@@ -1,0 +1,93 @@
+import { sameHostConnection, type HostScopeToken } from "../shell/hostScope";
+import {
+  isDestructiveTmuxAction,
+  isStaleTmuxTopologyError,
+  requestTmuxAction,
+  type AuthoritativePrecondition,
+  type TmuxAction,
+  type TmuxActionResult,
+} from "./actions";
+
+const ACTION_RECONCILE_TIMEOUT_MS = 2_000;
+const ACTION_RECONCILE_RETRIES = 2;
+
+type ActionRequest = (
+  clientId: string,
+  action: TmuxAction,
+  precondition: AuthoritativePrecondition,
+) => Promise<TmuxActionResult>;
+
+type ScopeWaiter = (
+  attempted: HostScopeToken,
+  current: () => HostScopeToken,
+) => Promise<HostScopeToken | undefined>;
+
+export interface ReconciledTmuxActionOptions {
+  clientId: string;
+  action: TmuxAction;
+  initialScope: HostScopeToken;
+  currentScope: () => HostScopeToken;
+  capturedPrecondition?: AuthoritativePrecondition;
+  request?: ActionRequest;
+  waitForNewerScope?: ScopeWaiter;
+}
+
+async function waitForNewerActionScope(
+  attempted: HostScopeToken,
+  current: () => HostScopeToken,
+): Promise<HostScopeToken | undefined> {
+  const deadline = Date.now() + ACTION_RECONCILE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const candidate = current();
+    if (!sameHostConnection(attempted, candidate)) return undefined;
+    if (candidate.serverIdentity && candidate.generation > attempted.generation) return candidate;
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 16));
+  }
+  return undefined;
+}
+
+/**
+ * Retries only non-destructive actions whose implicit topology generation went
+ * stale while the user was interacting. Confirmed destructive actions and
+ * callers with an explicit captured precondition remain exactly-once.
+ */
+export async function requestReconciledTmuxAction({
+  clientId,
+  action,
+  initialScope,
+  currentScope,
+  capturedPrecondition,
+  request = requestTmuxAction,
+  waitForNewerScope = waitForNewerActionScope,
+}: ReconciledTmuxActionOptions): Promise<void> {
+  if (!initialScope.serverIdentity) throw new Error("authoritative server identity is unavailable");
+  let precondition = capturedPrecondition ?? {
+    serverIdentity: initialScope.serverIdentity,
+    generation: initialScope.generation,
+  };
+  let attemptedScope: HostScopeToken = {
+    ...initialScope,
+    serverIdentity: precondition.serverIdentity,
+    generation: precondition.generation,
+  };
+
+  for (let retry = 0; ; retry += 1) {
+    try {
+      await request(clientId, action, precondition);
+      return;
+    } catch (error) {
+      const mayRetry = retry < ACTION_RECONCILE_RETRIES
+        && !capturedPrecondition
+        && !isDestructiveTmuxAction(action)
+        && isStaleTmuxTopologyError(error);
+      if (!mayRetry) throw error;
+      const refreshed = await waitForNewerScope(attemptedScope, currentScope);
+      if (!refreshed?.serverIdentity) throw error;
+      attemptedScope = refreshed;
+      precondition = {
+        serverIdentity: refreshed.serverIdentity,
+        generation: refreshed.generation,
+      };
+    }
+  }
+}

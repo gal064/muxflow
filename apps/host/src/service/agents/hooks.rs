@@ -1,0 +1,1070 @@
+use std::{
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{OpenOptionsExt, PermissionsExt},
+    },
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, bail};
+use serde_json::{Map, Value};
+use tmux_agent_protocol::v1;
+
+use super::adapters;
+
+const MAX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_PREVIEW_BYTES: usize = 32 * 1024;
+
+#[derive(Debug, Clone)]
+pub(crate) struct HookManager {
+    home: PathBuf,
+    helper_path: PathBuf,
+}
+
+impl HookManager {
+    #[cfg(test)]
+    pub(super) fn for_home(home: &Path) -> Self {
+        Self {
+            home: home.into(),
+            helper_path: PathBuf::from("/opt/tmux-agent-ide/bin/tmux-ide-host"),
+        }
+    }
+
+    pub(crate) fn system_default() -> anyhow::Result<Self> {
+        let home = std::env::var_os("HOME").context("HOME is unavailable")?;
+        let helper_path = std::env::current_exe()
+            .context("resolve current hook helper executable")?
+            .canonicalize()
+            .context("canonicalize current hook helper executable")?;
+        if !helper_path.is_absolute() {
+            bail!("hook helper path must be absolute");
+        }
+        Ok(Self {
+            home: PathBuf::from(home),
+            helper_path,
+        })
+    }
+
+    /// Return the adapters whose configuration still contains a hook owned by
+    /// this application. This intentionally uses the same parser and ownership
+    /// rules as install/uninstall so packaging cannot drift from hook formats.
+    pub(crate) fn managed_adapters(&self) -> anyhow::Result<Vec<&'static str>> {
+        let mut managed = Vec::new();
+        for kind in [
+            v1::AgentAdapterKind::Codex,
+            v1::AgentAdapterKind::ClaudeCode,
+        ] {
+            let adapter = adapters::adapter(kind).context("agent adapter is required")?;
+            let path = adapter.hook_path(&self.home);
+            inspect_config_path(&path)?;
+            let value = parse_config(&read_config(&path)?)?;
+            validate_hook_shape(&value, adapter.hook_events())?;
+            if managed_entry_count(&value, adapter) > 0 {
+                managed.push(adapter.id());
+            }
+        }
+        Ok(managed)
+    }
+
+    pub(crate) fn review(
+        &self,
+        adapter: v1::AgentAdapterKind,
+        action: v1::HookManagementAction,
+    ) -> anyhow::Result<v1::HookManagementPlan> {
+        let adapter_impl = adapters::adapter(adapter).context("agent adapter is required")?;
+        let path = adapter_impl.hook_path(&self.home);
+        inspect_config_path(&path)?;
+        let bytes = read_config(&path)?;
+        let value = parse_config(&bytes)?;
+        ensure_no_future_managed(&value, adapter_impl)?;
+        validate_hook_shape(&value, adapter_impl.hook_events())?;
+        let already_current = match action {
+            v1::HookManagementAction::Install => {
+                managed_entries_are_current(&value, adapter_impl, &self.helper_path)
+            }
+            v1::HookManagementAction::Uninstall => managed_entry_count(&value, adapter_impl) == 0,
+            _ => false,
+        };
+        let confirmation_token = confirmation_token(adapter, action, &bytes);
+        let mut proposed = value.clone();
+        remove_managed(&mut proposed, adapter_impl);
+        if action == v1::HookManagementAction::Install {
+            add_managed(&mut proposed, adapter_impl, &self.helper_path);
+        }
+        let removes_config = action == v1::HookManagementAction::Uninstall
+            && proposed.as_object().is_some_and(Map::is_empty)
+            && !backup_path(&path).exists();
+        let proposed_bytes = if removes_config {
+            Vec::new()
+        } else {
+            serde_json::to_vec_pretty(&proposed)?
+        };
+        Ok(v1::HookManagementPlan {
+            adapter: adapter.into(),
+            adapter_id: adapter_impl.id().into(),
+            action: action.into(),
+            config_path: path.to_string_lossy().into_owned(),
+            backup_path: backup_path(&path).to_string_lossy().into_owned(),
+            managed_version: adapters::MANAGED_VERSION.to_string(),
+            summary: match action {
+                v1::HookManagementAction::Install => {
+                    "Merge labeled lifecycle hooks; preserve every unrelated hook and setting"
+                }
+                v1::HookManagementAction::Uninstall => {
+                    "Remove only tmux-agent-ide labeled hooks; preserve backup and unrelated config"
+                }
+                _ => "Review managed hook configuration",
+            }
+            .into(),
+            confirmation_token,
+            already_current,
+            proposed_events: adapter_impl
+                .hook_events()
+                .iter()
+                .map(|event| (*event).into())
+                .collect(),
+            proposed_command: adapter_impl.hook_command(&self.helper_path),
+            ownership_marker: format!(
+                "owner={};version={}",
+                adapters::MANAGED_OWNER,
+                adapters::MANAGED_VERSION
+            ),
+            trust_guidance: adapter_impl.hook_trust_guidance().into(),
+            before_hash: blake3::hash(&bytes).to_hex().to_string(),
+            after_hash: blake3::hash(&proposed_bytes).to_hex().to_string(),
+            creates_config: bytes.is_empty() && action == v1::HookManagementAction::Install,
+            removes_config,
+            before_preview: preview(&value).0,
+            after_preview: preview(&proposed).0,
+            diff_preview: diff_preview(&value, &proposed).0,
+            preview_truncated: preview(&value).1
+                || preview(&proposed).1
+                || diff_preview(&value, &proposed).1,
+        })
+    }
+
+    pub(crate) fn apply(
+        &self,
+        adapter: v1::AgentAdapterKind,
+        action: v1::HookManagementAction,
+        confirmation_token_value: &str,
+    ) -> anyhow::Result<v1::HookManagementPlan> {
+        if !matches!(
+            action,
+            v1::HookManagementAction::Install | v1::HookManagementAction::Uninstall
+        ) {
+            bail!("hook action must be install or uninstall");
+        }
+        let review = self.review(adapter, action)?;
+        if confirmation_token_value != review.confirmation_token {
+            bail!("hook review is stale; review the current configuration again");
+        }
+        if review.already_current {
+            return Ok(review);
+        }
+        let adapter_impl = adapters::adapter(adapter).context("agent adapter is required")?;
+        let path = adapter_impl.hook_path(&self.home);
+        let _lock = ConfigLock::acquire(&path)?;
+        let review = self.review(adapter, action)?;
+        if confirmation_token_value != review.confirmation_token {
+            bail!("hook configuration changed while acquiring its exclusive lock");
+        }
+        let bytes = read_config(&path)?;
+        if confirmation_token(adapter, action, &bytes) != review.confirmation_token {
+            bail!("hook review changed while acquiring the configuration lock");
+        }
+        let mut value = parse_config(&bytes)?;
+        remove_managed(&mut value, adapter_impl);
+        if action == v1::HookManagementAction::Install {
+            add_managed(&mut value, adapter_impl, &self.helper_path);
+            write_backup_once(&path, &bytes)?;
+            write_atomic(&path, &serde_json::to_vec_pretty(&value)?, &bytes)?;
+        } else if value.as_object().is_some_and(Map::is_empty) && !backup_path(&path).exists() {
+            remove_atomic(&path, &bytes)?;
+        } else {
+            write_atomic(&path, &serde_json::to_vec_pretty(&value)?, &bytes)?;
+        }
+        self.review(adapter, action)
+    }
+}
+
+fn read_config(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES {
+        bail!("hook configuration must be a bounded regular file");
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_unchanged(path: &Path, reviewed: &[u8]) -> anyhow::Result<()> {
+    if read_config(path)? != reviewed {
+        bail!("hook configuration changed after review; review again");
+    }
+    Ok(())
+}
+
+struct ConfigLock {
+    path: PathBuf,
+    file: fs::File,
+}
+
+impl ConfigLock {
+    fn acquire(config: &Path) -> anyhow::Result<Self> {
+        let parent = config.parent().context("hook config path has no parent")?;
+        if !parent.exists() {
+            fs::create_dir_all(parent)?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+        inspect_parent(parent)?;
+        let path = parent.join(".tmux-agent-ide-hook.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .context("another hook configuration update is in progress")?;
+        // Advisory flock has process-lifetime cleanup, unlike a create-new
+        // sentinel which can permanently wedge after a crash.
+        // SAFETY: flock only receives the live lock-file descriptor and flags.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            bail!("another hook configuration update is in progress");
+        }
+        Ok(Self { path, file })
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor remains owned by self until after this call.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn parse_config(bytes: &[u8]) -> anyhow::Result<Value> {
+    if bytes.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    let value: Value = serde_json::from_slice(bytes).context("parse hook JSON configuration")?;
+    if !value.is_object() {
+        bail!("hook configuration root must be a JSON object");
+    }
+    Ok(value)
+}
+
+fn validate_hook_shape(value: &Value, events: &[&str]) -> anyhow::Result<()> {
+    let Some(hooks) = value.get("hooks") else {
+        return Ok(());
+    };
+    let hooks = hooks
+        .as_object()
+        .context("existing hooks setting must be a JSON object")?;
+    for event in events {
+        if let Some(groups) = hooks.get(*event)
+            && !groups.is_array()
+        {
+            bail!("existing {event} hooks must be a JSON array");
+        }
+    }
+    Ok(())
+}
+
+fn add_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter, helper_path: &Path) {
+    let root = value.as_object_mut().expect("validated object");
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let hooks = hooks
+        .as_object_mut()
+        .expect("review validated hooks object");
+    let command = adapter.hook_command(helper_path);
+    for event in adapter.hook_events() {
+        let groups = hooks
+            .entry((*event).to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        groups
+            .as_array_mut()
+            .expect("review validated event array")
+            .push(serde_json::json!({
+                "hooks": [{"type": "command", "command": command, "timeout": 5}]
+            }));
+    }
+}
+
+fn remove_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter) {
+    let Some(hooks) = value.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for groups in hooks.values_mut().filter_map(Value::as_array_mut) {
+        for group in groups.iter_mut() {
+            let Some(commands) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            commands.retain(|command| {
+                !command
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| is_owned_command(command, adapter))
+            });
+        }
+        groups.retain(|group| {
+            group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_none_or(|commands| !commands.is_empty())
+        });
+    }
+    hooks.retain(|_, groups| !groups.as_array().is_some_and(Vec::is_empty));
+    if hooks.is_empty() {
+        value.as_object_mut().unwrap().remove("hooks");
+    }
+}
+
+fn managed_entry_count(value: &Value, adapter: &dyn adapters::AgentAdapter) -> usize {
+    value
+        .get("hooks")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|hooks| hooks.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .flat_map(|group| {
+            group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|command| {
+            command
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| is_owned_command(command, adapter))
+        })
+        .count()
+}
+
+fn managed_entries_are_current(
+    value: &Value,
+    adapter: &dyn adapters::AgentAdapter,
+    helper_path: &Path,
+) -> bool {
+    let Some(hooks) = value.get("hooks").and_then(Value::as_object) else {
+        return false;
+    };
+    let expected = adapter.hook_command(helper_path);
+    managed_entry_count(value, adapter) == adapter.hook_events().len()
+        && adapter.hook_events().iter().all(|event| {
+            hooks
+                .get(*event)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .flat_map(|group| {
+                    group
+                        .get("hooks")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                })
+                .any(|command| {
+                    command
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|command| command == expected)
+                })
+        })
+}
+
+fn is_owned_command(command: &str, adapter: &dyn adapters::AgentAdapter) -> bool {
+    managed_command_version(command, adapter)
+        .is_some_and(|version| version <= adapters::MANAGED_VERSION)
+}
+
+fn managed_command_version(command: &str, adapter: &dyn adapters::AgentAdapter) -> Option<u32> {
+    let legacy = format!(
+        "tmux-ide-host hook ingest --adapter {} # tmux-agent-ide-managed:v1",
+        adapter.id()
+    );
+    if command == legacy {
+        return Some(1);
+    }
+    let (executable, suffix) = command.split_once(" hook ingest --adapter ")?;
+    if !executable.starts_with("'/") || !executable.ends_with('\'') || executable.contains('\n') {
+        return None;
+    }
+    let version = suffix.strip_prefix(&format!(
+        "{} --managed-owner {} --managed-version ",
+        adapter.id(),
+        adapters::MANAGED_OWNER
+    ))?;
+    version.parse().ok()
+}
+
+fn ensure_no_future_managed(
+    value: &Value,
+    adapter: &dyn adapters::AgentAdapter,
+) -> anyhow::Result<()> {
+    let future = value
+        .get("hooks")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|hooks| hooks.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .flat_map(|group| {
+            group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|command| command.get("command").and_then(Value::as_str))
+        .filter_map(|command| managed_command_version(command, adapter))
+        .any(|version| version > adapters::MANAGED_VERSION);
+    if future {
+        bail!("hook configuration is owned by a newer tmux-agent-ide version");
+    }
+    Ok(())
+}
+
+fn preview(value: &Value) -> (String, bool) {
+    let mut redacted = value.clone();
+    redact(&mut redacted);
+    bounded(serde_json::to_string_pretty(&redacted).unwrap_or_else(|_| "{}".into()))
+}
+
+fn diff_preview(before: &Value, after: &Value) -> (String, bool) {
+    let before = preview(before).0;
+    let after = preview(after).0;
+    bounded(format!("--- before\n{before}\n+++ after\n{after}"))
+}
+
+fn bounded(mut value: String) -> (String, bool) {
+    if value.len() <= MAX_PREVIEW_BYTES {
+        return (value, false);
+    }
+    const SUFFIX: &str = "\n… preview truncated …";
+    let mut boundary = MAX_PREVIEW_BYTES - SUFFIX.len();
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value.push_str(SUFFIX);
+    (value, true)
+}
+
+fn redact(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                let key = key.to_ascii_lowercase();
+                if [
+                    "token",
+                    "secret",
+                    "password",
+                    "credential",
+                    "private",
+                    "authorization",
+                    "api_key",
+                    "apikey",
+                ]
+                .iter()
+                .any(|sensitive| key.contains(sensitive))
+                {
+                    *value = Value::String("<redacted>".into());
+                } else {
+                    redact(value);
+                }
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(redact),
+        _ => {}
+    }
+}
+
+fn inspect_config_path(path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent().filter(|parent| parent.exists()) {
+        inspect_parent(parent)?;
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("refusing to mutate a non-regular or symlinked hook configuration");
+    }
+    if metadata.len() > MAX_CONFIG_BYTES {
+        bail!("hook configuration exceeds the {MAX_CONFIG_BYTES}-byte safety limit");
+    }
+    let backup = backup_path(path);
+    if let Ok(metadata) = fs::symlink_metadata(&backup)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        bail!("managed hook backup path is not a regular file");
+    }
+    Ok(())
+}
+
+fn inspect_parent(parent: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(parent)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("refusing to mutate hook configuration through an unsafe parent directory");
+    }
+    Ok(())
+}
+
+fn confirmation_token(
+    adapter: v1::AgentAdapterKind,
+    action: v1::HookManagementAction,
+    bytes: &[u8],
+) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(&(adapter as i32).to_le_bytes());
+    hash.update(&(action as i32).to_le_bytes());
+    hash.update(&adapters::MANAGED_VERSION.to_le_bytes());
+    hash.update(bytes);
+    hash.finalize().to_hex().to_string()
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    path.with_extension(format!(
+        "{}.tmux-agent-ide.backup",
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("json")
+    ))
+}
+
+fn write_backup_once(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if bytes.is_empty() || backup_path(path).exists() {
+        return Ok(());
+    }
+    write_new_private(&backup_path(path), bytes)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8], reviewed: &[u8]) -> anyhow::Result<()> {
+    let parent = path.parent().context("hook config path has no parent")?;
+    if !parent.exists() {
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    inspect_parent(parent)?;
+    let temporary = parent.join(format!(".hook-config-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        write_new_private(&temporary, bytes)?;
+        // This is intentionally the last fallible observation before replace:
+        // an editor that raced the reviewed bytes is never silently clobbered.
+        inspect_parent(parent)?;
+        #[cfg(target_os = "linux")]
+        if reviewed.is_empty() {
+            renameat2(&temporary, path, libc::RENAME_NOREPLACE)?;
+        } else {
+            exchange_reviewed(&temporary, path, reviewed)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            ensure_unchanged(path, reviewed)?;
+            fs::rename(&temporary, path)?;
+        }
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn exchange_reviewed(temporary: &Path, path: &Path, reviewed: &[u8]) -> anyhow::Result<()> {
+    renameat2(temporary, path, libc::RENAME_EXCHANGE)?;
+    if read_config(temporary)? != reviewed {
+        renameat2(temporary, path, libc::RENAME_EXCHANGE)
+            .context("roll back raced hook configuration")?;
+        bail!("hook configuration changed during atomic replace; review again");
+    }
+    fs::remove_file(temporary)?;
+    Ok(())
+}
+
+fn remove_atomic(path: &Path, reviewed: &[u8]) -> anyhow::Result<()> {
+    let parent = path.parent().context("hook config path has no parent")?;
+    inspect_parent(parent)?;
+    let tombstone = parent.join(format!(".hook-remove-{}.tmp", uuid::Uuid::new_v4()));
+    #[cfg(target_os = "linux")]
+    {
+        renameat2(path, &tombstone, libc::RENAME_NOREPLACE)?;
+        if read_config(&tombstone)? != reviewed {
+            renameat2(&tombstone, path, libc::RENAME_NOREPLACE)
+                .context("roll back raced hook uninstall")?;
+            bail!("hook configuration changed during atomic uninstall; review again");
+        }
+        fs::remove_file(tombstone)?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        ensure_unchanged(path, reviewed)?;
+        fs::remove_file(path)?;
+    }
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn renameat2(from: &Path, to: &Path, flags: libc::c_uint) -> anyhow::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let from = CString::new(from.as_os_str().as_bytes()).context("temporary path contains NUL")?;
+    let to = CString::new(to.as_os_str().as_bytes()).context("hook path contains NUL")?;
+    // SAFETY: both C strings are live for the syscall and AT_FDCWD scopes the
+    // operation to the exact validated paths.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            flags,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+fn write_new_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_upgrade_and_uninstall_preserve_unrelated_configuration() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-hooks-{}", uuid::Uuid::new_v4()));
+        let path = home.join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = br#"{"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"keep-me"}]}]}}"#;
+        fs::write(&path, original).unwrap();
+        let manager = HookManager::for_home(&home);
+        let review = manager
+            .review(
+                v1::AgentAdapterKind::Codex,
+                v1::HookManagementAction::Install,
+            )
+            .unwrap();
+        assert_eq!(
+            review.proposed_events,
+            adapter_events(v1::AgentAdapterKind::Codex)
+        );
+        assert_eq!(
+            review.proposed_command,
+            "'/opt/tmux-agent-ide/bin/tmux-ide-host' hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 2"
+        );
+        assert_eq!(review.ownership_marker, "owner=tmux-agent-ide;version=2");
+        assert!(review.trust_guidance.contains("never edits or bypasses"));
+        assert!(review.before_preview.contains("keep-me"));
+        assert!(review.after_preview.contains("--managed-owner"));
+        assert!(review.diff_preview.starts_with("--- before"));
+        assert_ne!(review.before_hash, review.after_hash);
+        manager
+            .apply(
+                v1::AgentAdapterKind::Codex,
+                v1::HookManagementAction::Install,
+                &review.confirmation_token,
+            )
+            .unwrap();
+        let installed: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let adapter = adapters::adapter(v1::AgentAdapterKind::Codex).unwrap();
+        assert_eq!(installed["theme"], "dark");
+        assert_eq!(
+            managed_entry_count(&installed, adapter),
+            adapter.hook_events().len()
+        );
+        assert!(installed["hooks"].get("Notification").is_none());
+        assert!(installed.to_string().contains("keep-me"));
+        let repeated = manager
+            .review(
+                v1::AgentAdapterKind::Codex,
+                v1::HookManagementAction::Install,
+            )
+            .unwrap();
+        assert!(repeated.already_current);
+        let uninstall = manager
+            .review(
+                v1::AgentAdapterKind::Codex,
+                v1::HookManagementAction::Uninstall,
+            )
+            .unwrap();
+        manager
+            .apply(
+                v1::AgentAdapterKind::Codex,
+                v1::HookManagementAction::Uninstall,
+                &uninstall.confirmation_token,
+            )
+            .unwrap();
+        let removed: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(managed_entry_count(&removed, adapter), 0);
+        assert!(removed.to_string().contains("keep-me"));
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), original);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn managed_status_detects_current_and_legacy_entries_across_adapters() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase8-hook-status-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let current = adapters::adapter(v1::AgentAdapterKind::Codex)
+            .unwrap()
+            .hook_command(Path::new("/opt/tmux-agent-ide/bin/tmux-ide-host"));
+        let legacy = "tmux-ide-host hook ingest --adapter claude-code # tmux-agent-ide-managed:v1";
+        fs::write(
+            home.join(".codex/hooks.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "hooks": {"Stop": [{"hooks": [{"type": "command", "command": current}]}]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            home.join(".claude/settings.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "hooks": {"Stop": [{"hooks": [{"type": "command", "command": legacy}]}]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let manager = HookManager::for_home(&home);
+        assert_eq!(
+            manager.managed_adapters().unwrap(),
+            ["codex", "claude-code"]
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn stale_review_token_cannot_mutate_configuration() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-hook-token-{}", uuid::Uuid::new_v4()));
+        let manager = HookManager::for_home(&home);
+        let error = manager
+            .apply(
+                v1::AgentAdapterKind::ClaudeCode,
+                v1::HookManagementAction::Install,
+                "stale",
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("stale"));
+        assert!(!home.exists());
+    }
+
+    #[test]
+    fn install_then_uninstall_of_new_config_restores_absence() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-hook-new-{}", uuid::Uuid::new_v4()));
+        let manager = HookManager::for_home(&home);
+        let install = manager
+            .review(
+                v1::AgentAdapterKind::ClaudeCode,
+                v1::HookManagementAction::Install,
+            )
+            .unwrap();
+        manager
+            .apply(
+                v1::AgentAdapterKind::ClaudeCode,
+                v1::HookManagementAction::Install,
+                &install.confirmation_token,
+            )
+            .unwrap();
+        let installed: Value =
+            serde_json::from_slice(&fs::read(home.join(".claude/settings.json")).unwrap()).unwrap();
+        let adapter = adapters::adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
+        assert_eq!(
+            managed_entry_count(&installed, adapter),
+            adapter.hook_events().len()
+        );
+        assert!(installed["hooks"]["Notification"].is_array());
+        let uninstall = manager
+            .review(
+                v1::AgentAdapterKind::ClaudeCode,
+                v1::HookManagementAction::Uninstall,
+            )
+            .unwrap();
+        manager
+            .apply(
+                v1::AgentAdapterKind::ClaudeCode,
+                v1::HookManagementAction::Uninstall,
+                &uninstall.confirmation_token,
+            )
+            .unwrap();
+        assert!(!home.join(".claude/settings.json").exists());
+        assert!(!backup_path(&home.join(".claude/settings.json")).exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn symlinked_config_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-hook-link-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::write(home.join("target.json"), b"{}").unwrap();
+        symlink(home.join("target.json"), home.join(".codex/hooks.json")).unwrap();
+        let manager = HookManager::for_home(&home);
+        assert!(
+            manager
+                .review(
+                    v1::AgentAdapterKind::Codex,
+                    v1::HookManagementAction::Install
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(home.join("target.json")).unwrap(), b"{}");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn symlinked_config_parent_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-hook-parent-link-{}", uuid::Uuid::new_v4()));
+        let target = home.join("real-codex");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("hooks.json"), b"{}").unwrap();
+        symlink(&target, home.join(".codex")).unwrap();
+        let manager = HookManager::for_home(&home);
+        assert!(
+            manager
+                .review(
+                    v1::AgentAdapterKind::Codex,
+                    v1::HookManagementAction::Install
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(target.join("hooks.json")).unwrap(), b"{}");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    fn adapter_events(kind: v1::AgentAdapterKind) -> Vec<String> {
+        adapters::adapter(kind)
+            .unwrap()
+            .hook_events()
+            .iter()
+            .map(|event| (*event).into())
+            .collect()
+    }
+
+    #[test]
+    fn unreadable_config_is_not_treated_as_absent() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-hook-unreadable-{}", uuid::Uuid::new_v4()));
+        let path = home.join(".claude/settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let manager = HookManager::for_home(&home);
+        let result = manager.review(
+            v1::AgentAdapterKind::ClaudeCode,
+            v1::HookManagementAction::Install,
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(result.is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn uninstall_matches_the_exact_owned_command_only() {
+        let adapter = adapters::adapter(v1::AgentAdapterKind::Codex).unwrap();
+        let helper = Path::new("/opt/tmux-agent-ide/bin/tmux-ide-host");
+        let owned = adapter.hook_command(helper);
+        let lookalike = format!("{owned} --extra");
+        let mut value = serde_json::json!({"hooks":{"Stop":[{"hooks":[
+            {"type":"command","command":owned},
+            {"type":"command","command":lookalike}
+        ]}]}});
+        remove_managed(&mut value, adapter);
+        let commands = value["hooks"]["Stop"][0]["hooks"].as_array().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0]["command"], lookalike);
+    }
+
+    #[test]
+    fn install_migrates_exact_legacy_owner_and_redacts_bounded_review() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-hook-migrate-{}", uuid::Uuid::new_v4()));
+        let path = home.join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = "tmux-ide-host hook ingest --adapter codex # tmux-agent-ide-managed:v1";
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "api_token": "do-not-show",
+                "hooks": {"Stop": [{"hooks": [
+                    {"type": "command", "command": legacy},
+                    {"type": "command", "command": format!("{legacy} lookalike")}
+                ]}]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let manager = HookManager::for_home(&home);
+        let plan = manager
+            .review(
+                v1::AgentAdapterKind::Codex,
+                v1::HookManagementAction::Install,
+            )
+            .unwrap();
+        assert!(!plan.before_preview.contains("do-not-show"));
+        assert!(plan.before_preview.contains("<redacted>"));
+        manager
+            .apply(
+                v1::AgentAdapterKind::Codex,
+                v1::HookManagementAction::Install,
+                &plan.confirmation_token,
+            )
+            .unwrap();
+        let installed = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        assert!(!installed.contains(&format!("\"command\": \"{legacy}\"")));
+        assert!(installed.contains(&format!("{legacy} lookalike")));
+        assert!(installed.contains("--managed-version 2"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn redacted_review_previews_include_the_truncation_marker_within_the_bound() {
+        let (preview, truncated) = preview(&serde_json::json!({
+            "password": "never-visible",
+            "ordinary": "x".repeat(MAX_PREVIEW_BYTES * 2)
+        }));
+        assert!(truncated);
+        assert!(preview.len() <= MAX_PREVIEW_BYTES);
+        assert!(preview.ends_with("preview truncated …"));
+        assert!(!preview.contains("never-visible"));
+    }
+
+    #[test]
+    fn redacted_review_never_exposes_nested_private_or_authorization_values() {
+        let (preview, truncated) = preview(&serde_json::json!({
+            "unrelated": {
+                "privateFixtureValue": "phase6-private-value",
+                "authorizationHeader": "Bearer phase6-secret",
+                "ordinary": "visible-review-value"
+            }
+        }));
+        assert!(!truncated);
+        assert!(!preview.contains("phase6-private-value"));
+        assert!(!preview.contains("Bearer phase6-secret"));
+        assert!(preview.contains("visible-review-value"));
+        assert_eq!(preview.matches("<redacted>").count(), 2);
+    }
+
+    #[test]
+    fn future_owned_version_and_concurrent_apply_fail_closed() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-hook-future-{}", uuid::Uuid::new_v4()));
+        let path = home.join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let future = "'/opt/future/tmux-ide-host' hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 99";
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":future}]}]}})).unwrap(),
+        )
+        .unwrap();
+        let manager = HookManager::for_home(&home);
+        assert!(
+            manager
+                .review(
+                    v1::AgentAdapterKind::Codex,
+                    v1::HookManagementAction::Install
+                )
+                .is_err()
+        );
+
+        fs::write(&path, b"{}").unwrap();
+        let review = manager
+            .review(
+                v1::AgentAdapterKind::Codex,
+                v1::HookManagementAction::Install,
+            )
+            .unwrap();
+        let _lock = ConfigLock::acquire(&path).unwrap();
+        assert!(
+            manager
+                .apply(
+                    v1::AgentAdapterKind::Codex,
+                    v1::HookManagementAction::Install,
+                    &review.confirmation_token
+                )
+                .is_err()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exchange_cas_rolls_back_a_noncooperating_racing_edit() {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-hook-cas-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hooks.json");
+        let temporary = dir.join("new.tmp");
+        fs::write(&path, b"racing editor bytes").unwrap();
+        fs::write(&temporary, b"our proposed bytes").unwrap();
+        assert!(exchange_reviewed(&temporary, &path, b"reviewed old bytes").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"racing editor bytes");
+        assert_eq!(fs::read(&temporary).unwrap(), b"our proposed bytes");
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

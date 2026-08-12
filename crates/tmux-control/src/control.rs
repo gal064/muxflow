@@ -1,0 +1,543 @@
+use std::collections::VecDeque;
+
+use thiserror::Error;
+
+const DEFAULT_MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CommandTag {
+    pub timestamp: u64,
+    pub number: u64,
+    pub flags: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlRecord {
+    Output { pane_id: String, data: Vec<u8> },
+    Begin { tag: CommandTag, arguments: String },
+    End { tag: CommandTag, arguments: String },
+    Error { tag: CommandTag, arguments: String },
+    Exit { reason: String },
+    Notification { name: String, arguments: String },
+    CommandOutput(Vec<u8>),
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ControlParseError {
+    #[error("tmux control line exceeded {limit} bytes")]
+    LineTooLarge { limit: usize },
+    #[error("invalid %{record} record")]
+    InvalidRecord { record: &'static str },
+    #[error("malformed tmux octal escape at byte {offset}")]
+    MalformedEscape { offset: usize },
+    #[error("tmux control stream ended with {bytes} bytes of an incomplete record")]
+    TruncatedLine { bytes: usize },
+}
+
+/// Incremental, byte-preserving tmux control-mode parser.
+///
+/// Once a line exceeds the configured bound, its entire remainder is discarded
+/// through the next newline. This prevents a suffix of an oversized record from
+/// being mistaken for a fresh command or terminal output record.
+#[derive(Debug)]
+pub struct ControlParser {
+    buffered: Vec<u8>,
+    ready: VecDeque<Result<ControlRecord, ControlParseError>>,
+    max_line_bytes: usize,
+    discarding_oversized_line: bool,
+}
+
+impl Default for ControlParser {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_LINE_BYTES)
+    }
+}
+
+impl ControlParser {
+    pub fn new(max_line_bytes: usize) -> Self {
+        assert!(max_line_bytes > 0, "control line limit must be non-zero");
+        Self {
+            buffered: Vec::new(),
+            ready: VecDeque::new(),
+            max_line_bytes,
+            discarding_oversized_line: false,
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if self.discarding_oversized_line {
+                if byte == b'\n' {
+                    self.discarding_oversized_line = false;
+                }
+                continue;
+            }
+            if byte == b'\n' {
+                if self.buffered.last() == Some(&b'\r') {
+                    self.buffered.pop();
+                }
+                let line = std::mem::take(&mut self.buffered);
+                self.ready.push_back(parse_line(&line));
+            } else if self.buffered.len() == self.max_line_bytes {
+                self.buffered.clear();
+                self.discarding_oversized_line = true;
+                self.ready.push_back(Err(ControlParseError::LineTooLarge {
+                    limit: self.max_line_bytes,
+                }));
+            } else {
+                self.buffered.push(byte);
+            }
+        }
+    }
+
+    /// Marks the byte stream as closed and reports a partial final record.
+    pub fn finish(&mut self) {
+        if self.discarding_oversized_line {
+            self.discarding_oversized_line = false;
+            return;
+        }
+        if !self.buffered.is_empty() {
+            let bytes = self.buffered.len();
+            self.buffered.clear();
+            self.ready
+                .push_back(Err(ControlParseError::TruncatedLine { bytes }));
+        }
+    }
+
+    pub fn next_record(&mut self) -> Option<Result<ControlRecord, ControlParseError>> {
+        self.ready.pop_front()
+    }
+}
+
+fn parse_line(line: &[u8]) -> Result<ControlRecord, ControlParseError> {
+    if !line.starts_with(b"%") {
+        return Ok(ControlRecord::CommandOutput(line.to_vec()));
+    }
+
+    let separator = line.iter().position(|byte| *byte == b' ');
+    let (name, arguments) = match separator {
+        Some(index) => (&line[1..index], &line[index + 1..]),
+        None => (&line[1..], &[][..]),
+    };
+    let name = String::from_utf8_lossy(name).into_owned();
+
+    match name.as_str() {
+        "output" => parse_output(arguments),
+        "extended-output" => parse_extended_output(arguments),
+        "begin" => Ok(ControlRecord::Begin {
+            tag: parse_command_tag(arguments, "begin")?,
+            arguments: String::from_utf8_lossy(arguments).into_owned(),
+        }),
+        "end" => Ok(ControlRecord::End {
+            tag: parse_command_tag(arguments, "end")?,
+            arguments: String::from_utf8_lossy(arguments).into_owned(),
+        }),
+        "error" => Ok(ControlRecord::Error {
+            tag: parse_command_tag(arguments, "error")?,
+            arguments: String::from_utf8_lossy(arguments).into_owned(),
+        }),
+        "exit" => Ok(ControlRecord::Exit {
+            reason: String::from_utf8_lossy(arguments).into_owned(),
+        }),
+        _ => Ok(ControlRecord::Notification {
+            name,
+            arguments: String::from_utf8_lossy(arguments).into_owned(),
+        }),
+    }
+}
+
+fn parse_command_tag(
+    arguments: &[u8],
+    record: &'static str,
+) -> Result<CommandTag, ControlParseError> {
+    let mut fields = arguments.split(|byte| *byte == b' ');
+    let parse = |value: Option<&[u8]>| std::str::from_utf8(value?).ok()?.parse::<u64>().ok();
+    Ok(CommandTag {
+        timestamp: parse(fields.next()).ok_or(ControlParseError::InvalidRecord { record })?,
+        number: parse(fields.next()).ok_or(ControlParseError::InvalidRecord { record })?,
+        flags: parse(fields.next()).ok_or(ControlParseError::InvalidRecord { record })?,
+    })
+}
+
+fn parse_output(arguments: &[u8]) -> Result<ControlRecord, ControlParseError> {
+    let separator = arguments
+        .iter()
+        .position(|byte| *byte == b' ')
+        .ok_or(ControlParseError::InvalidRecord { record: "output" })?;
+    output_record(
+        &arguments[..separator],
+        &arguments[separator.saturating_add(1)..],
+        "output",
+    )
+}
+
+fn parse_extended_output(arguments: &[u8]) -> Result<ControlRecord, ControlParseError> {
+    let pane_end = arguments.iter().position(|byte| *byte == b' ').ok_or(
+        ControlParseError::InvalidRecord {
+            record: "extended-output",
+        },
+    )?;
+    let value_start = arguments
+        .windows(3)
+        .position(|window| window == b" : ")
+        .map(|position| position + 3)
+        .ok_or(ControlParseError::InvalidRecord {
+            record: "extended-output",
+        })?;
+    output_record(
+        &arguments[..pane_end],
+        &arguments[value_start..],
+        "extended-output",
+    )
+}
+
+fn output_record(
+    pane: &[u8],
+    escaped: &[u8],
+    record: &'static str,
+) -> Result<ControlRecord, ControlParseError> {
+    let pane_id = String::from_utf8(pane.to_vec())
+        .map_err(|_| ControlParseError::InvalidRecord { record })?;
+    if !valid_id(&pane_id, '%') {
+        return Err(ControlParseError::InvalidRecord { record });
+    }
+    Ok(ControlRecord::Output {
+        pane_id,
+        data: unescape_output(escaped)?,
+    })
+}
+
+fn valid_id(value: &str, prefix: char) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+pub fn unescape_output(input: &[u8]) -> Result<Vec<u8>, ControlParseError> {
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] != b'\\' {
+            output.push(input[index]);
+            index += 1;
+            continue;
+        }
+        if index + 3 >= input.len()
+            || !input[index + 1..=index + 3]
+                .iter()
+                .all(|byte| (b'0'..=b'7').contains(byte))
+        {
+            return Err(ControlParseError::MalformedEscape { offset: index });
+        }
+        let value = u16::from(input[index + 1] - b'0') * 64
+            + u16::from(input[index + 2] - b'0') * 8
+            + u16::from(input[index + 3] - b'0');
+        let value = u8::try_from(value)
+            .map_err(|_| ControlParseError::MalformedEscape { offset: index })?;
+        output.push(value);
+        index += 4;
+    }
+    Ok(output)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchEvent {
+    Output {
+        pane_id: String,
+        data: Vec<u8>,
+    },
+    Notification {
+        name: String,
+        arguments: String,
+    },
+    CommandCompleted {
+        tag: CommandTag,
+        output: Vec<Vec<u8>>,
+        error: Option<String>,
+    },
+    Exit {
+        reason: String,
+    },
+    ResnapshotRequired {
+        reason: String,
+    },
+}
+
+#[derive(Debug)]
+struct ActiveCommand {
+    tag: CommandTag,
+    output: Vec<Vec<u8>>,
+}
+
+/// Correlates command blocks while allowing asynchronous pane output and
+/// notifications to pass through immediately.
+#[derive(Debug, Default)]
+pub struct ControlDispatcher {
+    active: Option<ActiveCommand>,
+}
+
+impl ControlDispatcher {
+    pub fn handle(
+        &mut self,
+        record: Result<ControlRecord, ControlParseError>,
+    ) -> Vec<DispatchEvent> {
+        let mut events = Vec::new();
+        match record {
+            Err(error) => events.push(DispatchEvent::ResnapshotRequired {
+                reason: error.to_string(),
+            }),
+            Ok(ControlRecord::Output { pane_id, data }) => {
+                events.push(DispatchEvent::Output { pane_id, data })
+            }
+            Ok(ControlRecord::Notification { name, arguments }) => {
+                events.push(DispatchEvent::Notification { name, arguments })
+            }
+            Ok(ControlRecord::Exit { reason }) => events.push(DispatchEvent::Exit { reason }),
+            Ok(ControlRecord::Begin { tag, .. }) => {
+                if let Some(abandoned) = self.active.replace(ActiveCommand {
+                    tag,
+                    output: Vec::new(),
+                }) {
+                    events.push(DispatchEvent::ResnapshotRequired {
+                        reason: format!(
+                            "command {} was interrupted by command {}",
+                            abandoned.tag.number, tag.number
+                        ),
+                    });
+                }
+            }
+            Ok(ControlRecord::CommandOutput(line)) => {
+                if let Some(active) = &mut self.active {
+                    active.output.push(line);
+                } else {
+                    events.push(DispatchEvent::ResnapshotRequired {
+                        reason: "command output arrived outside a command block".into(),
+                    });
+                }
+            }
+            Ok(ControlRecord::End { tag, .. }) => {
+                self.finish(tag, None, &mut events);
+            }
+            Ok(ControlRecord::Error { tag, arguments }) => {
+                self.finish(tag, Some(arguments), &mut events);
+            }
+        }
+        events
+    }
+
+    fn finish(&mut self, tag: CommandTag, error: Option<String>, events: &mut Vec<DispatchEvent>) {
+        match self.active.take() {
+            Some(active) if active.tag == tag => events.push(DispatchEvent::CommandCompleted {
+                tag,
+                output: active.output,
+                error,
+            }),
+            Some(active) => events.push(DispatchEvent::ResnapshotRequired {
+                reason: format!(
+                    "command block ended with tag {} while {} was active",
+                    tag.number, active.tag.number
+                ),
+            }),
+            None => events.push(DispatchEvent::ResnapshotRequired {
+                reason: format!("command block {} ended without a begin", tag.number),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retains_partial_records_and_unescapes_output_bytes() {
+        let mut parser = ControlParser::default();
+        parser.push(b"%output %7 hello\\033[31");
+        assert!(parser.next_record().is_none());
+        parser.push(b"m\\377\n%layout-change @2 deadbeef\n");
+        assert_eq!(
+            parser.next_record().unwrap().unwrap(),
+            ControlRecord::Output {
+                pane_id: "%7".into(),
+                data: b"hello\x1b[31m\xff".to_vec(),
+            }
+        );
+        assert!(matches!(
+            parser.next_record().unwrap().unwrap(),
+            ControlRecord::Notification { name, .. } if name == "layout-change"
+        ));
+    }
+
+    #[test]
+    fn parses_extended_output_without_treating_age_as_terminal_data() {
+        let mut parser = ControlParser::default();
+        parser.push(b"%extended-output %2 153 : a\\033b\n");
+        assert_eq!(
+            parser.next_record().unwrap().unwrap(),
+            ControlRecord::Output {
+                pane_id: "%2".into(),
+                data: b"a\x1bb".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_escape_and_disconnect_have_deterministic_errors() {
+        let mut parser = ControlParser::default();
+        parser.push(b"%output %1 bad\\x\npartial");
+        parser.finish();
+        assert_eq!(
+            parser.next_record().unwrap().unwrap_err(),
+            ControlParseError::MalformedEscape { offset: 3 }
+        );
+        assert_eq!(
+            parser.next_record().unwrap().unwrap_err(),
+            ControlParseError::TruncatedLine { bytes: 7 }
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_byte_range_octal_without_overflow() {
+        for value in 0o400..=0o777 {
+            let encoded = format!("\\{value:03o}");
+            assert_eq!(
+                unescape_output(encoded.as_bytes()),
+                Err(ControlParseError::MalformedEscape { offset: 0 })
+            );
+        }
+        assert_eq!(unescape_output(b"\\377").unwrap(), vec![0xff]);
+    }
+
+    #[test]
+    fn oversized_line_is_discarded_through_its_newline() {
+        let mut parser = ControlParser::new(12);
+        parser.push(b"1234567890123suffix\n%exit clean\n");
+        assert_eq!(
+            parser.next_record().unwrap().unwrap_err(),
+            ControlParseError::LineTooLarge { limit: 12 }
+        );
+        assert_eq!(
+            parser.next_record().unwrap().unwrap(),
+            ControlRecord::Exit {
+                reason: "clean".into()
+            }
+        );
+    }
+
+    #[test]
+    fn dispatcher_passes_async_records_during_correlated_command() {
+        let tag = CommandTag {
+            timestamp: 10,
+            number: 4,
+            flags: 1,
+        };
+        let mut dispatcher = ControlDispatcher::default();
+        assert!(
+            dispatcher
+                .handle(Ok(ControlRecord::Begin {
+                    tag,
+                    arguments: "10 4 1".into()
+                }))
+                .is_empty()
+        );
+        assert!(matches!(
+            dispatcher.handle(Ok(ControlRecord::Output {
+                pane_id: "%1".into(),
+                data: vec![0xff]
+            }))[0],
+            DispatchEvent::Output { .. }
+        ));
+        assert!(matches!(
+            dispatcher.handle(Ok(ControlRecord::Notification {
+                name: "layout-change".into(),
+                arguments: "@1 deadbeef".into()
+            }))[0],
+            DispatchEvent::Notification { .. }
+        ));
+        dispatcher.handle(Ok(ControlRecord::CommandOutput(b"answer".to_vec())));
+        assert!(matches!(
+            dispatcher.handle(Ok(ControlRecord::End {
+                tag,
+                arguments: "10 4 1".into()
+            }))[0],
+            DispatchEvent::CommandCompleted { ref output, .. } if output == &[b"answer".to_vec()]
+        ));
+    }
+
+    #[test]
+    fn recorded_interleaving_fixture_preserves_output_and_command_correlation() {
+        let fixture = include_bytes!("../../../fixtures/tmux-control/interleaved.control");
+        let mut parser = ControlParser::default();
+        let mut dispatcher = ControlDispatcher::default();
+        let mut events = Vec::new();
+        for chunk in fixture.chunks(7) {
+            parser.push(chunk);
+            while let Some(record) = parser.next_record() {
+                events.extend(dispatcher.handle(record));
+            }
+        }
+        parser.finish();
+        while let Some(record) = parser.next_record() {
+            events.extend(dispatcher.handle(record));
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DispatchEvent::Output { data, .. } if data == b"live\x1b[31moutput"
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, DispatchEvent::CommandCompleted { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, DispatchEvent::ResnapshotRequired { .. }))
+        );
+    }
+
+    #[test]
+    fn malformed_fixture_has_one_recovery_event_per_bad_record() {
+        let fixture = include_bytes!("../../../fixtures/tmux-control/malformed.control");
+        let mut parser = ControlParser::default();
+        let mut dispatcher = ControlDispatcher::default();
+        parser.push(fixture);
+        parser.finish();
+        let mut recoveries = 0;
+        while let Some(record) = parser.next_record() {
+            recoveries += dispatcher
+                .handle(record)
+                .into_iter()
+                .filter(|event| matches!(event, DispatchEvent::ResnapshotRequired { .. }))
+                .count();
+        }
+        assert_eq!(recoveries, 4);
+    }
+
+    #[test]
+    fn tmux_33_and_37_capture_corpus_survives_every_split_boundary() {
+        for fixture in [
+            include_bytes!("../../../fixtures/tmux-control/tmux-3.3a-capture.control").as_slice(),
+            include_bytes!("../../../fixtures/tmux-control/tmux-3.7-capture.control").as_slice(),
+        ] {
+            for split in 0..=fixture.len() {
+                let mut parser = ControlParser::default();
+                parser.push(&fixture[..split]);
+                parser.push(&fixture[split..]);
+                parser.finish();
+                let records = std::iter::from_fn(|| parser.next_record()).collect::<Vec<_>>();
+                assert!(records.iter().all(Result::is_ok), "failed at split {split}");
+                assert!(
+                    records.iter().any(|record| matches!(
+                        record,
+                        Ok(ControlRecord::CommandOutput(line))
+                            if line.starts_with(b"__ADE_META__")
+                    )),
+                    "metadata missing at split {split}"
+                );
+            }
+        }
+    }
+}

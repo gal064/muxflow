@@ -1,0 +1,1202 @@
+use std::{
+    collections::{BTreeSet, VecDeque},
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context, bail};
+use tmux_agent_protocol::v1;
+
+use super::{
+    broadcast_control_event,
+    snapshot::{discover_authoritative, server_identity},
+};
+
+pub(crate) mod adapters;
+mod fallback;
+mod hooks;
+mod identity;
+mod process;
+mod reconcile;
+mod screen;
+mod snapshot;
+mod store;
+pub(crate) use hooks::HookManager;
+use store::{StoredAgent, StoredRoute, StoredState};
+
+const MAX_HOOK_BYTES: usize = 256 * 1024;
+const MAX_DEDUPE_IDS: usize = 512;
+
+pub(crate) struct AgentRuntime {
+    state_path: PathBuf,
+    state: Mutex<StoredState>,
+    screen_observer: Mutex<screen::ScreenObserver>,
+}
+
+static GLOBAL: OnceLock<Arc<AgentRuntime>> = OnceLock::new();
+
+impl AgentRuntime {
+    pub(crate) fn global() -> Arc<Self> {
+        Arc::clone(GLOBAL.get_or_init(|| {
+            Arc::new(Self::load(
+                crate::paths::default_runtime_dir().join("agents.json"),
+            ))
+        }))
+    }
+
+    fn load(state_path: PathBuf) -> Self {
+        let state = store::load(&state_path);
+        Self {
+            state_path,
+            state: Mutex::new(state),
+            screen_observer: Mutex::new(screen::ScreenObserver::default()),
+        }
+    }
+
+    #[cfg(test)]
+    fn isolated(state_path: PathBuf) -> Self {
+        Self::load(state_path)
+    }
+
+    pub(super) fn snapshot(&self) -> v1::AgentSnapshot {
+        self.snapshot_for(&server_identity())
+    }
+
+    pub(super) fn snapshot_for(&self, server_identity: &str) -> v1::AgentSnapshot {
+        let state = self.state.lock().unwrap();
+        snapshot::build(&state, server_identity)
+    }
+
+    pub(super) fn reconcile_topology(
+        &self,
+        topology: &tmux_control::TmuxSnapshot,
+        identity: &str,
+    ) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let original = state.clone();
+        let result = reconcile::topology(&mut state, topology, identity, now_millis());
+        if result.changed
+            && let Err(error) = self.persist_locked(&state)
+        {
+            *state = original;
+            return Err(error);
+        }
+        drop(state);
+        let live_panes: BTreeSet<_> = topology.panes.iter().map(|pane| pane.id.as_str()).collect();
+        self.screen_observer
+            .lock()
+            .unwrap()
+            .retain_panes(live_panes.iter().copied());
+        Ok(())
+    }
+
+    pub(crate) fn ingest_hook(&self, event: &v1::AgentHookEvent) -> anyhow::Result<v1::AgentEvent> {
+        let identity = server_identity();
+        let topology = discover_authoritative()
+            .ok()
+            .filter(|(_, discovered_identity)| discovered_identity == &identity)
+            .map(|(topology, _)| topology);
+        self.ingest_hook_with_context(event, &identity, topology.as_ref())
+    }
+
+    fn ingest_hook_with_context(
+        &self,
+        event: &v1::AgentHookEvent,
+        active_server_identity: &str,
+        topology: Option<&tmux_control::TmuxSnapshot>,
+    ) -> anyhow::Result<v1::AgentEvent> {
+        if event.payload_json.len() > MAX_HOOK_BYTES {
+            bail!("hook payload exceeds the {MAX_HOOK_BYTES}-byte limit");
+        }
+        if event.source_event_id.is_empty() {
+            bail!("hook source_event_id is required");
+        }
+        validate_pane_id(&event.pane_id)?;
+        let adapter = if event.adapter_id.is_empty() {
+            adapters::adapter(v1::AgentAdapterKind::try_from(event.adapter).unwrap_or_default())
+        } else {
+            adapters::by_id(&event.adapter_id)
+        }
+        .context("supported agent adapter is required")?;
+        let adapter_id = adapter.kind();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&event.payload_json).context("parse hook JSON")?;
+        let parsed = adapter.parse_hook(&payload).map_err(anyhow::Error::msg)?;
+        let observed_now = now_millis();
+        let occurred_at = if event.occurred_at_unix_millis > 0 {
+            event.occurred_at_unix_millis
+        } else {
+            observed_now
+        };
+        let native_session_id = if event.native_session_id.is_empty() {
+            parsed.native_session_id
+        } else {
+            event.native_session_id.clone()
+        };
+        let origin_matches = event.origin_server_identity == active_server_identity;
+        let route = identity::hook_route(
+            origin_matches.then_some(topology).flatten(),
+            active_server_identity,
+            &event.pane_id,
+        );
+        let mut state = self.state.lock().unwrap();
+        let original = state.clone();
+        let route_verified = origin_matches && !route.pane_id.is_empty();
+        let agent_id = if route_verified && native_session_id.is_empty() {
+            identity::manual_agent_id(adapter_id, active_server_identity, &event.pane_id)
+        } else if route_verified {
+            identity::native_agent_id(adapter_id, active_server_identity, &native_session_id)
+        } else {
+            identity::unmapped_hook_agent_id(
+                adapter_id,
+                &event.origin_server_identity,
+                &event.pane_id,
+                &native_session_id,
+            )
+        };
+        let candidates = identity::hook_candidates(
+            &state,
+            adapter_id,
+            active_server_identity,
+            &native_session_id,
+            &route,
+            &agent_id,
+            route_verified,
+        );
+        let pane_record_id = candidates.pane;
+        let native_record_id = candidates.native;
+        let previous_id = native_record_id.clone().or(pane_record_id.clone());
+        for candidate in [native_record_id.as_ref(), pane_record_id.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if state.agents[candidate]
+                .source_event_ids
+                .contains(&event.source_event_id)
+            {
+                bail!("duplicate hook source_event_id");
+            }
+        }
+        let latest_sequence = [native_record_id.as_ref(), pane_record_id.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|id| state.agents.get(id))
+            .map(|record| record.latest_source_generation)
+            .max()
+            .unwrap_or_default();
+        if event.source_sequence_authoritative {
+            if event.source_generation == 0 {
+                bail!("authoritative hook source sequence must be nonzero");
+            }
+            if event.source_generation <= latest_sequence {
+                bail!("hook source sequence is older or already applied");
+            }
+        }
+        let previous = previous_id
+            .as_ref()
+            .and_then(|id| state.agents.get(id))
+            .cloned();
+        let mut source_ids = VecDeque::new();
+        for candidate in [native_record_id.as_ref(), pane_record_id.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|id| state.agents.get(id))
+        {
+            for id in &candidate.source_event_ids {
+                if !source_ids.contains(id) {
+                    source_ids.push_back(id.clone());
+                }
+            }
+        }
+        let mut retired_agent_ids = Vec::new();
+        for old_id in [native_record_id, pane_record_id].into_iter().flatten() {
+            if old_id != agent_id && state.agents.remove(&old_id).is_some() {
+                retired_agent_ids.push(old_id);
+            }
+        }
+        state.generation = state.generation.saturating_add(1);
+        let generation = state.generation;
+        let previous_lifecycle = previous
+            .as_ref()
+            .and_then(|record| v1::AgentLifecycleState::try_from(record.lifecycle).ok())
+            .unwrap_or(v1::AgentLifecycleState::Unknown);
+        let attention = previous
+            .as_ref()
+            .map_or(0, |record| record.attention_generation);
+        let terminal_late = previous.as_ref().is_some_and(|record| record.hook_terminal)
+            && !matches!(
+                parsed.event_name.as_str(),
+                "SessionStart" | "UserPromptSubmit"
+            );
+        let lifecycle = if terminal_late {
+            previous_lifecycle
+        } else {
+            parsed.lifecycle
+        };
+        let hook_terminal = if matches!(
+            parsed.event_name.as_str(),
+            "SessionStart" | "UserPromptSubmit"
+        ) {
+            false
+        } else if parsed.event_name == "Stop" && parsed.lifecycle == v1::AgentLifecycleState::Idle {
+            true
+        } else {
+            previous.as_ref().is_some_and(|record| record.hook_terminal)
+        };
+        let attention_transition = lifecycle == v1::AgentLifecycleState::Blocked
+            && previous_lifecycle != v1::AgentLifecycleState::Blocked
+            || previous_lifecycle == v1::AgentLifecycleState::Working
+                && lifecycle == v1::AgentLifecycleState::Idle;
+        let attention_generation = if attention_transition {
+            attention.saturating_add(1)
+        } else {
+            attention
+        };
+        let resolved_seen_block = previous_lifecycle == v1::AgentLifecycleState::Blocked
+            && lifecycle == v1::AgentLifecycleState::Idle
+            && previous.as_ref().is_some_and(|record| {
+                record.attention_kind == "blocked"
+                    && record.seen_generation >= record.attention_generation
+            });
+        let attention_kind = if attention_transition {
+            if lifecycle == v1::AgentLifecycleState::Blocked {
+                "blocked".into()
+            } else {
+                "completed".into()
+            }
+        } else if resolved_seen_block {
+            String::new()
+        } else {
+            previous
+                .as_ref()
+                .map(|record| record.attention_kind.clone())
+                .unwrap_or_default()
+        };
+        source_ids.push_back(event.source_event_id.clone());
+        while source_ids.len() > MAX_DEDUPE_IDS {
+            source_ids.pop_front();
+        }
+        let latest_source_generation = if event.source_sequence_authoritative {
+            event.source_generation
+        } else {
+            latest_sequence
+        };
+        let record = StoredAgent {
+            agent_id: agent_id.clone(),
+            adapter: adapter.legacy_kind() as i32,
+            adapter_id: adapter.id().into(),
+            native_session_id,
+            display_name: previous
+                .as_ref()
+                .map(|record| record.display_name.clone())
+                .unwrap_or_else(|| adapter.display_name().into()),
+            route,
+            lifecycle: lifecycle as i32,
+            authority: v1::AgentAuthority::Hook as i32,
+            state_generation: generation,
+            attention_generation,
+            attention_kind,
+            seen_generation: previous.as_ref().map_or(0, |record| record.seen_generation),
+            updated_at_unix_millis: occurred_at,
+            hook_authority_expires_at_unix_millis: observed_now
+                .saturating_add(parsed.authority_millis),
+            detected_manually: previous
+                .as_ref()
+                .is_some_and(|record| record.detected_manually),
+            source_event_ids: source_ids,
+            latest_source_generation,
+            present: true,
+            hook_terminal,
+        };
+        state.agents.insert(agent_id, record.clone());
+        if let Err(error) = self.persist_locked(&state) {
+            *state = original;
+            return Err(error);
+        }
+        let reason = if lifecycle == v1::AgentLifecycleState::Blocked {
+            "blocked"
+        } else if previous_lifecycle == v1::AgentLifecycleState::Working
+            && lifecycle == v1::AgentLifecycleState::Idle
+        {
+            "completed"
+        } else {
+            "state_changed"
+        };
+        Ok(v1::AgentEvent {
+            agent: Some(snapshot::record(&record)),
+            generation,
+            notify: attention_transition,
+            reason: reason.into(),
+            retired_agent_ids,
+        })
+    }
+
+    pub(super) fn mark_seen(
+        &self,
+        agent_id: &str,
+        attention_generation: u64,
+    ) -> anyhow::Result<v1::AgentEvent> {
+        let mut state = self.state.lock().unwrap();
+        let original = state.clone();
+        let current = state
+            .agents
+            .get(agent_id)
+            .context("agent no longer exists")?;
+        if attention_generation != current.attention_generation {
+            bail!("attention generation is stale");
+        }
+        state.generation = state.generation.saturating_add(1);
+        let generation = state.generation;
+        let record = state
+            .agents
+            .get_mut(agent_id)
+            .context("agent no longer exists")?;
+        record.seen_generation = record.seen_generation.max(attention_generation);
+        record.state_generation = generation;
+        let result = snapshot::record(record);
+        if let Err(error) = self.persist_locked(&state) {
+            *state = original;
+            return Err(error);
+        }
+        Ok(v1::AgentEvent {
+            agent: Some(result),
+            generation,
+            notify: false,
+            reason: "seen".into(),
+            retired_agent_ids: Vec::new(),
+        })
+    }
+
+    pub(super) fn observe_screen(
+        &self,
+        pane_id: &str,
+        bytes: &[u8],
+        reset: bool,
+    ) -> anyhow::Result<()> {
+        let now = now_millis();
+        let (agent_id, adapter_kind) = {
+            let state = self.state.lock().unwrap();
+            let Some(current) = state.agents.values().find(|record| {
+                record.present
+                    && record.route.pane_id == pane_id
+                    && adapters::adapter(
+                        v1::AgentAdapterKind::try_from(record.adapter).unwrap_or_default(),
+                    )
+                    .is_some()
+            }) else {
+                return Ok(());
+            };
+            if current.authority == v1::AgentAuthority::Hook as i32
+                && current.hook_authority_expires_at_unix_millis > now
+            {
+                return Ok(());
+            }
+            (
+                current.agent_id.clone(),
+                v1::AgentAdapterKind::try_from(current.adapter).unwrap_or_default(),
+            )
+        };
+        let Some(screen) = self
+            .screen_observer
+            .lock()
+            .unwrap()
+            .observe(pane_id, bytes, reset, now)
+        else {
+            return Ok(());
+        };
+        let Some(lifecycle) =
+            adapters::adapter(adapter_kind).and_then(|adapter| adapter.fallback_screen(&screen))
+        else {
+            return Ok(());
+        };
+        if !self
+            .screen_observer
+            .lock()
+            .unwrap()
+            .confirms(pane_id, lifecycle)
+        {
+            return Ok(());
+        }
+        let mut state = self.state.lock().unwrap();
+        let original = state.clone();
+        let Some(current) = state.agents.get(&agent_id) else {
+            return Ok(());
+        };
+        if current.authority == v1::AgentAuthority::Hook as i32
+            && current.hook_authority_expires_at_unix_millis > now
+        {
+            return Ok(());
+        }
+        if current.authority == v1::AgentAuthority::Screen as i32
+            && current.lifecycle == lifecycle as i32
+        {
+            return Ok(());
+        }
+        let previous_lifecycle =
+            v1::AgentLifecycleState::try_from(current.lifecycle).unwrap_or_default();
+        state.generation = state.generation.saturating_add(1);
+        let generation = state.generation;
+        let record = state.agents.get_mut(&agent_id).unwrap();
+        let notify = lifecycle == v1::AgentLifecycleState::Blocked
+            && previous_lifecycle != v1::AgentLifecycleState::Blocked
+            || previous_lifecycle == v1::AgentLifecycleState::Working
+                && lifecycle == v1::AgentLifecycleState::Idle;
+        if notify {
+            record.attention_generation = record.attention_generation.saturating_add(1);
+            record.attention_kind = if lifecycle == v1::AgentLifecycleState::Blocked {
+                "blocked"
+            } else {
+                "completed"
+            }
+            .into();
+        } else if previous_lifecycle == v1::AgentLifecycleState::Blocked
+            && lifecycle == v1::AgentLifecycleState::Idle
+            && record.attention_kind == "blocked"
+            && record.seen_generation >= record.attention_generation
+        {
+            record.attention_kind.clear();
+        }
+        record.lifecycle = lifecycle as i32;
+        record.authority = v1::AgentAuthority::Screen as i32;
+        record.state_generation = generation;
+        record.updated_at_unix_millis = now;
+        let record = snapshot::record(record);
+        if let Err(error) = self.persist_locked(&state) {
+            *state = original;
+            return Err(error);
+        }
+        drop(state);
+        publish(v1::AgentEvent {
+            agent: Some(record),
+            generation,
+            notify,
+            reason: if previous_lifecycle == v1::AgentLifecycleState::Working
+                && lifecycle == v1::AgentLifecycleState::Idle
+            {
+                "completed"
+            } else if lifecycle == v1::AgentLifecycleState::Blocked {
+                "blocked"
+            } else {
+                "screen_recovery"
+            }
+            .into(),
+            retired_agent_ids: Vec::new(),
+        });
+        Ok(())
+    }
+
+    pub(super) fn rename(&self, agent_id: &str, name: &str) -> anyhow::Result<v1::AgentEvent> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
+            bail!("agent name must be 1-128 printable characters");
+        }
+        let mut state = self.state.lock().unwrap();
+        let original = state.clone();
+        state.generation = state.generation.saturating_add(1);
+        let generation = state.generation;
+        let record = state
+            .agents
+            .get_mut(agent_id)
+            .context("agent no longer exists")?;
+        record.display_name = name.into();
+        record.state_generation = generation;
+        let result = snapshot::record(record);
+        if let Err(error) = self.persist_locked(&state) {
+            *state = original;
+            return Err(error);
+        }
+        Ok(v1::AgentEvent {
+            agent: Some(result),
+            generation,
+            notify: false,
+            reason: "renamed".into(),
+            retired_agent_ids: Vec::new(),
+        })
+    }
+
+    fn persist_locked(&self, state: &StoredState) -> anyhow::Result<()> {
+        store::persist(&self.state_path, state)
+    }
+}
+
+pub(crate) fn publish(event: v1::AgentEvent) {
+    broadcast_control_event(v1::HostEvent {
+        kind: v1::EventKind::AgentState.into(),
+        scope: event
+            .agent
+            .as_ref()
+            .map(|agent| agent.agent_id.clone())
+            .unwrap_or_default(),
+        agent: Some(event),
+        ..Default::default()
+    });
+}
+
+pub(crate) fn ingest_fallbacks() -> anyhow::Result<usize> {
+    fallback::ingest()
+}
+
+fn validate_pane_id(pane_id: &str) -> anyhow::Result<()> {
+    if pane_id.strip_prefix('%').is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        Ok(())
+    } else {
+        bail!("hook TMUX_PANE must be an exact tmux % pane ID")
+    }
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+    use std::fs;
+
+    fn runtime(name: &str) -> AgentRuntime {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-agent-{name}-{}", uuid::Uuid::new_v4()))
+            .join("agents.json");
+        AgentRuntime::isolated(path)
+    }
+
+    fn event(id: &str, generation: u64, name: &str) -> v1::AgentHookEvent {
+        v1::AgentHookEvent {
+            adapter: v1::AgentAdapterKind::Codex.into(),
+            source_event_id: id.into(),
+            source_generation: generation,
+            native_session_id: "native-1".into(),
+            pane_id: "%7".into(),
+            payload_json: serde_json::to_vec(&serde_json::json!({"hook_event_name": name}))
+                .unwrap(),
+            occurred_at_unix_millis: now_millis(),
+            origin_server_identity: "server-a".into(),
+            ..Default::default()
+        }
+    }
+
+    fn topology(command: &str) -> tmux_control::TmuxSnapshot {
+        tmux_control::TmuxSnapshot {
+            sessions: vec![tmux_control::Session {
+                id: "$1".into(),
+                name: "workspace".into(),
+                window_count: 1,
+                attached_clients: 0,
+                order: 0,
+            }],
+            windows: vec![tmux_control::Window {
+                id: "@2".into(),
+                session_id: "$1".into(),
+                index: 0,
+                name: "agent".into(),
+                active: true,
+                layout: String::new(),
+                zoomed: false,
+            }],
+            panes: vec![tmux_control::Pane {
+                id: "%7".into(),
+                session_id: "$1".into(),
+                window_id: "@2".into(),
+                index: 0,
+                active: true,
+                width: 80,
+                height: 24,
+                left: 0,
+                top: 0,
+                current_path: "/work".into(),
+                current_command: command.into(),
+                pane_pid: 0,
+                start_command: String::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn hook_generations_dedupe_and_attention_are_monotonic() {
+        let runtime = runtime("transitions");
+        let working = runtime
+            .ingest_hook(&event("e1", 1, "UserPromptSubmit"))
+            .unwrap();
+        assert!(!working.notify);
+        let done = runtime.ingest_hook(&event("e2", 2, "Stop")).unwrap();
+        assert!(done.notify);
+        let record = done.agent.unwrap();
+        assert_eq!(record.attention_generation, 1);
+        assert_eq!(record.attention_kind, "completed");
+        assert_eq!(record.seen_generation, 0);
+        assert!(runtime.ingest_hook(&event("e2", 2, "Stop")).is_err());
+        assert!(
+            runtime
+                .ingest_hook(&event("older-sequence", 1, "Stop"))
+                .is_ok()
+        );
+        let seen = runtime.mark_seen(&record.agent_id, 1).unwrap();
+        assert_eq!(seen.reason, "seen");
+        assert!(!seen.notify);
+        assert!(seen.generation > done.generation);
+        let snapshot = runtime.snapshot();
+        assert!(snapshot.authoritative);
+        assert_eq!(snapshot.notification_watermark, snapshot.generation);
+        assert_eq!(snapshot.agents[0].seen_generation, 1);
+    }
+
+    #[test]
+    fn rename_returns_a_canonical_published_event_generation() {
+        let runtime = runtime("rename-event");
+        let topology_snapshot = topology("codex");
+        runtime
+            .reconcile_topology(&topology_snapshot, "server-a")
+            .unwrap();
+        let before = runtime.snapshot_for("server-a");
+        let renamed = runtime
+            .rename(&before.agents[0].agent_id, "Build agent")
+            .unwrap();
+        assert_eq!(renamed.reason, "renamed");
+        assert!(!renamed.notify);
+        assert!(renamed.generation > before.generation);
+        assert_eq!(renamed.agent.unwrap().display_name, "Build agent");
+    }
+
+    #[test]
+    fn persist_failure_rolls_back_runtime_mutations() {
+        let seeded = runtime("transaction-seed");
+        let topology_snapshot = topology("codex");
+        seeded
+            .reconcile_topology(&topology_snapshot, "server-a")
+            .unwrap();
+        let baseline_state = seeded.state.lock().unwrap().clone();
+        let blocker = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-state-blocker-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+        fs::write(&blocker, b"not a directory").unwrap();
+        let failing = || AgentRuntime {
+            state_path: blocker.join("agents.json"),
+            state: Mutex::new(baseline_state.clone()),
+            screen_observer: Mutex::new(screen::ScreenObserver::default()),
+        };
+        let agent_id = baseline_state.agents.keys().next().unwrap().clone();
+
+        let runtime = failing();
+        assert!(runtime.rename(&agent_id, "must rollback").is_err());
+        assert_eq!(
+            runtime.state.lock().unwrap().generation,
+            baseline_state.generation
+        );
+
+        let runtime = failing();
+        assert!(runtime.mark_seen(&agent_id, 0).is_err());
+        assert_eq!(
+            runtime.state.lock().unwrap().generation,
+            baseline_state.generation
+        );
+
+        let runtime = failing();
+        assert!(
+            runtime
+                .reconcile_topology(&topology("claude"), "server-a")
+                .is_err()
+        );
+        let state = runtime.state.lock().unwrap();
+        assert_eq!(state.generation, baseline_state.generation);
+        assert_eq!(
+            state.agents.keys().collect::<Vec<_>>(),
+            baseline_state.agents.keys().collect::<Vec<_>>()
+        );
+        drop(state);
+
+        let runtime = failing();
+        assert!(
+            runtime
+                .ingest_hook_with_context(
+                    &event("transaction-hook", 0, "PermissionRequest"),
+                    "server-a",
+                    Some(&topology_snapshot),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            runtime.state.lock().unwrap().generation,
+            baseline_state.generation
+        );
+    }
+
+    #[test]
+    fn snapshot_exposes_raw_records_for_frontend_rollups() {
+        let runtime = runtime("raw-records");
+        let mut topology = topology("codex");
+        let mut second_pane = topology.panes[0].clone();
+        second_pane.id = "%8".into();
+        topology.panes.push(second_pane);
+        runtime.reconcile_topology(&topology, "server-a").unwrap();
+        runtime
+            .ingest_hook_with_context(
+                &event("e1", 1, "UserPromptSubmit"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        let mut second = event("e2", 1, "PermissionRequest");
+        second.native_session_id = "native-2".into();
+        second.pane_id = "%8".into();
+        runtime
+            .ingest_hook_with_context(&second, "server-a", Some(&topology))
+            .unwrap();
+        let snapshot = runtime.snapshot_for("server-a");
+        assert_eq!(snapshot.agents.len(), 2);
+        assert!(
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| { agent.lifecycle == v1::AgentLifecycleState::Blocked as i32 })
+        );
+        assert!(
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| { agent.lifecycle == v1::AgentLifecycleState::Working as i32 })
+        );
+    }
+
+    #[test]
+    fn unexpired_hook_authority_survives_process_reconciliation() {
+        let runtime = runtime("authority");
+        let topology = topology("codex");
+        runtime
+            .ingest_hook_with_context(
+                &event("e1", 1, "PermissionRequest"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        runtime.reconcile_topology(&topology, "server-a").unwrap();
+        let snapshot = runtime.snapshot_for("server-a");
+        assert_eq!(snapshot.agents.len(), 1);
+        let record = &snapshot.agents[0];
+        assert_eq!(record.authority, v1::AgentAuthority::Hook as i32);
+        assert_eq!(record.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+    }
+
+    #[test]
+    fn screen_fallback_classifies_but_cannot_override_current_hook() {
+        let runtime = runtime("screen-authority");
+        runtime
+            .ingest_hook(&event("e1", 1, "UserPromptSubmit"))
+            .unwrap();
+        runtime
+            .observe_screen("%7", b"Permission required: Allow command?", true)
+            .unwrap();
+        let current = &runtime.snapshot().agents[0];
+        assert_eq!(current.authority, v1::AgentAuthority::Hook as i32);
+        assert_eq!(current.lifecycle, v1::AgentLifecycleState::Working as i32);
+    }
+
+    #[test]
+    fn reconciliation_retires_process_exit_pane_close_and_adapter_replacement() {
+        let runtime = runtime("retire");
+        runtime
+            .reconcile_topology(&topology("codex"), "server-a")
+            .unwrap();
+        let codex_id = runtime.snapshot_for("server-a").agents[0].agent_id.clone();
+
+        runtime
+            .reconcile_topology(&topology("claude"), "server-a")
+            .unwrap();
+        let replaced = runtime.snapshot_for("server-a");
+        assert_eq!(replaced.agents.len(), 1);
+        assert_ne!(replaced.agents[0].agent_id, codex_id);
+        assert_eq!(
+            replaced.agents[0].adapter,
+            v1::AgentAdapterKind::ClaudeCode as i32
+        );
+
+        runtime
+            .reconcile_topology(&topology("bash"), "server-a")
+            .unwrap();
+        assert!(runtime.snapshot_for("server-a").agents.is_empty());
+
+        runtime
+            .reconcile_topology(&topology("codex"), "server-a")
+            .unwrap();
+        runtime
+            .reconcile_topology(&tmux_control::TmuxSnapshot::default(), "server-a")
+            .unwrap();
+        assert!(runtime.snapshot_for("server-a").agents.is_empty());
+    }
+
+    #[test]
+    fn server_replacement_filters_and_retires_foreign_records() {
+        let runtime = runtime("server-replace");
+        runtime
+            .reconcile_topology(&topology("codex"), "server-a")
+            .unwrap();
+        assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
+        assert!(runtime.snapshot_for("server-b").agents.is_empty());
+        runtime
+            .reconcile_topology(&topology("codex"), "server-b")
+            .unwrap();
+        assert!(runtime.snapshot_for("server-a").agents.is_empty());
+        assert_eq!(runtime.snapshot_for("server-b").agents.len(), 1);
+    }
+
+    #[test]
+    fn hook_atomically_promotes_manual_pane_identity_without_duplicates() {
+        let runtime = runtime("promotion");
+        let topology = topology("codex");
+        runtime.reconcile_topology(&topology, "server-a").unwrap();
+        let manual_id = runtime.snapshot_for("server-a").agents[0].agent_id.clone();
+        let promoted = runtime
+            .ingest_hook_with_context(
+                &event("hook-1", 0, "UserPromptSubmit"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        let snapshot = runtime.snapshot_for("server-a");
+        assert_eq!(snapshot.agents.len(), 1);
+        assert_eq!(snapshot.agents[0].native_session_id, "native-1");
+        assert_ne!(snapshot.agents[0].agent_id, manual_id);
+        assert_eq!(promoted.retired_agent_ids, [manual_id]);
+        assert_eq!(snapshot.agents[0].route.as_ref().unwrap().pane_id, "%7");
+    }
+
+    #[test]
+    fn foreign_hook_is_visible_but_never_invents_a_destination() {
+        let runtime = runtime("foreign-route");
+        let mut foreign = event("foreign", 0, "PermissionRequest");
+        foreign.pane_id = "%99".into();
+        runtime
+            .ingest_hook_with_context(&foreign, "server-a", Some(&topology("codex")))
+            .unwrap();
+        let snapshot = runtime.snapshot_for("server-a");
+        let route = snapshot.agents[0].route.as_ref().unwrap().clone();
+        assert!(route.pane_id.is_empty());
+        assert!(route.session_id.is_empty());
+        assert!(route.window_id.is_empty());
+    }
+
+    #[test]
+    fn same_numbered_pane_from_another_server_remains_unmapped() {
+        let runtime = runtime("foreign-server-collision");
+        let topology = topology("codex");
+        runtime.reconcile_topology(&topology, "server-a").unwrap();
+        let direct_before = runtime.snapshot_for("server-a").agents[0].clone();
+        let mut foreign = event("foreign-collision", 0, "UserPromptSubmit");
+        foreign.origin_server_identity = "server-b".into();
+        foreign.native_session_id = direct_before.native_session_id.clone();
+        runtime
+            .ingest_hook_with_context(&foreign, "server-a", Some(&topology))
+            .unwrap();
+        assert!(
+            runtime
+                .ingest_hook_with_context(&foreign, "server-a", Some(&topology))
+                .is_err(),
+            "foreign exact-ID continuity must retain source-event dedupe"
+        );
+        let mut completed = foreign.clone();
+        completed.source_event_id = "foreign-completed".into();
+        completed.payload_json =
+            serde_json::to_vec(&serde_json::json!({"hook_event_name": "Stop"})).unwrap();
+        runtime
+            .ingest_hook_with_context(&completed, "server-a", Some(&topology))
+            .unwrap();
+        let snapshot = runtime.snapshot_for("server-a");
+        let direct_after = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == direct_before.agent_id)
+            .unwrap();
+        assert_eq!(direct_after, &direct_before);
+        let unmapped = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id != direct_before.agent_id)
+            .unwrap();
+        let route = unmapped.route.as_ref().unwrap();
+        assert!(
+            route.pane_id.is_empty() && route.session_id.is_empty() && route.window_id.is_empty()
+        );
+        assert_eq!(unmapped.lifecycle, v1::AgentLifecycleState::Idle as i32);
+        assert_eq!(unmapped.attention_kind, "completed");
+        assert_eq!(unmapped.attention_generation, 1);
+    }
+
+    #[test]
+    fn missing_same_server_pane_cannot_replace_a_mapped_native_agent() {
+        let runtime = runtime("same-server-missing-pane");
+        let topology = topology("codex");
+        runtime.reconcile_topology(&topology, "server-a").unwrap();
+        runtime
+            .ingest_hook_with_context(
+                &event("mapped-working", 0, "UserPromptSubmit"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        let direct_before = runtime.snapshot_for("server-a").agents[0].clone();
+
+        let mut stale = event("stale-working", 0, "UserPromptSubmit");
+        stale.pane_id = "%99".into();
+        stale.native_session_id = direct_before.native_session_id.clone();
+        runtime
+            .ingest_hook_with_context(&stale, "server-a", Some(&topology))
+            .unwrap();
+        assert!(
+            runtime
+                .ingest_hook_with_context(&stale, "server-a", Some(&topology))
+                .is_err(),
+            "same-server unmapped continuity must retain source-event dedupe"
+        );
+        let mut completed = stale.clone();
+        completed.source_event_id = "stale-completed".into();
+        completed.payload_json =
+            serde_json::to_vec(&serde_json::json!({"hook_event_name": "Stop"})).unwrap();
+        runtime
+            .ingest_hook_with_context(&completed, "server-a", Some(&topology))
+            .unwrap();
+
+        let snapshot = runtime.snapshot_for("server-a");
+        let direct_after = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == direct_before.agent_id)
+            .unwrap();
+        assert_eq!(direct_after, &direct_before);
+        let unmapped = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id != direct_before.agent_id)
+            .unwrap();
+        let route = unmapped.route.as_ref().unwrap();
+        assert!(
+            route.pane_id.is_empty() && route.session_id.is_empty() && route.window_id.is_empty()
+        );
+        assert_eq!(unmapped.native_session_id, "native-1");
+        assert_eq!(unmapped.lifecycle, v1::AgentLifecycleState::Idle as i32);
+        assert_eq!(unmapped.attention_kind, "completed");
+        assert_eq!(unmapped.attention_generation, 1);
+    }
+
+    #[test]
+    fn blocked_to_idle_never_becomes_a_completed_attention() {
+        let unseen = runtime("blocked-idle-unseen");
+        unseen
+            .ingest_hook_with_context(
+                &event("blocked", 0, "PermissionRequest"),
+                "server-a",
+                Some(&topology("codex")),
+            )
+            .unwrap();
+        let idle = unseen
+            .ingest_hook_with_context(
+                &event("idle", 0, "Stop"),
+                "server-a",
+                Some(&topology("codex")),
+            )
+            .unwrap();
+        assert!(!idle.notify);
+        let idle = idle.agent.unwrap();
+        assert_eq!(idle.lifecycle, v1::AgentLifecycleState::Idle as i32);
+        assert_eq!(idle.attention_kind, "blocked");
+        assert_ne!(idle.attention_kind, "completed");
+
+        let seen = runtime("blocked-idle-seen");
+        let blocked = seen
+            .ingest_hook_with_context(
+                &event("blocked-seen", 0, "PermissionRequest"),
+                "server-a",
+                Some(&topology("codex")),
+            )
+            .unwrap()
+            .agent
+            .unwrap();
+        seen.mark_seen(&blocked.agent_id, blocked.attention_generation)
+            .unwrap();
+        let idle = seen
+            .ingest_hook_with_context(
+                &event("idle-seen", 0, "Stop"),
+                "server-a",
+                Some(&topology("codex")),
+            )
+            .unwrap();
+        assert!(!idle.notify);
+        assert_eq!(idle.agent.unwrap().attention_kind, "");
+    }
+
+    #[test]
+    fn concurrent_same_millisecond_hooks_do_not_use_wall_clock_ordering() {
+        let runtime = Arc::new(runtime("concurrent"));
+        let topology = Arc::new(topology("codex"));
+        runtime.reconcile_topology(&topology, "server-a").unwrap();
+        let occurred = now_millis();
+        let handles: Vec<_> = ["concurrent-a", "concurrent-b"]
+            .into_iter()
+            .map(|id| {
+                let runtime = Arc::clone(&runtime);
+                let topology = Arc::clone(&topology);
+                std::thread::spawn(move || {
+                    let mut event = event(id, 0, "UserPromptSubmit");
+                    event.occurred_at_unix_millis = occurred;
+                    runtime.ingest_hook_with_context(&event, "server-a", Some(&topology))
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        let snapshot = runtime.snapshot_for("server-a");
+        assert_eq!(snapshot.agents.len(), 1);
+        assert!(snapshot.generation >= 3);
+    }
+
+    #[test]
+    fn authoritative_vendor_sequence_rejects_replay_but_unsequenced_hooks_remain_concurrent() {
+        let runtime = runtime("vendor-sequence");
+        let topology = topology("codex");
+        let mut sequenced = event("vendor-10", 10, "UserPromptSubmit");
+        sequenced.source_sequence_authoritative = true;
+        runtime
+            .ingest_hook_with_context(&sequenced, "server-a", Some(&topology))
+            .unwrap();
+        let mut older = event("vendor-9", 9, "PermissionRequest");
+        older.source_sequence_authoritative = true;
+        assert!(
+            runtime
+                .ingest_hook_with_context(&older, "server-a", Some(&topology))
+                .is_err()
+        );
+        let unsequenced = event("parallel-no-sequence", 0, "PermissionRequest");
+        assert!(
+            runtime
+                .ingest_hook_with_context(&unsequenced, "server-a", Some(&topology))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn unsequenced_late_tool_events_cannot_regress_a_completed_phase() {
+        let runtime = runtime("phase-reducer");
+        let topology = topology("codex");
+        for (id, name) in [
+            ("prompt", "UserPromptSubmit"),
+            ("stop", "Stop"),
+            ("late-permission", "PermissionRequest"),
+            ("late-post", "PostToolUse"),
+        ] {
+            runtime
+                .ingest_hook_with_context(&event(id, 0, name), "server-a", Some(&topology))
+                .unwrap();
+        }
+        let completed = &runtime.snapshot_for("server-a").agents[0];
+        assert_eq!(completed.lifecycle, v1::AgentLifecycleState::Idle as i32);
+        assert_eq!(completed.attention_generation, 1);
+
+        runtime
+            .ingest_hook_with_context(
+                &event("next-prompt", 0, "UserPromptSubmit"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.snapshot_for("server-a").agents[0].lifecycle,
+            v1::AgentLifecycleState::Working as i32
+        );
+    }
+
+    #[test]
+    fn completed_phase_survives_runtime_reload_before_late_fallback() {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-agent-reload-{}", uuid::Uuid::new_v4()))
+            .join("agents.json");
+        let topology = topology("codex");
+        {
+            let runtime = AgentRuntime::isolated(path.clone());
+            runtime
+                .ingest_hook_with_context(
+                    &event("prompt", 0, "UserPromptSubmit"),
+                    "server-a",
+                    Some(&topology),
+                )
+                .unwrap();
+            runtime
+                .ingest_hook_with_context(&event("stop", 0, "Stop"), "server-a", Some(&topology))
+                .unwrap();
+        }
+        let runtime = AgentRuntime::isolated(path);
+        runtime
+            .ingest_hook_with_context(&event("late", 0, "PreToolUse"), "server-a", Some(&topology))
+            .unwrap();
+        assert_eq!(
+            runtime.snapshot_for("server-a").agents[0].lifecycle,
+            v1::AgentLifecycleState::Idle as i32
+        );
+    }
+
+    #[test]
+    fn hook_expiry_retires_an_unmapped_record_without_touching_direct_detection() {
+        let runtime = runtime("expired-evidence");
+        let topology = topology("codex");
+        runtime.reconcile_topology(&topology, "server-a").unwrap();
+        let mut unmapped = event("unmapped-expiry", 0, "PermissionRequest");
+        unmapped.native_session_id = "unmapped-session".into();
+        unmapped.pane_id = "%101".into();
+        runtime
+            .ingest_hook_with_context(&unmapped, "server-a", Some(&topology))
+            .unwrap();
+        assert_eq!(runtime.snapshot_for("server-a").agents.len(), 2);
+        {
+            let mut state = runtime.state.lock().unwrap();
+            state.agents.values_mut().for_each(|record| {
+                if record.route.pane_id.is_empty() {
+                    record.hook_authority_expires_at_unix_millis = 1;
+                }
+            });
+        }
+        runtime.reconcile_topology(&topology, "server-a").unwrap();
+        let snapshot = runtime.snapshot_for("server-a");
+        assert_eq!(snapshot.agents.len(), 1);
+        assert_eq!(snapshot.agents[0].route.as_ref().unwrap().pane_id, "%7");
+    }
+
+    #[test]
+    fn malformed_fallback_is_removed_and_does_not_stop_the_scan() {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase6-fallback-scan-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("hook-fallback-a-1.pb"), b"malformed").unwrap();
+        fs::write(
+            dir.join("hook-fallback-b-2.pb"),
+            event("valid", 0, "Stop").encode_to_vec(),
+        )
+        .unwrap();
+        let mut seen = Vec::new();
+        assert_eq!(
+            fallback::consume(&dir, |event| {
+                seen.push(event.source_event_id);
+                true
+            })
+            .unwrap(),
+            1
+        );
+        assert_eq!(seen, ["valid"]);
+        assert!(fs::read_dir(&dir).unwrap().next().is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

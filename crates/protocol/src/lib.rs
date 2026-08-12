@@ -1,0 +1,265 @@
+//! Versioned, bounded binary messages shared by desktop and host processes.
+
+// Prost generates the wire-compatible oneof as an enum. Boxing a variant
+// would leak a generator-specific ownership change through every protocol
+// consumer without changing the bounded frame contract.
+#![allow(clippy::large_enum_variant)]
+
+use std::io::{Read, Write};
+
+use prost::Message;
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+pub mod v1 {
+    include!(concat!(env!("OUT_DIR"), "/tmux_agent.protocol.v1.rs"));
+}
+
+// Phase 9 removes obsolete topology and agent-route fields. The major bump
+// deliberately makes older helpers read-only until the user accepts the
+// existing explicit helper-upgrade flow.
+pub const PROTOCOL_MAJOR: u32 = 2;
+pub const PROTOCOL_MINOR: u32 = 0;
+pub const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Outcome of a descriptor-anchored filesystem publication. This Rust-level
+/// contract is shared by the desktop downloader and host uploader so callers
+/// never infer whether rename happened from an error string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationOutcome {
+    Published,
+    NotPublished,
+    Unknown,
+}
+
+#[derive(Debug)]
+pub struct Published<T> {
+    pub value: T,
+    pub cleanup_error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct PublishFailure {
+    pub outcome: PublicationOutcome,
+    pub message: String,
+}
+
+impl std::fmt::Display for PublishFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let prefix = match self.outcome {
+            PublicationOutcome::Published => "published",
+            PublicationOutcome::NotPublished => "not_published",
+            PublicationOutcome::Unknown => "outcome_unknown",
+        };
+        write!(formatter, "{prefix}: {}", self.message)
+    }
+}
+
+impl std::error::Error for PublishFailure {}
+
+pub type PublishResult<T> = Result<Published<T>, PublishFailure>;
+
+pub const CAP_SNAPSHOTS: u64 = 1 << 0;
+pub const CAP_ORDERED_EVENTS: u64 = 1 << 1;
+pub const CAP_CANCELLATION: u64 = 1 << 2;
+pub const CAP_TERMINAL_STREAM: u64 = 1 << 3;
+pub const CAP_RESYNC: u64 = 1 << 4;
+pub const CAP_TMUX_ACTIONS: u64 = 1 << 5;
+pub const CAP_TERMINAL_RESOURCES: u64 = 1 << 6;
+pub const CAP_ACTIVE_ROOT: u64 = 1 << 7;
+pub const CAP_FILE_SERVICE: u64 = 1 << 8;
+pub const CAP_TEXT_EDITOR: u64 = 1 << 9;
+pub const CAP_BULK_DOWNLOAD: u64 = 1 << 10;
+pub const CAP_GIT: u64 = 1 << 11;
+pub const CAP_AGENTS: u64 = 1 << 12;
+pub const CAP_TERMINAL_UPLOAD: u64 = 1 << 13;
+pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
+    | CAP_ORDERED_EVENTS
+    | CAP_CANCELLATION
+    | CAP_TERMINAL_STREAM
+    | CAP_RESYNC
+    | CAP_TMUX_ACTIONS
+    | CAP_TERMINAL_RESOURCES
+    | CAP_ACTIVE_ROOT
+    | CAP_FILE_SERVICE
+    | CAP_TEXT_EDITOR
+    | CAP_BULK_DOWNLOAD
+    | CAP_GIT
+    | CAP_AGENTS
+    | CAP_TERMINAL_UPLOAD;
+
+#[derive(Debug, Error)]
+pub enum FrameError {
+    #[error("frame I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("frame length {0} exceeds the {MAX_FRAME_BYTES}-byte limit")]
+    TooLarge(usize),
+    #[error("invalid protobuf frame: {0}")]
+    Decode(#[from] prost::DecodeError),
+}
+
+pub fn encode_frame(envelope: &v1::Envelope) -> Result<Vec<u8>, FrameError> {
+    let body = envelope.encode_to_vec();
+    if body.len() > MAX_FRAME_BYTES {
+        return Err(FrameError::TooLarge(body.len()));
+    }
+    let mut frame = Vec::with_capacity(4 + body.len());
+    frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&body);
+    Ok(frame)
+}
+
+pub fn read_frame_sync(reader: &mut impl Read) -> Result<Option<v1::Envelope>, FrameError> {
+    let mut length = [0_u8; 4];
+    let first = reader.read(&mut length[..1])?;
+    if first == 0 {
+        return Ok(None);
+    }
+    reader.read_exact(&mut length[1..])?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_FRAME_BYTES {
+        return Err(FrameError::TooLarge(length));
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    Ok(Some(v1::Envelope::decode(body.as_slice())?))
+}
+
+/// Incremental bounded decoder used by cancellable synchronous IPC clients.
+/// It never allocates beyond one maximum-sized frame plus its length prefix.
+#[derive(Default)]
+pub struct FrameAccumulator {
+    bytes: Vec<u8>,
+}
+
+impl FrameAccumulator {
+    pub fn push(&mut self, chunk: &[u8]) -> Result<(), FrameError> {
+        if self.bytes.len().saturating_add(chunk.len()) > MAX_FRAME_BYTES + 4 {
+            return Err(FrameError::TooLarge(
+                self.bytes.len().saturating_add(chunk.len()),
+            ));
+        }
+        self.bytes.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    pub fn next_frame(&mut self) -> Result<Option<v1::Envelope>, FrameError> {
+        if self.bytes.len() < 4 {
+            return Ok(None);
+        }
+        let length =
+            u32::from_be_bytes(self.bytes[..4].try_into().expect("four-byte prefix")) as usize;
+        if length > MAX_FRAME_BYTES {
+            return Err(FrameError::TooLarge(length));
+        }
+        if self.bytes.len() < length + 4 {
+            return Ok(None);
+        }
+        let envelope = v1::Envelope::decode(&self.bytes[4..length + 4])?;
+        self.bytes.drain(..length + 4);
+        Ok(Some(envelope))
+    }
+}
+
+pub fn write_frame_sync(
+    writer: &mut impl Write,
+    envelope: &v1::Envelope,
+) -> Result<(), FrameError> {
+    writer.write_all(&encode_frame(envelope)?)?;
+    writer.flush()?;
+    Ok(())
+}
+
+pub async fn read_frame<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<v1::Envelope>, FrameError> {
+    let mut length = [0_u8; 4];
+    let first = reader.read(&mut length[..1]).await?;
+    if first == 0 {
+        return Ok(None);
+    }
+    reader.read_exact(&mut length[1..]).await?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_FRAME_BYTES {
+        return Err(FrameError::TooLarge(length));
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).await?;
+    Ok(Some(v1::Envelope::decode(body.as_slice())?))
+}
+
+pub async fn write_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    envelope: &v1::Envelope,
+) -> Result<(), FrameError> {
+    writer.write_all(&encode_frame(envelope)?).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+pub fn envelope(request_id: u64, sequence: u64, payload: v1::envelope::Payload) -> v1::Envelope {
+    v1::Envelope {
+        protocol_major: PROTOCOL_MAJOR,
+        protocol_minor: PROTOCOL_MINOR,
+        request_id,
+        sequence,
+        stream_id: 0,
+        priority: v1::Priority::Control.into(),
+        payload: Some(payload),
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn transactional_publish_failures_have_typed_outcomes() {
+        let not_published = PublishFailure {
+            outcome: PublicationOutcome::NotPublished,
+            message: "rolled back".into(),
+        };
+        assert_eq!(not_published.to_string(), "not_published: rolled back");
+        let unknown = PublishFailure {
+            outcome: PublicationOutcome::Unknown,
+            message: "replacement preserved".into(),
+        };
+        assert_eq!(
+            unknown.to_string(),
+            "outcome_unknown: replacement preserved"
+        );
+    }
+
+    #[test]
+    fn incremental_decoder_accepts_fragmented_frames_and_rejects_oversize() {
+        let expected = envelope(
+            77,
+            0,
+            v1::envelope::Payload::Cancel(v1::Cancel {
+                target_request_id: 42,
+            }),
+        );
+        let encoded = encode_frame(&expected).unwrap();
+        let mut decoder = FrameAccumulator::default();
+        for byte in &encoded[..encoded.len() - 1] {
+            decoder.push(std::slice::from_ref(byte)).unwrap();
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
+        decoder.push(&encoded[encoded.len() - 1..]).unwrap();
+        let decoded = decoder.next_frame().unwrap().unwrap();
+        assert_eq!(decoded.request_id, 77);
+        assert!(matches!(
+            decoded.payload,
+            Some(v1::envelope::Payload::Cancel(_))
+        ));
+
+        let mut oversized = FrameAccumulator::default();
+        let length = (MAX_FRAME_BYTES as u32 + 1).to_be_bytes();
+        oversized.push(&length).unwrap();
+        assert!(matches!(
+            oversized.next_frame(),
+            Err(FrameError::TooLarge(_))
+        ));
+    }
+}

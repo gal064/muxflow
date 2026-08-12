@@ -1,0 +1,425 @@
+use super::*;
+
+pub(crate) async fn handle_request(
+    request_id: u64,
+    request: v1::Request,
+    read_only: bool,
+    cancellation: Arc<AtomicBool>,
+    context: RequestContext,
+) {
+    let RequestContext {
+        control_tx,
+        event_tx,
+        generation,
+        overflowed,
+        subscribed,
+        pending,
+        terminal,
+        topology_lock,
+        topology_baseline,
+        files,
+        git,
+        bulk_connection,
+        connection_epoch,
+        closed,
+    } = context;
+    let control_tx = &control_tx;
+    let event_tx = &event_tx;
+    let generation = &generation;
+    let overflowed = &overflowed;
+    let subscribed = &subscribed;
+    let pending = &pending;
+    let terminal = &terminal;
+    let topology_lock = &topology_lock;
+    let topology_baseline = &topology_baseline;
+    let files = &files;
+    let git = &git;
+    if closed.load(Ordering::Acquire) || cancellation.load(Ordering::Acquire) {
+        send_response(
+            control_tx,
+            request_id,
+            response_error("cancelled", "request was cancelled before execution"),
+        )
+        .await;
+        pending.lock().unwrap().remove(&request_id);
+        return;
+    }
+    let operation = v1::Operation::try_from(request.operation).unwrap_or_default();
+    if matches!(
+        operation,
+        v1::Operation::FullSnapshot | v1::Operation::Subscribe | v1::Operation::Resync
+    ) && !matches!(request.scope.as_str(), "" | "full" | "topology")
+    {
+        send_response(
+            control_tx,
+            request_id,
+            response_error(
+                "invalid_snapshot_scope",
+                "snapshot scope must be full or topology",
+            ),
+        )
+        .await;
+        pending.lock().unwrap().remove(&request_id);
+        return;
+    }
+    let is_mutation = matches!(
+        operation,
+        v1::Operation::AttachTerminal
+            | v1::Operation::TerminalInput
+            | v1::Operation::ResizeTerminal
+            | v1::Operation::TmuxAction
+            | v1::Operation::SetTerminalVisibility
+            | v1::Operation::RequestTerminalSeed
+            | v1::Operation::WatchDirectory
+            | v1::Operation::UnwatchDirectory
+            | v1::Operation::FileMutation
+            | v1::Operation::WriteFile
+            | v1::Operation::StartDownload
+            | v1::Operation::ReadDownloadChunk
+            | v1::Operation::CancelDownload
+            | v1::Operation::BeginFileWrite
+            | v1::Operation::WriteFileChunk
+            | v1::Operation::CommitFileWrite
+            | v1::Operation::CancelFileWrite
+            | v1::Operation::PrepareTerminalUpload
+            | v1::Operation::WriteTerminalUploadChunk
+            | v1::Operation::CommitTerminalUpload
+            | v1::Operation::CancelTerminalUpload
+            | v1::Operation::WatchGit
+            | v1::Operation::UnwatchGit
+            | v1::Operation::PrepareGitDiscard
+            | v1::Operation::GitMutation
+            | v1::Operation::GitCommit
+            | v1::Operation::AgentAction
+            | v1::Operation::AgentMarkSeen
+            | v1::Operation::AgentHookIngest
+            | v1::Operation::AgentHookManagement
+    );
+    if read_only && is_mutation {
+        send_response(
+            control_tx,
+            request_id,
+            response_error(
+                "helper_incompatible",
+                "host is read-only until the helper is upgraded",
+            ),
+        )
+        .await;
+        pending.lock().unwrap().remove(&request_id);
+        return;
+    }
+    if !bulk_connection && file_ops::requires_bulk_connection(operation) {
+        send_response(
+            control_tx,
+            request_id,
+            response_error(
+                "bulk_connection_required",
+                "file bodies are allowed only on an independent bulk connection",
+            ),
+        )
+        .await;
+        pending.lock().unwrap().remove(&request_id);
+        return;
+    }
+
+    if super::filesystem_dispatch::handles(operation) {
+        super::filesystem_dispatch::handle(
+            request_id,
+            operation,
+            request,
+            Arc::clone(&cancellation),
+            super::filesystem_dispatch::FileDispatchContext {
+                control_tx,
+                event_tx,
+                pending,
+                files,
+                bulk_connection,
+            },
+        )
+        .await;
+        pending.lock().unwrap().remove(&request_id);
+        return;
+    }
+
+    if super::git_dispatch::handles(operation) {
+        super::git_dispatch::handle(
+            request_id,
+            operation,
+            request,
+            Arc::clone(&cancellation),
+            super::git_dispatch::GitDispatchContext {
+                control_tx,
+                event_tx,
+                git,
+                connection_epoch,
+                closed: &closed,
+            },
+        )
+        .await;
+        pending.lock().unwrap().remove(&request_id);
+        return;
+    }
+
+    if super::agent_dispatch::handles(operation) {
+        super::agent_dispatch::handle(
+            request_id,
+            operation,
+            request,
+            control_tx,
+            generation,
+            topology_baseline,
+            &cancellation,
+        )
+        .await;
+        pending.lock().unwrap().remove(&request_id);
+        return;
+    }
+
+    if operation == v1::Operation::ResolveActiveRoot {
+        super::active_root_dispatch::handle(
+            request_id,
+            request,
+            Arc::clone(&cancellation),
+            super::active_root_dispatch::ActiveRootContext {
+                control_tx,
+                event_tx,
+                generation,
+                pending,
+                topology_lock,
+                files,
+            },
+        )
+        .await;
+        pending.lock().unwrap().remove(&request_id);
+        return;
+    }
+
+    if operation == v1::Operation::TmuxAction {
+        super::tmux_action_dispatch::handle(
+            request_id,
+            request,
+            super::tmux_action_dispatch::TmuxActionContext {
+                control_tx,
+                event_tx,
+                generation,
+                overflowed,
+                pending,
+                terminal,
+                topology_lock,
+                topology_baseline,
+            },
+        )
+        .await;
+        pending.lock().unwrap().remove(&request_id);
+        return;
+    }
+
+    match operation {
+        v1::Operation::FullSnapshot | v1::Operation::Resync => {
+            spawn_snapshot_request(SnapshotRequest {
+                request_id,
+                subscribe_after: false,
+                sender: control_tx.clone(),
+                generation: Arc::clone(generation),
+                cancellation,
+                pending: Arc::clone(pending),
+                subscribed: Arc::clone(subscribed),
+                topology_lock: Arc::clone(topology_lock),
+                topology_baseline: Arc::clone(topology_baseline),
+                terminal: Arc::clone(terminal),
+                event_sender: event_tx.clone(),
+                overflowed: Arc::clone(overflowed),
+            });
+            return;
+        }
+        v1::Operation::Subscribe => {
+            spawn_snapshot_request(SnapshotRequest {
+                request_id,
+                subscribe_after: true,
+                sender: control_tx.clone(),
+                generation: Arc::clone(generation),
+                cancellation,
+                pending: Arc::clone(pending),
+                subscribed: Arc::clone(subscribed),
+                topology_lock: Arc::clone(topology_lock),
+                topology_baseline: Arc::clone(topology_baseline),
+                terminal: Arc::clone(terminal),
+                event_sender: event_tx.clone(),
+                overflowed: Arc::clone(overflowed),
+            });
+            return;
+        }
+        v1::Operation::AttachTerminal => {
+            let mut result = terminal.lock().unwrap().attach(
+                &request.session_id,
+                &request.pane_ids,
+                true,
+                event_tx.clone(),
+                Arc::clone(overflowed),
+            );
+            if result.is_ok() {
+                result = reconcile_internal_tmux_change(
+                    topology_lock,
+                    topology_baseline,
+                    generation,
+                    terminal,
+                    event_tx,
+                    overflowed,
+                )
+                .await;
+            }
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_attach_failed", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
+        v1::Operation::TerminalInput => {
+            let queued = terminal
+                .lock()
+                .unwrap()
+                .send_input(&request.scope, &request.data);
+            let result = match queued {
+                Ok(completion) => {
+                    match tokio::task::spawn_blocking(move || completion.wait()).await {
+                        Ok(result) => result,
+                        Err(error) => Err(anyhow::anyhow!("terminal input task failed: {error}")),
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_input_rejected", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
+        v1::Operation::ResizeTerminal => {
+            let mut result = {
+                let mut terminal = terminal.lock().unwrap();
+                terminal
+                    .flush_input()
+                    .and_then(|()| terminal.resize(request.columns, request.rows))
+            };
+            if result.is_ok() {
+                result = reconcile_internal_tmux_change(
+                    topology_lock,
+                    topology_baseline,
+                    generation,
+                    terminal,
+                    event_tx,
+                    overflowed,
+                )
+                .await;
+            }
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_resize_rejected", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
+        v1::Operation::SetTerminalVisibility => {
+            let result = terminal.lock().unwrap().set_visibility(
+                &request.scope,
+                VisibilityChange {
+                    visible: request.visible,
+                    serialized_snapshot: request.data,
+                    checkpoint: tmux_control::VisibilityCheckpoint {
+                        epoch: request.terminal_epoch,
+                        generation: request.terminal_generation_cutoff,
+                    },
+                },
+                event_tx,
+                overflowed,
+            );
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_visibility_rejected", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
+        v1::Operation::RequestTerminalSeed => {
+            let result = terminal.lock().unwrap().request_seed(&request.scope);
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_seed_rejected", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
+        v1::Operation::TestDelay if testing_enabled() => {
+            let sender = control_tx.clone();
+            let pending = Arc::clone(pending);
+            tokio::spawn(async move {
+                let mut remaining = request.delay_millis.min(30_000);
+                while remaining > 0 && !cancellation.load(Ordering::Acquire) {
+                    let step = remaining.min(10);
+                    sleep(Duration::from_millis(step)).await;
+                    remaining -= step;
+                }
+                let response = if cancellation.load(Ordering::Acquire) {
+                    response_error("cancelled", "request was cancelled")
+                } else {
+                    response_ok()
+                };
+                send_response(&sender, request_id, response).await;
+                pending.lock().unwrap().remove(&request_id);
+            });
+            return;
+        }
+        v1::Operation::TestInjectGap if testing_enabled() => {
+            let _ = control_tx
+                .send(SequencerControl::InjectGap(v1::HostEvent {
+                    kind: v1::EventKind::TopologyDirty.into(),
+                    scope: "topology".into(),
+                    detail: "injected sequence gap".into(),
+                    ..Default::default()
+                }))
+                .await;
+            send_response(control_tx, request_id, response_ok()).await;
+        }
+        v1::Operation::TestOverflow if testing_enabled() => {
+            for index in 0..(EVENT_QUEUE * 8) {
+                emit_event(
+                    event_tx,
+                    overflowed,
+                    v1::HostEvent {
+                        kind: v1::EventKind::TopologyDirty.into(),
+                        scope: "topology".into(),
+                        detail: format!("overflow-{index}"),
+                        ..Default::default()
+                    },
+                );
+            }
+            send_response(control_tx, request_id, response_ok()).await;
+        }
+        _ => {
+            send_response(
+                control_tx,
+                request_id,
+                response_error("unsupported_operation", "operation is not supported"),
+            )
+            .await;
+        }
+    }
+    pending.lock().unwrap().remove(&request_id);
+}

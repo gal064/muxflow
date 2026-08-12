@@ -1,0 +1,221 @@
+import { invoke } from "@tauri-apps/api/core";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  decodeTerminalEvent,
+  MAX_HOST_TERMINAL_INPUT_BYTES,
+  prepareTerminalSnapshot,
+  requestTerminalSeed,
+  sendBinaryInput,
+  sendInput,
+  setTerminalVisibility,
+  terminalBridgeKey,
+  terminalBridgeScope,
+} from "./api";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  Channel: class MockChannel<T> { onmessage?: (message: T) => void; },
+  invoke: vi.fn(() => Promise.resolve()),
+}));
+
+const textEncoder = new TextEncoder();
+
+function u64(value: number | bigint): Uint8Array {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value), false);
+  return bytes;
+}
+
+function u32(value: number): Uint8Array {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value, false);
+  return bytes;
+}
+
+function frame(kind: number, label: string, sequence: number, payload: Uint8Array<ArrayBufferLike> = new Uint8Array()): ArrayBuffer {
+  const encodedLabel = textEncoder.encode(label);
+  return Uint8Array.from([
+    kind, encodedLabel.length >> 8, encodedLabel.length & 0xff, ...encodedLabel,
+    ...u64(sequence), ...payload,
+  ]).buffer;
+}
+
+function paneResourcePayload(options: {
+  state?: number;
+  flags?: number;
+  generation?: number;
+  snapshotGeneration?: number;
+  tailThroughGeneration?: number;
+  reason?: Uint8Array<ArrayBufferLike>;
+  snapshot?: Uint8Array<ArrayBufferLike>;
+  tail?: Uint8Array<ArrayBufferLike>;
+} = {}): Uint8Array {
+  const reason = options.reason ?? new Uint8Array();
+  const snapshot = options.snapshot ?? new Uint8Array();
+  const tail = options.tail ?? new Uint8Array();
+  return Uint8Array.from([
+    options.state ?? 2, options.flags ?? 0, ...u64(options.generation ?? 19),
+    ...u64(options.snapshotGeneration ?? 17), ...u64(options.tailThroughGeneration ?? 19),
+    ...u32(reason.byteLength), ...u32(snapshot.byteLength), ...u32(tail.byteLength),
+    ...reason, ...snapshot, ...tail,
+  ]);
+}
+
+beforeEach(() => vi.mocked(invoke).mockClear());
+
+describe("binary terminal IPC", () => {
+  it("decodes the common sequence and arbitrary output bytes without JSON byte arrays", () => {
+    expect(decodeTerminalEvent(frame(2, "%4", 12, Uint8Array.from([...u64(7), 0, 255, 27])))).toEqual({
+      kind: "output", paneId: "%4", sequence: 12, generation: 7, data: Uint8Array.from([0, 255, 27]),
+    });
+  });
+
+  it("rejects frames truncated before the label, sequence, or terminal generation", () => {
+    expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37]).buffer)).toThrow("common header");
+    expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37, 49, 50, 51, ...u64(1).slice(0, 7)]).buffer)).toThrow("truncated");
+    expect(() => decodeTerminalEvent(frame(1, "%1", 1, new Uint8Array(7)))).toThrow("generation");
+  });
+
+  it("accepts connection/error/epoch only as local sequence-zero frames", () => {
+    expect(decodeTerminalEvent(frame(6, "disconnected", 0))).toEqual({
+      kind: "connectionState", state: "disconnected", sequence: 0,
+    });
+    expect(() => decodeTerminalEvent(frame(6, "connected", 1))).toThrow("sequence zero");
+    expect(() => decodeTerminalEvent(frame(4, "broken", 1))).toThrow("sequence zero");
+    expect(() => decodeTerminalEvent(frame(10, "terminal", 1, u64(7)))).toThrow("sequence zero");
+  });
+
+  it("preserves authoritative snapshot metadata and rejects split sequence metadata", () => {
+    const payload = textEncoder.encode(JSON.stringify({
+      snapshot: { sessions: [], windows: [], panes: [] }, sequence: 12, generation: 7,
+      serverIdentity: "tmux:test", authoritative: true,
+    }));
+    expect(decodeTerminalEvent(frame(7, "snapshot", 12, payload))).toMatchObject({
+      kind: "snapshot", sequence: 12, generation: 7, serverIdentity: "tmux:test", authoritative: true,
+    });
+    expect(() => decodeTerminalEvent(frame(7, "snapshot", 13, payload))).toThrow("conflicts");
+  });
+
+  it("decodes kind 8 only as standalone protocol progress", () => {
+    expect(decodeTerminalEvent(frame(8, "protocol", 9))).toEqual({ kind: "protocolProgress", sequence: 9 });
+    expect(() => decodeTerminalEvent(frame(8, "9", 9))).toThrow("malformed");
+    expect(() => decodeTerminalEvent(frame(8, "protocol", 9, Uint8Array.of(1)))).toThrow("malformed");
+  });
+
+  it("decodes ordered file-service events without losing opaque u64 strings", () => {
+    const event = { operationId: "op", activeRoot: undefined, directory: undefined, metadata: { path: "/r/a", generation: "18446744073709551615" }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" };
+    expect(decodeTerminalEvent(frame(12, "/r/a", 17, textEncoder.encode(JSON.stringify(event))))).toEqual({
+      kind: "fileService", scope: "/r/a", sequence: 17, event,
+    });
+    expect(() => decodeTerminalEvent(frame(12, "x", 0, textEncoder.encode(JSON.stringify(event))))).toThrow("nonzero");
+    expect(() => decodeTerminalEvent(frame(12, "x", 1, Uint8Array.of(0xff)))).toThrow("UTF-8 JSON");
+  });
+
+  it("decodes ordered Git-service status while retaining raw path byte arrays", () => {
+    const event = { watchId: "watch", rootToken: "root", status: { generation: "18446744073709551615", entries: [{ path: [45, 45, 0, 10] }] }, error: "" };
+    expect(decodeTerminalEvent(frame(13, "/repo", 18, textEncoder.encode(JSON.stringify(event))))).toEqual({
+      kind: "gitService", scope: "/repo", sequence: 18, event,
+    });
+    expect(() => decodeTerminalEvent(frame(13, "/repo", 0, textEncoder.encode(JSON.stringify(event))))).toThrow("nonzero");
+    expect(() => decodeTerminalEvent(frame(13, "/repo", 1, Uint8Array.of(0xff)))).toThrow("UTF-8 JSON");
+  });
+
+  it("decodes ordered agent events and authoritative reconnect snapshots losslessly", () => {
+    const event = { generation: "18446744073709551615", connectionEpoch: "41", notify: true, reason: "blocked", agent: { agentId: "codex:1" } };
+    expect(decodeTerminalEvent(frame(14, "agent:codex:1", 0, textEncoder.encode(JSON.stringify(event))))).toEqual({
+      kind: "agentService", scope: "agent:codex:1", sequence: 0, event,
+    });
+    const snapshot = { generation: "20", acceptedGeneration: "20", agents: [], authoritative: true, notificationWatermark: "20", connectionEpoch: "41" };
+    expect(decodeTerminalEvent(frame(14, "snapshot", 0, textEncoder.encode(JSON.stringify(snapshot))))).toEqual({
+      kind: "agentService", scope: "snapshot", sequence: 0, snapshot,
+    });
+    expect(decodeTerminalEvent(frame(14, "agent", 0, textEncoder.encode(JSON.stringify(event)))).sequence).toBe(0);
+    expect(() => decodeTerminalEvent(frame(14, "agent", 2, textEncoder.encode(JSON.stringify(event))))).toThrow("agent service frame must use local sequence zero");
+    expect(() => decodeTerminalEvent(frame(14, "agent", 0, Uint8Array.of(0xff)))).toThrow("UTF-8 JSON");
+  });
+
+  it("decodes compact pane recovery material with strict length-delimited byte segments", () => {
+    const payload = paneResourcePayload({
+      flags: 1,
+      reason: textEncoder.encode("overflow λ"),
+      snapshot: Uint8Array.from([27, 91, 109]),
+      tail: Uint8Array.from([255, 0]),
+    });
+    expect(decodeTerminalEvent(frame(9, "%7", 20, payload))).toEqual({
+      kind: "paneResource", paneId: "%7", state: "hiddenBuffered", requiresSeed: true,
+      recoveryReason: "overflow λ", generation: 19, snapshotGeneration: 17, tailThroughGeneration: 19,
+      serializedSnapshot: Uint8Array.from([27, 91, 109]),
+      rawTail: Uint8Array.from([255, 0]), sequence: 20,
+    });
+    expect(payload.byteLength).toBe(54);
+  });
+
+  it("rejects compact pane recovery truncation, unknown flags, invalid state, and malformed UTF-8", () => {
+    expect(() => decodeTerminalEvent(frame(9, "%7", 1, new Uint8Array(37)))).toThrow("truncated");
+    expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ flags: 2 })))).toThrow("flags");
+    expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ state: 4 })))).toThrow("state");
+    expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ reason: Uint8Array.of(0xff) })))).toThrow("UTF-8");
+    const lengthMismatch = paneResourcePayload({ snapshot: Uint8Array.of(1) }).slice(0, -1);
+    expect(() => decodeTerminalEvent(frame(9, "%7", 1, lengthMismatch))).toThrow("length fields");
+    expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({
+      snapshotGeneration: 20, tailThroughGeneration: 19,
+    })))).toThrow("generation metadata");
+  });
+
+  it("encodes serialized renderer snapshots within the host cap", () => {
+    const prepared = prepareTerminalSnapshot("shell: λ", 32);
+    expect(new TextDecoder().decode(prepared.data)).toBe("shell: λ");
+    expect(prepared).toMatchObject({ retained: true, originalByteLength: 9 });
+    expect(prepareTerminalSnapshot("λλ", 3)).toMatchObject({ retained: false, originalByteLength: 4 });
+  });
+
+  it("sends pane visibility with the exact epoch, rendered cutoff, and serialized bytes", async () => {
+    await setTerminalVisibility(
+      "client-1", "%7", false, Uint8Array.from([0, 255, 27]),
+      { terminalEpoch: 17, outputGeneration: 42 },
+    );
+    expect(invoke).toHaveBeenCalledWith("set_terminal_visibility", {
+      clientId: "client-1", paneId: "%7", visible: false,
+      serializedSnapshot: [0, 255, 27], terminalEpoch: 17, outputGeneration: 42,
+    });
+  });
+
+  it("requests one scoped seed for bounded or conflicting recovery", async () => {
+    await requestTerminalSeed("client-1", "%7");
+    expect(invoke).toHaveBeenCalledWith("request_terminal_seed", { clientId: "client-1", paneId: "%7" });
+  });
+
+  it("keeps terminal input atomic by rejecting oversized text, binary, and bracketed paste calls", async () => {
+    const atLimit = "x".repeat(MAX_HOST_TERMINAL_INPUT_BYTES - 12);
+    await sendInput("client-1", "%7", `\u001b[200~${atLimit}\u001b[201~`);
+    await expect(sendInput("client-1", "%7", `\u001b[200~${atLimit}x\u001b[201~`)).rejects.toThrow("partial commit");
+    await expect(sendInput("client-1", "%7", "λ".repeat(MAX_HOST_TERMINAL_INPUT_BYTES / 2 + 1)))
+      .rejects.toThrow("1 MiB");
+    await expect(sendBinaryInput("client-1", "%7", new Uint8Array(MAX_HOST_TERMINAL_INPUT_BYTES + 1)))
+      .rejects.toThrow("1 MiB");
+    expect(invoke).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it("decodes a nonzero safe big-endian terminal generation epoch", () => {
+    expect(decodeTerminalEvent(frame(10, "terminal", 0, u64(0x001f_ffff_ffff_fffen)))).toEqual({
+      kind: "generationEpoch", epoch: 0x001f_ffff_ffff_fffe, sequence: 0,
+    });
+    expect(() => decodeTerminalEvent(frame(10, "terminal", 0, u64(0)))).toThrow("nonzero");
+    expect(() => decodeTerminalEvent(frame(10, "terminal", 0, u64(BigInt(Number.MAX_SAFE_INTEGER) + 1n)))).toThrow("safe range");
+  });
+
+  it("decodes pane-scoped UTF-8 seed diagnostics and rejects malformed values", () => {
+    expect(decodeTerminalEvent(frame(11, "%7", 14, textEncoder.encode("alternate metadata λ")))).toEqual({
+      kind: "seedDiagnostic", paneId: "%7", message: "alternate metadata λ", sequence: 14,
+    });
+    expect(() => decodeTerminalEvent(frame(11, "pane-7", 1, Uint8Array.of(65)))).toThrow("pane label");
+    expect(() => decodeTerminalEvent(frame(11, "%7", 1, Uint8Array.of(0xff)))).toThrow("UTF-8");
+  });
+
+  it("keeps one initially-empty bridge lifecycle stable across session and topology UI changes", () => {
+    const connection = { mode: "local" } as const;
+    const initialKey = terminalBridgeKey(connection, 2);
+    expect(terminalBridgeKey(connection, 2)).toBe(initialKey);
+    expect(terminalBridgeKey(connection, 3)).not.toBe(initialKey);
+    expect(terminalBridgeScope()).toEqual({ sessionId: "", paneIds: [] });
+  });
+});

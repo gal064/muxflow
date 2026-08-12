@@ -1,0 +1,322 @@
+import { Channel, invoke } from "@tauri-apps/api/core";
+import type { ConnectionSpec, TmuxSnapshot } from "../../app/types";
+import type { WireFileEvent } from "../files/api";
+import type { WireGitEvent } from "../git/api";
+import type { WireAgentEvent, WireAgentSnapshot } from "../agents/api";
+
+interface SequencedTerminalEvent {
+  sequence: number;
+}
+
+export type TerminalEvent = SequencedTerminalEvent & (
+  | { kind: "generationEpoch"; epoch: number }
+  | { kind: "seed"; paneId: string; generation: number; data: Uint8Array }
+  | { kind: "output"; paneId: string; generation: number; data: Uint8Array }
+  | { kind: "seedDiagnostic"; paneId: string; message: string }
+  | { kind: "topologyDirty"; name: string }
+  | { kind: "error"; message: string }
+  | { kind: "exit"; reason: string }
+  | { kind: "connectionState"; state: "connecting" | "connected" | "reconnecting" | "resyncing" | "disconnected" | "readOnly" }
+  | { kind: "protocolProgress" }
+  | {
+      kind: "paneResource";
+      paneId: string;
+      state: "visible" | "hiddenBuffered" | "released" | "unspecified";
+      requiresSeed: boolean;
+      recoveryReason: string;
+      generation: number;
+      snapshotGeneration: number;
+      tailThroughGeneration: number;
+      serializedSnapshot: Uint8Array;
+      rawTail: Uint8Array;
+    }
+  | { kind: "snapshot"; snapshot: TmuxSnapshot; generation: number; serverIdentity: string; authoritative: boolean }
+  | { kind: "fileService"; scope: string; event: WireFileEvent }
+  | { kind: "gitService"; scope: string; event: WireGitEvent }
+  | { kind: "agentService"; scope: string; event?: WireAgentEvent; snapshot?: WireAgentSnapshot }
+);
+
+const decoder = new TextDecoder("utf-8", { fatal: true });
+const encoder = new TextEncoder();
+export const MAX_HOST_TERMINAL_SNAPSHOT_BYTES = 4 * 1024 * 1024;
+export const MAX_HOST_TERMINAL_INPUT_BYTES = 1024 * 1024;
+const COMMON_HEADER_BYTES = 11;
+const PANE_RESOURCE_HEADER_BYTES = 38;
+
+export interface PreparedTerminalSnapshot {
+  data: Uint8Array;
+  originalByteLength: number;
+  retained: boolean;
+}
+
+export interface TerminalVisibilityCheckpoint {
+  terminalEpoch: number;
+  outputGeneration: number;
+}
+
+export function prepareTerminalSnapshot(
+  serialized: string,
+  maxBytes = MAX_HOST_TERMINAL_SNAPSHOT_BYTES,
+): PreparedTerminalSnapshot {
+  const encoded = encoder.encode(serialized);
+  if (encoded.byteLength > maxBytes) {
+    return { data: new Uint8Array(), originalByteLength: encoded.byteLength, retained: false };
+  }
+  return { data: encoded, originalByteLength: encoded.byteLength, retained: true };
+}
+
+export function decodeTerminalEvent(buffer: ArrayBuffer): TerminalEvent {
+  const frame = new Uint8Array(buffer);
+  if (frame.length < COMMON_HEADER_BYTES) throw new Error("terminal frame is shorter than its common header");
+  const labelLength = (frame[1] << 8) | frame[2];
+  const payloadOffset = COMMON_HEADER_BYTES + labelLength;
+  if (frame.length < payloadOffset) throw new Error("terminal frame label or sequence is truncated");
+
+  let label: string;
+  try {
+    label = decoder.decode(frame.subarray(3, 3 + labelLength));
+  } catch {
+    throw new Error("terminal frame label is not valid UTF-8");
+  }
+  const sequence = decodeSafeU64(frame.subarray(3 + labelLength, payloadOffset), "event sequence");
+  const data = frame.subarray(payloadOffset);
+
+  switch (frame[0]) {
+    case 1: return decodeTerminalBytes("seed", label, sequence, data);
+    case 2: return decodeTerminalBytes("output", label, sequence, data);
+    case 3:
+      requireHostSequence(sequence, "topology dirty");
+      requireEmptyPayload(data, "topology dirty");
+      return { kind: "topologyDirty", name: label, sequence };
+    case 4:
+      requireLocalSequence(sequence, "error");
+      requireEmptyPayload(data, "error");
+      return { kind: "error", message: label, sequence };
+    case 5:
+      requireHostSequence(sequence, "exit");
+      requireEmptyPayload(data, "exit");
+      return { kind: "exit", reason: label, sequence };
+    case 6:
+      requireLocalSequence(sequence, "connection state");
+      requireEmptyPayload(data, "connection state");
+      if (!["connecting", "connected", "reconnecting", "resyncing", "disconnected", "readOnly"].includes(label)) {
+        throw new Error(`unknown connection state ${label}`);
+      }
+      return { kind: "connectionState", state: label as Extract<TerminalEvent, { kind: "connectionState" }>["state"], sequence };
+    case 7: {
+      if (label !== "snapshot") throw new Error("topology snapshot has an invalid label");
+      let parsed: { snapshot: TmuxSnapshot; sequence: number; generation: number; serverIdentity: string; authoritative: boolean };
+      try {
+        parsed = JSON.parse(decoder.decode(data)) as typeof parsed;
+      } catch {
+        throw new Error("topology snapshot payload is not valid UTF-8 JSON");
+      }
+      if (!Number.isSafeInteger(parsed.sequence) || parsed.sequence < 0) throw new Error("invalid snapshot sequence");
+      if (parsed.sequence !== sequence) throw new Error("snapshot sequence conflicts with its common frame header");
+      if (!Number.isSafeInteger(parsed.generation) || parsed.generation < 0) throw new Error("invalid snapshot generation");
+      if (typeof parsed.serverIdentity !== "string" || typeof parsed.authoritative !== "boolean" || !parsed.snapshot) {
+        throw new Error("invalid topology snapshot metadata");
+      }
+      if (!parsed.authoritative) requireHostSequence(sequence, "ordered topology snapshot");
+      const { sequence: _embeddedSequence, ...snapshot } = parsed;
+      return { kind: "snapshot", sequence, ...snapshot };
+    }
+    case 8:
+      requireHostSequence(sequence, "protocol progress");
+      if (label !== "protocol" || data.byteLength !== 0) throw new Error("protocol progress frame is malformed");
+      return { kind: "protocolProgress", sequence };
+    case 9: return decodePaneResource(label, sequence, data);
+    case 10: {
+      requireLocalSequence(sequence, "terminal generation epoch");
+      if (label !== "terminal") throw new Error("terminal generation epoch has an invalid label");
+      const epoch = decodeSafeU64(data, "terminal generation epoch");
+      if (epoch === 0) throw new Error("terminal generation epoch must be nonzero");
+      return { kind: "generationEpoch", epoch, sequence };
+    }
+    case 11:
+      requireHostSequence(sequence, "terminal seed diagnostic");
+      requirePaneId(label, "terminal seed diagnostic");
+      try {
+        return { kind: "seedDiagnostic", paneId: label, message: decoder.decode(data), sequence };
+      } catch {
+        throw new Error("terminal seed diagnostic payload is not valid UTF-8");
+      }
+    case 12: {
+      requireHostSequence(sequence, "file service");
+      let event: WireFileEvent;
+      try { event = JSON.parse(decoder.decode(data)) as WireFileEvent; } catch { throw new Error("file-service payload is not valid UTF-8 JSON"); }
+      if (!event || typeof event !== "object" || typeof event.operationId !== "string") throw new Error("file-service payload is malformed");
+      return { kind: "fileService", scope: label, event, sequence };
+    }
+    case 13: {
+      requireHostSequence(sequence, "Git service");
+      let event: WireGitEvent;
+      try { event = JSON.parse(decoder.decode(data)) as WireGitEvent; } catch { throw new Error("Git-service payload is not valid UTF-8 JSON"); }
+      if (!event || typeof event !== "object" || typeof event.rootToken !== "string") throw new Error("Git-service payload is malformed");
+      return { kind: "gitService", scope: label, event, sequence };
+    }
+    case 14: {
+      // Every agent frame is a connection-epoch-scoped sideband. Topology and
+      // agent frames can share a protocol sequence, so admitting a nonzero
+      // header here would create a false gap or duplicate in the terminal hub.
+      requireLocalSequence(sequence, "agent service");
+      try {
+        const payload = JSON.parse(decoder.decode(data)) as WireAgentEvent | WireAgentSnapshot;
+        if (label === "snapshot") return { kind: "agentService", scope: label, snapshot: payload as WireAgentSnapshot, sequence };
+        const event = payload as WireAgentEvent;
+        if (!event || typeof event !== "object" || event.generation === undefined) throw new Error("malformed");
+        return { kind: "agentService", scope: label, event, sequence };
+      } catch {
+        throw new Error("agent-service payload is not valid UTF-8 JSON");
+      }
+    }
+    default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
+  }
+}
+
+function decodePaneResource(paneId: string, sequence: number, payload: Uint8Array): TerminalEvent {
+  requireHostSequence(sequence, "pane resource");
+  requirePaneId(paneId, "pane resource");
+  if (payload.byteLength < PANE_RESOURCE_HEADER_BYTES) throw new Error("pane resource payload is truncated");
+  const state = (["unspecified", "visible", "hiddenBuffered", "released"] as const)[payload[0]];
+  if (!state) throw new Error("invalid pane resource state");
+  const flags = payload[1];
+  if ((flags & ~1) !== 0) throw new Error("pane resource payload has unknown flags");
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const generation = safeBigIntToNumber(view.getBigUint64(2, false), "pane resource generation");
+  const snapshotGeneration = safeBigIntToNumber(view.getBigUint64(10, false), "pane resource snapshot generation");
+  const tailThroughGeneration = safeBigIntToNumber(view.getBigUint64(18, false), "pane resource tail generation");
+  if (snapshotGeneration > tailThroughGeneration || tailThroughGeneration > generation) {
+    throw new Error("pane resource generation metadata is inconsistent");
+  }
+  const reasonLength = view.getUint32(26, false);
+  const snapshotLength = view.getUint32(30, false);
+  const tailLength = view.getUint32(34, false);
+  const expectedLength = PANE_RESOURCE_HEADER_BYTES + reasonLength + snapshotLength + tailLength;
+  if (expectedLength !== payload.byteLength) throw new Error("pane resource length fields do not match its payload");
+  const reasonEnd = PANE_RESOURCE_HEADER_BYTES + reasonLength;
+  const snapshotEnd = reasonEnd + snapshotLength;
+  let recoveryReason: string;
+  try {
+    recoveryReason = decoder.decode(payload.subarray(PANE_RESOURCE_HEADER_BYTES, reasonEnd));
+  } catch {
+    throw new Error("pane resource recovery reason is not valid UTF-8");
+  }
+  return {
+    kind: "paneResource",
+    paneId,
+    state,
+    requiresSeed: Boolean(flags & 1),
+    recoveryReason,
+    generation,
+    snapshotGeneration,
+    tailThroughGeneration,
+    serializedSnapshot: payload.slice(reasonEnd, snapshotEnd),
+    rawTail: payload.slice(snapshotEnd),
+    sequence,
+  };
+}
+
+function decodeTerminalBytes(
+  kind: "seed" | "output",
+  paneId: string,
+  sequence: number,
+  payload: Uint8Array,
+): TerminalEvent {
+  requireHostSequence(sequence, kind);
+  requirePaneId(paneId, kind);
+  if (payload.byteLength < 8) throw new Error(`${kind} frame omitted terminal generation`);
+  const generation = decodeSafeU64(payload.subarray(0, 8), `${kind} generation`);
+  return { kind, paneId, generation, data: payload.slice(8), sequence };
+}
+
+function decodeSafeU64(bytes: Uint8Array, label: string): number {
+  if (bytes.byteLength !== 8) throw new Error(`${label} must be an 8-byte u64`);
+  return safeBigIntToNumber(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, false), label);
+}
+
+function safeBigIntToNumber(value: bigint, label: string): number {
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`${label} exceeds JavaScript's safe range`);
+  return Number(value);
+}
+
+function requirePaneId(value: string, context: string): void {
+  if (!/^%\d+$/.test(value)) throw new Error(`${context} has an invalid pane label`);
+}
+
+function requireLocalSequence(sequence: number, context: string): void {
+  if (sequence !== 0) throw new Error(`${context} frame must use local sequence zero`);
+}
+
+function requireHostSequence(sequence: number, context: string): void {
+  if (sequence === 0) throw new Error(`${context} frame must use a nonzero host sequence`);
+}
+
+function requireEmptyPayload(payload: Uint8Array, context: string): void {
+  if (payload.byteLength !== 0) throw new Error(`${context} frame has an unexpected payload`);
+}
+
+export async function startTerminal(
+  sessionId: string,
+  paneIds: string[],
+  connection: ConnectionSpec,
+  onEvent: (event: TerminalEvent) => void,
+): Promise<string> {
+  const channel = new Channel<ArrayBuffer>();
+  channel.onmessage = (frame) => onEvent(decodeTerminalEvent(frame));
+  return invoke<string>("start_terminal", { sessionId, paneIds, connection, onEvent: channel });
+}
+
+export function stopTerminal(clientId: string): Promise<void> {
+  return invoke("stop_terminal", { clientId });
+}
+
+export function sendInput(clientId: string, paneId: string, data: string): Promise<void> {
+  const byteLength = encoder.encode(data).byteLength;
+  if (byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(byteLength);
+  return invoke("send_terminal_input", { clientId, paneId, data });
+}
+
+export function sendBinaryInput(clientId: string, paneId: string, data: Uint8Array): Promise<void> {
+  if (data.byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(data.byteLength);
+  return invoke("send_terminal_input_bytes", { clientId, paneId, data: Array.from(data) });
+}
+
+function oversizedTerminalInput(byteLength: number): Promise<never> {
+  return Promise.reject(new Error(
+    `Terminal input is ${byteLength} bytes; the 1 MiB atomic input limit prevents sending a partial commit.`,
+  ));
+}
+
+export function resizeClient(clientId: string, columns: number, rows: number): Promise<void> {
+  return invoke("resize_terminal_client", { clientId, columns, rows });
+}
+
+export function setTerminalVisibility(
+  clientId: string,
+  paneId: string,
+  visible: boolean,
+  serializedSnapshot: Uint8Array,
+  checkpoint: TerminalVisibilityCheckpoint,
+): Promise<void> {
+  return invoke("set_terminal_visibility", {
+    clientId,
+    paneId,
+    visible,
+    serializedSnapshot: Array.from(serializedSnapshot),
+    terminalEpoch: checkpoint.terminalEpoch,
+    outputGeneration: checkpoint.outputGeneration,
+  });
+}
+
+export function requestTerminalSeed(clientId: string, paneId: string): Promise<void> {
+  return invoke("request_terminal_seed", { clientId, paneId });
+}
+
+export function terminalBridgeKey(connection: ConnectionSpec, epoch: number): string {
+  return `${JSON.stringify(connection)}:${epoch}`;
+}
+
+export function terminalBridgeScope(): { sessionId: ""; paneIds: [] } {
+  return { sessionId: "", paneIds: [] };
+}

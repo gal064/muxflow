@@ -1,0 +1,858 @@
+syntax = "proto3";
+
+package tmux_agent.protocol.v1;
+
+message Envelope {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  uint64 request_id = 3;
+  uint64 sequence = 4;
+  uint64 stream_id = 5;
+  Priority priority = 6;
+
+  oneof payload {
+    ClientHello client_hello = 10;
+    ServerHello server_hello = 11;
+    Request request = 12;
+    Response response = 13;
+    HostEvent event = 14;
+    Cancel cancel = 15;
+    Error error = 16;
+    TerminalBytes terminal_bytes = 17;
+    TransferChunk transfer_chunk = 18;
+  }
+}
+
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_CONTROL = 1;
+  PRIORITY_BULK = 2;
+}
+
+message ClientHello {
+  string desktop_version = 1;
+  uint64 requested_capabilities = 2;
+  string expected_helper_version = 3;
+  bool bulk_connection = 4;
+  // Bulk connections are capabilities of one observed control connection,
+  // never merely of a profile. The helper rejects a mismatched identity and
+  // echoes the caller's opaque connection epoch.
+  string expected_server_identity = 5;
+  uint64 connection_epoch = 6;
+}
+
+message ServerHello {
+  string helper_version = 1;
+  string operating_system = 2;
+  string architecture = 3;
+  string tmux_version = 4;
+  string server_identity = 5;
+  uint64 capabilities = 6;
+  bool read_only = 7;
+  string incompatibility = 8;
+  string git_version = 9;
+  uint64 connection_epoch = 10;
+}
+
+enum Operation {
+  OPERATION_UNSPECIFIED = 0;
+  OPERATION_FULL_SNAPSHOT = 1;
+  OPERATION_SUBSCRIBE = 2;
+  OPERATION_ATTACH_TERMINAL = 3;
+  OPERATION_TERMINAL_INPUT = 4;
+  OPERATION_RESIZE_TERMINAL = 5;
+  OPERATION_RESYNC = 6;
+  OPERATION_SHUTDOWN_DAEMON = 7;
+  OPERATION_TMUX_ACTION = 8;
+  OPERATION_SET_TERMINAL_VISIBILITY = 9;
+    OPERATION_REQUEST_TERMINAL_SEED = 10;
+  OPERATION_RESOLVE_ACTIVE_ROOT = 11;
+  OPERATION_LIST_DIRECTORY = 12;
+  OPERATION_WATCH_DIRECTORY = 13;
+  OPERATION_UNWATCH_DIRECTORY = 14;
+  OPERATION_FILE_MUTATION = 15;
+  OPERATION_READ_FILE = 16;
+  OPERATION_WRITE_FILE = 17;
+  OPERATION_START_DOWNLOAD = 18;
+  OPERATION_READ_DOWNLOAD_CHUNK = 19;
+  OPERATION_CANCEL_DOWNLOAD = 20;
+  OPERATION_BEGIN_FILE_WRITE = 21;
+  OPERATION_WRITE_FILE_CHUNK = 22;
+  OPERATION_COMMIT_FILE_WRITE = 23;
+  OPERATION_CANCEL_FILE_WRITE = 24;
+  OPERATION_GIT_STATUS = 25;
+  OPERATION_WATCH_GIT = 26;
+  OPERATION_UNWATCH_GIT = 27;
+  OPERATION_GIT_DIFF = 28;
+  OPERATION_PREPARE_GIT_DISCARD = 29;
+  OPERATION_GIT_MUTATION = 30;
+  OPERATION_GIT_COMMIT = 31;
+  OPERATION_AGENT_SNAPSHOT = 32;
+  OPERATION_AGENT_ACTION = 33;
+  OPERATION_AGENT_MARK_SEEN = 34;
+  OPERATION_AGENT_HOOK_INGEST = 35;
+  OPERATION_AGENT_HOOK_MANAGEMENT = 36;
+  OPERATION_PREPARE_TERMINAL_UPLOAD = 37;
+  OPERATION_WRITE_TERMINAL_UPLOAD_CHUNK = 38;
+  OPERATION_COMMIT_TERMINAL_UPLOAD = 39;
+  OPERATION_CANCEL_TERMINAL_UPLOAD = 40;
+  OPERATION_RECONCILE_TERMINAL_UPLOAD = 41;
+  OPERATION_TEST_DELAY = 100;
+  OPERATION_TEST_INJECT_GAP = 101;
+  OPERATION_TEST_OVERFLOW = 102;
+}
+
+message Request {
+  Operation operation = 1;
+  string scope = 2;
+  string session_id = 3;
+  repeated string pane_ids = 4;
+  bytes data = 5;
+  uint32 columns = 6;
+  uint32 rows = 7;
+  uint64 delay_millis = 8;
+  TmuxAction tmux_action = 9;
+  bool visible = 10;
+  uint64 terminal_epoch = 11;
+  uint64 terminal_generation_cutoff = 12;
+  FileServiceRequest file = 13;
+  GitRequest git = 14;
+  AgentRequest agent = 15;
+}
+
+message Response {
+  bool ok = 1;
+  string error_code = 2;
+  string display_message = 3;
+  Snapshot snapshot = 4;
+  uint64 accepted_sequence = 5;
+  TmuxActionResult tmux_action_result = 6;
+  FileServiceResponse file = 7;
+  GitResponse git = 8;
+  AgentResponse agent = 9;
+  PublicationOutcome publication_outcome = 10;
+  bool cleanup_failed = 11;
+}
+
+enum PublicationOutcome {
+  PUBLICATION_OUTCOME_UNSPECIFIED = 0;
+  PUBLICATION_OUTCOME_NOT_PUBLISHED = 1;
+  PUBLICATION_OUTCOME_PUBLISHED = 2;
+  PUBLICATION_OUTCOME_UNKNOWN = 3;
+}
+
+enum CleanupStatus {
+  CLEANUP_STATUS_UNSPECIFIED = 0;
+  CLEANUP_STATUS_NOT_NEEDED = 1;
+  CLEANUP_STATUS_REMOVED = 2;
+  CLEANUP_STATUS_RETAINED = 3;
+  CLEANUP_STATUS_FAILED = 4;
+  CLEANUP_STATUS_CONNECTION_CLOSED = 5;
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_TOPOLOGY_SNAPSHOT = 1;
+  EVENT_KIND_TOPOLOGY_DIRTY = 2;
+  EVENT_KIND_RESYNC_REQUIRED = 3;
+  EVENT_KIND_TERMINAL_SEED = 4;
+  EVENT_KIND_TERMINAL_OUTPUT = 5;
+  EVENT_KIND_TERMINAL_EXIT = 6;
+  EVENT_KIND_TERMINAL_FLOW_PAUSED = 7;
+  EVENT_KIND_TERMINAL_RESNAPSHOT_REQUIRED = 8;
+  EVENT_KIND_PANE_RESOURCE = 9;
+  EVENT_KIND_TERMINAL_SEED_DIAGNOSTIC = 10;
+  EVENT_KIND_ACTIVE_ROOT = 11;
+  EVENT_KIND_DIRECTORY_SNAPSHOT = 12;
+  EVENT_KIND_FILE_CHANGED = 13;
+  EVENT_KIND_TRANSFER_PROGRESS = 14;
+  EVENT_KIND_GIT_STATUS = 15;
+  EVENT_KIND_AGENT_STATE = 16;
+}
+
+message HostEvent {
+  EventKind kind = 1;
+  string scope = 2;
+  Snapshot snapshot = 3;
+  TerminalBytes terminal = 4;
+  string detail = 5;
+  PaneResource pane_resource = 6;
+  FileServiceEvent file = 7;
+  GitEvent git = 8;
+  AgentEvent agent = 9;
+}
+
+message Cancel {
+  uint64 target_request_id = 1;
+}
+
+message Snapshot {
+  string server_identity = 1;
+  uint64 generation = 2;
+  repeated Session sessions = 3;
+  repeated Window windows = 4;
+  repeated Pane panes = 5;
+  AgentSnapshot agents = 6;
+}
+
+message Session {
+  string id = 1;
+  string name = 2;
+  uint32 window_count = 3;
+  uint32 attached_clients = 4;
+  uint32 order = 5;
+}
+
+message Window {
+  string id = 1;
+  string session_id = 2;
+  uint32 index = 3;
+  string name = 4;
+  bool active = 5;
+  string layout = 6;
+  bool zoomed = 7;
+  uint64 layout_generation = 8;
+}
+
+message Pane {
+  string id = 1;
+  string session_id = 2;
+  string window_id = 3;
+  uint32 index = 4;
+  bool active = 5;
+  uint32 width = 6;
+  uint32 height = 7;
+  uint32 left = 8;
+  uint32 top = 9;
+  string current_path = 10;
+  string current_command = 11;
+  reserved 12, 13, 14;
+  reserved "nested_tmux", "outer_pane_id", "nested_provenance";
+}
+
+message TerminalBytes {
+  string pane_id = 1;
+  bytes data = 2;
+  uint64 generation = 3;
+}
+
+enum TmuxActionKind {
+  TMUX_ACTION_KIND_UNSPECIFIED = 0;
+  TMUX_ACTION_KIND_CREATE_SESSION = 1;
+  TMUX_ACTION_KIND_RENAME_SESSION = 2;
+  TMUX_ACTION_KIND_REORDER_SESSION = 3;
+  TMUX_ACTION_KIND_SELECT_SESSION = 4;
+  TMUX_ACTION_KIND_CLOSE_SESSION = 5;
+  TMUX_ACTION_KIND_CREATE_WINDOW = 6;
+  TMUX_ACTION_KIND_RENAME_WINDOW = 7;
+  TMUX_ACTION_KIND_REORDER_WINDOW = 8;
+  TMUX_ACTION_KIND_SELECT_WINDOW = 9;
+  TMUX_ACTION_KIND_CLOSE_WINDOW = 10;
+  TMUX_ACTION_KIND_SPLIT_PANE_RIGHT = 11;
+  TMUX_ACTION_KIND_SPLIT_PANE_DOWN = 12;
+  TMUX_ACTION_KIND_FOCUS_PANE = 13;
+  TMUX_ACTION_KIND_RESIZE_PANE_LEFT = 14;
+  TMUX_ACTION_KIND_RESIZE_PANE_RIGHT = 15;
+  TMUX_ACTION_KIND_RESIZE_PANE_UP = 16;
+  TMUX_ACTION_KIND_RESIZE_PANE_DOWN = 17;
+  TMUX_ACTION_KIND_ZOOM_PANE = 18;
+  TMUX_ACTION_KIND_CLOSE_PANE = 19;
+}
+
+message TmuxAction {
+  TmuxActionKind kind = 1;
+  string session_id = 2;
+  string window_id = 3;
+  string pane_id = 4;
+  string name = 5;
+  uint32 index = 6;
+  uint32 split_size = 7;
+  uint32 resize_cells = 8;
+  bool zoomed = 9;
+  string expected_server_identity = 10;
+  uint64 expected_generation = 11;
+  bool confirmed = 12;
+  string target_window_id = 13;
+  WindowRelativePosition relative_position = 14;
+}
+
+enum WindowRelativePosition {
+  WINDOW_RELATIVE_POSITION_UNSPECIFIED = 0;
+  WINDOW_RELATIVE_POSITION_BEFORE = 1;
+  WINDOW_RELATIVE_POSITION_AFTER = 2;
+}
+
+message TmuxActionResult {
+  string session_id = 1;
+  string window_id = 2;
+  string pane_id = 3;
+  uint64 topology_generation = 4;
+}
+
+enum PaneResourceState {
+  PANE_RESOURCE_STATE_UNSPECIFIED = 0;
+  PANE_RESOURCE_STATE_VISIBLE = 1;
+  PANE_RESOURCE_STATE_HIDDEN_BUFFERED = 2;
+  PANE_RESOURCE_STATE_RELEASED = 3;
+}
+
+message PaneResource {
+  string pane_id = 1;
+  PaneResourceState state = 2;
+  bytes serialized_snapshot = 3;
+  bytes raw_tail = 4;
+  uint64 generation = 5;
+  bool requires_seed = 6;
+  string recovery_reason = 7;
+  // Renderer snapshot includes pane output through this generation.
+  uint64 snapshot_generation = 8;
+  // raw_tail includes every pane-output chunk after snapshot_generation and
+  // through this generation, in order. A renderer may discard deferred output
+  // at or below this boundary after applying snapshot + raw_tail.
+  uint64 tail_through_generation = 9;
+}
+
+message TransferChunk {
+  string transfer_id = 3;
+  uint64 offset = 1;
+  bytes data = 2;
+  bool eof = 4;
+  uint64 total_bytes = 5;
+  string blake3 = 6;
+  // Folder archives are streamed while tar is producing them, so their exact
+  // size becomes known only at EOF. File transfers always set this true.
+  bool total_known = 7;
+}
+
+enum FileMutationKind {
+  FILE_MUTATION_KIND_UNSPECIFIED = 0;
+  FILE_MUTATION_KIND_CREATE = 1;
+  FILE_MUTATION_KIND_RENAME = 2;
+  FILE_MUTATION_KIND_MOVE = 3;
+  FILE_MUTATION_KIND_DUPLICATE = 4;
+  FILE_MUTATION_KIND_DELETE = 5;
+}
+
+enum FileKind {
+  FILE_KIND_UNSPECIFIED = 0;
+  FILE_KIND_FILE = 1;
+  FILE_KIND_DIRECTORY = 2;
+  FILE_KIND_SYMLINK = 3;
+  FILE_KIND_OTHER = 4;
+}
+
+enum FileContentKind {
+  FILE_CONTENT_KIND_UNSPECIFIED = 0;
+  FILE_CONTENT_KIND_TEXT = 1;
+  FILE_CONTENT_KIND_BINARY = 2;
+  FILE_CONTENT_KIND_IMAGE = 3;
+  FILE_CONTENT_KIND_TOO_LARGE = 4;
+}
+
+enum CollisionPolicy {
+  COLLISION_POLICY_UNSPECIFIED = 0;
+  COLLISION_POLICY_FAIL = 1;
+  COLLISION_POLICY_OVERWRITE_CONFIRMED = 2;
+  COLLISION_POLICY_RENAME = 3;
+}
+
+message FileServiceRequest {
+  string operation_id = 1;
+  string root = 2;
+  string path = 3;
+  string destination = 4;
+  string pane_id = 5;
+  string expected_server_identity = 6;
+  uint64 expected_topology_generation = 7;
+  FileMutationKind mutation = 8;
+  bool create_directory = 9;
+  bool overwrite_confirmed = 10;
+  bool non_empty_confirmed = 11;
+  uint64 file_generation = 12;
+  bytes content = 13;
+  string watch_id = 14;
+  string transfer_id = 15;
+  uint64 offset = 16;
+  uint32 chunk_bytes = 17;
+  bool folder = 18;
+  CollisionPolicy collision_policy = 19;
+  string root_token = 20;
+  string page_token = 21;
+  uint32 page_size = 22;
+  uint64 total_bytes = 23;
+  string blake3 = 24;
+  // Terminal-upload fields are additive so older helpers safely ignore them.
+  // destination is the requested basename, never a shell command or path.
+  string source_name = 25;
+  bool large_upload_confirmed = 26;
+  bool image_png = 27;
+}
+
+message FileMetadata {
+  string path = 1;
+  string name = 2;
+  FileKind kind = 3;
+  uint64 size = 4;
+  int64 modified_unix_millis = 5;
+  uint32 mode = 6;
+  bool symlink = 7;
+  string symlink_target = 8;
+  bool expandable = 9;
+  uint64 generation = 10;
+  string mime = 11;
+  bool image_preview_eligible = 12;
+  // For a symlink, describes its safely-resolved target without making the
+  // symlink expandable. Unspecified means broken, escaping, or unsupported.
+  FileKind symlink_target_kind = 13;
+}
+
+message ActiveRoot {
+  string pane_id = 1;
+  string root = 2;
+  bool git_worktree = 3;
+  string server_identity = 4;
+  uint64 topology_generation = 5;
+  uint64 root_generation = 6;
+  string root_token = 7;
+}
+
+message DirectorySnapshot {
+  string watch_id = 1;
+  string root = 2;
+  string path = 3;
+  uint64 generation = 4;
+  repeated FileMetadata entries = 5;
+  bool overflowed = 6;
+  bool authoritative = 7;
+  string next_page_token = 8;
+  bool complete = 9;
+}
+
+message FileContent {
+  FileMetadata metadata = 1;
+  FileContentKind kind = 2;
+  bytes content = 3;
+  uint64 generation = 4;
+}
+
+message DownloadDescriptor {
+  string transfer_id = 1;
+  string suggested_name = 2;
+  uint64 total_bytes = 3;
+  bool folder_archive = 4;
+  uint32 mode = 5;
+  uint64 file_generation = 6;
+  bool total_known = 7;
+}
+
+message UploadDescriptor {
+  string transfer_id = 1;
+  string destination_name = 2;
+  uint64 total_bytes = 3;
+  bool collision_renamed = 4;
+  uint64 available_bytes = 5;
+  // Set only by a successful verified commit. Preflight never exposes a path
+  // that could be mistaken for a complete upload.
+  string final_path = 6;
+  bool verified = 7;
+  string blake3 = 8;
+  string cleanup_error = 9;
+  CleanupStatus cleanup_status = 10;
+}
+
+message FileServiceResponse {
+  string operation_id = 1;
+  ActiveRoot active_root = 2;
+  DirectorySnapshot directory = 3;
+  FileContent content = 4;
+  FileMetadata metadata = 5;
+  TransferChunk transfer_chunk = 6;
+  DownloadDescriptor download = 7;
+  bool deleted = 8;
+  UploadDescriptor upload = 9;
+}
+
+message FileServiceEvent {
+  string operation_id = 1;
+  ActiveRoot active_root = 2;
+  DirectorySnapshot directory = 3;
+  FileMetadata metadata = 4;
+  string transfer_id = 5;
+  uint64 transferred_bytes = 6;
+  uint64 total_bytes = 7;
+  string state = 8;
+  string error = 9;
+  bool deleted = 10;
+  // Capability and lease identity for authoritative routing. Existing field
+  // numbers remain stable for backwards compatibility.
+  string root_token = 11;
+  string watch_id = 12;
+}
+
+// Git paths are opaque host byte strings. display_path is lossy presentation
+// only and must never be sent back as an operation target.
+enum GitChangeKind {
+  GIT_CHANGE_KIND_UNSPECIFIED = 0;
+  GIT_CHANGE_KIND_MODIFIED = 1;
+  GIT_CHANGE_KIND_ADDED = 2;
+  GIT_CHANGE_KIND_DELETED = 3;
+  GIT_CHANGE_KIND_RENAMED = 4;
+  GIT_CHANGE_KIND_COPIED = 5;
+  GIT_CHANGE_KIND_TYPE_CHANGED = 6;
+  GIT_CHANGE_KIND_UNMERGED = 7;
+  GIT_CHANGE_KIND_UNTRACKED = 8;
+  GIT_CHANGE_KIND_IGNORED = 9;
+}
+
+enum GitDiffTarget {
+  GIT_DIFF_TARGET_UNSPECIFIED = 0;
+  GIT_DIFF_TARGET_UNSTAGED = 1;
+  GIT_DIFF_TARGET_STAGED = 2;
+}
+
+enum GitMutationKind {
+  GIT_MUTATION_KIND_UNSPECIFIED = 0;
+  GIT_MUTATION_KIND_STAGE_FILE = 1;
+  GIT_MUTATION_KIND_UNSTAGE_FILE = 2;
+  GIT_MUTATION_KIND_DISCARD_FILE = 3;
+  GIT_MUTATION_KIND_STAGE_HUNK = 4;
+  GIT_MUTATION_KIND_UNSTAGE_HUNK = 5;
+  GIT_MUTATION_KIND_DISCARD_HUNK = 6;
+}
+
+message GitRepository {
+  string repository_id = 1;
+  string worktree_root = 2;
+  bytes git_dir = 3;
+  bytes common_dir = 4;
+  bool initial = 5;
+  bool detached_head = 6;
+  string head_name = 7;
+  string head_oid = 8;
+}
+
+message GitStatusEntry {
+  bytes path = 1;
+  string display_path = 2;
+  bytes original_path = 3;
+  string display_original_path = 4;
+  GitChangeKind index_kind = 5;
+  GitChangeKind worktree_kind = 6;
+  string index_status = 7;
+  string worktree_status = 8;
+  uint32 head_mode = 9;
+  uint32 index_mode = 10;
+  uint32 worktree_mode = 11;
+  string head_oid = 12;
+  string index_oid = 13;
+  bool untracked = 14;
+  bool ignored = 15;
+  bool conflicted = 16;
+  string conflict_code = 17;
+  bool submodule = 18;
+  string submodule_state = 19;
+  bool symlink = 20;
+  bool binary = 21;
+  string rename_score = 22;
+}
+
+message GitStatusSnapshot {
+  GitRepository repository = 1;
+  uint64 generation = 2;
+  string source_generation = 3;
+  repeated GitStatusEntry entries = 4;
+  bool authoritative = 5;
+  // A bounded placeholder is returned instead of attempting to write an
+  // oversized control-lane frame. Entries are omitted when this is true.
+  bool oversized = 6;
+  uint64 total_entry_count = 7;
+  string error = 8;
+  // True when bounded policy skipped exhaustive copy classification. The
+  // remaining status data is authoritative, but Added entries may be copies.
+  bool copy_detection_incomplete = 9;
+}
+
+message GitDiff {
+  GitRepository repository = 1;
+  GitDiffTarget target = 2;
+  bytes path = 3;
+  bytes original_path = 4;
+  string display_path = 5;
+  bytes old_content = 6;
+  bytes new_content = 7;
+  bytes patch = 8;
+  string source_generation = 9;
+  bool binary = 10;
+  bool too_large = 11;
+  bool old_missing = 12;
+  bool new_missing = 13;
+  uint32 hunk_count = 14;
+}
+
+message GitConfirmation {
+  string token = 1;
+  uint64 expires_unix_millis = 2;
+}
+
+enum GitCommandOutcome {
+  GIT_COMMAND_OUTCOME_UNSPECIFIED = 0;
+  GIT_COMMAND_OUTCOME_NOT_APPLIED = 1;
+  GIT_COMMAND_OUTCOME_APPLIED = 2;
+  GIT_COMMAND_OUTCOME_PARTIAL_OR_UNKNOWN = 3;
+}
+
+message GitCommandResult {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  GitStatusSnapshot status = 4;
+  // True only when the Git command itself exited successfully. A subsequent
+  // refresh failure never erases this completed command outcome.
+  bool applied = 5;
+  bool refresh_failed = 6;
+  string refresh_error = 7;
+  GitCommandOutcome outcome = 8;
+  bool stdout_truncated = 9;
+  bool stderr_truncated = 10;
+  string error = 11;
+  string pre_head_oid = 12;
+  string post_head_oid = 13;
+  string pre_index_generation = 14;
+  string post_index_generation = 15;
+  bool post_state_authoritative = 16;
+  uint64 pre_status_generation = 17;
+  uint64 post_status_generation = 18;
+  bool status_omitted = 19;
+}
+
+message GitRequest {
+  string operation_id = 1;
+  string root = 2;
+  string root_token = 3;
+  string repository_id = 4;
+  uint64 expected_status_generation = 5;
+  string expected_source_generation = 6;
+  uint64 connection_epoch = 7;
+  bytes path = 8;
+  bytes original_path = 9;
+  GitDiffTarget diff_target = 10;
+  GitMutationKind mutation = 11;
+  uint32 hunk_index = 12;
+  string confirmation_token = 13;
+  string commit_message = 14;
+  string watch_id = 15;
+  string expected_server_identity = 16;
+}
+
+message GitResponse {
+  string operation_id = 1;
+  GitStatusSnapshot status = 2;
+  GitDiff diff = 3;
+  GitConfirmation confirmation = 4;
+  GitCommandResult command = 5;
+}
+
+message GitEvent {
+  string watch_id = 1;
+  string root_token = 2;
+  GitStatusSnapshot status = 3;
+  string error = 4;
+}
+
+// Agent protocol is adapter-neutral. Vendor-specific hook JSON remains on the
+// private host side and is normalized before it crosses the desktop bridge.
+enum AgentAdapterKind {
+  AGENT_ADAPTER_KIND_UNSPECIFIED = 0;
+  AGENT_ADAPTER_KIND_CODEX = 1;
+  AGENT_ADAPTER_KIND_CLAUDE_CODE = 2;
+}
+
+enum AgentLifecycleState {
+  AGENT_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  AGENT_LIFECYCLE_STATE_WORKING = 1;
+  AGENT_LIFECYCLE_STATE_BLOCKED = 2;
+  AGENT_LIFECYCLE_STATE_IDLE = 3;
+  AGENT_LIFECYCLE_STATE_UNKNOWN = 4;
+}
+
+enum AgentAuthority {
+  AGENT_AUTHORITY_UNSPECIFIED = 0;
+  AGENT_AUTHORITY_SCREEN = 1;
+  AGENT_AUTHORITY_PROCESS = 2;
+  AGENT_AUTHORITY_HOOK = 3;
+}
+
+enum AgentActionKind {
+  AGENT_ACTION_KIND_UNSPECIFIED = 0;
+  AGENT_ACTION_KIND_LAUNCH_WINDOW = 1;
+  AGENT_ACTION_KIND_LAUNCH_SPLIT = 2;
+  AGENT_ACTION_KIND_RESUME = 3;
+  AGENT_ACTION_KIND_RENAME = 4;
+}
+
+enum AgentPlacementKind {
+  AGENT_PLACEMENT_KIND_UNSPECIFIED = 0;
+  AGENT_PLACEMENT_KIND_WINDOW = 1;
+  AGENT_PLACEMENT_KIND_SPLIT = 2;
+}
+
+enum HookManagementAction {
+  HOOK_MANAGEMENT_ACTION_UNSPECIFIED = 0;
+  HOOK_MANAGEMENT_ACTION_REVIEW = 1;
+  HOOK_MANAGEMENT_ACTION_INSTALL = 2;
+  HOOK_MANAGEMENT_ACTION_UNINSTALL = 3;
+}
+
+message AgentRoute {
+  string host_profile_id = 1;
+  string server_identity = 2;
+  string session_id = 3;
+  string session_name_fallback = 4;
+  string window_id = 5;
+  string window_name_fallback = 6;
+  string pane_id = 7;
+  uint32 pane_index_fallback = 8;
+  string agent_id = 9;
+  uint64 attention_generation = 10;
+  reserved 11, 12;
+  reserved "nested_provenance", "reported_pane_id";
+}
+
+message AgentAdapterDescriptor {
+  AgentAdapterKind adapter = 1;
+  string id = 2;
+  string display_name = 3;
+  bool supports_launch = 4;
+  bool supports_resume = 5;
+  bool supports_hooks = 6;
+  bool supports_process_detection = 7;
+  bool supports_screen_fallback = 8;
+  string hook_config_path = 9;
+  repeated string hook_events = 10;
+}
+
+message AgentRecord {
+  string agent_id = 1;
+  AgentAdapterKind adapter = 2;
+  string native_session_id = 3;
+  string display_name = 4;
+  AgentRoute route = 5;
+  AgentLifecycleState lifecycle = 6;
+  AgentAuthority authority = 7;
+  uint64 state_generation = 8;
+  uint64 attention_generation = 9;
+  uint64 seen_generation = 10;
+  int64 updated_at_unix_millis = 11;
+  int64 hook_authority_expires_at_unix_millis = 12;
+  bool detected_manually = 13;
+  // Presence is topology/process reachability, independent of the authority
+  // which supplied the retained lifecycle evidence.
+  bool present = 14;
+  // Canonical registry identity. The enum remains for protocol compatibility.
+  string adapter_id = 15;
+  // Empty, "blocked", or "completed" for the current attention generation.
+  string attention_kind = 16;
+}
+
+message AgentSnapshot {
+  uint64 generation = 1;
+  repeated AgentRecord agents = 2;
+  reserved 3, 4, 5;
+  bool authoritative = 6;
+  // Desktop notification reducers must advance this boundary without
+  // replaying native notifications for records at or below it.
+  uint64 notification_watermark = 7;
+  repeated AgentAdapterDescriptor adapters = 8;
+  // All live events at or below this daemon generation are included.
+  uint64 accepted_generation = 9;
+}
+
+message AgentHookEvent {
+  AgentAdapterKind adapter = 1;
+  string source_event_id = 2;
+  uint64 source_generation = 3;
+  string native_session_id = 4;
+  string pane_id = 5;
+  bytes payload_json = 6;
+  int64 occurred_at_unix_millis = 7;
+  reserved 8, 9;
+  reserved "outer_pane_id", "nested_provenance";
+  // Only true when source_generation is an adapter-defined, stable vendor
+  // sequence. Unsequenced hooks use zero and exact source-event ID dedupe.
+  bool source_sequence_authoritative = 10;
+  string adapter_id = 11;
+  // Exact identity of the tmux server inherited by the hook process. Pane IDs
+  // are server-local, so an absent or different identity must remain unmapped.
+  string origin_server_identity = 12;
+}
+
+message AgentRequest {
+  AgentActionKind action = 1;
+  AgentAdapterKind adapter = 2;
+  string agent_id = 3;
+  string native_session_id = 4;
+  string display_name = 5;
+  string session_id = 6;
+  string window_id = 7;
+  string pane_id = 8;
+  string active_root = 9;
+  string root_token = 10;
+  string expected_server_identity = 11;
+  uint64 expected_topology_generation = 12;
+  uint64 attention_generation = 13;
+  AgentHookEvent hook_event = 14;
+  HookManagementAction hook_management = 15;
+  bool confirmed = 16;
+  string confirmation_token = 17;
+  HookManagementAction hook_management_target = 18;
+  AgentPlacementKind placement = 19;
+  string adapter_id = 20;
+}
+
+message HookManagementPlan {
+  AgentAdapterKind adapter = 1;
+  HookManagementAction action = 2;
+  string config_path = 3;
+  string backup_path = 4;
+  string managed_version = 5;
+  string summary = 6;
+  string confirmation_token = 7;
+  bool already_current = 8;
+  repeated string proposed_events = 9;
+  string proposed_command = 10;
+  string ownership_marker = 11;
+  string trust_guidance = 12;
+  string before_hash = 13;
+  string after_hash = 14;
+  bool creates_config = 15;
+  bool removes_config = 16;
+  string before_preview = 17;
+  string after_preview = 18;
+  string diff_preview = 19;
+  bool preview_truncated = 20;
+  string adapter_id = 21;
+}
+
+message AgentResponse {
+  AgentSnapshot snapshot = 1;
+  AgentRecord agent = 2;
+  HookManagementPlan hook_plan = 3;
+  string session_id = 4;
+  string window_id = 5;
+  string pane_id = 6;
+  uint64 accepted_generation = 7;
+}
+
+message AgentEvent {
+  AgentRecord agent = 1;
+  uint64 generation = 2;
+  bool notify = 3;
+  string reason = 4;
+  repeated string retired_agent_ids = 5;
+}
+
+message Error {
+  string code = 1;
+  string display_message = 2;
+  bool retryable = 3;
+}
