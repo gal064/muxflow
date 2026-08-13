@@ -3,6 +3,7 @@ mod connection;
 mod external_links;
 mod macos_window;
 mod notifications;
+mod perf_log;
 mod power_events;
 
 use phase0_core::{NotificationRoute, ResolvedRoute, SyntheticTopology, resolve_route};
@@ -183,6 +184,8 @@ pub fn run() {
             connection::files::upload_manager::stage_clipboard_png,
             connection::files::native_clipboard::read_native_terminal_clipboard,
             external_links::open_external_link,
+            perf_log::perf_log_enabled,
+            perf_log::append_perf_log,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tmux Agent IDE");

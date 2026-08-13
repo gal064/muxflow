@@ -18,6 +18,7 @@ import type { TerminalInput, TerminalSize } from "../features/terminal/TerminalR
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
+import { abandonPerfSpan, openPerfSpan } from "../perf/probe";
 import { requestTmuxAction, type TmuxAction } from "../features/tmux/actions";
 import { requestReconciledTmuxAction } from "../features/tmux/actionReconciliation";
 import { AgentPanel } from "../features/agents/AgentPanel";
@@ -68,6 +69,19 @@ import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
 
 const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then((module) => ({ default: module.AppTabSurface })));
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
+
+/**
+ * Actions whose perceived completion is a pane painting. Phase 12 budgets these
+ * as "action to interactive pane", so the instrumentation spans have to start
+ * at the action and end at the paint rather than at the tmux ack.
+ */
+const INTERACTION_SPAN_BY_ACTION: Partial<Record<TmuxAction["kind"], string>> = {
+  createSession: "create.workspace",
+  createWindow: "create.tab",
+  selectWindow: "window.switch",
+  splitPaneDown: "pane.split",
+  splitPaneRight: "pane.split",
+};
 
 export function App() {
   const [status, setStatus] = useState("Discovering local tmux…");
@@ -162,6 +176,10 @@ export function App() {
       setStatus("This action is unavailable until the authoritative connection is live.");
       return undefined;
     }
+    // The user's wait for a create or a split ends when a pane paints, not when
+    // tmux acks; the pane that paints closes this span (see TerminalPane).
+    const paneSpan = INTERACTION_SPAN_BY_ACTION[action.kind];
+    if (paneSpan) openPerfSpan(paneSpan);
     try {
       const result = await requestReconciledTmuxAction({
         clientId,
@@ -173,6 +191,7 @@ export function App() {
       setStatus("Waiting for authoritative tmux state…");
       return result;
     } catch (error) {
+      if (paneSpan) abandonPerfSpan(paneSpan);
       setStatus(String(error));
       return undefined;
     }

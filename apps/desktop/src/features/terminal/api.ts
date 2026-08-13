@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { measurePerf } from "../../perf/probe";
 import type { ConnectionSpec, TmuxSnapshot } from "../../app/types";
 import type { WireFileEvent } from "../files/api";
 import type { WireGitEvent } from "../git/api";
@@ -274,12 +275,12 @@ export function stopTerminal(clientId: string): Promise<void> {
 export function sendInput(clientId: string, paneId: string, data: string): Promise<void> {
   const byteLength = encoder.encode(data).byteLength;
   if (byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(byteLength);
-  return invoke("send_terminal_input", { clientId, paneId, data });
+  return measurePerf("invoke.send_terminal_input", () => invoke("send_terminal_input", { clientId, paneId, data }));
 }
 
 export function sendBinaryInput(clientId: string, paneId: string, data: Uint8Array): Promise<void> {
   if (data.byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(data.byteLength);
-  return invoke("send_terminal_input_bytes", { clientId, paneId, data: Array.from(data) });
+  return measurePerf("invoke.send_terminal_input_bytes", () => invoke("send_terminal_input_bytes", { clientId, paneId, data: Array.from(data) }));
 }
 
 function oversizedTerminalInput(byteLength: number): Promise<never> {
@@ -299,18 +300,19 @@ export function setTerminalVisibility(
   serializedSnapshot: Uint8Array,
   checkpoint: TerminalVisibilityCheckpoint,
 ): Promise<void> {
-  return invoke("set_terminal_visibility", {
-    clientId,
-    paneId,
-    visible,
-    serializedSnapshot: Array.from(serializedSnapshot),
-    terminalEpoch: checkpoint.terminalEpoch,
-    outputGeneration: checkpoint.outputGeneration,
-  });
+  return measurePerf(visible ? "invoke.set_terminal_visibility.reveal" : "invoke.set_terminal_visibility.hide", () =>
+    invoke("set_terminal_visibility", {
+      clientId,
+      paneId,
+      visible,
+      serializedSnapshot: Array.from(serializedSnapshot),
+      terminalEpoch: checkpoint.terminalEpoch,
+      outputGeneration: checkpoint.outputGeneration,
+    }));
 }
 
 export function requestTerminalSeed(clientId: string, paneId: string): Promise<void> {
-  return invoke("request_terminal_seed", { clientId, paneId });
+  return measurePerf("invoke.request_terminal_seed", () => invoke("request_terminal_seed", { clientId, paneId }));
 }
 
 export function terminalBridgeKey(connection: ConnectionSpec, epoch: number): string {
