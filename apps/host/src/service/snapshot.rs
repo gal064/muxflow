@@ -85,11 +85,17 @@ pub(super) fn snapshot_from_identity(
 /// whole life, so there is no interval in which the records could straddle two
 /// servers and nothing left for a second probe to detect.
 pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
-    // Identity before the records, so a server that restarts *during*
-    // discovery is caught rather than pairing the old topology with the new
-    // server. This is a stat, not a fork: the five-fork before/after probe this
-    // replaces cost milliseconds, and this costs a syscall.
-    let before = socket_server_identity(&tmux_socket_path("")).ok();
+    // Identity before the records, so a server that restarts *during* discovery
+    // is caught rather than pairing the old topology with the new server. This
+    // is a stat, not a fork: the five-fork before/after probe this replaces cost
+    // milliseconds, and this costs a syscall.
+    //
+    // The comparison is on device and inode alone. The identity *string* also
+    // carries the socket path, and the path derived from the environment here
+    // ("/tmp/...") and the one tmux reports below ("/private/tmp/...") name the
+    // same socket through different prefixes on macOS — comparing the strings
+    // reports a server restart on every single discovery.
+    let before = socket_identity_key(&tmux_socket_path(""));
     let output = tmux_command()
         .args(tmux_control::batched_discovery_args())
         .output()
@@ -107,7 +113,7 @@ pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
     }
     let mut value = discovery.snapshot;
     overlay_session_order(&mut value, &identity)?;
-    if before.is_some_and(|before| before != identity) {
+    if before.is_some_and(|before| Some(before) != socket_identity_key(&socket)) {
         bail!("tmux server changed during snapshot discovery");
     }
     Ok((value, identity))
@@ -283,6 +289,18 @@ fn tmux_socket_path(formatted: &str) -> std::path::PathBuf {
     let uid = unsafe { libc::geteuid() };
     let name = configured_name.unwrap_or_else(|| "default".into());
     Path::new(&base).join(format!("tmux-{uid}")).join(name)
+}
+
+/// The socket's device and inode: what actually identifies a tmux server, with
+/// none of the path aliasing that the printable identity carries.
+fn socket_identity_key(socket: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+
+    let metadata = fs::metadata(socket).ok()?;
+    metadata
+        .file_type()
+        .is_socket()
+        .then(|| (metadata.dev(), metadata.ino()))
 }
 
 fn socket_server_identity(socket: &Path) -> anyhow::Result<String> {
