@@ -43,6 +43,7 @@ trait FreedesktopNotifications {
     fn notification_closed(&self, id: u32, reason: u32) -> zbus::Result<()>;
 }
 
+#[derive(Clone)]
 pub struct NativeNotifications {
     connection: Result<Connection, String>,
     routes: Arc<Mutex<PendingNotificationRoutes>>,

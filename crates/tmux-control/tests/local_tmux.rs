@@ -1,6 +1,6 @@
 use std::{
     io::{Read, Write},
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
@@ -13,6 +13,7 @@ static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
 struct IsolatedTmux {
     socket_name: String,
     ordinary_client: Option<Child>,
+    ordinary_stdin: Option<ChildStdin>,
 }
 
 impl IsolatedTmux {
@@ -48,6 +49,7 @@ impl IsolatedTmux {
         Some(Self {
             socket_name,
             ordinary_client: None,
+            ordinary_stdin: None,
         })
     }
 
@@ -62,19 +64,39 @@ impl IsolatedTmux {
     }
 
     fn attach_ordinary_client(&mut self) {
-        let command = format!(
-            "env -u TMUX TERM=xterm-256color COLUMNS=90 LINES=30 tmux -L {} attach-session -t phase0",
-            self.socket_name
-        );
-        self.ordinary_client = Some(
-            Command::new("script")
-                .args(["-q", "-c", &command, "/dev/null"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
+        let mut script = Command::new("script");
+        if cfg!(target_os = "macos") {
+            script.args([
+                "-q",
+                "/dev/null",
+                "env",
+                "-u",
+                "TMUX",
+                "TERM=xterm-256color",
+                "COLUMNS=90",
+                "LINES=30",
+                "tmux",
+                "-L",
+                &self.socket_name,
+                "attach-session",
+                "-t",
+                "phase0",
+            ]);
+        } else {
+            let command = format!(
+                "env -u TMUX TERM=xterm-256color COLUMNS=90 LINES=30 tmux -L {} attach-session -t phase0",
+                self.socket_name
+            );
+            script.args(["-q", "-c", &command, "/dev/null"]);
+        }
+        let mut client = script
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        self.ordinary_stdin = client.stdin.take();
+        self.ordinary_client = Some(client);
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
@@ -119,7 +141,7 @@ impl IsolatedTmux {
         let mut stdin = client.stdin.take().unwrap();
         writeln!(
             stdin,
-            "capture-pane -p -e -S -2000 -t {pane_id} ; display-message -p -t {pane_id} '__ADE_META__:{pane_id}:#{{cursor_x}}:#{{cursor_y}}:#{{alternate_on}}'"
+            "capture-pane -p -e -S -2000 -t {pane_id} ; display-message -p -t {pane_id} '__ADE_META__:#{{pane_id}}:#{{cursor_x}}:#{{cursor_y}}:#{{alternate_on}}'"
         )
         .unwrap();
         stdin.flush().unwrap();
@@ -142,7 +164,11 @@ impl IsolatedTmux {
                 found |= line.starts_with(format!("__ADE_META__:{pane_id}:").as_bytes());
             }
         }
-        assert!(found, "compound capture did not return cursor metadata");
+        assert!(
+            found,
+            "compound capture did not return cursor metadata; raw control output: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
     }
 }
 
@@ -186,6 +212,15 @@ fn discovers_splits_and_coexists_with_an_ordinary_client() {
     server.tmux(&["split-window", "-v", "-t", "phase0:0.1"]);
 
     let updated = discover_with_socket_name(&server.socket_name).unwrap();
-    assert_eq!(updated.panes.len(), 3);
+    assert_eq!(
+        updated.panes.len(),
+        3,
+        "ordinary-client topology after split: {:?}",
+        updated
+            .panes
+            .iter()
+            .map(|pane| (&pane.id, &pane.session_id, &pane.window_id, pane.index))
+            .collect::<Vec<_>>()
+    );
     parse_layout(&updated.windows[0].layout).unwrap();
 }

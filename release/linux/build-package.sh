@@ -4,6 +4,17 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo_root"
 
+# This script produces a Linux desktop package and links against WebKitGTK, so
+# it can only run on Linux. The guard matters beyond a clearer message: the
+# native-build branch below is chosen by comparing the requested architecture to
+# `uname -m`, which on an Apple Silicon Mac reports arm64/aarch64. Requesting
+# aarch64 there would take that branch, build a Darwin binary, and publish it
+# inside a Linux release archive rather than failing.
+if [[ $(uname -s) != Linux ]]; then
+  echo "LINUX_HOST_REQUIRED: release/linux/build-package.sh builds a Linux desktop package and must run on Linux; found $(uname -s)" >&2
+  exit 78
+fi
+
 arch=${1:-$(uname -m)}
 case "$arch" in
   x86_64|amd64)

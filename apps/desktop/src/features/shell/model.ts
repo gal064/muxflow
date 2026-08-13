@@ -238,6 +238,36 @@ export function openFileTab(
   return selectAppTab({ ...state, appTabs }, currentHostProfileId, currentServerIdentity, session, tab.id);
 }
 
+export function relocateFileTabs(
+  state: PersistedAppState,
+  currentHostProfileId: string,
+  currentServerIdentity: string,
+  rootPath: string,
+  source: string,
+  destination: string,
+): PersistedAppState {
+  const absoluteDestination = destination.startsWith("/")
+    ? destination
+    : `${rootPath.replace(/\/+$/u, "")}/${destination}`;
+  const resolvedDestination = `/${absoluteDestination.split("/").filter((component) => component && component !== ".").join("/")}`;
+  const sourcePrefix = `${source.replace(/\/+$/u, "")}/`;
+  let changed = false;
+  const appTabs = state.appTabs.map((tab) => {
+    if (tab.hostProfileId !== currentHostProfileId || tab.serverIdentity !== currentServerIdentity
+      || (tab.kind !== "file" && tab.kind !== "markdown")
+      || (tab.resource !== source && !tab.resource.startsWith(sourcePrefix))) return tab;
+    const suffix = tab.resource === source ? "" : tab.resource.slice(sourcePrefix.length);
+    const resource = suffix ? `${resolvedDestination.replace(/\/+$/u, "")}/${suffix}` : resolvedDestination;
+    changed = true;
+    return {
+      ...tab,
+      resource,
+      title: resource.split("/").filter(Boolean).at(-1) ?? resource,
+    };
+  });
+  return changed ? { ...state, appTabs } : state;
+}
+
 export function openGitDiffTab(
   state: PersistedAppState,
   currentHostProfileId: string,

@@ -59,7 +59,7 @@ export async function requestReconciledTmuxAction({
   capturedPrecondition,
   request = requestTmuxAction,
   waitForNewerScope = waitForNewerActionScope,
-}: ReconciledTmuxActionOptions): Promise<void> {
+}: ReconciledTmuxActionOptions): Promise<TmuxActionResult> {
   if (!initialScope.serverIdentity) throw new Error("authoritative server identity is unavailable");
   let precondition = capturedPrecondition ?? {
     serverIdentity: initialScope.serverIdentity,
@@ -73,8 +73,7 @@ export async function requestReconciledTmuxAction({
 
   for (let retry = 0; ; retry += 1) {
     try {
-      await request(clientId, action, precondition);
-      return;
+      return await request(clientId, action, precondition);
     } catch (error) {
       const mayRetry = retry < ACTION_RECONCILE_RETRIES
         && !capturedPrecondition

@@ -23,10 +23,33 @@ const pendingPaneHandoffs = new Map<string, Promise<void>>();
 const paneLifecycleVersions = new Map<string, number>();
 let nextTransferRenderLifetime = 0;
 
+function visibleSeedDiagnostic(message: string | undefined): string | undefined {
+  // These are expected capability limits on supported tmux versions. Keep the
+  // pane-scoped diagnostic in the event stream without permanently covering
+  // terminal output with an implementation detail the user cannot act on.
+  return message?.startsWith("tmux does not expose ") ? undefined : message;
+}
+
 export function isForcedLocalSelection(event: Pick<MouseEvent, "shiftKey">): boolean {
   // xterm's cross-platform force-selection contract is Shift. In particular,
   // this bypasses DEC mouse reporting on Linux without altering child modes.
   return event.shiftKey;
+}
+
+export function interceptTerminalPlainTextPaste(
+  event: Pick<ClipboardEvent, "defaultPrevented" | "preventDefault" | "stopImmediatePropagation" | "stopPropagation"> & {
+    clipboardData: Pick<DataTransfer, "getData"> | null;
+  },
+  paste: (text: string) => void,
+): boolean {
+  if (event.defaultPrevented) return false;
+  const text = event.clipboardData?.getData("text/plain");
+  if (!text) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation();
+  paste(text);
+  return true;
 }
 
 
@@ -143,7 +166,17 @@ export function TerminalPane({
       hub.markRendered(pane.id, generation, terminalEpoch);
     };
     rendererRef.current = renderer;
-    renderer.open(container.current);
+    const terminalContainer = container.current;
+    renderer.open(terminalContainer);
+    const interceptPaste = (event: ClipboardEvent) => {
+      // Native Edit > Paste bypasses the app command and targets xterm's
+      // textarea. Own plain text in capture phase so xterm cannot pre-wrap it;
+      // tmux remains the single authority that applies bracketed-paste mode.
+      interceptTerminalPlainTextPaste(event, (text) => {
+        inputRef.current(pane.id, { kind: "text", data: text });
+      });
+    };
+    terminalContainer.addEventListener("paste", interceptPaste, true);
     const cached = terminalStateCache.get(pane.id);
     const currentCached = cached?.terminalEpoch !== undefined && cached.terminalEpoch === hub.generationEpoch
       ? cached
@@ -265,6 +298,7 @@ export function TerminalPane({
       unsubscribeEvents();
       unsubscribeViewport();
       unsubscribeInput();
+      terminalContainer.removeEventListener("paste", interceptPaste, true);
       controllerRef.current(pane.id, undefined);
       const currentClientId = clientIdRef.current;
       const handoff = (async () => {
@@ -442,8 +476,8 @@ export function TerminalPane({
       onClick={() => rendererRef.current?.scrollToBottom()}
       type="button"
     >New output ↓</button>}
-    {(seedDiagnostic || rendererDiagnostic) && <div className="renderer-diagnostic" role="status">
-      {[seedDiagnostic, rendererDiagnostic].filter(Boolean).join(" · ")}
+    {(visibleSeedDiagnostic(seedDiagnostic) || rendererDiagnostic) && <div className="renderer-diagnostic" role="status">
+      {[visibleSeedDiagnostic(seedDiagnostic), rendererDiagnostic].filter(Boolean).join(" · ")}
     </div>}
   </>;
 }

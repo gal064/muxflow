@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CString, OsStr, OsString},
+    ffi::{CStr, CString, OsStr, OsString},
     fs::File,
     os::unix::{
         fs::MetadataExt,
@@ -13,6 +13,14 @@ pub(super) struct LocalOwnedDirectory {
     path: PathBuf,
     device: u64,
     inode: u64,
+}
+
+pub(super) struct EntryMetadata {
+    pub(super) regular: bool,
+    pub(super) symlink: bool,
+    pub(super) uid: u32,
+    pub(super) device: u64,
+    pub(super) inode: u64,
 }
 
 impl LocalOwnedDirectory {
@@ -48,13 +56,19 @@ impl LocalOwnedDirectory {
         }
         let home_fd = open_directory_path(home, "HOME")?;
         validate_owned_directory(&home_fd, "HOME")?;
+        #[cfg(target_os = "macos")]
+        let cache = {
+            let library =
+                open_or_create_child(&home_fd, OsStr::new("Library"), false, "Library parent")?;
+            open_or_create_child(&library, OsStr::new("Caches"), false, "cache parent")?
+        };
+        #[cfg(not(target_os = "macos"))]
         let cache = open_or_create_child(&home_fd, OsStr::new(".cache"), false, "cache parent")?;
-        let app = open_or_create_child(
-            &cache,
-            OsStr::new("tmux-agent-ide"),
-            true,
-            "private app cache",
-        )?;
+        #[cfg(target_os = "macos")]
+        let app_name = OsStr::new("dev.dev.tmux-agent-ide");
+        #[cfg(not(target_os = "macos"))]
+        let app_name = OsStr::new("tmux-agent-ide");
+        let app = open_or_create_child(&cache, app_name, true, "private app cache")?;
         let clipboard = open_or_create_child(
             &app,
             OsStr::new("clipboard"),
@@ -64,7 +78,7 @@ impl LocalOwnedDirectory {
         let metadata = clipboard.metadata().map_err(|error| error.to_string())?;
         Ok(Self {
             file: clipboard,
-            path: home.join(".cache/tmux-agent-ide/clipboard"),
+            path: clipboard_cache_path(home),
             device: metadata.dev(),
             inode: metadata.ino(),
         })
@@ -99,7 +113,7 @@ impl LocalOwnedDirectory {
                 self.file.as_raw_fd(),
                 name.as_ptr(),
                 flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                mode,
+                libc::c_uint::from(mode),
             )
         };
         if fd < 0 {
@@ -108,15 +122,33 @@ impl LocalOwnedDirectory {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    pub(super) fn entries(&self) -> Result<Vec<(OsString, std::fs::Metadata)>, String> {
+    pub(super) fn entries(&self) -> Result<Vec<(OsString, EntryMetadata)>, String> {
         let mut result = Vec::new();
-        for entry in std::fs::read_dir(descriptor_path(self.file.as_raw_fd()))
-            .map_err(|error| error.to_string())?
-        {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let metadata =
-                std::fs::symlink_metadata(entry.path()).map_err(|error| error.to_string())?;
-            result.push((entry.file_name(), metadata));
+        for name in directory_entry_names(&self.file)? {
+            let name_c = CString::new(name.as_encoded_bytes()).map_err(|_| "entry contains NUL")?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+            if unsafe {
+                libc::fstatat(
+                    self.file.as_raw_fd(),
+                    name_c.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                continue;
+            }
+            let stat = unsafe { stat.assume_init() };
+            result.push((
+                name,
+                EntryMetadata {
+                    regular: stat.st_mode & libc::S_IFMT == libc::S_IFREG,
+                    symlink: stat.st_mode & libc::S_IFMT == libc::S_IFLNK,
+                    uid: stat.st_uid,
+                    device: u64::try_from(stat.st_dev).unwrap_or(u64::MAX),
+                    inode: stat.st_ino,
+                },
+            ));
         }
         Ok(result)
     }
@@ -151,6 +183,13 @@ impl LocalOwnedDirectory {
         self.unlink(&quarantine)?;
         Ok(true)
     }
+}
+
+pub(super) fn clipboard_cache_path(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return home.join("Library/Caches/dev.dev.tmux-agent-ide/clipboard");
+    #[cfg(not(target_os = "macos"))]
+    home.join(".cache/tmux-agent-ide/clipboard")
 }
 
 fn open_directory_path(path: &Path, label: &str) -> Result<File, String> {
@@ -251,7 +290,29 @@ fn rename_noreplace(directory_fd: i32, source: &OsStr, target: &OsStr) -> Result
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn rename_noreplace(directory_fd: i32, source: &OsStr, target: &OsStr) -> Result<(), String> {
+    let source =
+        CString::new(source.as_encoded_bytes()).map_err(|_| "staging name contains NUL")?;
+    let target =
+        CString::new(target.as_encoded_bytes()).map_err(|_| "staging name contains NUL")?;
+    let result = unsafe {
+        libc::renameatx_np(
+            directory_fd,
+            source.as_ptr(),
+            directory_fd,
+            target.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result < 0 {
+        Err(std::io::Error::last_os_error().to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn rename_noreplace(_directory_fd: i32, _source: &OsStr, _target: &OsStr) -> Result<(), String> {
     Err("identity-preserving quarantine is unavailable on this platform".into())
 }
@@ -275,14 +336,59 @@ pub(super) fn try_lock_file_exclusive(file: &File) -> Result<bool, String> {
     }
 }
 
+pub(super) fn directory_entry_names(directory: &File) -> Result<Vec<OsString>, String> {
+    // Open a new file description instead of duplicating `directory`: dup/fcntl
+    // descriptors share the directory offset, which makes concurrent or repeated
+    // enumeration stateful on Darwin and Linux.
+    let enumeration_fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if enumeration_fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let stream = unsafe { libc::fdopendir(enumeration_fd) };
+    if stream.is_null() {
+        let error = std::io::Error::last_os_error().to_string();
+        unsafe { libc::close(enumeration_fd) };
+        return Err(error);
+    }
+    let mut names = Vec::new();
+    loop {
+        unsafe { *errno_location() = 0 };
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let errno = unsafe { *errno_location() };
+            if errno != 0 {
+                let error = std::io::Error::from_raw_os_error(errno).to_string();
+                unsafe { libc::closedir(stream) };
+                return Err(error);
+            }
+            break;
+        }
+        let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if bytes != b"." && bytes != b".." {
+            use std::os::unix::ffi::OsStringExt;
+            names.push(OsString::from_vec(bytes.to_vec()));
+        }
+    }
+    if unsafe { libc::closedir(stream) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(names)
+}
+
 #[cfg(target_os = "linux")]
-fn descriptor_path(fd: i32) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{fd}"))
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn descriptor_path(fd: i32) -> PathBuf {
-    PathBuf::from(format!("/dev/fd/{fd}"))
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__error() }
 }
 
 #[cfg(all(test, target_os = "linux"))]

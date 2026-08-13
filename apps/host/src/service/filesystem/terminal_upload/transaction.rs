@@ -7,6 +7,13 @@ fn crash_at(point: &str) {
         // SAFETY: the subprocess crash matrix deliberately terminates only
         // its own test process to model an uncatchable helper loss.
         unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+        // Linux tears the process down before `kill` returns to user code, but
+        // macOS executes further instructions, and reaching the panic below
+        // would replace the uncatchable loss being modelled with an unwind that
+        // runs destructors — a strictly weaker crash than the test intends.
+        // Park without unwinding until the signal lands, and keep the panic as a
+        // loud bound in case the kill genuinely failed.
+        std::thread::sleep(std::time::Duration::from_secs(10));
         unreachable!("SIGKILL did not terminate crash-test subprocess");
     }
 }
@@ -330,7 +337,7 @@ pub(super) fn publish_upload_transaction(
     fault: Option<PublicationFault>,
 ) -> PublishResult<()> {
     if had_original {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         upload
             .directory
             .exchange(&upload.temporary_name, &upload.target_name)

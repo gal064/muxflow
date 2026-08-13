@@ -1,4 +1,8 @@
-use std::{io::Write, process::Stdio, sync::mpsc};
+use std::{
+    io::Write,
+    process::Stdio,
+    sync::{OnceLock, mpsc},
+};
 
 use tmux_control::HOST_INPUT_COALESCE_BYTES;
 use uuid::Uuid;
@@ -117,8 +121,17 @@ fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let output = tmux_command()
-        .args(["paste-buffer", "-d", "-b", &buffer_name, "-t", pane_id])
+    let mut paste = tmux_command();
+    paste.args(["paste-buffer", "-d"]);
+    // tmux 3.7 sanitizes control bytes with vis(3) unless -S is present.
+    // Earlier supported releases do not expose -S and preserve them by
+    // default. Probe the command surface once so keyboard controls such as
+    // Ctrl-C and Ctrl-U remain bytes without dropping tmux 3.3 support.
+    if paste_buffer_needs_unsanitized_flag()? {
+        paste.arg("-S");
+    }
+    let output = paste
+        .args(["-b", &buffer_name, "-t", pane_id])
         .output()
         .map_err(|error| {
             cleanup_buffer(&buffer_name);
@@ -136,6 +149,43 @@ fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+fn paste_buffer_needs_unsanitized_flag() -> Result<bool, String> {
+    static SUPPORTS_FLAG: OnceLock<bool> = OnceLock::new();
+    cache_successful_probe(&SUPPORTS_FLAG, || {
+        let output = tmux_command()
+            .arg("list-commands")
+            .output()
+            .map_err(|error| format!("failed to inspect tmux paste semantics: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to inspect tmux paste semantics: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(paste_buffer_supports_unsanitized_flag(&output.stdout))
+    })
+}
+
+fn cache_successful_probe(
+    cache: &OnceLock<bool>,
+    probe: impl FnOnce() -> Result<bool, String>,
+) -> Result<bool, String> {
+    if let Some(value) = cache.get() {
+        return Ok(*value);
+    }
+    let value = probe()?;
+    let _ = cache.set(value);
+    Ok(*cache.get().unwrap_or(&value))
+}
+
+fn paste_buffer_supports_unsanitized_flag(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output).lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next() == Some("paste-buffer")
+            && fields.any(|options| options.starts_with('[') && options.contains('S'))
+    })
+}
+
 fn cleanup_buffer(buffer_name: &str) {
     let _ = tmux_command()
         .args(["delete-buffer", "-b", buffer_name])
@@ -145,6 +195,30 @@ fn cleanup_buffer(buffer_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_37_unsanitized_paste_flag_is_detected_without_requiring_it_on_tmux_33() {
+        assert!(paste_buffer_supports_unsanitized_flag(
+            b"paste-buffer (pasteb) [-dprS] [-s separator] [-b buffer-name] [-t target-pane]\n"
+        ));
+        assert!(!paste_buffer_supports_unsanitized_flag(
+            b"paste-buffer (pasteb) [-dpr] [-s separator] [-b buffer-name] [-t target-pane]\n"
+        ));
+        assert!(!paste_buffer_supports_unsanitized_flag(
+            b"send-keys (send) [-FHlMRX] [key ...]\n"
+        ));
+    }
+
+    #[test]
+    fn transient_probe_failure_is_retried_and_only_success_is_cached() {
+        let cache = OnceLock::new();
+        assert_eq!(
+            cache_successful_probe(&cache, || Err("tmux temporarily unavailable".into())),
+            Err("tmux temporarily unavailable".into())
+        );
+        assert_eq!(cache_successful_probe(&cache, || Ok(true)), Ok(true));
+        assert_eq!(cache_successful_probe(&cache, || Ok(false)), Ok(true));
+    }
 
     #[test]
     fn writer_failure_is_correlated_without_poisoning_the_next_request() {

@@ -196,6 +196,40 @@ describe("TerminalTransferSurface", () => {
     expect(view.onPaste).toHaveBeenCalledWith(mode === "local" ? staged.path : `/remote/${name}`);
   });
 
+  it.each(["local", "ssh"] as const)("pastes native clipboard text copied by another application for %s", async (mode) => {
+    // M10-E054: WebKit refuses `navigator.clipboard` reads for foreign content,
+    // so the native rung is the only path that carries this text through.
+    const transferClient = client({ readNativeClipboard: vi.fn(async () => ({ kind: "text" as const, text: "echo from-another-app\n" })) });
+    let controller: TerminalTransferSurfaceController | undefined;
+    const view = await mounted(mode, transferClient, vi.fn(), (value) => { controller = value; });
+    await act(async () => { expect(await controller!.pasteClipboard()).toBe(true); });
+    expect(view.onPaste).toHaveBeenCalledWith("echo from-another-app\n");
+    expect(transferClient.preflight).not.toHaveBeenCalled();
+    expect(transferClient.start).not.toHaveBeenCalled();
+  });
+
+  it("renders a native clipboard rejection instead of leaking an unhandled paste promise", async () => {
+    const diagnostic = vi.fn();
+    const transferClient = client({
+      readNativeClipboard: vi.fn(async () => { throw new Error("clipboard PNG exceeds the 25 MiB encoded-image limit"); }),
+    });
+    let controller: TerminalTransferSurfaceController | undefined;
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<TerminalTransferSurface
+        client={transferClient}
+        onController={(value) => { controller = value; }}
+        onDiagnostic={diagnostic}
+        onPaste={vi.fn()}
+        scope={scope("local")}
+        target={{ current: null }}
+      ><div /></TerminalTransferSurface>);
+    });
+    await act(async () => { expect(await controller!.pasteClipboard()).toBe(true); });
+    expect(renderer!.root.findByProps({ role: "alert" }).children.join("")).toContain("25 MiB");
+    expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining("25 MiB"));
+  });
+
   it("processes every mixed PNG/text DOM drop path in original order without image staging", async () => {
     const transferClient = client();
     const view = await mounted("ssh", transferClient);

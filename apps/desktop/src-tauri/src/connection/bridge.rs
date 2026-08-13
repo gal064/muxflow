@@ -15,7 +15,7 @@ use tmux_agent_protocol::{
 use uuid::Uuid;
 
 use super::event_frame::encode_event_with_sequence;
-use super::transport::spawn_bridge;
+use super::transport::{BridgeStderr, spawn_bridge, with_bridge_diagnostic};
 use super::{
     ConnectionSpec, InitialHostState, TerminalClient, TerminalEvent, mark_input_reconnected,
     send_event, snapshot_from_proto, validate_tmux_id,
@@ -101,10 +101,12 @@ fn run_bridge_once(
         .stdout
         .take()
         .ok_or("host bridge stdout unavailable")?;
+    let diagnostic = bridge.stderr.take().map(BridgeStderr::capture);
     let mut reader = BufReader::new(stdout);
     let terminal_epoch = ((Uuid::new_v4().as_u128() as u64) & ((1_u64 << 53) - 1)).max(1);
     let (hello, initial, negotiated_writable) =
-        handshake_and_snapshot(&mut stdin, &mut reader, terminal_epoch)?;
+        handshake_and_snapshot(&mut stdin, &mut reader, terminal_epoch)
+            .map_err(|error| with_bridge_diagnostic(error, diagnostic.as_ref()))?;
     // Terminal generations are scoped to one helper protocol connection.  Tell
     // the renderer to discard same-server generation watermarks before any seed
     // or output from the new connection is delivered.
@@ -282,6 +284,7 @@ fn handshake_and_snapshot(
             response.error_code, response.display_message
         ));
     }
+    let accepted_sequence = response.accepted_sequence;
     let snapshot = response
         .snapshot
         .ok_or("subscribe response omitted snapshot")?;
@@ -297,12 +300,24 @@ fn handshake_and_snapshot(
         Some(InitialHostState {
             snapshot: snapshot_from_proto(snapshot),
             agent_snapshot,
-            accepted_sequence: response.accepted_sequence,
+            accepted_sequence,
             generation,
-            buffered_events: buffered,
+            // A snapshot barrier already incorporates every ordered event at
+            // or below its accepted sequence. Replaying an event that happened
+            // to reach stdout before the response would make the bridge treat
+            // that already-accepted sequence as a gap and reconnect. This race
+            // is common while the first tmux controls are being attached.
+            buffered_events: buffered
+                .into_iter()
+                .filter(|frame| event_follows_snapshot_barrier(frame, accepted_sequence))
+                .collect(),
         }),
         true,
     ))
+}
+
+fn event_follows_snapshot_barrier(frame: &v1::Envelope, accepted_sequence: u64) -> bool {
+    matches!(&frame.payload, Some(Payload::Event(_))) && frame.sequence > accepted_sequence
 }
 
 pub(super) fn handshake_allows_snapshot(envelope_major: u32, hello: &v1::ServerHello) -> bool {
@@ -711,4 +726,23 @@ pub(super) fn validate_event_sequence(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(sequence: u64) -> v1::Envelope {
+        envelope(0, sequence, Payload::Event(v1::HostEvent::default()))
+    }
+
+    #[test]
+    fn initial_snapshot_barrier_supersedes_events_already_in_its_sequence() {
+        assert!(!event_follows_snapshot_barrier(&event(40), 41));
+        assert!(!event_follows_snapshot_barrier(&event(41), 41));
+        assert!(event_follows_snapshot_barrier(&event(42), 41));
+
+        let response = envelope(9, 0, Payload::Response(v1::Response::default()));
+        assert!(!event_follows_snapshot_barrier(&response, 41));
+    }
 }

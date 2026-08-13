@@ -62,6 +62,33 @@ describe("TauriGitWorkspaceClient", () => {
     expect(events[0]).toMatchObject({ kind: "status", rootToken: "root-token", watchId: "watch", status: { repository: { id: "repo-id" } } });
   });
 
+  it("retries a superseded watch bootstrap without surfacing an internal freshness race", async () => {
+    invokeMock
+      .mockRejectedValueOnce("git_rejected: Git status refresh superseded by a newer snapshot")
+      .mockRejectedValueOnce("git_rejected: Git status refresh superseded by a newer snapshot")
+      .mockResolvedValueOnce({ operationId: "watch", status: wireStatus() })
+      .mockResolvedValue({});
+    const lease = await new TauriGitWorkspaceClient().watch(scope, root);
+    const requests = invokeMock.mock.calls.filter(([command]) => command === "git_request");
+    expect(requests).toHaveLength(3);
+    expect(new Set(requests.map(([, args]) => args.command.watchId)).size).toBe(3);
+    expect(lease.status.repository.id).toBe("repo-id");
+    lease.release();
+  });
+
+  it("retries only a pre-command superseded commit request with a fresh operation identity", async () => {
+    invokeMock
+      .mockRejectedValueOnce("git_rejected: Git status refresh superseded by a newer snapshot")
+      .mockResolvedValueOnce({ operationId: "commit", command: {
+        exitCode: 0, stdout: [], stderr: [], applied: true, refreshFailed: false, refreshError: "", outcome: "applied",
+      } });
+    const result = await new TauriGitWorkspaceClient().commit(scope, root, "repo-id", "7", "message");
+    expect(result.outcome).toBe("applied");
+    const requests = invokeMock.mock.calls.filter(([command]) => command === "git_request");
+    expect(requests).toHaveLength(2);
+    expect(new Set(requests.map(([, args]) => args.command.operationId)).size).toBe(2);
+  });
+
   it("turns malformed event generations and byte arrays into a scoped error instead of crashing the shell", () => {
     const client = new TauriGitWorkspaceClient();
     const events: unknown[] = [];

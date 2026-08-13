@@ -10,6 +10,9 @@ use std::{
     path::{Component, Path},
 };
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use std::os::unix::ffi::OsStringExt;
+
 use anyhow::{Context, bail};
 
 use super::validate_git_path;
@@ -26,6 +29,48 @@ pub(super) struct WorktreeEntry {
     leaf: OsString,
 }
 
+pub(super) struct EntryMetadata {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    len: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+impl EntryMetadata {
+    fn from_stat(value: libc::stat) -> Self {
+        Self {
+            dev: value.st_dev as u64,
+            ino: value.st_ino,
+            mode: value.st_mode as u32,
+            len: value.st_size.max(0) as u64,
+            mtime: value.st_mtime,
+            mtime_nsec: value.st_mtime_nsec,
+            ctime: value.st_ctime,
+            ctime_nsec: value.st_ctime_nsec,
+        }
+    }
+
+    pub(super) fn mode(&self) -> u32 {
+        self.mode
+    }
+    pub(super) fn len(&self) -> u64 {
+        self.len
+    }
+    pub(super) fn is_file(&self) -> bool {
+        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
+    }
+    pub(super) fn is_dir(&self) -> bool {
+        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR)
+    }
+    pub(super) fn is_symlink(&self) -> bool {
+        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFLNK)
+    }
+}
+
 impl WorktreeRoot {
     pub(super) fn capture(root: &str) -> anyhow::Result<Self> {
         let path = CString::new(root.as_bytes()).context("repository root contains NUL")?;
@@ -35,11 +80,10 @@ impl WorktreeRoot {
             libc::open(
                 path.as_ptr(),
                 libc::O_RDONLY
-                    | libc::O_DIRECTORY
                     | if descriptor_backed {
                         0
                     } else {
-                        libc::O_NOFOLLOW
+                        libc::O_DIRECTORY | libc::O_NOFOLLOW
                     },
             )
         };
@@ -66,6 +110,10 @@ impl WorktreeRoot {
         descriptor_path(self.directory.as_raw_fd())
             .to_string_lossy()
             .into_owned()
+    }
+
+    pub(super) fn watch_path(&self) -> std::path::PathBuf {
+        descriptor_directory_path(self.directory.as_raw_fd())
     }
 
     pub(super) fn try_clone(&self) -> anyhow::Result<Self> {
@@ -134,7 +182,7 @@ impl WorktreeEntry {
         // SAFETY: successful open returned a uniquely owned fd.
         Ok(unsafe { File::from_raw_fd(fd) })
     }
-    pub(super) fn metadata(&self) -> anyhow::Result<Option<Metadata>> {
+    pub(super) fn metadata(&self) -> anyhow::Result<Option<EntryMetadata>> {
         let path = CString::new(self.leaf.as_bytes()).context("Git path contains NUL")?;
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         // SAFETY: the fd, C string, and output pointer remain live for fstatat.
@@ -153,28 +201,23 @@ impl WorktreeEntry {
             }
             return Err(error.into());
         }
-        // Rust does not expose a constructor from stat, so obtain Metadata
-        // through the descriptor-bound proc path after the no-follow lookup.
-        // The held parent fd makes this lookup immune to ancestor swaps.
-        let stable = descriptor_path(self.parent.as_raw_fd()).join(&self.leaf);
-        match std::fs::symlink_metadata(stable) {
-            Ok(metadata) => Ok(Some(metadata)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        // SAFETY: successful fstatat initialized the complete stat value.
+        Ok(Some(EntryMetadata::from_stat(unsafe {
+            stat.assume_init()
+        })))
     }
 
     pub(super) fn is_directory(&self) -> anyhow::Result<bool> {
         Ok(self
             .metadata()?
-            .is_some_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink()))
+            .is_some_and(|metadata| metadata.is_dir() && !metadata.is_symlink()))
     }
 
     pub(super) fn read(&self, maximum: Option<usize>) -> anyhow::Result<Option<Vec<u8>>> {
         let Some(metadata) = self.metadata()? else {
             return Ok(None);
         };
-        if metadata.file_type().is_symlink() {
+        if metadata.is_symlink() {
             return Ok(Some(self.read_link()?));
         }
         if metadata.is_dir() {
@@ -228,16 +271,16 @@ impl WorktreeEntry {
         };
         hasher.update(&metadata.mode().to_le_bytes());
         hasher.update(&metadata.len().to_le_bytes());
-        hasher.update(&metadata.mtime().to_le_bytes());
-        hasher.update(&metadata.mtime_nsec().to_le_bytes());
-        hasher.update(&metadata.ctime().to_le_bytes());
-        hasher.update(&metadata.ctime_nsec().to_le_bytes());
-        if metadata.file_type().is_symlink() {
+        hasher.update(&metadata.mtime.to_le_bytes());
+        hasher.update(&metadata.mtime_nsec.to_le_bytes());
+        hasher.update(&metadata.ctime.to_le_bytes());
+        hasher.update(&metadata.ctime_nsec.to_le_bytes());
+        if metadata.is_symlink() {
             hasher.update(&self.read_link()?);
             let after = self
                 .metadata()?
                 .context("worktree entry changed during status refresh")?;
-            ensure_same_snapshot(&metadata, &after)?;
+            ensure_same_entry_snapshot(&metadata, &after)?;
         } else if metadata.is_file() {
             let leaf = CString::new(self.leaf.as_bytes()).context("Git path contains NUL")?;
             // SAFETY: openat uses a live parent fd and returns an owned fd.
@@ -279,7 +322,7 @@ impl WorktreeEntry {
         let Some(metadata) = self.metadata()? else {
             return Ok(false);
         };
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
+        if !metadata.is_file() || metadata.is_symlink() {
             return Ok(false);
         }
         let leaf = CString::new(self.leaf.as_bytes()).context("Git path contains NUL")?;
@@ -341,15 +384,30 @@ impl WorktreeEntry {
     }
 }
 
-fn ensure_same_snapshot(before: &Metadata, after: &Metadata) -> anyhow::Result<()> {
-    if before.dev() != after.dev()
-        || before.ino() != after.ino()
-        || before.mode() != after.mode()
-        || before.len() != after.len()
-        || before.mtime() != after.mtime()
-        || before.mtime_nsec() != after.mtime_nsec()
-        || before.ctime() != after.ctime()
-        || before.ctime_nsec() != after.ctime_nsec()
+fn ensure_same_snapshot(before: &EntryMetadata, after: &Metadata) -> anyhow::Result<()> {
+    if before.dev != after.dev()
+        || before.ino != after.ino()
+        || before.mode != after.mode()
+        || before.len != after.len()
+        || before.mtime != after.mtime()
+        || before.mtime_nsec != after.mtime_nsec()
+        || before.ctime != after.ctime()
+        || before.ctime_nsec != after.ctime_nsec()
+    {
+        bail!("worktree entry changed during status refresh");
+    }
+    Ok(())
+}
+
+fn ensure_same_entry_snapshot(before: &EntryMetadata, after: &EntryMetadata) -> anyhow::Result<()> {
+    if before.dev != after.dev
+        || before.ino != after.ino
+        || before.mode != after.mode
+        || before.len != after.len
+        || before.mtime != after.mtime
+        || before.mtime_nsec != after.mtime_nsec
+        || before.ctime != after.ctime
+        || before.ctime_nsec != after.ctime_nsec
     {
         bail!("worktree entry changed during status refresh");
     }
@@ -396,6 +454,26 @@ pub(super) fn descriptor_path(fd: i32) -> std::path::PathBuf {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(super) fn descriptor_path(fd: i32) -> std::path::PathBuf {
     format!("/dev/fd/{fd}").into()
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_directory_path(fd: i32) -> std::path::PathBuf {
+    descriptor_path(fd)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn descriptor_directory_path(fd: i32) -> std::path::PathBuf {
+    let mut buffer = [0_u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes the live descriptor's vnode path into this
+    // fixed-size buffer. Descriptor-relative opens remain authoritative.
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buffer.as_mut_ptr()) } == 0 {
+        let length = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(buffer.len());
+        return std::path::PathBuf::from(OsString::from_vec(buffer[..length].to_vec()));
+    }
+    descriptor_path(fd)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]

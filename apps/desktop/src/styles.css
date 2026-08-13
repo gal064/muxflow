@@ -141,6 +141,7 @@ code, kbd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .transfer.verifying, .terminal-upload.verifying { border-left: 2px solid #b58a4b; }
 .transfer.failed, .terminal-upload.failed { border-left: 2px solid #a95858; }
 .file-dialog { display: grid; gap: 12px; }.file-dialog label { display: grid; gap: 5px; color: #9ca7b3; font-size: 11px; }.file-dialog input:not([type="checkbox"]) { width: 100%; padding: 8px; border: 1px solid #46515d; border-radius: 5px; background: #0d1014; }.file-dialog .overwrite { grid-template-columns: auto 1fr; align-items: center; }
+.download-destination { display: flex; gap: 7px; }.download-destination input { min-width: 0; flex: 1; }.download-destination button { flex: 0 0 auto; padding: 6px 10px; border: 1px solid #46515d; border-radius: 5px; background: #222831; }
 .load-more-files { display: block; margin-top: 3px; margin-bottom: 3px; padding: 4px 8px; border: 1px solid #38434e; border-radius: 4px; background: #1c232a; color: #9cabb8; font-size: 10px; }
 .download-dialog { display: grid; gap: 11px; }.download-dialog label { display: grid; gap: 4px; color: #929eaa; font-size: 11px; }.download-dialog input, .download-dialog select { width: 100%; padding: 8px; border: 1px solid #46515d; border-radius: 5px; background: #0d1014; }.download-warning { padding: 8px; border: 1px solid #805b35; border-radius: 4px; color: #e1bd88; background: #332619; font-size: 10px; }
 .connection-card { margin: 8px; border: 1px solid #303740; border-radius: 6px; background: #111419; }
@@ -226,7 +227,7 @@ code, kbd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .terminal-upload > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.terminal-upload > small:first-of-type { color: #8e9ba7; text-transform: capitalize; }.terminal-upload progress { grid-column: 1 / -1; width: 100%; height: 5px; }.terminal-upload button { justify-self: end; }.terminal-upload em { grid-column: 1 / -1; color: #efaaa4; font-style: normal; overflow-wrap: anywhere; }
 .terminal-upload .transfer-finalizing { grid-column: 1 / -1; color: #d4b97c; }
 .terminal-upload .transfer-origin { grid-column: 1 / -1; color: #71808d; overflow-wrap: anywhere; }
-.terminal-transfer-error { padding: 6px; border-radius: 4px; color: #efb2b2; background: #3b2023; font-size: 10px; overflow-wrap: anywhere; }
+.terminal-transfer-error { position: absolute; z-index: 9; right: 10px; bottom: 10px; max-width: min(360px, calc(100% - 20px)); padding: 6px; border: 1px solid #78454a; border-radius: 4px; color: #efb2b2; background: #3b2023f2; box-shadow: 0 8px 26px #0009; font-size: 10px; overflow-wrap: anywhere; }
 .terminal-upload-review { display: grid; gap: 10px; width: min(620px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 24px)); overflow: auto; }
 .terminal-upload-review ul { max-height: 190px; margin: 0; padding-left: 22px; overflow: auto; color: #9ea9b4; font-size: 11px; }.terminal-upload-review li + li { margin-top: 4px; }.terminal-upload-review label { display: grid; gap: 5px; color: #9ca7b3; font-size: 11px; }.terminal-upload-review select { width: 100%; padding: 8px; border: 1px solid #46515d; border-radius: 5px; background: #0d1014; }
 .divider-handle { position: absolute; z-index: 7; padding: 0; border: 0; background: transparent; touch-action: none; }
@@ -248,6 +249,7 @@ code, kbd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .git-target.staged { background: #203a2a; color: #99d2aa; }
 .git-diff-toolbar .danger, .git-hunk-actions .danger { color: #ff9d98; }
 .git-diff-error { padding: 5px 8px; border-bottom: 1px solid #4b2b2b; background: #261718; color: #ffaaa4; font-size: 11px; }
+.git-diff-content { min-width: 0; min-height: 0; }
 .git-diff-empty { min-height: 0; display: grid; align-content: center; justify-items: center; padding: 30px; color: #84909b; text-align: center; }
 .git-diff-empty h1 { margin: 10px 0 3px; color: #c4ccd4; font-size: 16px; }
 .git-hunk-actions { display: flex; gap: 6px; overflow-x: auto; padding: 5px 8px; border-top: 1px solid #2a3037; background: #13181d; }

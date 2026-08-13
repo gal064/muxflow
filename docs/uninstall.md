@@ -22,3 +22,9 @@ leaving broken hook commands. Remove the hooks through the app and retry.
 To remove local app state later, inspect and manually delete the application's
 configuration/state directory. That separate destructive step is intentionally
 not part of package uninstall.
+# macOS
+
+Run `release/macos/uninstall.sh`. It removes only the ownership-marked app from
+`$HOME/Applications` (or the explicit `ADE_MACOS_APPLICATIONS_DIR`), stops its
+local helper when possible, and preserves application configuration and all
+tmux sessions.

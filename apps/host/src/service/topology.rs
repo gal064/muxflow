@@ -11,7 +11,7 @@ use tokio::time::sleep;
 
 use super::snapshot::{discover_authoritative, snapshot_from_identity};
 use super::terminal::TerminalClients;
-use super::{SequencerControl, emit_event, reconcile_terminal_clients};
+use super::{SequencerControl, emit_event, reconcile_terminal_clients_if_open};
 
 const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -114,8 +114,30 @@ impl TopologyActor {
                                         ..Default::default()
                                     }))
                                     .await;
+                            } else if notified {
+                                // A tmux notification can describe a transient
+                                // change that has already settled back to the
+                                // authoritative baseline. Close the frontend's
+                                // reconciliation state even when no generation
+                                // change is needed.
+                                let generation = self.generation.load(Ordering::Acquire);
+                                let _ = self
+                                    .sender
+                                    .send(SequencerControl::OrderedEvent(v1::HostEvent {
+                                        kind: v1::EventKind::TopologySnapshot.into(),
+                                        scope: "topology".into(),
+                                        snapshot: Some(snapshot_from_identity(
+                                            current.clone(),
+                                            generation,
+                                            identity.clone(),
+                                        )),
+                                        detail: "topology reconciliation completed".into(),
+                                        ..Default::default()
+                                    }))
+                                    .await;
                             }
-                            reconcile_terminal_clients(
+                            reconcile_terminal_clients_if_open(
+                                &self.closed,
                                 &self.terminal,
                                 &current,
                                 &self.sender,

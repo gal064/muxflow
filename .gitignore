@@ -13,6 +13,7 @@ out/
 coverage/
 target/
 **/src-tauri/gen/
+apps/desktop/src-tauri/binaries/linux-helpers/tmux-ide-host-linux-*
 
 # Tool caches
 .cache/

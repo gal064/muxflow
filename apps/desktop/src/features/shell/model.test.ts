@@ -9,6 +9,7 @@ import {
   openFileTab,
   openGitDiffTab,
   orderedSessions,
+  relocateFileTabs,
   reconcileWorkspaceIdentity,
   recoverableAppTabCount,
   recoverAppTabsFromPreviousServer,
@@ -106,6 +107,21 @@ describe("application shell model", () => {
     expect(deduplicated.appTabs).toHaveLength(1);
     const preview = setMarkdownViewMode(deduplicated, "local", deduplicated.appTabs[0].id, "preview");
     expect(preview.appTabs[0].viewMode).toBe("preview");
+  });
+
+  it("relocates open file tabs after an app-owned file or directory move", () => {
+    const file = openFileTab(defaultAppState, "local", "server-a", sessions[1], "/repo/old/a.txt", "file", { path: "/repo", token: "root", revision: "1" });
+    const markdown = openFileTab(file, "local", "server-a", sessions[1], "/repo/old/guide.md", "markdown", { path: "/repo", token: "root", revision: "1" });
+    const moved = relocateFileTabs(markdown, "local", "server-a", "/repo", "/repo/old", "new 日本語");
+    expect(moved.appTabs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: "/repo/new 日本語/a.txt", title: "a.txt" }),
+      expect.objectContaining({ resource: "/repo/new 日本語/guide.md", title: "guide.md" }),
+    ]));
+    const normalized = relocateFileTabs(moved, "local", "server-a", "/repo/", "/repo/new 日本語/a.txt", "./final//a.txt");
+    expect(normalized.appTabs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: "/repo/final/a.txt", title: "a.txt" }),
+    ]));
+    expect(relocateFileTabs(moved, "local", "other-server", "/repo", "/repo/new 日本語/a.txt", "/repo/nope")).toBe(moved);
   });
 
   it("routes agent shell selections only through exact stable topology IDs", () => {

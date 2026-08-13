@@ -337,6 +337,33 @@ fn reconcile_terminal_clients(
     overflowed: &Arc<AtomicBool>,
 ) {
     let mut terminal = terminal.lock().unwrap();
+    reconcile_terminal_clients_locked(&mut terminal, snapshot, event_sender, overflowed);
+}
+
+fn reconcile_terminal_clients_if_open(
+    closed: &AtomicBool,
+    terminal: &Arc<Mutex<TerminalClients>>,
+    snapshot: &tmux_control::TmuxSnapshot,
+    event_sender: &mpsc::Sender<SequencerControl>,
+    overflowed: &Arc<AtomicBool>,
+) {
+    // Serialize the final connection-close check with attachment creation.
+    // Otherwise a topology discovery that started before EOF can attach a new
+    // tmux control client after `serve_with_shutdown` has already stopped and
+    // cleared the connection's existing clients.
+    let mut terminal = terminal.lock().unwrap();
+    if closed.load(Ordering::Acquire) {
+        return;
+    }
+    reconcile_terminal_clients_locked(&mut terminal, snapshot, event_sender, overflowed);
+}
+
+fn reconcile_terminal_clients_locked(
+    terminal: &mut TerminalClients,
+    snapshot: &tmux_control::TmuxSnapshot,
+    event_sender: &mpsc::Sender<SequencerControl>,
+    overflowed: &Arc<AtomicBool>,
+) {
     terminal.reconcile(snapshot);
     for session in &snapshot.sessions {
         let pane_ids: Vec<_> = snapshot

@@ -184,3 +184,75 @@ fn git_metadata_capability_prevents_same_path_dot_git_retarget_for_stage_and_com
             .success()
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn darwin_git_keeps_cross_parent_metadata_move_paired_with_captured_worktree() {
+    let fixture = Fixture::new("metadata-cross-parent-move");
+    fixture.write("base", b"base\n");
+    fixture.git(&["add", "base"]);
+    fixture.git(&["commit", "-qm", "base"]);
+    let root = WorktreeRoot::capture(fixture.root.to_str().unwrap()).unwrap();
+    let stable_root = root.stable_path();
+    let repository = discover_repository(
+        &stable_root,
+        fixture.root.to_str().unwrap(),
+        root.identity().unwrap(),
+        None,
+    )
+    .unwrap();
+    let metadata =
+        GitMetadataCapability::capture(&repository.git_dir, &repository.common_dir).unwrap();
+    validate_metadata_capability(
+        fixture.root.to_str().unwrap(),
+        root.identity().unwrap(),
+        &repository,
+        &metadata,
+    )
+    .unwrap();
+
+    let outside = fixture
+        .root
+        .parent()
+        .unwrap()
+        .join(format!("phase5-cross-parent-{}", Uuid::new_v4()));
+    fs::create_dir(&outside).unwrap();
+    let held_git = outside.join("held-git");
+    fs::rename(fixture.root.join(".git"), &held_git).unwrap();
+    fixture.write("victim", b"captured worktree\n");
+    fs::write(outside.join("victim"), b"outside worktree\n").unwrap();
+
+    let guard = metadata.install();
+    let staged =
+        runner::git_path_cancellable(&stable_root, &[b"add"], b"victim", &AtomicBool::new(false))
+            .unwrap();
+    ensure_success(&staged, "cross-parent stage").unwrap();
+    let staged_contents = runner::git_stdout_cancellable(
+        &stable_root,
+        &[OsStr::new("show"), OsStr::new(":victim")],
+        None,
+    )
+    .unwrap();
+    assert_eq!(staged_contents, b"captured worktree\n");
+
+    let committed = runner::git_output_with_deadline(
+        &stable_root,
+        &[
+            OsStr::new("commit"),
+            OsStr::new("-m"),
+            OsStr::new("cross-parent metadata"),
+        ],
+        None,
+        None,
+        runner::GIT_COMMIT_DEADLINE,
+    )
+    .unwrap();
+    ensure_success(&committed, "cross-parent commit").unwrap();
+    assert_eq!(
+        fs::read(outside.join("victim")).unwrap(),
+        b"outside worktree\n"
+    );
+
+    drop(guard);
+    fs::remove_dir_all(outside).unwrap();
+}

@@ -17,3 +17,17 @@ Common report states:
 - Nonzero connection or accept error counts — reconnect and check network/SSH/tmux availability. The report intentionally records only safe error classes, so local application logs may be needed for deeper investigation.
 
 The report never includes terminal output, prompts, file contents, SSH configuration, credentials, hosts, users, or paths. See [Diagnostics, privacy, and security](diagnostics-privacy-security.md) before sharing it.
+# macOS package and permissions
+
+The internal macOS build is unsigned. If a quarantined artifact is blocked,
+inspect it with `release/macos/verify-package.sh` and use the normal System
+Settings privacy/security UI; do not disable Gatekeeper globally. Notification
+denial is reported by the app and can be changed for `tmux Agent IDE` in System
+Settings. Accessibility and Screen Recording are required only by the QA
+driver, not by normal app operation.
+
+The local helper uses a private runtime under
+`~/Library/Caches/dev.dev.tmux-agent-ide/runtime` unless
+`ADE_HOST_RUNTIME_DIR` is explicitly set. Remote Linux helpers are ELF files in
+the application Resources directory; a macOS Mach-O helper is never uploaded
+to Linux.

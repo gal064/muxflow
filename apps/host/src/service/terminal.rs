@@ -508,6 +508,14 @@ impl TerminalClients {
     }
 }
 
+impl Drop for TerminalClients {
+    fn drop(&mut self) {
+        // This is a last-resort ownership guarantee for connection tasks that
+        // are cancelled while a background topology pass is winding down.
+        self.stop();
+    }
+}
+
 fn register_mounted_panes(
     resources: &mut PaneResourceStore,
     pane_ids: &[String],

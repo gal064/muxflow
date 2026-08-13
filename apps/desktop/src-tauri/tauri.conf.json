@@ -24,7 +24,15 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/icon.png"]
+    "active": true,
+    "targets": ["app"],
+    "resources": {
+      "binaries/linux-helpers/*": ".",
+      "../../../release/macos/package-owner": "."
+    },
+    "icon": ["icons/icon.icns", "icons/icon.png"],
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    }
   }
 }

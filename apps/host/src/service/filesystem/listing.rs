@@ -54,16 +54,12 @@ pub(super) fn list_directory_impl(
     page_token: &str,
     page_size: u32,
 ) -> anyhow::Result<v1::DirectorySnapshot> {
-    let (logical_target, target) = root.resolve_existing(path)?;
+    let (logical_target, _) = root.resolve_new(path)?;
     let directory = if logical_target == root.logical_root() {
         root.open_root_directory()?
     } else {
         root.anchor(&logical_target)?.open_directory()?
     };
-    let stable_target = descriptor_path(directory.as_raw_fd());
-    if fs::symlink_metadata(&target)?.file_type().is_symlink() {
-        bail!("directory listing target must be a non-symlink directory");
-    }
     let relative = logical_target
         .strip_prefix(root.logical_root())
         .expect("resolved path is in root");
@@ -81,15 +77,16 @@ pub(super) fn list_directory_impl(
     };
     let start = decode_page_token(page_token)?;
     let mut candidates = BTreeMap::<(u8, Vec<u8>), v1::FileMetadata>::new();
-    for entry in fs::read_dir(&stable_target)? {
-        let entry = entry?;
-        let metadata = metadata_for_anchored(
-            &root.stable_root(),
-            &entry.path(),
-            &logical_target.join(entry.file_name()),
-        )?;
+    let entries = if logical_target == root.logical_root() {
+        root.directory_entries()?
+    } else {
+        root.anchor(&logical_target)?.directory_entries()?
+    };
+    for name in entries {
+        let entry = AnchoredPath::in_directory(&directory, name.clone())?;
+        let metadata = metadata_for_directory_entry(&entry, &logical_target.join(&name))?;
         let rank = u8::from(metadata.kind != i32::from(v1::FileKind::Directory));
-        let key = (rank, entry.file_name().as_bytes().to_vec());
+        let key = (rank, name.as_bytes().to_vec());
         if start.as_ref().is_some_and(|start| key <= *start) {
             continue;
         }

@@ -1,6 +1,7 @@
 mod app_state;
 mod connection;
 mod external_links;
+mod macos_window;
 mod notifications;
 mod power_events;
 
@@ -71,7 +72,7 @@ struct AgentNotificationContent {
 }
 
 #[tauri::command]
-fn emit_agent_notification(
+async fn emit_agent_notification(
     notification: AgentNotificationContent,
     notifications: tauri::State<'_, notifications::NativeNotifications>,
 ) -> Result<notifications::NotificationReceipt, String> {
@@ -81,12 +82,18 @@ fn emit_agent_notification(
     if !valid_notification_content(&notification.title, &notification.body) {
         return Err("native notification content is malformed".into());
     }
-    notifications.notify(
-        &notification.title,
-        &notification.body,
-        notification.route.into_route()?,
-        notification.request_action,
-    )
+    let notifications = notifications.inner().clone();
+    let route = notification.route.into_route()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        notifications.notify(
+            &notification.title,
+            &notification.body,
+            route,
+            notification.request_action,
+        )
+    })
+    .await
+    .map_err(|error| format!("native notification worker failed: {error}"))?
 }
 
 fn valid_notification_content(title: &str, body: &str) -> bool {
@@ -104,6 +111,7 @@ fn valid_notification_content(title: &str, body: &str) -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("navigation-policy")
                 .on_navigation(|_, url| {
@@ -134,6 +142,9 @@ pub fn run() {
             app.manage(notifications::NativeNotifications::new(
                 app.handle().clone(),
             ));
+            for window in app.webview_windows().values() {
+                macos_window::enable_native_full_screen(window)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -1,8 +1,9 @@
 use std::{
-    ffi::{CString, OsString},
-    fs::{self, File, Metadata},
+    ffi::{CString, OsStr, OsString},
+    fs::{self, File, Metadata, Permissions},
     os::unix::{
         ffi::OsStrExt,
+        fs::PermissionsExt,
         io::{AsRawFd, FromRawFd},
     },
     path::{Component, Path, PathBuf},
@@ -66,6 +67,10 @@ impl RootCapability {
         self.resolve(path)
     }
 
+    pub(super) fn directory_entries(&self) -> anyhow::Result<Vec<OsString>> {
+        directory_entry_names(&self.directory)
+    }
+
     pub(super) fn anchor(&self, logical_target: &Path) -> anyhow::Result<AnchoredPath> {
         AnchoredPath::open_in(self, logical_target)
     }
@@ -116,48 +121,71 @@ pub(super) fn root_identity_token(root: &Path, metadata: &Metadata) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-pub(super) fn rename_noreplace(source: &Path, destination: &Path) -> anyhow::Result<()> {
-    let source_parent = source.parent().context("source has no parent")?;
-    let destination_parent = destination.parent().context("destination has no parent")?;
-    let source_name = source.file_name().context("source has no leaf")?.to_owned();
-    let destination_name = destination
-        .file_name()
-        .context("destination has no leaf")?
-        .to_owned();
-    let source_parent = open_stable_descriptor_directory(source_parent)?;
-    let destination_parent = open_stable_descriptor_directory(destination_parent)?;
-    AnchoredPath {
-        parent: source_parent,
-        leaf: source_name,
-    }
-    .rename_to_noreplace(&AnchoredPath {
-        parent: destination_parent,
-        leaf: destination_name,
-    })
-}
-
-fn open_stable_descriptor_directory(path: &Path) -> anyhow::Result<File> {
-    let path = CString::new(path.as_os_str().as_bytes()).context("path contains a NUL byte")?;
-    // SAFETY: these paths are generated from live kernel descriptor capabilities.
-    // Following that kernel-owned descriptor link duplicates the validated fd.
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error()).context("stable parent is unavailable");
-    }
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
 /// A leaf whose parent is held open with `O_NOFOLLOW`. Operations through the
 /// proc-fd path remain attached to that directory even if an attacker swaps a
 /// pathname component after validation.
 pub(super) struct AnchoredPath {
     parent: File,
     leaf: OsString,
+}
+
+pub(super) struct AnchoredMetadata {
+    stat: libc::stat,
+}
+
+impl AnchoredMetadata {
+    pub(super) fn is_dir(&self) -> bool {
+        self.kind() == libc::S_IFDIR
+    }
+
+    pub(super) fn is_file(&self) -> bool {
+        self.kind() == libc::S_IFREG
+    }
+
+    pub(super) fn is_symlink(&self) -> bool {
+        self.kind() == libc::S_IFLNK
+    }
+
+    pub(super) fn device(&self) -> u64 {
+        self.stat.st_dev as u64
+    }
+
+    #[allow(clippy::unnecessary_cast)]
+    pub(super) fn inode(&self) -> u64 {
+        self.stat.st_ino as u64
+    }
+
+    pub(super) fn len(&self) -> u64 {
+        self.stat.st_size.max(0) as u64
+    }
+
+    pub(super) fn mode(&self) -> u32 {
+        self.stat.st_mode as u32
+    }
+
+    pub(super) fn permissions(&self) -> Permissions {
+        Permissions::from_mode(self.mode() & 0o7777)
+    }
+
+    pub(super) fn modified_unix_millis(&self) -> i64 {
+        let (seconds, nanos) = stat_modified(&self.stat);
+        seconds
+            .saturating_mul(1_000)
+            .saturating_add(nanos / 1_000_000)
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        let (seconds, nanos) = stat_modified(&self.stat);
+        let mut value = self.device().rotate_left(7) ^ self.inode();
+        value ^= self.len().rotate_left(19);
+        value ^= (seconds as u64).rotate_left(31);
+        value ^= (nanos as u64).rotate_left(43);
+        value
+    }
+
+    fn kind(&self) -> libc::mode_t {
+        self.stat.st_mode & libc::S_IFMT
+    }
 }
 
 impl AnchoredPath {
@@ -183,8 +211,29 @@ impl AnchoredPath {
         })
     }
 
-    pub(super) fn path(&self) -> PathBuf {
-        self.parent_proc_path().join(&self.leaf)
+    pub(super) fn leaf(&self) -> &OsStr {
+        &self.leaf
+    }
+
+    pub(super) fn in_directory(directory: &File, leaf: OsString) -> anyhow::Result<Self> {
+        Ok(Self {
+            parent: directory.try_clone()?,
+            leaf,
+        })
+    }
+
+    pub(super) fn sibling(&self, leaf: OsString) -> anyhow::Result<Self> {
+        Ok(Self {
+            parent: self.parent.try_clone()?,
+            leaf,
+        })
+    }
+
+    pub(super) fn same_parent(&self, other: &Self) -> anyhow::Result<bool> {
+        let left = self.parent.metadata()?;
+        let right = other.parent.metadata()?;
+        use std::os::unix::fs::MetadataExt as _;
+        Ok((left.dev(), left.ino()) == (right.dev(), right.ino()))
     }
 
     pub(super) fn open_file(&self) -> anyhow::Result<File> {
@@ -199,8 +248,101 @@ impl AnchoredPath {
         )
     }
 
-    pub(super) fn metadata_no_follow(&self) -> anyhow::Result<Metadata> {
-        Ok(fs::symlink_metadata(self.path())?)
+    pub(super) fn metadata_no_follow(&self) -> anyhow::Result<AnchoredMetadata> {
+        metadata_at(
+            self.parent.as_raw_fd(),
+            &self.leaf,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    }
+
+    pub(super) fn exists(&self) -> anyhow::Result<bool> {
+        match self.metadata_no_follow() {
+            Ok(_) => Ok(true),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) fn create_file(&self, mode: u32) -> anyhow::Result<File> {
+        let name = CString::new(self.leaf.as_bytes()).context("path contains a NUL byte")?;
+        // SAFETY: parent/name remain live; O_EXCL makes creation race-free.
+        let fd = unsafe {
+            libc::openat(
+                self.parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+                mode as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    pub(super) fn create_directory(&self, mode: u32) -> anyhow::Result<()> {
+        let name = CString::new(self.leaf.as_bytes()).context("path contains a NUL byte")?;
+        // SAFETY: parent/name remain live and mkdirat does not follow the leaf.
+        if unsafe { libc::mkdirat(self.parent.as_raw_fd(), name.as_ptr(), mode as libc::mode_t) }
+            < 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn read_link(&self) -> anyhow::Result<PathBuf> {
+        let name = CString::new(self.leaf.as_bytes()).context("path contains a NUL byte")?;
+        let mut buffer = vec![0_u8; libc::PATH_MAX as usize];
+        // SAFETY: parent/name and the output buffer remain live for readlinkat.
+        let read = unsafe {
+            libc::readlinkat(
+                self.parent.as_raw_fd(),
+                name.as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if read < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        buffer.truncate(read as usize);
+        use std::os::unix::ffi::OsStringExt as _;
+        Ok(PathBuf::from(OsString::from_vec(buffer)))
+    }
+
+    pub(super) fn create_symlink(&self, target: &Path) -> anyhow::Result<()> {
+        let target = CString::new(target.as_os_str().as_bytes())
+            .context("link target contains a NUL byte")?;
+        let name = CString::new(self.leaf.as_bytes()).context("path contains a NUL byte")?;
+        // SAFETY: both C strings and the parent descriptor remain live.
+        if unsafe { libc::symlinkat(target.as_ptr(), self.parent.as_raw_fd(), name.as_ptr()) } < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn directory_entries(&self) -> anyhow::Result<Vec<OsString>> {
+        directory_entry_names(&self.open_directory()?)
+    }
+
+    pub(super) fn child(&self, name: OsString) -> anyhow::Result<Self> {
+        Ok(Self {
+            parent: self.open_directory()?,
+            leaf: name,
+        })
+    }
+
+    pub(super) fn sync_parent(&self) -> anyhow::Result<()> {
+        self.parent.sync_all()?;
+        Ok(())
     }
 
     pub(super) fn unlink(&self, directory: bool) -> anyhow::Result<()> {
@@ -242,13 +384,77 @@ impl AnchoredPath {
         Ok(())
     }
 
-    fn parent_proc_path(&self) -> PathBuf {
-        descriptor_path(self.parent.as_raw_fd())
+    pub(super) fn rename_to_replace(&self, destination: &Self) -> anyhow::Result<()> {
+        let source = CString::new(self.leaf.as_bytes()).context("path contains a NUL byte")?;
+        let target =
+            CString::new(destination.leaf.as_bytes()).context("path contains a NUL byte")?;
+        // SAFETY: both directory descriptors and C strings remain live.
+        let result = unsafe {
+            libc::renameat(
+                self.parent.as_raw_fd(),
+                source.as_ptr(),
+                destination.parent.as_raw_fd(),
+                target.as_ptr(),
+            )
+        };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
     }
 }
 
+fn metadata_at(parent_fd: i32, name: &OsStr, flags: i32) -> anyhow::Result<AnchoredMetadata> {
+    let name = CString::new(name.as_bytes()).context("path contains a NUL byte")?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: parent/name remain live and stat points to writable storage.
+    if unsafe { libc::fstatat(parent_fd, name.as_ptr(), stat.as_mut_ptr(), flags) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(AnchoredMetadata {
+        stat: unsafe { stat.assume_init() },
+    })
+}
+
+fn stat_modified(stat: &libc::stat) -> (i64, i64) {
+    (stat.st_mtime, stat.st_mtime_nsec)
+}
+
+fn directory_entry_names(directory: &File) -> anyhow::Result<Vec<OsString>> {
+    // fdopendir owns its descriptor, so duplicate the capability first.
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(duplicate) };
+        return Err(error.into());
+    }
+    let mut entries = Vec::new();
+    loop {
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        use std::os::unix::ffi::OsStringExt as _;
+        entries.push(OsString::from_vec(name.to_bytes().to_vec()));
+    }
+    if unsafe { libc::closedir(stream) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(entries)
+}
+
 /// A path backed by a live descriptor. Linux exposes descriptors through
-/// procfs; Apple platforms expose the equivalent vnode through devfs.
+/// procfs. Darwin's `/dev/fd` entries cannot be traversed as directories, so
+/// ask the kernel for the descriptor's current vnode path instead. The live
+/// descriptor remains the authority used by the openat/renameat operations.
 #[cfg(target_os = "linux")]
 pub(super) fn descriptor_path(fd: i32) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{fd}"))
@@ -256,6 +462,20 @@ pub(super) fn descriptor_path(fd: i32) -> PathBuf {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(super) fn descriptor_path(fd: i32) -> PathBuf {
+    let mut buffer = [0_u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes into this live buffer,
+    // and callers only provide owned, open descriptors.
+    let result = unsafe { libc::fcntl(fd, libc::F_GETPATH, buffer.as_mut_ptr()) };
+    if result == 0 {
+        let length = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(buffer.len());
+        use std::os::unix::ffi::OsStringExt as _;
+        return PathBuf::from(OsString::from_vec(buffer[..length].to_vec()));
+    }
+    // Preserve a fail-closed path: subsequent operations report the kernel
+    // error instead of falling back to the user-controlled logical root.
     PathBuf::from(format!("/dev/fd/{fd}"))
 }
 
@@ -355,10 +575,17 @@ mod tests {
         fs::create_dir_all(root.join("parent")).unwrap();
         fs::create_dir(&outside).unwrap();
         let capability = RootCapability::capture(root.to_str().unwrap()).unwrap();
-        let anchored = capability.anchor(&root.join("parent/created")).unwrap();
+        let anchored = capability
+            .anchor(&capability.logical_root().join("parent/created"))
+            .unwrap();
         fs::rename(root.join("parent"), root.join("original-parent")).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("parent")).unwrap();
-        fs::write(anchored.path(), "safe").unwrap();
+        use std::io::Write as _;
+        anchored
+            .create_file(0o600)
+            .unwrap()
+            .write_all(b"safe")
+            .unwrap();
         assert!(root.join("original-parent/created").exists());
         assert!(!outside.join("created").exists());
         fs::remove_dir_all(&root).unwrap();
@@ -374,7 +601,9 @@ mod tests {
         fs::write(root.join("leaf"), "inside").unwrap();
         fs::write(outside.join("secret"), "outside").unwrap();
         let capability = RootCapability::capture(root.to_str().unwrap()).unwrap();
-        let anchored = capability.anchor(&root.join("leaf")).unwrap();
+        let anchored = capability
+            .anchor(&capability.logical_root().join("leaf"))
+            .unwrap();
         fs::rename(root.join("leaf"), root.join("original")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret"), root.join("leaf")).unwrap();
         assert!(anchored.open_file().is_err());
@@ -394,7 +623,14 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(root.join("source"), "ours").unwrap();
         fs::write(root.join("destination"), "racer").unwrap();
-        let error = rename_noreplace(&root.join("source"), &root.join("destination")).unwrap_err();
+        let capability = RootCapability::capture(root.to_str().unwrap()).unwrap();
+        let source = capability
+            .anchor(&capability.logical_root().join("source"))
+            .unwrap();
+        let destination = capability
+            .anchor(&capability.logical_root().join("destination"))
+            .unwrap();
+        let error = source.rename_to_noreplace(&destination).unwrap_err();
         assert!(
             error
                 .downcast_ref::<std::io::Error>()
