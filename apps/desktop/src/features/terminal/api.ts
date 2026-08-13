@@ -322,14 +322,42 @@ export function setTerminalVisibility(
   checkpoint: TerminalVisibilityCheckpoint,
 ): Promise<void> {
   return measurePerf(visible ? "invoke.set_terminal_visibility.reveal" : "invoke.set_terminal_visibility.hide", () =>
-    invoke("set_terminal_visibility", {
-      clientId,
-      paneId,
-      visible,
-      serializedSnapshot: Array.from(serializedSnapshot),
-      terminalEpoch: checkpoint.terminalEpoch,
-      outputGeneration: checkpoint.outputGeneration,
-    }));
+    invoke("set_terminal_visibility",
+      encodeTerminalVisibilityFrame(clientId, paneId, visible, serializedSnapshot, checkpoint)));
+}
+
+/**
+ * Frames a visibility change as a raw IPC body: the input frame's header, then
+ * a visibility byte, the terminal epoch and the output cutoff as big-endian
+ * `u64`s, then the snapshot bytes.
+ *
+ * A hide carries the renderer's serialized screen, up to 4 MiB. As a JSON
+ * argument that becomes an array of numbers — around 15 MB of text to
+ * stringify here and re-parse on the other side, on the thread that is
+ * supposed to be painting the tab the user just switched to.
+ */
+export function encodeTerminalVisibilityFrame(
+  clientId: string,
+  paneId: string,
+  visible: boolean,
+  serializedSnapshot: Uint8Array,
+  checkpoint: TerminalVisibilityCheckpoint,
+): Uint8Array {
+  const client = encoder.encode(clientId);
+  const pane = encoder.encode(paneId);
+  const scalarsOffset = 4 + client.byteLength + pane.byteLength;
+  const frame = new Uint8Array(scalarsOffset + 17 + serializedSnapshot.byteLength);
+  const view = new DataView(frame.buffer);
+  view.setUint16(0, client.byteLength, false);
+  frame.set(client, 2);
+  const paneOffset = 2 + client.byteLength;
+  view.setUint16(paneOffset, pane.byteLength, false);
+  frame.set(pane, paneOffset + 2);
+  frame[scalarsOffset] = visible ? 1 : 0;
+  view.setBigUint64(scalarsOffset + 1, BigInt(checkpoint.terminalEpoch), false);
+  view.setBigUint64(scalarsOffset + 9, BigInt(checkpoint.outputGeneration), false);
+  frame.set(serializedSnapshot, scalarsOffset + 17);
+  return frame;
 }
 
 export function requestTerminalSeed(clientId: string, paneId: string): Promise<void> {
