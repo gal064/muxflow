@@ -13,7 +13,15 @@ use super::snapshot::{discover_authoritative, snapshot_from_identity};
 use super::terminal::TerminalClients;
 use super::{SequencerControl, emit_event, reconcile_terminal_clients_if_open};
 
-const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+/// Backstop for a tmux notification the reader never saw.
+///
+/// tmux notifies on every structural change, and those notifications are what
+/// actually drive reconciliation; this timer only exists for the case where one
+/// is missed. Running it every two seconds meant a fully idle connection did a
+/// tmux discovery and woke every consumer twice a second forever, which is the
+/// opposite of "zero periodic round-trips at idle". Thirty seconds is still a
+/// backstop and is invisible at rest.
+const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Default)]
 pub(super) struct TopologySignal {

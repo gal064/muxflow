@@ -118,13 +118,13 @@ impl TerminalAttachment {
         let reader_stopped = Arc::clone(&stopped);
         let reader_stop_signal = Arc::clone(&stopped);
         let reader_panes = pane_ids.to_vec();
-        let reader_stdin = Arc::clone(&stdin);
+        let reader_writer = input_tx.clone();
         std::thread::Builder::new()
             .name(format!("host-tmux-control-{session_id}"))
             .spawn(move || {
                 read_control_stream(ControlStreamReader {
                     stdout,
-                    stdin: reader_stdin,
+                    writer: reader_writer,
                     pane_ids: reader_panes,
                     event_tx,
                     overflowed,
@@ -553,9 +553,24 @@ fn queue_capture(stdin: &mut impl Write, pane_id: &str) -> anyhow::Result<()> {
 /// Writes one pane's capture marker and capture command under a single lock
 /// hold, upholding [`queue_capture`]'s adjacency invariant.
 fn write_capture_request<W: Write>(stdin: &Arc<Mutex<W>>, pane_id: &str) -> anyhow::Result<()> {
+    write_capture_request_resuming(stdin, pane_id, false)
+}
+
+/// As [`write_capture_request`], optionally resuming a pane tmux paused first.
+/// The resume and the capture share the lock hold so no other writer can land
+/// between them.
+pub(super) fn write_capture_request_resuming<W: Write>(
+    stdin: &Arc<Mutex<W>>,
+    pane_id: &str,
+    resume_first: bool,
+) -> anyhow::Result<()> {
+    validate_tmux_id(pane_id, '%')?;
     let mut writer = stdin
         .lock()
         .map_err(|_| anyhow::anyhow!("tmux control stdin is poisoned"))?;
+    if resume_first {
+        writeln!(writer, "refresh-client -A {pane_id}:continue")?;
+    }
     queue_capture(&mut *writer, pane_id)?;
     writer.flush()?;
     Ok(())
@@ -565,8 +580,14 @@ fn write_capture_request<W: Write>(stdin: &Arc<Mutex<W>>, pane_id: &str) -> anyh
 /// `send-keys`. It is deliberately untargeted so it cannot fail when the pane
 /// has vanished: the marker's job is to name the pane whose command block is
 /// about to fail, which requires the marker itself to always succeed.
+///
+/// The pane's `%` sigil is stripped rather than written literally. tmux runs a
+/// display message through `strftime`, which silently swallows `%0` as an
+/// unknown conversion — the marker looked correct and matched nothing. The
+/// reader restores the sigil.
 pub(super) fn queue_input(pane_id: &str) -> String {
-    format!("display-message -p '__ADE_INPUT__:{pane_id}'")
+    let digits = pane_id.strip_prefix('%').unwrap_or(pane_id);
+    format!("display-message -p '__ADE_INPUT__:{digits}'")
 }
 
 fn capture_command(pane_id: &str) -> String {

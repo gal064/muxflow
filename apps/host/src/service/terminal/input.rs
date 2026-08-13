@@ -25,6 +25,17 @@ pub(super) enum InputDispatch {
         data: Vec<u8>,
         completion: mpsc::SyncSender<Result<(), String>>,
     },
+    /// A capture the control-stream reader needs written.
+    ///
+    /// The reader must never write to tmux's stdin itself. tmux stops reading
+    /// its stdin while it is blocked writing output to us, and the reader is
+    /// the only thing that drains that output — a write from the reader can
+    /// therefore deadlock the pair, and the pane goes silent forever. Handing
+    /// the write to this thread keeps the reader free to drain.
+    Capture {
+        pane_id: String,
+        resume_first: bool,
+    },
     Barrier(mpsc::SyncSender<Result<(), String>>),
     Stop,
 }
@@ -33,23 +44,40 @@ pub(super) fn run_input_dispatch<W: Write>(
     receiver: mpsc::Receiver<InputDispatch>,
     control_stdin: Arc<Mutex<W>>,
 ) {
-    run_input_dispatch_with(receiver, move |pane_id, data| {
-        if data.len() <= INBAND_INPUT_MAX_BYTES {
-            send_input_inband(&control_stdin, pane_id, data)
-        } else {
-            // Ordering against the in-band path is preserved because this
-            // dispatch thread is the only writer: the previous request's bytes
-            // were written and flushed to the control client's socket before
-            // this call, so the tmux server has them in its receive buffer
-            // before the `paste-buffer` client has even finished connecting.
-            send_input_batch(pane_id, data)
-        }
-    })
+    let capture_stdin = Arc::clone(&control_stdin);
+    run_input_dispatch_with_control(
+        receiver,
+        move |pane_id, data| {
+            if data.len() <= INBAND_INPUT_MAX_BYTES {
+                send_input_inband(&control_stdin, pane_id, data)
+            } else {
+                // Ordering against the in-band path is preserved because this
+                // dispatch thread is the only writer: the previous request's
+                // bytes were written and flushed to the control client's socket
+                // before this call, so the tmux server has them in its receive
+                // buffer before the `paste-buffer` client has even finished
+                // connecting.
+                send_input_batch(pane_id, data)
+            }
+        },
+        move |pane_id, resume_first| {
+            let _ = super::write_capture_request_resuming(&capture_stdin, pane_id, resume_first);
+        },
+    )
 }
 
+#[cfg(test)]
 fn run_input_dispatch_with(
     receiver: mpsc::Receiver<InputDispatch>,
+    send_batch: impl FnMut(&str, &[u8]) -> Result<(), String>,
+) {
+    run_input_dispatch_with_control(receiver, send_batch, |_, _| {})
+}
+
+fn run_input_dispatch_with_control(
+    receiver: mpsc::Receiver<InputDispatch>,
     mut send_batch: impl FnMut(&str, &[u8]) -> Result<(), String>,
+    mut write_capture: impl FnMut(&str, bool),
 ) {
     let mut deferred = None;
     loop {
@@ -93,6 +121,10 @@ fn run_input_dispatch_with(
                     let _ = completion.send(result.clone());
                 }
             }
+            InputDispatch::Capture {
+                pane_id,
+                resume_first,
+            } => write_capture(&pane_id, resume_first),
             InputDispatch::Barrier(sender) => {
                 let _ = sender.send(Ok(()));
             }
@@ -391,9 +423,11 @@ mod tests {
         send_input_inband(&stdin, "%12", &[0x00, 0x03, 0x1b, 0xff, b'a']).unwrap();
         let written = String::from_utf8(stdin.lock().unwrap().clone()).unwrap();
         let mut lines = written.lines();
+        // The pane sigil is absent on purpose: tmux runs a display message
+        // through strftime, which swallows a literal `%12`.
         assert_eq!(
             lines.next().unwrap(),
-            "display-message -p '__ADE_INPUT__:%12'"
+            "display-message -p '__ADE_INPUT__:12'"
         );
         assert_eq!(lines.next().unwrap(), "send-keys -H -t %12 00 03 1b ff 61");
         assert!(lines.next().is_none());

@@ -49,8 +49,10 @@ pub struct AgentCommand {
     pub connection_epoch: String,
 }
 
+/// Async so an agent launch or hook review never freezes the WebView's main
+/// thread for the length of the host round trip.
 #[tauri::command]
-pub fn agent_request(
+pub async fn agent_request(
     client_id: String,
     command: AgentCommand,
     clients: State<'_, TerminalClients>,
@@ -70,7 +72,7 @@ pub fn agent_request(
     };
     let adapter_kind = legacy_adapter_kind(requested_adapter);
     let adapter_id = canonical_adapter_id(requested_adapter);
-    let response = client.request(v1::Request {
+    let request = v1::Request {
         operation: operation.into(),
         agent: Some(v1::AgentRequest {
             action: action.into(),
@@ -98,7 +100,10 @@ pub fn agent_request(
             ..Default::default()
         }),
         ..Default::default()
-    })?;
+    };
+    let response = tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("agent request task failed: {error}"))??;
     response
         .agent
         .as_ref()

@@ -102,7 +102,6 @@ enum ClientInputDispatch {
         pane_id: String,
         data: Vec<u8>,
         epoch: u64,
-        completion: mpsc::SyncSender<Result<(), String>>,
     },
     Barrier(mpsc::SyncSender<Result<(), String>>),
     Stop,
@@ -147,6 +146,15 @@ impl TerminalClient {
             .map_err(|error| format!("failed to start input dispatcher: {error}"))
     }
 
+    /// Queues a keystroke and returns.
+    ///
+    /// Waiting for the host's ack put a full round trip — an entire RTT over
+    /// SSH — on the main thread of every keypress, and the ack carried no
+    /// information the caller could act on. Delivery failures now surface where
+    /// they belong: backpressure is still refused synchronously here, because
+    /// the queue is local and its answer is immediate, while a host-side
+    /// rejection arrives as a pane-scoped recovery event on the event stream
+    /// and a transport failure tears down the bridge visibly.
     fn enqueue_input(&self, pane_id: String, data: Vec<u8>) -> Result<(), String> {
         if self.stopped.load(Ordering::Acquire)
             || !self.ready.load(Ordering::Acquire)
@@ -160,7 +168,6 @@ impl TerminalClient {
         if data.is_empty() {
             return Ok(());
         }
-        let (completion_tx, completion_rx) = mpsc::sync_channel(1);
         self.input_tx
             .lock()
             .unwrap()
@@ -170,7 +177,6 @@ impl TerminalClient {
                 pane_id,
                 data,
                 epoch: self.input_epoch.load(Ordering::Acquire),
-                completion: completion_tx,
             })
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => {
@@ -179,10 +185,7 @@ impl TerminalClient {
                 mpsc::TrySendError::Disconnected(_) => {
                     "terminal input dispatcher is disconnected".to_owned()
                 }
-            })?;
-        completion_rx
-            .recv_timeout(REQUEST_TIMEOUT)
-            .map_err(|_| "terminal input completion timed out".to_owned())?
+            })
     }
 
     fn flush_input(&self) -> Result<(), String> {
@@ -201,6 +204,29 @@ impl TerminalClient {
 
     fn request(&self, request: v1::Request) -> Result<v1::Response, String> {
         self.request_with_timeout(request, REQUEST_TIMEOUT, None)
+    }
+
+    /// Writes a request without registering a waiter for its response.
+    ///
+    /// Used by the keystroke path, whose acks carry nothing actionable. The
+    /// reader drops responses with no waiter, so the host stays free to answer
+    /// without either side having to change shape.
+    fn dispatch_request(&self, request: v1::Request) -> Result<(), String> {
+        if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
+            return Err(
+                "host is disconnected, reconciling, or read-only; input was not sent".into(),
+            );
+        }
+        let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
+        self.stdin
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or_else(|| "host bridge is disconnected".to_owned())
+            .and_then(|stdin| {
+                write_frame_sync(stdin, &envelope(request_id, 0, Payload::Request(request)))
+                    .map_err(|error| error.to_string())
+            })
     }
 
     fn request_git(
@@ -332,23 +358,19 @@ fn run_client_input_dispatch(
                 pane_id,
                 mut data,
                 epoch,
-                completion,
             } => {
-                let mut completions = vec![completion];
                 while data.len() < DESKTOP_INPUT_COALESCE_BYTES {
                     match receiver.try_recv() {
                         Ok(ClientInputDispatch::Bytes {
                             pane_id: next_pane,
                             data: next_data,
                             epoch: next_epoch,
-                            completion,
                         }) if next_pane == pane_id
                             && next_epoch == epoch
                             && data.len().saturating_add(next_data.len())
                                 <= DESKTOP_INPUT_COALESCE_BYTES =>
                         {
                             data.extend_from_slice(&next_data);
-                            completions.push(completion);
                         }
                         Ok(message) => {
                             deferred = Some(message);
@@ -358,33 +380,19 @@ fn run_client_input_dispatch(
                         Err(mpsc::TryRecvError::Disconnected) => break,
                     }
                 }
-                let result = if !input_epoch_is_current(&client, epoch) {
-                    // Accepted by an older connection but not written before
-                    // it ended: drop it permanently and do not poison the new
-                    // connection's input state.
-                    Err(
-                        "connection changed before terminal input was accepted; input was dropped"
-                            .into(),
-                    )
-                } else if !client.ready.load(Ordering::Acquire)
-                    || client.read_only.load(Ordering::Acquire)
+                // Accepted by an older connection but not written before it
+                // ended: drop it permanently rather than poison the new
+                // connection's input state with bytes from the old one.
+                if input_epoch_is_current(&client, epoch)
+                    && client.ready.load(Ordering::Acquire)
+                    && !client.read_only.load(Ordering::Acquire)
                 {
-                    Err(
-                        "connection changed before terminal input was accepted; input was dropped"
-                            .into(),
-                    )
-                } else {
-                    client
-                        .request(v1::Request {
-                            operation: v1::Operation::TerminalInput.into(),
-                            scope: pane_id,
-                            data,
-                            ..Default::default()
-                        })
-                        .map(|_| ())
-                };
-                for completion in completions {
-                    let _ = completion.send(result.clone());
+                    let _ = client.dispatch_request(v1::Request {
+                        operation: v1::Operation::TerminalInput.into(),
+                        scope: pane_id,
+                        data,
+                        ..Default::default()
+                    });
                 }
             }
             ClientInputDispatch::Barrier(sender) => {
@@ -477,19 +485,49 @@ pub fn send_terminal_input(
     client.enqueue_input(pane_id, data.into_bytes())
 }
 
+/// Binary terminal input, carried as a raw IPC body.
+///
+/// A `Vec<u8>` argument in a JSON command becomes a JSON array of numbers —
+/// roughly four characters of text per byte, stringified and re-parsed on the
+/// main thread. The payload is framed the same way the downlink event frames
+/// are, so the bytes cross the boundary once, as bytes.
 #[tauri::command]
 pub fn send_terminal_input_bytes(
-    client_id: String,
-    pane_id: String,
-    data: Vec<u8>,
+    request: tauri::ipc::Request<'_>,
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
-    validate_tmux_id(&pane_id, '%')?;
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err("terminal input IPC body must be raw binary".into());
+    };
+    let (client_id, pane_id, data) = decode_terminal_input_frame(body)?;
+    validate_tmux_id(pane_id, '%')?;
     if data.len() > MAX_INPUT_REQUEST_BYTES {
         return Err("terminal input batch exceeds 1 MiB".into());
     }
-    let client = get_client(&clients, &client_id)?;
-    client.enqueue_input(pane_id, data)
+    let client = get_client(&clients, client_id)?;
+    client.enqueue_input(pane_id.to_owned(), data.to_vec())
+}
+
+/// `u16` client-id length, client id, `u16` pane-id length, pane id, payload.
+fn decode_terminal_input_frame(body: &[u8]) -> Result<(&str, &str, &[u8]), String> {
+    fn take_prefixed<'a>(body: &'a [u8], offset: &mut usize) -> Result<&'a str, String> {
+        let header_end = offset
+            .checked_add(2)
+            .filter(|end| *end <= body.len())
+            .ok_or("terminal input frame is truncated")?;
+        let length = usize::from(u16::from_be_bytes([body[*offset], body[*offset + 1]]));
+        let end = header_end
+            .checked_add(length)
+            .filter(|end| *end <= body.len())
+            .ok_or("terminal input frame is truncated")?;
+        *offset = end;
+        std::str::from_utf8(&body[header_end..end])
+            .map_err(|_| "terminal input frame label is not valid UTF-8".to_owned())
+    }
+    let mut offset = 0;
+    let client_id = take_prefixed(body, &mut offset)?;
+    let pane_id = take_prefixed(body, &mut offset)?;
+    Ok((client_id, pane_id, &body[offset..]))
 }
 
 #[tauri::command]
@@ -510,8 +548,11 @@ pub fn resize_terminal_client(
     Ok(())
 }
 
+/// Async: a tab switch reveals and hides panes, and doing that on the WebView's
+/// main thread meant the new tab could not paint until the host had answered
+/// for the old one — a whole RTT of frozen UI per switch over SSH.
 #[tauri::command]
-pub fn set_terminal_visibility(
+pub async fn set_terminal_visibility(
     client_id: String,
     pane_id: String,
     visible: bool,
@@ -529,7 +570,9 @@ pub fn set_terminal_visibility(
         output_generation,
         client.terminal_epoch.load(Ordering::Acquire),
     )?;
-    client.request(request)?;
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal visibility task failed: {error}"))??;
     Ok(())
 }
 
@@ -560,14 +603,16 @@ fn terminal_visibility_request(
 }
 
 #[tauri::command]
-pub fn request_terminal_seed(
+pub async fn request_terminal_seed(
     client_id: String,
     pane_id: String,
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
     let request = terminal_seed_request(pane_id)?;
     let client = get_client(&clients, &client_id)?;
-    client.request(request)?;
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal seed task failed: {error}"))??;
     Ok(())
 }
 
@@ -597,8 +642,8 @@ mod bridge;
 use bridge::supervise_bridge;
 #[cfg(test)]
 use bridge::{
-    handshake_allows_snapshot, reconnect_jitter, scoped_terminal_recovery, terminal_scope,
-    validate_event_sequence,
+    handshake_allows_snapshot, reconnect_delay_millis, reconnect_jitter, scoped_terminal_recovery,
+    terminal_scope, validate_event_sequence,
 };
 
 fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
@@ -728,6 +773,23 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_backoff_stays_quick_for_a_blip_and_tops_out_at_a_minute() {
+        // A blip must not be punished: the first retries are sub-second.
+        assert!(reconnect_delay_millis("client-a", 1) < 600);
+        assert!(reconnect_delay_millis("client-a", 2) < 1_000);
+        // A machine that is away all afternoon must not retry ten times a
+        // minute forever, and the ceiling must hold for every later attempt
+        // rather than overflowing back to something short.
+        for attempt in 9..64 {
+            let delay = reconnect_delay_millis("client-a", attempt);
+            assert!(
+                (60_000..=60_150).contains(&delay),
+                "attempt {attempt} slept {delay} ms"
+            );
+        }
+    }
+
+    #[test]
     fn disconnected_input_is_rejected_and_reconnect_starts_a_fresh_epoch() {
         let client = Arc::new(TerminalClient::new(None));
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -746,25 +808,59 @@ mod tests {
         mark_input_reconnected(&client);
         client.ready.store(true, Ordering::Release);
         assert_eq!(client.input_epoch.load(Ordering::Acquire), 1);
-        let input_client = Arc::clone(&client);
-        let waiter =
-            thread::spawn(move || input_client.enqueue_input("%1".into(), b"connected".to_vec()));
-        let ClientInputDispatch::Bytes {
-            epoch,
-            data,
-            completion,
-            ..
-        } = receiver.recv().unwrap()
-        else {
+        // Queueing is the whole of the caller's obligation now: the keystroke
+        // path never waits for the host, so this must return before anything
+        // drains the queue.
+        assert_eq!(
+            client.enqueue_input("%1".into(), b"connected".to_vec()),
+            Ok(())
+        );
+        let ClientInputDispatch::Bytes { epoch, data, .. } = receiver.recv().unwrap() else {
             panic!("expected terminal bytes");
         };
         assert_eq!(epoch, 1);
         assert_eq!(data, b"connected");
-        completion.send(Ok(())).unwrap();
-        assert_eq!(waiter.join().unwrap(), Ok(()));
 
         mark_input_reconnected(&client);
         assert!(!input_epoch_is_current(&client, epoch));
+    }
+
+    #[test]
+    fn raw_terminal_input_frame_round_trips_without_a_json_number_array() {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(6_u16).to_be_bytes());
+        frame.extend_from_slice(b"client");
+        frame.extend_from_slice(&(2_u16).to_be_bytes());
+        frame.extend_from_slice(b"%7");
+        frame.extend_from_slice(&[0x00, 0x1b, 0xff]);
+        assert_eq!(
+            decode_terminal_input_frame(&frame).unwrap(),
+            ("client", "%7", [0x00, 0x1b, 0xff].as_slice())
+        );
+        assert!(decode_terminal_input_frame(&frame[..5]).is_err());
+        assert!(decode_terminal_input_frame(&[]).is_err());
+    }
+
+    #[test]
+    fn queue_backpressure_is_still_refused_synchronously_without_dropping_bytes() {
+        let client = Arc::new(TerminalClient::new(None));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        *client.input_tx.lock().unwrap() = Some(sender);
+        mark_input_reconnected(&client);
+        client.ready.store(true, Ordering::Release);
+
+        assert_eq!(client.enqueue_input("%1".into(), b"first".to_vec()), Ok(()));
+        let error = client
+            .enqueue_input("%1".into(), b"second".to_vec())
+            .unwrap_err();
+        assert!(error.contains("retry without dropping bytes"));
+        let ClientInputDispatch::Bytes { data, .. } = receiver.recv().unwrap() else {
+            panic!("expected terminal bytes");
+        };
+        assert_eq!(
+            data, b"first",
+            "the refused request must not displace the queued one"
+        );
     }
 
     #[test]

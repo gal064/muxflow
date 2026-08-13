@@ -280,7 +280,28 @@ export function sendInput(clientId: string, paneId: string, data: string): Promi
 
 export function sendBinaryInput(clientId: string, paneId: string, data: Uint8Array): Promise<void> {
   if (data.byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(data.byteLength);
-  return measurePerf("invoke.send_terminal_input_bytes", () => invoke("send_terminal_input_bytes", { clientId, paneId, data: Array.from(data) }));
+  return measurePerf("invoke.send_terminal_input_bytes", () =>
+    invoke("send_terminal_input_bytes", encodeTerminalInputFrame(clientId, paneId, data)));
+}
+
+/**
+ * Frames binary input as a raw IPC body: `u16` client-id length, client id,
+ * `u16` pane-id length, pane id, payload. A `Uint8Array` inside a JSON argument
+ * object is serialised as a JSON array of numbers, which is roughly four
+ * characters of text per byte, stringified and re-parsed on the main thread.
+ */
+export function encodeTerminalInputFrame(clientId: string, paneId: string, data: Uint8Array): Uint8Array {
+  const client = encoder.encode(clientId);
+  const pane = encoder.encode(paneId);
+  const frame = new Uint8Array(4 + client.byteLength + pane.byteLength + data.byteLength);
+  const view = new DataView(frame.buffer);
+  view.setUint16(0, client.byteLength, false);
+  frame.set(client, 2);
+  const paneOffset = 2 + client.byteLength;
+  view.setUint16(paneOffset, pane.byteLength, false);
+  frame.set(pane, paneOffset + 2);
+  frame.set(data, paneOffset + 2 + pane.byteLength);
+  return frame;
 }
 
 function oversizedTerminalInput(byteLength: number): Promise<never> {

@@ -153,14 +153,29 @@ pub(crate) fn spawn_bulk_bridge(connection: &ConnectionSpec) -> Result<Child, St
             command
         }
         ConnectionSpec::Ssh {
+            profile_id,
             target,
             config_path,
-            ..
         } => {
             let mut command = ssh_base(config_path.as_deref());
+            command.arg("-T");
+            // Bulk traffic keeps its own TCP connection so a multi-gigabyte
+            // transfer cannot head-of-line block a keystroke. That does not
+            // require a *fresh* connection per request, which is what this used
+            // to do: opening a 3 KB file paid a full TCP handshake, key
+            // exchange and authentication before a byte moved. A second
+            // persistent master gives the same isolation at no per-request
+            // cost, and a failure to establish it falls back to the previous
+            // one-off connection rather than failing the transfer.
+            match bulk_control_socket(profile_id, target, config_path.as_deref()) {
+                Ok(socket) => {
+                    command.arg("-S").arg(socket);
+                }
+                Err(_) => {
+                    command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
+                }
+            }
             command
-                .arg("-T")
-                .args(["-o", "ControlMaster=no", "-o", "ControlPath=none"])
                 .arg(target)
                 .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
             command
@@ -172,6 +187,19 @@ pub(crate) fn spawn_bulk_bridge(connection: &ConnectionSpec) -> Result<Child, St
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("failed to start independent bulk bridge: {error}"))
+}
+
+/// Resolves (creating if needed) the persistent master that carries bulk file
+/// I/O. It is a different socket from the control master on purpose: the point
+/// of the bulk lane is a separate TCP connection, not a separate handshake.
+fn bulk_control_socket(
+    profile_id: &str,
+    target: &str,
+    config_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let socket = ssh_profile_control_socket(&format!("{profile_id}-bulk"), target, config_path)?;
+    ensure_control_master(target, config_path, &socket)?;
+    Ok(socket)
 }
 
 pub(super) fn acquire_control_master(
@@ -458,10 +486,24 @@ fn ssh_base(config_path: Option<&str>) -> Command {
     command.args([
         "-o",
         "BatchMode=yes",
+        // A 1 s probe with two allowances tears the session down after any two
+        // second stall — a laptop lid, a Wi-Fi roam, a busy uplink — and the
+        // reconnect that follows costs a full snapshot and a reseed of every
+        // pane. 15 s with three allowances still notices a genuinely dead peer
+        // inside a minute, which is what a keepalive is for.
         "-o",
-        "ServerAliveInterval=1",
+        "ServerAliveInterval=15",
         "-o",
-        "ServerAliveCountMax=2",
+        "ServerAliveCountMax=3",
+        // Terminal output is highly repetitive text and compresses five to ten
+        // times over, so on a real link this buys throughput; the CPU cost is
+        // trivial next to a WebView.
+        "-o",
+        "Compression=yes",
+        // Keystrokes and control frames are the latency-critical traffic on
+        // this connection; ask the network to treat them that way.
+        "-o",
+        "IPQoS=lowdelay",
     ]);
     command
 }

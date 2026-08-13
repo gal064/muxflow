@@ -366,8 +366,11 @@ pub fn load_app_state(store: State<'_, AppStateStore>) -> Result<PersistedAppSta
     Ok(store.value.lock().unwrap().clone())
 }
 
+/// Async: shell state is saved on ordinary interactions such as opening a tab,
+/// and an atomic write plus fsync on the WebView's main thread stalls the whole
+/// UI for the length of that disk round trip.
 #[tauri::command]
-pub fn save_app_state(
+pub async fn save_app_state(
     state: PersistedAppState,
     store: State<'_, AppStateStore>,
 ) -> Result<(), String> {
@@ -375,7 +378,11 @@ pub fn save_app_state(
         return Err("saved shell state is write-frozen until explicit reset".into());
     }
     validate(&state)?;
-    write_private_atomic(&store.path, &state)?;
+    let path = store.path.clone();
+    let persisted = state.clone();
+    tauri::async_runtime::spawn_blocking(move || write_private_atomic(&path, &persisted))
+        .await
+        .map_err(|error| format!("shell state write task failed: {error}"))??;
     *store.value.lock().unwrap() = state;
     Ok(())
 }

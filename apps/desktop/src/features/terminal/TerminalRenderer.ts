@@ -54,6 +54,11 @@ export interface TerminalRenderer {
 type FrameRequest = (callback: FrameRequestCallback) => number;
 type FrameCancel = (handle: number) => void;
 
+/** xterm's default-feeling scroll animation, used while the pane is keeping up. */
+const SMOOTH_SCROLL_DURATION_MS = 80;
+/** Queue depth past which animating each scroll step is wasted work. */
+const SMOOTH_SCROLL_SUSPEND_BYTES = 256 * 1024;
+
 /** A byte-preserving queue bounded across both JS and xterm's async parser. */
 export class TerminalWriteScheduler {
   readonly #queue: Array<{ bytes: Uint8Array; onRendered?: () => void }> = [];
@@ -63,6 +68,8 @@ export class TerminalWriteScheduler {
   #inFlightBytes = 0;
   #overflowed = false;
   #accepting = true;
+  #immediateWriteUsed = false;
+  #immediateResetFrame?: number;
   readonly #drainWaiters = new Set<() => void>();
 
   constructor(
@@ -122,6 +129,8 @@ export class TerminalWriteScheduler {
     this.clear();
     this.#disposed = true;
     this.#accepting = false;
+    if (this.#immediateResetFrame !== undefined) this.cancelFrame(this.#immediateResetFrame);
+    this.#immediateResetFrame = undefined;
     this.#resolveDrainWaiters();
   }
 
@@ -142,7 +151,27 @@ export class TerminalWriteScheduler {
 
   #schedule(): void {
     if (this.#disposed || this.#inFlightBytes || this.#frame !== undefined || this.#queue.length === 0) return;
+    // Idle fast path. An echoed keystroke is a few bytes arriving into an empty
+    // queue, and waiting for the next animation frame quantises it by up to a
+    // whole frame — on a 60 Hz display that is most of the local keystroke
+    // budget spent doing nothing. At most one write per frame skips the wait,
+    // so a flood still gets frame-paced exactly as before.
+    if (this.#queue.length === 1 && !this.#immediateWriteUsed) {
+      this.#immediateWriteUsed = true;
+      this.#armImmediateWriteReset();
+      this.#flush();
+      return;
+    }
     this.#frame = this.requestFrame(() => this.#flush());
+  }
+
+  #armImmediateWriteReset(): void {
+    if (this.#immediateResetFrame !== undefined) return;
+    this.#immediateResetFrame = this.requestFrame(() => {
+      this.#immediateResetFrame = undefined;
+      this.#immediateWriteUsed = false;
+      this.#schedule();
+    });
   }
 
   #flush(): void {
@@ -196,6 +225,7 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #options: TerminalRendererOptions;
   #webgl?: WebglAddon;
   #newOutput = false;
+  #lastViewport?: TerminalViewportState;
   #lastAppliedGeneration = 0;
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
   #disposed = false;
@@ -215,7 +245,7 @@ export class XtermRenderer implements TerminalRenderer {
       screenReaderMode: true,
       scrollback: 10_000,
       scrollOnUserInput: true,
-      smoothScrollDuration: 80,
+      smoothScrollDuration: SMOOTH_SCROLL_DURATION_MS,
       windowOptions: {
         getCellSizePixels: true,
         getWinSizeChars: true,
@@ -244,6 +274,7 @@ export class XtermRenderer implements TerminalRenderer {
       256 * 1024,
       8 * 1024 * 1024,
       (pending) => {
+        this.#applyScrollSmoothingForLoad(pending);
         if (pending > 4 * 1024 * 1024) this.#options.onDiagnostic?.("Terminal output is catching up…");
         else if (pending === 0 && this.#webgl) this.#options.onDiagnostic?.(undefined);
       },
@@ -391,9 +422,30 @@ export class XtermRenderer implements TerminalRenderer {
     };
   }
 
+  /**
+   * Notifies only on an actual change. This fired once per output chunk per
+   * pane, and each notification is a React `setState` with a fresh object, so
+   * a busy pane re-rendered its surface for every chunk it received while
+   * saying nothing new.
+   */
   #emitViewport(): void {
-    const state = { atBottom: this.#atBottom(), newOutput: this.#newOutput };
+    const atBottom = this.#atBottom();
+    if (this.#lastViewport?.atBottom === atBottom && this.#lastViewport.newOutput === this.#newOutput) return;
+    const state = { atBottom, newOutput: this.#newOutput };
+    this.#lastViewport = state;
     for (const listener of this.#viewportListeners) listener(state);
+  }
+
+  /**
+   * Smooth scrolling animates each scroll step, which is pleasant when the user
+   * scrolls and pure overhead when output is arriving faster than frames. It is
+   * disabled while the queue is backed up and restored when it drains, so the
+   * resting behaviour is unchanged.
+   */
+  #applyScrollSmoothingForLoad(pendingBytes: number): void {
+    const smoothing = pendingBytes > SMOOTH_SCROLL_SUSPEND_BYTES ? 0 : SMOOTH_SCROLL_DURATION_MS;
+    if (this.#terminal.options.smoothScrollDuration === smoothing) return;
+    this.#terminal.options.smoothScrollDuration = smoothing;
   }
 
   #mountWebgl(): void {
