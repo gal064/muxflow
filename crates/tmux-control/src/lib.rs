@@ -14,7 +14,8 @@ pub use control::{
     unescape_output,
 };
 pub use discovery::{
-    Pane, Session, TmuxSnapshot, Window, discover, discover_with, discover_with_socket_name,
+    BatchedDiscovery, Pane, Session, TmuxSnapshot, Window, batched_discovery_args, discover,
+    discover_with, discover_with_socket_name, parse_batched_discovery,
 };
 pub use input::{DESKTOP_INPUT_COALESCE_BYTES, HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
 pub use layout::{LayoutAxis, LayoutGeneration, LayoutNode, LayoutParseError, parse_layout};

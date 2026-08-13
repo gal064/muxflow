@@ -92,11 +92,10 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
     }
     if !stopped.load(Ordering::Acquire) {
-        emit_resnapshot(
+        state.emit_pane_scoped_recovery(
             &event_tx,
             &overflowed,
-            "terminal",
-            "tmux session control stream ended".into(),
+            "tmux session control stream ended",
         );
     }
 }
@@ -118,6 +117,13 @@ pub(super) enum CommandBlock {
         tag: CommandTag,
         pane_id: Option<String>,
         lines: Vec<Vec<u8>>,
+    },
+    /// One in-band `send-keys` request, correlated to the pane its marker
+    /// named. Input is fire-and-forget on the desktop side, so this block is
+    /// the only place a rejected keystroke can still be attributed.
+    Input {
+        tag: CommandTag,
+        pane_id: String,
     },
     CapturePrimary {
         tag: CommandTag,
@@ -145,6 +151,7 @@ pub(super) enum CommandBlock {
 pub(super) struct StreamState {
     pub(super) pane_states: HashMap<String, PaneSeedState>,
     pub(super) expected_capture: Option<String>,
+    pub(super) expected_input: Option<String>,
     pub(super) pending_alternate: Option<(String, Vec<Vec<u8>>, u64)>,
     pub(super) pending_metadata: Option<PendingCaptureMetadata>,
     command_block: CommandBlock,
@@ -184,6 +191,7 @@ impl StreamState {
                 })
                 .collect(),
             expected_capture: None,
+            expected_input: None,
             pending_alternate: None,
             pending_metadata: None,
             command_block: CommandBlock::None,
@@ -264,6 +272,7 @@ impl StreamState {
                     }
                     lines.push(line);
                 }
+                CommandBlock::Input { .. } => {}
                 CommandBlock::CapturePrimary { lines, .. }
                 | CommandBlock::CaptureAlternate { lines, .. }
                 | CommandBlock::CaptureMetadata { lines, .. } => lines.push(line),
@@ -288,12 +297,33 @@ impl StreamState {
                     );
                 }
                 let scope = self.active_scope();
+                // Input acks are fire-and-forget on the desktop side, so a
+                // rejected keystroke reaches the user only here. Scoping the
+                // recovery to the pane keeps one dead pane from resnapshotting
+                // the whole connection, and the detail names the cause.
+                let detail = match &self.command_block {
+                    CommandBlock::Input { pane_id, .. } => {
+                        format!("terminal input for {pane_id} was rejected by tmux: {arguments}")
+                    }
+                    _ => arguments,
+                };
                 self.command_block = CommandBlock::None;
-                emit_resnapshot(sender, overflowed, &scope, arguments);
+                emit_resnapshot(sender, overflowed, &scope, detail);
             }
             ControlRecord::Exit { reason } => {
                 if !stopped.load(Ordering::Acquire) {
-                    emit_resnapshot(sender, overflowed, "terminal", reason);
+                    // tmux sends `%exit` whenever this control client's session
+                    // ends, which includes the ordinary case of the user
+                    // closing a workspace. Scoping the recovery to this
+                    // client's panes keeps that from asking the desktop for a
+                    // connection-wide resnapshot — a full bridge reconnect and
+                    // a reseed of every pane in every other workspace.
+                    let detail = if reason.is_empty() {
+                        "tmux session control client exited".to_owned()
+                    } else {
+                        reason
+                    };
+                    self.emit_pane_scoped_recovery(sender, overflowed, &detail);
                     stopped.store(true, Ordering::Release);
                 }
             }
@@ -313,7 +343,7 @@ impl StreamState {
                     );
                     if let Ok(mut writer) = stdin.lock() {
                         let _ = writeln!(writer, "refresh-client -A {pane_id}:continue");
-                        let _ = queue_capture(&mut writer, pane_id);
+                        let _ = queue_capture(&mut *writer, pane_id);
                         let _ = writer.flush();
                     }
                 }
@@ -355,10 +385,16 @@ impl StreamState {
         }
         match std::mem::replace(&mut self.command_block, CommandBlock::None) {
             CommandBlock::Unknown { pane_id, lines, .. } => {
+                if let Some(pane_id) = lines.iter().find_map(|line| input_marker_pane(line)) {
+                    // The block that follows is one in-band input request.
+                    self.expected_input = Some(pane_id);
+                    return;
+                }
                 let pane_id = pane_id.or_else(|| lines.iter().find_map(|line| marker_pane(line)));
                 self.expected_capture =
                     pane_id.filter(|pane_id| self.pane_states.contains_key(pane_id));
             }
+            CommandBlock::Input { .. } => {}
             CommandBlock::CapturePrimary { pane_id, lines, .. } => {
                 // tmux emits one %begin/%end block per command separated by
                 // `;`: capture-pane and its following display-message metadata
@@ -517,6 +553,7 @@ impl StreamState {
     fn active_tag_matches(&self, tag: CommandTag) -> bool {
         match &self.command_block {
             CommandBlock::Unknown { tag: active, .. }
+            | CommandBlock::Input { tag: active, .. }
             | CommandBlock::CapturePrimary { tag: active, .. }
             | CommandBlock::CaptureAlternate { tag: active, .. }
             | CommandBlock::CaptureMetadata { tag: active, .. } => *active == tag,
@@ -530,6 +567,7 @@ impl StreamState {
                 pane_id: Some(pane_id),
                 ..
             }
+            | CommandBlock::Input { pane_id, .. }
             | CommandBlock::CapturePrimary { pane_id, .. }
             | CommandBlock::CaptureAlternate { pane_id, .. }
             | CommandBlock::CaptureMetadata { pane_id, .. } => pane_id.clone(),
@@ -538,7 +576,9 @@ impl StreamState {
     }
 
     pub(super) fn start_block(&mut self, tag: CommandTag) -> CommandBlock {
-        if let Some(pane_id) = self.expected_capture.take() {
+        if let Some(pane_id) = self.expected_input.take() {
+            CommandBlock::Input { tag, pane_id }
+        } else if let Some(pane_id) = self.expected_capture.take() {
             self.pane_states.insert(
                 pane_id.clone(),
                 PaneSeedState::Pending {
@@ -589,6 +629,9 @@ impl StreamState {
                     if self.expected_capture.as_deref() == Some(&pane_id) {
                         self.expected_capture = None;
                     }
+                    if self.expected_input.as_deref() == Some(&pane_id) {
+                        self.expected_input = None;
+                    }
                     if self
                         .pending_alternate
                         .as_ref()
@@ -621,8 +664,32 @@ impl StreamState {
         }
     }
 
+    /// Asks for recovery of exactly the panes this control client owned.
+    ///
+    /// A pane-scoped resnapshot makes the desktop reseed that pane; an
+    /// unscoped one makes it tear down and rebuild the whole bridge. Panes that
+    /// disappeared along with their session simply have no seed to fetch, and
+    /// the reconciler re-attaches the client if the session outlived it.
+    fn emit_pane_scoped_recovery(
+        &self,
+        sender: &mpsc::Sender<SequencerControl>,
+        overflowed: &AtomicBool,
+        reason: &str,
+    ) {
+        if self.pane_states.is_empty() {
+            emit_resnapshot(sender, overflowed, "terminal", reason.to_owned());
+            return;
+        }
+        let mut pane_ids: Vec<_> = self.pane_states.keys().cloned().collect();
+        pane_ids.sort();
+        for pane_id in pane_ids {
+            emit_resnapshot(sender, overflowed, &pane_id, reason.to_owned());
+        }
+    }
+
     fn resnapshot_all(&mut self, stdin: &Arc<Mutex<ChildStdin>>) {
         self.expected_capture = None;
+        self.expected_input = None;
         self.pending_alternate = None;
         self.pending_metadata = None;
         self.command_block = CommandBlock::None;
@@ -633,7 +700,7 @@ impl StreamState {
                     buffered_bytes: 0,
                     overflowed: false,
                 };
-                let _ = queue_capture(&mut writer, pane_id);
+                let _ = queue_capture(&mut *writer, pane_id);
             }
             let _ = writer.flush();
         }
@@ -692,7 +759,15 @@ fn emit_terminal(
 }
 
 fn marker_pane(line: &[u8]) -> Option<String> {
-    let pane = std::str::from_utf8(line.strip_prefix(b"__ADE_CAPTURE__:")?)
+    marker_pane_with_prefix(line, b"__ADE_CAPTURE__:")
+}
+
+fn input_marker_pane(line: &[u8]) -> Option<String> {
+    marker_pane_with_prefix(line, b"__ADE_INPUT__:")
+}
+
+fn marker_pane_with_prefix(line: &[u8], prefix: &[u8]) -> Option<String> {
+    let pane = std::str::from_utf8(line.strip_prefix(prefix)?)
         .ok()?
         .to_owned();
     validate_tmux_id(&pane, '%').ok()?;

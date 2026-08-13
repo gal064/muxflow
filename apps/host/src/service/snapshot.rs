@@ -76,18 +76,33 @@ pub(super) fn snapshot_from_identity(
     }
 }
 
+/// Discovers the tmux server's identity and whole topology in one client fork.
+///
+/// The previous shape paid five forks — identity, sessions, windows, panes,
+/// identity again — and compared the two identity probes to catch a server
+/// restart mid-discovery. Batching removes both costs at once: every record
+/// comes from a single tmux client, and a client is bound to one server for its
+/// whole life, so there is no interval in which the records could straddle two
+/// servers and nothing left for a second probe to detect.
 pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
-    let before = server_identity();
-    if before == "tmux:none" {
+    let output = tmux_command()
+        .args(tmux_control::batched_discovery_args())
+        .output()
+        .context("run batched tmux discovery")?;
+    let discovery = tmux_control::parse_batched_discovery(
+        &output.stdout,
+        &output.stderr,
+        output.status.success(),
+    )
+    .map_err(|_| anyhow::anyhow!("tmux server is unavailable"))?;
+    let identity = socket_server_identity(&tmux_socket_path(&discovery.socket_path))
+        .unwrap_or_else(|_| "tmux:none".into());
+    if identity == "tmux:none" {
         bail!("tmux server is unavailable");
     }
-    let mut value = discover_host()?;
-    let after = server_identity();
-    if before != after {
-        bail!("tmux server changed during snapshot discovery");
-    }
-    overlay_session_order(&mut value, &after)?;
-    Ok((value, after))
+    let mut value = discovery.snapshot;
+    overlay_session_order(&mut value, &identity)?;
+    Ok((value, identity))
 }
 
 pub(super) fn discover_authoritative() -> anyhow::Result<(TmuxSnapshot, String)> {
@@ -277,16 +292,6 @@ fn socket_server_identity(socket: &Path) -> anyhow::Result<String> {
         metadata.dev(),
         metadata.ino()
     ))
-}
-
-pub(super) fn discover_host() -> anyhow::Result<TmuxSnapshot> {
-    if let Some(name) = std::env::var_os("ADE_TMUX_SOCKET_NAME") {
-        Ok(tmux_control::discover_with_socket_name(
-            &name.to_string_lossy(),
-        )?)
-    } else {
-        Ok(tmux_control::discover()?)
-    }
 }
 
 pub(super) fn tmux_command() -> Command {

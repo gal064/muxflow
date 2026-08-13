@@ -103,16 +103,17 @@ impl TerminalAttachment {
         {
             let mut writer = stdin.lock().unwrap();
             for pane_id in pane_ids {
-                queue_capture(&mut writer, pane_id)?;
+                queue_capture(&mut *writer, pane_id)?;
             }
             writer.flush()?;
         }
 
         let stopped = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = std_mpsc::sync_channel(TERMINAL_INPUT_QUEUE);
+        let input_stdin = Arc::clone(&stdin);
         std::thread::Builder::new()
             .name(format!("host-tmux-input-{session_id}"))
-            .spawn(move || run_input_dispatch(input_rx))?;
+            .spawn(move || run_input_dispatch(input_rx, input_stdin))?;
         let (stream_tx, stream_rx) = std_mpsc::channel();
         let reader_stopped = Arc::clone(&stopped);
         let reader_stop_signal = Arc::clone(&stopped);
@@ -227,7 +228,7 @@ impl TerminalAttachment {
         if !added.is_empty() {
             let mut stdin = self.stdin.lock().unwrap();
             for pane_id in &added {
-                queue_capture(&mut stdin, pane_id)?;
+                queue_capture(&mut *stdin, pane_id)?;
             }
             stdin.flush()?;
         }
@@ -242,10 +243,7 @@ impl TerminalAttachment {
         if !self.contains_pane(pane_id) {
             bail!("pane is not owned by this session control client");
         }
-        let mut stdin = self.stdin.lock().unwrap();
-        queue_capture(&mut stdin, pane_id)?;
-        stdin.flush()?;
-        Ok(())
+        write_capture_request(&self.stdin, pane_id)
     }
 
     fn set_sizing(&mut self, participates: bool) -> anyhow::Result<()> {
@@ -530,7 +528,19 @@ fn register_mounted_panes(
     }
 }
 
-fn queue_capture(stdin: &mut ChildStdin, pane_id: &str) -> anyhow::Result<()> {
+/// Queues a screen capture for one pane.
+///
+/// INVARIANT: the `__ADE_CAPTURE__` marker and the `capture-pane` command that
+/// follows it must reach tmux with nothing written between them. The reader
+/// correlates a capture block with a pane purely by "the block after the marker
+/// block", so an interleaved write — an in-band keystroke shares this same
+/// stdin — would attribute the capture to the wrong pane and corrupt the seed.
+/// Every caller therefore writes both lines under a single lock hold; use
+/// [`write_capture_request`] rather than taking the lock yourself when only one
+/// pane is being captured. `input.rs` upholds the same rule for its own marker,
+/// and `capture_marker_and_capture_command_are_never_split_by_concurrent_input`
+/// proves it under concurrency.
+fn queue_capture(stdin: &mut impl Write, pane_id: &str) -> anyhow::Result<()> {
     validate_tmux_id(pane_id, '%')?;
     writeln!(
         stdin,
@@ -538,6 +548,25 @@ fn queue_capture(stdin: &mut ChildStdin, pane_id: &str) -> anyhow::Result<()> {
     )?;
     writeln!(stdin, "{}", capture_command(pane_id))?;
     Ok(())
+}
+
+/// Writes one pane's capture marker and capture command under a single lock
+/// hold, upholding [`queue_capture`]'s adjacency invariant.
+fn write_capture_request<W: Write>(stdin: &Arc<Mutex<W>>, pane_id: &str) -> anyhow::Result<()> {
+    let mut writer = stdin
+        .lock()
+        .map_err(|_| anyhow::anyhow!("tmux control stdin is poisoned"))?;
+    queue_capture(&mut *writer, pane_id)?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// The correlation marker an in-band input request writes ahead of its
+/// `send-keys`. It is deliberately untargeted so it cannot fail when the pane
+/// has vanished: the marker's job is to name the pane whose command block is
+/// about to fail, which requires the marker itself to always succeed.
+pub(super) fn queue_input(pane_id: &str) -> String {
+    format!("display-message -p '__ADE_INPUT__:{pane_id}'")
 }
 
 fn capture_command(pane_id: &str) -> String {

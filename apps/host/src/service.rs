@@ -470,10 +470,14 @@ async fn reconcile_internal_tmux_change(
         &snapshot,
         &identity,
     );
+    // Re-attachment runs even when the topology is unchanged. A control client
+    // can die on its own — the session outliving it is exactly the case the
+    // pane-scoped recovery events describe — and that produces no topology
+    // change to notice. Attaching an already-live client is a no-op.
+    reconcile_terminal_clients(terminal, &snapshot, event_tx, overflowed);
     if changed {
         let next_generation = generation.fetch_add(1, Ordering::AcqRel) + 1;
         *topology_baseline.lock().unwrap() = Some((snapshot.clone(), identity.clone()));
-        reconcile_terminal_clients(terminal, &snapshot, event_tx, overflowed);
         event_tx
             .send(SequencerControl::OrderedEvent(v1::HostEvent {
                 kind: v1::EventKind::TopologySnapshot.into(),
