@@ -356,6 +356,73 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
 
+    fn batched_output(sessions: &[&str], windows: &[&str], panes: &[&str]) -> Vec<u8> {
+        let mut text = String::from("__ADE_ID__/tmp/tmux-501/default\n");
+        for line in sessions {
+            text.push_str(&format!("__ADE_S__{line}\n"));
+        }
+        for line in windows {
+            text.push_str(&format!("__ADE_W__{line}\n"));
+        }
+        for line in panes {
+            text.push_str(&format!("__ADE_P__{line}\n"));
+        }
+        text.into_bytes()
+    }
+
+    #[test]
+    fn batched_discovery_parses_one_invocation_into_the_same_records_as_five() {
+        let session = format!("$1{SEPARATOR}work{SEPARATOR}1{SEPARATOR}0");
+        let window = format!(
+            "$1{SEPARATOR}@2{SEPARATOR}0{SEPARATOR}editor{SEPARATOR}1{SEPARATOR}b25d,80x24,0,0,2{SEPARATOR}0"
+        );
+        let pane = format!(
+            "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp/a path{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}"
+        );
+        let parsed = parse_batched_discovery(
+            &batched_output(&[&session], &[&window], &[&pane]),
+            b"",
+            true,
+        )
+        .unwrap();
+        assert_eq!(parsed.socket_path, "/tmp/tmux-501/default");
+        assert_eq!(parsed.snapshot.sessions.len(), 1);
+        assert_eq!(parsed.snapshot.sessions[0].order, 0);
+        assert_eq!(parsed.snapshot.windows[0].name, "editor");
+        assert_eq!(parsed.snapshot.panes[0].current_path, "/tmp/a path");
+
+        // The batched argv and the per-command formats must describe the same
+        // fields, or one path would parse records the other cannot produce.
+        let arguments = batched_discovery_args();
+        assert!(arguments.iter().any(|value| value.contains(SESSION_FORMAT)));
+        assert!(arguments.iter().any(|value| value.contains(WINDOW_FORMAT)));
+        assert!(arguments.iter().any(|value| value.contains(PANE_FORMAT)));
+    }
+
+    #[test]
+    fn a_live_server_with_no_sessions_is_an_empty_topology_but_a_partial_one_is_an_error() {
+        // tmux aborts a chained command list at the first command needing a
+        // current target, after the identity line has already printed. That is
+        // a real empty topology, not a failure.
+        let empty =
+            parse_batched_discovery(&batched_output(&[], &[], &[]), b"no current target", false)
+                .unwrap();
+        assert!(empty.snapshot.sessions.is_empty());
+        assert_eq!(empty.socket_path, "/tmp/tmux-501/default");
+
+        // A failure that already produced records is a truncated topology, and
+        // acting on one would let a mutation run against a server state that
+        // never existed.
+        let session = format!("$1{SEPARATOR}work{SEPARATOR}1{SEPARATOR}0");
+        assert!(
+            parse_batched_discovery(&batched_output(&[&session], &[], &[]), b"boom", false)
+                .is_err()
+        );
+
+        // No identity line at all means tmux never answered.
+        assert!(parse_batched_discovery(b"", b"no server running", false).is_err());
+    }
+
     #[test]
     fn parses_names_and_paths_without_whitespace_splitting() {
         let pane = parse_pane("$1__ADE_TMUX_FIELD_9C71__@2__ADE_TMUX_FIELD_9C71__%3__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__1__ADE_TMUX_FIELD_9C71__80__ADE_TMUX_FIELD_9C71__24__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__/tmp/a path__ADE_TMUX_FIELD_9C71__fish__ADE_TMUX_FIELD_9C71__123__ADE_TMUX_FIELD_9C71__").unwrap();

@@ -155,6 +155,9 @@ pub struct AppStateStore {
     path: PathBuf,
     value: Mutex<PersistedAppState>,
     recovery_error: Mutex<Option<String>>,
+    /// Serialises `save_app_state`, whose file write and cache update are now
+    /// separated by an await.
+    write_lock: tauri::async_runtime::Mutex<()>,
 }
 
 impl AppStateStore {
@@ -171,6 +174,7 @@ impl AppStateStore {
             path,
             value: Mutex::new(value),
             recovery_error: Mutex::new(recovery_error),
+            write_lock: tauri::async_runtime::Mutex::new(()),
         }
     }
 }
@@ -378,6 +382,12 @@ pub async fn save_app_state(
         return Err("saved shell state is write-frozen until explicit reset".into());
     }
     validate(&state)?;
+    // One save at a time. The await between writing the file and updating the
+    // cache is a window two concurrent saves could interleave in, leaving the
+    // file holding one state and the cache another — and shell state is saved
+    // on ordinary interactions, so concurrent saves are the normal case, not an
+    // exotic one.
+    let _serialized = store.write_lock.lock().await;
     let path = store.path.clone();
     let persisted = state.clone();
     tauri::async_runtime::spawn_blocking(move || write_private_atomic(&path, &persisted))

@@ -55,7 +55,12 @@ pub(super) fn spawn_bridge(connection: &ConnectionSpec, _client_id: &str) -> Res
             config_path,
         } => {
             let socket = ssh_profile_control_socket(profile_id, target, config_path.as_deref())?;
-            ensure_control_master(target, config_path.as_deref(), &socket)?;
+            ensure_control_master(
+                target,
+                config_path.as_deref(),
+                &socket,
+                ControlLane::Interactive,
+            )?;
             let mut command = ssh_base(config_path.as_deref());
             command
                 .arg("-T")
@@ -198,7 +203,7 @@ fn bulk_control_socket(
     config_path: Option<&str>,
 ) -> Result<PathBuf, String> {
     let socket = ssh_profile_control_socket(&format!("{profile_id}-bulk"), target, config_path)?;
-    ensure_control_master(target, config_path, &socket)?;
+    ensure_control_master(target, config_path, &socket, ControlLane::Bulk)?;
     Ok(socket)
 }
 
@@ -214,7 +219,12 @@ pub(super) fn acquire_control_master(
         return Ok(None);
     };
     let socket = ssh_profile_control_socket(profile_id, target, config_path.as_deref())?;
-    ensure_control_master(target, config_path.as_deref(), &socket)?;
+    ensure_control_master(
+        target,
+        config_path.as_deref(),
+        &socket,
+        ControlLane::Interactive,
+    )?;
     let mut masters = ssh_masters().lock().unwrap();
     let master = masters
         .get_mut(&socket)
@@ -367,10 +377,24 @@ fn validate_control_socket(socket: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Which multiplexed SSH connection a master serves.
+///
+/// The two lanes want opposite transport settings, and because these are
+/// properties of the master rather than of a multiplexed client, the choice has
+/// to be made here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlLane {
+    /// Keystrokes, control frames and terminal output.
+    Interactive,
+    /// File bodies and transfers.
+    Bulk,
+}
+
 pub(super) fn ensure_control_master(
     target: &str,
     config_path: Option<&str>,
     socket: &Path,
+    lane: ControlLane,
 ) -> Result<(), String> {
     validate_control_socket(socket)?;
     let mut masters = ssh_masters().lock().unwrap();
@@ -396,7 +420,11 @@ pub(super) fn ensure_control_master(
     if validate_control_socket(socket)? {
         fs::remove_file(socket).map_err(|error| error.to_string())?;
     }
-    let output = ssh_base(config_path)
+    let mut master = ssh_base(config_path);
+    if lane == ControlLane::Interactive {
+        apply_control_lane_options(&mut master);
+    }
+    let output = master
         .args([
             "-M",
             "-N",
@@ -495,17 +523,20 @@ fn ssh_base(config_path: Option<&str>) -> Command {
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
-        // Terminal output is highly repetitive text and compresses five to ten
-        // times over, so on a real link this buys throughput; the CPU cost is
-        // trivial next to a WebView.
-        "-o",
-        "Compression=yes",
-        // Keystrokes and control frames are the latency-critical traffic on
-        // this connection; ask the network to treat them that way.
-        "-o",
-        "IPQoS=lowdelay",
     ]);
     command
+}
+
+/// Options that suit the interactive control lane and only that lane.
+///
+/// Terminal output is highly repetitive text and compresses five to ten times
+/// over, and keystrokes are the latency-critical traffic, so the control
+/// connection wants compression and a low-delay class. The bulk lane wants
+/// neither: compressing an already-compressed multi-gigabyte transfer is pure
+/// CPU cost, and a bulk transfer is not low-delay traffic. These are properties
+/// of the master connection, so they are applied where masters are created.
+fn apply_control_lane_options(command: &mut Command) {
+    command.args(["-o", "Compression=yes", "-o", "IPQoS=lowdelay"]);
 }
 
 #[cfg(test)]

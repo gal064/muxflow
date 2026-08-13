@@ -115,6 +115,8 @@ export function abandonPerfSpan(name: string): void {
  */
 export const PANE_PAINT_SPANS = ["create.tab", "create.workspace", "pane.split", "window.switch"] as const;
 
+export type PanePaintSpan = (typeof PANE_PAINT_SPANS)[number];
+
 export function closePanePaintSpans(): void {
   for (const name of PANE_PAINT_SPANS) closePerfSpan(name);
 }

@@ -35,7 +35,7 @@ describe("TerminalWriteScheduler", () => {
     expect(pending.at(-1)).toBe(0);
   });
 
-  it("cancels and drops queued work on disposal", () => {
+  it("cancels and drops queued work on disposal", async () => {
     let cancelled = 0;
     const completions: Array<() => void> = [];
     const scheduler = new TerminalWriteScheduler(
@@ -45,12 +45,17 @@ describe("TerminalWriteScheduler", () => {
     );
     scheduler.enqueue(Uint8Array.of(1));
     scheduler.enqueue(Uint8Array.of(2, 3));
+    // The first byte took the idle fast path and is inside xterm's parser,
+    // where nothing will ever complete it once the terminal is disposed.
+    const drained = scheduler.sealAndDrain();
     scheduler.dispose();
     scheduler.enqueue(Uint8Array.of(4));
     expect(cancelled).toBeGreaterThan(0);
-    // The first byte took the idle fast path and is inside xterm's parser
-    // already, so it cannot be un-sent; only the queued work is dropped.
-    expect(scheduler.pendingBytes).toBe(1);
+    expect(scheduler.pendingBytes).toBe(0);
+    // Disposal must release the drain, or the next reveal of this pane — which
+    // waits on it — never happens.
+    await expect(drained).resolves.toBeUndefined();
+    // A completion arriving after disposal is harmless.
     completions.shift()!();
     expect(scheduler.pendingBytes).toBe(0);
   });

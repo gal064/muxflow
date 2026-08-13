@@ -34,13 +34,20 @@ pub(super) fn execute(
         // server the caller never saw.
         bail!("stale topology: a tmux server started before the bootstrap action executed");
     }
+    // Re-discover immediately before mutating. The topology lock serialises
+    // *this* daemon, not the user's other tmux clients, and between the
+    // dispatcher's discovery and this point the request has waited on an input
+    // barrier that can be several tmux forks long. This is the check that keeps
+    // an action from running against a topology an external client has already
+    // changed — the phase's own invariant. Batching made it one fork rather
+    // than six, which is why it is affordable to keep.
     let (mut before, identity) = if bootstrapping {
         (
             tmux_control::TmuxSnapshot::default(),
             "tmux:none".to_owned(),
         )
     } else {
-        (expected_snapshot.clone(), expected_identity.clone())
+        discover_consistent()?
     };
     if identity != expected_identity || !super::same_action_topology(&before, &expected_snapshot) {
         bail!("stale topology: external tmux structural mutation occurred before action execution");

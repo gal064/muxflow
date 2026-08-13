@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { closePanePaintSpans, perfProbeEnabled, recordPerfSample } from "../../perf/probe";
+import { closePanePaintSpans } from "../../perf/probe";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import type { Pane } from "../../app/types";
 import type { TerminalEventHub } from "./TerminalEventHub";
@@ -17,15 +17,6 @@ import { TerminalTransferSurface, type TerminalTransferSurfaceController } from 
 import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
 export { paneRecoveryPlan } from "./PaneRecovery";
-
-/**
- * Outstanding keystrokes awaiting their echo, per pane, for the Phase 12
- * keystroke-to-painted-glyph probe. A keystroke's sample closes when the pane's
- * next output chunk finishes reaching xterm, which is the first moment the
- * character can be on screen. The queue is bounded so a pane that is producing
- * output on its own (an agent, a build) cannot accumulate stale marks.
- */
-const PENDING_KEYSTROKE_MARKS = 8;
 
 // A pane may remount while its prior renderer is still draining. Serializing
 // visibility ownership keeps a late hide from overtaking the new reveal.
@@ -167,20 +158,6 @@ export function TerminalPane({
         });
       },
     });
-    const pendingKeystrokeMarks: number[] = [];
-    const noteKeystrokeSent = (input: TerminalInput) => {
-      // Only single keypresses: a paste or a programmatic burst has no
-      // meaningful "when did my character appear" moment.
-      if (!perfProbeEnabled()) return;
-      const length = input.kind === "text" ? input.data.length : input.data.byteLength;
-      if (length === 0 || length > 4) return;
-      if (pendingKeystrokeMarks.length >= PENDING_KEYSTROKE_MARKS) pendingKeystrokeMarks.shift();
-      pendingKeystrokeMarks.push(performance.now());
-    };
-    const noteOutputPainted = () => {
-      const mark = pendingKeystrokeMarks.shift();
-      if (mark !== undefined) recordPerfSample("keystroke.echoToPaint", performance.now() - mark);
-    };
     const commitRendered = (generation: number, terminalEpoch: number | undefined, establishesEpoch = false) => {
       if (establishesEpoch && hub.generationEpoch === terminalEpoch) {
         rendererEpoch = terminalEpoch;
@@ -194,8 +171,8 @@ export function TerminalPane({
     renderer.open(terminalContainer);
     const interceptPaste = (event: ClipboardEvent) => {
       // Native Edit > Paste bypasses the app command and targets xterm's
-      // textarea. Own plain text in capture phase so xterm cannot pre-wrap it;
-      // tmux remains the single authority that applies bracketed-paste mode.
+      // textarea. Own plain text in capture phase so xterm cannot wrap it in a
+      // bracketed-paste envelope on its way through.
       interceptTerminalPlainTextPaste(event, (text) => {
         inputRef.current(pane.id, { kind: "text", data: text });
       });
@@ -239,10 +216,7 @@ export function TerminalPane({
       });
     };
 
-    const unsubscribeInput = renderer.onInput((input) => {
-      noteKeystrokeSent(input);
-      inputRef.current(pane.id, input);
-    });
+    const unsubscribeInput = renderer.onInput((input) => inputRef.current(pane.id, input));
     const unsubscribeViewport = renderer.onViewportChange(setViewport);
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
       if (!("paneId" in event)) return;
@@ -262,10 +236,7 @@ export function TerminalPane({
         if (seedDiagnosticForNextSeedRef.current) seedDiagnosticForNextSeedRef.current = false;
         else setSeedDiagnostic(undefined);
       } else if (effect.kind === "output") {
-        renderer.write(effect.data, () => {
-          noteOutputPainted();
-          commitRendered(generation, eventEpoch);
-        }, generation);
+        renderer.write(effect.data, () => commitRendered(generation, eventEpoch), generation);
       } else if (effect.kind === "deferOutput") {
         if (deferredOutputBytesRef.current + effect.data.byteLength > 1024 * 1024) {
           clearDeferredOutput();
@@ -481,10 +452,12 @@ export function TerminalPane({
       client={transferClient}
       onDiagnostic={onDiagnostic}
       onController={(controller) => { transferControllerRef.current = controller; }}
-      // The host commits terminal input with tmux paste-buffer. Passing raw
-      // text here lets tmux add bracket markers exactly once when the pane has
-      // bracketed paste enabled; xterm.paste would pre-wrap and leak/double the
-      // markers across the tmux boundary.
+      // Pass the raw text. Neither host input path adds bracketed-paste
+      // markers — `send-keys -H` sends bytes, and `paste-buffer` brackets only
+      // with `-p`, which is never passed — so whatever the payload contains is
+      // what the program receives. `xterm.paste` would wrap it in a second
+      // envelope, which is how markers used to get doubled across the tmux
+      // boundary.
       onPaste={(value) => inputRef.current(pane.id, { kind: "text", data: value })}
       registry={transferRegistry}
       scope={paneTransferScope}
