@@ -322,6 +322,7 @@ export function TerminalTransferSurface({
     if (image) {
       event.preventDefault();
       void acceptImage(image).catch(fail);
+      return;
     }
   };
 
@@ -329,43 +330,55 @@ export function TerminalTransferSurface({
     if (!onController) return;
     const controller: TerminalTransferSurfaceController = {
       pasteClipboard: async () => {
-        if (client.readNativeClipboard) {
-          const native = await client.readNativeClipboard();
-          if (native?.kind === "files") {
-            await acceptPaths(parseFileUriList(native.uris.join("\n")));
+        try {
+          if (client.readNativeClipboard) {
+            const native = await client.readNativeClipboard();
+            if (native?.kind === "files") {
+              await acceptPaths(parseFileUriList(native.uris.join("\n")));
+              return true;
+            }
+            if (native?.kind === "image") {
+              await acceptStagedImage(native.staged);
+              return true;
+            }
+            // WebKit refuses `navigator.clipboard` reads for content the page
+            // did not write itself, so without this rung pasting from another
+            // application silently did nothing (M10-E054).
+            if (native?.kind === "text") {
+              onPaste(native.text);
+              return true;
+            }
+          }
+          if (!navigator.clipboard?.read) return false;
+          let items: ClipboardItems;
+          try { items = await navigator.clipboard.read(); } catch { return false; }
+          const paths: string[] = [];
+          for (const item of items) {
+            const uriType = item.types.includes("x-special/gnome-copied-files")
+              ? "x-special/gnome-copied-files"
+              : item.types.includes("text/uri-list") ? "text/uri-list" : undefined;
+            if (uriType) {
+              const value = await (await item.getType(uriType)).text();
+              paths.push(...(uriType === "x-special/gnome-copied-files" ? parseCopiedFileList(value) : parseFileUriList(value)));
+            }
+          }
+          if (paths.length) {
+            await acceptPaths(paths);
             return true;
           }
-          if (native?.kind === "image") {
-            await acceptStagedImage(native.staged);
+          const imageItems = items.flatMap((item) => {
+            const type = supportedClipboardImageType(item.types);
+            return type ? [{ item, type }] : [];
+          });
+          if (imageItems.length === 1) {
+            await acceptImage(await imageItems[0].item.getType(imageItems[0].type));
             return true;
           }
-        }
-        if (!navigator.clipboard?.read) return false;
-        let items: ClipboardItems;
-        try { items = await navigator.clipboard.read(); } catch { return false; }
-        const paths: string[] = [];
-        for (const item of items) {
-          const uriType = item.types.includes("x-special/gnome-copied-files")
-            ? "x-special/gnome-copied-files"
-            : item.types.includes("text/uri-list") ? "text/uri-list" : undefined;
-          if (uriType) {
-            const value = await (await item.getType(uriType)).text();
-            paths.push(...(uriType === "x-special/gnome-copied-files" ? parseCopiedFileList(value) : parseFileUriList(value)));
-          }
-        }
-        if (paths.length) {
-          await acceptPaths(paths);
+          return false;
+        } catch (reason) {
+          fail(reason);
           return true;
         }
-        const imageItems = items.flatMap((item) => {
-          const type = supportedClipboardImageType(item.types);
-          return type ? [{ item, type }] : [];
-        });
-        if (imageItems.length === 1) {
-          await acceptImage(await imageItems[0].item.getType(imageItems[0].type));
-          return true;
-        }
-        return false;
       },
     };
     onController(controller);

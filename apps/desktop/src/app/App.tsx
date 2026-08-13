@@ -27,6 +27,7 @@ import { useAgentNotificationActivation, type PaneSurfaceResult } from "../featu
 import { useAgentRuntime } from "../features/agents/useAgentRuntime";
 import { keyForScope, keyForTransferConnection, TauriFileWorkspaceClient } from "../features/files/api";
 import { ExplorerTree } from "../features/files/ExplorerTree";
+import { reconcileDownloadStatus, type ActiveDownloadStatus } from "../features/files/downloadStatus";
 import type { PendingDownload } from "../features/files/DownloadDialog";
 import type { ActiveRoot, DownloadRequest, FileEntry, FileMutation } from "../features/files/types";
 import { TauriGitWorkspaceClient } from "../features/git/api";
@@ -37,6 +38,7 @@ import { helperConnectionKey, helperUpgradeReducer, initialHelperUpgradeState, t
 import { profileIdForSshConnection } from "../features/shell/hostProfiles";
 import { sameHostConnection, sameHostScope, type HostScopeToken } from "../features/shell/hostScope";
 import { useShellCommands } from "../features/shell/useShellCommands";
+import { collapseSidebarsForCompactViewport } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   combineWorkspaceTabs,
@@ -47,6 +49,7 @@ import {
   reconcileWorkspaceIdentity,
   recoverableAppTabCount,
   recoverAppTabsFromPreviousServer,
+  relocateFileTabs,
   selectAppTab,
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
@@ -68,6 +71,7 @@ const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then(
 
 export function App() {
   const [status, setStatus] = useState("Discovering local tmux…");
+  const [activeDownloadStatus, setActiveDownloadStatus] = useState<ActiveDownloadStatus>();
   const agentClient = useMemo(() => new TauriAgentClient(), []);
   const fileClient = useMemo(() => new TauriFileWorkspaceClient(), []);
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
@@ -82,6 +86,7 @@ export function App() {
     snapshotRef, sshConfigPath, sshTarget, terminalEpoch, windows,
   } = connectionController;
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus);
+  const [compactViewport, setCompactViewport] = useState(() => window.matchMedia?.("(max-width: 880px)").matches ?? false);
   const [helperState, dispatchHelper] = useReducer(helperUpgradeReducer, initialHelperUpgradeState);
   const [profileResetConfirmation, setProfileResetConfirmation] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -102,6 +107,19 @@ export function App() {
   const terminalTransferRegistry = useTerminalTransferRegistry();
 
   useEffect(() => dispatchHelper({ type: "reset" }), [currentHelperConnectionKey]);
+
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const query = window.matchMedia("(max-width: 880px)");
+    const acceptViewport = (compact: boolean) => {
+      setCompactViewport(compact);
+      if (compact) setAppState((current) => ({ ...current, shell: collapseSidebarsForCompactViewport(current.shell) }));
+    };
+    acceptViewport(query.matches);
+    const handleChange = (event: MediaQueryListEvent) => acceptViewport(event.matches);
+    query.addEventListener("change", handleChange);
+    return () => query.removeEventListener("change", handleChange);
+  }, [setAppState]);
 
   const lastReconciledIdentity = useRef<{ hostProfileId: string; serverIdentity?: string } | undefined>(undefined);
   useEffect(() => {
@@ -130,16 +148,22 @@ export function App() {
     currentHostProfileId, fileClient, generation: hostState.generation, gitClient,
     serverIdentity: hostState.serverIdentity, snapshot, terminalEpoch, windows,
   });
+  useEffect(() => {
+    if (!activeDownloadStatus) return;
+    const reconciled = reconcileDownloadStatus(status, activeDownloadStatus, workspaceFiles.transfers);
+    if (reconciled.status !== status) setStatus(reconciled.status);
+    if (reconciled.active !== activeDownloadStatus) setActiveDownloadStatus(reconciled.active);
+  }, [activeDownloadStatus, status, workspaceFiles.transfers]);
   const performAction = useCallback(async (
     action: TmuxAction,
     capturedPrecondition?: { serverIdentity: string; generation: number },
   ) => {
     if (!clientId || !hostState.canMutate || !hostState.serverIdentity) {
       setStatus("This action is unavailable until the authoritative connection is live.");
-      return false;
+      return undefined;
     }
     try {
-      await requestReconciledTmuxAction({
+      const result = await requestReconciledTmuxAction({
         clientId,
         action,
         capturedPrecondition,
@@ -147,10 +171,10 @@ export function App() {
         currentScope: () => hostScopeRef.current,
       });
       setStatus("Waiting for authoritative tmux state…");
-      return true;
+      return result;
     } catch (error) {
       setStatus(String(error));
-      return false;
+      return undefined;
     }
   }, [clientId, hostState.canMutate, hostState.generation, hostState.serverIdentity]);
 
@@ -163,9 +187,28 @@ export function App() {
       return { ok: false, error };
     }
     try {
+      // `focusPane` is `select-pane`, which selects a pane *within* its window
+      // and leaves the session's active window untouched. The app then derives
+      // its active tab from tmux's own `window_active` flag via
+      // `resolveActiveWindowId`, so a destination in a non-active window landed
+      // on the right workspace and the wrong terminal — the exact case a
+      // notification exists for (M10-E061). Select the window first when it is
+      // not already active, chaining the generation the first action returns so
+      // the second is not rejected as stale.
+      let generation = hostState.generation;
+      const targetWindowIsActive = snapshotRef.current.windows.some(
+        (item) => item.id === target.windowId && item.active,
+      );
+      if (!targetWindowIsActive) {
+        const selected = await requestTmuxAction(clientId, { kind: "selectWindow", sessionId: target.sessionId, windowId: target.windowId }, {
+          serverIdentity: hostState.serverIdentity,
+          generation,
+        });
+        generation = selected.topologyGeneration;
+      }
       await requestTmuxAction(clientId, { kind: "focusPane", sessionId: target.sessionId, windowId: target.windowId, paneId: target.id }, {
         serverIdentity: hostState.serverIdentity,
-        generation: hostState.generation,
+        generation,
       });
     } catch (error) {
       setStatus(String(error));
@@ -180,13 +223,13 @@ export function App() {
     return { ok: true };
   }, [clientId, currentHostProfileId, hostState.canMutate, hostState.generation, hostState.serverIdentity, setAppState]);
 
-  const agentScope = useMemo(() => clientId && hostState.serverIdentity ? {
+  const agentScope = useMemo(() => clientId && hostState.serverIdentity && hostState.canMutate ? {
     clientId,
     hostProfileId: currentHostProfileId,
     serverIdentity: hostState.serverIdentity,
     topologyGeneration: hostState.generation,
     connectionEpoch: terminalEpoch,
-  } : undefined, [clientId, currentHostProfileId, hostState.generation, hostState.serverIdentity, terminalEpoch]);
+  } : undefined, [clientId, currentHostProfileId, hostState.canMutate, hostState.generation, hostState.serverIdentity, terminalEpoch]);
   const notificationActivation = useAgentNotificationActivation({
     agentClient,
     agentScope,
@@ -254,10 +297,12 @@ export function App() {
 
   const { commandContext, runCommand } = useShellCommands({
     activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
+    compactViewport,
     combinedTabs, controllers, currentHostProfileId, focusDirection,
     generation: hostState.generation, hostScope: currentHostScope,
     isHostScopeCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
     performAction, selectedAppTab,
+    selectCreatedSession: (sessionId) => { setActiveSessionId(sessionId); setActiveWindowId(undefined); },
     serverIdentity: hostState.serverIdentity, setAppState, setConfirmation,
     setPaletteOpen, setShortcutEditorOpen, setStatus, setTextPrompt, snapshot, windows,
   });
@@ -363,11 +408,24 @@ export function App() {
 
   const mutateFile = async (mutation: FileMutation) => {
     if (!fileScope || !workspaceFiles.root || !hostState.canMutate) throw new Error("File changes are unavailable while the host is read-only.");
+    const mutationScope = fileScope;
+    const mutationHostProfileId = currentHostProfileId;
+    const mutationRoot = workspaceFiles.root;
     try {
-      await fileClient.mutate(fileScope, workspaceFiles.root, mutation);
+      await fileClient.mutate(mutationScope, mutationRoot, mutation);
+      if (mutation.kind === "rename" || mutation.kind === "move") {
+        setAppState((current) => relocateFileTabs(
+          current,
+          mutationHostProfileId,
+          mutationScope.serverIdentity,
+          mutationRoot.path,
+          mutation.path,
+          mutation.destination,
+        ));
+      }
       const directory = "parent" in mutation
         ? mutation.parent
-        : mutation.path.slice(0, mutation.path.lastIndexOf("/")) || workspaceFiles.root.path;
+        : mutation.path.slice(0, mutation.path.lastIndexOf("/")) || mutationRoot.path;
       workspaceFiles.refresh(directory);
       setStatus(`File ${mutation.kind} completed.`);
     } catch (error) {
@@ -381,7 +439,9 @@ export function App() {
     try {
       const transfer = await fileClient.startDownload(fileScope, downloadRoot, request);
       workspaceFiles.recordTransfer(transfer);
-      setStatus(`Download ${transfer.state}: ${request.path}`);
+      const banner = `Download ${transfer.state}: ${request.path}`;
+      setActiveDownloadStatus({ id: transfer.id, path: request.path, banner });
+      setStatus(banner);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       workspaceFiles.recordTransfer({

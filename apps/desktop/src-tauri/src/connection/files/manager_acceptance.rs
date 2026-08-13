@@ -199,6 +199,7 @@ fn terminal_event(events: &[Value]) -> Option<Value> {
         .cloned()
 }
 
+#[cfg(target_os = "linux")]
 fn process_hwm_kib() -> Result<u64, String> {
     fs::read_to_string("/proc/self/status")
         .map_err(|error| error.to_string())?
@@ -207,6 +208,24 @@ fn process_hwm_kib() -> Result<u64, String> {
         .and_then(|value| value.split_whitespace().next())
         .and_then(|value| value.parse().ok())
         .ok_or("desktop manager process status omitted VmHWM".into())
+}
+
+#[cfg(target_os = "macos")]
+fn process_hwm_kib() -> Result<u64, String> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let bytes = unsafe { usage.assume_init() }.ru_maxrss;
+    u64::try_from(bytes)
+        .map(|value| value / 1024)
+        .map_err(|_| "desktop manager maximum RSS was negative".into())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_hwm_kib() -> Result<u64, String> {
+    Err("desktop manager maximum RSS is unsupported on this platform".into())
 }
 
 #[test]

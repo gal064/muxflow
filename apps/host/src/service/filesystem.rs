@@ -1,11 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    ffi::OsStr,
-    fs::{self, File, Metadata, OpenOptions},
+    ffi::{OsStr, OsString},
+    fs::{self, File, Metadata},
     io::{ErrorKind, Read, Write},
     os::unix::{
         ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        fs::{MetadataExt, PermissionsExt},
         io::AsRawFd,
     },
     path::{Component, Path, PathBuf},
@@ -34,7 +34,8 @@ mod terminal_upload;
 pub(crate) use terminal_upload::UploadCommitFailure;
 mod watch_service;
 use listing::{list_directory_impl, resolve_watch_directory};
-use path_policy::{AnchoredPath, RootCapability, descriptor_path, rename_noreplace};
+use mutations::mutation_metadata;
+use path_policy::{AnchoredMetadata, AnchoredPath, RootCapability, descriptor_path};
 use watch_service::Watch;
 
 pub(super) const MAX_TEXT_BYTES: u64 = 10 * 1024 * 1024;
@@ -63,10 +64,9 @@ enum TransferSource {
 
 struct Upload {
     file: File,
-    temporary: PathBuf,
-    target: PathBuf,
-    _target_anchor: AnchoredPath,
-    root_capability: RootCapability,
+    temporary: AnchoredPath,
+    target: AnchoredPath,
+    _root_capability: RootCapability,
     root_token: String,
     metadata_path: PathBuf,
     offset: u64,
@@ -116,7 +116,7 @@ impl Drop for FileService {
             }
         }
         for (_, upload) in self.uploads.get_mut().unwrap().drain() {
-            let _ = fs::remove_file(upload.temporary);
+            let _ = upload.temporary.unlink(false);
         }
         for (_, upload) in self.terminal_uploads.get_mut().unwrap().drain() {
             terminal_upload::cleanup_dropped_terminal_upload(upload);
@@ -215,6 +215,53 @@ fn metadata_for_anchored(
         .to_string_lossy()
         .into_owned();
     Ok(metadata)
+}
+
+fn metadata_for_directory_entry(
+    entry: &AnchoredPath,
+    logical: &Path,
+) -> anyhow::Result<v1::FileMetadata> {
+    let metadata = entry.metadata_no_follow()?;
+    let symlink = metadata.is_symlink();
+    let kind = if symlink {
+        v1::FileKind::Symlink
+    } else if metadata.is_dir() {
+        v1::FileKind::Directory
+    } else if metadata.is_file() {
+        v1::FileKind::File
+    } else {
+        v1::FileKind::Other
+    };
+    let name = logical
+        .file_name()
+        .unwrap_or(logical.as_os_str())
+        .to_string_lossy()
+        .into_owned();
+    let collapsed = name == ".git" || name == "node_modules" || symlink;
+    let mime = image_mime(logical).unwrap_or_default().to_owned();
+    Ok(v1::FileMetadata {
+        path: logical.to_string_lossy().into_owned(),
+        name,
+        kind: kind.into(),
+        size: metadata.len(),
+        modified_unix_millis: metadata.modified_unix_millis(),
+        mode: metadata.mode(),
+        symlink,
+        symlink_target: symlink
+            .then(|| entry.read_link().ok())
+            .flatten()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        expandable: metadata.is_dir() && !collapsed,
+        generation: metadata.generation(),
+        mime,
+        image_preview_eligible: metadata.is_file()
+            && image_mime(logical).is_some()
+            && metadata.len() <= MAX_IMAGE_BYTES,
+        // Directory enumeration never follows a link. The target is resolved
+        // only when a later authorized operation opens it descriptor-relative.
+        symlink_target_kind: v1::FileKind::Unspecified.into(),
+    })
 }
 
 fn metadata_generation(metadata: &Metadata) -> u64 {
@@ -348,7 +395,11 @@ mod tests {
     use super::*;
 
     fn fixture() -> (PathBuf, FileService) {
-        let root = std::env::temp_dir().join(format!("ade-files-{}", Uuid::new_v4()));
+        #[cfg(target_os = "macos")]
+        let temporary_root = Path::new("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let temporary_root = std::env::temp_dir();
+        let root = temporary_root.join(format!("ade-files-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         (root, FileService::new())
     }
@@ -614,6 +665,34 @@ mod tests {
             fs::read_to_string(root.join("destination")).unwrap(),
             "original"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn case_only_rename_succeeds_without_overwrite_confirmation_and_reports_truthfully() {
+        let (root, service) = fixture();
+        fs::write(root.join("Case.txt"), "preserved").unwrap();
+        let metadata = service
+            .mutate(&v1::FileServiceRequest {
+                operation_id: "case-only-rename".into(),
+                root: root.to_string_lossy().into_owned(),
+                path: "Case.txt".into(),
+                destination: "case.txt".into(),
+                mutation: v1::FileMutationKind::Rename.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(metadata.name, "case.txt");
+        assert_eq!(metadata.path, root.join("case.txt").to_string_lossy());
+        assert_eq!(
+            fs::read_to_string(root.join("case.txt")).unwrap(),
+            "preserved"
+        );
+        let names = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(names, [OsString::from("case.txt")]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -892,21 +971,22 @@ mod tests {
         let root_path = std::env::temp_dir().join(format!("ade-watch-route-{}", Uuid::new_v4()));
         fs::create_dir_all(root_path.join("huge")).unwrap();
         let root = Arc::new(RootCapability::capture(root_path.to_str().unwrap()).unwrap());
+        let logical_root = root.logical_root().to_owned();
         let target_directory = root
-            .anchor(&root_path.join("huge"))
+            .anchor(&logical_root.join("huge"))
             .unwrap()
             .open_directory()
             .unwrap();
         let watch = Watch {
             root_token: root.token().to_owned(),
             root,
-            path: root_path.join("huge").to_string_lossy().into_owned(),
-            target: root_path.join("huge"),
+            path: logical_root.join("huge").to_string_lossy().into_owned(),
+            target: logical_root.join("huge"),
             target_directory: Arc::new(target_directory),
             fallback_scan: Arc::new(Mutex::new(FallbackScan::new(0))),
         };
         let mut event = Event::new(notify::EventKind::Any);
-        event.paths.push(root_path.join("huge/entry-249999"));
+        event.paths.push(watch.target.join("entry-249999"));
         assert!(watch_matches_events(&watch, &[Ok(event)], false));
         assert!(watch_matches_events(&watch, &[], true));
         assert!(!watch_matches_events(&watch, &[], false));
@@ -1022,25 +1102,26 @@ mod tests {
         fs::write(root_path.join("removed"), "root").unwrap();
         fs::write(root_path.join("nested/removed"), "nested").unwrap();
         let root = Arc::new(RootCapability::capture(root_path.to_str().unwrap()).unwrap());
+        let logical_root = root.logical_root().to_owned();
         let root_directory = root.open_root_directory().unwrap();
         let nested_directory = root
-            .anchor(&root_path.join("nested"))
+            .anchor(&logical_root.join("nested"))
             .unwrap()
             .open_directory()
             .unwrap();
         let root_watch = Watch {
             root_token: root.token().to_owned(),
             root: Arc::clone(&root),
-            path: root_path.to_string_lossy().into_owned(),
-            target: root_path.clone(),
+            path: logical_root.to_string_lossy().into_owned(),
+            target: logical_root.clone(),
             target_directory: Arc::new(root_directory),
             fallback_scan: Arc::new(Mutex::new(FallbackScan::new(0))),
         };
         let nested_watch = Watch {
             root_token: root.token().to_owned(),
             root,
-            path: root_path.join("nested").to_string_lossy().into_owned(),
-            target: root_path.join("nested"),
+            path: logical_root.join("nested").to_string_lossy().into_owned(),
+            target: logical_root.join("nested"),
             target_directory: Arc::new(nested_directory),
             fallback_scan: Arc::new(Mutex::new(FallbackScan::new(0))),
         };
@@ -1054,15 +1135,16 @@ mod tests {
             ("nested", &nested_watch, &nested_removed),
         ] {
             let mut notify = Event::new(notify::EventKind::Any);
-            notify.paths.push(removed.clone());
+            let logical_removed = watch.target.join(removed.file_name().unwrap());
+            notify.paths.push(logical_removed.clone());
             let events = precise_file_events(watch_id, watch, &[Ok(notify)]);
             assert_eq!(events.len(), 1);
-            assert_eq!(events[0].scope, removed.to_string_lossy());
+            assert_eq!(events[0].scope, logical_removed.to_string_lossy());
             let file = events[0].file.as_ref().unwrap();
             assert!(file.deleted);
             assert_eq!(
                 file.metadata.as_ref().unwrap().path,
-                removed.to_string_lossy()
+                logical_removed.to_string_lossy()
             );
         }
         fs::remove_dir_all(root_path).unwrap();
@@ -1104,7 +1186,11 @@ mod tests {
             .watch_directory(root.to_str().unwrap(), "", "watch-native")
             .unwrap();
         fs::write(root.join("created"), "event").unwrap();
-        let expected = root.join("created").to_string_lossy().into_owned();
+        let expected = fs::canonicalize(&root)
+            .unwrap()
+            .join("created")
+            .to_string_lossy()
+            .into_owned();
         let observed = tokio::time::timeout(Duration::from_secs(3), async {
             while let Some(message) = receiver.recv().await {
                 if matches!(message, SequencerControl::OrderedEvent(v1::HostEvent {
@@ -1141,15 +1227,18 @@ mod tests {
             .watch_directory(root.to_str().unwrap(), "", "watch-delete-root")
             .unwrap();
         service
-            .watch_directory(
-                root.to_str().unwrap(),
-                root.join("nested").to_str().unwrap(),
-                "watch-delete-nested",
-            )
+            .watch_directory(root.to_str().unwrap(), "nested", "watch-delete-nested")
             .unwrap();
 
-        let expected_root = root.join("removed").to_string_lossy().into_owned();
-        let expected_nested = root.join("nested/removed").to_string_lossy().into_owned();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let expected_root = canonical_root
+            .join("removed")
+            .to_string_lossy()
+            .into_owned();
+        let expected_nested = canonical_root
+            .join("nested/removed")
+            .to_string_lossy()
+            .into_owned();
         fs::remove_file(&expected_root).unwrap();
         fs::remove_file(&expected_nested).unwrap();
         let mut expected = BTreeSet::from([expected_root, expected_nested]);

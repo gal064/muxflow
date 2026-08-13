@@ -9,13 +9,16 @@ case "$arch" in
   aarch64|arm64) arch=aarch64 ;;
   *) echo "unsupported host-helper architecture: $arch" >&2; exit 64 ;;
 esac
-native=$(uname -m)
-[[ "$native" != amd64 ]] || native=x86_64
-[[ "$native" != arm64 ]] || native=aarch64
-if [[ "$arch" != "$native" ]]; then
-  echo "COMPATIBLE_HOST_BLOCKER: build the $arch helper on a native $arch runner" >&2
-  exit 69
-fi
+# release/macos/build-package.sh already produces both shipped Linux helpers
+# from an Apple Silicon host through Docker platform emulation, and those are
+# the artifacts whose digests this release is bound to. Build the requested
+# architecture the same sanctioned way rather than refusing every non-native
+# target, which previously made the Phase 9 helper-compatibility lane
+# unrunnable on the very machine that packages the release.
+case "$arch" in
+  x86_64) docker_platform=linux/amd64 ;;
+  aarch64) docker_platform=linux/arm64 ;;
+esac
 command -v docker >/dev/null 2>&1 || {
   echo "COMPATIBLE_HOST_BLOCKER: Docker is required to build the Debian 12 baseline helper" >&2
   exit 69
@@ -44,13 +47,21 @@ target_dir="$cache_dir/target"
 cached_binary="$cache_dir/tmux-ide-host"
 mkdir -p "$cache_dir"
 exec 9>"$cache_dir/build.lock"
-flock 9
+if command -v flock >/dev/null 2>&1; then
+  flock 9
+else
+  # macOS ships no flock(1). mkdir is atomic on every filesystem these gates
+  # use, so it provides the same mutual exclusion for the shared cache entry.
+  lock_dir="$cache_dir/build.lock.d"
+  until mkdir "$lock_dir" 2>/dev/null; do sleep 1; done
+  trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+fi
 if [[ -x "$cached_binary" ]]; then
   install -m 0755 "$cached_binary" "$output"
   printf '%s\n' "$output"
   exit 0
 fi
-docker run --rm --user "$(id -u):$(id -g)" \
+docker run --rm --platform "$docker_platform" --user "$(id -u):$(id -g)" \
   -e CARGO_HOME=/artifact-cache/cargo-home \
   -e SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1704067200}" \
   -e RUSTFLAGS='--remap-path-prefix=/workspace=/workspace/tmux-agent-ide --remap-path-prefix=/artifact-build=/workspace/target' \
@@ -65,7 +76,7 @@ install -m 0755 "$cached_binary" "$output"
 # Debian 12's glibc 2.36 is the declared dynamically-linked compatibility
 # baseline. The runtime smoke below guards against accidentally packaging a
 # helper rebuilt against the newer desktop distribution.
-docker run --rm --user "$(id -u):$(id -g)" \
+docker run --rm --platform "$docker_platform" --user "$(id -u):$(id -g)" \
   -v "$(dirname "$output"):/artifact:ro" debian:bookworm-slim \
   "/artifact/$(basename "$output")" version >/dev/null
 printf '%s\n' "$output"

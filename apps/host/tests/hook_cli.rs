@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::Write,
+    path::PathBuf,
     process::{Command, Stdio},
 };
 
@@ -9,10 +10,12 @@ use tmux_agent_protocol::v1;
 
 #[test]
 fn cli_persists_an_exact_unsequenced_hook_envelope() {
-    let runtime = std::env::current_dir()
-        .unwrap()
-        .join("tmp")
-        .join(format!("phase6-hook-cli-{}", uuid::Uuid::new_v4()));
+    let runtime_root = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::current_dir().unwrap().join("tmp")
+    };
+    let runtime = runtime_root.join(format!("phase6-hook-cli-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&runtime).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
         .args(["hook", "ingest", "--adapter", "codex"])

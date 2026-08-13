@@ -2,6 +2,7 @@ use phase0_core::NotificationRoute;
 use serde::Serialize;
 use tauri::AppHandle;
 
+#[derive(Clone)]
 pub struct NativeNotifications;
 
 #[derive(Debug, Clone, Copy, Serialize)]

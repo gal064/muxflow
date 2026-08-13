@@ -151,7 +151,8 @@ impl PreparedDestination {
         }
         // SAFETY: successful fstatvfs initialized the value.
         let stats = unsafe { stats.assume_init() };
-        let available = stats.f_bavail.saturating_mul(stats.f_frsize);
+        let available = u128::from(stats.f_bavail).saturating_mul(u128::from(stats.f_frsize));
+        let available = u64::try_from(available).unwrap_or(u64::MAX);
         if available < required {
             return Err(format!(
                 "insufficient destination space: need {required} bytes, have {available}"
@@ -517,11 +518,7 @@ fn rewrite_local_journal(
 }
 
 fn recover_local_transactions(directory: &File) -> Result<(), String> {
-    for entry in std::fs::read_dir(descriptor_path(directory.as_raw_fd()))
-        .map_err(|error| error.to_string())?
-    {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let name = entry.file_name();
+    for name in super::local_staging::directory_entry_names(directory)? {
         let text = name.to_string_lossy();
         let Some(id) = text
             .strip_prefix(".tmux-agent-download-transaction-")
@@ -704,16 +701,6 @@ fn validate_generated_uuid_leaf(name: &CString, prefix: &str, suffix: &str) -> R
         .map_err(|_| "owned download leaf has an invalid UUID".to_owned())
 }
 
-#[cfg(target_os = "linux")]
-fn descriptor_path(fd: i32) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{fd}"))
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn descriptor_path(fd: i32) -> PathBuf {
-    PathBuf::from(format!("/dev/fd/{fd}"))
-}
-
 fn not_published(message: String) -> PublishFailure {
     PublishFailure {
         outcome: PublicationOutcome::NotPublished,
@@ -837,7 +824,8 @@ fn metadata_at(directory: &File, name: &CString) -> Result<Option<EntryMetadata>
     let stat = unsafe { stat.assume_init() };
     Ok(Some(EntryMetadata {
         identity: FileIdentity {
-            device: stat.st_dev,
+            device: u64::try_from(stat.st_dev)
+                .map_err(|_| "destination device identity is invalid".to_owned())?,
             inode: stat.st_ino,
         },
         regular: (stat.st_mode & libc::S_IFMT) == libc::S_IFREG,
@@ -872,11 +860,30 @@ fn rename_at(
             )
         }
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     let result = unsafe {
         if exclusive {
-            -1
+            libc::renameatx_np(
+                directory.as_raw_fd(),
+                source.as_ptr(),
+                directory.as_raw_fd(),
+                destination.as_ptr(),
+                libc::RENAME_EXCL,
+            )
         } else {
+            libc::renameat(
+                directory.as_raw_fd(),
+                source.as_ptr(),
+                directory.as_raw_fd(),
+                destination.as_ptr(),
+            )
+        }
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let result = if exclusive {
+        -1
+    } else {
+        unsafe {
             libc::renameat(
                 directory.as_raw_fd(),
                 source.as_ptr(),
@@ -921,7 +928,25 @@ fn exchange_at(directory: &File, left: &CString, right: &CString) -> Result<(), 
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn exchange_at(directory: &File, left: &CString, right: &CString) -> Result<(), String> {
+    let result = unsafe {
+        libc::renameatx_np(
+            directory.as_raw_fd(),
+            left.as_ptr(),
+            directory.as_raw_fd(),
+            right.as_ptr(),
+            libc::RENAME_SWAP,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error().to_string())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn exchange_at(_directory: &File, _left: &CString, _right: &CString) -> Result<(), String> {
     Err("transactional overwrite exchange is unavailable on this platform".into())
 }

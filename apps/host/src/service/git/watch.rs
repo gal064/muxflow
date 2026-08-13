@@ -284,7 +284,7 @@ pub(super) fn start_repository_watcher(
                 let _ = sender.try_send(WatchSignal::Failed);
             }
         })?;
-    watcher.watch(Path::new(&root.stable_path()), RecursiveMode::Recursive)?;
+    watcher.watch(&root.watch_path(), RecursiveMode::Recursive)?;
     let (git_dir, common_dir) = metadata.stable_paths();
     for directory in [&git_dir, &common_dir] {
         watcher.watch(Path::new(directory), RecursiveMode::Recursive)?;

@@ -11,7 +11,9 @@ use std::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::local_staging::{LocalOwnedDirectory, lock_file, try_lock_file_exclusive};
+use super::local_staging::{
+    LocalOwnedDirectory, clipboard_cache_path, lock_file, try_lock_file_exclusive,
+};
 
 const MAX_PNG_BYTES: u64 = 25 * 1024 * 1024;
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -33,7 +35,7 @@ pub(super) fn stage_clipboard_png(png_bytes: &[u8]) -> Result<Value, String> {
     if !home.is_absolute() {
         return Err("HOME must be absolute".into());
     }
-    let directory = home.join(".cache/tmux-agent-ide/clipboard");
+    let directory = clipboard_cache_path(&home);
     let staging = LocalOwnedDirectory::open_clipboard_cache(&home)?;
     cleanup_owned_clipboard(&staging)?;
     let id = Uuid::new_v4();
@@ -89,10 +91,7 @@ pub(super) fn lock_owned_source(path: &Path, file: File) -> Result<Option<Arc<Fi
     let Some(home) = std::env::var_os("HOME") else {
         return Ok(None);
     };
-    let expected = PathBuf::from(home)
-        .join(".cache")
-        .join("tmux-agent-ide")
-        .join("clipboard");
+    let expected = clipboard_cache_path(&PathBuf::from(home));
     if path.parent() != Some(expected.as_path())
         || !path
             .file_name()
@@ -110,9 +109,9 @@ fn cleanup_owned_clipboard(directory: &LocalOwnedDirectory) -> Result<(), String
     let mut candidates = Vec::new();
     for (name, metadata) in directory.entries()? {
         if !owned_clipboard_name(&name.to_string_lossy())
-            || !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.uid() != unsafe { libc::geteuid() }
+            || !metadata.regular
+            || metadata.symlink
+            || metadata.uid != unsafe { libc::geteuid() }
         {
             continue;
         }
@@ -124,7 +123,7 @@ fn cleanup_owned_clipboard(directory: &LocalOwnedDirectory) -> Result<(), String
             continue;
         }
         let opened = file.metadata().map_err(|error| error.to_string())?;
-        if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+        if opened.dev() != metadata.device || opened.ino() != metadata.inode {
             continue;
         }
         total = total.saturating_add(opened.len());
@@ -263,6 +262,9 @@ mod tests {
     #[test]
     fn existing_cache_parent_permissions_are_never_changed() {
         let root = std::env::temp_dir().join(format!("cache-parent-mode-{}", Uuid::new_v4()));
+        #[cfg(target_os = "macos")]
+        let cache = root.join("Library/Caches");
+        #[cfg(not(target_os = "macos"))]
         let cache = root.join(".cache");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -277,12 +279,19 @@ mod tests {
     #[test]
     fn clipboard_cache_symlink_substitution_preserves_foreign_inode_and_mode() {
         let root = std::env::temp_dir().join(format!("cache-symlink-{}", Uuid::new_v4()));
+        #[cfg(target_os = "macos")]
+        let cache = root.join("Library/Caches");
+        #[cfg(not(target_os = "macos"))]
         let cache = root.join(".cache");
         let foreign = root.join("foreign");
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::create_dir(&foreign).unwrap();
         std::fs::set_permissions(&foreign, std::fs::Permissions::from_mode(0o755)).unwrap();
-        symlink(&foreign, cache.join("tmux-agent-ide")).unwrap();
+        #[cfg(target_os = "macos")]
+        let app_name = "dev.dev.tmux-agent-ide";
+        #[cfg(not(target_os = "macos"))]
+        let app_name = "tmux-agent-ide";
+        symlink(&foreign, cache.join(app_name)).unwrap();
         assert!(LocalOwnedDirectory::open_clipboard_cache(&root).is_err());
         assert_eq!(
             std::fs::metadata(&foreign).unwrap().permissions().mode() & 0o777,

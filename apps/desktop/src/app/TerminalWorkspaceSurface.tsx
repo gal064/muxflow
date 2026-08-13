@@ -8,7 +8,7 @@ import type { TerminalInput, TerminalSize } from "../features/terminal/TerminalR
 import type { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import type { TerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import type { TerminalTransferConnectionScope } from "../features/terminal/terminalTransfers";
-import type { TmuxAction } from "../features/tmux/actions";
+import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 
 type TerminalWorkspaceSurfaceProps = {
   activePane?: Pane;
@@ -26,7 +26,7 @@ type TerminalWorkspaceSurfaceProps = {
   beginDividerDrag(event: PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical"): void;
   handleInput(paneId: string, input: TerminalInput): void;
   handleResize(pane: Pane, size: TerminalSize): void;
-  performAction(action: TmuxAction): Promise<boolean>;
+  performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
   setStatus(message: string): void;
 };
 

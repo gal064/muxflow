@@ -46,22 +46,18 @@ impl FileService {
     ) -> anyhow::Result<v1::FileMetadata> {
         let (logical_target, _) = root.resolve_new(&request.path)?;
         let anchored_target = root.anchor(&logical_target)?;
-        let target = anchored_target.path();
-        if target.exists() {
+        if anchored_target.exists()? {
             bail!(
                 "destination_exists: refusing to overwrite without an explicit destination action"
             );
         }
         if request.create_directory {
-            fs::create_dir(&target)?;
+            anchored_target.create_directory(0o777)?;
         } else {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&target)?;
+            anchored_target.create_file(0o666)?;
         }
         self.next_generation();
-        metadata_for_anchored(&root.stable_root(), &target, &logical_target)
+        mutation_metadata(&anchored_target, &logical_target)
     }
 
     fn rename(
@@ -76,21 +72,24 @@ impl FileService {
             bail!("source and destination are identical");
         }
         let source_anchor = root.anchor(&logical_source)?;
-        if fs::symlink_metadata(source_anchor.path())?.is_dir()
-            && logical_destination.starts_with(&logical_source)
-        {
+        let source_metadata = source_anchor.metadata_no_follow()?;
+        if source_metadata.is_dir() && logical_destination.starts_with(&logical_source) {
             bail!("destination_inside_source: a directory cannot be moved into itself");
         }
         let destination_anchor = root.anchor(&logical_destination)?;
-        let destination = destination_anchor.path();
+        if is_case_only_same_entry(&source_anchor, &destination_anchor, &source_metadata)? {
+            source_anchor.rename_to_replace(&destination_anchor)?;
+            self.next_generation();
+            return mutation_metadata(&destination_anchor, &logical_destination);
+        }
         let backup = stage_destination(
-            &destination,
+            &destination_anchor,
             request.overwrite_confirmed,
             request.non_empty_confirmed,
         )?;
         let renamed = source_anchor.rename_to_noreplace(&destination_anchor);
         if let Err(error) = renamed {
-            rollback_destination(&destination, backup.as_deref())?;
+            rollback_destination(&destination_anchor, backup.as_ref())?;
             if error
                 .downcast_ref::<std::io::Error>()
                 .and_then(std::io::Error::raw_os_error)
@@ -102,9 +101,9 @@ impl FileService {
         }
         // The rename already committed. Backup cleanup is maintenance and must
         // not turn a committed mutation into a false failure response.
-        let _ = discard_backup(backup.as_deref());
+        let _ = discard_backup(backup.as_ref());
         self.next_generation();
-        metadata_for_anchored(&root.stable_root(), &destination, &logical_destination)
+        mutation_metadata(&destination_anchor, &logical_destination)
     }
 
     fn duplicate(
@@ -121,25 +120,24 @@ impl FileService {
         }
         let source_anchor = root.anchor(&logical_source)?;
         let destination_anchor = root.anchor(&logical_destination)?;
-        let source = source_anchor.path();
-        let destination = destination_anchor.path();
-        let source_meta = fs::symlink_metadata(&source)?;
+        let source_meta = source_anchor.metadata_no_follow()?;
         if source_meta.is_dir() && logical_destination.starts_with(&logical_source) {
             bail!("destination_inside_source: a directory cannot be duplicated into itself");
         }
         let backup = stage_destination(
-            &destination,
+            &destination_anchor,
             request.overwrite_confirmed,
             request.non_empty_confirmed,
         )?;
-        let result = if source_meta.file_type().is_symlink() {
-            check_cancelled(cancellation).and_then(|()| copy_symlink_atomic(&source, &destination))
+        let result = if source_meta.is_symlink() {
+            check_cancelled(cancellation)
+                .and_then(|()| copy_symlink_atomic(&source_anchor, &destination_anchor))
         } else if source_meta.is_dir() {
-            copy_directory_atomic(&source, &destination, cancellation)
+            copy_directory_atomic(&source_anchor, &destination_anchor, cancellation)
         } else if source_meta.is_file() {
             copy_file_atomic(
-                &source,
-                &destination,
+                &source_anchor,
+                &destination_anchor,
                 source_meta.permissions(),
                 cancellation,
             )
@@ -149,12 +147,12 @@ impl FileService {
             ))
         };
         if let Err(error) = result {
-            rollback_destination(&destination, backup.as_deref())?;
+            rollback_destination(&destination_anchor, backup.as_ref())?;
             return Err(error);
         }
-        let _ = discard_backup(backup.as_deref());
+        let _ = discard_backup(backup.as_ref());
         self.next_generation();
-        metadata_for_anchored(&root.stable_root(), &destination, &logical_destination)
+        mutation_metadata(&destination_anchor, &logical_destination)
     }
 
     fn delete(
@@ -166,26 +164,27 @@ impl FileService {
         let (logical_target, _) = root.resolve_existing(&request.path)?;
         reject_root_target(root.logical_root(), &logical_target)?;
         let target_anchor = root.anchor(&logical_target)?;
-        let target = target_anchor.path();
         let metadata = target_anchor.metadata_no_follow()?;
         check_cancelled(cancellation)?;
-        if metadata.file_type().is_symlink() || metadata.is_file() {
+        if metadata.is_symlink() || metadata.is_file() {
             target_anchor.unlink(false)?;
         } else if metadata.is_dir() {
-            let non_empty = fs::read_dir(&target)?.next().transpose()?.is_some();
+            let non_empty = !target_anchor.directory_entries()?.is_empty();
             if non_empty && !request.non_empty_confirmed {
                 bail!("confirmation_required_non_empty_directory");
             }
             if non_empty {
-                let parent = target.parent().context("delete target has no parent")?;
-                let staged = parent.join(format!(".tmux-ide-delete-{}.partial", Uuid::new_v4()));
-                rename_noreplace(&target, &staged)?;
+                let staged = target_anchor.sibling(OsString::from(format!(
+                    ".tmux-ide-delete-{}.partial",
+                    Uuid::new_v4()
+                )))?;
+                target_anchor.rename_to_noreplace(&staged)?;
                 let result = remove_directory_cooperative(&staged, cancellation);
                 if let Err(error) = result {
                     // The public delete committed at rename. Finish cleanup and
                     // report success if cleanup succeeds; never claim cancellation
                     // after the irreversible boundary.
-                    fs::remove_dir_all(&staged).with_context(|| {
+                    remove_path(&staged).with_context(|| {
                         format!("delete committed but partial cleanup failed after: {error}")
                     })?;
                 }
@@ -201,80 +200,84 @@ impl FileService {
 }
 
 fn stage_destination(
-    path: &Path,
+    path: &AnchoredPath,
     overwrite: bool,
     non_empty: bool,
-) -> anyhow::Result<Option<PathBuf>> {
-    if !path.exists() && fs::symlink_metadata(path).is_err() {
+) -> anyhow::Result<Option<AnchoredPath>> {
+    if !path.exists()? {
         return Ok(None);
     }
     if !overwrite {
         bail!("confirmation_required_destination_overwrite");
     }
-    let metadata = fs::symlink_metadata(path)?;
-    let expected_identity = (metadata.dev(), metadata.ino());
+    let metadata = path.metadata_no_follow()?;
+    let expected_identity = (metadata.device(), metadata.inode());
     if metadata.is_dir() {
-        let has_entries = fs::read_dir(path)?.next().transpose()?.is_some();
+        let has_entries = !path.directory_entries()?.is_empty();
         if has_entries && !non_empty {
             bail!("confirmation_required_non_empty_destination");
         }
-    } else if !metadata.file_type().is_symlink() && !metadata.is_file() {
+    } else if !metadata.is_symlink() && !metadata.is_file() {
         bail!("unsupported overwrite destination type");
     }
-    let parent = path.parent().context("destination has no parent")?;
-    let backup = parent.join(format!(".tmux-ide-overwrite-{}.partial", Uuid::new_v4()));
-    rename_noreplace(path, &backup)?;
-    let staged = fs::symlink_metadata(&backup)?;
-    if (staged.dev(), staged.ino()) != expected_identity {
-        let _ = rename_noreplace(&backup, path);
+    let backup = path.sibling(OsString::from(format!(
+        ".tmux-ide-overwrite-{}.partial",
+        Uuid::new_v4()
+    )))?;
+    path.rename_to_noreplace(&backup)?;
+    let staged = backup.metadata_no_follow()?;
+    if (staged.device(), staged.inode()) != expected_identity {
+        let _ = backup.rename_to_noreplace(path);
         bail!("destination changed while it was being staged; retry from a fresh snapshot");
     }
     Ok(Some(backup))
 }
 
-fn discard_backup(backup: Option<&Path>) -> anyhow::Result<()> {
+fn discard_backup(backup: Option<&AnchoredPath>) -> anyhow::Result<()> {
     if let Some(backup) = backup {
         remove_path(backup)?;
     }
     Ok(())
 }
 
-fn rollback_destination(destination: &Path, backup: Option<&Path>) -> anyhow::Result<()> {
+fn rollback_destination(
+    destination: &AnchoredPath,
+    backup: Option<&AnchoredPath>,
+) -> anyhow::Result<()> {
     if let Some(backup) = backup {
-        rename_noreplace(backup, destination).context(
+        backup.rename_to_noreplace(destination).context(
             "destination changed during rollback; preserved backup instead of deleting a racer",
         )?;
     }
     Ok(())
 }
 
-fn remove_path(path: &Path) -> anyhow::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(path)?;
+fn remove_path(path: &AnchoredPath) -> anyhow::Result<()> {
+    let metadata = path.metadata_no_follow()?;
+    if metadata.is_dir() && !metadata.is_symlink() {
+        for name in path.directory_entries()? {
+            remove_path(&path.child(name)?)?;
+        }
+        path.unlink(true)?;
     } else {
-        fs::remove_file(path)?;
+        path.unlink(false)?;
     }
     Ok(())
 }
 
 fn copy_file_atomic(
-    source: &Path,
-    destination: &Path,
+    source: &AnchoredPath,
+    destination: &AnchoredPath,
     permissions: fs::Permissions,
     cancellation: &AtomicBool,
 ) -> anyhow::Result<()> {
-    let parent = destination.parent().context("destination has no parent")?;
-    let temporary = parent.join(format!(".tmux-ide-copy-{}.partial", Uuid::new_v4()));
+    let temporary = destination.sibling(OsString::from(format!(
+        ".tmux-ide-copy-{}.partial",
+        Uuid::new_v4()
+    )))?;
     let result = (|| -> anyhow::Result<()> {
-        let mut input = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(source)?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        let mut input = source.open_file()?;
+        let mut output = temporary.create_file(0o600)?;
         let mut buffer = vec![0_u8; 256 * 1024];
         loop {
             check_cancelled(cancellation)?;
@@ -285,63 +288,57 @@ fn copy_file_atomic(
             output.write_all(&buffer[..read])?;
         }
         output.sync_all()?;
-        fs::set_permissions(&temporary, permissions)?;
-        rename_noreplace(&temporary, destination)?;
+        output.set_permissions(permissions)?;
+        temporary.rename_to_noreplace(destination)?;
         Ok(())
     })();
     if result.is_err() {
-        let _ = fs::remove_file(temporary);
+        let _ = temporary.unlink(false);
     }
     result
 }
 
-fn copy_symlink_atomic(source: &Path, destination: &Path) -> anyhow::Result<()> {
-    let parent = destination.parent().context("destination has no parent")?;
-    let temporary = parent.join(format!(".tmux-ide-copy-{}.partial", Uuid::new_v4()));
-    let link = fs::read_link(source)?;
+fn copy_symlink_atomic(source: &AnchoredPath, destination: &AnchoredPath) -> anyhow::Result<()> {
+    let temporary = destination.sibling(OsString::from(format!(
+        ".tmux-ide-copy-{}.partial",
+        Uuid::new_v4()
+    )))?;
+    let link = source.read_link()?;
     let result = (|| -> anyhow::Result<()> {
-        std::os::unix::fs::symlink(link, &temporary)?;
-        rename_noreplace(&temporary, destination)?;
+        temporary.create_symlink(&link)?;
+        temporary.rename_to_noreplace(destination)?;
         Ok(())
     })();
     if result.is_err() {
-        let _ = fs::remove_file(temporary);
+        let _ = temporary.unlink(false);
     }
     result
 }
 
 fn copy_directory(
-    source: &Path,
-    destination: &Path,
+    source: &AnchoredPath,
+    destination: &AnchoredPath,
     cancellation: &AtomicBool,
 ) -> anyhow::Result<()> {
     check_cancelled(cancellation)?;
-    let source_directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(source)?;
-    let stable_source = descriptor_path(source_directory.as_raw_fd());
-    fs::create_dir(destination)?;
-    fs::set_permissions(destination, source_directory.metadata()?.permissions())?;
-    let destination_directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(destination)?;
-    let stable_destination = descriptor_path(destination_directory.as_raw_fd());
-    for entry in fs::read_dir(&stable_source)? {
+    let source_permissions = source.open_directory()?.metadata()?.permissions();
+    destination.create_directory(0o700)?;
+    destination
+        .open_directory()?
+        .set_permissions(source_permissions)?;
+    for name in source.directory_entries()? {
         check_cancelled(cancellation)?;
-        let entry = entry?;
-        let metadata = fs::symlink_metadata(entry.path())?;
-        let target = stable_destination.join(entry.file_name());
-        if metadata.file_type().is_symlink() {
-            let link = fs::read_link(entry.path())?;
-            std::os::unix::fs::symlink(link, target)?;
+        let source_entry = source.child(name.clone())?;
+        let target = destination.child(name)?;
+        let metadata = source_entry.metadata_no_follow()?;
+        if metadata.is_symlink() {
+            target.create_symlink(&source_entry.read_link()?)?;
             continue;
         }
         if metadata.is_dir() {
-            copy_directory(&entry.path(), &target, cancellation)?;
+            copy_directory(&source_entry, &target, cancellation)?;
         } else if metadata.is_file() {
-            copy_file_atomic(&entry.path(), &target, metadata.permissions(), cancellation)?;
+            copy_file_atomic(&source_entry, &target, metadata.permissions(), cancellation)?;
         } else {
             bail!("unsupported file type while duplicating directory");
         }
@@ -350,42 +347,108 @@ fn copy_directory(
 }
 
 fn copy_directory_atomic(
-    source: &Path,
-    destination: &Path,
+    source: &AnchoredPath,
+    destination: &AnchoredPath,
     cancellation: &AtomicBool,
 ) -> anyhow::Result<()> {
-    let parent = destination.parent().context("destination has no parent")?;
-    let temporary = parent.join(format!(".tmux-ide-copy-{}.partial", Uuid::new_v4()));
+    let temporary = destination.sibling(OsString::from(format!(
+        ".tmux-ide-copy-{}.partial",
+        Uuid::new_v4()
+    )))?;
     let result = copy_directory(source, &temporary, cancellation).and_then(|()| {
         check_cancelled(cancellation)?;
-        rename_noreplace(&temporary, destination)?;
+        temporary.rename_to_noreplace(destination)?;
         Ok(())
     });
-    if result.is_err() && temporary.exists() {
-        let _ = fs::remove_dir_all(temporary);
+    if result.is_err() && temporary.exists().unwrap_or(false) {
+        let _ = remove_path(&temporary);
     }
     result
 }
 
-fn remove_directory_cooperative(path: &Path, cancellation: &AtomicBool) -> anyhow::Result<()> {
+fn remove_directory_cooperative(
+    path: &AnchoredPath,
+    cancellation: &AtomicBool,
+) -> anyhow::Result<()> {
     check_cancelled(cancellation)?;
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(path)?;
-    let stable = descriptor_path(directory.as_raw_fd());
-    for entry in fs::read_dir(stable)? {
+    for name in path.directory_entries()? {
         check_cancelled(cancellation)?;
-        let entry = entry?;
-        let metadata = fs::symlink_metadata(entry.path())?;
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            remove_directory_cooperative(&entry.path(), cancellation)?;
+        let entry = path.child(name)?;
+        let metadata = entry.metadata_no_follow()?;
+        if metadata.is_dir() && !metadata.is_symlink() {
+            remove_directory_cooperative(&entry, cancellation)?;
         } else {
-            fs::remove_file(entry.path())?;
+            entry.unlink(false)?;
         }
     }
-    fs::remove_dir(path)?;
+    path.unlink(true)?;
     Ok(())
+}
+
+fn is_case_only_same_entry(
+    source: &AnchoredPath,
+    destination: &AnchoredPath,
+    source_metadata: &AnchoredMetadata,
+) -> anyhow::Result<bool> {
+    if !source.same_parent(destination)? || source.leaf() == destination.leaf() {
+        return Ok(false);
+    }
+    let Some(destination_metadata) = destination
+        .exists()?
+        .then(|| destination.metadata_no_follow())
+        .transpose()?
+    else {
+        return Ok(false);
+    };
+    let same_folded_name = source.leaf().to_string_lossy().to_lowercase()
+        == destination.leaf().to_string_lossy().to_lowercase();
+    Ok(same_folded_name
+        && (source_metadata.device(), source_metadata.inode())
+            == (destination_metadata.device(), destination_metadata.inode()))
+}
+
+pub(super) fn mutation_metadata(
+    anchor: &AnchoredPath,
+    logical: &Path,
+) -> anyhow::Result<v1::FileMetadata> {
+    let metadata = anchor.metadata_no_follow()?;
+    let symlink = metadata.is_symlink();
+    let kind = if symlink {
+        v1::FileKind::Symlink
+    } else if metadata.is_dir() {
+        v1::FileKind::Directory
+    } else if metadata.is_file() {
+        v1::FileKind::File
+    } else {
+        v1::FileKind::Other
+    };
+    let name = logical
+        .file_name()
+        .unwrap_or(logical.as_os_str())
+        .to_string_lossy()
+        .into_owned();
+    let mime = image_mime(logical).unwrap_or_default().to_owned();
+    Ok(v1::FileMetadata {
+        path: logical.to_string_lossy().into_owned(),
+        name: name.clone(),
+        kind: kind.into(),
+        size: metadata.len(),
+        modified_unix_millis: metadata.modified_unix_millis(),
+        mode: metadata.mode(),
+        symlink,
+        symlink_target: symlink
+            .then(|| anchor.read_link().ok())
+            .flatten()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        expandable: metadata.is_dir() && name != ".git" && name != "node_modules",
+        generation: metadata.generation(),
+        mime: mime.clone(),
+        image_preview_eligible: metadata.is_file()
+            && !mime.is_empty()
+            && metadata.len() <= MAX_IMAGE_BYTES,
+        symlink_target_kind: v1::FileKind::Unspecified.into(),
+    })
 }
 
 fn check_cancelled(cancellation: &AtomicBool) -> anyhow::Result<()> {
@@ -393,4 +456,48 @@ fn check_cancelled(cancellation: &AtomicBool) -> anyhow::Result<()> {
         bail!("cancelled: file mutation was cancelled");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn staging_and_recursive_copy_stay_on_captured_parent_after_late_swap() {
+        #[cfg(target_os = "macos")]
+        let temporary_root = PathBuf::from("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let temporary_root = std::env::temp_dir();
+        let root = temporary_root.join(format!("ade-mutation-{}", Uuid::new_v4()));
+        let outside = temporary_root.join(format!("ade-outside-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("parent/source/nested")).unwrap();
+        fs::write(root.join("parent/source/nested/value"), "inside").unwrap();
+        fs::create_dir(root.join("parent/destination")).unwrap();
+        fs::write(root.join("parent/destination/original"), "original").unwrap();
+        fs::create_dir_all(outside.join("destination")).unwrap();
+        fs::write(outside.join("destination/foreign"), "foreign").unwrap();
+
+        let capability = RootCapability::capture(root.to_str().unwrap()).unwrap();
+        let source = capability.anchor(&root.join("parent/source")).unwrap();
+        let destination = capability.anchor(&root.join("parent/destination")).unwrap();
+        fs::rename(root.join("parent"), root.join("captured-parent")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("parent")).unwrap();
+
+        let backup = stage_destination(&destination, true, true).unwrap();
+        copy_directory_atomic(&source, &destination, &AtomicBool::new(false)).unwrap();
+        discard_backup(backup.as_ref()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join("captured-parent/destination/nested/value")).unwrap(),
+            "inside"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("destination/foreign")).unwrap(),
+            "foreign"
+        );
+        assert!(!outside.join("destination/nested").exists());
+        fs::remove_file(root.join("parent")).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
 }

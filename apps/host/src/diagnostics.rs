@@ -856,7 +856,11 @@ mod tests {
     use super::*;
 
     fn private_directory() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("ade-diagnostics-{}", uuid::Uuid::new_v4()));
+        #[cfg(target_os = "macos")]
+        let temporary_root = Path::new("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let temporary_root = std::env::temp_dir();
+        let path = temporary_root.join(format!("ade-diagnostics-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path

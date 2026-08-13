@@ -122,7 +122,16 @@ fn phase0_ssh(target: &str) -> anyhow::Result<()> {
     if target.is_empty() || target.starts_with('-') || target.contains(char::is_whitespace) {
         bail!("invalid SSH target");
     }
-    let control_socket = std::env::temp_dir().join(format!("ade-phase0-{}.sock", Uuid::new_v4()));
+    // OpenSSH appends a temporary suffix while creating a control socket, and a
+    // macOS per-user temporary directory leaves no room for it under the
+    // 104-byte AF_UNIX limit. Use the same short, private, uid-scoped runtime
+    // root the helper's own SSH control sockets already use.
+    let runtime = std::path::PathBuf::from(format!("/tmp/tmux-agent-ide-{}", unsafe {
+        libc::geteuid()
+    }))
+    .join("ssh");
+    paths::prepare_runtime_dir(&runtime)?;
+    let control_socket = runtime.join(format!("ade-phase0-{}.sock", Uuid::new_v4()));
     let result = phase0_ssh_inner(target, &control_socket);
     let _ = ssh_command()
         .arg("-S")

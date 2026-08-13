@@ -4,17 +4,18 @@ import { createTmuxConfirmation, type PendingTmuxConfirmation } from "../../comm
 import type { PendingTextPrompt } from "../../commands/TextInputDialog";
 import { commandRegistry, type CommandContext, type CommandId, type CommandTarget } from "../../commands/registry";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
-import type { TmuxAction } from "../tmux/actions";
+import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
 import { relativeWindowReorderAction } from "../../app/windowSelection";
 import { closeAppTab, reorderAppTab, type CombinedTab } from "./model";
 import type { AppOwnedTab, PersistedAppState } from "./types";
 import type { HostScopeToken } from "./hostScope";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
+import { shellAfterSidebarCommand } from "./responsiveShell";
 
 type PerformAction = (
   action: TmuxAction,
   precondition?: { serverIdentity: string; generation: number },
-) => Promise<boolean>;
+) => Promise<TmuxActionResult | undefined>;
 
 interface ShellCommandOptions {
   activePane?: Pane;
@@ -23,6 +24,7 @@ interface ShellCommandOptions {
   appState: PersistedAppState;
   canMutate: boolean;
   combinedTabs: readonly CombinedTab[];
+  compactViewport: boolean;
   controllers: MutableRefObject<Map<string, TerminalPaneController>>;
   currentHostProfileId: string;
   focusDirection(direction: "left" | "right" | "up" | "down"): void;
@@ -31,6 +33,7 @@ interface ShellCommandOptions {
   isHostScopeCurrent(scope: HostScopeToken): boolean;
   performAction: PerformAction;
   selectedAppTab?: AppOwnedTab;
+  selectCreatedSession(sessionId: string): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
   setConfirmation: Dispatch<SetStateAction<PendingTmuxConfirmation | undefined>>;
@@ -109,10 +112,15 @@ export function useShellCommands(options: ShellCommandOptions): {
     switch (commandId) {
       case "commands.show": options.setPaletteOpen(true); return;
       case "shortcuts.configure": options.setShortcutEditorOpen(true); return;
-      case "view.toggleExplorer": options.setAppState((current) => ({ ...current, shell: { ...current.shell, explorerCollapsed: !current.shell.explorerCollapsed } })); return;
-      case "view.toggleAgents": options.setAppState((current) => ({ ...current, shell: { ...current.shell, agentSidebarCollapsed: !current.shell.agentSidebarCollapsed } })); return;
-      case "view.showExplorer": options.setAppState((current) => ({ ...current, shell: { ...current.shell, explorerCollapsed: false, explorerSurface: "explorer" } })); return;
-      case "view.showGit": options.setAppState((current) => ({ ...current, shell: { ...current.shell, explorerCollapsed: false, explorerSurface: "git" } })); return;
+      case "view.toggleExplorer":
+      case "view.toggleAgents":
+      case "view.showExplorer":
+      case "view.showGit":
+        options.setAppState((current) => ({
+          ...current,
+          shell: shellAfterSidebarCommand(current.shell, commandId, options.compactViewport),
+        }));
+        return;
       case "focus.workspaces": document.querySelector<HTMLButtonElement>(".workspace-select[aria-current=page], .workspace-select")?.focus(); return;
       case "focus.tabs": document.querySelector<HTMLButtonElement>(".combined-tab-select[aria-selected=true], .combined-tab-select")?.focus(); return;
       case "session.new": {
@@ -120,7 +128,9 @@ export function useShellCommands(options: ShellCommandOptions): {
         options.setTextPrompt({ title: "New workspace", label: "Workspace name", submit: (name) => {
           options.setTextPrompt(undefined);
           if (!options.isHostScopeCurrent(scope)) return options.setStatus("Workspace creation was cancelled because its host scope changed.");
-          void options.performAction({ kind: "createSession", name });
+          void options.performAction({ kind: "createSession", name }).then((result) => {
+            if (result?.sessionId && options.isHostScopeCurrent(scope)) options.selectCreatedSession(result.sessionId);
+          });
         } });
         return;
       }

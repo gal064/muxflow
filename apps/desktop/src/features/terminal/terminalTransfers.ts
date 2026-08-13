@@ -72,7 +72,8 @@ export interface VerifiedTerminalUpload {
 
 export type NativeTerminalClipboard =
   | { kind: "files"; uris: string[] }
-  | { kind: "image"; staged: { path: string; sizeBytes: string; name: string } };
+  | { kind: "image"; staged: { path: string; sizeBytes: string; name: string } }
+  | { kind: "text"; text: string };
 
 export interface TerminalTransferClient {
   readNativeClipboard?(): Promise<NativeTerminalClipboard | undefined>;

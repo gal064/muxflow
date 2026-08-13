@@ -204,7 +204,7 @@ pub(super) fn read_status_cancellable(
             entry.symlink = worktree
                 .entry(&entry.path)?
                 .metadata()?
-                .is_some_and(|metadata| metadata.file_type().is_symlink());
+                .is_some_and(|metadata| metadata.is_symlink());
         }
     }
     for record in output

@@ -57,3 +57,9 @@ and helper version before offering an explicit helper installation or upgrade.
 It never requires root or systemd on the host.
 
 Only one host/tmux server is active at a time in V1.
+# macOS
+
+Development and the internal package require macOS 14 or newer, Xcode Command
+Line Tools, Rust 1.97.1, Node 24, pnpm 11, tmux 3.3 or newer, and Git. Homebrew
+installations under `/opt/homebrew` are supported from the non-interactive app
+environment. The current packaged artifact supports Apple Silicon only.

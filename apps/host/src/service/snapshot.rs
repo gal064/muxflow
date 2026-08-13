@@ -314,10 +314,12 @@ mod tests {
 
     #[test]
     fn server_identity_changes_when_the_same_path_gets_a_replacement_socket() {
-        let directory = std::env::current_dir()
-            .unwrap()
-            .join("tmp")
-            .join(format!("phase5-server-identity-{}", uuid::Uuid::new_v4()));
+        #[cfg(target_os = "macos")]
+        let temporary_root = Path::new("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let temporary_root = std::env::temp_dir();
+        let directory =
+            temporary_root.join(format!("phase5-server-identity-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("tmux.sock");
         let first_listener = UnixListener::bind(&socket).unwrap();

@@ -37,7 +37,13 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             let (_topology_guard, known_generation) =
                 lock_topology_generation(topology_lock, generation).await;
             let cached_baseline = topology_baseline.lock().unwrap().clone();
-            let fresh = tokio::task::spawn_blocking(tmux_actions::discover_before_action).await;
+            // Resolving the baseline has to know the action kind: creating the
+            // first session is allowed to run with no tmux server, and every
+            // other action is not (M10-E060).
+            let action_kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
+            let fresh =
+                tokio::task::spawn_blocking(move || tmux_actions::discover_for_action(action_kind))
+                    .await;
             let (fresh_snapshot, fresh_identity) = match fresh {
                 Ok(Ok(value)) => value,
                 Ok(Err(error)) => {
@@ -106,7 +112,6 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 pending.lock().unwrap().remove(&request_id);
                 return;
             }
-            let action_kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
             let result = tokio::task::spawn_blocking(move || {
                 tmux_actions::execute(action, known_generation, fresh_snapshot, fresh_identity)
             })

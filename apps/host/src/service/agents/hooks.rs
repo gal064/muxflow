@@ -607,9 +607,9 @@ fn exchange_reviewed(temporary: &Path, path: &Path, reviewed: &[u8]) -> anyhow::
 fn remove_atomic(path: &Path, reviewed: &[u8]) -> anyhow::Result<()> {
     let parent = path.parent().context("hook config path has no parent")?;
     inspect_parent(parent)?;
-    let tombstone = parent.join(format!(".hook-remove-{}.tmp", uuid::Uuid::new_v4()));
     #[cfg(target_os = "linux")]
     {
+        let tombstone = parent.join(format!(".hook-remove-{}.tmp", uuid::Uuid::new_v4()));
         renameat2(path, &tombstone, libc::RENAME_NOREPLACE)?;
         if read_config(&tombstone)? != reviewed {
             renameat2(&tombstone, path, libc::RENAME_NOREPLACE)

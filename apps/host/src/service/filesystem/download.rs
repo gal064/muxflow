@@ -28,75 +28,85 @@ impl FileService {
             bail!("transfer ID is already active");
         }
         let root = RootCapability::validate(root, root_token)?;
-        let (logical_source, source) = root.resolve_existing(path)?;
+        let (logical_source, _) = root.resolve_new(path)?;
         reject_root_target(root.logical_root(), &logical_source)?;
-        let leaf_metadata = fs::symlink_metadata(&source)?;
-        let (source_mode, source_kind) = if leaf_metadata.file_type().is_symlink() {
-            let (_, target) = root.regular_file_target(&logical_source, &source)?;
-            let metadata = fs::metadata(target)?;
-            (metadata.permissions().mode(), metadata)
-        } else {
-            (leaf_metadata.permissions().mode(), leaf_metadata)
-        };
-        let (source_handle, total, file_generation, folder_archive, suggested_name) = if folder {
-            if !source_kind.is_dir() || fs::symlink_metadata(&source)?.file_type().is_symlink() {
-                bail!("folder download source is not a directory");
-            }
-            let name = source.file_name().context("folder has no name")?;
-            let source_anchor = root.anchor(&logical_source)?;
-            let directory = source_anchor.open_directory()?;
-            let stable_directory = descriptor_path(directory.as_raw_fd());
-            let mut child = Command::new("tar")
-                .arg("--format=pax")
-                // The child resolves the descriptor-backed cwd before exec,
-                // while the inherited directory fd is still live even when
-                // it has CLOEXEC set.
-                .current_dir(stable_directory)
-                .args(["-cf", "-", "--"])
-                .arg(".")
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .context("failed to start folder download archive")?;
-            let stdout = child
-                .stdout
-                .take()
-                .context("folder archive stdout unavailable")?;
-            set_nonblocking(&stdout)?;
-            (
-                TransferSource::Archive {
-                    child,
-                    stdout,
-                    _directory: directory,
-                },
-                None,
-                metadata_generation(&source_kind),
-                true,
-                format!("{}.tar", name.to_string_lossy()),
-            )
-        } else {
-            let (logical_opened, _) = root.regular_file_target(&logical_source, &source)?;
-            let opened_anchor = root.anchor(&logical_opened)?;
-            let file = opened_anchor.open_file()?;
-            let opened_metadata = file.metadata()?;
-            let generation = metadata_generation(&opened_metadata);
-            if expected_generation != 0 && expected_generation != generation {
-                bail!("stale_file_generation: file changed before transfer opened");
-            }
-            let name = source
-                .file_name()
-                .context("file has no name")?
-                .to_string_lossy()
-                .into_owned();
-            (
-                TransferSource::File(file),
-                Some(opened_metadata.len()),
-                generation,
-                false,
-                name,
-            )
-        };
+        let source_anchor = root.anchor(&logical_source)?;
+        let leaf_metadata = source_anchor.metadata_no_follow()?;
+        let (source_handle, total, file_generation, source_mode, folder_archive, suggested_name) =
+            if folder {
+                if !leaf_metadata.is_dir() || leaf_metadata.is_symlink() {
+                    bail!("folder download source is not a directory");
+                }
+                let name = logical_source.file_name().context("folder has no name")?;
+                let directory = source_anchor.open_directory()?;
+                let directory_fd = directory.as_raw_fd();
+                let mut command = Command::new("tar");
+                command
+                    .arg("--format=pax")
+                    .args(["-cf", "-", "--"])
+                    .arg(".")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null());
+                // SAFETY: the child performs only async-signal-safe fchdir before
+                // exec. Its cwd remains bound to the authorized directory inode
+                // even if every pathname leading to it is concurrently replaced.
+                unsafe {
+                    use std::os::unix::process::CommandExt as _;
+                    command.pre_exec(move || {
+                        if libc::fchdir(directory_fd) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                let mut child = command
+                    .spawn()
+                    .context("failed to start folder download archive")?;
+                let stdout = child
+                    .stdout
+                    .take()
+                    .context("folder archive stdout unavailable")?;
+                set_nonblocking(&stdout)?;
+                (
+                    TransferSource::Archive {
+                        child,
+                        stdout,
+                        _directory: directory,
+                    },
+                    None,
+                    leaf_metadata.generation(),
+                    leaf_metadata.mode(),
+                    true,
+                    format!("{}.tar", name.to_string_lossy()),
+                )
+            } else {
+                let file = if leaf_metadata.is_symlink() {
+                    let (_, source) = root.resolve_existing(path)?;
+                    let (logical_opened, _) = root.regular_file_target(&logical_source, &source)?;
+                    root.anchor(&logical_opened)?.open_file()?
+                } else {
+                    source_anchor.open_file()?
+                };
+                let opened_metadata = file.metadata()?;
+                let generation = metadata_generation(&opened_metadata);
+                if expected_generation != 0 && expected_generation != generation {
+                    bail!("stale_file_generation: file changed before transfer opened");
+                }
+                let name = logical_source
+                    .file_name()
+                    .context("file has no name")?
+                    .to_string_lossy()
+                    .into_owned();
+                (
+                    TransferSource::File(file),
+                    Some(opened_metadata.len()),
+                    generation,
+                    opened_metadata.permissions().mode(),
+                    false,
+                    name,
+                )
+            };
         self.transfers.lock().unwrap().insert(
             transfer_id.to_owned(),
             Transfer {

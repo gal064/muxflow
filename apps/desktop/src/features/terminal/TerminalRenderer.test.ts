@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SearchAddon } from "@xterm/addon-search";
 import { TerminalWriteScheduler } from "./TerminalRenderer";
-import { isForcedLocalSelection, paneRecoveryPlan } from "./TerminalPane";
+import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan } from "./TerminalPane";
 
 describe("TerminalWriteScheduler", () => {
   it("preserves byte order and respects the per-frame budget", () => {
@@ -194,6 +194,37 @@ describe("local terminal selection modifier", () => {
   it("uses Shift to force local selection while Linux TUIs report mouse input", () => {
     expect(isForcedLocalSelection({ shiftKey: true })).toBe(true);
     expect(isForcedLocalSelection({ shiftKey: false })).toBe(false);
+  });
+});
+
+describe("native terminal paste interception", () => {
+  it("owns plain text before xterm can add a second bracketed-paste envelope", () => {
+    const paste = vi.fn();
+    const event = {
+      clipboardData: { getData: (type: string) => type === "text/plain" ? "printf 'rocket 🚀\\n'" : "" },
+      defaultPrevented: false,
+      preventDefault: vi.fn(),
+      stopImmediatePropagation: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+    expect(interceptTerminalPlainTextPaste(event, paste)).toBe(true);
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(event.stopPropagation).toHaveBeenCalledOnce();
+    expect(event.stopImmediatePropagation).toHaveBeenCalledOnce();
+    expect(paste).toHaveBeenCalledWith("printf 'rocket 🚀\\n'");
+  });
+
+  it("leaves file or image paste already claimed by the transfer surface alone", () => {
+    const paste = vi.fn();
+    const event = {
+      clipboardData: { getData: () => "file:///tmp/image.png" },
+      defaultPrevented: true,
+      preventDefault: vi.fn(),
+      stopImmediatePropagation: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+    expect(interceptTerminalPlainTextPaste(event, paste)).toBe(false);
+    expect(paste).not.toHaveBeenCalled();
   });
 });
 
