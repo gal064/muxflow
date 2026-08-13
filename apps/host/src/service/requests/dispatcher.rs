@@ -292,6 +292,27 @@ pub(crate) async fn handle_request(
                 }
                 Err(error) => Err(error),
             };
+            // A malformed scope has no pane to recover, and an unscoped
+            // resnapshot event would escalate to a whole-connection reconnect.
+            if let Err(error) = &result
+                && super::super::terminal::validate_tmux_id(&request.scope, '%').is_ok()
+            {
+                // The desktop no longer awaits this response on the keystroke
+                // path, so the event stream is the only channel that still
+                // reaches the user. Scope the recovery to the pane: bytes the
+                // user typed did not reach it, so its screen no longer reflects
+                // what they think they sent.
+                emit_event(
+                    event_tx,
+                    overflowed,
+                    v1::HostEvent {
+                        kind: v1::EventKind::TerminalResnapshotRequired.into(),
+                        scope: request.scope.clone(),
+                        detail: format!("terminal input was not delivered: {error}"),
+                        ..Default::default()
+                    },
+                );
+            }
             send_response(
                 control_tx,
                 request_id,

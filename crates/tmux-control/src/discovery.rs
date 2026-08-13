@@ -140,6 +140,122 @@ where
     })
 }
 
+// ---------------------------------------------------------------------------
+// Batched discovery
+// ---------------------------------------------------------------------------
+
+const SESSION_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{session_name}__ADE_TMUX_FIELD_9C71__#{session_windows}__ADE_TMUX_FIELD_9C71__#{session_attached}";
+const WINDOW_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{window_index}__ADE_TMUX_FIELD_9C71__#{window_name}__ADE_TMUX_FIELD_9C71__#{window_active}__ADE_TMUX_FIELD_9C71__#{window_layout}__ADE_TMUX_FIELD_9C71__#{window_zoomed_flag}";
+const PANE_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}";
+
+const IDENTITY_MARKER: &str = "__ADE_ID__";
+const SESSION_MARKER: &str = "__ADE_S__";
+const WINDOW_MARKER: &str = "__ADE_W__";
+const PANE_MARKER: &str = "__ADE_P__";
+
+/// One tmux invocation that returns the server's socket path and its whole
+/// topology.
+///
+/// Discovery used to cost five client forks — identity, sessions, windows,
+/// panes, identity again — and a tmux client fork is milliseconds, which is
+/// most of the latency of every action. tmux accepts several commands per
+/// invocation, so the same records travel on one fork. The repeated identity
+/// probe becomes unnecessary at the same time: one client invocation is bound
+/// to one server for its whole life, so there is no window in which the records
+/// could come from two different servers.
+pub fn batched_discovery_args() -> Vec<String> {
+    [
+        "display-message",
+        "-p",
+        &format!("{IDENTITY_MARKER}#{{socket_path}}"),
+        ";",
+        "list-sessions",
+        "-F",
+        &format!("{SESSION_MARKER}{SESSION_FORMAT}"),
+        ";",
+        "list-windows",
+        "-a",
+        "-F",
+        &format!("{WINDOW_MARKER}{WINDOW_FORMAT}"),
+        ";",
+        "list-panes",
+        "-a",
+        "-F",
+        &format!("{PANE_MARKER}{PANE_FORMAT}"),
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+/// The socket path and topology carried by one [`batched_discovery_args`] run.
+pub struct BatchedDiscovery {
+    pub socket_path: String,
+    pub snapshot: TmuxSnapshot,
+}
+
+/// Parses the output of [`batched_discovery_args`].
+///
+/// `success` is the invocation's exit status. tmux aborts a chained command
+/// list at the first failure, and a live server with no sessions fails at the
+/// first command that needs a current target — after the identity line has
+/// already been printed. That case is a real empty topology, not an error, so
+/// it is accepted; a failure that already produced topology records is not,
+/// because a truncated topology would let an action run against a snapshot the
+/// server never actually had.
+pub fn parse_batched_discovery(
+    stdout: &[u8],
+    stderr: &[u8],
+    success: bool,
+) -> Result<BatchedDiscovery, DiscoverError> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut socket_path = None;
+    let (mut sessions, mut windows, mut panes) = (Vec::new(), Vec::new(), Vec::new());
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix(IDENTITY_MARKER) {
+            socket_path = Some(rest.trim_end().to_owned());
+        } else if let Some(rest) = line.strip_prefix(SESSION_MARKER) {
+            sessions.push(rest);
+        } else if let Some(rest) = line.strip_prefix(WINDOW_MARKER) {
+            windows.push(rest);
+        } else if let Some(rest) = line.strip_prefix(PANE_MARKER) {
+            panes.push(rest);
+        }
+    }
+    let Some(socket_path) = socket_path else {
+        return Err(DiscoverError::Command(
+            String::from_utf8_lossy(stderr).trim().to_owned(),
+        ));
+    };
+    if !success && !(sessions.is_empty() && windows.is_empty() && panes.is_empty()) {
+        return Err(DiscoverError::Command(
+            String::from_utf8_lossy(stderr).trim().to_owned(),
+        ));
+    }
+    Ok(BatchedDiscovery {
+        socket_path,
+        snapshot: TmuxSnapshot {
+            sessions: sessions
+                .iter()
+                .enumerate()
+                .map(|(order, line)| {
+                    let mut session = parse_session(line)?;
+                    session.order = order.try_into().unwrap_or(u32::MAX);
+                    Ok(session)
+                })
+                .collect::<Result<_, DiscoverError>>()?,
+            windows: windows
+                .iter()
+                .map(|line| parse_window(line))
+                .collect::<Result<_, _>>()?,
+            panes: panes
+                .iter()
+                .map(|line| parse_pane(line))
+                .collect::<Result<_, _>>()?,
+        },
+    })
+}
+
 fn query<F>(execute: &mut F, subcommand: &str, format: &str) -> Result<Vec<String>, DiscoverError>
 where
     F: FnMut(&[String]) -> Result<Output, std::io::Error>,

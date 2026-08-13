@@ -20,14 +20,27 @@ pub(super) fn execute(
     expected_identity: String,
 ) -> anyhow::Result<ActionOutcome> {
     let kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
-    let bootstrapping = bootstraps_server(kind, &server_identity());
+    // The dispatcher discovered this snapshot under the same topology lock
+    // immediately before calling in, and proved it equals the cached baseline.
+    // Re-discovering here would repeat six tmux forks to learn nothing, and the
+    // forks were most of every action's latency. The snapshot the dispatcher
+    // resolved is the pre-action topology by construction.
+    let bootstrapping = bootstraps_server(kind, &expected_identity);
+    if bootstrapping && server_identity() != "tmux:none" {
+        // The bootstrap arm is the one path where the dispatcher deliberately
+        // skipped discovery, so it is the only place a server can have appeared
+        // since. Probing identity costs one fork on the first-ever create and
+        // preserves the previous refusal: a session is never created on a
+        // server the caller never saw.
+        bail!("stale topology: a tmux server started before the bootstrap action executed");
+    }
     let (mut before, identity) = if bootstrapping {
         (
             tmux_control::TmuxSnapshot::default(),
             "tmux:none".to_owned(),
         )
     } else {
-        discover_consistent()?
+        (expected_snapshot.clone(), expected_identity.clone())
     };
     if identity != expected_identity || !super::same_action_topology(&before, &expected_snapshot) {
         bail!("stale topology: external tmux structural mutation occurred before action execution");
@@ -172,7 +185,7 @@ pub(super) fn execute(
     }
 
     let (snapshot, server_identity) =
-        normalize_post_action(kind, discover_consistent(), &server_identity())?;
+        normalize_post_action(kind, discover_consistent(), server_identity)?;
     let identity_preserved =
         identity_transition_allowed(kind, bootstrapping, &identity, &server_identity);
     if !identity_preserved
@@ -329,24 +342,29 @@ fn action_postcondition(
     }
 }
 
+/// `current_identity` is resolved lazily: it only matters when discovery
+/// failed, and probing it eagerly would put an extra tmux fork on the hot path
+/// of every successful action.
 fn normalize_post_action(
     kind: v1::TmuxActionKind,
     discovered: anyhow::Result<(tmux_control::TmuxSnapshot, String)>,
-    current_identity: &str,
+    current_identity: impl FnOnce() -> String,
 ) -> anyhow::Result<(tmux_control::TmuxSnapshot, String)> {
     match discovered {
         Ok(value) => Ok(value),
-        Err(_)
+        Err(error) => {
             if matches!(
                 kind,
                 v1::TmuxActionKind::CloseSession
                     | v1::TmuxActionKind::CloseWindow
                     | v1::TmuxActionKind::ClosePane
-            ) && current_identity == "tmux:none" =>
-        {
-            Ok((tmux_control::TmuxSnapshot::default(), "tmux:none".into()))
+            ) && current_identity() == "tmux:none"
+            {
+                Ok((tmux_control::TmuxSnapshot::default(), "tmux:none".into()))
+            } else {
+                Err(error)
+            }
         }
-        Err(error) => Err(error),
     }
 }
 
@@ -706,8 +724,10 @@ mod tests {
             v1::TmuxActionKind::ClosePane,
         ] {
             let (snapshot, identity) =
-                normalize_post_action(kind, Err(anyhow::anyhow!("no server")), "tmux:none")
-                    .unwrap();
+                normalize_post_action(kind, Err(anyhow::anyhow!("no server")), || {
+                    "tmux:none".into()
+                })
+                .unwrap();
             assert_eq!(snapshot, tmux_control::TmuxSnapshot::default());
             assert_eq!(identity, "tmux:none");
         }
@@ -715,7 +735,7 @@ mod tests {
             normalize_post_action(
                 v1::TmuxActionKind::RenameSession,
                 Err(anyhow::anyhow!("no server")),
-                "tmux:none",
+                || "tmux:none".into(),
             )
             .is_err()
         );
@@ -723,7 +743,7 @@ mod tests {
             normalize_post_action(
                 v1::TmuxActionKind::CloseSession,
                 Err(anyhow::anyhow!("discovery failed")),
-                "tmux:still-running",
+                || "tmux:still-running".into(),
             )
             .is_err()
         );
