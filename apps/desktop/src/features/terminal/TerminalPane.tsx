@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { closePanePaintSpans, perfProbeEnabled, recordPerfSample } from "../../perf/probe";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import type { Pane } from "../../app/types";
 import type { TerminalEventHub } from "./TerminalEventHub";
@@ -16,6 +17,15 @@ import { TerminalTransferSurface, type TerminalTransferSurfaceController } from 
 import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
 export { paneRecoveryPlan } from "./PaneRecovery";
+
+/**
+ * Outstanding keystrokes awaiting their echo, per pane, for the Phase 12
+ * keystroke-to-painted-glyph probe. A keystroke's sample closes when the pane's
+ * next output chunk finishes reaching xterm, which is the first moment the
+ * character can be on screen. The queue is bounded so a pane that is producing
+ * output on its own (an agent, a build) cannot accumulate stale marks.
+ */
+const PENDING_KEYSTROKE_MARKS = 8;
 
 // A pane may remount while its prior renderer is still draining. Serializing
 // visibility ownership keeps a late hide from overtaking the new reveal.
@@ -157,6 +167,20 @@ export function TerminalPane({
         });
       },
     });
+    const pendingKeystrokeMarks: number[] = [];
+    const noteKeystrokeSent = (input: TerminalInput) => {
+      // Only single keypresses: a paste or a programmatic burst has no
+      // meaningful "when did my character appear" moment.
+      if (!perfProbeEnabled()) return;
+      const length = input.kind === "text" ? input.data.length : input.data.byteLength;
+      if (length === 0 || length > 4) return;
+      if (pendingKeystrokeMarks.length >= PENDING_KEYSTROKE_MARKS) pendingKeystrokeMarks.shift();
+      pendingKeystrokeMarks.push(performance.now());
+    };
+    const noteOutputPainted = () => {
+      const mark = pendingKeystrokeMarks.shift();
+      if (mark !== undefined) recordPerfSample("keystroke.echoToPaint", performance.now() - mark);
+    };
     const commitRendered = (generation: number, terminalEpoch: number | undefined, establishesEpoch = false) => {
       if (establishesEpoch && hub.generationEpoch === terminalEpoch) {
         rendererEpoch = terminalEpoch;
@@ -184,6 +208,7 @@ export function TerminalPane({
     if (currentCached) {
       const cachedEpoch = currentCached.terminalEpoch;
       renderer.restore(currentCached.serialized, () => {
+        closePanePaintSpans();
         commitRendered(currentCached.outputGeneration, cachedEpoch, true);
       }, currentCached.outputGeneration);
     } else if (cached) {
@@ -214,7 +239,10 @@ export function TerminalPane({
       });
     };
 
-    const unsubscribeInput = renderer.onInput((input) => inputRef.current(pane.id, input));
+    const unsubscribeInput = renderer.onInput((input) => {
+      noteKeystrokeSent(input);
+      inputRef.current(pane.id, input);
+    });
     const unsubscribeViewport = renderer.onViewportChange(setViewport);
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
       if (!("paneId" in event)) return;
@@ -226,12 +254,18 @@ export function TerminalPane({
       if (effect.kind === "seed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
-        renderer.seed(effect.data, () => commitRendered(generation, eventEpoch, true), generation);
+        renderer.seed(effect.data, () => {
+          closePanePaintSpans();
+          commitRendered(generation, eventEpoch, true);
+        }, generation);
         setRendererDiagnostic(undefined);
         if (seedDiagnosticForNextSeedRef.current) seedDiagnosticForNextSeedRef.current = false;
         else setSeedDiagnostic(undefined);
       } else if (effect.kind === "output") {
-        renderer.write(effect.data, () => commitRendered(generation, eventEpoch), generation);
+        renderer.write(effect.data, () => {
+          noteOutputPainted();
+          commitRendered(generation, eventEpoch);
+        }, generation);
       } else if (effect.kind === "deferOutput") {
         if (deferredOutputBytesRef.current + effect.data.byteLength > 1024 * 1024) {
           clearDeferredOutput();
@@ -249,6 +283,7 @@ export function TerminalPane({
         if (effect.requestSeed) requestFreshSeed(effect.reason);
       } else if (effect.kind === "restore") {
         const markRecoveryRendered = () => {
+          closePanePaintSpans();
           commitRendered(effect.tailThroughGeneration, eventEpoch, true);
         };
         renderer.restore(
