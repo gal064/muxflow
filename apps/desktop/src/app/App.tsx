@@ -18,7 +18,7 @@ import type { TerminalInput, TerminalSize } from "../features/terminal/TerminalR
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
-import { abandonPerfSpan, openPerfSpan } from "../perf/probe";
+import { abandonPerfSpan, openPerfSpan, type PanePaintSpan } from "../perf/probe";
 import { requestTmuxAction, type TmuxAction } from "../features/tmux/actions";
 import { requestReconciledTmuxAction } from "../features/tmux/actionReconciliation";
 import { AgentPanel } from "../features/agents/AgentPanel";
@@ -75,7 +75,7 @@ const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then(
  * as "action to interactive pane", so the instrumentation spans have to start
  * at the action and end at the paint rather than at the tmux ack.
  */
-const INTERACTION_SPAN_BY_ACTION: Partial<Record<TmuxAction["kind"], string>> = {
+const INTERACTION_SPAN_BY_ACTION: Partial<Record<TmuxAction["kind"], PanePaintSpan>> = {
   createSession: "create.workspace",
   createWindow: "create.tab",
   selectWindow: "window.switch",

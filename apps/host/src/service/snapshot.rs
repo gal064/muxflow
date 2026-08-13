@@ -85,6 +85,11 @@ pub(super) fn snapshot_from_identity(
 /// whole life, so there is no interval in which the records could straddle two
 /// servers and nothing left for a second probe to detect.
 pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
+    // Identity before the records, so a server that restarts *during*
+    // discovery is caught rather than pairing the old topology with the new
+    // server. This is a stat, not a fork: the five-fork before/after probe this
+    // replaces cost milliseconds, and this costs a syscall.
+    let before = socket_server_identity(&tmux_socket_path("")).ok();
     let output = tmux_command()
         .args(tmux_control::batched_discovery_args())
         .output()
@@ -95,13 +100,16 @@ pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
         output.status.success(),
     )
     .map_err(|_| anyhow::anyhow!("tmux server is unavailable"))?;
-    let identity = socket_server_identity(&tmux_socket_path(&discovery.socket_path))
-        .unwrap_or_else(|_| "tmux:none".into());
+    let socket = tmux_socket_path(&discovery.socket_path);
+    let identity = socket_server_identity(&socket).unwrap_or_else(|_| "tmux:none".into());
     if identity == "tmux:none" {
         bail!("tmux server is unavailable");
     }
     let mut value = discovery.snapshot;
     overlay_session_order(&mut value, &identity)?;
+    if before.is_some_and(|before| before != identity) {
+        bail!("tmux server changed during snapshot discovery");
+    }
     Ok((value, identity))
 }
 

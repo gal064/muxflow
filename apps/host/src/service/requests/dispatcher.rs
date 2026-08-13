@@ -279,19 +279,20 @@ pub(crate) async fn handle_request(
             .await;
         }
         v1::Operation::TerminalInput => {
-            let queued = terminal
+            // Enqueue and answer; do not wait for tmux to accept the bytes.
+            //
+            // Enqueueing is ordered and cannot block, so keystroke order is
+            // still exactly the order they arrived in. Waiting here, by
+            // contrast, held the connection's read loop for the whole round
+            // trip: only one keystroke could be in flight at a time and nothing
+            // else on the connection — a snapshot, a tmux action, a resize —
+            // could be served while it was. The commit point callers actually
+            // depend on is the input barrier that every tmux action and resize
+            // already takes before it runs.
+            let result = terminal
                 .lock()
                 .unwrap()
                 .send_input(&request.scope, &request.data);
-            let result = match queued {
-                Ok(completion) => {
-                    match tokio::task::spawn_blocking(move || completion.wait()).await {
-                        Ok(result) => result,
-                        Err(error) => Err(anyhow::anyhow!("terminal input task failed: {error}")),
-                    }
-                }
-                Err(error) => Err(error),
-            };
             // A malformed scope has no pane to recover, and an unscoped
             // resnapshot event would escalate to a whole-connection reconnect.
             if let Err(error) = &result

@@ -20,17 +20,18 @@ use super::{
     build_seed_with_metadata, capture_metadata, selected_capture_boundary, validate_tmux_id,
 };
 
-/// Asks the dispatch thread to write a capture for `pane_id`.
+/// Asks the control-writer thread to write a capture for `pane_id`.
 ///
-/// A full queue means the writer is already saturated with work that includes
-/// captures, so dropping this one loses nothing: the reader stays free, which
-/// is the whole point of not writing from here.
+/// The send cannot block and cannot drop: the lane is unbounded and exists
+/// solely for these writes. That matters most for `resume_first`, which carries
+/// the only `refresh-client -A <pane>:continue` in the host — losing one would
+/// leave tmux's flow control holding that pane's output forever.
 fn request_capture(
-    writer: &std_mpsc::SyncSender<super::InputDispatch>,
+    writer: &std_mpsc::Sender<super::ControlWrite>,
     pane_id: &str,
     resume_first: bool,
 ) {
-    let _ = writer.try_send(super::InputDispatch::Capture {
+    let _ = writer.send(super::ControlWrite {
         pane_id: pane_id.to_owned(),
         resume_first,
     });
@@ -43,7 +44,7 @@ pub(super) struct ControlStreamReader {
     /// reading stdin while it is blocked writing output, and the reader is the
     /// only thing draining that output, so a write from here can deadlock the
     /// pair and silence the pane permanently.
-    pub(super) writer: std_mpsc::SyncSender<super::InputDispatch>,
+    pub(super) writer: std_mpsc::Sender<super::ControlWrite>,
     pub(super) pane_ids: Vec<String>,
     pub(super) event_tx: mpsc::Sender<SequencerControl>,
     pub(super) overflowed: Arc<AtomicBool>,
@@ -186,7 +187,7 @@ pub(super) struct PendingCaptureMetadata {
 }
 
 struct StreamRuntime<'a> {
-    writer: &'a std_mpsc::SyncSender<super::InputDispatch>,
+    writer: &'a std_mpsc::Sender<super::ControlWrite>,
     sender: &'a mpsc::Sender<SequencerControl>,
     overflowed: &'a AtomicBool,
     resources: &'a Arc<Mutex<PaneResourceStore>>,
@@ -332,7 +333,20 @@ impl StreamState {
                     }
                     _ => arguments,
                 };
+                // An error abandons whatever multi-block sequence was running,
+                // so every correlation slot has to be released too — otherwise
+                // the next unrelated block is mistaken for the missing half of
+                // this one.
                 self.command_block = CommandBlock::None;
+                self.expected_capture = None;
+                self.expected_input = None;
+                self.pending_alternate = None;
+                self.pending_metadata = None;
+                // No automatic retry here. The event above already asks the
+                // desktop to reseed this pane, and a capture re-issued against a
+                // pane that has just vanished fails at its own marker — which is
+                // untargeted, so its failure would be attributed to the whole
+                // connection and tear the bridge down.
                 emit_resnapshot(sender, overflowed, &scope, detail);
             }
             ControlRecord::Exit { reason } => {
@@ -349,6 +363,20 @@ impl StreamState {
                         reason
                     };
                     self.emit_pane_scoped_recovery(sender, overflowed, &detail);
+                    // This client *was* the notification source for its session,
+                    // so its death produces no topology change to notice. Say so
+                    // explicitly: reconciliation is what replaces the client, and
+                    // without this the panes stay dead until the safety pass.
+                    emit_event(
+                        sender,
+                        overflowed,
+                        v1::HostEvent {
+                            kind: v1::EventKind::TopologyDirty.into(),
+                            scope: "topology".into(),
+                            detail: "session control client exited".into(),
+                            ..Default::default()
+                        },
+                    );
                     stopped.store(true, Ordering::Release);
                 }
             }
@@ -392,7 +420,7 @@ impl StreamState {
         overflowed: &AtomicBool,
         resources: &Arc<Mutex<PaneResourceStore>>,
         terminal_generation: &Arc<AtomicU64>,
-        writer: &std_mpsc::SyncSender<super::InputDispatch>,
+        writer: &std_mpsc::Sender<super::ControlWrite>,
     ) {
         if !self.active_tag_matches(end_tag) {
             let scope = self.active_scope();
@@ -717,7 +745,7 @@ impl StreamState {
         }
     }
 
-    fn resnapshot_all(&mut self, writer: &std_mpsc::SyncSender<super::InputDispatch>) {
+    fn resnapshot_all(&mut self, writer: &std_mpsc::Sender<super::ControlWrite>) {
         self.expected_capture = None;
         self.expected_input = None;
         self.pending_alternate = None;

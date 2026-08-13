@@ -131,6 +131,12 @@ export class TerminalWriteScheduler {
     this.#accepting = false;
     if (this.#immediateResetFrame !== undefined) this.cancelFrame(this.#immediateResetFrame);
     this.#immediateResetFrame = undefined;
+    // Bytes already inside xterm's parser are unrecoverable once the terminal
+    // is disposed: nothing will call their completion. Anyone awaiting the
+    // drain has to be released anyway, or the next reveal of this pane — which
+    // waits on that promise — never happens.
+    this.#pendingBytes = 0;
+    this.#inFlightBytes = 0;
     this.#resolveDrainWaiters();
   }
 

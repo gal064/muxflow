@@ -39,21 +39,10 @@ pub(super) struct TerminalAttachment {
     stream_tx: std_mpsc::Sender<StreamControl>,
 }
 
-pub(super) struct InputCompletion(std_mpsc::Receiver<Result<(), String>>);
-
 pub(super) struct VisibilityChange {
     pub(super) visible: bool,
     pub(super) serialized_snapshot: Vec<u8>,
     pub(super) checkpoint: VisibilityCheckpoint,
-}
-
-impl InputCompletion {
-    pub(super) fn wait(self) -> anyhow::Result<()> {
-        self.0
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| anyhow::anyhow!("terminal input completion timed out"))?
-            .map_err(anyhow::Error::msg)
-    }
 }
 
 impl TerminalAttachment {
@@ -111,14 +100,33 @@ impl TerminalAttachment {
         let stopped = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = std_mpsc::sync_channel(TERMINAL_INPUT_QUEUE);
         let input_stdin = Arc::clone(&stdin);
+        // Input is fire-and-forget from the desktop, so a write that fails here
+        // has no caller left to tell. Report it on the event stream instead:
+        // the user's keystrokes did not reach the pane, and its screen no
+        // longer shows what they believe they typed.
+        let failure_tx = event_tx.clone();
+        let failure_overflowed = Arc::clone(&overflowed);
         std::thread::Builder::new()
             .name(format!("host-tmux-input-{session_id}"))
-            .spawn(move || run_input_dispatch(input_rx, input_stdin))?;
+            .spawn(move || {
+                run_input_dispatch(input_rx, input_stdin, |pane_id, error| {
+                    emit_event(
+                        &failure_tx,
+                        &failure_overflowed,
+                        v1::HostEvent {
+                            kind: v1::EventKind::TerminalResnapshotRequired.into(),
+                            scope: pane_id.to_owned(),
+                            detail: format!("terminal input was not written: {error}"),
+                            ..Default::default()
+                        },
+                    );
+                })
+            })?;
         let (stream_tx, stream_rx) = std_mpsc::channel();
         let reader_stopped = Arc::clone(&stopped);
         let reader_stop_signal = Arc::clone(&stopped);
         let reader_panes = pane_ids.to_vec();
-        let reader_writer = input_tx.clone();
+        let reader_writer = spawn_control_writer(session_id, Arc::clone(&stdin))?;
         std::thread::Builder::new()
             .name(format!("host-tmux-control-{session_id}"))
             .spawn(move || {
@@ -145,11 +153,11 @@ impl TerminalAttachment {
         })
     }
 
-    pub(super) fn send_input(
-        &mut self,
-        pane_id: &str,
-        data: &[u8],
-    ) -> anyhow::Result<InputCompletion> {
+    /// Queues one input request. Returning `Ok` means the bytes are ordered
+    /// behind everything already queued for this client, not that tmux has
+    /// accepted them; the input barrier taken before every tmux action and
+    /// resize is the point at which that becomes true.
+    pub(super) fn send_input(&mut self, pane_id: &str, data: &[u8]) -> anyhow::Result<()> {
         validate_tmux_id(pane_id, '%')?;
         if self.stopped.load(Ordering::Acquire) {
             bail!("terminal control stream is disconnected");
@@ -157,11 +165,10 @@ impl TerminalAttachment {
         if data.len() > MAX_INPUT_REQUEST_BYTES {
             bail!("terminal input request exceeds the 1 MiB atomic commit limit");
         }
-        let (completion_tx, completion_rx) = std_mpsc::sync_channel(1);
         if data.is_empty() {
-            let _ = completion_tx.send(Ok(()));
-            return Ok(InputCompletion(completion_rx));
+            return Ok(());
         }
+        let (completion_tx, _completion_rx) = std_mpsc::sync_channel(1);
         self.input_tx
             .try_send(InputDispatch::Bytes {
                 pane_id: pane_id.to_owned(),
@@ -179,7 +186,7 @@ impl TerminalAttachment {
                     anyhow::anyhow!("terminal input dispatcher is disconnected")
                 }
             })?;
-        Ok(InputCompletion(completion_rx))
+        Ok(())
     }
 
     fn flush_input(&mut self) -> anyhow::Result<()> {
@@ -347,11 +354,7 @@ impl TerminalClients {
         Ok(())
     }
 
-    pub(super) fn send_input(
-        &mut self,
-        pane_id: &str,
-        data: &[u8],
-    ) -> anyhow::Result<InputCompletion> {
+    pub(super) fn send_input(&mut self, pane_id: &str, data: &[u8]) -> anyhow::Result<()> {
         self.clients
             .values_mut()
             .find(|client| client.contains_pane(pane_id))
@@ -556,10 +559,47 @@ fn write_capture_request<W: Write>(stdin: &Arc<Mutex<W>>, pane_id: &str) -> anyh
     write_capture_request_resuming(stdin, pane_id, false)
 }
 
+/// One write the control-stream reader needs performed on its behalf.
+///
+/// The reader must never write to tmux's stdin itself: tmux stops reading its
+/// stdin while it is blocked writing output to us, and the reader is the only
+/// thing draining that output, so a write from the reader can deadlock the pair
+/// and silence the pane permanently.
+pub(super) struct ControlWrite {
+    pub(super) pane_id: String,
+    /// Whether tmux paused this pane and is waiting to be told to continue.
+    pub(super) resume_first: bool,
+}
+
+/// Serialises reader-requested writes onto a thread that is allowed to block.
+///
+/// This is deliberately its own unbounded lane rather than a slot on the input
+/// queue. A `refresh-client -A <pane>:continue` is the only thing that ever
+/// resumes a pane tmux paused for flow control, so dropping one stalls that
+/// pane forever — it cannot share a bound with keystrokes, whose backpressure
+/// policy is to refuse. Unbounded is safe because every producer is already
+/// rate-limited: tmux pauses a pane at most once per flow-control episode, a
+/// discarded seed needs another few megabytes of output before it can recur,
+/// and a parse error resnapshots once.
+pub(super) fn spawn_control_writer(
+    session_id: &str,
+    stdin: Arc<Mutex<ChildStdin>>,
+) -> anyhow::Result<std_mpsc::Sender<ControlWrite>> {
+    let (sender, receiver) = std_mpsc::channel::<ControlWrite>();
+    std::thread::Builder::new()
+        .name(format!("host-tmux-writer-{session_id}"))
+        .spawn(move || {
+            while let Ok(write) = receiver.recv() {
+                let _ = write_capture_request_resuming(&stdin, &write.pane_id, write.resume_first);
+            }
+        })?;
+    Ok(sender)
+}
+
 /// As [`write_capture_request`], optionally resuming a pane tmux paused first.
 /// The resume and the capture share the lock hold so no other writer can land
 /// between them.
-pub(super) fn write_capture_request_resuming<W: Write>(
+fn write_capture_request_resuming<W: Write>(
     stdin: &Arc<Mutex<W>>,
     pane_id: &str,
     resume_first: bool,

@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock, mpsc},
 };
 
-use tmux_control::HOST_INPUT_COALESCE_BYTES;
+use tmux_control::{HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
 use uuid::Uuid;
 
 use super::super::snapshot::tmux_command;
@@ -17,24 +17,19 @@ use super::{queue_input, validate_tmux_id};
 /// tmux forks. Above it — real pastes and terminal uploads — the request keeps
 /// the `load-buffer` + `paste-buffer` path, whose stdin transfer is the only
 /// way to move an arbitrary blob without putting it through a command line.
-pub(super) const INBAND_INPUT_MAX_BYTES: usize = 1024;
+/// It is deliberately the coalescing bound: the dispatcher merges same-pane
+/// requests up to that size before choosing a path, so anything smaller would
+/// hand a fast typist's merged burst straight back to the fork path.
+pub(super) const INBAND_INPUT_MAX_BYTES: usize = HOST_INPUT_COALESCE_BYTES;
+
+// The fork path must remain reachable, or a real paste would have nowhere to go.
+const _: () = assert!(MAX_INPUT_REQUEST_BYTES > INBAND_INPUT_MAX_BYTES);
 
 pub(super) enum InputDispatch {
     Bytes {
         pane_id: String,
         data: Vec<u8>,
         completion: mpsc::SyncSender<Result<(), String>>,
-    },
-    /// A capture the control-stream reader needs written.
-    ///
-    /// The reader must never write to tmux's stdin itself. tmux stops reading
-    /// its stdin while it is blocked writing output to us, and the reader is
-    /// the only thing that drains that output — a write from the reader can
-    /// therefore deadlock the pair, and the pane goes silent forever. Handing
-    /// the write to this thread keeps the reader free to drain.
-    Capture {
-        pane_id: String,
-        resume_first: bool,
     },
     Barrier(mpsc::SyncSender<Result<(), String>>),
     Stop,
@@ -43,41 +38,27 @@ pub(super) enum InputDispatch {
 pub(super) fn run_input_dispatch<W: Write>(
     receiver: mpsc::Receiver<InputDispatch>,
     control_stdin: Arc<Mutex<W>>,
+    report_failure: impl Fn(&str, &str),
 ) {
-    let capture_stdin = Arc::clone(&control_stdin);
-    run_input_dispatch_with_control(
-        receiver,
-        move |pane_id, data| {
-            if data.len() <= INBAND_INPUT_MAX_BYTES {
-                send_input_inband(&control_stdin, pane_id, data)
-            } else {
-                // Ordering against the in-band path is preserved because this
-                // dispatch thread is the only writer: the previous request's
-                // bytes were written and flushed to the control client's socket
-                // before this call, so the tmux server has them in its receive
-                // buffer before the `paste-buffer` client has even finished
-                // connecting.
-                send_input_batch(pane_id, data)
-            }
-        },
-        move |pane_id, resume_first| {
-            let _ = super::write_capture_request_resuming(&capture_stdin, pane_id, resume_first);
-        },
-    )
+    run_input_dispatch_with(receiver, move |pane_id, data| {
+        if data.len() <= INBAND_INPUT_MAX_BYTES {
+            send_input_inband(&control_stdin, pane_id, data)
+        } else {
+            // Ordering against the in-band path is preserved because this
+            // dispatch thread is the only writer of input: the previous
+            // request's bytes were written and flushed to the control client's
+            // socket before this call, so the tmux server has them in its
+            // receive buffer before the `paste-buffer` client has even finished
+            // connecting.
+            send_input_batch(pane_id, data)
+        }
+        .inspect_err(|error| report_failure(pane_id, error))
+    })
 }
 
-#[cfg(test)]
 fn run_input_dispatch_with(
     receiver: mpsc::Receiver<InputDispatch>,
-    send_batch: impl FnMut(&str, &[u8]) -> Result<(), String>,
-) {
-    run_input_dispatch_with_control(receiver, send_batch, |_, _| {})
-}
-
-fn run_input_dispatch_with_control(
-    receiver: mpsc::Receiver<InputDispatch>,
     mut send_batch: impl FnMut(&str, &[u8]) -> Result<(), String>,
-    mut write_capture: impl FnMut(&str, bool),
 ) {
     let mut deferred = None;
     loop {
@@ -121,10 +102,6 @@ fn run_input_dispatch_with_control(
                     let _ = completion.send(result.clone());
                 }
             }
-            InputDispatch::Capture {
-                pane_id,
-                resume_first,
-            } => write_capture(&pane_id, resume_first),
             InputDispatch::Barrier(sender) => {
                 let _ = sender.send(Ok(()));
             }

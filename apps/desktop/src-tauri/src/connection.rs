@@ -76,7 +76,7 @@ pub(crate) mod helper;
 mod transport;
 pub(crate) use transport::close_all_control_masters;
 use transport::{
-    SshLease, acquire_control_master, ensure_control_master, host_helper_path,
+    ControlLane, SshLease, acquire_control_master, ensure_control_master, host_helper_path,
     ssh_profile_control_socket,
 };
 
