@@ -23,6 +23,13 @@ interface WorkspaceFilesState {
 
 const EMPTY = new Map<string, DirectoryListing>();
 
+/**
+ * How often the workspace root is re-resolved when nothing has changed. Every
+ * event that *can* be pushed already re-resolves it immediately; this only
+ * covers `cd` inside the current pane, which tmux does not announce.
+ */
+const ACTIVE_ROOT_POLL_MS = 2_000;
+
 export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorkspaceScope | undefined) {
   const [state, setState] = useState<WorkspaceFilesState>({
     scopeKey: "",
@@ -149,7 +156,13 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       }
     };
     void resolve();
-    const poll = window.setInterval(() => { void resolve(); }, 350);
+    // A backstop, not the primary path. Pane and window changes already rebuild
+    // this scope and re-resolve immediately, so the only thing left for a timer
+    // to catch is the user running `cd` inside the pane they are already in —
+    // for which tmux emits no notification at all, so nothing can push it.
+    // At 350 ms this was a host round trip three times a second forever, which
+    // over SSH is three round trips a second on an idle connection.
+    const poll = window.setInterval(() => { void resolve(); }, ACTIVE_ROOT_POLL_MS);
     return () => {
       disposed = true;
       scopeEpoch.current += 1;

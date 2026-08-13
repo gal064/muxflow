@@ -43,7 +43,16 @@ use events::{
     ConnectionTaskGuard, ProtocolSequencer, SequencerControl, register_control_event_sink,
 };
 
-pub(crate) const EVENT_QUEUE: usize = 128;
+/// Depth of the ordered host-event queue.
+///
+/// Overflow here is not a dropped frame but a connection-wide resync: the
+/// desktop tears the bridge down and reseeds every pane. At 128 a burst of
+/// terminal output could reach that cliff during ordinary use, and it took a
+/// seed with it — a seed dropped by a full queue leaves the pane waiting for
+/// bytes that will never come. The depth is chosen against the reader's 64 KiB
+/// read size and tmux's own `pause-after` flow control, which bounds how far
+/// ahead of a slow consumer the queue can run.
+pub(crate) const EVENT_QUEUE: usize = 1024;
 pub(crate) const TERMINAL_INPUT_QUEUE: usize = 256;
 
 pub async fn serve_with_shutdown(

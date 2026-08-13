@@ -73,10 +73,26 @@ pub(super) fn supervise_bridge(
             },
         );
         attempt = attempt.saturating_add(1);
-        let delay = 200_u64.saturating_mul(2_u64.pow(attempt.min(5)))
-            + reconnect_jitter(&client_id, attempt);
-        thread::sleep(Duration::from_millis(delay));
+        thread::sleep(Duration::from_millis(reconnect_delay_millis(
+            &client_id, attempt,
+        )));
     }
+}
+
+/// Backs off from 400 ms to a one-minute ceiling.
+///
+/// The early attempts are unchanged, because the common case is a blip that
+/// clears in a second and the user should not notice it. The ceiling used to be
+/// 6.4 s, which means a machine that is asleep, off the network, or away for an
+/// afternoon reconnects roughly ten times a minute forever; a minute is long
+/// enough to stop being a cost and short enough that a returning laptop comes
+/// back promptly.
+pub(super) fn reconnect_delay_millis(client_id: &str, attempt: u32) -> u64 {
+    const CEILING_MILLIS: u64 = 60_000;
+    // Saturating arithmetic is what bounds a long outage: the doubling runs
+    // away to u64::MAX and the ceiling below is what the caller actually sleeps.
+    let backoff = 200_u64.saturating_mul(2_u64.saturating_pow(attempt));
+    backoff.min(CEILING_MILLIS) + reconnect_jitter(client_id, attempt)
 }
 
 pub(super) fn reconnect_jitter(client_id: &str, attempt: u32) -> u64 {

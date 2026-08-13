@@ -37,16 +37,52 @@ describe("TerminalWriteScheduler", () => {
 
   it("cancels and drops queued work on disposal", () => {
     let cancelled = 0;
+    const completions: Array<() => void> = [];
     const scheduler = new TerminalWriteScheduler(
-      (_chunk, _done) => undefined,
+      (_chunk, done) => completions.push(done),
       () => 7,
       () => { cancelled += 1; },
     );
     scheduler.enqueue(Uint8Array.of(1));
+    scheduler.enqueue(Uint8Array.of(2, 3));
     scheduler.dispose();
-    scheduler.enqueue(Uint8Array.of(2));
-    expect(cancelled).toBe(1);
+    scheduler.enqueue(Uint8Array.of(4));
+    expect(cancelled).toBeGreaterThan(0);
+    // The first byte took the idle fast path and is inside xterm's parser
+    // already, so it cannot be un-sent; only the queued work is dropped.
+    expect(scheduler.pendingBytes).toBe(1);
+    completions.shift()!();
     expect(scheduler.pendingBytes).toBe(0);
+  });
+
+  it("writes immediately when idle and falls back to frame pacing under load", () => {
+    const frames: FrameRequestCallback[] = [];
+    const written: number[][] = [];
+    const completions: Array<() => void> = [];
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => { written.push(Array.from(chunk)); completions.push(done); },
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      64,
+      1024,
+    );
+    // An echoed keystroke arriving into an empty queue must not wait a frame.
+    scheduler.enqueue(Uint8Array.of(1));
+    expect(written).toEqual([[1]]);
+    completions.shift()!();
+
+    // A second write in the same frame is paced, so a flood cannot spin.
+    scheduler.enqueue(Uint8Array.of(2));
+    expect(written).toEqual([[1]]);
+    const paced = frames.pop()!;
+    paced(0);
+    expect(written).toEqual([[1], [2]]);
+    completions.shift()!();
+
+    // Once a frame boundary passes, the fast path is available again.
+    frames.shift()!(16);
+    scheduler.enqueue(Uint8Array.of(3));
+    expect(written).toEqual([[1], [2], [3]]);
   });
 
   it("advances a rendered checkpoint only after every chunk reaches xterm", () => {
@@ -111,7 +147,10 @@ describe("TerminalWriteScheduler", () => {
     expect(scheduler.enqueue(Uint8Array.from([1, 2, 3, 4]))).toBe(true);
     expect(scheduler.enqueue(Uint8Array.from([5, 6]))).toBe(false);
     expect(scheduler.overflowed).toBe(true);
-    expect(scheduler.pendingBytes).toBe(0);
+    // The first chunk went straight to xterm on the idle fast path and is still
+    // in flight there; dropping the queue cannot retract bytes already handed
+    // over, and pretending otherwise would under-report the real backlog.
+    expect(scheduler.pendingBytes).toBe(4);
     expect(scheduler.enqueue(Uint8Array.of(7))).toBe(false);
     expect(overflow).toEqual([6]);
   });

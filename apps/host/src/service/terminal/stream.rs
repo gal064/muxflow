@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
-    io::{BufReader, Read, Write},
-    process::{ChildStdin, ChildStdout},
+    io::{BufReader, Read},
+    process::ChildStdout,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -17,13 +17,33 @@ use tokio::sync::mpsc;
 
 use super::super::{SequencerControl, emit_event};
 use super::{
-    build_seed_with_metadata, capture_metadata, queue_capture, selected_capture_boundary,
-    validate_tmux_id,
+    build_seed_with_metadata, capture_metadata, selected_capture_boundary, validate_tmux_id,
 };
+
+/// Asks the dispatch thread to write a capture for `pane_id`.
+///
+/// A full queue means the writer is already saturated with work that includes
+/// captures, so dropping this one loses nothing: the reader stays free, which
+/// is the whole point of not writing from here.
+fn request_capture(
+    writer: &std_mpsc::SyncSender<super::InputDispatch>,
+    pane_id: &str,
+    resume_first: bool,
+) {
+    let _ = writer.try_send(super::InputDispatch::Capture {
+        pane_id: pane_id.to_owned(),
+        resume_first,
+    });
+}
 
 pub(super) struct ControlStreamReader {
     pub(super) stdout: ChildStdout,
-    pub(super) stdin: Arc<Mutex<ChildStdin>>,
+    /// Writes the reader needs performed are handed to the input dispatch
+    /// thread. The reader itself must never write to tmux's stdin: tmux stops
+    /// reading stdin while it is blocked writing output, and the reader is the
+    /// only thing draining that output, so a write from here can deadlock the
+    /// pair and silence the pane permanently.
+    pub(super) writer: std_mpsc::SyncSender<super::InputDispatch>,
     pub(super) pane_ids: Vec<String>,
     pub(super) event_tx: mpsc::Sender<SequencerControl>,
     pub(super) overflowed: Arc<AtomicBool>,
@@ -43,7 +63,7 @@ pub(super) enum StreamControl {
 pub(super) fn read_control_stream(context: ControlStreamReader) {
     let ControlStreamReader {
         stdout,
-        stdin,
+        writer,
         pane_ids,
         event_tx,
         overflowed,
@@ -69,7 +89,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                         Ok(record) => state.handle(
                             record,
                             StreamRuntime {
-                                stdin: &stdin,
+                                writer: &writer,
                                 sender: &event_tx,
                                 overflowed: &overflowed,
                                 resources: &resources,
@@ -79,7 +99,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                         ),
                         Err(error) => {
                             emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
-                            state.resnapshot_all(&stdin);
+                            state.resnapshot_all(&writer);
                         }
                     }
                 }
@@ -166,7 +186,7 @@ pub(super) struct PendingCaptureMetadata {
 }
 
 struct StreamRuntime<'a> {
-    stdin: &'a Arc<Mutex<ChildStdin>>,
+    writer: &'a std_mpsc::SyncSender<super::InputDispatch>,
     sender: &'a mpsc::Sender<SequencerControl>,
     overflowed: &'a AtomicBool,
     resources: &'a Arc<Mutex<PaneResourceStore>>,
@@ -200,7 +220,7 @@ impl StreamState {
 
     fn handle(&mut self, record: ControlRecord, runtime: StreamRuntime<'_>) {
         let StreamRuntime {
-            stdin,
+            writer,
             sender,
             overflowed,
             resources,
@@ -283,9 +303,14 @@ impl StreamState {
                     "command output arrived without a begin record".into(),
                 ),
             },
-            ControlRecord::End { tag, .. } => {
-                self.finish_block(tag, sender, overflowed, resources, terminal_generation)
-            }
+            ControlRecord::End { tag, .. } => self.finish_block(
+                tag,
+                sender,
+                overflowed,
+                resources,
+                terminal_generation,
+                writer,
+            ),
             ControlRecord::Error { tag, arguments } => {
                 if !self.active_tag_matches(tag) {
                     let scope = self.active_scope();
@@ -341,11 +366,7 @@ impl StreamState {
                             ..Default::default()
                         },
                     );
-                    if let Ok(mut writer) = stdin.lock() {
-                        let _ = writeln!(writer, "refresh-client -A {pane_id}:continue");
-                        let _ = queue_capture(&mut *writer, pane_id);
-                        let _ = writer.flush();
-                    }
+                    request_capture(writer, pane_id, true);
                 }
             }
             ControlRecord::Notification { name, .. } if is_topology_notification(&name) => {
@@ -371,6 +392,7 @@ impl StreamState {
         overflowed: &AtomicBool,
         resources: &Arc<Mutex<PaneResourceStore>>,
         terminal_generation: &Arc<AtomicU64>,
+        writer: &std_mpsc::SyncSender<super::InputDispatch>,
     ) {
         if !self.active_tag_matches(end_tag) {
             let scope = self.active_scope();
@@ -385,14 +407,13 @@ impl StreamState {
         }
         match std::mem::replace(&mut self.command_block, CommandBlock::None) {
             CommandBlock::Unknown { pane_id, lines, .. } => {
-                if let Some(pane_id) = lines.iter().find_map(|line| input_marker_pane(line)) {
-                    // The block that follows is one in-band input request.
-                    self.expected_input = Some(pane_id);
-                    return;
+                match classify_marker_block(pane_id, &lines) {
+                    MarkerBlock::Input(pane_id) => self.expected_input = Some(pane_id),
+                    MarkerBlock::Capture(pane_id) => {
+                        self.expected_capture =
+                            pane_id.filter(|pane_id| self.pane_states.contains_key(pane_id));
+                    }
                 }
-                let pane_id = pane_id.or_else(|| lines.iter().find_map(|line| marker_pane(line)));
-                self.expected_capture =
-                    pane_id.filter(|pane_id| self.pane_states.contains_key(pane_id));
             }
             CommandBlock::Input { .. } => {}
             CommandBlock::CapturePrimary { pane_id, lines, .. } => {
@@ -544,6 +565,15 @@ impl StreamState {
                         &pane_id,
                         format!("discarded incomplete seed for {pane_id}"),
                     );
+                    // The pane is still Pending, so its output is being
+                    // buffered rather than delivered: leaving it that way waits
+                    // for the client to ask again, and a client that does not
+                    // will never hear from this pane again. Ask tmux for
+                    // another capture here. The replay buffer is the rate
+                    // limiter — a discard needs another few megabytes of output
+                    // before it can happen again — so even a permanent flood
+                    // costs a couple of in-band commands per megabyte.
+                    request_capture(writer, &pane_id, false);
                 }
             }
             CommandBlock::None => {}
@@ -687,24 +717,39 @@ impl StreamState {
         }
     }
 
-    fn resnapshot_all(&mut self, stdin: &Arc<Mutex<ChildStdin>>) {
+    fn resnapshot_all(&mut self, writer: &std_mpsc::SyncSender<super::InputDispatch>) {
         self.expected_capture = None;
         self.expected_input = None;
         self.pending_alternate = None;
         self.pending_metadata = None;
         self.command_block = CommandBlock::None;
-        if let Ok(mut writer) = stdin.lock() {
-            for (pane_id, state) in &mut self.pane_states {
-                *state = PaneSeedState::Pending {
-                    buffered: Vec::new(),
-                    buffered_bytes: 0,
-                    overflowed: false,
-                };
-                let _ = queue_capture(&mut *writer, pane_id);
-            }
-            let _ = writer.flush();
+        for (pane_id, state) in &mut self.pane_states {
+            *state = PaneSeedState::Pending {
+                buffered: Vec::new(),
+                buffered_bytes: 0,
+                overflowed: false,
+            };
+            request_capture(writer, pane_id, false);
         }
     }
+}
+
+/// What an uncorrelated command block establishes about the block after it.
+///
+/// Both markers are ordinary `display-message` output, so the only thing that
+/// separates them is their prefix; classifying once keeps the reader from
+/// having to know which marker shapes exist.
+#[derive(Debug, PartialEq, Eq)]
+enum MarkerBlock {
+    Input(String),
+    Capture(Option<String>),
+}
+
+fn classify_marker_block(pane_id: Option<String>, lines: &[Vec<u8>]) -> MarkerBlock {
+    if let Some(pane_id) = lines.iter().find_map(|line| input_marker_pane(line)) {
+        return MarkerBlock::Input(pane_id);
+    }
+    MarkerBlock::Capture(pane_id.or_else(|| lines.iter().find_map(|line| marker_pane(line))))
 }
 
 fn emit_resnapshot(
@@ -762,8 +807,13 @@ fn marker_pane(line: &[u8]) -> Option<String> {
     marker_pane_with_prefix(line, b"__ADE_CAPTURE__:")
 }
 
+/// Restores the `%` sigil `queue_input` had to strip: tmux's display message
+/// goes through `strftime`, which eats a literal `%0`.
 fn input_marker_pane(line: &[u8]) -> Option<String> {
-    marker_pane_with_prefix(line, b"__ADE_INPUT__:")
+    let digits = std::str::from_utf8(line.strip_prefix(b"__ADE_INPUT__:")?).ok()?;
+    let pane = format!("%{digits}");
+    validate_tmux_id(&pane, '%').ok()?;
+    Some(pane)
 }
 
 fn marker_pane_with_prefix(line: &[u8], prefix: &[u8]) -> Option<String> {
@@ -816,6 +866,51 @@ mod tests {
         assert!(state.pane_states.contains_key("%2"));
         assert!(matches!(state.command_block, CommandBlock::None));
         assert!(state.pending_alternate.is_none());
+    }
+
+    #[test]
+    fn input_marker_survives_the_strftime_pass_that_eats_a_literal_pane_sigil() {
+        // `queue_input` strips the sigil because tmux expands a display message
+        // through strftime and drops `%0` as an unknown conversion; the reader
+        // has to put it back or every in-band input goes uncorrelated.
+        assert_eq!(
+            input_marker_pane(b"__ADE_INPUT__:12").as_deref(),
+            Some("%12")
+        );
+        assert_eq!(input_marker_pane(b"__ADE_INPUT__:%12"), None);
+        assert_eq!(input_marker_pane(b"__ADE_INPUT__:"), None);
+        assert_eq!(input_marker_pane(b"__ADE_INPUT__:1a"), None);
+        assert_eq!(input_marker_pane(b"__ADE_CAPTURE__:%12"), None);
+        assert_eq!(marker_pane(b"__ADE_CAPTURE__:%12").as_deref(), Some("%12"));
+    }
+
+    #[test]
+    fn an_in_band_input_block_is_correlated_to_the_pane_that_was_typed_into() {
+        assert_eq!(
+            classify_marker_block(None, &[b"__ADE_INPUT__:2".to_vec()]),
+            MarkerBlock::Input("%2".into())
+        );
+        assert_eq!(
+            classify_marker_block(None, &[b"__ADE_CAPTURE__:%2".to_vec()]),
+            MarkerBlock::Capture(Some("%2".into()))
+        );
+        assert_eq!(
+            classify_marker_block(None, &[b"__ADE_MEMBERSHIP__".to_vec()]),
+            MarkerBlock::Capture(None)
+        );
+
+        // Input correlation is consumed by the block that follows its marker,
+        // so an error inside that block recovers only the pane typed into.
+        let mut state = StreamState::new(&["%1".into(), "%2".into()]);
+        state.expected_input = Some("%2".into());
+        let block = state.start_block(CommandTag {
+            timestamp: 1,
+            number: 2,
+            flags: 1,
+        });
+        assert!(matches!(block, CommandBlock::Input { ref pane_id, .. } if pane_id == "%2"));
+        state.command_block = block;
+        assert_eq!(state.active_scope(), "%2");
     }
 
     #[test]

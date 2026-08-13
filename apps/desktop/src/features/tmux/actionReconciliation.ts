@@ -8,7 +8,17 @@ import {
   type TmuxActionResult,
 } from "./actions";
 
-const ACTION_RECONCILE_TIMEOUT_MS = 2_000;
+/**
+ * How long a retry waits for a newer authoritative topology to arrive.
+ *
+ * This is a ceiling on how long a create can appear to hang, and with two
+ * retries it used to be about four and a half seconds — the amplifier that
+ * turned an ordinary `stale_topology` rejection into the user's "creates take
+ * seconds". The host now answers a batched discovery in tens of milliseconds,
+ * so a newer generation that is coming at all arrives well inside this bound;
+ * anything slower is a stall the user is better off seeing than waiting through.
+ */
+const ACTION_RECONCILE_TIMEOUT_MS = 250;
 const ACTION_RECONCILE_RETRIES = 2;
 
 type ActionRequest = (

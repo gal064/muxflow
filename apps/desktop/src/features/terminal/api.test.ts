@@ -195,6 +195,21 @@ describe("binary terminal IPC", () => {
     expect(invoke).toHaveBeenCalledTimes(1);
   }, 15_000);
 
+  it("sends binary terminal input as one raw framed body, not a JSON number array", async () => {
+    vi.mocked(invoke).mockClear();
+    await sendBinaryInput("client-1", "%7", Uint8Array.of(0x00, 0x1b, 0xff));
+    const [command, payload] = vi.mocked(invoke).mock.calls[0];
+    expect(command).toBe("send_terminal_input_bytes");
+    expect(payload).toBeInstanceOf(Uint8Array);
+    const frame = payload as unknown as Uint8Array;
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    expect(view.getUint16(0, false)).toBe("client-1".length);
+    expect(new TextDecoder().decode(frame.subarray(2, 10))).toBe("client-1");
+    expect(view.getUint16(10, false)).toBe(2);
+    expect(new TextDecoder().decode(frame.subarray(12, 14))).toBe("%7");
+    expect([...frame.subarray(14)]).toEqual([0x00, 0x1b, 0xff]);
+  });
+
   it("decodes a nonzero safe big-endian terminal generation epoch", () => {
     expect(decodeTerminalEvent(frame(10, "terminal", 0, u64(0x001f_ffff_ffff_fffen)))).toEqual({
       kind: "generationEpoch", epoch: 0x001f_ffff_ffff_fffe, sequence: 0,
