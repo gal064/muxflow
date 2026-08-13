@@ -510,23 +510,9 @@ pub fn send_terminal_input_bytes(
 
 /// `u16` client-id length, client id, `u16` pane-id length, pane id, payload.
 fn decode_terminal_input_frame(body: &[u8]) -> Result<(&str, &str, &[u8]), String> {
-    fn take_prefixed<'a>(body: &'a [u8], offset: &mut usize) -> Result<&'a str, String> {
-        let header_end = offset
-            .checked_add(2)
-            .filter(|end| *end <= body.len())
-            .ok_or("terminal input frame is truncated")?;
-        let length = usize::from(u16::from_be_bytes([body[*offset], body[*offset + 1]]));
-        let end = header_end
-            .checked_add(length)
-            .filter(|end| *end <= body.len())
-            .ok_or("terminal input frame is truncated")?;
-        *offset = end;
-        std::str::from_utf8(&body[header_end..end])
-            .map_err(|_| "terminal input frame label is not valid UTF-8".to_owned())
-    }
     let mut offset = 0;
-    let client_id = take_prefixed(body, &mut offset)?;
-    let pane_id = take_prefixed(body, &mut offset)?;
+    let client_id = take_length_prefixed(body, &mut offset)?;
+    let pane_id = take_length_prefixed(body, &mut offset)?;
     Ok((client_id, pane_id, &body[offset..]))
 }
 
@@ -551,29 +537,93 @@ pub fn resize_terminal_client(
 /// Async: a tab switch reveals and hides panes, and doing that on the WebView's
 /// main thread meant the new tab could not paint until the host had answered
 /// for the old one — a whole RTT of frozen UI per switch over SSH.
+///
+/// The payload is a raw IPC body rather than a JSON argument object. A hide
+/// carries the renderer's serialized screen, up to 4 MiB, and as a JSON array
+/// of numbers that is roughly 15 MB of text to stringify and re-parse on the
+/// main thread — measured at one to two seconds per switch.
 #[tauri::command]
 pub async fn set_terminal_visibility(
-    client_id: String,
-    pane_id: String,
-    visible: bool,
-    serialized_snapshot: Vec<u8>,
-    terminal_epoch: u64,
-    output_generation: u64,
+    request: tauri::ipc::Request<'_>,
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
-    let client = get_client(&clients, &client_id)?;
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err("terminal visibility IPC body must be raw binary".into());
+    };
+    let visibility = decode_terminal_visibility_frame(body)?;
+    let client = get_client(&clients, visibility.client_id)?;
     let request = terminal_visibility_request(
-        pane_id,
-        visible,
-        serialized_snapshot,
-        terminal_epoch,
-        output_generation,
+        visibility.pane_id.to_owned(),
+        visibility.visible,
+        visibility.serialized_snapshot.to_vec(),
+        visibility.terminal_epoch,
+        visibility.output_generation,
         client.terminal_epoch.load(Ordering::Acquire),
     )?;
     tauri::async_runtime::spawn_blocking(move || client.request(request))
         .await
         .map_err(|error| format!("terminal visibility task failed: {error}"))??;
     Ok(())
+}
+
+struct TerminalVisibilityFrame<'a> {
+    client_id: &'a str,
+    pane_id: &'a str,
+    visible: bool,
+    terminal_epoch: u64,
+    output_generation: u64,
+    serialized_snapshot: &'a [u8],
+}
+
+/// `u16` client-id length, client id, `u16` pane-id length, pane id, one
+/// visibility byte, two big-endian `u64`s, then the snapshot bytes.
+fn decode_terminal_visibility_frame(body: &[u8]) -> Result<TerminalVisibilityFrame<'_>, String> {
+    const SCALARS: usize = 1 + 8 + 8;
+    let mut offset = 0;
+    let client_id = take_length_prefixed(body, &mut offset)?;
+    let pane_id = take_length_prefixed(body, &mut offset)?;
+    let scalars_end = offset
+        .checked_add(SCALARS)
+        .filter(|end| *end <= body.len())
+        .ok_or("terminal visibility frame is truncated")?;
+    let visible = match body[offset] {
+        0 => false,
+        1 => true,
+        _ => return Err("terminal visibility flag must be 0 or 1".into()),
+    };
+    let terminal_epoch = u64::from_be_bytes(
+        body[offset + 1..offset + 9]
+            .try_into()
+            .map_err(|_| "terminal visibility epoch is truncated")?,
+    );
+    let output_generation = u64::from_be_bytes(
+        body[offset + 9..scalars_end]
+            .try_into()
+            .map_err(|_| "terminal visibility cutoff is truncated")?,
+    );
+    Ok(TerminalVisibilityFrame {
+        client_id,
+        pane_id,
+        visible,
+        terminal_epoch,
+        output_generation,
+        serialized_snapshot: &body[scalars_end..],
+    })
+}
+
+fn take_length_prefixed<'a>(body: &'a [u8], offset: &mut usize) -> Result<&'a str, String> {
+    let header_end = offset
+        .checked_add(2)
+        .filter(|end| *end <= body.len())
+        .ok_or("raw IPC frame is truncated")?;
+    let length = usize::from(u16::from_be_bytes([body[*offset], body[*offset + 1]]));
+    let end = header_end
+        .checked_add(length)
+        .filter(|end| *end <= body.len())
+        .ok_or("raw IPC frame is truncated")?;
+    *offset = end;
+    std::str::from_utf8(&body[header_end..end])
+        .map_err(|_| "raw IPC frame label is not valid UTF-8".to_owned())
 }
 
 fn terminal_visibility_request(
@@ -823,6 +873,32 @@ mod tests {
 
         mark_input_reconnected(&client);
         assert!(!input_epoch_is_current(&client, epoch));
+    }
+
+    #[test]
+    fn raw_visibility_frame_carries_its_scalars_and_snapshot_without_a_json_number_array() {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(6_u16).to_be_bytes());
+        frame.extend_from_slice(b"client");
+        frame.extend_from_slice(&(2_u16).to_be_bytes());
+        frame.extend_from_slice(b"%3");
+        frame.push(0);
+        frame.extend_from_slice(&7_u64.to_be_bytes());
+        frame.extend_from_slice(&42_u64.to_be_bytes());
+        frame.extend_from_slice(b"screen");
+        let decoded = decode_terminal_visibility_frame(&frame).unwrap();
+        assert_eq!(decoded.client_id, "client");
+        assert_eq!(decoded.pane_id, "%3");
+        assert!(!decoded.visible);
+        assert_eq!(decoded.terminal_epoch, 7);
+        assert_eq!(decoded.output_generation, 42);
+        assert_eq!(decoded.serialized_snapshot, b"screen");
+
+        // A truncated or malformed frame is refused rather than read past.
+        assert!(decode_terminal_visibility_frame(&frame[..frame.len() - 20]).is_err());
+        let mut invalid_flag = frame.clone();
+        invalid_flag[12] = 2;
+        assert!(decode_terminal_visibility_frame(&invalid_flag).is_err());
     }
 
     #[test]

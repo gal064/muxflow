@@ -173,10 +173,19 @@ describe("binary terminal IPC", () => {
       "client-1", "%7", false, Uint8Array.from([0, 255, 27]),
       { terminalEpoch: 17, outputGeneration: 42 },
     );
-    expect(invoke).toHaveBeenCalledWith("set_terminal_visibility", {
-      clientId: "client-1", paneId: "%7", visible: false,
-      serializedSnapshot: [0, 255, 27], terminalEpoch: 17, outputGeneration: 42,
-    });
+    // One raw framed body, not a JSON array of numbers: a hide carries up to
+    // 4 MiB of serialized screen on the thread that has to paint the new tab.
+    const [command, payload] = vi.mocked(invoke).mock.calls.at(-1)!;
+    expect(command).toBe("set_terminal_visibility");
+    const frame = payload as unknown as Uint8Array;
+    expect(frame).toBeInstanceOf(Uint8Array);
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    expect(new TextDecoder().decode(frame.subarray(2, 10))).toBe("client-1");
+    expect(new TextDecoder().decode(frame.subarray(12, 14))).toBe("%7");
+    expect(frame[14]).toBe(0);
+    expect(view.getBigUint64(15, false)).toBe(17n);
+    expect(view.getBigUint64(23, false)).toBe(42n);
+    expect([...frame.subarray(31)]).toEqual([0, 255, 27]);
   });
 
   it("requests one scoped seed for bounded or conflicting recovery", async () => {
