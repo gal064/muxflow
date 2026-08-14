@@ -214,7 +214,9 @@ function GitGroup(props: {
           onClick={() => props.onOpen(entry, props.target)}
           // What "the selected change" means for the palette and for a bound
           // shortcut: whichever row the keyboard or the pointer last landed on.
+          // Both are needed — macOS WebKit does not focus a button on click.
           onFocus={() => props.onFocusEntry(entry, props.target)}
+          onPointerDown={() => props.onFocusEntry(entry, props.target)}
           onContextMenu={(event) => {
             if (!props.onMenu) return;
             event.preventDefault();
