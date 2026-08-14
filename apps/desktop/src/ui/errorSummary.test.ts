@@ -32,6 +32,20 @@ describe("summarizeSurfaceError", () => {
     expect(summarizeSurfaceError("   ").summary).toBe("Something went wrong.");
   });
 
+  it("leaves a sentence the app wrote itself exactly as the app wrote it", () => {
+    // The status channel carries both host diagnostics and the app's own
+    // sentences. Answering "which pane failed to hide" with generic advice
+    // about checking the connection would throw away the useful half.
+    const own = "Could not mark %117 hidden: timed out";
+    expect(summarizeSurfaceError(own).summary).toBe(own);
+    expect(summarizeSurfaceError(own).detail).toBeUndefined();
+    const agent = "Agent Codex has no exact pane match; navigation is unavailable.";
+    expect(summarizeSurfaceError(agent).summary).toBe(agent);
+    // Only a structured host code opts into the rewrite.
+    expect(summarizeSurfaceError("terminal_visibility_rejected: timed out").summary)
+      .toBe("The host did not answer in time. Check the connection and try again.");
+  });
+
   it("strips the JavaScript wrappers a rethrow adds and keeps only the first sentence in front", () => {
     const result = summarizeSurfaceError("Error: Error: something odd happened. And then more detail nobody needs first.");
     expect(result.summary).toBe("something odd happened.");
