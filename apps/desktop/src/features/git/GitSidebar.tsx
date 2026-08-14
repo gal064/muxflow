@@ -178,6 +178,7 @@ export function GitSidebar(props: Props) {
     />}
     {pendingDiscard && <ConfirmationDialog
       confirmLabel="Discard"
+      destructive
       detail={`Discard ${pendingDiscard.entry.displayPath}? This cannot be undone by the app.`}
       onCancel={() => setPendingDiscard(undefined)}
       onConfirm={() => {

@@ -55,9 +55,10 @@ export function AppDialogLayer(props: AppDialogLayerProps) {
     {paletteOpen && <CommandPalette context={commandContext} onClose={props.onPaletteClose} onInvoke={props.onRunCommand} platform={platform} shortcuts={shortcuts} />}
     {shortcutEditorOpen && <ShortcutEditorDialog onChange={props.onShortcutChange} onClose={props.onShortcutClose} overrides={shortcuts} platform={platform} />}
     {textPrompt && <TextInputDialog {...textPrompt} onCancel={props.onTextPromptCancel} />}
-    {confirmation && <ConfirmationDialog detail={confirmation.detail} title={confirmation.title} onCancel={props.onConfirmationCancel} onConfirm={() => props.onConfirmationConfirm(confirmation)} />}
+    {confirmation && <ConfirmationDialog destructive detail={confirmation.detail} title={confirmation.title} onCancel={props.onConfirmationCancel} onConfirm={() => props.onConfirmationConfirm(confirmation)} />}
     {appStateResetConfirmation && <ConfirmationDialog
       confirmLabel="Preserve and reset"
+      destructive={false}
       detail="The incompatible or malformed file will be preserved beside app-state.json, then shell preferences and app-owned tabs will start empty. tmux sessions and terminal processes are not changed."
       title="Reset saved shell state?"
       onCancel={props.onAppStateResetCancel}
@@ -65,6 +66,7 @@ export function AppDialogLayer(props: AppDialogLayerProps) {
     />}
     {profileResetConfirmation && <ConfirmationDialog
       confirmLabel="Use recovered defaults"
+      destructive={false}
       detail="Keep the preserved invalid profile file and write a fresh Local profile. tmux sessions and terminal processes are not changed."
       title="Reset saved host profiles?"
       onCancel={props.onProfileResetCancel}
@@ -80,6 +82,7 @@ export function AppDialogLayer(props: AppDialogLayerProps) {
     />}
     {appRecoveryDiscard && <ConfirmationDialog
       confirmLabel="Discard old tabs"
+      destructive
       detail={`${appRecoveryDiscard.count} app-owned tab record${appRecoveryDiscard.count === 1 ? "" : "s"} from the replaced server will be removed. tmux sessions and terminal processes are not changed.`}
       title="Discard app tabs from replaced server?"
       onCancel={props.onAppRecoveryDiscardCancel}
@@ -87,6 +90,7 @@ export function AppDialogLayer(props: AppDialogLayerProps) {
     />}
     {helperState.phase === "confirming" && <ConfirmationDialog
       confirmLabel={helperState.probe.installed ? "Upgrade and reconnect" : "Install and connect"}
+      destructive={false}
       detail={helperState.probe.installed
         ? `Replace the helper at ${helperState.probe.remotePath}. The current helper is backed up and restored automatically if the new helper cannot complete its handshake.`
         : `Install the packaged helper at ${helperState.probe.remotePath}, verify its digest and handshake, then connect to tmux.`}
