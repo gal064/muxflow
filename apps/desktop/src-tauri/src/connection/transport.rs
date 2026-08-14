@@ -238,11 +238,13 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
         return Ok(path.into());
     }
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut sibling_path = None;
     if let Some(parent) = current.parent() {
         let sibling = parent.join("tmux-ide-host");
         if sibling.is_file() {
             return Ok(sibling);
         }
+        sibling_path = Some(sibling);
     }
     #[cfg(debug_assertions)]
     {
@@ -256,10 +258,14 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
             }
         }
     }
-    Err(
-        "tmux-ide-host helper is not installed beside the desktop; build or install the sidecar"
-            .into(),
-    )
+    // The banner this produces is the only thing the user sees, so it names the
+    // path that was checked and the command that fills it (P12-U004).
+    Err(format!(
+        "tmux-ide-host helper is not installed beside the desktop{}. Rebuild the app with `pnpm --dir apps/desktop tauri build --bundles app`, which stages the helper, or run `release/macos/build-package.sh` for the packaged flow.",
+        sibling_path
+            .map(|path| format!(" (looked for {})", path.display()))
+            .unwrap_or_default()
+    ))
 }
 
 // A Unix socket bind must fit `sockaddr_un::sun_path` including its terminator:
