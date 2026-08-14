@@ -263,7 +263,16 @@ export function App() {
       setStatus(String(error));
       return { ok: false, error };
     }
-    if (!sameHostScope(scope, hostScopeRef.current)) return { ok: false, error: new Error("authoritative connection changed while focusing") };
+    // `sameHostConnection`, not `sameHostScope`. The guard exists to catch the
+    // connection being replaced underneath a focus request — a profile switch,
+    // a reconnect, a different tmux server. `sameHostScope` also compares the
+    // topology generation, and the two actions just performed *always* bump it,
+    // so that comparison could never hold: tmux moved to the agent's pane and
+    // the app then refused to follow it, leaving the sidebar and the terminal
+    // pointing at different workspaces. Measured against the real server: the
+    // click selected window 5 / pane %120 while the app stayed on the previous
+    // workspace.
+    if (!sameHostConnection(scope, hostScopeRef.current)) return { ok: false, error: new Error("authoritative connection changed while focusing") };
     setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, session, undefined));
     setActiveSessionId(target.sessionId);
     setActiveWindowId(target.windowId);
@@ -704,7 +713,12 @@ export function App() {
       workspaceName={activeSession?.name}
     />
     <DisconnectedStrip
-      detail={connectionDetail || (hostState.phase === "connected" ? "" : status)}
+      // `connectionDetail` only — never the general status line. The status
+      // line carries whatever happened last, which during a disconnect is
+      // usually an unrelated consequence ("Could not mark %117 hidden…"), and
+      // this strip's job is to explain the connection. The full status stays in
+      // the live region at the end of the shell.
+      detail={connectionDetail}
       hasSnapshot={snapshot.sessions.length > 0}
       onOpenSettings={() => setSettingsOpen(true)}
       onReconnect={() => setConnectionEpoch((value) => value + 1)}
