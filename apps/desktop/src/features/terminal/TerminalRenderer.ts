@@ -840,9 +840,16 @@ export class XtermRenderer implements TerminalRenderer {
    * first answer is the only one — but a measurement that arrived late, or a
    * window dragged to a display of a different pixel ratio, would otherwise
    * leave a multiplier derived from a measurement that no longer holds, and the
-   * only symptom would be a grid that does not fit its surface. The pane's
-   * observer re-reports the cell metric that follows from this, so the tmux
-   * client size stays derived from what is actually rendered either way.
+   * only symptom would be a grid that does not fit its surface.
+   *
+   * What is *not* covered: the cell metric the tmux client size is derived from
+   * is re-read by the pane's `ResizeObserver`, which fires on the surface's box,
+   * not on this multiplier. A re-application that changes the line height
+   * without changing that box — a late measurement, a display change — leaves
+   * tmux sized from the previous cell until the next resize. Recorded in
+   * `tests/phase12/evidence/phase12-11/review-round-3-deferred.md` rather than
+   * fixed here: the fix belongs in the observer, which is the protected resize
+   * path.
    *
    * A missing measurement is reported rather than guessed at: it means xterm
    * moved the service, which is what `measureBox.test.ts` fails on.
