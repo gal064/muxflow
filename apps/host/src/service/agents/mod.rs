@@ -51,6 +51,9 @@ pub(crate) struct AgentRuntime {
     state_path: PathBuf,
     state: Mutex<StoredState>,
     screen_observer: Mutex<screen::ScreenObserver>,
+    /// What this host's agent configuration was last observed to do with
+    /// lifecycle events. Re-read only when a configuration file changed.
+    wiring: Mutex<hooks::WiringCache>,
 }
 
 static GLOBAL: OnceLock<Arc<AgentRuntime>> = OnceLock::new();
@@ -70,6 +73,7 @@ impl AgentRuntime {
             state_path,
             state: Mutex::new(state),
             screen_observer: Mutex::new(screen::ScreenObserver::default()),
+            wiring: Mutex::new(hooks::WiringCache::default()),
         }
     }
 
@@ -95,9 +99,12 @@ impl AgentRuntime {
         let stale: Vec<String> = state
             .agents
             .values()
+            // Authority is deliberately not consulted. Every Working state in
+            // the store came from evidence — a hook, or a screen the observer
+            // confirmed — and both go silent the same way; process detection
+            // only ever writes Unknown, so there is no third case to carve out.
             .filter(|record| {
                 record.lifecycle == v1::AgentLifecycleState::Working as i32
-                    && record.authority != v1::AgentAuthority::Process as i32
                     && now.saturating_sub(record.updated_at_unix_millis) > STALE_WORKING_TTL_MILLIS
             })
             .map(|record| record.agent_id.clone())
@@ -129,8 +136,9 @@ impl AgentRuntime {
     }
 
     pub(super) fn snapshot_for(&self, server_identity: &str) -> v1::AgentSnapshot {
+        let wiring = self.wiring.lock().unwrap().current();
         let state = self.state.lock().unwrap();
-        snapshot::build(&state, server_identity)
+        snapshot::build(&state, server_identity, &wiring)
     }
 
     pub(super) fn reconcile_topology(
@@ -765,6 +773,7 @@ mod tests {
             state_path: blocker.join("agents.json"),
             state: Mutex::new(baseline_state.clone()),
             screen_observer: Mutex::new(screen::ScreenObserver::default()),
+            wiring: Mutex::new(hooks::WiringCache::default()),
         };
         let agent_id = baseline_state.agents.keys().next().unwrap().clone();
 
@@ -1531,6 +1540,65 @@ mod tests {
                 .all(|agent| agent.lifecycle == v1::AgentLifecycleState::Unknown as i32),
             "the identically named window kept its own state"
         );
+    }
+
+    /// A turn that starts and then blocks while the daemon is down.
+    ///
+    /// The mailbox used to keep one event per pane, so only the block survived
+    /// — and the daemon then correctly ignored it, because the prompt that
+    /// opened the new turn had been overwritten and the previous turn was
+    /// already finished. The user came back to the old result and no sign that
+    /// an agent was waiting on them.
+    #[test]
+    fn a_turn_that_starts_and_blocks_offline_replays_in_the_order_it_happened() {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase13-offline-turn-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let runtime = AgentRuntime::isolated(dir.join("agents.json"));
+        let topology = topology("codex");
+        for (id, name) in [("prompt", "UserPromptSubmit"), ("stop", "Stop")] {
+            runtime
+                .ingest_hook_with_context(&event(id, 0, name), "server-a", Some(&topology))
+                .unwrap();
+        }
+
+        // Written out of order on purpose: the replay must be driven by the
+        // names, not by whatever order the directory happens to hand back.
+        for (name, event_name) in [
+            (
+                "hook-fallback-codex-7-00000000000000000002-b.pb",
+                "PermissionRequest",
+            ),
+            (
+                "hook-fallback-codex-7-00000000000000000001-a.pb",
+                "UserPromptSubmit",
+            ),
+        ] {
+            fs::write(
+                dir.join(name),
+                event(event_name, 0, event_name).encode_to_vec(),
+            )
+            .unwrap();
+        }
+        let mut replayed = Vec::new();
+        assert_eq!(
+            fallback::consume(&dir, |event| {
+                replayed.push(event.source_event_id.clone());
+                runtime
+                    .ingest_hook_with_context(&event, "server-a", Some(&topology))
+                    .is_ok()
+            })
+            .unwrap(),
+            2
+        );
+        assert_eq!(replayed, ["UserPromptSubmit", "PermissionRequest"]);
+        let record = &runtime.snapshot_for("server-a").agents[0];
+        assert_eq!(record.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+        assert_eq!(record.attention_kind, "blocked");
+        assert!(record.attention_generation > record.seen_generation);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

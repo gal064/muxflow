@@ -23,7 +23,6 @@ function harness(overrides: Partial<AgentHostSetupOptions> = {}) {
     recordDecision: vi.fn(),
     refreshWiring: vi.fn(),
     onStatus: vi.fn(),
-    onModalChange: vi.fn(),
     openReview: vi.fn(),
     applyHostNaming: vi.fn(async () => "applied" as const),
   };
@@ -49,9 +48,9 @@ describe("the one-time set-up prompt", () => {
   beforeEach(() => { Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true }); });
 
   it("asks once when a connected host cannot report status", async () => {
-    const { calls, Harness } = harness();
+    const setup = harness();
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<Harness />); });
+    await act(async () => { renderer = create(<setup.Harness />); });
     const html = JSON.stringify(renderer.toJSON());
     expect(html).toContain("Set up agent status on ");
     expect(html).toContain("omarchy");
@@ -59,17 +58,17 @@ describe("the one-time set-up prompt", () => {
     // The exact files it would change are named: that is the part a user would
     // say no to, so it is not hidden behind the review.
     expect(html).toContain("/home/user/.claude-code/settings.json");
-    expect(calls.onModalChange).toHaveBeenLastCalledWith(true);
+    expect(setup.current.open).toBe(true);
     await act(async () => renderer.unmount());
   });
 
   it("never asks again once the host has an answer, of either kind", async () => {
     for (const decision of ["accepted", "declined"] as const) {
-      const { calls, Harness } = harness({ decision });
+      const setup = harness({ decision });
       let renderer!: ReturnType<typeof create>;
-      await act(async () => { renderer = create(<Harness />); });
+      await act(async () => { renderer = create(<setup.Harness />); });
       expect(renderer.toJSON()).toEqual({ type: "div", props: {}, children: null });
-      expect(calls.onModalChange).not.toHaveBeenCalledWith(true);
+      expect(setup.current.open).toBe(false);
       await act(async () => renderer.unmount());
     }
   });
@@ -133,13 +132,13 @@ describe("the one-time set-up prompt", () => {
 
   it("offers nothing, and shows no prompt, for a configuration it could not read", async () => {
     const setup = harness({ adapters: [adapter("claude-code", "unavailable")] });
-    const { calls, Harness } = setup;
+    const { Harness } = setup;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); });
     expect(setup.current.offerable).toBe(false);
     expect(setup.current.notice)
       .toBe("Agent status unavailable on this host — its agent configuration could not be read");
-    expect(calls.onModalChange).not.toHaveBeenCalledWith(true);
+    expect(setup.current.open).toBe(false);
     await act(async () => renderer.unmount());
   });
 
@@ -182,12 +181,12 @@ describe("the one-time set-up prompt", () => {
   });
 
   it("takes its question away with the host it was about", async () => {
-    const { calls, Harness } = harness();
+    const setup = harness();
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<Harness />); });
-    await act(async () => renderer.update(<Harness connected={false} />));
+    await act(async () => { renderer = create(<setup.Harness />); });
+    await act(async () => renderer.update(<setup.Harness connected={false} />));
     expect(renderer.toJSON()).toEqual({ type: "div", props: {}, children: null });
-    expect(calls.onModalChange).toHaveBeenLastCalledWith(false);
+    expect(setup.current.open).toBe(false);
     await act(async () => renderer.unmount());
   });
 });

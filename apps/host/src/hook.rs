@@ -59,20 +59,18 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
     let home = flag(&arguments, "--home").map(std::path::PathBuf::from);
     let settings_path = flag(&arguments, "--settings-path").map(std::path::PathBuf::from);
     let adapter_id = flag(&arguments, "--adapter");
-    if settings_path.is_some() && adapter_id.is_none() {
-        bail!("--settings-path names one adapter's configuration and requires --adapter");
-    }
-    let targets: Vec<_> = match adapter_id.as_deref() {
-        Some(id) => vec![
-            crate::service::agents::adapters::by_id(id)
-                .context("unsupported hook adapter")?
-                .legacy_kind(),
-        ],
-        None => crate::service::agents::adapters::all()
-            .map(|adapter| adapter.legacy_kind())
-            .collect(),
+    let selected = adapter_id
+        .as_deref()
+        .map(|id| crate::service::agents::adapters::by_id(id).context("unsupported hook adapter"))
+        .transpose()?;
+    let config_override = match (settings_path, selected) {
+        (Some(path), Some(adapter)) => Some((adapter.id(), path)),
+        (Some(_), None) => {
+            bail!("--settings-path names one adapter's configuration and requires --adapter")
+        }
+        (None, _) => None,
     };
-    let manager = crate::service::agents::HookManager::with_overrides(home, settings_path)?;
+    let manager = crate::service::agents::HookManager::with_overrides(home, config_override)?;
     let action = match verb {
         "status" => None,
         "install" => Some(v1::HookManagementAction::Install),
@@ -80,21 +78,22 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
         _ => bail!("usage: tmux-ide-host hook <ingest|status|install|uninstall>"),
     };
     let mut report = Vec::new();
-    for adapter in targets {
-        let id = crate::service::agents::adapters::adapter(adapter)
-            .context("agent adapter is required")?
-            .id();
-        if let Some(action) = action {
-            let review = manager.review(adapter, action)?;
+    if let Some(action) = action {
+        let targets: Vec<_> = match selected {
+            Some(adapter) => vec![adapter],
+            None => crate::service::agents::adapters::all().collect(),
+        };
+        for adapter in targets {
+            let review = manager.review(adapter.legacy_kind(), action)?;
             // `already_current` is the installer's own idempotence answer, so a
             // second run reports "unchanged" rather than rewriting a file and
             // claiming it did something.
             let changed = !review.already_current;
             if changed {
-                manager.apply(adapter, action, &review.confirmation_token)?;
+                manager.apply(adapter.legacy_kind(), action, &review.confirmation_token)?;
             }
             report.push(serde_json::json!({
-                "adapterId": id,
+                "adapterId": adapter.id(),
                 "configPath": review.config_path,
                 "backupPath": review.backup_path,
                 "changed": changed,
@@ -134,6 +133,7 @@ fn wiring_label(state: v1::AgentHookWiring) -> &'static str {
         v1::AgentHookWiring::Wired => "wired",
         v1::AgentHookWiring::Partial => "partial",
         v1::AgentHookWiring::NotWired => "notWired",
+        v1::AgentHookWiring::Absent => "absent",
         v1::AgentHookWiring::Unavailable => "unavailable",
         v1::AgentHookWiring::Unspecified => "unspecified",
     }
@@ -269,6 +269,22 @@ async fn send(socket: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<()> {
     }
 }
 
+/// Events a stopped daemon could not be told about, kept in order.
+///
+/// This used to be one file per pane, overwritten by each event, and that
+/// discarded exactly the sequence the daemon needs. A turn that starts and then
+/// blocks while the daemon is down left only the block behind — and the
+/// daemon's own rule that a late tool event may not revive a finished turn then
+/// correctly ignored it, because the prompt that opened the new turn had been
+/// overwritten. The user closed the app mid-turn, the agent asked for
+/// permission, and the app came back showing the *previous* turn's result.
+///
+/// Bounded rather than unbounded: a mailbox that nothing ever drains must not
+/// grow without limit, so the oldest events are dropped once a pane has this
+/// many waiting. Dropping the oldest keeps the tail, which is the part that
+/// describes where the agent ended up.
+const MAX_FALLBACK_PER_PANE: usize = 32;
+
 fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
     let runtime = crate::paths::default_runtime_dir();
     crate::paths::prepare_runtime_dir(&runtime)?;
@@ -278,7 +294,20 @@ fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
     )
     .context("unsupported hook adapter")?
     .id();
-    let path = runtime.join(format!("hook-fallback-{adapter}-{pane}.pb"));
+    let prefix = format!("hook-fallback-{adapter}-{pane}-");
+    prune_fallbacks(&runtime, &prefix);
+    // Fixed-width nanoseconds first, so the file name sorts chronologically and
+    // the daemon can replay the sequence without opening anything; the random
+    // suffix separates two hooks that fired in the same nanosecond, which are
+    // concurrent and have no order to preserve anyway.
+    let path = runtime.join(format!(
+        "{prefix}{:020}-{}.pb",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        uuid::Uuid::new_v4().simple()
+    ));
     let temporary = runtime.join(format!(".hook-fallback-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> anyhow::Result<()> {
         let mut file = OpenOptions::new()
@@ -296,6 +325,33 @@ fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+/// Drop the oldest waiting events for this pane once the mailbox is full.
+///
+/// Best effort by design: a mailbox that cannot be pruned is not a reason to
+/// lose the event that is being written now.
+fn prune_fallbacks(runtime: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(runtime) else {
+        return;
+    };
+    let mut existing: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_owned();
+            (name.starts_with(prefix) && name.ends_with(".pb")).then(|| (name, entry.path()))
+        })
+        .collect();
+    if existing.len() < MAX_FALLBACK_PER_PANE {
+        return;
+    }
+    existing.sort_by(|left, right| left.0.cmp(&right.0));
+    for (_, path) in existing
+        .iter()
+        .take(existing.len() + 1 - MAX_FALLBACK_PER_PANE)
+    {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn parse_adapter(arguments: &[String]) -> anyhow::Result<v1::AgentAdapterKind> {

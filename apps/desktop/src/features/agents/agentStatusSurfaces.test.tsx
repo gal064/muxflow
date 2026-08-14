@@ -63,15 +63,34 @@ describe("the honest empty state", () => {
     expect(html).not.toContain("<button class=\"agents-notice\"");
   });
 
-  it("draws an unknown dot as an outline in every place a dot appears", () => {
-    // The regression this guards: unknown was a filled dot, so a detected but
-    // silent agent was in the same visual class as a working one.
-    for (const selector of [".state-dot.unknown", ".tab-dot.unknown"]) {
-      const rule = stylesCss.slice(stylesCss.indexOf(selector));
-      const block = rule.slice(0, rule.indexOf("}"));
-      expect(block).toContain("background: transparent");
-      expect(block).toContain("dashed");
+  it("draws an unknown dot as an outline, and never as a visible glyph by default", () => {
+    // Two regressions, both cascade accidents, both read from the source.
+    //
+    // Unknown used to be a *filled* dot, which put a detected-but-silent agent
+    // in the same visual class as a working one. And when it was first made
+    // hollow it also set `color`, which — at the same specificity as the
+    // `:not(.glyphs)` rule that hides the glyph, but later in the file —
+    // painted a literal "?" inside every 8px dot with the accessibility option
+    // off. `.idle` gets away with the same shape only because its glyph is the
+    // empty string.
+    //
+    // Asserted against the stylesheet rather than through `getComputedStyle`
+    // because jsdom answers neither question: it does not resolve `var()`, so
+    // every token-coloured dot computes as transparent, and it does not rank
+    // two equal-specificity `color` rules — the precise thing that broke. What
+    // is asserted instead is exact: the unknown rule sets no `color` at all,
+    // and the glyph colour is scoped to `.glyphs`.
+    for (const dot of ["state-dot", "tab-dot"]) {
+      const block = stylesCss.slice(stylesCss.indexOf(`.${dot}.unknown {`));
+      const body = block.slice(0, block.indexOf("}"));
+      expect(body).toContain("background: transparent");
+      expect(body).toContain("dashed");
+      expect(body).not.toContain("color:");
+      expect(stylesCss).toContain(`.${dot}.unknown.glyphs { color:`);
     }
+    // And a working dot stays filled, so the two remain distinguishable.
+    const working = stylesCss.slice(stylesCss.indexOf(".state-dot.working {"));
+    expect(working.slice(0, working.indexOf("}"))).toContain("background: var(--state-working)");
   });
 });
 

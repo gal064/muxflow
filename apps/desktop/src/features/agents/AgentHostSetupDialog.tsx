@@ -48,6 +48,11 @@ export function AgentHostSetupDialog(props: AgentHostSetupDialogProps) {
             <code>{adapter.hookConfigPath}</code>
           </li>)}
         </ul>
+        <p>
+          It also asks this host’s tmux server to name agent windows after what the
+          agent is working on. Only agent windows — everything else keeps the name
+          tmux gives it — and nothing is written to your tmux config.
+        </p>
         <p className="quiet-note">Until then the agents list stays honest: it shows which agents exist and says nothing about what they are doing.</p>
         {props.error && <SurfaceError className="dialog-error" detail={props.error} />}
       </div>
