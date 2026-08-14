@@ -260,9 +260,50 @@ mod tests {
             fs::remove_dir_all(&directory).ok();
         }
 
-        /// The regression: a reference URL is either resolved to a real path or
-        /// refused. It is never handed on as `/.file/id=…`, which no `open(2)`
-        /// can follow.
+        /// The regression, from the side Finder actually exercises: the URL a
+        /// Copy in Finder puts on the pasteboard is a *file reference* URL, and
+        /// what the upload path needs back is the path it stands for. Built
+        /// through `fileReferenceURL` rather than typed out, because the id in
+        /// one belongs to a real inode on the machine running the test.
+        #[test]
+        fn a_finder_file_reference_url_resolves_to_the_file_it_stands_for() {
+            let directory = std::env::temp_dir().join(format!("ade-ref-{}", std::process::id()));
+            fs::create_dir_all(&directory).expect("scratch directory");
+            let file = directory.join("finder copy.txt");
+            fs::write(&file, b"x").expect("scratch file");
+
+            let reference =
+                NSURL::fileURLWithPath(&NSString::from_str(file.to_str().expect("utf-8 path")))
+                    .fileReferenceURL()
+                    .expect("a file reference URL")
+                    .absoluteString()
+                    .expect("a file URL")
+                    .to_string();
+            assert!(
+                reference.contains("/.file/id="),
+                "the fixture must be a reference URL: {reference}"
+            );
+
+            let resolved = file_path_url(&reference).expect("a reference URL resolves");
+            assert!(
+                !resolved.contains("/.file/id="),
+                "a reference URL must not be forwarded: {resolved}"
+            );
+            let path = NSURL::URLWithString(&NSString::from_str(&resolved))
+                .expect("a URL")
+                .path()
+                .expect("a filesystem path")
+                .to_string();
+            assert_eq!(
+                fs::canonicalize(path).unwrap(),
+                fs::canonicalize(&file).unwrap()
+            );
+
+            fs::remove_dir_all(&directory).ok();
+        }
+
+        /// The other half: a reference URL that stands for nothing is refused
+        /// rather than handed on as `/.file/id=…`, which no `open(2)` can follow.
         #[test]
         fn an_unresolvable_file_reference_url_is_refused_not_forwarded() {
             assert_eq!(file_path_url("file:///.file/id=1.1"), None);

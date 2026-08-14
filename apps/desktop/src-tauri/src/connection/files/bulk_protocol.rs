@@ -397,3 +397,104 @@ fn wait_ready(fd: i32, events: libc::c_short, timeout_ms: libc::c_int) -> Result
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs::File,
+        os::fd::{FromRawFd, OwnedFd},
+    };
+
+    /// A pipe, as the two halves a bridge's stdio is made of.
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: `pipe` writes two descriptors into an array of two.
+        let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(created, 0, "pipe: {}", std::io::Error::last_os_error());
+        // SAFETY: both descriptors are freshly created and owned by nothing else.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    fn answer(request_id: u64) -> Vec<u8> {
+        encode_frame(&envelope(
+            request_id,
+            0,
+            Payload::Response(v1::Response {
+                ok: true,
+                ..Default::default()
+            }),
+        ))
+        .expect("an encodable response")
+    }
+
+    /// Two jobs on one bridge, over a real pipe pair rather than a mock.
+    ///
+    /// The cursor lives on the *bridge* and each job builds a fresh client
+    /// around it (`BulkLease::client`), so a client that started counting from
+    /// its own zero would reuse ids the connection had already spent — and the
+    /// response loop skips frames it is not waiting for rather than failing on
+    /// them, so the reuse would surface as a stale response silently accepted as
+    /// the answer to a new request, not as an error.
+    #[test]
+    fn request_ids_carry_across_the_jobs_that_share_one_connection() {
+        let (request_read, request_write) = pipe();
+        let (response_read, response_write) = pipe();
+        // Both answers are queued before either question is asked: what is under
+        // test is the numbering, and a pipe buffer holds far more than this.
+        let mut answers = File::from(response_write);
+        answers
+            .write_all(&answer(2))
+            .expect("queue the first answer");
+        // A second answer to the *first* id, so a client that restarted its
+        // numbering would find one waiting and fail this test on the cursor
+        // rather than blocking on a response that never comes — which is the
+        // shape the bug has in production: a stale response, silently accepted.
+        // A client that does not restart skips this frame, as the loop must.
+        answers
+            .write_all(&answer(2))
+            .expect("queue the stale answer");
+        answers
+            .write_all(&answer(3))
+            .expect("queue the second answer");
+
+        // Each half becomes the stdio type that owns the corresponding end of a
+        // child's pipes, which is what the client under test takes.
+        let mut stdin = ChildStdin::from(request_write);
+        let mut reader = BufReader::new(ChildStdout::from(response_read));
+        let mut decoder = FrameAccumulator::default();
+        // What a freshly handshaken bridge starts at: 1 was the handshake's.
+        let mut next_id = 2_u64;
+        let mut clean = true;
+
+        for expected in [2_u64, 3] {
+            BulkProtocolClient::resumed(
+                &mut stdin,
+                &mut reader,
+                &mut decoder,
+                &mut next_id,
+                &mut clean,
+            )
+            .request(v1::Request::default())
+            .expect("the queued answer");
+            assert_eq!(next_id, expected + 1, "the cursor advanced past {expected}");
+        }
+        assert!(clean, "two complete exchanges leave the bridge reusable");
+
+        // And the ids reached the wire, rather than only being counted in here.
+        let mut questions = File::from(request_read);
+        let mut asked = Vec::new();
+        let mut sent = FrameAccumulator::default();
+        let mut bytes = [0_u8; 4096];
+        while asked.len() < 2 {
+            let count = questions.read(&mut bytes).expect("the requests written");
+            assert_ne!(count, 0, "the request stream ended early");
+            sent.push(&bytes[..count]).expect("decodable requests");
+            while let Some(frame) = sent.next_frame().expect("decodable requests") {
+                asked.push(frame.request_id);
+            }
+        }
+        assert_eq!(asked, vec![2, 3]);
+        assert!(asked[1] > asked[0], "ids never restart");
+    }
+}
