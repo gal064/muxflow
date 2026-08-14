@@ -196,6 +196,7 @@ function MarkdownPreview({ source, onStatus }: { source: string; onStatus(messag
   }} dangerouslySetInnerHTML={{ __html: html }} />
   {externalUrl && <ConfirmationDialog
     confirmLabel="Open link"
+    destructive={false}
     detail={externalUrl}
     onCancel={() => setExternalUrl(undefined)}
     onConfirm={() => {

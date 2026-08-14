@@ -8,21 +8,23 @@ interface Props {
   /**
    * Whether the confirm button is drawn as destructive.
    *
-   * Stated, not inferred. It used to be read off the *label* —
+   * Stated by every caller, never inferred. It used to be read off the *label* —
    * `confirmLabel.startsWith("Close")` — so a dialog whose button said "Delete
    * host" got the accent-blue treatment reserved for safe primary actions,
    * identical to "Connect". A one-bit fact about what a button does should not
-   * be encoded in the first word of its text. Defaulted from the old rule so
-   * the existing "Close permanently" callers are unchanged.
+   * be encoded in the first word of its text, and a default derived from the
+   * label is that same rule with somewhere to hide: required here so a new
+   * dialog has to answer the question rather than inherit an answer from its
+   * wording.
    */
-  destructive?: boolean;
+  destructive: boolean;
   onCancel(): void;
   onConfirm(): void;
 }
 
 export function ConfirmationDialog({
   confirmLabel = "Close permanently",
-  destructive = confirmLabel.startsWith("Close"),
+  destructive,
   detail,
   title,
   onCancel,

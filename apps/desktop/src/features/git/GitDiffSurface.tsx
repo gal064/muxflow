@@ -232,6 +232,7 @@ export function GitDiffSurface(props: Props) {
     </aside>}
     {pendingDiscard && <ConfirmationDialog
       confirmLabel="Discard"
+      destructive
       detail={`Discard ${pendingDiscard.hunkIndex === undefined ? "all changes" : `hunk ${pendingDiscard.hunkIndex + 1}`} in ${pendingDiscard.diff.displayPath}? This cannot be undone by the app.`}
       onCancel={() => setPendingDiscard(undefined)}
       onConfirm={() => { const captured = pendingDiscard; setPendingDiscard(undefined); void confirmDiscard(captured); }}
