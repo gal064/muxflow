@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Pane } from "../../app/types";
 import { windowGrid } from "./layout";
 import { cellsForBox, type PixelBox, type TerminalMeasurements, type TerminalSize } from "./TerminalRenderer";
-import { clientSizeForSurface, MAX_CLIENT_CELLS, PANE_FRAME_CHROME_PIXELS } from "./clientSize";
+import { clientSizeForSurface, MAX_CLIENT_CELLS } from "./clientSize";
 
 /** One terminal's measurements, fixed so every expectation below is exact. */
 const CELL: PixelBox = { width: 8, height: 17 };
@@ -11,11 +11,7 @@ const MEASUREMENTS: TerminalMeasurements = { cell: CELL, chrome: CHROME };
 
 /** The size a surface of this many pixels is worth, independent of everything else. */
 function surfaceSize(surface: PixelBox): TerminalSize {
-  return cellsForBox(
-    { width: surface.width - PANE_FRAME_CHROME_PIXELS, height: surface.height - PANE_FRAME_CHROME_PIXELS },
-    CELL,
-    CHROME,
-  )!;
+  return cellsForBox(surface, CELL, CHROME)!;
 }
 
 /**
@@ -111,27 +107,44 @@ describe("clientSizeForSurface", () => {
     const refused = clientSizeForSurface({ width: 4000, height: 4000 }, { cell: tallCell, chrome: CHROME });
     expect(refused.kind).toBe("refused");
     expect(refused.kind === "refused" && refused.reason).toContain(`${MAX_CLIENT_CELLS} cell bound`);
-    expect(refused.kind === "refused" && refused.reason).toContain("3972x3986");
+    expect(refused.kind === "refused" && refused.reason).toContain("3974x3988");
 
     // Dragging the window narrow is not a defect and must not be reported as
     // one: below the minimum the answer is the same "nothing to ask for" as an
     // unmounted surface, and nothing retries it into a loop.
-    const narrow = clientSizeForSurface({ width: 40, height: 800 }, MEASUREMENTS);
-    expect(narrow).toEqual({ kind: "unavailable", reason: expect.stringContaining("too small") });
-    expect(clientSizeForSurface({ width: 30, height: 20 }, MEASUREMENTS).kind).toBe("unavailable");
+    expect(clientSizeForSurface({ width: 40, height: 800 }, MEASUREMENTS)).toEqual({ kind: "none" });
+    expect(clientSizeForSurface({ width: 30, height: 20 }, MEASUREMENTS)).toEqual({ kind: "none" });
   });
 
   it("asks for nothing while the surface or the terminals cannot be measured", () => {
-    expect(clientSizeForSurface(undefined, MEASUREMENTS).kind).toBe("unavailable");
-    expect(clientSizeForSurface({ width: Number.NaN, height: 800 }, MEASUREMENTS).kind).toBe("unavailable");
-    expect(clientSizeForSurface({ width: 0, height: 0 }, MEASUREMENTS).kind).toBe("unavailable");
-    // No terminal has reported yet; the effect recomputes when one does.
-    expect(clientSizeForSurface(surface, undefined)).toEqual({
-      kind: "unavailable",
-      reason: expect.stringContaining("no terminal has reported"),
-    });
+    expect(clientSizeForSurface(undefined, MEASUREMENTS)).toEqual({ kind: "none" });
+    expect(clientSizeForSurface({ width: Number.NaN, height: 800 }, MEASUREMENTS)).toEqual({ kind: "none" });
+    expect(clientSizeForSurface({ width: 0, height: 0 }, MEASUREMENTS)).toEqual({ kind: "none" });
+    // No terminal has reported yet; the hook recomputes when one does.
+    expect(clientSizeForSurface(surface, undefined)).toEqual({ kind: "none" });
   });
 });
+
+  it("gives every pane a box that can render the grid tmux derives from it", () => {
+    // The request is a whole-surface number; tmux hands each pane a share of it
+    // and the app renders that pane at tmux's grid, clipped by its frame. If a
+    // pane's box is one pixel short of its grid, its last row is cut — the
+    // symptom this stage exists to remove — so the property is checked over
+    // every surface height in a realistic range and every split up to eight.
+    for (let height = 400; height <= 1200; height += 1) {
+      const decision = clientSizeForSurface({ width: 1000, height }, MEASUREMENTS);
+      if (decision.kind !== "size") continue;
+      const rows = decision.size.rows;
+      for (const panes of [2, 3, 4, 8]) {
+        // tmux spends one row per divider and splits the rest.
+        const share = Math.floor((rows - (panes - 1)) / panes);
+        if (share < 2) continue;
+        // `paneStyle` gives the pane its share of the surface's pixels.
+        const box = (share / rows) * height;
+        expect(Math.floor(box / CELL.height)).toBeGreaterThanOrEqual(share);
+      }
+    }
+  });
 
 describe("cellsForBox", () => {
   it("subtracts the terminal's own padding and scrollbar before dividing", () => {

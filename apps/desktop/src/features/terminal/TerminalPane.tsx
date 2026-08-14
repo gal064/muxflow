@@ -107,7 +107,7 @@ interface Props {
    * Reports what this terminal turns pixels into. It describes a terminal, not
    * this pane, and the tmux client size is computed from it (P12-U006).
    */
-  onMeasurements?: (measurements: TerminalMeasurements) => void;
+  onMeasurements: (measurements: TerminalMeasurements) => void;
   onController: (paneId: string, controller: TerminalPaneController | undefined) => void;
   onDiagnostic?: (message: string) => void;
   transferClient?: TerminalTransferClient;
@@ -354,7 +354,7 @@ export function TerminalPane({
     // a terminal (cell size and chrome) and nothing about this pane's box.
     const reportMeasurements = () => {
       const measurements = renderer.measurements();
-      if (measurements) measurementsRef.current?.(measurements);
+      if (measurements) measurementsRef.current(measurements);
     };
     const observer = new ResizeObserver(() => {
       reportGrid(reconcilePaneGrid(renderer, paneRef.current, renderer.measure()));

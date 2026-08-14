@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useEffect } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PixelBox, TerminalMeasurements } from "../features/terminal/TerminalRenderer";
@@ -50,13 +51,14 @@ interface HarnessProps {
 }
 
 function Harness(props: HarnessProps) {
-  const { surfaceRef } = useClientResize({
+  const { onMeasurements, surfaceRef } = useClientResize({
     activeWindowId: props.activeWindowId,
     canMutate: props.canMutate ?? true,
     clientId: props.clientId,
-    measurements: "measurements" in props ? props.measurements : MEASUREMENTS,
     onStatus: props.onStatus ?? (() => undefined),
   });
+  const measurements = "measurements" in props ? props.measurements : MEASUREMENTS;
+  useEffect(() => { if (measurements) onMeasurements(measurements); }, [measurements, onMeasurements]);
   return props.surfaceMounted === false ? null : <div ref={surfaceRef} />;
 }
 
@@ -201,7 +203,7 @@ describe("useClientResize", () => {
     );
     expect(resizeClientMock).not.toHaveBeenCalled();
     expect(statuses).toHaveLength(1);
-    expect(statuses[0]).toContain("3972x3986");
+    expect(statuses[0]).toContain("3974x3988");
     // Said once, not once per recompute.
     await update({ activeWindowId: "@2" });
     expect(statuses).toHaveLength(1);

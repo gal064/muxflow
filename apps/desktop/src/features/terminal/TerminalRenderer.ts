@@ -134,6 +134,16 @@ export interface TerminalBoxChrome {
   scrollbar: number;
 }
 
+/**
+ * A terminal, plus the internal xterm does not expose: its render service's CSS
+ * cell size. The dependency is in the signature rather than inside a cast so
+ * that "this reads xterm internals" is visible to the next reader and to the
+ * next upgrade.
+ */
+export type MeasurableTerminal = Pick<Terminal, "options"> & {
+  _core?: { _renderService?: { dimensions?: { css?: { cell?: Partial<PixelBox> } } } };
+};
+
 /** Everything needed to turn a pixel box into a terminal grid. */
 export interface TerminalMeasurements {
   cell: PixelBox;
@@ -151,13 +161,11 @@ export interface TerminalMeasurements {
  * nothing and the app asks tmux for nothing, which is the safe outcome.
  */
 export function terminalMeasurements(
-  terminal: Pick<Terminal, "options">,
+  terminal: MeasurableTerminal,
   host: Element,
   element: Element,
 ): TerminalMeasurements | undefined {
-  const cell = (terminal as unknown as {
-    _core?: { _renderService?: { dimensions?: { css?: { cell?: Partial<PixelBox> } } } };
-  })._core?._renderService?.dimensions?.css?.cell;
+  const cell = terminal._core?._renderService?.dimensions?.css?.cell;
   if (!cell?.width || !cell.height) return undefined;
   const hostStyle = window.getComputedStyle(host);
   const terminalStyle = window.getComputedStyle(element);
@@ -199,10 +207,10 @@ export function cellsForBox(
 /**
  * Padding plus border an element spends on the named sides, in CSS pixels.
  *
- * A border with no style spends nothing, whatever width the cascade resolved —
- * browsers compute that to `0px`, and at least one DOM implementation reports
- * the initial `medium` instead, which would charge a terminal 32 px of border
- * it does not have.
+ * A border with no style spends nothing. Browsers already compute its width to
+ * `0px`, so this guard changes nothing in the app; jsdom reports the initial
+ * `medium` (16 px) instead, and without it `measureBox.test.ts` would be
+ * asserting against 64 px of border that does not exist anywhere.
  */
 function edges(style: CSSStyleDeclaration, ...sides: Array<"top" | "bottom" | "left" | "right">): number {
   return sides.reduce((total, side) => {
@@ -586,7 +594,7 @@ export class XtermRenderer implements TerminalRenderer {
     // holding an *outer* box has to give up both.
     const host = element?.parentElement;
     if (!element || !host) return undefined;
-    return terminalMeasurements(this.#terminal, host, element);
+    return terminalMeasurements(this.#terminal as MeasurableTerminal, host, element);
   }
 
   /**

@@ -18,40 +18,17 @@ export const MIN_CLIENT_CELLS = 2;
 export const MAX_CLIENT_CELLS = 500;
 
 /**
- * Chrome between the tiled surface's box and a pane's terminal, per axis, in
- * CSS pixels: the two 1px borders of one `.pane-frame` (`styles.css`).
- *
- * Everything else in the frame is deliberately zero, because per-pane chrome
- * does not shrink with the pane. A pane holding a fraction `f` of the window
- * gets only `f` of the surface's allowance back while spending the whole of its
- * own, so the shortfall is `chrome × (1 − f)`: with the 6 px terminal padding
- * this used to carry, a half-height pane came up ~7 px short and clipped its
- * bottom row. At 2 px the worst case is 2 px of a ~17 px cell. The surface's
- * breathing room now comes from the `inset` on `.terminal-window`, which is
- * outside the box measured here and costs the panes nothing.
- *
- * The horizontal axis carries one more term the surface pays once and each pane
- * spends: xterm's scrollbar allowance (`chrome.scrollbar`, 14 px). It does not
- * clip, because the allowance is subtracted from the whole surface while each
- * pane keeps its full box: for N panes across, a pane's element exceeds its
- * canvas by `(16 + r·cell − 2N)/N` px, which stays positive well past any
- * usable split. What it costs is margin — with many panes across, the last
- * column of each sits where a scrollbar would be drawn, and xterm's scrollbar
- * overlays rather than reserves.
- */
-export const PANE_FRAME_CHROME_PIXELS = 2;
-
-/**
  * What the desktop decided to ask tmux for, or why it decided to ask nothing.
  *
  * `refused` is a bug report: a size above the bound is a defect in this
  * computation, it is never clamped into range and sent anyway, and the user is
- * told. `unavailable` is ordinary — no metrics yet, no visible surface, a
- * window dragged too small to hold a terminal — and stays quiet.
+ * told. `none` is ordinary — no metrics yet, no visible surface, a window
+ * dragged too small to hold a terminal — and carries no message because nothing
+ * reads one.
  */
 export type ClientSizeDecision =
   | { kind: "size"; size: TerminalSize }
-  | { kind: "unavailable"; reason: string }
+  | { kind: "none" }
   | { kind: "refused"; reason: string };
 
 /**
@@ -75,26 +52,16 @@ export function clientSizeForSurface(
   surface: PixelBox | undefined,
   measurements: TerminalMeasurements | undefined,
 ): ClientSizeDecision {
-  if (!surface || !Number.isFinite(surface.width) || !Number.isFinite(surface.height)) {
-    return { kind: "unavailable", reason: "the terminal surface has no measured pixel box yet" };
+  if (!surface || !Number.isFinite(surface.width) || !Number.isFinite(surface.height) || !measurements) {
+    return { kind: "none" };
   }
-  if (!measurements) {
-    return { kind: "unavailable", reason: "no terminal has reported cell metrics yet" };
-  }
-  const measured = cellsForBox(
-    {
-      width: surface.width - PANE_FRAME_CHROME_PIXELS,
-      height: surface.height - PANE_FRAME_CHROME_PIXELS,
-    },
-    measurements.cell,
-    measurements.chrome,
-  );
-  if (!measured) {
-    return {
-      kind: "unavailable",
-      reason: `a ${Math.round(surface.width)}x${Math.round(surface.height)} pixel surface is smaller than one cell of terminal`,
-    };
-  }
+  // The surface's box is spent in full. A pane frame draws its edge with an
+  // inset shadow and its terminal has no padding, so nothing between this box
+  // and a pane's terminal consumes a pixel — which is what lets a pane always
+  // render the grid tmux derived from this number, at any split (`styles.css`).
+  const measured = cellsForBox(surface, measurements.cell, measurements.chrome);
+  // Smaller than one cell of terminal, which a window can legitimately be.
+  if (!measured) return { kind: "none" };
   const { columns, rows } = measured;
   if (columns > MAX_CLIENT_CELLS || rows > MAX_CLIENT_CELLS) {
     return {
@@ -102,10 +69,8 @@ export function clientSizeForSurface(
       reason: `Refusing to resize the tmux client to ${columns}x${rows}: above the ${MAX_CLIENT_CELLS} cell bound for a ${Math.round(surface.width)}x${Math.round(surface.height)} pixel surface.`,
     };
   }
-  if (columns < MIN_CLIENT_CELLS || rows < MIN_CLIENT_CELLS) {
-    // An ordinary consequence of dragging the window small. Nothing is sent,
-    // and nothing is said: the user can see how big their own window is.
-    return { kind: "unavailable", reason: `${columns}x${rows} is too small to be a terminal` };
-  }
+  // Dragging the window small is not a defect. Nothing is sent, and nothing is
+  // said: the user can see how big their own window is.
+  if (columns < MIN_CLIENT_CELLS || rows < MIN_CLIENT_CELLS) return { kind: "none" };
   return { kind: "size", size: { columns, rows } };
 }
