@@ -175,7 +175,9 @@ export interface AgentHookReview {
  * user's own arrangement, kept — it may carry exemptions this app knows
  * nothing about.
  */
-export type AgentHostNamingOutcome = "applied" | "alreadyCurrent" | "userConfigured" | "removed" | "unavailable";
+export const AGENT_HOST_NAMING_OUTCOMES = ["applied", "alreadyCurrent", "userConfigured", "removed", "nothingToRemove"] as const;
+/** `unavailable` is this side's answer to a value the host did not give. */
+export type AgentHostNamingOutcome = typeof AGENT_HOST_NAMING_OUTCOMES[number] | "unavailable";
 
 export interface AgentRequestScope {
   clientId: string;
