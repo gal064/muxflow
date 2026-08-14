@@ -298,8 +298,28 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .state-dot.working { background: var(--state-working); }
 .state-dot.blocked { background: var(--state-blocked); }
 .state-dot.done { background: var(--state-done); }
-.state-dot.unknown { background: var(--state-unknown); }
+/* Unknown is "this agent exists and nothing has told us what it is doing" —
+   the state a bare process detection produces, and the state a hook-sourced
+   Working decays to when its events stop. It was a filled dot, which reads as
+   a state at a glance and put two idle agents on the field machine in the same
+   visual class as a working one. Hollow and dashed: present, unfilled, and
+   distinct from the solid ring idle draws for "we know it is idle". */
+.state-dot.unknown {
+  background: transparent; border: 1.5px dashed var(--state-unknown); color: var(--state-unknown);
+}
 .state-dot.idle, .state-dot.none { border: 1.5px solid var(--chrome-faint); color: var(--chrome-faint); }
+
+/* The agents section's one honest line, when this host cannot report status at
+   all. A button when there is something to do about it, and a paragraph when
+   there is not; both are quiet, because it is a fact, not an alarm. */
+.agents-notice {
+  display: block; width: 100%; flex: 0 0 auto;
+  padding: 5px 8px; margin: 0; border: 0; border-radius: 4px;
+  background: transparent; text-align: left;
+  font-size: var(--type-secondary); line-height: 1.35; color: var(--chrome-dim);
+}
+button.agents-notice { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+button.agents-notice:hover { background: var(--chrome-hover); color: var(--chrome-ink); }
 
 .host-row {
   display: flex; align-items: center; gap: 7px;
@@ -387,7 +407,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .tab-dot.blocked { background: var(--state-blocked); }
 .tab-dot.done { background: var(--state-done); }
 .tab-dot.working { background: var(--state-working); }
-.tab-dot.unknown { background: var(--state-unknown); }
+/* Same rule as the sidebar dot: a tab whose agent state is unknown must not
+   look like a tab whose agent is doing something. */
+.tab-dot.unknown { background: transparent; border: 1px dashed var(--state-unknown); }
 .tab-dot.idle { background: transparent; border: 1px solid var(--chrome-faint); }
 .tab-close {
   display: inline-flex; align-items: center; justify-content: center;

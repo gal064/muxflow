@@ -30,6 +30,13 @@ interface SettingsDialogProps {
   onRequestHelperInstall(): void;
   onShell(update: Partial<ShellState>): void;
   onSounds(preferences: AgentSoundPreferences): void;
+  /**
+   * Where a "not now" is taken back. The one-time prompt is deliberately
+   * one-time, so declining it has to leave a way back that is not "reinstall
+   * the app" — and someone whose hooks were later removed by another tool
+   * needs the same door.
+   */
+  agentSetup: { available: boolean; reports: boolean; onSetUp(): void };
 }
 
 type SettingsTab = "connection" | "sounds" | "accessibility";
@@ -130,6 +137,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 is the obvious question. */}
             <span className="settings-hint">{hostDeleteHint(props)}</span>
           </div>
+          <div className="settings-host-actions">
+            <button disabled={!props.agentSetup.available} onClick={props.agentSetup.onSetUp} type="button">Set up agent status…</button>
+            <span className="settings-hint">{agentSetupHint(props.agentSetup)}</span>
+          </div>
           <fieldset className="settings-modes">
             <legend>Transport</legend>
             <label><input checked={props.connectionMode === "local"} name="connection-mode" onChange={() => props.onConnectionMode("local")} type="radio" /> Local</label>
@@ -182,6 +193,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
       <footer><button className="primary" onClick={tab === "connection" ? props.onConnect : props.onClose} type="button">{tab === "connection" ? "Connect" : "Done"}</button></footer>
     </section>
   </div>;
+}
+
+/** What the host's agent configuration is, in the words of what it is. */
+function agentSetupHint(setup: SettingsDialogProps["agentSetup"]): string {
+  if (setup.available) return "Adds this app’s lifecycle hooks alongside the ones already configured on this host.";
+  if (setup.reports) return "This host already reports agent status.";
+  return "Connect to a host to check whether it can report agent status.";
 }
 
 /** Why Delete is unavailable, in the words of the reason it is unavailable. */

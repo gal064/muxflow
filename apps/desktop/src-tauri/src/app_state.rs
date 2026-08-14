@@ -158,6 +158,19 @@ pub enum AgentSortMode {
 }
 
 // No `Eq`: the shell's sidebar width and agents-section ratio are fractions.
+/// Whether the user has answered "set up this host" for one host profile.
+///
+/// Stored per host rather than globally: consent to change configuration files
+/// on a laptop says nothing about a shared build box, and the prompt is
+/// one-time per host precisely because re-asking is how a consent prompt turns
+/// into something people click through.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum HostSetupDecision {
+    Accepted,
+    Declined,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedAppState {
@@ -167,6 +180,8 @@ pub struct PersistedAppState {
     pub shell: ShellPreferences,
     #[serde(default)]
     pub commands: CommandPreferences,
+    #[serde(default)]
+    pub host_setup: HashMap<String, HostSetupDecision>,
 }
 
 impl Default for PersistedAppState {
@@ -177,6 +192,7 @@ impl Default for PersistedAppState {
             workspace_ui: Vec::new(),
             shell: ShellPreferences::default(),
             commands: CommandPreferences::default(),
+            host_setup: HashMap::new(),
         }
     }
 }
@@ -268,6 +284,12 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
         if let Some(binding) = binding {
             validate_text("shortcut binding", binding, false)?;
         }
+    }
+    if value.host_setup.len() > 1_024 {
+        return Err("too many recorded host setup decisions".into());
+    }
+    for host_profile_id in value.host_setup.keys() {
+        validate_text("host setup profile ID", host_profile_id, false)?;
     }
     let mut ids = HashSet::new();
     for tab in &value.app_tabs {
@@ -502,6 +524,7 @@ mod tests {
             commands: CommandPreferences {
                 shortcut_overrides: HashMap::from([("window.new".into(), Some("Ctrl+T".into()))]),
             },
+            host_setup: HashMap::from([("local".into(), HostSetupDecision::Accepted)]),
         }
     }
 
@@ -614,6 +637,14 @@ mod tests {
         assert!(value.shell.sidebar_collapsed && value.shell.panel_open);
         assert!(value.shell.agent_state_glyphs && value.shell.terminal_screen_reader);
         assert!(value.shell.window_geometry.is_some());
+        assert_eq!(
+            value.host_setup.get("local"),
+            Some(&HostSetupDecision::Accepted)
+        );
+        assert_eq!(
+            value.host_setup.get("ssh-omarchy"),
+            Some(&HostSetupDecision::Declined)
+        );
         validate(&value).expect("the frontend's own payload must validate");
 
         // Nothing may be stored that the frontend does not send, and nothing the

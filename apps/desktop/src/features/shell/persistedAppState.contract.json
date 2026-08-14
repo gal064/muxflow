@@ -71,5 +71,9 @@
     "shortcutOverrides": {
       "window.new": "Ctrl+T"
     }
+  },
+  "hostSetup": {
+    "local": "accepted",
+    "ssh-omarchy": "declined"
   }
 }

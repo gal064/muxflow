@@ -70,12 +70,24 @@ export interface ShellState {
   windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
 }
 
+/**
+ * The user's one-time answer to "set up agent status on this host".
+ *
+ * Recorded per host profile, because agreeing to merge hook entries into the
+ * configuration on one machine says nothing about another, and because a prompt
+ * that comes back every connect is a prompt people learn to dismiss without
+ * reading. `declined` is remembered as deliberately as `accepted`; Settings is
+ * where either can be revisited.
+ */
+export type HostSetupDecision = "accepted" | "declined";
+
 export interface PersistedAppState {
   schemaVersion: 1;
   appTabs: AppOwnedTab[];
   workspaceUi: WorkspaceUiRecord[];
   shell: ShellState;
   commands: { shortcutOverrides: Record<string, string | null> };
+  hostSetup: Record<string, HostSetupDecision>;
 }
 
 export const defaultShellState: ShellState = {
@@ -95,6 +107,7 @@ export const defaultAppState: PersistedAppState = {
   workspaceUi: [],
   shell: defaultShellState,
   commands: { shortcutOverrides: {} },
+  hostSetup: {},
 };
 
 export function hostProfileId(connection: ConnectionSpec): string {
@@ -131,7 +144,19 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
         ? { windowGeometry: shell.windowGeometry } : {}),
     },
     commands: { shortcutOverrides: normalizeShortcutRecord(candidate.commands?.shortcutOverrides) },
+    hostSetup: normalizeHostSetup(candidate.hostSetup),
   };
+}
+
+/**
+ * An unrecognised decision is dropped rather than coerced. Coercing it to
+ * `declined` would silently suppress the prompt on a host the user never
+ * answered for, and coercing it to `accepted` would be worse.
+ */
+function normalizeHostSetup(value: unknown): Record<string, HostSetupDecision> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value)
+    .filter(([host, decision]) => host && (decision === "accepted" || decision === "declined"))) as Record<string, HostSetupDecision>;
 }
 
 /** Never narrower than the token width; the window cap is applied at render. */

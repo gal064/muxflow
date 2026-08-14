@@ -25,6 +25,7 @@ import { useAgentWorkflow } from "../features/agents/AgentHookWorkflow";
 import { TauriAgentClient } from "../features/agents/api";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
 import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
+import { useAgentHostSetup } from "../features/agents/useAgentHostSetup";
 import { useAgentNotificationActivation, type PaneSurfaceResult } from "../features/agents/useAgentNotificationActivation";
 import { useAgentRuntime } from "../features/agents/useAgentRuntime";
 import { keyForScope, keyForTransferConnection, TauriFileWorkspaceClient } from "../features/files/api";
@@ -152,6 +153,7 @@ export function App() {
   const [pendingDownload, setPendingDownload] = useState<PendingDownload>();
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
+  const [agentSetupOpen, setAgentSetupOpen] = useState(false);
   const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
   const focusHistoryRef = useRef(focusHistory);
   focusHistoryRef.current = focusHistory;
@@ -382,6 +384,24 @@ export function App() {
     onStatus: setStatus,
     runtime: agentRuntime,
   });
+  const hostLabel = connection.mode === "local" ? "local" : connection.target;
+  const agentHostSetup = useAgentHostSetup({
+    adapters: agentRuntime.adapters,
+    applyHooks: agentRuntime.applyHooks,
+    connected: Boolean(agentScope),
+    decision: appState.hostSetup[currentHostProfileId],
+    hostLabel,
+    hostProfileId: currentHostProfileId,
+    onModalChange: setAgentSetupOpen,
+    onStatus: setStatus,
+    openReview: (adapter) => agentWorkflow.reviewHooks(adapter, "install"),
+    recordDecision: (hostProfileId, decision) => setAppState((current) => ({
+      ...current,
+      hostSetup: { ...current.hostSetup, [hostProfileId]: decision },
+    })),
+    refreshWiring: agentRuntime.refreshSnapshot,
+    reviewHooks: agentRuntime.reviewHooks,
+  });
 
   const home = useMemo(() => inferHome(snapshot.panes.map((pane) => pane.currentPath)), [snapshot.panes]);
   const sidebarRows = useMemo(() => workspaceRows({
@@ -547,7 +567,7 @@ export function App() {
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
     || Boolean(confirmation) || Boolean(textPrompt)
-    || agentModalOpen || Boolean(pendingDownload) || appStateResetConfirmation || appRecoveryDiscardConfirmation
+    || agentModalOpen || agentSetupOpen || Boolean(pendingDownload) || appStateResetConfirmation || appRecoveryDiscardConfirmation
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
   useEffect(() => {
@@ -797,8 +817,10 @@ export function App() {
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}
         canMutate={hostState.canMutate}
-        hostLabel={connection.mode === "local" ? "local" : connection.target}
+        hookNotice={agentHostSetup.notice}
+        hostLabel={hostLabel}
         latencyMs={latency?.milliseconds}
+        onSetUpHost={agentHostSetup.offerable ? agentHostSetup.offer : undefined}
         onAgentsRatio={(ratio) => updateShell({ agentsSectionRatio: clampedAgentsRatio(ratio) })}
         maxWidth={Math.max(SIDEBAR_MIN_WIDTH, Math.floor(windowWidth / 3))}
         onWidth={(width) => updateShell({ sidebarWidth: sidebarWidthForWindow(width, windowWidth) })}
@@ -957,7 +979,13 @@ export function App() {
 
     <TerminalTransferHistory client={terminalTransferClient} onError={(error) => setStatus(String(error))} registry={terminalTransferRegistry} />
     {agentWorkflow.dialog}
+    {agentHostSetup.dialog}
     {settingsOpen && <SettingsDialog
+      agentSetup={{
+        available: agentHostSetup.offerable,
+        reports: agentHostSetup.wiring.reports,
+        onSetUp: () => { setSettingsOpen(false); agentHostSetup.offer(); },
+      }}
       connectionMode={connectionMode}
       deletableProfile={deletableProfile}
       helper={helperState}

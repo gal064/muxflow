@@ -57,6 +57,7 @@ export interface WireAgentSnapshot {
     adapter: string; id: string; displayName: string; supportsLaunch?: boolean; supportsResume?: boolean;
     supportsHooks?: boolean; supportsProcessDetection?: boolean; supportsScreenFallback?: boolean;
     hookConfigPath?: string; hookEvents?: string[];
+    hookWiring?: string; hookWiringDetail?: string;
   }>;
 }
 
@@ -310,7 +311,20 @@ function mapAdapterDescriptor(value: NonNullable<WireAgentSnapshot["adapters"]>[
     supportsScreenFallback: Boolean(value.supportsScreenFallback),
     hookConfigPath: value.hookConfigPath ?? "", hookEvents: value.hookEvents ?? [],
     placements: value.supportsLaunch ? ["window", "split"] : [],
+    hookWiring: mapHookWiring(value.hookWiring),
+    hookWiringDetail: value.hookWiringDetail ?? "",
   };
+}
+
+/**
+ * An unrecognised value becomes `unspecified`, never a definite answer. A host
+ * that speaks a wiring state this build does not know has told us nothing, and
+ * guessing "not wired" would put an install prompt in front of the user for a
+ * configuration that may already be correct.
+ */
+function mapHookWiring(value: string | undefined): AgentAdapterDescriptor["hookWiring"] {
+  return value === "wired" || value === "partial" || value === "notWired" || value === "unavailable"
+    ? value : "unspecified";
 }
 
 function mapLifecycle(value: string): AgentLifecycle {
