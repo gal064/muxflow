@@ -19,9 +19,7 @@ use super::super::{SequencerControl, emit_event};
 use super::correlation::{
     MarkerBlock, classify_marker_block, error_reason, marker_pane, wants_error_line,
 };
-use super::{
-    build_seed_with_metadata, capture_metadata, selected_capture_boundary, validate_tmux_id,
-};
+use super::{build_seed_with_metadata, capture_metadata, validate_tmux_id};
 
 /// Asks the control-writer thread to write a capture for `pane_id`.
 ///
@@ -166,17 +164,16 @@ pub(super) enum CommandBlock {
     CaptureAlternate {
         tag: CommandTag,
         pane_id: String,
-        primary_lines: Vec<Vec<u8>>,
-        primary_boundary: u64,
+        visible_lines: Vec<Vec<u8>>,
+        visible_boundary: u64,
         lines: Vec<Vec<u8>>,
     },
     CaptureMetadata {
         tag: CommandTag,
         pane_id: String,
-        primary_lines: Vec<Vec<u8>>,
-        alternate_lines: Vec<Vec<u8>>,
-        primary_boundary: u64,
-        alternate_boundary: u64,
+        visible_lines: Vec<Vec<u8>>,
+        saved_normal_lines: Vec<Vec<u8>>,
+        visible_boundary: u64,
         lines: Vec<Vec<u8>>,
     },
 }
@@ -193,10 +190,9 @@ pub(super) struct StreamState {
 
 pub(super) struct PendingCaptureMetadata {
     pub(super) pane_id: String,
-    pub(super) primary_lines: Vec<Vec<u8>>,
-    pub(super) alternate_lines: Vec<Vec<u8>>,
-    pub(super) primary_boundary: u64,
-    pub(super) alternate_boundary: u64,
+    pub(super) visible_lines: Vec<Vec<u8>>,
+    pub(super) saved_normal_lines: Vec<Vec<u8>>,
+    pub(super) visible_boundary: u64,
 }
 
 struct StreamRuntime<'a> {
@@ -495,33 +491,30 @@ impl StreamState {
                 // tmux emits one %begin/%end block per command separated by
                 // `;`: capture-pane and its following display-message metadata
                 // are distinct correlated blocks.
-                let primary_boundary = terminal_generation.load(Ordering::Acquire);
-                self.pending_alternate = Some((pane_id, lines, primary_boundary));
+                let visible_boundary = terminal_generation.load(Ordering::Acquire);
+                self.pending_alternate = Some((pane_id, lines, visible_boundary));
             }
             CommandBlock::CaptureAlternate {
                 pane_id,
-                primary_lines,
-                primary_boundary,
+                visible_lines,
+                visible_boundary,
                 lines,
                 ..
             } => {
                 // This is the precise output boundary represented by both
                 // screen captures. Later terminal output is replayed once.
-                let alternate_boundary = terminal_generation.load(Ordering::Acquire);
                 self.pending_metadata = Some(PendingCaptureMetadata {
                     pane_id,
-                    primary_lines,
-                    alternate_lines: lines,
-                    primary_boundary,
-                    alternate_boundary,
+                    visible_lines,
+                    saved_normal_lines: lines,
+                    visible_boundary,
                 });
             }
             CommandBlock::CaptureMetadata {
                 pane_id,
-                primary_lines,
-                alternate_lines,
-                primary_boundary,
-                alternate_boundary,
+                visible_lines,
+                saved_normal_lines,
+                visible_boundary,
                 lines,
                 ..
             } => {
@@ -536,14 +529,16 @@ impl StreamState {
                         retry = *replay_overflowed;
                         if !retry {
                             if let Some(metadata) = capture_metadata(&lines, &pane_id) {
-                                let capture_boundary = selected_capture_boundary(
-                                    metadata,
-                                    primary_boundary,
-                                    alternate_boundary,
-                                );
+                                // The screen the user sees always comes from
+                                // the first capture — plain `capture-pane`
+                                // returns the displayed grid in both screen
+                                // modes — so that is the point this seed is
+                                // current through. Output that landed between
+                                // the two captures is replayed after it.
+                                let capture_boundary = visible_boundary;
                                 let seed_build = build_seed_with_metadata(
-                                    primary_lines,
-                                    alternate_lines,
+                                    visible_lines,
+                                    saved_normal_lines,
                                     metadata,
                                 );
                                 let mut seeder = ScreenSeeder::default();
@@ -709,24 +704,23 @@ impl StreamState {
                 pane_id,
                 lines: Vec::new(),
             }
-        } else if let Some((pane_id, primary_lines, primary_boundary)) =
+        } else if let Some((pane_id, visible_lines, visible_boundary)) =
             self.pending_alternate.take()
         {
             CommandBlock::CaptureAlternate {
                 tag,
                 pane_id,
-                primary_lines,
-                primary_boundary,
+                visible_lines,
+                visible_boundary,
                 lines: Vec::new(),
             }
         } else if let Some(pending) = self.pending_metadata.take() {
             CommandBlock::CaptureMetadata {
                 tag,
                 pane_id: pending.pane_id,
-                primary_lines: pending.primary_lines,
-                alternate_lines: pending.alternate_lines,
-                primary_boundary: pending.primary_boundary,
-                alternate_boundary: pending.alternate_boundary,
+                visible_lines: pending.visible_lines,
+                saved_normal_lines: pending.saved_normal_lines,
+                visible_boundary: pending.visible_boundary,
                 lines: Vec::new(),
             }
         } else {
