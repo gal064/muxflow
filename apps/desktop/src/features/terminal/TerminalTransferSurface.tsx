@@ -131,11 +131,6 @@ export function TerminalTransferSurface({
     setReview(pending);
   });
 
-  const dismissSuccessfulPreflights = () => {
-    const batch = activeBatchRef.current;
-    if (batch) transferRegistry.dismissSuccessfulPreflights(batch.scope);
-  };
-
   const startRemoteBatch = async (batch: ActiveBatch, items: UploadPreflight[], imagePng: boolean) => {
     assertCurrentBatch(batch);
     const large = requiresLargeUploadConfirmation(items);
@@ -171,6 +166,9 @@ export function TerminalTransferSurface({
     onPaste(imagePng
       ? destinations.map(validateAgentImagePath).join(" ")
       : joinShellEscapedPaths(destinations));
+    // Delivered: the paths are in the pane. Only now, and only for a batch that
+    // reached this line — a completion whose paste was refused stays visible.
+    transferRegistry.dismissDelivered(batch.scope);
   };
 
   const acceptPaths = async (paths: readonly string[], imagePng = false) => {
@@ -203,7 +201,9 @@ export function TerminalTransferSurface({
         }, (progress) => updateProgress(batch, progress), batch.abortController.signal));
         assertCurrentBatch(batch);
       }
-      dismissSuccessfulPreflights();
+      // The preflights have become uploads; their completions are no longer
+      // what the list should be showing.
+      transferRegistry.dismissDelivered(batch.scope);
       await startRemoteBatch(batch, items, imagePng);
     } catch (reason) {
       if (!batchIsCurrent(batch)) throw new DOMException("Terminal transfer scope changed.", "AbortError");
@@ -239,7 +239,7 @@ export function TerminalTransferSurface({
         collision: "rename", largeUploadConfirmed: true, imagePng: true,
       }, (progress) => updateProgress(batch, progress), batch.abortController.signal);
       assertCurrentBatch(batch);
-      dismissSuccessfulPreflights();
+      transferRegistry.dismissDelivered(batch.scope);
       await startRemoteBatch(batch, [item], true);
     } catch (reason) {
       if (!batchIsCurrent(batch)) throw new DOMException("Terminal transfer scope changed.", "AbortError");
@@ -271,7 +271,7 @@ export function TerminalTransferSurface({
         collision: "rename", largeUploadConfirmed: true, imagePng: true,
       }, (progress) => updateProgress(batch, progress), batch.abortController.signal);
       assertCurrentBatch(batch);
-      dismissSuccessfulPreflights();
+      transferRegistry.dismissDelivered(batch.scope);
       await startRemoteBatch(batch, [item], true);
     } catch (reason) {
       if (!batchIsCurrent(batch)) throw new DOMException("Terminal transfer scope changed.", "AbortError");
@@ -416,7 +416,12 @@ export function TerminalTransferSurface({
     {children}
     {dragging && <div className="terminal-drop-hint" role="status">Drop files to paste paths</div>}
     {!registry && <TerminalTransferHistory client={client} onError={fail} registry={transferRegistry} />}
-    {error && <SurfaceError className="terminal-transfer-error" detail={error} />}
+    {/* Dismissible, because it does not auto-clear: it survives until the next
+        transfer starts, and a failed paste is not followed by one. */}
+    {error && <div className="terminal-transfer-error">
+      <SurfaceError className="surface-error" detail={error} />
+      <button aria-label="Dismiss the transfer error" onClick={() => setError(undefined)} type="button">Dismiss</button>
+    </div>}
     {review && <UploadReviewDialog pending={review} onChoose={(policy) => {
       const resolve = reviewResolve.current;
       reviewResolve.current = undefined;
@@ -484,6 +489,14 @@ export function TerminalTransferHistory({ registry, client, onError }: {
         {canCancelTransfer(transfer.state) && <button aria-label={`Cancel upload ${transfer.name}`} onClick={() => void client.cancel(transfer.id).then((disposition) => {
           if (disposition.disposition === "awaitingAuthoritativeOutcome") registry.markVerifying(record.key);
         }).catch((reason) => onError?.(reason))} type="button">Cancel</button>}
+        {/* Only finished records reach this list at all now — a success removes
+            itself — so what is left is a failure, a cancellation or an unknown
+            outcome, and every one of those is the user's to close. */}
+        {!canCancelTransfer(transfer.state) && transfer.state !== "verifying" && <button
+          aria-label={`Dismiss upload ${transfer.name}`}
+          onClick={() => registry.dismiss(record.key)}
+          type="button"
+        >Dismiss</button>}
         {transfer.state === "verifying" && <small className="transfer-finalizing" role="status">Commit in progress; awaiting the authoritative backend outcome.</small>}
         {transfer.failureKind === "staleScope" && <em role="alert">Upload stopped because the connection scope changed.</em>}
         {transfer.failureKind === "timeout" && <em role="alert">Upload timed out before an authoritative result arrived.</em>}
