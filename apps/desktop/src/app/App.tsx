@@ -1014,10 +1014,13 @@ export function App() {
       shortcutEditorOpen={shortcutEditorOpen}
       textPrompt={textPrompt}
     />
-    {/* The screen-reader half of the status channel — and only the half the
-        visible notice does not already carry. Both regions holding the same
-        text announced every refusal twice, and the routine "Live" sat here at
-        rest as a second connection indicator beside the host row. */}
-    <div className="sr-only" aria-live="polite">{notice ? "" : status}</div>
+    {/* No second live region. The notice above *is* one — `role="alert"` for a
+        problem, `role="status"` otherwise — and it carries every message that
+        is not routine progress. A duplicate `sr-only` region holding the same
+        text announced each refusal twice, and held the routine "Live" at rest,
+        which put a second resting connection indicator in the accessibility
+        tree beside the host row. Routine progress is deliberately invisible to
+        sighted users; the host row and the disconnected strip carry connection
+        state with accessible names of their own. */}
   </main>;
 }
