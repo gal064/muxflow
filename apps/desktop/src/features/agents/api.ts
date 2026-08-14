@@ -116,7 +116,7 @@ export interface AgentClient {
   markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void>;
   reviewHooks(scope: AgentRequestScope, adapter: AgentAdapterId, action?: "install" | "uninstall"): Promise<AgentHookReview>;
   applyHooks(scope: AgentRequestScope, review: AgentHookReview): Promise<void>;
-  applyHostNaming(scope: AgentRequestScope): Promise<AgentHostNamingOutcome>;
+  applyHostNaming(scope: AgentRequestScope, action?: "install" | "uninstall"): Promise<AgentHostNamingOutcome>;
   publishWireEvent(scope: AgentRequestScope, event: WireAgentEvent): void;
   publishWireSnapshot(scope: AgentRequestScope, snapshot: WireAgentSnapshot): void;
   subscribe(listener: (event: AgentWireEvent) => void): () => void;
@@ -200,11 +200,11 @@ export class TauriAgentClient implements AgentClient {
     };
   }
 
-  async applyHostNaming(scope: AgentRequestScope): Promise<AgentHostNamingOutcome> {
-    const response = await this.#request(scope, { operation: "hostNaming" });
-    return response.hostNaming === "applied" || response.hostNaming === "alreadyCurrent"
-      || response.hostNaming === "userConfigured"
-      ? response.hostNaming
+  async applyHostNaming(scope: AgentRequestScope, action: "install" | "uninstall" = "install"): Promise<AgentHostNamingOutcome> {
+    const response = await this.#request(scope, { operation: action === "install" ? "hostNaming" : "hostNamingRemove" });
+    const known: readonly string[] = ["applied", "alreadyCurrent", "userConfigured", "removed"];
+    return known.includes(response.hostNaming ?? "")
+      ? response.hostNaming as AgentHostNamingOutcome
       : "unavailable";
   }
 

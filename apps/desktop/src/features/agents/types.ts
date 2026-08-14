@@ -175,7 +175,7 @@ export interface AgentHookReview {
  * user's own arrangement, kept — it may carry exemptions this app knows
  * nothing about.
  */
-export type AgentHostNamingOutcome = "applied" | "alreadyCurrent" | "userConfigured" | "unavailable";
+export type AgentHostNamingOutcome = "applied" | "alreadyCurrent" | "userConfigured" | "removed" | "unavailable";
 
 export interface AgentRequestScope {
   clientId: string;

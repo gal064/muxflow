@@ -32,7 +32,6 @@ function harness(overrides: Partial<AgentHostSetupOptions> = {}) {
     hostProfileId: "ssh-omarchy",
     hostLabel: "omarchy",
     decision: undefined,
-    liveAdapterIds: [],
     ...calls,
     ...overrides,
   };
@@ -192,7 +191,9 @@ describe("the one-time set-up prompt", () => {
    * answered and unable to come back and fix it.
    */
   it("brings an already-consented host up to date without asking again", async () => {
-    const setup = harness({ decision: "accepted" });
+    // `partial` is the shape a grown event set leaves: this app already owns
+    // entries in that file, and some of the events it now needs are missing.
+    const setup = harness({ decision: "accepted", adapters: [adapter("claude-code", "partial")] });
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<setup.Harness />); });
     expect(renderer.toJSON()).toEqual({ type: "div", props: {}, children: null });
@@ -200,9 +201,45 @@ describe("the one-time set-up prompt", () => {
     expect(setup.calls.refreshWiring).toHaveBeenCalled();
     expect(setup.calls.onStatus).toHaveBeenCalledWith(expect.stringContaining("Updated the agent status hooks"));
 
-    // Once per connection, not once per render.
-    await act(async () => renderer.update(<setup.Harness decision="accepted" />));
+    // Once, not once per render — and `install` finishes by refreshing the
+    // wiring, which is what would otherwise re-enter this effect forever.
+    await act(async () => renderer.update(<setup.Harness decision="accepted" adapters={[adapter("claude-code", "partial")]} />));
     expect(setup.calls.applyHooks).toHaveBeenCalledTimes(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it("stops re-asserting on a host that refuses, instead of rewriting it forever", async () => {
+    // `install` refreshes the wiring whatever happens, which produces a new
+    // snapshot and re-runs the effect. Without a refusal being remembered, a
+    // host whose configuration can never reach `wired` — a racing editor, a
+    // stale lock, an unwritable file — is rewritten in a silent loop.
+    const applyHooks = vi.fn(async () => { throw new Error("another hook configuration update is in progress"); });
+    const setup = harness({ decision: "accepted", adapters: [adapter("claude-code", "partial")], applyHooks });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    expect(applyHooks).toHaveBeenCalledTimes(1);
+    expect(setup.calls.onStatus).toHaveBeenCalledWith(expect.stringContaining("Could not update"));
+    // Every re-render here hands the hook a *new* adapters array, which is what
+    // a fresh snapshot does — and `install` asks for one on its way out.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await act(async () => renderer.update(<setup.Harness decision="accepted" adapters={[adapter("claude-code", "partial")]} />));
+    }
+    expect(applyHooks).toHaveBeenCalledTimes(1);
+    // A new connection is a new chance.
+    await act(async () => renderer.update(<setup.Harness connected={false} decision="accepted" />));
+    await act(async () => renderer.update(<setup.Harness decision="accepted" adapters={[adapter("claude-code", "partial")]} />));
+    expect(applyHooks).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.unmount());
+  });
+
+  it("never installs for an adapter the consent dialog did not name", async () => {
+    // Consent named the files it would touch. An adapter installed on the host
+    // months later was in none of them, so it is offered rather than written.
+    const setup = harness({ decision: "accepted", adapters: [adapter("codex", "notWired")] });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    expect(setup.calls.applyHooks).not.toHaveBeenCalled();
+    expect(setup.current.offerable).toBe(true);
     await act(async () => renderer.unmount());
   });
 

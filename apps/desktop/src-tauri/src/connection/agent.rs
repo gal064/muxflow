@@ -156,7 +156,12 @@ fn operation_from_name(
         "hostNaming" => Ok((
             Operation::AgentHostNaming,
             Action::Unspecified,
-            Hook::Unspecified,
+            Hook::Install,
+        )),
+        "hostNamingRemove" => Ok((
+            Operation::AgentHostNaming,
+            Action::Unspecified,
+            Hook::Uninstall,
         )),
         _ => Err(format!("unsupported agent operation {value}")),
     }

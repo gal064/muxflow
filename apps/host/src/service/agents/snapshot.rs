@@ -9,6 +9,29 @@ pub(super) fn build(
     server_identity: &str,
     wiring: &[super::hooks::ObservedAdapter],
 ) -> v1::AgentSnapshot {
+    // A running agent is proof its vendor is installed here, whatever the
+    // configuration probe concluded — and the probe can be wrong in exactly
+    // this direction, because it consults the *daemon process's* `PATH` and a
+    // daemon started by launchd or a non-login SSH exec has no `~/.local/bin`
+    // in it. Corrected here, at the one place that has both the store and the
+    // observation, rather than by the desktop after the fact.
+    let running: std::collections::BTreeSet<&str> = state
+        .agents
+        .values()
+        .filter(|record| record.route.server_identity == server_identity)
+        .map(|record| record.adapter_id.as_str())
+        .collect();
+    let wiring: Vec<_> = wiring
+        .iter()
+        .map(|(adapter, observed)| {
+            let mut observed = observed.clone();
+            if observed.state == v1::AgentHookWiring::Absent && running.contains(adapter.id()) {
+                observed.state = v1::AgentHookWiring::NotWired;
+            }
+            (*adapter, observed)
+        })
+        .collect();
+    let wiring = &wiring[..];
     let agents = state
         .agents
         .values()

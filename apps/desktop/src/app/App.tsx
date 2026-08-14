@@ -48,7 +48,7 @@ import { sameHostConnection, sameHostScope, type HostScopeToken } from "../featu
 import { useShellCommands } from "../features/shell/useShellCommands";
 import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
-import { clampedAgentsRatio, sidebarWidthForWindow, SIDEBAR_MIN_WIDTH, type ShellState } from "../features/shell/types";
+import { clampedAgentsRatio, sidebarWidthForWindow, SIDEBAR_MIN_WIDTH, type HostSetupDecision, type ShellState } from "../features/shell/types";
 import {
   combineWorkspaceTabs,
   discardServerAppState,
@@ -381,39 +381,37 @@ export function App() {
       : undefined,
     onHooksChanged: (action) => {
       agentRuntime.refreshSnapshot();
-      // Removing the managed hooks is withdrawing consent for this host;
-      // otherwise the per-host "accepted" reinstalls them on the next connect.
-      if (action === "uninstall") setAppState((current) => ({
-        ...current,
-        hostSetup: { ...current.hostSetup, [currentHostProfileId]: "declined" },
-      }));
+      // Removing the managed hooks is withdrawing consent for this host: the
+      // per-host "accepted" would otherwise reinstall them on the next connect,
+      // and the tmux hook would keep renaming windows until the server
+      // restarted.
+      if (action === "uninstall") {
+        recordHostSetupDecision(currentHostProfileId, "declined");
+        void agentRuntime.removeHostNaming().catch((cause) => setStatus(String(cause)));
+      }
     },
     onModalChange: setAgentModalOpen,
     onStatus: setStatus,
     runtime: agentRuntime,
   });
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
-  // A running agent proves its vendor is installed here, whatever the host's
-  // own `PATH`-based probe concluded from a daemon started by launchd.
-  const liveAgentAdapterIds = useMemo(
-    () => [...new Set(agentRuntime.agents.map((record) => record.adapterId))],
-    [agentRuntime.agents],
-  );
+  const recordHostSetupDecision = useCallback((hostProfileId: string, decision: HostSetupDecision) => {
+    setAppState((current) => ({
+      ...current,
+      hostSetup: { ...current.hostSetup, [hostProfileId]: decision },
+    }));
+  }, [setAppState]);
   const agentHostSetup = useAgentHostSetup({
     adapters: agentRuntime.adapters,
     applyHooks: agentRuntime.applyHooks,
     applyHostNaming: agentRuntime.applyHostNaming,
     connected: Boolean(agentScope),
     decision: appState.hostSetup[currentHostProfileId],
-    liveAdapterIds: liveAgentAdapterIds,
     hostLabel,
     hostProfileId: currentHostProfileId,
     onStatus: setStatus,
     openReview: (adapter) => agentWorkflow.reviewHooks(adapter, "install"),
-    recordDecision: (hostProfileId, decision) => setAppState((current) => ({
-      ...current,
-      hostSetup: { ...current.hostSetup, [hostProfileId]: decision },
-    })),
+    recordDecision: recordHostSetupDecision,
     refreshWiring: agentRuntime.refreshSnapshot,
     reviewHooks: agentRuntime.reviewHooks,
   });
