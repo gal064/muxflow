@@ -26,7 +26,12 @@ export interface DrainedTerminalSnapshot {
 export interface TerminalRendererOptions {
   onDiagnostic?: (message: string | undefined) => void;
   onOpenLink?: (url: string) => void;
-  onResnapshotRequired?: (reason: string) => void;
+  /**
+   * Asks the owner to fetch a fresh seed. Returning a promise lets the renderer
+   * reopen its one-shot request latch when the request itself fails, so a pane
+   * whose request never went out is not left permanently unable to ask again.
+   */
+  onResnapshotRequired?: (reason: string) => void | Promise<void>;
 }
 
 /** Why a grid was not applied, or the size that now governs the terminal. */
@@ -55,8 +60,6 @@ export interface TerminalRenderer {
   measure(): TerminalSize | undefined;
   /** Forces the grid tmux says this pane has, whatever the CSS box measured. */
   setGrid(size: TerminalSize): GridOutcome;
-  /** Clears the one-shot latch that suppresses repeated seed requests. */
-  resetSeedRequest(): void;
   focus(): void;
   blur(): void;
   onInput(listener: (input: TerminalInput) => void): () => void;
@@ -84,21 +87,22 @@ const SMOOTH_SCROLL_SUSPEND_BYTES = 256 * 1024;
 /**
  * Whether a cached or host-owned screen may replace what this terminal shows.
  *
- * A restore replaces the screen wholesale, so an older one erases newer output
- * and leaves the pane showing the past — the stale-splice artifact in
- * P12-U003.3. And after an overflow the pane owes the host a scoped seed; a
+ * A restore replaces the screen wholesale — including bytes still queued for
+ * xterm — so an older one erases newer output and leaves the pane showing the
+ * past: the stale-splice artifact in P12-U003.3. The comparison is against what
+ * the terminal has been *given*, not what it has finished parsing. And after an overflow the pane owes the host a scoped seed; a
  * cached restore is not that seed, and silently doing nothing marks the pane
  * ready while it shows nothing. Both cases recover from the host instead.
  */
 export function restoreDecision(
   throughGeneration: number,
-  lastAppliedGeneration: number,
+  lastEnqueuedGeneration: number,
   overflowed: boolean,
 ): { kind: "apply" } | { kind: "reseed"; reason: string } {
-  if (throughGeneration < lastAppliedGeneration) {
+  if (throughGeneration < lastEnqueuedGeneration) {
     return {
       kind: "reseed",
-      reason: `A restore through generation ${throughGeneration} arrived for a pane that has already applied ${lastAppliedGeneration}; requesting a fresh seed.`,
+      reason: `A restore through generation ${throughGeneration} arrived for a pane that has already been given generation ${lastEnqueuedGeneration}; requesting a fresh seed.`,
     };
   }
   if (overflowed) {
@@ -320,6 +324,10 @@ export class XtermRenderer implements TerminalRenderer {
   #newOutput = false;
   #lastViewport?: TerminalViewportState;
   #lastAppliedGeneration = 0;
+  /// What this terminal has been *given*, which runs ahead of what it has
+  /// applied. A restore drops the queue, so admitting one has to be judged
+  /// against the queued bytes it would discard, not only the parsed ones.
+  #lastEnqueuedGeneration = 0;
   #seedRequested = false;
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
   #disposed = false;
@@ -408,10 +416,11 @@ export class XtermRenderer implements TerminalRenderer {
     // left behind, and every later restore and hide checkpoint would be
     // measured against a number from a stream that no longer exists.
     this.#lastAppliedGeneration = 0;
+    this.#lastEnqueuedGeneration = 0;
     // The seed is the recovery this pane may have asked for; the next refusal
     // is allowed to ask again.
     this.#seedRequested = false;
-    this.#scheduler.replace(bytes, true, this.#applied(generation, onRendered));
+    this.#scheduler.replace(bytes, true, this.#enqueued(generation, onRendered));
     this.#emitViewport();
   }
 
@@ -421,23 +430,23 @@ export class XtermRenderer implements TerminalRenderer {
     generation = 0,
     throughGeneration = generation,
   ): boolean {
-    const decision = restoreDecision(throughGeneration, this.#lastAppliedGeneration, this.#scheduler.overflowed);
+    const decision = restoreDecision(throughGeneration, this.#lastEnqueuedGeneration, this.#scheduler.overflowed);
     if (decision.kind === "reseed") {
       this.#requestSeed(decision.reason);
       return false;
     }
     this.#newOutput = false;
-    this.#scheduler.replace(new TextEncoder().encode(serialized), false, this.#applied(generation, onRendered));
+    this.#scheduler.replace(new TextEncoder().encode(serialized), false, this.#enqueued(generation, onRendered));
     this.#emitViewport();
     return true;
   }
 
   write(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
     if (!this.#atBottom()) this.#newOutput = true;
-    if (!this.#scheduler.enqueue(bytes, this.#applied(generation, onRendered)) && !this.#disposed) {
-      // Refused bytes are gone. Saying so is the only thing that gets this pane
-      // its screen back; dropping them quietly is how a pane goes permanently
-      // stale after one overflow.
+    if (!this.#scheduler.enqueue(bytes, this.#enqueued(generation, onRendered)) && this.#scheduler.overflowed) {
+      // Only an overflow refusal means bytes were lost. The scheduler also
+      // refuses when it is disposed or sealed for the hide drain, and asking
+      // for a seed then would be recovery for a pane that is going away.
       this.#requestSeed("Terminal output could not be queued for this pane; requesting a fresh seed.");
     }
     this.#emitViewport();
@@ -473,10 +482,6 @@ export class XtermRenderer implements TerminalRenderer {
     if (this.#terminal.cols === columns && this.#terminal.rows === rows) return { kind: "unchanged" };
     this.#terminal.resize(columns, rows);
     return { kind: "applied", size: { columns, rows } };
-  }
-
-  resetSeedRequest(): void {
-    this.#seedRequested = false;
   }
 
   focus(): void {
@@ -570,6 +575,15 @@ export class XtermRenderer implements TerminalRenderer {
     return buffer.viewportY >= buffer.baseY;
   }
 
+  /// Records what the terminal was handed, and returns the completion that
+  /// records what it applied.
+  #enqueued(generation: number, onRendered?: () => void): () => void {
+    if (Number.isSafeInteger(generation) && generation > this.#lastEnqueuedGeneration) {
+      this.#lastEnqueuedGeneration = generation;
+    }
+    return this.#applied(generation, onRendered);
+  }
+
   #applied(generation: number, onRendered?: () => void): () => void {
     return () => {
       // Monotonic: this is the cutoff the hide handoff hands the host, and a
@@ -585,14 +599,16 @@ export class XtermRenderer implements TerminalRenderer {
   /**
    * The diagnostic is never suppressed — a refused write or a refused restore
    * is exactly the silence P12-U003.7 was about. Only the *request* is deduped,
-   * so one overflow cannot become a reseed storm; `resetSeedRequest` reopens it
-   * when the request itself failed, and a seed landing clears it.
+   * so one overflow cannot become a reseed storm; a request that fails reopens
+   * the latch here rather than at the caller, and a seed landing clears it.
    */
   #requestSeed(reason: string): void {
     this.#options.onDiagnostic?.(reason);
     if (this.#seedRequested) return;
     this.#seedRequested = true;
-    this.#options.onResnapshotRequired?.(reason);
+    void Promise.resolve(this.#options.onResnapshotRequired?.(reason)).catch(() => {
+      this.#seedRequested = false;
+    });
   }
 
   /**

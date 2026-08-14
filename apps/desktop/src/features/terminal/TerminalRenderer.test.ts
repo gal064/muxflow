@@ -358,6 +358,31 @@ describe("pane grid reconciliation", () => {
     expect(reconcilePaneGrid(renderer, pane, { columns: 49, rows: 14 })).toBeUndefined();
   });
 
+  it("settles: reconciling twice resizes once and then says nothing", () => {
+    // Every reconcile is driven by something that can be caused by a resize —
+    // a ResizeObserver callback, a topology push. If applying tmux's grid could
+    // provoke another apply, the pane would resize in a loop and repaint on
+    // every frame, which is what continuous flickering is. `measure()` is
+    // propose-only and `setGrid` is the only writer, so the second call has
+    // nothing to do.
+    let grid: TerminalSize = { columns: 80, rows: 24 };
+    const resizes: TerminalSize[] = [];
+    const renderer = {
+      setGrid: (size: TerminalSize): GridOutcome => {
+        if (size.columns < 2 || size.rows < 2) return { kind: "rejected", reason: "unusable" };
+        if (grid.columns === size.columns && grid.rows === size.rows) return { kind: "unchanged" };
+        grid = size;
+        resizes.push(size);
+        return { kind: "applied", size };
+      },
+    };
+    const measured = { columns: 50, rows: 15 };
+    expect(reconcilePaneGrid(renderer, pane, measured)).toContain("tmux reports 49x14");
+    expect(reconcilePaneGrid(renderer, pane, measured)).toBeUndefined();
+    expect(reconcilePaneGrid(renderer, pane, measured)).toBeUndefined();
+    expect(resizes).toEqual([{ columns: 49, rows: 14 }]);
+  });
+
   it("falls back to the measured box only when tmux reports no usable grid", () => {
     const { applied, renderer } = recordingRenderer((size) =>
       size.columns < 2 ? { kind: "rejected", reason: "0x0 is not a usable terminal grid" } : { kind: "applied", size });
