@@ -41,6 +41,13 @@ interface WorkspaceSidebarProps {
   onResumeAgent(agent: AgentRecord, placement: AgentPlacement): void;
   onRenameAgent(agent: AgentRecord): void;
   onReviewHooks(adapter: AgentAdapterId, action: "install" | "uninstall"): void;
+  /**
+   * Set when this host cannot report agent status at all. The section says so
+   * once, rather than letting rows imply a state nothing feeds.
+   */
+  hookNotice?: string;
+  /** Present when the notice is something the user can act on. */
+  onSetUpHost?(): void;
 }
 
 /**
@@ -213,6 +220,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           type="button"
         >{props.agentSort}</button>
       </div>
+      {/* Above the list, not instead of it. The rows are real — a detected
+          agent exists — and what is missing is any way to know what they are
+          doing, which is what this line says and the neutral "unknown" dot on
+          each row repeats. Replacing the rows would hide something true to
+          avoid saying something honest. */}
+      {props.hookNotice && (props.onSetUpHost
+        ? <button className="agents-notice" onClick={props.onSetUpHost} type="button">{props.hookNotice}</button>
+        : <p className="agents-notice" role="note">{props.hookNotice}</p>)}
       <div aria-labelledby="sidebar-agents-label" className="sidebar-scroll" role="list">
         {props.agents.length === 0
           ? <p className="quiet-empty">No agents detected.</p>

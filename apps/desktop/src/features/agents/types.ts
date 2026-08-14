@@ -7,6 +7,16 @@ export type AgentDisplayState = AgentLifecycle | "done";
 export type AgentAuthority = "hook" | "process" | "screen";
 export type AgentPlacement = "window" | "split";
 
+/**
+ * What this host's configuration actually does with the adapter's lifecycle
+ * events, observed by the daemon rather than claimed by the adapter.
+ *
+ * `unavailable` is not `notWired`: a configuration nobody could read might be
+ * wired perfectly, and offering to write over it is how unrelated hooks get
+ * lost. `unspecified` is a host too old to answer.
+ */
+export type AgentHookWiring = "wired" | "partial" | "notWired" | "unavailable" | "unspecified";
+
 export interface AgentAdapterDescriptor {
   id: AgentAdapterId;
   displayName: string;
@@ -18,6 +28,9 @@ export interface AgentAdapterDescriptor {
   hookConfigPath: string;
   hookEvents: string[];
   placements: AgentPlacement[];
+  hookWiring: AgentHookWiring;
+  /** Why the wiring could not be read; empty in every other state. */
+  hookWiringDetail: string;
 }
 
 export interface AgentRoute {

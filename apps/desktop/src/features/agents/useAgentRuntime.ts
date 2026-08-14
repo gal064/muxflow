@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { AgentClient } from "./api";
 import { compareAgentGenerations, generationIsAfter, zeroGeneration } from "./generation";
 import { emitNativeAgentNotification, decideAgentNotification } from "./notifications";
@@ -100,6 +100,11 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
 
   useEffect(() => options.client.subscribe(accept), [accept, options.client]);
 
+  // Anything that changes what the host would answer without changing the
+  // scope — installing hooks is the one that exists — bumps this to ask again.
+  const [resnapshot, setResnapshot] = useState(0);
+  const refreshSnapshot = useCallback(() => setResnapshot((value) => value + 1), []);
+
   useEffect(() => {
     if (!options.scope) {
       dispatch({ type: "disconnect" });
@@ -113,7 +118,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
       if (!cancelled) options.onStatus(`Agent snapshot unavailable: ${String(error)}`);
     });
     return () => { cancelled = true; };
-  }, [accept, options.client, options.scope?.clientId, options.scope?.connectionEpoch, options.scope?.hostProfileId, options.scope?.serverIdentity, options.scope?.topologyGeneration]);
+  }, [accept, options.client, options.scope?.clientId, options.scope?.connectionEpoch, options.scope?.hostProfileId, options.scope?.serverIdentity, options.scope?.topologyGeneration, resnapshot]);
 
   const agents = useMemo(
     () => agentsForScope(state, options.focus.hostProfileId, options.focus.serverIdentity),
@@ -160,7 +165,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     return optionsRef.current.client.applyHooks(optionsRef.current.scope, review);
   }, []);
 
-  return { state, agents, adapters: state.adapters, rollups, accept, launch, resume, rename, reviewHooks, applyHooks };
+  return { state, agents, adapters: state.adapters, rollups, accept, launch, resume, rename, reviewHooks, applyHooks, refreshSnapshot };
 }
 
 export type AgentRuntime = ReturnType<typeof useAgentRuntime>;
