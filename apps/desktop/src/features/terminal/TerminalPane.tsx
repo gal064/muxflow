@@ -22,7 +22,31 @@ export { paneRecoveryPlan } from "./PaneRecovery";
 // visibility ownership keeps a late hide from overtaking the new reveal.
 const pendingPaneHandoffs = new Map<string, Promise<void>>();
 const paneLifecycleVersions = new Map<string, number>();
+const paneGridDivergence = new Map<string, string>();
 let nextTransferRenderLifetime = 0;
+
+/**
+ * Renders a pane at the grid tmux says it has, not the one its CSS box measures.
+ *
+ * tmux is authoritative: the program in the pane addressed the cursor against
+ * tmux's cols and rows, so any other grid puts its text on the wrong lines
+ * (P12-U003.1). The two genuinely differ — tmux splits a 100-column client into
+ * 50 and 49 with a divider column, while the layout gives each pane a rounded
+ * percentage of the container — and only the active pane's measurement is ever
+ * sent back to tmux, so every other mounted pane drifts silently. The measured
+ * size still decides what client size to ask tmux for; it just no longer decides
+ * what the terminal renders at.
+ */
+export function reconcilePaneGrid(renderer: Pick<TerminalRenderer, "setGrid">, pane: Pane, measured?: TerminalSize): void {
+  const applied = renderer.setGrid({ columns: pane.width, rows: pane.height });
+  if (!applied || !measured) return;
+  const divergence = `${measured.columns}x${measured.rows}->${applied.columns}x${applied.rows}`;
+  if (paneGridDivergence.get(pane.id) === divergence) return;
+  paneGridDivergence.set(pane.id, divergence);
+  console.warn(
+    `Pane ${pane.id} measured ${measured.columns}x${measured.rows} from its box but tmux reports ${applied.columns}x${applied.rows}; rendering at tmux's grid.`,
+  );
+}
 
 function visibleSeedDiagnostic(message: string | undefined): string | undefined {
   // These are expected capability limits on supported tmux versions. Keep the
@@ -163,7 +187,13 @@ export function TerminalPane({
         rendererEpoch = terminalEpoch;
         if (rendererActive) rendererEpochRef.current = terminalEpoch;
       }
-      if (!rendererActive) return;
+      // Deliberately not gated on `rendererActive`. Bytes still reach xterm
+      // while this effect is tearing down and the drain runs, and silencing
+      // the hub for that window made the hide checkpoint (renderer counter)
+      // and the reveal checkpoint (hub counter) describe different cutoffs —
+      // the stale-splice half of P12-U003.3. A superseded lifecycle is a
+      // different pane instance and must stay silent.
+      if (paneLifecycleVersions.get(pane.id) !== lifecycle) return;
       hub.markRendered(pane.id, generation, terminalEpoch);
     };
     rendererRef.current = renderer;
@@ -276,8 +306,13 @@ export function TerminalPane({
         flushDeferredOutput();
       }
     });
-    const observer = new ResizeObserver(() => resizeRef.current(paneRef.current, renderer.fit()));
+    const observer = new ResizeObserver(() => {
+      const measured = renderer.fit();
+      resizeRef.current(paneRef.current, measured);
+      reconcilePaneGrid(renderer, paneRef.current, measured);
+    });
     observer.observe(container.current);
+    reconcilePaneGrid(renderer, pane, undefined);
 
     const controller: TerminalPaneController = {
       focus: () => renderer.focus(),
@@ -300,6 +335,7 @@ export function TerminalPane({
     return () => {
       rendererActive = false;
       lastRevealKeyRef.current = undefined;
+      paneGridDivergence.delete(pane.id);
       observer.disconnect();
       unsubscribeEvents();
       unsubscribeViewport();
@@ -425,6 +461,14 @@ export function TerminalPane({
   useEffect(() => {
     if (pane.active) rendererRef.current?.focus();
   }, [pane.active]);
+
+  // tmux resized this pane (a split, a zoom, another client attaching). Follow
+  // it immediately rather than at the next ResizeObserver callback, which a
+  // pane whose CSS box did not change never gets.
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (renderer) reconcilePaneGrid(renderer, pane);
+  }, [pane.id, pane.width, pane.height]);
 
   const find = (direction: "next" | "previous") => {
     const found = rendererRef.current?.search(query, direction);

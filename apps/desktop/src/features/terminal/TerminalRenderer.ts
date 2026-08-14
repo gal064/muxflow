@@ -35,6 +35,11 @@ export interface TerminalRenderer {
   restore(serialized: string, onRendered?: () => void, generation?: number): void;
   write(bytes: Uint8Array, onRendered?: () => void, generation?: number): void;
   fit(): TerminalSize;
+  /**
+   * Forces the grid tmux says this pane has, whatever the CSS box measured.
+   * Returns the size that was applied, or `undefined` when it already matched.
+   */
+  setGrid(size: TerminalSize): TerminalSize | undefined;
   focus(): void;
   blur(): void;
   onInput(listener: (input: TerminalInput) => void): () => void;
@@ -58,6 +63,35 @@ type FrameCancel = (handle: number) => void;
 const SMOOTH_SCROLL_DURATION_MS = 80;
 /** Queue depth past which animating each scroll step is wasted work. */
 const SMOOTH_SCROLL_SUSPEND_BYTES = 256 * 1024;
+
+/**
+ * Whether a cached or host-owned screen may replace what this terminal shows.
+ *
+ * A restore replaces the screen wholesale, so an older one erases newer output
+ * and leaves the pane showing the past — the stale-splice artifact in
+ * P12-U003.3. And after an overflow the pane owes the host a scoped seed; a
+ * cached restore is not that seed, and silently doing nothing marks the pane
+ * ready while it shows nothing. Both cases recover from the host instead.
+ */
+export function restoreDecision(
+  generation: number,
+  lastAppliedGeneration: number,
+  overflowed: boolean,
+): { kind: "apply" } | { kind: "reseed"; reason: string } {
+  if (generation < lastAppliedGeneration) {
+    return {
+      kind: "reseed",
+      reason: `A restore through generation ${generation} arrived for a pane that has already applied ${lastAppliedGeneration}; requesting a fresh seed.`,
+    };
+  }
+  if (overflowed) {
+    return {
+      kind: "reseed",
+      reason: "The pane overflowed its renderer queue; a cached restore cannot replace the seed it needs.",
+    };
+  }
+  return { kind: "apply" };
+}
 
 function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
   if (pieces.length === 1) return pieces[0];
@@ -267,6 +301,7 @@ export class XtermRenderer implements TerminalRenderer {
   #newOutput = false;
   #lastViewport?: TerminalViewportState;
   #lastAppliedGeneration = 0;
+  #seedRequested = false;
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
   #disposed = false;
 
@@ -328,11 +363,9 @@ export class XtermRenderer implements TerminalRenderer {
         if (pending > 4 * 1024 * 1024) this.#options.onDiagnostic?.("Terminal output is catching up…");
         else if (pending === 0 && this.#webgl) this.#options.onDiagnostic?.(undefined);
       },
-      (pending) => {
-        const reason = `Terminal renderer queue exceeded its 8 MiB bound (${pending} bytes); requesting a fresh seed.`;
-        this.#options.onDiagnostic?.(reason);
-        this.#options.onResnapshotRequired?.(reason);
-      },
+      (pending) => this.#requestSeed(
+        `Terminal renderer queue exceeded its 8 MiB bound (${pending} bytes); requesting a fresh seed.`,
+      ),
     );
     this.#disposables.push(this.#terminal.onScroll(() => {
       if (this.#atBottom()) this.#newOutput = false;
@@ -351,27 +384,54 @@ export class XtermRenderer implements TerminalRenderer {
 
   seed(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
     this.#newOutput = false;
+    // The seed is the recovery this pane may have asked for; the next refusal
+    // is allowed to ask again.
+    this.#seedRequested = false;
     this.#scheduler.replace(bytes, true, this.#applied(generation, onRendered));
     this.#emitViewport();
   }
 
   restore(serialized: string, onRendered?: () => void, generation = 0): void {
+    const decision = restoreDecision(generation, this.#lastAppliedGeneration, this.#scheduler.overflowed);
+    if (decision.kind === "reseed") {
+      this.#requestSeed(decision.reason);
+      return;
+    }
     this.#newOutput = false;
-    // A cached/resource restore is not a substitute for the scoped seed that
-    // was requested after an output overflow.
     this.#scheduler.replace(new TextEncoder().encode(serialized), false, this.#applied(generation, onRendered));
     this.#emitViewport();
   }
 
   write(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
     if (!this.#atBottom()) this.#newOutput = true;
-    this.#scheduler.enqueue(bytes, this.#applied(generation, onRendered));
+    if (!this.#scheduler.enqueue(bytes, this.#applied(generation, onRendered)) && !this.#disposed) {
+      // Refused bytes are gone. Saying so is the only thing that gets this pane
+      // its screen back; dropping them quietly is how a pane goes permanently
+      // stale after one overflow.
+      this.#requestSeed("Terminal output could not be queued for this pane; requesting a fresh seed.");
+    }
     this.#emitViewport();
   }
 
   fit(): TerminalSize {
     this.#fit.fit();
     return { columns: this.#terminal.cols, rows: this.#terminal.rows };
+  }
+
+  /**
+   * tmux owns this pane's grid: the program inside it drew for tmux's cols and
+   * rows, and a cursor-addressed frame rendered against any other grid puts
+   * text on the wrong lines (P12-U003.1). The CSS box can only ever approximate
+   * that grid — tmux splits 100 columns into 50 and 49 with a divider column,
+   * while the box is a percentage that rounds per pane — so the measured fit
+   * decides how big a *client* to ask tmux for, and this decides what the
+   * terminal actually renders at.
+   */
+  setGrid({ columns, rows }: TerminalSize): TerminalSize | undefined {
+    if (!Number.isInteger(columns) || !Number.isInteger(rows) || columns < 2 || rows < 2) return undefined;
+    if (this.#terminal.cols === columns && this.#terminal.rows === rows) return undefined;
+    this.#terminal.resize(columns, rows);
+    return { columns, rows };
   }
 
   focus(): void {
@@ -467,9 +527,23 @@ export class XtermRenderer implements TerminalRenderer {
 
   #applied(generation: number, onRendered?: () => void): () => void {
     return () => {
-      if (Number.isSafeInteger(generation) && generation >= 0) this.#lastAppliedGeneration = generation;
+      // Monotonic: this is the cutoff the hide handoff hands the host, and a
+      // restore that rewound it made the next checkpoint claim bytes the host
+      // would then never resend.
+      if (Number.isSafeInteger(generation) && generation > this.#lastAppliedGeneration) {
+        this.#lastAppliedGeneration = generation;
+      }
       onRendered?.();
     };
+  }
+
+  /** One recovery request per episode; repeating it per refused chunk would
+   * turn one overflow into a reseed storm. */
+  #requestSeed(reason: string): void {
+    if (this.#seedRequested) return;
+    this.#seedRequested = true;
+    this.#options.onDiagnostic?.(reason);
+    this.#options.onResnapshotRequired?.(reason);
   }
 
   /**
