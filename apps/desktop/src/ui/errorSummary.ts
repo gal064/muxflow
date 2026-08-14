@@ -75,9 +75,16 @@ export function summarizeSurfaceError(raw: string): SurfaceErrorText {
   const code = split?.[1];
   const reason = split?.[2]?.trim() ?? stripped;
 
-  const summary = matched(REASON_SUMMARY, reason)
-    ?? (code ? matched(CODE_SUMMARY, code) : undefined)
-    ?? firstSentence(reason);
+  // Rewriting only ever applies to a *structured host diagnostic*. The same
+  // status channel also carries sentences the app wrote itself — "Could not
+  // mark %117 hidden: timed out" — and answering one of those with generic
+  // advice would throw away the half that says which pane. An app-authored
+  // line is shown as written; it only gains a disclosure if it is long or
+  // multi-line.
+  const structured = code !== undefined && (/_(rejected|unavailable|failed)$/.test(code) || matched(CODE_SUMMARY, code) !== undefined);
+  const summary = structured
+    ? matched(REASON_SUMMARY, reason) ?? matched(CODE_SUMMARY, code!) ?? firstSentence(reason)
+    : firstSentence(stripped);
   return summary === text ? { summary } : { summary, detail: text };
 }
 
