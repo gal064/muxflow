@@ -1,7 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import type { CommandId } from "../../commands/registry";
+import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { Icon } from "../../ui/Icon";
+import { SurfaceError } from "../../ui/SurfaceError";
 import type { ActiveRoot, DirectoryListing, DownloadRequest, FileEntry, FileMutation, TransferStatus } from "./types";
 import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
 
@@ -96,6 +99,48 @@ export function ExplorerTree(props: Props) {
     setMenu(undefined);
   };
 
+  // The row the palette means is the one the tree has focus on — the same row
+  // its arrow keys walk and its Shift+F10 opens a menu for. Nothing new to aim
+  // with, and the disabled state published here is the same one the menu draws.
+  const focusedRow = rows[focusIndex];
+  const focusedEntry = focusedRow?.kind === "entry" ? focusedRow.entry : undefined;
+  const rowActions = useMemo<readonly CommandId[]>(() => {
+    if (!props.root) return [];
+    const ids: CommandId[] = [];
+    if (focusedEntry) {
+      if (focusedEntry.kind !== "directory") ids.push("files.open");
+      ids.push("files.download");
+      if (!props.disabled) ids.push("files.rename", "files.move", "files.duplicate", "files.delete");
+    }
+    if (!props.disabled) ids.push("files.newFile", "files.newFolder");
+    ids.push("files.refresh");
+    return ids;
+  }, [focusedEntry, props.disabled, props.root]);
+  // A ref, not a dependency: the handlers close over state that changes every
+  // keystroke, and rebuilding the published source that often would be churn
+  // for nothing. What the palette needs to be current is the *id list*, and
+  // that is memoized above.
+  const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
+  runRowCommand.current = (commandId) => {
+    switch (commandId) {
+      case "files.open": if (focusedEntry) props.onOpen(focusedEntry); return;
+      case "files.rename": begin("rename", focusedEntry); return;
+      case "files.move": begin("move", focusedEntry); return;
+      case "files.duplicate": begin("duplicate", focusedEntry); return;
+      case "files.delete": begin("delete", focusedEntry); return;
+      case "files.download": if (focusedEntry) void props.onDownload({ path: focusedEntry.path, kind: focusedEntry.kind === "directory" ? "folder" : "file", collision: "fail" }); return;
+      case "files.newFile": begin("newFile", focusedEntry); return;
+      case "files.newFolder": begin("newDirectory", focusedEntry); return;
+      case "files.refresh": props.onRefresh(); return;
+    }
+  };
+  const rowSource = useMemo<RowCommandSource | undefined>(() => rowActions.length === 0 ? undefined : {
+    subject: focusedEntry?.name ?? rootName,
+    available: rowActions,
+    run: (commandId) => runRowCommand.current(commandId),
+  }, [focusedEntry, rootName, rowActions]);
+  usePublishedRowCommands("files", rowSource);
+
   const submit = async () => {
     if (!pending || !props.root) return;
     if (pending.rootToken !== props.root.token || pending.scopeIdentity !== props.scopeIdentity || props.disabled) {
@@ -126,7 +171,7 @@ export function ExplorerTree(props: Props) {
       <span title={props.root?.path}>{rootName}</span>
       {props.root && <small>{props.root.gitWorktree ? "git worktree" : "pane cwd"}</small>}
     </header>
-    {props.error && <div className="surface-error" role="alert">{props.error}</div>}
+    {props.error && <SurfaceError detail={props.error} />}
     <div
       aria-label="Files"
       className="file-tree"
@@ -211,7 +256,7 @@ export function ExplorerTree(props: Props) {
       </label>}
       {["rename", "move", "duplicate"].includes(pending.action) && <label className="overwrite"><input checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} type="checkbox" /> Allow overwrite after confirmation</label>}
       {["rename", "move", "duplicate"].includes(pending.action) && overwrite && <label className="overwrite"><input checked={nonEmptyOverwrite} onChange={(event) => setNonEmptyOverwrite(event.target.checked)} type="checkbox" /> Also replace a non-empty destination directory</label>}
-      {dialogError && <div className="surface-error" role="alert">{dialogError}</div>}
+      {dialogError && <SurfaceError detail={dialogError} />}
       <div className="dialog-actions"><button onClick={() => setPending(undefined)} type="button">Cancel</button><button className={pending.action === "delete" ? "danger" : "primary"} type="submit">{pending.action === "delete" ? "Delete" : "Apply"}</button></div>
     </form></div>}
   </div>;

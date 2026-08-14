@@ -10,6 +10,13 @@ export interface CommandContext {
   canMoveSessionDown: boolean;
   canMoveTabLeft: boolean;
   canMoveTabRight: boolean;
+  /**
+   * Row commands (`requires: "row"`) published by whichever row surface holds
+   * the row the user last pointed at. See `rowCommands.ts`: the publishing
+   * surface is the only thing that knows whether "Stage" applies to its current
+   * row, so its answer *is* the availability rule rather than an input to one.
+   */
+  rowCommands: readonly CommandId[];
   run(commandId: CommandId, target?: CommandTarget): void | Promise<void>;
 }
 
@@ -40,15 +47,30 @@ export type CommandId =
   | "pane.splitRight" | "pane.splitDown" | "pane.focusLeft" | "pane.focusRight"
   | "pane.focusUp" | "pane.focusDown" | "pane.resizeLeft" | "pane.resizeRight"
   | "pane.resizeUp" | "pane.resizeDown" | "pane.zoom" | "pane.close"
-  | "terminal.copy" | "terminal.paste" | "terminal.search" | "terminal.scrollBottom";
+  | "terminal.copy" | "terminal.paste" | "terminal.search" | "terminal.scrollBottom"
+  | RowCommandId;
+
+/**
+ * Actions that need a row as their subject. The Explorer, Git and the agents
+ * list publish these for whichever of their rows the user last pointed at, so
+ * that the palette can reach the actions that used to be per-row buttons —
+ * 11.4's rule is that a removed button becomes a palette command *and* a
+ * context-menu item *and* a bindable shortcut, and these were only the last two.
+ */
+export type RowCommandId =
+  | "files.open" | "files.rename" | "files.move" | "files.duplicate" | "files.download"
+  | "files.delete" | "files.newFile" | "files.newFolder" | "files.refresh"
+  | "git.openDiff" | "git.stage" | "git.unstage" | "git.discard"
+  | "agents.focusRow" | "agents.renameRow" | "agents.resumeRow";
 
 export interface CommandDefinition {
   id: CommandId;
   title: string;
-  group: "Application" | "View" | "Agents" | "Workspace" | "Terminal tab" | "Pane" | "Terminal";
+  group: "Application" | "View" | "Agents" | "Workspace" | "Terminal tab" | "Pane" | "Terminal"
+    | "Files" | "Source control";
   defaults?: Partial<Record<Platform, string>>;
   mutates?: boolean;
-  requires?: "session" | "window" | "pane" | "tab";
+  requires?: "session" | "window" | "pane" | "tab" | "row";
   destructive?: boolean;
   /**
    * Positional selectors (⌘4, ⌃7) are muscle memory, not things anyone searches
@@ -100,15 +122,24 @@ export const commandRegistry: readonly CommandDefinition[] = [
   // are the first thing that cap should spend.
   { id: "focus.back", title: "Back to the previous terminal", group: "View", defaults: { mac: "Meta+[", linux: "Ctrl+[" } },
   { id: "focus.forward", title: "Forward again", group: "View", defaults: { mac: "Meta+]", linux: "Ctrl+]" } },
-  { id: "tab.previous", title: "Previous tab", group: "Terminal tab", defaults: { mac: "Meta+Shift+[", linux: "Ctrl+Shift+[" }, requires: "tab" },
-  { id: "tab.next", title: "Next tab", group: "Terminal tab", defaults: { mac: "Meta+Shift+]", linux: "Ctrl+Shift+]" }, requires: "tab" },
   { id: "agents.jumpUnread", title: "Jump to the agent that needs you", group: "Agents", defaults: { mac: "Meta+Shift+U", linux: "Ctrl+Shift+U" } },
   { id: "agents.toggleSort", title: "Toggle agent ordering (grouped ⇄ priority)", group: "Agents" },
+  // Kept adjacent to the rest of the Agents group: the palette prints a group
+  // heading whenever the group changes down the list, so a group split across
+  // two places in this array would print its heading twice.
+  { id: "agents.focusRow", title: "Focus the selected agent's pane", group: "Agents", requires: "row" },
+  { id: "agents.renameRow", title: "Rename the selected agent…", group: "Agents", requires: "row" },
+  { id: "agents.resumeRow", title: "Resume the selected agent", group: "Agents", requires: "row" },
   { id: "session.new", title: "New workspace", group: "Workspace", defaults: { mac: "Meta+N", linux: "Ctrl+Shift+N" }, mutates: true },
   { id: "session.rename", title: "Rename workspace", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.moveLeft", title: "Move workspace up", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.moveRight", title: "Move workspace down", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.close", title: "Close workspace…", group: "Workspace", mutates: true, requires: "session", destructive: true },
+  // With the rest of the Terminal tab group, not up beside the View commands:
+  // the palette's headings assume one contiguous run per group, and these two
+  // sitting apart printed a second "Terminal tab" heading.
+  { id: "tab.previous", title: "Previous tab", group: "Terminal tab", defaults: { mac: "Meta+Shift+[", linux: "Ctrl+Shift+[" }, requires: "tab" },
+  { id: "tab.next", title: "Next tab", group: "Terminal tab", defaults: { mac: "Meta+Shift+]", linux: "Ctrl+Shift+]" }, requires: "tab" },
   { id: "window.new", title: "New terminal tab", group: "Terminal tab", defaults: { mac: "Meta+T", linux: "Ctrl+Shift+T" }, mutates: true, requires: "session" },
   { id: "window.rename", title: "Rename terminal tab", group: "Terminal tab", mutates: true, requires: "window" },
   { id: "window.moveLeft", title: "Move current tab left", group: "Terminal tab", requires: "tab" },
@@ -130,6 +161,25 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "terminal.paste", title: "Paste into terminal", group: "Terminal", defaults: { mac: "Meta+V", linux: "Ctrl+Shift+V" }, requires: "pane" },
   { id: "terminal.search", title: "Find in terminal", group: "Terminal", defaults: { mac: "Meta+F", linux: "Ctrl+Shift+F" }, requires: "pane" },
   { id: "terminal.scrollBottom", title: "Scroll terminal to bottom", group: "Terminal", requires: "pane" },
+  // Row commands. `destructive` is deliberately absent from the two that
+  // destroy something: in this registry that flag means "route through the tmux
+  // confirmation builder", and these two already carry their own confirmation
+  // in the surface that owns them (the Explorer's delete dialog, Git's discard
+  // dialog). Marking them here would produce a second, tmux-shaped prompt for a
+  // filesystem action. The palette still reaches the same guarded path.
+  { id: "files.open", title: "Open the selected file", group: "Files", requires: "row" },
+  { id: "files.rename", title: "Rename the selected file…", group: "Files", requires: "row" },
+  { id: "files.move", title: "Move the selected file…", group: "Files", requires: "row" },
+  { id: "files.duplicate", title: "Duplicate the selected file…", group: "Files", requires: "row" },
+  { id: "files.download", title: "Download the selected file…", group: "Files", requires: "row" },
+  { id: "files.delete", title: "Delete the selected file…", group: "Files", requires: "row" },
+  { id: "files.newFile", title: "New file in the Explorer…", group: "Files", requires: "row" },
+  { id: "files.newFolder", title: "New folder in the Explorer…", group: "Files", requires: "row" },
+  { id: "files.refresh", title: "Refresh the file tree", group: "Files", requires: "row" },
+  { id: "git.openDiff", title: "Open the selected change's diff", group: "Source control", requires: "row" },
+  { id: "git.stage", title: "Stage the selected change", group: "Source control", requires: "row" },
+  { id: "git.unstage", title: "Unstage the selected change", group: "Source control", requires: "row" },
+  { id: "git.discard", title: "Discard the selected change…", group: "Source control", requires: "row" },
   ...workspaceSelectCommands,
   ...tabSelectCommands,
 ];
@@ -154,6 +204,12 @@ export function selectionIndex(commandId: CommandId, prefix: "workspace.select" 
 }
 
 export function commandAvailable(command: CommandDefinition, context: CommandContext): boolean {
+  // A row command is available exactly while a row surface publishes it. That
+  // one check replaces every proxy condition — connection state, panel
+  // visibility, whether the row is a submodule — because the surface applied
+  // all of them before publishing, and a second, weaker copy of those rules
+  // here is how the palette and the context menu would drift apart.
+  if (command.requires === "row") return context.rowCommands.includes(command.id);
   if (command.mutates && !context.canMutate) return false;
   if (command.id === "window.close" && context.hasWindow && !context.canMutate) return false;
   if (command.requires === "session" && !context.hasSession) return false;

@@ -3,6 +3,7 @@ import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../ap
 import { createTmuxConfirmation, type PendingTmuxConfirmation } from "../../commands/destructiveConfirmation";
 import type { PendingTextPrompt } from "../../commands/TextInputDialog";
 import { commandRegistry, selectionIndex, type CommandContext, type CommandId, type CommandTarget } from "../../commands/registry";
+import { rowCommandRegistry } from "../../commands/rowCommands";
 import { nextSortMode } from "../agents/agentsList";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
 import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
@@ -33,6 +34,8 @@ interface ShellCommandOptions {
   hostScope: HostScopeToken;
   isHostScopeCurrent(scope: HostScopeToken): boolean;
   performAction: PerformAction;
+  /** Live subscription to what the row surfaces currently offer. */
+  rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
   selectCreatedSession(sessionId: string): void;
   serverIdentity?: string;
@@ -63,6 +66,15 @@ export function useShellCommands(options: ShellCommandOptions): {
   const runCommand = useCallback(async (commandId: CommandId, target?: CommandTarget) => {
     const definition = commandRegistry.find((command) => command.id === commandId);
     if (!definition) return;
+    // Row commands belong to the surface that published them; this hook has no
+    // business knowing what "the selected file" is. The row may also have gone
+    // between the palette opening and Enter — a panel closed, a connection
+    // dropped — and that has to be said rather than silently doing nothing.
+    if (definition.requires === "row") {
+      const outcome = rowCommandRegistry.run(commandId);
+      if (!outcome.ran) options.setStatus(`${definition.title.replace(/…$/, "")} is unavailable: nothing is selected in that panel any more.`);
+      return;
+    }
     const targetSession = target?.kind === "session"
       ? options.snapshot.sessions.find((session) => session.id === target.id)
       : options.activeSession;
@@ -229,6 +241,7 @@ export function useShellCommands(options: ShellCommandOptions): {
     canMoveTabRight: options.selectedAppTab
       ? Boolean(options.combinedTabs.find((tab) => tab.key === `app:${options.selectedAppTab!.id}`)?.canMoveRight)
       : Boolean(options.activeWindow && relativeWindowReorderAction(options.windows, options.activeWindow.id, "right")),
+    rowCommands: options.rowCommands,
     run: runCommand,
   }), [options, runCommand]);
 

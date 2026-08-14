@@ -1,7 +1,11 @@
+// @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
+import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import type { Session } from "../../app/types";
+import { rowCommandRegistry } from "../../commands/rowCommands";
 import { agent } from "../agents/testFixtures";
+import type { AgentAdapterDescriptor } from "../agents/types";
 import { buildAgentRows } from "../agents/agentsList";
 import { HookReviewDialog } from "../agents/HookReviewDialog";
 import { WorkspaceSidebar } from "../workspaces/WorkspaceSidebar";
@@ -72,6 +76,48 @@ describe("application shell accessibility contracts", () => {
     });
     expect(quiet).not.toContain("waiting");
     expect(quiet).not.toContain('class="badge badge-row"');
+  });
+
+  it("reaches the agent row actions from the command registry, on the last agent focused", async () => {
+    const onSelectAgent = vi.fn();
+    const onRenameAgent = vi.fn();
+    const onResumeAgent = vi.fn();
+    const agents = buildAgentRows(
+      [agent({ id: "a1", displayName: "Codex one", lifecycle: "blocked" })],
+      () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "grouped",
+    );
+    const adapters: AgentAdapterDescriptor[] = [{
+      id: "codex", displayName: "Codex", supportsLaunch: true, supportsResume: true, supportsHooks: true,
+      supportsProcessDetection: true, supportsScreenFallback: false, hookConfigPath: "~/.codex/config.toml",
+      hookEvents: [], placements: ["window", "split"],
+    }];
+    let renderer!: ReturnType<typeof create>;
+    const element = (rows: typeof agents, canMutate = true) => <WorkspaceSidebar
+      adapters={adapters} agents={rows} agentSort="grouped" agentsRatio={0.4} canMutate={canMutate}
+      hostLabel="omarchy" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
+      onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
+      onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop}
+      onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop}
+    />;
+    await act(async () => { renderer = create(element(agents)); });
+    // No agent focused: nothing to act on.
+    expect(rowCommandRegistry.available()).toEqual([]);
+
+    const row = renderer.root.findAllByProps({ className: "agent-button" })[0];
+    await act(async () => { row.props.onFocus(); });
+    expect(rowCommandRegistry.available()).toEqual(["agents.focusRow", "agents.renameRow", "agents.resumeRow"]);
+    await act(async () => { rowCommandRegistry.run("agents.resumeRow"); });
+    // One line in the palette takes the adapter's first declared placement; the
+    // context menu is where a choice between placements belongs.
+    expect(onResumeAgent).toHaveBeenCalledWith(expect.objectContaining({ id: "a1" }), "window");
+    await act(async () => { rowCommandRegistry.run("agents.focusRow"); });
+    expect(onSelectAgent).toHaveBeenCalled();
+
+    // The agent's pane closed while it was the palette's subject: the row goes
+    // and its commands go with it, rather than acting on a stale record.
+    await act(async () => { renderer.update(element([])); });
+    expect(rowCommandRegistry.available()).toEqual([]);
+    await act(async () => { renderer.unmount(); });
   });
 
   it("states empty sidebar sections in one line each", () => {

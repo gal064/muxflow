@@ -1,6 +1,7 @@
-import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import type { Session } from "../../app/types";
 import type { CommandId } from "../../commands/registry";
+import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { needsAttention, nextSortMode, type AgentListRow, type AgentSortMode } from "../agents/agentsList";
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPlacement, AgentRecord } from "../agents/types";
@@ -67,7 +68,40 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   // visible affordances in the agents panel. They are right-click menus now:
   // the section header for "start something", a row for "do something to this".
   const [agentMenu, setAgentMenu] = useState<{ row?: AgentListRow; anchor: ContextMenuAnchor }>();
+  const [focusedAgentId, setFocusedAgentId] = useState<string>();
   const container = useRef<HTMLElement>(null);
+
+  // Resolved against the live list every render: an agent whose pane closed
+  // drops out of `props.agents`, and the palette must stop offering to focus it
+  // at the same moment its row stops being clickable.
+  const focusedAgent = focusedAgentId ? props.agents.find((row) => row.agent.id === focusedAgentId) : undefined;
+  const focusedAgentResume = focusedAgent ? resumePlacements(props.adapters, focusedAgent.agent)[0] : undefined;
+  const rowActions = useMemo<readonly CommandId[]>(() => {
+    if (!focusedAgent) return [];
+    const ids: CommandId[] = [];
+    if (focusedAgent.routable) ids.push("agents.focusRow");
+    if (props.canMutate) ids.push("agents.renameRow");
+    if (props.canMutate && focusedAgentResume) ids.push("agents.resumeRow");
+    return ids;
+  }, [focusedAgent, focusedAgentResume, props.canMutate]);
+  const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
+  runRowCommand.current = (commandId) => {
+    if (!focusedAgent) return;
+    switch (commandId) {
+      case "agents.focusRow": props.onSelectAgent(focusedAgent); return;
+      case "agents.renameRow": props.onRenameAgent(focusedAgent.agent); return;
+      // The context menu offers one item per placement because it has room to.
+      // The palette is a single line, so it takes the adapter's first declared
+      // placement rather than inventing a second prompt to ask which.
+      case "agents.resumeRow": if (focusedAgentResume) props.onResumeAgent(focusedAgent.agent, focusedAgentResume); return;
+    }
+  };
+  const rowSource = useMemo<RowCommandSource | undefined>(() => rowActions.length === 0 || !focusedAgent ? undefined : {
+    subject: focusedAgent.agent.displayName,
+    available: rowActions,
+    run: (commandId) => runRowCommand.current(commandId),
+  }, [focusedAgent, rowActions]);
+  usePublishedRowCommands("agents", rowSource);
 
   const focusRelative = (event: KeyboardEvent<HTMLElement>, selector: string, index: number, length: number) => {
     const delta = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
@@ -207,8 +241,10 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               onClick={() => props.onSelectAgent(row)}
               onContextMenu={(event) => {
                 event.preventDefault();
+                setFocusedAgentId(row.agent.id);
                 setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY } });
               }}
+              onFocus={() => setFocusedAgentId(row.agent.id)}
               onKeyDown={(event) => {
                 if (isContextMenuKey(event)) {
                   event.preventDefault();

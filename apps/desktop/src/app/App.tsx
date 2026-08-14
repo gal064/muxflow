@@ -9,6 +9,7 @@ import {
   globalShortcutAllowed,
   type ShortcutOverrides,
 } from "../commands/registry";
+import { useRowCommands } from "../commands/rowCommands";
 import type { TerminalPaneController } from "../features/terminal/TerminalPane";
 import { adjacentPane, resizeCellsFromPixels, windowGrid, type PaneDirection } from "../features/terminal/layout";
 import { sendBinaryInput, sendInput } from "../features/terminal/api";
@@ -64,6 +65,7 @@ import {
   type CombinedTab,
 } from "../features/shell/model";
 import { useContextMenusOpen } from "../ui/ContextMenu";
+import { SurfaceError } from "../ui/SurfaceError";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
@@ -469,6 +471,9 @@ export function App() {
     void surfacePaneDestination(destination.pane, `Agent ${row.agent.displayName}`);
   }, [notificationActivation, snapshot.panes, surfacePaneDestination]);
 
+  // What the Explorer, Git and the agents list currently offer for the row the
+  // user last pointed at — the palette's only way to name a row.
+  const rowCommands = useRowCommands();
   const { commandContext, runCommand } = useShellCommands({
     activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
     compactViewport,
@@ -480,7 +485,7 @@ export function App() {
       if (!target) return setStatus("No agent is waiting on you.");
       selectAgentRow(target);
     },
-    performAction, selectedAppTab,
+    performAction, rowCommands, selectedAppTab,
     selectCreatedSession: (sessionId) => { setActiveSessionId(sessionId); setActiveWindowId(undefined); },
     selectRelativeTab: (direction) => {
       const index = combinedTabs.findIndex((tab) => tab.key === activeCombinedTabKey);
@@ -906,7 +911,13 @@ export function App() {
         takes a pixel from the terminal surface the client size is measured
         from; the full text is also in the live region below. */}
     {notice && <div className={notice.severity === "problem" ? "toast toast-problem" : "toast"} role={notice.severity === "problem" ? "alert" : "status"}>
-      <span>{notice.message}</span>
+      {/* A problem is usually a host rejection arriving verbatim — the raw
+          `file_mutation_rejected: …` of M10-E059. It gets the summary-plus-
+          disclosure treatment; ordinary progress is already a sentence and is
+          left alone. The live region below still carries the full text. */}
+      {notice.severity === "problem"
+        ? <SurfaceError className="toast-body" detail={notice.message} role="none" />
+        : <span>{notice.message}</span>}
       <button aria-label="Dismiss" onClick={() => setNotice(undefined)} type="button">Dismiss</button>
     </div>}
     {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}

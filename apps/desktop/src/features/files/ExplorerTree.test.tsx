@@ -1,6 +1,10 @@
+// @vitest-environment jsdom
+// jsdom, because opening a row action's dialog goes through `useModalDialog`,
+// which manages real focus.
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
+import { rowCommandRegistry } from "../../commands/rowCommands";
 import { ExplorerTree } from "./ExplorerTree";
 import type { ActiveRoot, DirectoryListing } from "./types";
 
@@ -65,6 +69,52 @@ describe("ExplorerTree", () => {
     await act(async () => { renderer.root.findByProps({ "aria-label": "Cancel download /r/running" }).props.onClick(); });
     expect(cancel).toHaveBeenCalledWith("running-id");
     await act(async () => { renderer.unmount(); });
+  });
+
+  it("reaches every row action from the command registry, on the row the tree has focus on", async () => {
+    // The palette's half of "a removed button becomes a palette command, a
+    // context-menu item and a shortcut". Nothing here goes through the menu:
+    // this is the route ⌘K takes.
+    const onDownload = vi.fn(async () => undefined);
+    const onRefresh = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} transfers={[]} disabled={false} error={undefined}
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={onDownload} onCancelTransfer={vi.fn()} onRefresh={onRefresh} onLoadMore={vi.fn()} />); });
+
+    expect(rowCommandRegistry.available()).toEqual([
+      "files.open", "files.download", "files.rename", "files.move", "files.duplicate", "files.delete",
+      "files.newFile", "files.newFolder", "files.refresh",
+    ]);
+    // Row 0 is `.env`; the tree's own focus cursor is what "selected" means.
+    await act(async () => { rowCommandRegistry.run("files.download"); });
+    expect(onDownload).toHaveBeenCalledWith({ path: "/r/.env", kind: "file", collision: "fail" });
+    await act(async () => { rowCommandRegistry.run("files.refresh"); });
+    expect(onRefresh).toHaveBeenCalled();
+    await act(async () => { rowCommandRegistry.run("files.rename"); });
+    expect(JSON.stringify(renderer.toJSON())).toContain("Rename");
+
+    await act(async () => { renderer.unmount(); });
+    // A closed panel offers nothing; the palette must not hold a row nobody
+    // can see.
+    expect(rowCommandRegistry.available()).toEqual([]);
+    expect(rowCommandRegistry.run("files.rename")).toEqual({ ran: false });
+  });
+
+  it("withholds the mutating row actions while the host is read-only", async () => {
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} transfers={[]} disabled error={undefined}
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+    expect(rowCommandRegistry.available()).toEqual(["files.open", "files.download", "files.refresh"]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("summarizes a host rejection and keeps the diagnostic behind a disclosure", () => {
+    const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} transfers={[]} disabled={false}
+      error="file_mutation_rejected: File name too long (os error 63)"
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+    expect(html).toContain("That name is longer than this filesystem allows.");
+    expect(html).toContain("<details");
+    expect(html).toContain("os error 63");
   });
 
   it("makes commit authoritative and renders unknown/cleanup outcomes as terminal alerts", () => {

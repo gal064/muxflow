@@ -3,6 +3,7 @@ import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { GitStatusSnapshot, GitWorkspaceClient } from "./types";
+import { rowCommandRegistry } from "../../commands/rowCommands";
 import { GitSidebar } from "./GitSidebar";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -12,9 +13,13 @@ import { GitSidebar } from "./GitSidebar";
  * every row action is reached the way a user reaches it: open the row's menu,
  * then pick the item out of it.
  */
-async function rowMenuItem(renderer: ReturnType<typeof create>, displayPath: string, itemId: string) {
-  const row = renderer.root.findAll((node) => node.props.className === "git-file"
+function gitRow(renderer: ReturnType<typeof create>, displayPath: string) {
+  return renderer.root.findAll((node) => node.props.className === "git-file"
     && typeof node.props.title === "string" && node.props.title.startsWith(`${displayPath} ·`))[0];
+}
+
+async function rowMenuItem(renderer: ReturnType<typeof create>, displayPath: string, itemId: string) {
+  const row = gitRow(renderer, displayPath);
   await act(async () => { row.props.onContextMenu({ preventDefault: vi.fn(), clientX: 10, clientY: 10 }); });
   return renderer.root.findByProps({ "data-menu-item": itemId });
 }
@@ -144,6 +149,54 @@ describe("GitSidebar", () => {
     expect(text).toContain("900000 entries were detected");
     expect(text).not.toContain("Working tree clean");
     expect(renderer.root.findAllByType("form")).toHaveLength(0);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("reaches stage, unstage and discard from the command registry, on the last row focused", async () => {
+    const props = baseProps();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} status={status()} />); });
+    // Nothing focused yet: the palette does not guess which change is meant.
+    expect(rowCommandRegistry.available()).toEqual([]);
+
+    await act(async () => { gitRow(renderer, "changed.txt").props.onFocus(); });
+    expect(rowCommandRegistry.available()).toEqual(["git.openDiff", "git.stage", "git.discard"]);
+    await act(async () => { rowCommandRegistry.run("git.stage"); await settle(); });
+    expect(props.client.mutate).toHaveBeenCalledWith(scope, root, "repo", expect.objectContaining({ kind: "stageFile", target: "unstaged" }));
+
+    // The staged copy of a path offers the opposite direction.
+    await act(async () => { gitRow(renderer, "staged.txt").props.onFocus(); });
+    expect(rowCommandRegistry.available()).toEqual(["git.openDiff", "git.unstage", "git.discard"]);
+    // Discard still goes through its own confirmation — the palette is another
+    // way in, not a way around the guard.
+    await act(async () => { rowCommandRegistry.run("git.discard"); });
+    expect(renderer.root.findAllByProps({ role: "alertdialog" })).toHaveLength(1);
+
+    await act(async () => { renderer.unmount(); });
+    expect(rowCommandRegistry.available()).toEqual([]);
+  });
+
+  it("offers no row mutations for a submodule or while the status is resynchronizing", async () => {
+    const value = status();
+    value.entries.push(entry("module", { submodule: true, submoduleState: "S.M.", worktreeKind: "modified" }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...baseProps()} status={value} />); });
+    await act(async () => { gitRow(renderer, "module").props.onFocus(); });
+    expect(rowCommandRegistry.available()).toEqual(["git.openDiff"]);
+
+    await act(async () => { renderer.update(<GitSidebar {...baseProps()} status={{ ...value, authoritative: false }} />); });
+    await act(async () => { gitRow(renderer, "changed.txt").props.onFocus(); });
+    expect(rowCommandRegistry.available()).toEqual(["git.openDiff"]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("summarizes a Git rejection and keeps the raw output behind a disclosure", async () => {
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...baseProps()} error="git_rejected: fatal: pathspec did not match" status={status()} />); });
+    const text = JSON.stringify(renderer.toJSON());
+    expect(text).toContain("Git refused that change.");
+    expect(text).toContain("Details");
+    expect(text).toContain("pathspec did not match");
     await act(async () => { renderer.unmount(); });
   });
 
