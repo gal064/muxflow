@@ -81,25 +81,43 @@ pub struct WorkspaceUiRecord {
     pub selected_app_tab_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// The shell preferences the frontend owns.
+///
+/// Every field is `#[serde(default)]`, and that is a contract rather than a
+/// convenience. This struct is the *storage* end of a shape declared in
+/// TypeScript (`features/shell/types.ts`, `ShellState`); the two are written by
+/// hand, so a field the frontend adds or drops must not be able to make the
+/// whole save fail. It could before: Phase 11 replaced the shell preferences
+/// wholesale and left three required fields behind here, so every
+/// `save_app_state` was rejected with `missing field \`explorerSurface\`` and
+/// the app silently stopped persisting open tabs, workspace selection,
+/// shortcut overrides and window geometry. `app_state_contract` below is the
+/// test that would have caught it.
+///
+/// Fields removed by the frontend are simply dropped: serde ignores unknown
+/// keys, so a file written by the previous build still loads, with the new
+/// preferences at their defaults. That is why `schema_version` stays at 1.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellPreferences {
-    pub explorer_surface: ExplorerSurface,
-    pub explorer_collapsed: bool,
-    pub agent_sidebar_collapsed: bool,
+    #[serde(default)]
+    pub panel_surface: PanelSurface,
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    #[serde(default)]
+    pub sidebar_width: Option<f64>,
+    #[serde(default)]
+    pub panel_open: bool,
+    #[serde(default)]
+    pub agent_sort: AgentSortMode,
+    #[serde(default)]
+    pub agents_section_ratio: Option<f64>,
+    #[serde(default)]
+    pub agent_state_glyphs: bool,
+    #[serde(default)]
+    pub terminal_screen_reader: bool,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
-}
-
-impl Default for ShellPreferences {
-    fn default() -> Self {
-        Self {
-            explorer_surface: ExplorerSurface::Explorer,
-            explorer_collapsed: false,
-            agent_sidebar_collapsed: false,
-            window_geometry: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,14 +139,26 @@ pub struct CommandPreferences {
     pub shortcut_overrides: HashMap<String, Option<String>>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Which half of the right panel is showing when it is open.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum ExplorerSurface {
-    Explorer,
+pub enum PanelSurface {
+    #[default]
+    Files,
     Git,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// The agents section's ordering: workspace order, or attention order.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentSortMode {
+    #[default]
+    Grouped,
+    Priority,
+}
+
+// No `Eq`: the shell's sidebar width and agents-section ratio are fractions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedAppState {
     pub schema_version: u32,
@@ -452,9 +482,14 @@ mod tests {
                 selected_app_tab_id: Some("tab-1".into()),
             }],
             shell: ShellPreferences {
-                explorer_surface: ExplorerSurface::Git,
-                explorer_collapsed: true,
-                agent_sidebar_collapsed: true,
+                panel_surface: PanelSurface::Git,
+                sidebar_collapsed: true,
+                sidebar_width: Some(260.0),
+                panel_open: true,
+                agent_sort: AgentSortMode::Priority,
+                agents_section_ratio: Some(0.42),
+                agent_state_glyphs: true,
+                terminal_screen_reader: false,
                 window_geometry: Some(WindowGeometry {
                     x: 20,
                     y: 30,
@@ -550,6 +585,69 @@ mod tests {
         });
         let restored: WindowGeometry = serde_json::from_value(legacy).unwrap();
         assert_eq!(restored.scale_factor_milli, None);
+    }
+
+    /// The storage end of the `save_app_state` contract.
+    ///
+    /// `PersistedAppState` is declared twice — here and in
+    /// `src/features/shell/types.ts` — and hand-copied between them. The
+    /// fixture below is read by both ends; `appStateContract.test.ts` asserts
+    /// the frontend's key set against it, and this asserts that everything in
+    /// it deserializes and that this side invents no field the frontend never
+    /// sends.
+    ///
+    /// The break it exists to prevent, measured on the packaged app: the
+    /// frontend replaced the shell preferences wholesale, three fields stayed
+    /// required here, and every save was refused with
+    /// `missing field \`explorerSurface\`` — open tabs, workspace selection,
+    /// shortcut overrides and window geometry all silently stopped persisting.
+    #[test]
+    fn app_state_contract_matches_the_frontend_shape() {
+        const CONTRACT: &str =
+            include_str!("../../src/features/shell/persistedAppState.contract.json");
+        let value: PersistedAppState =
+            serde_json::from_str(CONTRACT).expect("the frontend's own payload must deserialize");
+        assert_eq!(value.shell.panel_surface, PanelSurface::Git);
+        assert_eq!(value.shell.agent_sort, AgentSortMode::Priority);
+        assert_eq!(value.shell.sidebar_width, Some(260.0));
+        assert_eq!(value.shell.agents_section_ratio, Some(0.42));
+        assert!(value.shell.sidebar_collapsed && value.shell.panel_open);
+        assert!(value.shell.agent_state_glyphs && value.shell.terminal_screen_reader);
+        assert!(value.shell.window_geometry.is_some());
+        validate(&value).expect("the frontend's own payload must validate");
+
+        // Nothing may be stored that the frontend does not send: a field only
+        // this side knows about is a field that resets on the next save.
+        let expected: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
+        let mut expected_shell: Vec<&String> = expected["shell"].as_object().unwrap().keys().collect();
+        let stored = serde_json::to_value(&value).unwrap();
+        let mut stored_shell: Vec<&String> = stored["shell"].as_object().unwrap().keys().collect();
+        expected_shell.sort();
+        stored_shell.sort();
+        assert_eq!(stored_shell, expected_shell);
+    }
+
+    /// A file written by the build before Phase 11 must still load, with the
+    /// preferences it never heard of at their defaults. The schema version
+    /// deliberately did not move for a shell-preferences change.
+    #[test]
+    fn shell_preferences_written_by_the_previous_build_still_load() {
+        let legacy = serde_json::json!({
+            "schemaVersion": 1,
+            "appTabs": [],
+            "workspaceUi": [],
+            "shell": {
+                "explorerSurface": "git",
+                "explorerCollapsed": true,
+                "agentSidebarCollapsed": true,
+                "windowGeometry": { "x": 1, "y": 2, "width": 900, "height": 700, "maximized": false }
+            }
+        });
+        let value: PersistedAppState = serde_json::from_value(legacy).unwrap();
+        assert_eq!(value.shell.panel_surface, PanelSurface::Files);
+        assert_eq!(value.shell.agent_sort, AgentSortMode::Grouped);
+        assert!(!value.shell.sidebar_collapsed);
+        assert_eq!(value.shell.window_geometry.unwrap().width, 900);
     }
 
     #[test]

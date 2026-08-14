@@ -6,9 +6,11 @@ import {
   commandsForSurface,
   globalShortcutAllowed,
   isSafeShortcut,
+  keyFromCode,
   keyboardEventIsComposing,
   normalizeShortcut,
   selectionIndex,
+  shortcutFromEvent,
   shortcutFor,
   shortcutCollisions,
   unsafeShortcutBindings,
@@ -96,6 +98,23 @@ describe("command registry", () => {
     // the two positional families stay distinct.
     expect(shortcut("workspace.select4", "linux")).toBe("Alt+4");
     expect(shortcut("tab.select4", "linux")).toBe("Ctrl+4");
+  });
+
+  it("resolves an Option-modified binding, which macOS rewrites into a different glyph", () => {
+    // ⌥⌘B. macOS types `∫` for ⌥B, so matching on `event.key` normalized this
+    // to `Meta+Alt+∫` and the right panel's shortcut did nothing at all —
+    // measured on the packaged app, where the titlebar toggle worked and the
+    // key did not. Same defect class as ⌘⇧[, one modifier over.
+    const event = {
+      key: "∫", code: "KeyB", ctrlKey: false, altKey: true, shiftKey: false, metaKey: true,
+      isComposing: false, keyCode: 0,
+    } as KeyboardEvent;
+    expect(shortcutFromEvent(event)).toBe("Alt+Meta+B");
+    expect(commandForKeyboardEvent(event, "mac", {})?.id).toBe("view.togglePanel");
+    // A layout `code` cannot describe still falls back to what was typed.
+    expect(keyFromCode("KeyB")).toBe("B");
+    expect(keyFromCode("Digit4")).toBe("4");
+    expect(keyFromCode("IntlBackslash")).toBeUndefined();
   });
 
   it("resolves every default binding back from the keystroke that produces it", () => {

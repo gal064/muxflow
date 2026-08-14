@@ -1,0 +1,75 @@
+{
+  "_comment": [
+    "The shape `save_app_state` carries across the WebView boundary, written",
+    "once and asserted from both ends: `appStateContract.test.ts` on the",
+    "TypeScript side and `app_state_contract` in `src-tauri/src/app_state.rs`",
+    "on the Rust side.",
+    "",
+    "It exists because the two `PersistedAppState` declarations are hand-written",
+    "copies of each other. Phase 11 replaced the shell preferences in TypeScript",
+    "and left three now-absent fields required in Rust; every save was rejected",
+    "with `missing field explorerSurface`, the app stopped persisting open tabs,",
+    "workspace selection, shortcut overrides and window geometry, and 440 green",
+    "frontend tests plus a clean `tsc` saw none of it, because neither side had",
+    "anything that crossed the boundary.",
+    "",
+    "Every field is present and deliberately non-default, so a field that either",
+    "side drops, renames, or stops accepting fails a test instead of a user's",
+    "save."
+  ],
+  "schemaVersion": 1,
+  "appTabs": [
+    {
+      "id": "tab-1",
+      "hostProfileId": "local",
+      "serverIdentity": "server-a",
+      "sessionId": "$1",
+      "sessionName": "project",
+      "kind": "gitDiff",
+      "resource": "/work/README.md",
+      "title": "README.md (unstaged)",
+      "order": 0,
+      "rootPath": "/work",
+      "rootToken": "root-token",
+      "viewMode": "split",
+      "gitRepositoryId": "repo-1",
+      "gitPath": "L3dvcmsvUkVBRE1FLm1k",
+      "gitOriginalPath": "L3dvcmsvT0xELm1k",
+      "gitTarget": "unstaged",
+      "gitStatusGeneration": "7",
+      "gitSourceGeneration": "source-7"
+    }
+  ],
+  "workspaceUi": [
+    {
+      "hostProfileId": "local",
+      "serverIdentity": "server-a",
+      "sessionId": "$1",
+      "sessionName": "project",
+      "selectedAppTabId": "tab-1"
+    }
+  ],
+  "shell": {
+    "panelSurface": "git",
+    "sidebarCollapsed": true,
+    "sidebarWidth": 260,
+    "panelOpen": true,
+    "agentSort": "priority",
+    "agentsSectionRatio": 0.42,
+    "agentStateGlyphs": true,
+    "terminalScreenReader": true,
+    "windowGeometry": {
+      "x": 20,
+      "y": 30,
+      "width": 1200,
+      "height": 800,
+      "maximized": false,
+      "scaleFactorMilli": 2000
+    }
+  },
+  "commands": {
+    "shortcutOverrides": {
+      "window.new": "Ctrl+T"
+    }
+  }
+}

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
+import { SurfaceError } from "../../ui/SurfaceError";
 import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot, GitWorkspaceClient, GitWorkspaceEvent } from "./types";
 import "../files/monaco";
 
@@ -204,7 +205,7 @@ export function GitDiffSurface(props: Props) {
     </header>
     <div className="git-diff-errors">
       {mutationBlock && <div className="git-diff-error" role="note">{mutationBlock}</div>}
-      {error && <div className="git-diff-error" role="alert">{error}</div>}
+      {error && <SurfaceError className="git-diff-error" detail={error} />}
     </div>
     <div className="git-diff-content">
       {diff.binary || !text ? <GitDiffEmpty title={diff.displayPath} detail={diff.binary ? "Binary changes cannot be displayed or edited as text." : "This diff contains non-UTF-8 content and is shown safely as binary."} />

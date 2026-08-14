@@ -14,6 +14,7 @@ import {
   validateAgentImagePath,
 } from "./terminalTransfers";
 import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
+import { SurfaceError } from "../../ui/SurfaceError";
 import { useTerminalTransferRegistry, type TerminalTransferRegistry } from "./terminalTransferRegistry";
 
 interface PendingReview {
@@ -415,7 +416,7 @@ export function TerminalTransferSurface({
     {children}
     {dragging && <div className="terminal-drop-hint" role="status">Drop files to paste paths</div>}
     {!registry && <TerminalTransferHistory client={client} onError={fail} registry={transferRegistry} />}
-    {error && <div className="terminal-transfer-error" role="alert">{error}</div>}
+    {error && <SurfaceError className="terminal-transfer-error" detail={error} />}
     {review && <UploadReviewDialog pending={review} onChoose={(policy) => {
       const resolve = reviewResolve.current;
       reviewResolve.current = undefined;

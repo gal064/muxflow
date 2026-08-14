@@ -26,7 +26,9 @@ export type IconName =
   | "file"
   | "markdown"
   | "diff"
-  | "zoom";
+  | "zoom"
+  | "search"
+  | "branch";
 
 const paths: Record<IconName, ReactElement> = {
   sidebarLeft: <>
@@ -66,6 +68,19 @@ const paths: Record<IconName, ReactElement> = {
   </>,
   zoom: <>
     <path d="M2.75 6V2.75H6M10 2.75h3.25V6M13.25 10v3.25H10M6 13.25H2.75V10" />
+  </>,
+  // 11.1.3 names both of these. `search` marks the palette's input the way the
+  // mock's `⌕` does; `branch` marks the titlebar's branch name, which was a
+  // bare string with no way to tell it apart from the workspace name beside it.
+  search: <>
+    <circle cx="7" cy="7" r="4.25" />
+    <path d="m10.2 10.2 3 3" />
+  </>,
+  branch: <>
+    <circle cx="4.75" cy="3.75" r="1.75" />
+    <circle cx="4.75" cy="12.25" r="1.75" />
+    <circle cx="11.25" cy="3.75" r="1.75" />
+    <path d="M4.75 5.5v5M11.25 5.5v1.25a2.5 2.5 0 0 1-2.5 2.5H6.5" />
   </>,
 };
 

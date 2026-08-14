@@ -256,26 +256,42 @@ export function unsafeShortcutBindings(overrides: ShortcutOverrides): CommandId[
 }
 
 /**
- * The character a punctuation key produces with no Shift held.
+ * The character a key produces with no modifier that rewrites it.
  *
- * `event.key` reports what the keystroke *typed*, so ⌘⇧[ arrives as `{` and
- * never matches a binding written `Meta+Shift+[` — which is how the cmux
- * keymap's ⌘⇧[ / ⌘⇧] tab shortcuts came to be drawn in the palette while doing
- * nothing at all. `event.code` names the physical key, so a Shift-modified
- * binding can be matched against the key rather than the glyph. Only the US
- * punctuation row needs this; letters and digits already round-trip, and the
- * fallback is `event.key` for any layout `code` does not describe.
+ * `event.key` reports what the keystroke *typed*, and two modifiers change what
+ * that is:
+ *
+ * - **Shift.** ⌘⇧[ arrives as `{` and never matched a binding written
+ *   `Meta+Shift+[`, which is how the cmux keymap's tab shortcuts came to be
+ *   drawn in the palette while doing nothing at all.
+ * - **Option, on macOS.** ⌥B arrives as `∫`, ⌥N as `˜`, ⌥E as `´`. So
+ *   `Meta+Alt+B` — ⌥⌘B, the right panel, straight out of the plan's keymap —
+ *   normalized to `Meta+Alt+∫` and could never fire either. Measured on the
+ *   packaged app: the titlebar toggle worked, the shortcut did nothing.
+ *
+ * `event.code` names the physical key, so both cases are answered the same way:
+ * when a rewriting modifier is held, resolve the key from the code. Letters and
+ * digits get their own arms because `KeyB` → `B` and `Digit4` → `4` are the
+ * whole mapping; only the US punctuation row needs a table. `event.key` remains
+ * the fallback for any layout `code` does not describe.
  */
 const UNSHIFTED_BY_CODE: Record<string, string> = {
   BracketLeft: "[", BracketRight: "]", Semicolon: ";", Quote: "'", Backquote: "`",
   Comma: ",", Period: ".", Slash: "/", Backslash: "\\", Minus: "-", Equal: "=",
 };
 
+/** What a physical key means when a modifier has rewritten what it typed. */
+export function keyFromCode(code: string): string | undefined {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  return UNSHIFTED_BY_CODE[code];
+}
+
 export function shortcutFromEvent(event: KeyboardEvent): string {
   const parts = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Meta"]
     .filter((part): part is string => Boolean(part));
-  const unshifted = event.shiftKey ? UNSHIFTED_BY_CODE[event.code] : undefined;
-  const raw = unshifted ?? event.key;
+  const rewritten = event.shiftKey || event.altKey ? keyFromCode(event.code) : undefined;
+  const raw = rewritten ?? event.key;
   const key = raw.length === 1 ? raw.toUpperCase() : raw;
   if (!["Control", "Alt", "Shift", "Meta"].includes(key)) parts.push(key);
   return normalizeShortcut(parts.join("+"));
