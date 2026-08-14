@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { measurePerf } from "../../perf/probe";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES } from "./types";
 import type {
   ActiveRoot,
@@ -110,7 +111,16 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     return { snapshot, release };
   }
 
-  async openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile> {
+  /**
+   * Instrumented because "opening a file is slow" was a report nothing in the
+   * app could confirm or refute: every perf span belonged to the terminal, and
+   * the file lane — the one spawning an ssh process per open — had none.
+   */
+  openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile> {
+    return measurePerf("file.open", () => this.#openFile(scope, root, path, signal));
+  }
+
+  async #openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile> {
     let transfer = await this.#readFile(scope, root, path, "text", signal);
     if (transfer.contentKind === "text" && transfer.bytes) {
       let value: string;

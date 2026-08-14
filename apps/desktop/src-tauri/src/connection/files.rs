@@ -7,6 +7,7 @@ use serde_json::Value;
 use tauri::State;
 use tmux_agent_protocol::v1;
 
+pub(crate) mod bulk_pool;
 mod bulk_protocol;
 mod cleanup;
 mod clipboard_staging;

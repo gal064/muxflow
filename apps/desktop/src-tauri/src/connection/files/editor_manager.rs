@@ -1,4 +1,4 @@
-use std::{io::BufReader, sync::Arc};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -9,17 +9,15 @@ use tauri::{
 use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
-use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
-use super::scheduler::{
-    BulkBinding, BulkChild, CancelReason, CancelState, cancel_transfer, enqueue_transfer,
-};
+use super::bulk_pool::BulkLease;
+use super::bulk_protocol::RequestFailure;
+use super::scheduler::{BulkBinding, CancelReason, CancelState, cancel_transfer, enqueue_transfer};
 use super::serialization::metadata_json;
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
     TransferState,
 };
 use super::{BULK_CHUNK_BYTES, parse_optional_u64, parse_required_u64};
-use crate::connection::transport::spawn_bulk_bridge;
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -255,20 +253,9 @@ fn emit_file_job_state(job: &FileIoJob, kind: u8, state: TransferState) {
 fn run_file_read(job: &FileReadJob) -> Result<(), String> {
     job.binding.validate()?;
     let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-    let _process_binding = job.cancellation.bind_process(child.0.id())?;
-    let mut stdin = child
-        .0
-        .stdin
-        .take()
-        .ok_or("bulk bridge stdin unavailable")?;
-    let stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or("bulk bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+    let mut protocol = lease.client();
     let metadata_response = protocol.request_cancellable(
         2,
         v1::Request {
@@ -440,20 +427,9 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
 fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
     job.binding.validate()?;
     let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-    let _process_binding = job.cancellation.bind_process(child.0.id())?;
-    let mut stdin = child
-        .0
-        .stdin
-        .take()
-        .ok_or("bulk bridge stdin unavailable")?;
-    let stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or("bulk bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+    let mut protocol = lease.client();
     protocol.request_cancellable(
         2,
         v1::Request {

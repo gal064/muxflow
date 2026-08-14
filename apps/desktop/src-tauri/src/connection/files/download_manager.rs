@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{BufReader, Write},
+    io::Write,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::Arc,
@@ -14,17 +14,17 @@ use tauri::{State, ipc::Channel};
 use tmux_agent_protocol::{PublicationOutcome, v1};
 use uuid::Uuid;
 
+use super::bulk_pool::BulkLease;
 use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
 use super::local_destination::PreparedDestination;
 use super::scheduler::{
-    BulkBinding, BulkChild, CancelState, DeadlineGuard, cancel_transfer, enqueue_transfer,
+    BulkBinding, CancelState, DeadlineGuard, cancel_transfer, enqueue_transfer,
 };
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
     TransferResult, TransferState,
 };
 use super::{BULK_CHUNK_BYTES, parse_required_u64};
-use crate::connection::transport::spawn_bulk_bridge;
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -202,20 +202,9 @@ fn run_download(job: &DownloadJob) -> TransferResult {
     // descriptor, so a parent rename/symlink swap cannot redirect them.
     let destination = PreparedDestination::open(&requested_destination, job.collision)?;
     let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-    let _process_binding = job.cancellation.bind_process(child.0.id())?;
-    let mut stdin = child
-        .0
-        .stdin
-        .take()
-        .ok_or("bulk bridge stdin unavailable")?;
-    let stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or("bulk bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+    let mut protocol = lease.client();
     let descriptor_response = match protocol.request_classified_cancellable(
         2,
         v1::Request {
@@ -243,10 +232,10 @@ fn run_download(job: &DownloadJob) -> TransferResult {
             // recovery helper. This job continues to hold exactly one global
             // lane permit throughout the handoff.
             _deadline.complete();
-            drop(reader);
-            drop(stdin);
             drop(_process_binding);
-            drop(child);
+            // Dropping the lease closes the bridge: a transport failure is
+            // exactly the case `bulk_pool` refuses to return to the pool.
+            drop(lease);
             let cleanup = cancel_download_out_of_band(job)
                 .err()
                 .map(|cleanup| format!("host transfer cleanup was not confirmed: {cleanup}"));
@@ -303,20 +292,9 @@ fn run_download(job: &DownloadJob) -> TransferResult {
 fn cancel_download_out_of_band(job: &DownloadJob) -> Result<(), String> {
     job.binding.validate()?;
     let deadline = job.cancellation.arm_inactivity_deadline();
-    let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-    let _process_binding = job.cancellation.bind_process(child.0.id())?;
-    let mut stdin = child
-        .0
-        .stdin
-        .take()
-        .ok_or("bulk bridge stdin unavailable")?;
-    let stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or("bulk bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+    let mut protocol = lease.client();
     let result = protocol.cancel_download(&job.transfer_id, 2);
     deadline.touch();
     result
