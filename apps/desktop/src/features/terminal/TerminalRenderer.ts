@@ -143,8 +143,40 @@ export interface TerminalBoxChrome {
  * next upgrade.
  */
 export type MeasurableTerminal = Pick<Terminal, "options"> & {
-  _core?: { _renderService?: { dimensions?: { css?: { cell?: Partial<PixelBox> } } } };
+  _core?: {
+    _renderService?: { dimensions?: { css?: { cell?: Partial<PixelBox> } } };
+    /** What xterm measured one character to be, in CSS pixels. See `xtermLineHeight`. */
+    _charSizeService?: { height?: number };
+  };
 };
+
+/**
+ * The `lineHeight` option that makes xterm render rows at `rowPitch` CSS pixels.
+ *
+ * xterm's `lineHeight` is **not** CSS's. It multiplies the *measured character
+ * height* — `device.cell.height = floor(device.char.height * lineHeight)` in
+ * `RenderService._updateDimensions` — and a monospace face measures taller than
+ * its font size (JetBrains Mono at 13 px measures ~17 px). Handing xterm the
+ * token's 1.42 therefore asked for 17 × 1.42 ≈ 24 px rows: a real pitch of
+ * ~1.86 font sizes, a terminal that looks stretched, and a tmux grid a third
+ * shorter than the window can hold — 30 rows where 41 belong.
+ *
+ * So the token stays the design value (row pitch = font size × 1.42) and this
+ * expresses it in xterm's units. Only the cell metric changes; every derivation
+ * downstream — `FitAddon`, `terminalMeasurements`, `clientSizeForSurface` —
+ * reads the resulting `css.cell`, so all of them stay in agreement by
+ * construction.
+ *
+ * Returns undefined when there is nothing to derive from, which leaves xterm at
+ * its unit multiplier: rows one measured character tall, slightly tighter than
+ * the design, never a grid the surface cannot show. xterm rejects a `lineHeight`
+ * below 1 outright, so a face measuring taller than the requested pitch clamps
+ * there rather than throwing.
+ */
+export function xtermLineHeight(rowPitch: number, measuredCharHeight: number | undefined): number | undefined {
+  if (!(rowPitch > 0) || !(measuredCharHeight !== undefined && measuredCharHeight > 0)) return undefined;
+  return Math.max(1, rowPitch / measuredCharHeight);
+}
 
 /** Everything needed to turn a pixel box into a terminal grid. */
 export interface TerminalMeasurements {
@@ -433,6 +465,8 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #disposables: IDisposable[] = [];
   readonly #scheduler: TerminalWriteScheduler;
   readonly #options: TerminalRendererOptions;
+  /** CSS pixels the token asks one row to occupy. See `xtermLineHeight`. */
+  readonly #rowPitch: number;
   #webgl?: WebglAddon;
   #newOutput = false;
   #lastViewport?: TerminalViewportState;
@@ -451,6 +485,7 @@ export class XtermRenderer implements TerminalRenderer {
     // terminal is a Ghostty surface by derivation rather than by a second set
     // of literals that drifted from the chrome.
     const font = terminalFont();
+    this.#rowPitch = font.rowPitch;
     this.#terminal = new Terminal({
       allowProposedApi: false,
       altClickMovesCursor: false,
@@ -459,7 +494,10 @@ export class XtermRenderer implements TerminalRenderer {
       cursorStyle: "block",
       fontFamily: font.fontFamily,
       fontSize: font.fontSize,
-      lineHeight: font.lineHeight,
+      // Corrected to the token's row pitch in `open`, once xterm has measured
+      // the face this multiplier is relative to (`xtermLineHeight`). Rows are
+      // one measured character tall until then, which is only ever too tight.
+      lineHeight: 1,
       ignoreBracketedPasteMode: false,
       macOptionClickForcesSelection: true,
       rightClickSelectsWord: true,
@@ -516,6 +554,9 @@ export class XtermRenderer implements TerminalRenderer {
 
   open(element: HTMLElement): void {
     this.#terminal.open(element);
+    // After `open`, not in the constructor: xterm builds its char-size service
+    // out of the helper elements `open` creates, and measures there.
+    this.#applyRowPitch();
     this.#mountWebgl();
   }
 
@@ -759,6 +800,27 @@ export class XtermRenderer implements TerminalRenderer {
     const smoothing = pendingBytes > SMOOTH_SCROLL_SUSPEND_BYTES ? 0 : SMOOTH_SCROLL_DURATION_MS;
     if (this.#terminal.options.smoothScrollDuration === smoothing) return;
     this.#terminal.options.smoothScrollDuration = smoothing;
+  }
+
+  /**
+   * Restates the token's row pitch in xterm's units, now that xterm has
+   * measured the face.
+   *
+   * Applied once. The measurement depends on the font family and size, both of
+   * which are constants read from `tokens.css`, and the app waits for the
+   * bundled face before it builds a terminal at all (`main.tsx`) — so there is
+   * no later moment at which this answer changes. A missing measurement is
+   * reported rather than guessed at: it means xterm moved the service, and the
+   * next reader should hear about it the way `measureBox.test.ts` will.
+   */
+  #applyRowPitch(): void {
+    const measured = (this.#terminal as MeasurableTerminal)._core?._charSizeService?.height;
+    const lineHeight = xtermLineHeight(this.#rowPitch, measured);
+    if (lineHeight === undefined) {
+      console.warn("xterm reported no character height; terminal rows keep xterm's unit line height");
+      return;
+    }
+    this.#terminal.options.lineHeight = lineHeight;
   }
 
   #mountWebgl(): void {

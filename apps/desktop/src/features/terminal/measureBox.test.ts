@@ -2,7 +2,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { cellsForBox, terminalMeasurements } from "./TerminalRenderer";
+import { cellsForBox, terminalMeasurements, xtermLineHeight } from "./TerminalRenderer";
 
 /**
  * The tmux client size is derived from cell metrics xterm does not expose
@@ -33,6 +33,31 @@ describe("xterm cell metrics", () => {
       "xterm moved _core._renderService.dimensions.css.cell; measureBox reads it",
     ).toBeDefined();
     terminal.dispose();
+  });
+
+  it("still expose the measured character height the row pitch is derived from", () => {
+    const terminal = new Terminal();
+    terminal.open(document.createElement("div"));
+    expect(
+      charHeight(terminal),
+      "xterm moved _core._charSizeService.height; the terminal's row pitch is derived from it",
+    ).toBeTypeOf("number");
+    terminal.dispose();
+  });
+
+  it("turns a CSS row pitch into the multiplier xterm actually applies", () => {
+    // xterm multiplies the *measured character*, so the token's ratio has to be
+    // restated against that measurement rather than against the font size.
+    // 13 px JetBrains Mono measures ~17 px, so a 1.42 CSS line-height is a 1.08
+    // xterm one — and handing xterm 1.42 rendered ~24 px rows instead.
+    expect(xtermLineHeight(13 * 1.42, 17.05)).toBeCloseTo(1.0827, 3);
+    expect(17.05 * xtermLineHeight(13 * 1.42, 17.05)!).toBeCloseTo(18.46, 2);
+    // xterm throws below 1, so a face taller than the requested pitch clamps.
+    expect(xtermLineHeight(18.46, 20)).toBe(1);
+    // Nothing measured, nothing derived: the caller leaves xterm alone.
+    expect(xtermLineHeight(18.46, undefined)).toBeUndefined();
+    expect(xtermLineHeight(18.46, 0)).toBeUndefined();
+    expect(xtermLineHeight(0, 17.05)).toBeUndefined();
   });
 
   it("are read into the same cells FitAddon computes, chrome and all", () => {
@@ -90,4 +115,10 @@ function cellSize(terminal: Terminal): { width: number; height: number } | undef
   return (terminal as unknown as {
     _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } };
   })._core?._renderService?.dimensions?.css?.cell;
+}
+
+function charHeight(terminal: Terminal): number | undefined {
+  return (terminal as unknown as {
+    _core?: { _charSizeService?: { height?: number } };
+  })._core?._charSizeService?.height;
 }
