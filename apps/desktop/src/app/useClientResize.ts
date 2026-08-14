@@ -1,27 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { resizeClient } from "../features/terminal/api";
 import { clientSizeForSurface } from "../features/terminal/clientSize";
-import type { PixelBox, TerminalSize } from "../features/terminal/TerminalRenderer";
+import type { PixelBox, TerminalMeasurements } from "../features/terminal/TerminalRenderer";
 
 /** Coalesces a drag of the window edge into one request, as before. */
 export const CLIENT_RESIZE_DEBOUNCE_MS = 60;
-/** Spacing and count of the retries that wait for a terminal to report metrics. */
-export const CLIENT_RESIZE_RETRY_MS = 250;
-export const CLIENT_RESIZE_RETRIES = 8;
+/** Spacing and count of the retries after a request the bridge did not take. */
+export const CLIENT_RESIZE_RETRY_MS = 500;
+export const CLIENT_RESIZE_RETRIES = 4;
 
 interface ClientResizeOptions {
   /** Recomputes when the workspace shows a different tmux window. */
   activeWindowId?: string;
   canMutate: boolean;
   clientId?: string;
-  /**
-   * Changes whenever a terminal mounts or unmounts. A computation that ran
-   * before any renderer existed has no cell metrics; this is what brings it
-   * back as soon as one is alive, without waiting for the retry timer.
-   */
-  metricsKey?: string | number;
-  /** Cells that fit a pixel box, from a live terminal's font metrics. */
-  measureBox(box: PixelBox): TerminalSize | undefined;
+  /** What a live terminal turns pixels into. Absent until one has mounted. */
+  measurements?: TerminalMeasurements;
   onStatus(message: string): void;
 }
 
@@ -40,17 +34,14 @@ export function useClientResize({
   activeWindowId,
   canMutate,
   clientId,
-  measureBox,
-  metricsKey,
+  measurements,
   onStatus,
 }: ClientResizeOptions): { surfaceRef: (element: HTMLElement | null) => void } {
   const [surface, setSurface] = useState<HTMLElement | null>(null);
   const [box, setBox] = useState<PixelBox>();
-  const measureBoxRef = useRef(measureBox);
   const statusRef = useRef(onStatus);
   const lastRequested = useRef<{ clientId: string; columns: number; rows: number } | undefined>(undefined);
-  const reportedUnavailable = useRef<string | undefined>(undefined);
-  measureBoxRef.current = measureBox;
+  const lastReported = useRef<string | undefined>(undefined);
   statusRef.current = onStatus;
 
   useEffect(() => {
@@ -77,44 +68,36 @@ export function useClientResize({
     let disposed = false;
     let attempt = 0;
     let timer = 0;
+    const report = (message: string) => {
+      // One message per distinct problem. A window dragged past the bound would
+      // otherwise repeat itself once per debounce.
+      if (disposed || lastReported.current === message) return;
+      lastReported.current = message;
+      statusRef.current(message);
+    };
     const send = () => {
       // Measured here rather than taken from the observer's last report. The
-      // surface moves while the connection banner grows and shrinks, and the
+      // surface moves when the connection banner and the sidebars do, and the
       // request is gated on `canMutate`, so the box that arrives with the gate
       // reopening can already be one layout out of date — and a request built
       // from it moves tmux, which moves the banner, which moves the surface.
       // Reading the live box at send time is what stops that loop.
       const rect = surface.getBoundingClientRect();
-      const decision = clientSizeForSurface({ width: rect.width, height: rect.height }, (candidate) => measureBoxRef.current(candidate));
-      if (decision.kind === "unavailable") {
-        if (!decision.retry) return;
-        if (attempt < CLIENT_RESIZE_RETRIES) {
-          attempt += 1;
-          timer = window.setTimeout(send, CLIENT_RESIZE_RETRY_MS);
-          return;
-        }
-        // Out of retries: the app is connected, has a surface, and cannot size
-        // its client. Silence here is how a broken measurement would look
-        // exactly like a correct one (P12-U006's quiet direction).
-        if (reportedUnavailable.current !== decision.reason) {
-          reportedUnavailable.current = decision.reason;
-          statusRef.current(`The tmux client size could not be computed: ${decision.reason}.`);
-        }
-        return;
-      }
-      reportedUnavailable.current = undefined;
-      if (decision.kind === "refused") {
-        statusRef.current(decision.reason);
-        return;
-      }
+      const decision = clientSizeForSurface({ width: rect.width, height: rect.height }, measurements);
+      // `unavailable` is ordinary and silent: no terminal has reported metrics
+      // yet (this effect re-runs when one does), the surface is hidden, or the
+      // window is smaller than a cell.
+      if (decision.kind === "unavailable") return;
+      if (decision.kind === "refused") return report(decision.reason);
       const { columns, rows } = decision.size;
       const previous = lastRequested.current;
-      // Every trigger recomputes; only a *different* answer reaches tmux. A
-      // repeated identical `refresh-client -C` is not free on a shared session:
-      // it re-asserts this client as the one tmux last sized for, which tugs at
-      // the plain terminals attached to the same session for no gain.
+      // Every trigger recomputes; only a *different* answer reaches tmux.
+      // Re-sending a size tmux already has is not free: the omarchy lane
+      // measured 3 identical `refresh-client -C` requests costing 15
+      // topology-dirty events, which is the churn this stage exists to remove.
       if (previous && previous.clientId === clientId && previous.columns === columns && previous.rows === rows) return;
       lastRequested.current = { clientId, columns, rows };
+      lastReported.current = undefined;
       void resizeClient(clientId, columns, rows).catch((error) => {
         // The request never landed, so the next identical computation must not
         // be deduplicated away — unless a later request has already replaced
@@ -123,9 +106,19 @@ export function useClientResize({
         if (recorded?.clientId === clientId && recorded.columns === columns && recorded.rows === rows) {
           lastRequested.current = undefined;
         }
-        // A rejection from a bridge that has already been replaced is not this
-        // connection's status.
-        if (!disposed) statusRef.current(String(error));
+        // And retry, because nothing else will: the triggers are a window
+        // change, a surface change and a reconnect. A bridge that rejects the
+        // first resize after connect — the likeliest moment for one, 60 ms
+        // after the gate opens — would otherwise leave the client at whatever
+        // size the other terminals on that session set, for the whole session,
+        // on a desktop nobody resizes.
+        if (disposed) return;
+        if (attempt < CLIENT_RESIZE_RETRIES) {
+          attempt += 1;
+          timer = window.setTimeout(send, CLIENT_RESIZE_RETRY_MS);
+          return;
+        }
+        report(String(error));
       });
     };
     timer = window.setTimeout(send, CLIENT_RESIZE_DEBOUNCE_MS);
@@ -133,7 +126,7 @@ export function useClientResize({
       disposed = true;
       window.clearTimeout(timer);
     };
-  }, [activeWindowId, box, canMutate, clientId, metricsKey, surface]);
+  }, [activeWindowId, box, canMutate, clientId, measurements, surface]);
 
   return { surfaceRef: setSurface };
 }

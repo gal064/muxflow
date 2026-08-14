@@ -5,8 +5,8 @@ import type { Pane } from "../../app/types";
 import type { TerminalEventHub } from "./TerminalEventHub";
 import {
   XtermRenderer,
-  type PixelBox,
   type TerminalInput,
+  type TerminalMeasurements,
   type TerminalRenderer,
   type TerminalSize,
   type TerminalViewportState,
@@ -95,12 +95,6 @@ export interface TerminalPaneController {
   paste(): Promise<boolean>;
   showSearch(): void;
   scrollToBottom(): void;
-  /**
-   * Cells that fit an arbitrary pixel box, from this terminal's font metrics.
-   * Says nothing about this pane: any mounted pane answers identically, and the
-   * client-size computation only needs one of them to be alive.
-   */
-  measureBox(box: PixelBox): TerminalSize | undefined;
 }
 
 interface Props {
@@ -109,6 +103,11 @@ interface Props {
   hub: TerminalEventHub;
   onInput: (paneId: string, input: TerminalInput) => void;
   onFocus: (paneId: string) => void;
+  /**
+   * Reports what this terminal turns pixels into. It describes a terminal, not
+   * this pane, and the tmux client size is computed from it (P12-U006).
+   */
+  onMeasurements?: (measurements: TerminalMeasurements) => void;
   onController: (paneId: string, controller: TerminalPaneController | undefined) => void;
   onDiagnostic?: (message: string) => void;
   transferClient?: TerminalTransferClient;
@@ -122,6 +121,7 @@ export function TerminalPane({
   hub,
   onInput,
   onFocus,
+  onMeasurements,
   onController,
   onDiagnostic,
   transferClient,
@@ -140,6 +140,7 @@ export function TerminalPane({
   const paneRef = useRef(pane);
   const inputRef = useRef(onInput);
   const focusRef = useRef(onFocus);
+  const measurementsRef = useRef(onMeasurements);
   const controllerRef = useRef(onController);
   const diagnosticRef = useRef(onDiagnostic);
   const clientIdRef = useRef(clientId);
@@ -159,6 +160,7 @@ export function TerminalPane({
   paneRef.current = pane;
   inputRef.current = onInput;
   focusRef.current = onFocus;
+  measurementsRef.current = onMeasurements;
   controllerRef.current = onController;
   diagnosticRef.current = onDiagnostic;
   clientIdRef.current = clientId;
@@ -346,12 +348,20 @@ export function TerminalPane({
         flushDeferredOutput();
       }
     });
-    // Render-side only. This observer once also computed the tmux client size
-    // to request from this pane's box and share of the topology, which is the
-    // defect in P12-U006; the client size now comes from the tiled surface's
-    // own box (`useClientResize`) and no pane feeds it.
+    // Render-side only, plus the terminal's own metrics. This observer once
+    // computed the tmux client size from this pane's box and its share of the
+    // topology, which is the defect in P12-U006; what it reports now describes
+    // a terminal (cell size and chrome) and nothing about this pane's box.
+    const reportMeasurements = () => {
+      const measurements = renderer.measurements();
+      if (measurements) measurementsRef.current?.(measurements);
+    };
     const observer = new ResizeObserver(() => {
       reportGrid(reconcilePaneGrid(renderer, paneRef.current, renderer.measure()));
+      // Re-read rather than report once: xterm rounds a cell to whole device
+      // pixels, so moving the window between displays of different pixel
+      // ratios changes it with no remount.
+      reportMeasurements();
     });
     observer.observe(container.current);
 
@@ -369,9 +379,9 @@ export function TerminalPane({
       },
       showSearch: () => setSearching(true),
       scrollToBottom: () => renderer.scrollToBottom(),
-      measureBox: (box) => renderer.measureBox(box),
     };
     controllerRef.current(pane.id, controller);
+    reportMeasurements();
     if (pane.active) renderer.focus();
 
     return () => {

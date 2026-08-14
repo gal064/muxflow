@@ -218,7 +218,10 @@ impl TerminalAttachment {
     /// surfaces and in the daemon log, because "resize failed" without a number
     /// cannot be diagnosed after the fact.
     pub(super) fn resize(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {
-        check_client_size(columns, rows)?;
+        if let Err(error) = check_client_size(columns, rows) {
+            crate::diagnostics::record_rejected_client_resize(columns, rows);
+            return Err(error);
+        }
         let mut stdin = self.stdin.lock().unwrap();
         writeln!(stdin, "refresh-client -C {columns},{rows}")?;
         stdin.flush()?;
@@ -689,13 +692,13 @@ pub(super) fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> 
 }
 
 /// Rejects a client size outside [`TERMINAL_CLIENT_CELL_BOUNDS`], naming the
-/// size in both the caller's error and the daemon log.
+/// size in the error. Pure: the caller records and logs the rejection, so this
+/// stays a predicate and the test that exercises it has no side effects.
 fn check_client_size(columns: u32, rows: u32) -> anyhow::Result<()> {
     if TERMINAL_CLIENT_CELL_BOUNDS.contains(&columns) && TERMINAL_CLIENT_CELL_BOUNDS.contains(&rows)
     {
         return Ok(());
     }
-    crate::diagnostics::record_rejected_client_resize(columns, rows);
     bail!(
         "refusing a {columns}x{rows} tmux client size: terminal dimensions must be between {} and {} cells",
         TERMINAL_CLIENT_CELL_BOUNDS.start(),

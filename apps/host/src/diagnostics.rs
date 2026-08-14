@@ -23,8 +23,12 @@ const STATE_FILE: &str = "diagnostics.json";
 const DEPENDENCY_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const DEPENDENCY_OUTPUT_LIMIT: usize = 512;
 
+/// Unknown fields are ignored on purpose, in both directions: a counter added
+/// later must load into an older helper — the install path can roll back to one
+/// — and rejecting the file there would zero every counter in it. `RuntimeState`
+/// keeps `deny_unknown_fields`, so a structurally wrong file is still refused.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct FlowCounters {
     connections_accepted: u64,
     connections_active: u64,
@@ -35,8 +39,7 @@ struct FlowCounters {
     event_queue_overflows: u64,
     terminal_input_backpressure_rejections: u64,
     /// Client resizes refused for being outside the sane cell bound. Defaulted
-    /// so a state file written before this counter existed still loads: the
-    /// alternative is a rejected parse that resets every counter in it.
+    /// so a state file written before this counter existed still loads.
     #[serde(default)]
     terminal_client_resize_rejections: u64,
 }

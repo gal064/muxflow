@@ -1,17 +1,18 @@
 // @vitest-environment jsdom
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cellsForBox, type PixelBox, type TerminalSize } from "../features/terminal/TerminalRenderer";
+import type { PixelBox, TerminalMeasurements } from "../features/terminal/TerminalRenderer";
 import { CLIENT_RESIZE_DEBOUNCE_MS, CLIENT_RESIZE_RETRIES, CLIENT_RESIZE_RETRY_MS, useClientResize } from "./useClientResize";
 
-const resizeClientMock = vi.hoisted(() => vi.fn(async () => undefined));
+const resizeClientMock = vi.hoisted(() => vi.fn(async (_clientId: string, _columns: number, _rows: number) => undefined));
 vi.mock("../features/terminal/api", () => ({ resizeClient: resizeClientMock }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const CELL: PixelBox = { width: 8, height: 17 };
-const CHROME = { horizontal: 12, vertical: 12, scrollbar: 14 };
-const measureBox = (box: PixelBox): TerminalSize | undefined => cellsForBox(box, CELL, CHROME);
+const MEASUREMENTS: TerminalMeasurements = {
+  cell: { width: 8, height: 17 },
+  chrome: { horizontal: 12, vertical: 12, scrollbar: 14 },
+};
 
 /**
  * Every surface element the harness mounts, with a settable pixel box. jsdom
@@ -43,8 +44,7 @@ interface HarnessProps {
   activeWindowId?: string;
   canMutate?: boolean;
   clientId?: string;
-  measure?: (box: PixelBox) => TerminalSize | undefined;
-  metricsKey?: string;
+  measurements?: TerminalMeasurements;
   onStatus?: (message: string) => void;
   surfaceMounted?: boolean;
 }
@@ -54,8 +54,7 @@ function Harness(props: HarnessProps) {
     activeWindowId: props.activeWindowId,
     canMutate: props.canMutate ?? true,
     clientId: props.clientId,
-    measureBox: props.measure ?? measureBox,
-    metricsKey: props.metricsKey,
+    measurements: "measurements" in props ? props.measurements : MEASUREMENTS,
     onStatus: props.onStatus ?? (() => undefined),
   });
   return props.surfaceMounted === false ? null : <div ref={surfaceRef} />;
@@ -111,36 +110,32 @@ describe("useClientResize", () => {
     expect(resizeClientMock).not.toHaveBeenCalled();
   });
 
-  it("waits for a terminal to report metrics, then says so rather than staying silent", async () => {
+  it("waits for a terminal to report what it turns pixels into", async () => {
     const statuses: string[] = [];
-    let metrics: ((box: PixelBox) => TerminalSize | undefined) = () => undefined;
     const { update } = await render({
       clientId: "client-1",
-      measure: (box) => metrics(box),
+      measurements: undefined,
       onStatus: (message) => statuses.push(message),
     });
-    // Nothing yet, and nothing said: a renderer is expected to arrive.
+    // Nothing yet, and nothing said: a terminal is expected to arrive.
     expect(resizeClientMock).not.toHaveBeenCalled();
     expect(statuses).toEqual([]);
-    metrics = measureBox;
-    await act(async () => { await vi.advanceTimersByTimeAsync(CLIENT_RESIZE_RETRY_MS + 1); });
+    // It arrives; the value itself is the trigger.
+    await update({ measurements: MEASUREMENTS });
     expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46]]);
+  });
 
-    // A connection whose terminals never report metrics is a broken app that
-    // must not look like a working one.
-    metrics = () => undefined;
-    resizeClientMock.mockClear();
-    await update({ activeWindowId: "@2" });
-    await exhaustRetries();
-    expect(resizeClientMock).not.toHaveBeenCalled();
-    expect(statuses).toHaveLength(1);
-    expect(statuses[0]).toContain("could not be computed");
+  it("re-asks when the cell size changes under it, with no remount", async () => {
+    const { update } = await render({ clientId: "client-1" });
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46]]);
+    // What a move between displays of different pixel ratios does.
+    await update({ measurements: { ...MEASUREMENTS, cell: { width: 10, height: 20 } } });
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-1", 97, 39]]);
   });
 
   it("stays quiet when the window is merely too small for a terminal", async () => {
     const statuses: string[] = [];
     await render({ clientId: "client-1", onStatus: (message) => statuses.push(message) }, { width: 40, height: 800 });
-    await exhaustRetries();
     expect(resizeClientMock).not.toHaveBeenCalled();
     expect(statuses).toEqual([]);
   });
@@ -167,30 +162,48 @@ describe("useClientResize", () => {
     // `refresh-client -C` would only re-assert this client's size over the
     // plain terminals sharing the session.
     await update({ activeWindowId: "@2" });
-    await update({ metricsKey: "%7" });
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
     // A new bridge has a new tmux client, which has never been sized.
     await update({ clientId: "client-2" });
     expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-2", 121, 46]]);
   });
 
-  it("retries the size a failed request never delivered", async () => {
-    resizeClientMock.mockImplementationOnce(async () => { throw new Error("bridge disconnected"); });
+  it("retries a request the bridge refused, then reports it", async () => {
+    resizeClientMock.mockImplementation(async () => { throw new Error("bridge disconnected"); });
     const statuses: string[] = [];
-    const { update } = await render({ clientId: "client-1", onStatus: (message) => statuses.push(message) });
+    await render({ clientId: "client-1", onStatus: (message) => statuses.push(message) });
+    // Nothing else would ever ask again: the triggers are a window change, a
+    // surface change and a reconnect, and a desktop nobody resizes has none.
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+    expect(statuses).toEqual([]);
+    await exhaustRetries();
+    expect(resizeClientMock).toHaveBeenCalledTimes(CLIENT_RESIZE_RETRIES + 1);
+    expect(resizeClientMock.mock.calls.every(([, columns, rows]) => columns === 121 && rows === 46)).toBe(true);
     expect(statuses).toEqual(["Error: bridge disconnected"]);
-    await update({ activeWindowId: "@2" });
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-1", 121, 46]]);
+  });
+
+  it("stops retrying as soon as one lands", async () => {
+    resizeClientMock.mockImplementationOnce(async () => { throw new Error("bridge disconnected"); });
+    await render({ clientId: "client-1" });
+    await exhaustRetries();
+    expect(resizeClientMock).toHaveBeenCalledTimes(2);
   });
 
   it("refuses an out-of-bound size, says so, and sends nothing", async () => {
     const statuses: string[] = [];
-    await render(
-      { clientId: "client-1", measure: (box) => cellsForBox(box, { width: 1, height: 1 }, CHROME), onStatus: (message) => statuses.push(message) },
+    const { update } = await render(
+      {
+        clientId: "client-1",
+        measurements: { cell: { width: 1, height: 1 }, chrome: MEASUREMENTS.chrome },
+        onStatus: (message) => statuses.push(message),
+      },
       { width: 4000, height: 4000 },
     );
     expect(resizeClientMock).not.toHaveBeenCalled();
     expect(statuses).toHaveLength(1);
     expect(statuses[0]).toContain("3972x3986");
+    // Said once, not once per recompute.
+    await update({ activeWindowId: "@2" });
+    expect(statuses).toHaveLength(1);
   });
 });
