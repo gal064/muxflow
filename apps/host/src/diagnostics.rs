@@ -34,6 +34,11 @@ struct FlowCounters {
     hook_fallback_errors: u64,
     event_queue_overflows: u64,
     terminal_input_backpressure_rejections: u64,
+    /// Client resizes refused for being outside the sane cell bound. Defaulted
+    /// so a state file written before this counter existed still loads: the
+    /// alternative is a rejected parse that resets every counter in it.
+    #[serde(default)]
+    terminal_client_resize_rejections: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -260,7 +265,15 @@ fn update_active_counter(update: impl FnOnce(&mut FlowCounters)) {
 /// from a transport failure afterwards, and the size is what identifies which
 /// side computed nonsense. Cell counts carry no terminal content, no path and
 /// no hostname, so this stays inside the privacy declaration above.
-pub fn write_rejected_client_resize_log(columns: u32, rows: u32) {
+pub fn record_rejected_client_resize(columns: u32, rows: u32) {
+    update_active_counter(|counters| {
+        counters.terminal_client_resize_rejections =
+            counters.terminal_client_resize_rejections.saturating_add(1);
+    });
+    write_rejected_client_resize_log(columns, rows);
+}
+
+fn write_rejected_client_resize_log(columns: u32, rows: u32) {
     let line = serde_json::json!({
         "subsystem": "host_daemon",
         "event": "terminalClientResizeRejected",

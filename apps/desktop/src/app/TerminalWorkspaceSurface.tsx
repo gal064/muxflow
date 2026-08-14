@@ -27,6 +27,8 @@ type TerminalWorkspaceSurfaceProps = {
   terminalTransferScope?: TerminalTransferConnectionScope;
   beginDividerDrag(event: PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical"): void;
   handleInput(paneId: string, input: TerminalInput): void;
+  /** A terminal's controller was registered or dropped. */
+  onTerminalRegistered(): void;
   performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
   setStatus(message: string): void;
 };
@@ -40,7 +42,11 @@ export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
         clientId={props.clientId}
         pane={pane}
         hub={props.hub}
-        onController={(paneId, controller) => { if (controller) props.controllers.current.set(paneId, controller); else props.controllers.current.delete(paneId); }}
+        onController={(paneId, controller) => {
+          if (controller) props.controllers.current.set(paneId, controller);
+          else props.controllers.current.delete(paneId);
+          props.onTerminalRegistered();
+        }}
         onDiagnostic={props.setStatus}
         onFocus={(paneId) => { if (paneId !== activePane?.id) void props.performAction({ kind: "focusPane", paneId }); }}
         onInput={props.handleInput}
