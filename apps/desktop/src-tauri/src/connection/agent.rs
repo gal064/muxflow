@@ -299,7 +299,19 @@ fn adapter_descriptor_json(value: &v1::AgentAdapterDescriptor) -> Value {
         "supportsResume": value.supports_resume, "supportsHooks": value.supports_hooks,
         "supportsProcessDetection": value.supports_process_detection,
         "supportsScreenFallback": value.supports_screen_fallback,
-        "hookConfigPath": value.hook_config_path, "hookEvents": value.hook_events })
+        "hookConfigPath": value.hook_config_path, "hookEvents": value.hook_events,
+        "hookWiring": hook_wiring_name(value.hook_wiring),
+        "hookWiringDetail": value.hook_wiring_detail })
+}
+
+fn hook_wiring_name(value: i32) -> &'static str {
+    match v1::AgentHookWiring::try_from(value).unwrap_or_default() {
+        v1::AgentHookWiring::Wired => "wired",
+        v1::AgentHookWiring::Partial => "partial",
+        v1::AgentHookWiring::NotWired => "notWired",
+        v1::AgentHookWiring::Unavailable => "unavailable",
+        v1::AgentHookWiring::Unspecified => "unspecified",
+    }
 }
 
 fn adapter_name(value: i32) -> &'static str {

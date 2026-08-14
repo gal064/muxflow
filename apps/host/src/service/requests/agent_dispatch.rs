@@ -68,7 +68,13 @@ fn handle_inner(
     let runtime = AgentRuntime::global();
     let mut response = v1::AgentResponse::default();
     match operation {
-        v1::Operation::AgentSnapshot => response.snapshot = Some(runtime.snapshot()),
+        v1::Operation::AgentSnapshot => {
+            // Before the snapshot is built, not after: a reconnecting desktop
+            // must never be handed a Working state the daemon already knows
+            // nothing has confirmed for fifteen minutes.
+            super::super::agents::sweep_stale_and_publish();
+            response.snapshot = Some(runtime.snapshot());
+        }
         v1::Operation::AgentMarkSeen => {
             let event = runtime.mark_seen(&request.agent_id, request.attention_generation)?;
             response.agent = event.agent.clone();

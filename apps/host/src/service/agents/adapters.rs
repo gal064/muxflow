@@ -4,7 +4,10 @@ use tmux_agent_protocol::v1;
 
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
 pub(crate) const MANAGED_OWNER: &str = "tmux-agent-ide";
-pub(crate) const MANAGED_VERSION: u32 = 2;
+/// Bumped whenever the managed *event set* changes, not only the command
+/// string: an install from an older version covers fewer events, and reporting
+/// it as current would leave a transition that can never arrive.
+pub(crate) const MANAGED_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedHook {
@@ -47,8 +50,20 @@ pub(crate) trait AgentAdapter: Send + Sync {
         )
     }
 
-    fn descriptor(&self, home: &Path) -> v1::AgentAdapterDescriptor {
+    fn descriptor(
+        &self,
+        home: &Path,
+        wiring: &[super::hooks::AdapterWiring],
+    ) -> v1::AgentAdapterDescriptor {
+        let observed = wiring.iter().find(|entry| entry.adapter_id == self.id());
         v1::AgentAdapterDescriptor {
+            hook_wiring: observed
+                .map(|entry| entry.state)
+                .unwrap_or(v1::AgentHookWiring::Unspecified)
+                .into(),
+            hook_wiring_detail: observed
+                .map(|entry| entry.detail.clone())
+                .unwrap_or_default(),
             adapter: self.legacy_kind().into(),
             id: self.id().into(),
             display_name: self.display_name().into(),
@@ -96,6 +111,18 @@ impl AgentAdapter for CodexAdapter {
         ".codex/hooks.json"
     }
 
+    /// Measured against a real `~/.codex/hooks.json` (Codex CLI 0.128 and
+    /// 0.147): Codex fires `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+    /// `PermissionRequest`, `PostToolUse`, `Stop`, `SubagentStart` and
+    /// `SubagentStop`.
+    ///
+    /// Two events Claude Code has are absent from that surface and are
+    /// therefore gaps rather than omissions: there is no `StopFailure`, so a
+    /// turn that ends in failure is indistinguishable from one that succeeds,
+    /// and there is no `Notification`, so `PermissionRequest` is the only
+    /// evidence of a blocked Codex agent. `SubagentStart` is deliberately not
+    /// taken: it says nothing `PreToolUse` has not already said, and every hook
+    /// costs a daemon connection.
     fn hook_events(&self) -> &'static [&'static str] {
         &[
             "SessionStart",
@@ -103,6 +130,7 @@ impl AgentAdapter for CodexAdapter {
             "PreToolUse",
             "PermissionRequest",
             "PostToolUse",
+            "SubagentStop",
             "Stop",
         ]
     }
@@ -132,6 +160,8 @@ impl AgentAdapter for CodexAdapter {
                 ("UserPromptSubmit", v1::AgentLifecycleState::Working),
                 ("PreToolUse", v1::AgentLifecycleState::Working),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
+                // A subagent finishing says the parent is still mid-turn.
+                ("SubagentStop", v1::AgentLifecycleState::Working),
                 ("Stop", v1::AgentLifecycleState::Idle),
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
@@ -182,6 +212,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         ".claude/settings.json"
     }
 
+    /// Measured against a real `~/.claude/settings.json`: `StopFailure` and
+    /// `SubagentStop` are live events this app previously ignored, and a turn
+    /// that ended in failure therefore left the agent showing "working"
+    /// forever, since the `Stop` that would have ended it never fires.
     fn hook_events(&self) -> &'static [&'static str] {
         &[
             "SessionStart",
@@ -189,7 +223,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
             "PreToolUse",
             "PermissionRequest",
             "PostToolUse",
+            "SubagentStop",
             "Stop",
+            "StopFailure",
             "Notification",
         ]
     }
@@ -241,7 +277,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 ("UserPromptSubmit", v1::AgentLifecycleState::Working),
                 ("PreToolUse", v1::AgentLifecycleState::Working),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
+                ("SubagentStop", v1::AgentLifecycleState::Working),
                 ("Stop", v1::AgentLifecycleState::Idle),
+                // A failed turn is over. It is the case most worth surfacing
+                // and the one that used to leave the row working forever.
+                ("StopFailure", v1::AgentLifecycleState::Idle),
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
         )
@@ -281,8 +321,13 @@ pub(crate) fn all() -> impl Iterator<Item = &'static dyn AgentAdapter> {
     .filter_map(adapter)
 }
 
-pub(crate) fn descriptors(home: &Path) -> Vec<v1::AgentAdapterDescriptor> {
-    all().map(|adapter| adapter.descriptor(home)).collect()
+pub(crate) fn descriptors(
+    home: &Path,
+    wiring: &[super::hooks::AdapterWiring],
+) -> Vec<v1::AgentAdapterDescriptor> {
+    all()
+        .map(|adapter| adapter.descriptor(home, wiring))
+        .collect()
 }
 
 pub(crate) fn by_id(id: &str) -> Option<&'static dyn AgentAdapter> {
@@ -423,19 +468,35 @@ mod tests {
     #[test]
     fn registry_owns_descriptors_manifests_paths_and_commands() {
         let home = Path::new("/fixture/home");
-        let descriptors = descriptors(home);
+        let observed = [super::super::hooks::AdapterWiring {
+            adapter_id: "codex",
+            config_path: home.join(".codex/hooks.json"),
+            state: v1::AgentHookWiring::Wired,
+            detail: String::new(),
+        }];
+        let descriptors = descriptors(home, &observed);
         assert_eq!(descriptors.len(), 2);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
-        assert_eq!(codex.hook_events().len(), 6);
-        assert_eq!(codex.descriptor(home).id, "codex");
+        assert_eq!(codex.hook_events().len(), 7);
+        assert_eq!(codex.descriptor(home, &observed).id, "codex");
         assert_eq!(
             codex.hook_command(Path::new("/opt/tmux-ide-host")),
-            "'/opt/tmux-ide-host' hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 2"
+            "'/opt/tmux-ide-host' hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 3"
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));
-        assert!(claude.descriptor(home).supports_resume);
+        assert!(claude.descriptor(home, &observed).supports_resume);
+        // An adapter the wiring probe said nothing about must not inherit
+        // another adapter's answer.
+        assert_eq!(
+            codex.descriptor(home, &observed).hook_wiring,
+            v1::AgentHookWiring::Wired as i32
+        );
+        assert_eq!(
+            claude.descriptor(home, &observed).hook_wiring,
+            v1::AgentHookWiring::Unspecified as i32
+        );
     }
 
     #[test]

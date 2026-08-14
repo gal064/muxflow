@@ -703,6 +703,23 @@ enum HookManagementAction {
   HOOK_MANAGEMENT_ACTION_UNINSTALL = 3;
 }
 
+// Whether this host's agent configuration actually routes lifecycle events to
+// this application. Without it the desktop cannot tell "no agent is doing
+// anything" from "nothing here can ever report what an agent is doing".
+enum AgentHookWiring {
+  AGENT_HOOK_WIRING_UNSPECIFIED = 0;
+  // Every lifecycle event this adapter needs invokes the managed hook at the
+  // current owned version.
+  AGENT_HOOK_WIRING_WIRED = 1;
+  // Owned entries exist but do not cover every event at the current version,
+  // so some transitions can never arrive.
+  AGENT_HOOK_WIRING_PARTIAL = 2;
+  AGENT_HOOK_WIRING_NOT_WIRED = 3;
+  // The configuration could not be inspected; the wiring is unknown rather
+  // than absent, and the desktop must not offer to overwrite it blindly.
+  AGENT_HOOK_WIRING_UNAVAILABLE = 4;
+}
+
 message AgentRoute {
   string host_profile_id = 1;
   string server_identity = 2;
@@ -729,6 +746,10 @@ message AgentAdapterDescriptor {
   bool supports_screen_fallback = 8;
   string hook_config_path = 9;
   repeated string hook_events = 10;
+  // Observed on the host at snapshot time, not a capability claim.
+  AgentHookWiring hook_wiring = 11;
+  // Why the wiring could not be inspected; empty in every other state.
+  string hook_wiring_detail = 12;
 }
 
 message AgentRecord {

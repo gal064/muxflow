@@ -48,6 +48,104 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
     }
 }
 
+/// `hook status|install|uninstall` — the same merge-only installer the desktop
+/// drives, reachable without a UI.
+///
+/// This exists so the installer can be exercised against a fixture copied from
+/// a real machine's configuration: `--home` relocates every adapter's file and
+/// `--settings-path` relocates one adapter's, which is what keeps QA off a real
+/// `~/.claude` while still testing the real merge.
+pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
+    let home = flag(&arguments, "--home").map(std::path::PathBuf::from);
+    let settings_path = flag(&arguments, "--settings-path").map(std::path::PathBuf::from);
+    let adapter_id = flag(&arguments, "--adapter");
+    if settings_path.is_some() && adapter_id.is_none() {
+        bail!("--settings-path names one adapter's configuration and requires --adapter");
+    }
+    let targets: Vec<_> = match adapter_id.as_deref() {
+        Some(id) => vec![
+            crate::service::agents::adapters::by_id(id)
+                .context("unsupported hook adapter")?
+                .legacy_kind(),
+        ],
+        None => crate::service::agents::adapters::all()
+            .map(|adapter| adapter.legacy_kind())
+            .collect(),
+    };
+    let manager = crate::service::agents::HookManager::with_overrides(home, settings_path)?;
+    let action = match verb {
+        "status" => None,
+        "install" => Some(v1::HookManagementAction::Install),
+        "uninstall" => Some(v1::HookManagementAction::Uninstall),
+        _ => bail!("usage: tmux-ide-host hook <ingest|status|install|uninstall>"),
+    };
+    let mut report = Vec::new();
+    for adapter in targets {
+        let id = crate::service::agents::adapters::adapter(adapter)
+            .context("agent adapter is required")?
+            .id();
+        if let Some(action) = action {
+            let review = manager.review(adapter, action)?;
+            // `already_current` is the installer's own idempotence answer, so a
+            // second run reports "unchanged" rather than rewriting a file and
+            // claiming it did something.
+            let changed = !review.already_current;
+            if changed {
+                manager.apply(adapter, action, &review.confirmation_token)?;
+            }
+            report.push(serde_json::json!({
+                "adapterId": id,
+                "configPath": review.config_path,
+                "backupPath": review.backup_path,
+                "changed": changed,
+            }));
+        }
+    }
+    let wiring: Vec<_> = manager
+        .wiring()
+        .into_iter()
+        .filter(|entry| {
+            adapter_id
+                .as_deref()
+                .is_none_or(|id| id == entry.adapter_id)
+        })
+        .map(|entry| {
+            serde_json::json!({
+                "adapterId": entry.adapter_id,
+                "configPath": entry.config_path,
+                "wiring": wiring_label(entry.state),
+                "detail": entry.detail,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::json!({
+            "action": verb,
+            "applied": report,
+            "adapters": wiring,
+        })
+    );
+    Ok(())
+}
+
+fn wiring_label(state: v1::AgentHookWiring) -> &'static str {
+    match state {
+        v1::AgentHookWiring::Wired => "wired",
+        v1::AgentHookWiring::Partial => "partial",
+        v1::AgentHookWiring::NotWired => "notWired",
+        v1::AgentHookWiring::Unavailable => "unavailable",
+        v1::AgentHookWiring::Unspecified => "unspecified",
+    }
+}
+
+fn flag(arguments: &[String], name: &str) -> Option<String> {
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
+}
+
 fn build_event(
     adapter: v1::AgentAdapterKind,
     payload: Vec<u8>,
@@ -201,12 +299,9 @@ fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
 }
 
 fn parse_adapter(arguments: &[String]) -> anyhow::Result<v1::AgentAdapterKind> {
-    let value = arguments
-        .windows(2)
-        .find(|pair| pair[0] == "--adapter")
-        .map(|pair| pair[1].as_str())
-        .context("hook ingest requires --adapter codex|claude-code")?;
-    crate::service::agents::adapters::by_id(value)
+    let value =
+        flag(arguments, "--adapter").context("hook ingest requires --adapter codex|claude-code")?;
+    crate::service::agents::adapters::by_id(&value)
         .map(|adapter| adapter.legacy_kind())
         .ok_or_else(|| anyhow::anyhow!("unsupported hook adapter"))
 }

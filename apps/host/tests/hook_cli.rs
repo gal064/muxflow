@@ -44,3 +44,78 @@ fn cli_persists_an_exact_unsequenced_hook_envelope() {
     assert!(!normalized.contains("secret"));
     fs::remove_dir_all(runtime).unwrap();
 }
+
+/// `hook status|install|uninstall` against an isolated fixture home.
+///
+/// The overrides are the whole point: they are how the installer is exercised
+/// against a copy of a real machine's configuration without a test, a script,
+/// or an impatient operator ever touching a real `~/.claude`.
+#[test]
+fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
+    let home = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("phase13-hook-cli-{}", uuid::Uuid::new_v4()));
+    let settings = home.join(".claude/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let original = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/phase13/fixtures/claude-settings-orca.json"
+    ))
+    .unwrap();
+    fs::write(&settings, &original).unwrap();
+
+    let run = |verb: &str| -> serde_json::Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+            .args(["hook", verb, "--adapter", "claude-code"])
+            .arg("--home")
+            .arg(&home)
+            .arg("--settings-path")
+            .arg(&settings)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let before = run("status");
+    assert_eq!(before["adapters"][0]["wiring"], "notWired");
+    assert_eq!(
+        before["adapters"].as_array().unwrap().len(),
+        1,
+        "--adapter scopes the report"
+    );
+
+    let installed = run("install");
+    assert_eq!(installed["applied"][0]["changed"], true);
+    assert_eq!(installed["adapters"][0]["wiring"], "wired");
+    let after_install = fs::read(&settings).unwrap();
+
+    let repeated = run("install");
+    assert_eq!(
+        repeated["applied"][0]["changed"], false,
+        "install must be idempotent"
+    );
+    assert_eq!(fs::read(&settings).unwrap(), after_install);
+    assert_eq!(run("status")["adapters"][0]["wiring"], "wired");
+
+    let removed = run("uninstall");
+    assert_eq!(removed["adapters"][0]["wiring"], "notWired");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&settings).unwrap()).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(&original).unwrap(),
+        "uninstall left the foreign configuration changed"
+    );
+
+    // The override names one adapter's file, so it cannot be used without one.
+    let ambiguous = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        .args(["hook", "status", "--settings-path", "/tmp/anything.json"])
+        .output()
+        .unwrap();
+    assert!(!ambiguous.status.success());
+    fs::remove_dir_all(home).unwrap();
+}
