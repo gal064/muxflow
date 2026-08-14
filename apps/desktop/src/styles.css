@@ -480,6 +480,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   box-shadow: 0 8px 26px rgb(0 0 0 / .55); font-size: var(--type-meta); overflow-wrap: anywhere;
   display: grid; gap: 6px; justify-items: start;
 }
+.surface-error-dismiss { justify-self: end; }
 .terminal-upload-review { display: grid; gap: 10px; width: min(620px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 24px)); overflow: auto; }
 .terminal-upload-review ul { max-height: 190px; margin: 0; padding-left: 22px; overflow: auto; color: var(--chrome-dim); font-size: 11px; }
 .terminal-upload-review li + li { margin-top: 4px; }

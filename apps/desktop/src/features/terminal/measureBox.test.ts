@@ -39,25 +39,37 @@ describe("xterm cell metrics", () => {
     const terminal = new Terminal();
     terminal.open(document.createElement("div"));
     expect(
-      charHeight(terminal),
+      charSizeService(terminal)?.height,
       "xterm moved _core._charSizeService.height; the terminal's row pitch is derived from it",
     ).toBeTypeOf("number");
+    expect(
+      charSizeService(terminal)?.onCharSizeChange,
+      "xterm moved _core._charSizeService.onCharSizeChange; the row pitch re-derives on it",
+    ).toBeTypeOf("function");
     terminal.dispose();
   });
 
   it("turns a CSS row pitch into the multiplier xterm actually applies", () => {
-    // xterm multiplies the *measured character*, so the token's ratio has to be
-    // restated against that measurement rather than against the font size.
-    // 13 px JetBrains Mono measures ~17 px, so a 1.42 CSS line-height is a 1.08
-    // xterm one — and handing xterm 1.42 rendered ~24 px rows instead.
-    expect(xtermLineHeight(13 * 1.42, 17.05)).toBeCloseTo(1.0827, 3);
-    expect(17.05 * xtermLineHeight(13 * 1.42, 17.05)!).toBeCloseTo(18.46, 2);
+    // A row is a whole number of device pixels and xterm floors into them, so
+    // the answer is judged by what xterm would then render, not by the ratio.
+    const rendered = (pitch: number, charHeight: number, ratio: number) =>
+      Math.floor(Math.ceil(charHeight * ratio) * xtermLineHeight(pitch, charHeight, ratio)!) / ratio;
+    // 13px JetBrains Mono measures ~17px, so a 1.42 CSS line-height is a ~1.10
+    // xterm one — and handing xterm 1.42 rendered ~24px rows instead.
+    expect(xtermLineHeight(13 * 1.42, 17, 2)).toBeCloseTo(1.1029, 3);
+    // 18.46 CSS px is 36.92 device px: unreachable, and aiming straight at it
+    // floors to 36 and renders an 18.0px row. 18.5 is the closest whole device
+    // row there is.
+    expect(rendered(13 * 1.42, 17, 2)).toBe(18.5);
+    expect(rendered(13 * 1.42, 17, 1)).toBe(18);
     // xterm throws below 1, so a face taller than the requested pitch clamps.
-    expect(xtermLineHeight(18.46, 20)).toBe(1);
+    expect(xtermLineHeight(18.46, 20, 1)).toBe(1);
     // Nothing measured, nothing derived: the caller leaves xterm alone.
     expect(xtermLineHeight(18.46, undefined)).toBeUndefined();
     expect(xtermLineHeight(18.46, 0)).toBeUndefined();
     expect(xtermLineHeight(0, 17.05)).toBeUndefined();
+    // A nonsense ratio falls back to 1 rather than producing a nonsense cell.
+    expect(xtermLineHeight(13 * 1.42, 17, 0)).toBe(xtermLineHeight(13 * 1.42, 17, 1));
   });
 
   it("are read into the same cells FitAddon computes, chrome and all", () => {
@@ -117,8 +129,8 @@ function cellSize(terminal: Terminal): { width: number; height: number } | undef
   })._core?._renderService?.dimensions?.css?.cell;
 }
 
-function charHeight(terminal: Terminal): number | undefined {
+function charSizeService(terminal: Terminal): { height?: number; onCharSizeChange?: unknown } | undefined {
   return (terminal as unknown as {
-    _core?: { _charSizeService?: { height?: number } };
-  })._core?._charSizeService?.height;
+    _core?: { _charSizeService?: { height?: number; onCharSizeChange?: unknown } };
+  })._core?._charSizeService;
 }

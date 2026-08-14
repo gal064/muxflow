@@ -120,10 +120,17 @@ export function App() {
   const [helperState, dispatchHelper] = useReducer(helperUpgradeReducer, initialHelperUpgradeState);
   const [profileResetConfirmation, setProfileResetConfirmation] = useState(false);
   const [hostDeleteConfirmation, setHostDeleteConfirmation] = useState<HostProfile>();
-  // The store refuses to empty the list, so the last saved host is not offered
-  // for deletion here either — a disabled control beats a refusal after a
-  // confirmation dialog.
-  const deletableProfile = profiles.find((profile) => profile.id === selectedProfileId && profiles.length > 1);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [workspaceSwitcherOpen, setWorkspaceSwitcherOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Only while Settings is showing the picker. "The selected saved host" is a
+  // phrase with no referent anywhere else, and a destructive command whose
+  // subject is off screen is one the palette should not offer. The store also
+  // refuses to empty the list, so the last saved host is not offered here
+  // either — a disabled control beats a refusal after a confirmation dialog.
+  const deletableProfile = settingsOpen && profiles.length > 1
+    ? profiles.find((profile) => profile.id === selectedProfileId)
+    : undefined;
   const deleteSelectedProfile = (profile: HostProfile) => {
     void invoke<PersistedProfiles>("delete_host_profile", { profileId: profile.id }).then((saved) => {
       // The store's surviving list, not a locally filtered guess at it.
@@ -132,9 +139,6 @@ export function App() {
       setStatus(`Deleted the saved host ${profile.label}.`);
     }).catch((error) => setStatus(`Could not delete the saved host ${profile.label}: ${String(error)}`));
   };
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [workspaceSwitcherOpen, setWorkspaceSwitcherOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutEditorOpen, setShortcutEditorOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
@@ -669,14 +673,6 @@ export function App() {
     }
   };
 
-  // Typing in the form is how the picker stops describing what is on screen, so
-  // it drops back to "Current values" rather than naming a saved host whose
-  // details are no longer the ones shown.
-  const editConnectionForm = <T,>(apply: (value: T) => void) => (value: T) => {
-    setSelectedProfileId("");
-    apply(value);
-  };
-
   const probeHelper = async () => {
     if (connection.mode !== "ssh") return;
     const scope = currentHostScope;
@@ -962,15 +958,15 @@ export function App() {
       helper={helperState}
       onClose={() => setSettingsOpen(false)}
       onConnect={() => { connect(); setSettingsOpen(false); }}
-      onConnectionMode={editConnectionForm(setConnectionMode)}
+      onConnectionMode={(mode) => { setSelectedProfileId(""); setConnectionMode(mode); }}
       onDeleteProfile={() => void runCommand("host.delete")}
       onProbeHelper={() => void probeHelper()}
       onProfile={selectProfile}
       onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
       onShell={updateShell}
       onSounds={(preferences) => { setAgentSounds(preferences); saveAgentSoundPreferences(preferences); }}
-      onSshConfigPath={editConnectionForm(setSshConfigPath)}
-      onSshTarget={editConnectionForm(setSshTarget)}
+      onSshConfigPath={(value) => { setSelectedProfileId(""); setSshConfigPath(value); }}
+      onSshTarget={(value) => { setSelectedProfileId(""); setSshTarget(value); }}
       profiles={profiles}
       remote={connection.mode === "ssh"}
       selectedProfileId={selectedProfileId}

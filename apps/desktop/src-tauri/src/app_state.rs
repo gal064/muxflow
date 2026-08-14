@@ -628,15 +628,35 @@ mod tests {
             names
         };
         assert_eq!(keys(&stored["shell"]), keys(&expected["shell"]), "shell");
-        assert_eq!(keys(&stored["appTabs"][0]), keys(&expected["appTabs"][0]), "appTabs");
-        assert_eq!(keys(&stored["workspaceUi"][0]), keys(&expected["workspaceUi"][0]), "workspaceUi");
-        assert_eq!(keys(&stored["commands"]), keys(&expected["commands"]), "commands");
+        assert_eq!(
+            keys(&stored["appTabs"][0]),
+            keys(&expected["appTabs"][0]),
+            "appTabs"
+        );
+        assert_eq!(
+            keys(&stored["workspaceUi"][0]),
+            keys(&expected["workspaceUi"][0]),
+            "workspaceUi"
+        );
+        assert_eq!(
+            keys(&stored["commands"]),
+            keys(&expected["commands"]),
+            "commands"
+        );
         // And the envelope itself, so a whole section cannot go missing.
-        assert_eq!(keys(&stored), keys(&expected.as_object().unwrap().iter()
-            .filter(|(name, _)| !name.starts_with('_'))
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect::<serde_json::Map<_, _>>()
-            .into()));
+        assert_eq!(
+            keys(&stored),
+            keys(
+                &expected
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(name, _)| !name.starts_with('_'))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into()
+            )
+        );
     }
 
     /// A file written by the build before Phase 11 must still load, with the

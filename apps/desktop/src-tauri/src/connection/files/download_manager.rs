@@ -206,7 +206,6 @@ fn run_download(job: &DownloadJob) -> TransferResult {
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     let descriptor_response = match protocol.request_classified_cancellable(
-        2,
         v1::Request {
             operation: v1::Operation::StartDownload.into(),
             file: Some(v1::FileServiceRequest {
@@ -266,7 +265,7 @@ fn run_download(job: &DownloadJob) -> TransferResult {
     if let Err(mut failure) = result {
         // Every post-StartDownload error takes both cleanup paths. On success,
         // stream_download already cancelled the host record before publication.
-        let remote_cleanup = protocol.cancel_download(&job.transfer_id, u64::MAX - 1);
+        let remote_cleanup = protocol.cancel_download(&job.transfer_id);
         // An unknown transactional outcome may leave the confirmed original
         // inode under the owned partial name. Preserve it for reconciliation;
         // deleting by the pre-commit name would destroy the user's backup.
@@ -295,7 +294,7 @@ fn cancel_download_out_of_band(job: &DownloadJob) -> Result<(), String> {
     let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
-    let result = protocol.cancel_download(&job.transfer_id, 2);
+    let result = protocol.cancel_download(&job.transfer_id);
     deadline.touch();
     result
 }
@@ -312,13 +311,11 @@ fn stream_download(
     let mut last_progress = Instant::now() - Duration::from_secs(1);
     let mut hasher = blake3::Hasher::new();
     let mut offset = 0_u64;
-    let mut request_id = 10_u64;
     loop {
         if job.cancellation.is_cancelled() {
             return Err("download cancelled".into());
         }
         let response = protocol.request_cancellable(
-            request_id,
             v1::Request {
                 operation: v1::Operation::ReadDownloadChunk.into(),
                 file: Some(v1::FileServiceRequest {
@@ -334,7 +331,6 @@ fn stream_download(
             deadline,
         )?;
         deadline.touch();
-        request_id = request_id.saturating_add(1);
         let chunk = response
             .file
             .and_then(|file| file.transfer_chunk)
@@ -407,7 +403,7 @@ fn stream_download(
     // Release the host transfer/archive child while cancellation is still
     // pre-commit. A cleanup failure leaves only the local owned partial, which
     // the caller removes; no local destination has been published yet.
-    protocol.cancel_download(&job.transfer_id, request_id)?;
+    protocol.cancel_download(&job.transfer_id)?;
     deadline.touch();
     if job.cancellation.is_cancelled() {
         return Err("download cancelled during finalize".into());

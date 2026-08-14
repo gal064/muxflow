@@ -27,6 +27,12 @@ interface PendingReview {
 interface ActiveBatch {
   readonly scope: TerminalTransferScope;
   readonly abortController: AbortController;
+  /**
+   * Every transfer this batch has been told about. Dismissing a delivered
+   * result is scoped to these, so a paste cannot clear the record an *earlier*
+   * batch left behind when its own paste was refused.
+   */
+  readonly transferIds: Set<string>;
 }
 
 export interface TerminalTransferSurfaceController {
@@ -137,6 +143,7 @@ export function TerminalTransferSurface({
   };
 
   const updateProgress = (batch: ActiveBatch, progress: TerminalTransferProgress) => {
+    batch.transferIds.add(progress.id);
     transferRegistry.record(batch.scope, progress);
   };
 
@@ -183,7 +190,7 @@ export function TerminalTransferSurface({
       : joinShellEscapedPaths(destinations));
     // Delivered: the paths are in the pane. Only now, and only for a batch that
     // reached this line — a completion whose paste was refused stays visible.
-    transferRegistry.dismissDelivered(batch.scope);
+    transferRegistry.dismissDelivered(batch.scope, [...batch.transferIds]);
   };
 
   const acceptPaths = async (paths: readonly string[], imagePng = false) => {
@@ -194,6 +201,7 @@ export function TerminalTransferSurface({
     const batch: ActiveBatch = {
       scope: { ...scope },
       abortController: new AbortController(),
+      transferIds: new Set(),
     };
     activeBatchRef.current = batch;
     setError(undefined);
@@ -218,7 +226,7 @@ export function TerminalTransferSurface({
       }
       // The preflights have become uploads; their completions are no longer
       // what the list should be showing.
-      transferRegistry.dismissDelivered(batch.scope);
+      transferRegistry.dismissDelivered(batch.scope, [...batch.transferIds]);
       await startRemoteBatch(batch, items, imagePng);
     } catch (reason) {
       if (!batchIsCurrent(batch)) throw new DOMException("Terminal transfer scope changed.", "AbortError");
@@ -238,6 +246,7 @@ export function TerminalTransferSurface({
     const batch: ActiveBatch = {
       scope: { ...scope },
       abortController: new AbortController(),
+      transferIds: new Set(),
     };
     activeBatchRef.current = batch;
     setError(undefined);
@@ -254,7 +263,7 @@ export function TerminalTransferSurface({
         collision: "rename", largeUploadConfirmed: true, imagePng: true,
       }, (progress) => updateProgress(batch, progress), batch.abortController.signal);
       assertCurrentBatch(batch);
-      transferRegistry.dismissDelivered(batch.scope);
+      transferRegistry.dismissDelivered(batch.scope, [...batch.transferIds]);
       await startRemoteBatch(batch, [item], true);
     } catch (reason) {
       if (!batchIsCurrent(batch)) throw new DOMException("Terminal transfer scope changed.", "AbortError");
@@ -274,6 +283,7 @@ export function TerminalTransferSurface({
     const batch: ActiveBatch = {
       scope: { ...scope },
       abortController: new AbortController(),
+      transferIds: new Set(),
     };
     activeBatchRef.current = batch;
     setError(undefined);
@@ -286,7 +296,7 @@ export function TerminalTransferSurface({
         collision: "rename", largeUploadConfirmed: true, imagePng: true,
       }, (progress) => updateProgress(batch, progress), batch.abortController.signal);
       assertCurrentBatch(batch);
-      transferRegistry.dismissDelivered(batch.scope);
+      transferRegistry.dismissDelivered(batch.scope, [...batch.transferIds]);
       await startRemoteBatch(batch, [item], true);
     } catch (reason) {
       if (!batchIsCurrent(batch)) throw new DOMException("Terminal transfer scope changed.", "AbortError");
@@ -299,26 +309,33 @@ export function TerminalTransferSurface({
     }
   };
 
-  // Kept current every render, and read through the ref by the one long-lived
-  // listener below. The handler closes over `scope` and `acceptPaths`, both new
+  // Read through a ref by the one long-lived listener below, and replaced after
+  // every commit. The handler closes over `scope` and `acceptPaths`, both new
   // objects on every render, so making it the effect's dependency tore down four
   // Tauri listeners and re-registered four more — over IPC, with a gap in which
   // nothing was listening — on every render of every pane. `useHostLatency`
-  // ticks every five seconds, so that ran continuously.
+  // ticks every five seconds, so that ran continuously. Assigned in an effect
+  // rather than during render: a render React discards must not leave a handler
+  // behind that closes over state it threw away.
   const nativeDragDropRef = useRef<{
     handle(payload: DragDropPayload): void;
     fail(reason: unknown): void;
   }>({ handle: () => undefined, fail: () => undefined });
-  nativeDragDropRef.current.fail = fail;
-  nativeDragDropRef.current.handle = (payload) => {
+  const handleNativeDragDrop = (payload: DragDropPayload) => {
     if (!target.current) return;
     if (payload.type === "leave") return setDragging(false);
-    if (payload.type === "over") return;
+    // `enter` fires once, when the cursor crosses the *window*, so a drag that
+    // begins over one pane and ends over another would light up the pane it
+    // entered and leave the pane it landed on dark. Every position the drag
+    // reports is re-tested, so the highlight follows the cursor.
     const inside = pointIsInside(target.current, payload.position);
-    if (payload.type === "enter") return setDragging(inside);
+    if (payload.type === "enter" || payload.type === "over") return setDragging(inside);
     setDragging(false);
     if (inside) void acceptPaths(payload.paths).catch(fail);
   };
+  useEffect(() => {
+    nativeDragDropRef.current = { handle: handleNativeDragDrop, fail };
+  });
 
   useEffect(() => {
     if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
@@ -445,12 +462,9 @@ export function TerminalTransferSurface({
     {children}
     {dragging && <div className="terminal-drop-hint" role="status">Drop files to paste paths</div>}
     {!registry && <TerminalTransferHistory client={client} onError={fail} registry={transferRegistry} />}
-    {/* Dismissible, because it does not auto-clear: it survives until the next
+    {/* Dismissible, because nothing else clears it: it survives until the next
         transfer starts, and a failed paste is not followed by one. */}
-    {error && <div className="terminal-transfer-error">
-      <SurfaceError className="surface-error" detail={error} />
-      <button aria-label="Dismiss the transfer error" onClick={() => setError(undefined)} type="button">Dismiss</button>
-    </div>}
+    {error && <SurfaceError className="terminal-transfer-error" detail={error} onDismiss={() => setError(undefined)} />}
     {review && <UploadReviewDialog pending={review} onChoose={(policy) => {
       const resolve = reviewResolve.current;
       reviewResolve.current = undefined;

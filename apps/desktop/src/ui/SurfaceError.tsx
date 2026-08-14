@@ -17,6 +17,12 @@ interface Props {
    * say. The raw detail still goes behind the disclosure.
    */
   summary?: string;
+  /**
+   * Makes the banner closeable. Only for surfaces where nothing else clears it
+   * — a rejection that survives until the *next* attempt, on a surface a user
+   * may never use again, is one they cannot get rid of.
+   */
+  onDismiss?(): void;
 }
 
 /**
@@ -29,7 +35,7 @@ interface Props {
  * is keyed by the detail text — a fresh rejection must not inherit the previous
  * one's opened state.
  */
-export function SurfaceError({ className = "surface-error", detail, role = "alert", summary }: Props) {
+export function SurfaceError({ className = "surface-error", detail, onDismiss, role = "alert", summary }: Props) {
   const derived = summarizeSurfaceError(detail);
   const headline = summary ?? derived.summary;
   const disclosed = summary ? (detail.trim() === summary ? undefined : detail.trim()) : derived.detail;
@@ -39,5 +45,6 @@ export function SurfaceError({ className = "surface-error", detail, role = "aler
       <summary>Details</summary>
       <pre>{disclosed}</pre>
     </details>}
+    {onDismiss && <button aria-label="Dismiss the error" className="surface-error-dismiss" onClick={onDismiss} type="button">Dismiss</button>}
   </div>;
 }

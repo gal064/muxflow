@@ -43,9 +43,15 @@ pub(super) struct BulkProtocolClient<'a> {
     /// Borrowed, not owned: a decoder can be holding bytes read past the last
     /// response, and a bridge that outlives this client must keep them.
     decoder: &'a mut FrameAccumulator,
-    /// Where this job's request ids sit in the connection's id space. See
-    /// `bulk_pool::LEASE_ID_SPAN`.
-    id_offset: u64,
+    /// The connection's request-id cursor.
+    ///
+    /// Ids belong to the *connection*, not to a job, and the response loop
+    /// *skips* frames whose id it is not waiting for rather than failing on
+    /// them — so an id reused by a later job on the same connection would be a
+    /// stale response silently accepted as the answer to a new request. Every
+    /// request therefore takes the next id from here and no caller chooses one,
+    /// which is the only arrangement in which that cannot happen.
+    next_id: &'a mut u64,
     /// The bridge's reusability flag, cleared here rather than by any job: only
     /// this type knows whether a request left the stream mid-frame.
     clean: &'a mut bool,
@@ -119,86 +125,70 @@ impl<'a> BulkProtocolClient<'a> {
         stdin: &'a mut ChildStdin,
         reader: &'a mut BufReader<ChildStdout>,
         decoder: &'a mut FrameAccumulator,
-        id_offset: u64,
+        next_id: &'a mut u64,
         clean: &'a mut bool,
     ) -> Self {
         Self {
             stdin,
             reader,
             decoder,
-            id_offset,
+            next_id,
             clean,
         }
     }
 
-    /// This job's request id on the wire.
-    ///
-    /// Request ids are per connection, and the response loop *skips* frames
-    /// that do not match rather than failing on them — so an id reused across
-    /// two jobs on one connection is a stale response silently accepted as the
-    /// answer to a new request, not an error anyone would see. Every lease
-    /// therefore gets its own span of the id space; exhausting one is refused
-    /// rather than wrapped into the next lease's.
-    fn wire_id(&self, request_id: u64) -> Result<u64, RequestFailure> {
-        super::bulk_pool::wire_request_id(self.id_offset, request_id)
-            .map_err(RequestFailure::Transport)
+    fn take_request_id(&mut self) -> u64 {
+        let id = *self.next_id;
+        *self.next_id = id.saturating_add(1);
+        id
     }
 
-    pub(super) fn request(
-        &mut self,
-        request_id: u64,
-        request: v1::Request,
-    ) -> Result<v1::Response, String> {
-        self.request_classified(request_id, request)
+    pub(super) fn request(&mut self, request: v1::Request) -> Result<v1::Response, String> {
+        self.request_classified(request)
             .map_err(|error| error.to_string())
     }
 
     pub(super) fn request_classified(
         &mut self,
-        request_id: u64,
         request: v1::Request,
     ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request_id, request, None, None)
+        self.request_classified_inner(request, None, None)
     }
 
     pub(super) fn request_with_deadline(
         &mut self,
-        request_id: u64,
         request: v1::Request,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request_id, request, None, Some(deadline))
+        self.request_classified_inner(request, None, Some(deadline))
             .map_err(|error| error.to_string())
     }
 
     pub(super) fn request_classified_with_deadline(
         &mut self,
-        request_id: u64,
         request: v1::Request,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request_id, request, None, Some(deadline))
+        self.request_classified_inner(request, None, Some(deadline))
     }
 
     pub(super) fn request_cancellable(
         &mut self,
-        request_id: u64,
         request: v1::Request,
         cancellation: &CancelState,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request_id, request, Some(cancellation), Some(deadline))
+        self.request_classified_inner(request, Some(cancellation), Some(deadline))
             .map_err(|error| error.to_string())
     }
 
     pub(super) fn request_classified_cancellable(
         &mut self,
-        request_id: u64,
         request: v1::Request,
         cancellation: &CancelState,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request_id, request, Some(cancellation), Some(deadline))
+        self.request_classified_inner(request, Some(cancellation), Some(deadline))
     }
 
     /// Every request goes through here, so this is the one place that knows
@@ -208,11 +198,11 @@ impl<'a> BulkProtocolClient<'a> {
     /// in-flight response behind, and the bridge must not be handed on.
     fn request_classified_inner(
         &mut self,
-        request_id: u64,
         request: v1::Request,
         cancellation: Option<&CancelState>,
         deadline: Option<&DeadlineGuard>,
     ) -> Result<v1::Response, RequestFailure> {
+        let request_id = self.take_request_id();
         let outcome = self.request_framed(request_id, request, cancellation, deadline);
         if matches!(
             outcome,
@@ -230,7 +220,6 @@ impl<'a> BulkProtocolClient<'a> {
         cancellation: Option<&CancelState>,
         deadline: Option<&DeadlineGuard>,
     ) -> Result<v1::Response, RequestFailure> {
-        let request_id = self.wire_id(request_id)?;
         self.write_envelope_cancellable(
             &envelope(request_id, 0, Payload::Request(request)),
             cancellation,
@@ -343,23 +332,16 @@ impl<'a> BulkProtocolClient<'a> {
             .map_err(|error| RequestFailure::Transport(error.to_string()))
     }
 
-    pub(super) fn cancel_download(
-        &mut self,
-        transfer_id: &str,
-        request_id: u64,
-    ) -> Result<(), String> {
-        self.request(
-            request_id,
-            v1::Request {
-                operation: v1::Operation::CancelDownload.into(),
-                file: Some(v1::FileServiceRequest {
-                    operation_id: transfer_id.into(),
-                    transfer_id: transfer_id.into(),
-                    ..Default::default()
-                }),
+    pub(super) fn cancel_download(&mut self, transfer_id: &str) -> Result<(), String> {
+        self.request(v1::Request {
+            operation: v1::Operation::CancelDownload.into(),
+            file: Some(v1::FileServiceRequest {
+                operation_id: transfer_id.into(),
+                transfer_id: transfer_id.into(),
                 ..Default::default()
-            },
-        )?;
+            }),
+            ..Default::default()
+        })?;
         Ok(())
     }
 
@@ -367,40 +349,29 @@ impl<'a> BulkProtocolClient<'a> {
         &mut self,
         operation_id: &str,
         transfer_id: &str,
-        request_id: u64,
     ) -> Result<(), String> {
-        self.request(
-            request_id,
-            v1::Request {
-                operation: v1::Operation::CancelFileWrite.into(),
-                file: Some(v1::FileServiceRequest {
-                    operation_id: operation_id.into(),
-                    transfer_id: transfer_id.into(),
-                    ..Default::default()
-                }),
+        self.request(v1::Request {
+            operation: v1::Operation::CancelFileWrite.into(),
+            file: Some(v1::FileServiceRequest {
+                operation_id: operation_id.into(),
+                transfer_id: transfer_id.into(),
                 ..Default::default()
-            },
-        )?;
+            }),
+            ..Default::default()
+        })?;
         Ok(())
     }
 
-    pub(super) fn cancel_terminal_upload(
-        &mut self,
-        transfer_id: &str,
-        request_id: u64,
-    ) -> Result<String, String> {
-        let response = self.request(
-            request_id,
-            v1::Request {
-                operation: v1::Operation::CancelTerminalUpload.into(),
-                file: Some(v1::FileServiceRequest {
-                    operation_id: transfer_id.into(),
-                    transfer_id: transfer_id.into(),
-                    ..Default::default()
-                }),
+    pub(super) fn cancel_terminal_upload(&mut self, transfer_id: &str) -> Result<String, String> {
+        let response = self.request(v1::Request {
+            operation: v1::Operation::CancelTerminalUpload.into(),
+            file: Some(v1::FileServiceRequest {
+                operation_id: transfer_id.into(),
+                transfer_id: transfer_id.into(),
                 ..Default::default()
-            },
-        )?;
+            }),
+            ..Default::default()
+        })?;
         Ok(response
             .file
             .and_then(|file| file.upload)
