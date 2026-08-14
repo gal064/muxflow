@@ -16,7 +16,7 @@ function clientFor(snapshot: AgentSnapshot): AgentClient & { markSeen: ReturnTyp
   const listeners = new Set<(event: AgentWireEvent) => void>();
   return {
     snapshot: vi.fn(async () => snapshot), launch: vi.fn(), resume: vi.fn(), rename: vi.fn(),
-    markSeen: vi.fn(async () => undefined), reviewHooks: vi.fn(), applyHooks: vi.fn(), applyHostNaming: vi.fn(async () => "alreadyConfigured" as const),
+    markSeen: vi.fn(async () => undefined), reviewHooks: vi.fn(), applyHooks: vi.fn(), applyHostNaming: vi.fn(async () => "alreadyCurrent" as const),
     publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn(),
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     publish(event) { for (const listener of listeners) listener(event); },

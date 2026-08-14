@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hookWiringNotice, hostHookWiring, setupAdapterIds, shouldPromptForSetup } from "./hookWiring";
+import { hookWiringNotice, hostHookWiring, shouldPromptForSetup } from "./hookWiring";
 import type { AgentAdapterDescriptor, AgentHookWiring } from "./types";
 
 const adapter = (id: string, hookWiring: AgentHookWiring, overrides: Partial<AgentAdapterDescriptor> = {}): AgentAdapterDescriptor => ({
@@ -15,7 +15,7 @@ describe("what this host is allowed to say about agent status", () => {
     // belong to another tool, so the daemon has never heard from an agent.
     const wiring = hostHookWiring([adapter("claude-code", "notWired"), adapter("codex", "notWired")]);
     expect(wiring.reports).toBe(false);
-    expect(setupAdapterIds(wiring)).toEqual(["claude-code", "codex"]);
+    expect(wiring.setupTargets.map((item) => item.id)).toEqual(["claude-code", "codex"]);
     expect(hookWiringNotice(wiring)).toBe("Agent status unavailable on this host — set up hooks");
   });
 
@@ -24,20 +24,20 @@ describe("what this host is allowed to say about agent status", () => {
     // arrive — an agent that starts and never finishes, for instance.
     const wiring = hostHookWiring([adapter("claude-code", "partial")]);
     expect(wiring.reports).toBe(false);
-    expect(setupAdapterIds(wiring)).toEqual(["claude-code"]);
+    expect(wiring.setupTargets.map((item) => item.id)).toEqual(["claude-code"]);
   });
 
   it("stays quiet once any adapter reports, and offers to finish the other", () => {
     const wiring = hostHookWiring([adapter("claude-code", "wired"), adapter("codex", "notWired")]);
     expect(wiring.reports).toBe(true);
     expect(hookWiringNotice(wiring)).toBeUndefined();
-    expect(setupAdapterIds(wiring)).toEqual(["codex"]);
+    expect(wiring.setupTargets.map((item) => item.id)).toEqual(["codex"]);
   });
 
   it("never offers to write over a configuration it could not read", () => {
     const wiring = hostHookWiring([adapter("claude-code", "unavailable", { hookWiringDetail: "parse hook JSON configuration" })]);
     expect(wiring.setupTargets).toEqual([]);
-    expect(wiring.unreadable).toEqual(["parse hook JSON configuration"]);
+    expect(wiring.unreadableReason).toBe("parse hook JSON configuration");
     expect(hookWiringNotice(wiring))
       .toBe("Agent status unavailable on this host — parse hook JSON configuration");
   });
@@ -79,7 +79,7 @@ describe("what this host is allowed to say about agent status", () => {
     // what it does not do is interrupt someone whose status already works.
     const partlyWired = hostHookWiring([adapter("claude-code", "wired"), adapter("codex", "notWired")]);
     expect(shouldPromptForSetup(partlyWired)).toBe(false);
-    expect(setupAdapterIds(partlyWired)).toEqual(["codex"]);
+    expect(partlyWired.setupTargets.map((item) => item.id)).toEqual(["codex"]);
 
     const silent = hostHookWiring([adapter("claude-code", "notWired"), adapter("codex", "notWired")]);
     expect(shouldPromptForSetup(silent)).toBe(true);

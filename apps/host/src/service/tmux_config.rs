@@ -31,6 +31,13 @@ const AUTOMATIC_RENAME_FORMAT: &str = "automatic-rename-format";
 /// `if -F` means the command never runs for a non-agent pane at all, so an
 /// ordinary shell window keeps the name tmux would have given it.
 fn recommended_hook_command() -> String {
+    format!("if -F \"{}\" \"{OWNED_HOOK_BODY}\"", guard_condition())
+}
+
+/// The tmux format that is true exactly for a pane running an agent this app
+/// understands. Built from the registry, so adding an adapter changes it — and
+/// that change is what `AlreadyCurrent` has to be able to notice.
+fn guard_condition() -> String {
     let mut condition = String::new();
     for adapter in super::agents::adapters::all() {
         let test = format!("#{{==:#{{pane_current_command}},{}}}", adapter.executable());
@@ -40,41 +47,71 @@ fn recommended_hook_command() -> String {
             format!("#{{||:{condition},{test}}}")
         };
     }
-    format!("if -F \"{condition}\" \"rename-window \\\"#{{pane_title}}\\\"\"")
+    condition
 }
+
+/// The body that identifies a `pane-title-changed` hook as this app's.
+///
+/// The guard around it changes whenever the adapter registry does, so the
+/// *whole* command cannot be the identity — a hook installed before a third
+/// adapter existed has to be recognisable as ours and replaceable, exactly as
+/// the configuration-file installer recognises its own entries by owner and
+/// version. This body is the part that never varies.
+const OWNED_HOOK_BODY: &str = "rename-window \\\"#{pane_title}\\\"";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NamingOutcome {
-    /// This app set the hook. The tmux server holds it in memory only.
+    /// This app set or replaced the hook. The tmux server holds it in memory
+    /// only.
     Applied,
-    /// The user's own configuration already syncs pane titles to window names.
-    /// Their version is kept: it is theirs, and it may carry exemptions this
-    /// app knows nothing about — the field machine's config exempts one window
-    /// by name so a verbose editor title cannot clobber it.
-    AlreadyConfigured,
+    /// This app's hook is already on the server and already covers every
+    /// adapter it knows about. Nothing was written.
+    AlreadyCurrent,
+    /// The user's own configuration already syncs pane titles to window names,
+    /// by a hook of their own or by an `automatic-rename-format`. Theirs is
+    /// kept: it may carry exemptions this app knows nothing about — the field
+    /// machine's config exempts one window by name so a verbose editor title
+    /// cannot clobber it.
+    UserConfigured,
 }
 
 impl NamingOutcome {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::Applied => "applied",
-            Self::AlreadyConfigured => "alreadyConfigured",
+            Self::AlreadyCurrent => "alreadyCurrent",
+            Self::UserConfigured => "userConfigured",
         }
     }
 }
 
 /// Apply the recommended naming, unless the server already does it.
 ///
-/// Idempotent in both directions: running it twice sets the same global hook to
-/// the same value, and running it against a server that already has an
-/// equivalent hook does nothing at all. Nothing is written to disk — the hook
-/// lives in the running tmux server, so a server restart drops it and the next
-/// connect re-asserts it.
+/// Three answers, because collapsing them lies. A server carrying this app's
+/// own hook from an older adapter set has to be updated, not reported as
+/// configured; a server carrying somebody else's `pane-title-changed` hook —
+/// which may do something entirely unrelated — is left alone and said so.
+/// Nothing is written to disk: the hook lives in the running tmux server, so a
+/// server restart drops it and the next connect re-asserts it.
 pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
-    if already_syncs_pane_titles()? {
-        return Ok(NamingOutcome::AlreadyConfigured);
-    }
     let command = recommended_hook_command();
+    let existing = setting(PANE_TITLE_HOOK)?;
+    let ours: Vec<_> = existing
+        .iter()
+        .filter(|value| value.contains(OWNED_HOOK_BODY))
+        .collect();
+    if !existing.is_empty() && ours.is_empty() {
+        return Ok(NamingOutcome::UserConfigured);
+    }
+    if ours.len() == existing.len()
+        && ours.iter().all(|value| value.contains(&guard_condition()))
+        && !ours.is_empty()
+    {
+        return Ok(NamingOutcome::AlreadyCurrent);
+    }
+    if existing.is_empty() && syncs_titles_by_format()? {
+        return Ok(NamingOutcome::UserConfigured);
+    }
     let output = tmux_command()
         .args(["set-hook", "-g", PANE_TITLE_HOOK, &command])
         .output()
@@ -87,25 +124,22 @@ pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
     }
     // Read back rather than trusting the exit status: an option that did not
     // take is the failure mode worth catching, and it costs one command.
-    if setting(PANE_TITLE_HOOK)?.is_empty() {
+    if !setting(PANE_TITLE_HOOK)?
+        .iter()
+        .any(|value| value.contains(OWNED_HOOK_BODY))
+    {
         bail!("tmux accepted the recommended window naming but did not retain it");
     }
     Ok(NamingOutcome::Applied)
 }
 
-/// Whether this server already puts pane titles into window names, by either
-/// of the two mechanisms that can.
-///
-/// A `pane-title-changed` hook is the direct one and the one this app would
-/// add. An `automatic-rename-format` that mentions `pane_title` reaches the
-/// same result by a different route, and a user who chose that route has
-/// configured this as deliberately as one who wrote the hook. Neither is
-/// overridden — theirs may carry exemptions this app knows nothing about.
-fn already_syncs_pane_titles() -> anyhow::Result<bool> {
-    Ok(!setting(PANE_TITLE_HOOK)?.is_empty()
-        || setting(AUTOMATIC_RENAME_FORMAT)?
-            .iter()
-            .any(|value| value.contains("pane_title")))
+/// The other mechanism that reaches the same result. A user who put pane titles
+/// into `automatic-rename-format` has configured this as deliberately as one
+/// who wrote a hook, and is not overridden either.
+fn syncs_titles_by_format() -> anyhow::Result<bool> {
+    Ok(setting(AUTOMATIC_RENAME_FORMAT)?
+        .iter()
+        .any(|value| value.contains("pane_title")))
 }
 
 /// Every value bound to a global option, one per returned entry.
@@ -159,12 +193,35 @@ mod tests {
             );
         }
         assert!(command.starts_with("if -F "), "{command}");
-        assert!(command.contains("rename-window"));
+        assert!(command.contains(OWNED_HOOK_BODY));
         assert!(!command.contains("status"), "nothing cosmetic: {command}");
         assert_eq!(NamingOutcome::Applied.label(), "applied");
-        assert_eq!(
-            NamingOutcome::AlreadyConfigured.label(),
-            "alreadyConfigured"
+        assert_eq!(NamingOutcome::AlreadyCurrent.label(), "alreadyCurrent");
+        assert_eq!(NamingOutcome::UserConfigured.label(), "userConfigured");
+    }
+
+    /// The identity has to survive a change to the guard, because the guard is
+    /// the thing that changes. A hook installed before a third adapter existed
+    /// is still ours to replace; one that renames windows some other way is
+    /// not ours to touch.
+    #[test]
+    fn the_owned_hook_is_identified_by_its_body_and_not_by_its_guard() {
+        let older = "if-shell -F \"#{==:#{pane_current_command},claude}\" \
+                     \"rename-window \\\"#{pane_title}\\\"\"";
+        assert!(
+            older.contains(OWNED_HOOK_BODY),
+            "an older guard is still ours"
+        );
+        assert!(
+            !older.contains(&guard_condition()),
+            "and it is not current, so it must be replaced rather than kept"
+        );
+
+        // The field machine's own hook, which exempts a window by name.
+        let theirs = "rename-window \"#{?#{==:#{window_name},git},git,#{pane_title}}\"";
+        assert!(
+            !theirs.contains(OWNED_HOOK_BODY),
+            "someone else's hook is not ours"
         );
     }
 }

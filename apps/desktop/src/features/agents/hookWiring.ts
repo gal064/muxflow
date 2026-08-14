@@ -21,9 +21,9 @@ export interface HostHookWiring {
   setupTargets: AgentAdapterDescriptor[];
   /**
    * Why the host could not be read, when that is why it reports nothing.
-   * Empty otherwise — a healthy host has no reason to explain itself.
+   * Absent otherwise — a healthy host has no reason to explain itself.
    */
-  unreadable: string[];
+  unreadableReason?: string;
   /** True while the host has not answered — no snapshot, or too old to say. */
   unknown: boolean;
 }
@@ -39,10 +39,10 @@ export function hostHookWiring(adapters: readonly AgentAdapterDescriptor[]): Hos
   return {
     reports: hookAdapters.some((adapter) => adapter.hookWiring === "wired"),
     setupTargets: hookAdapters.filter((adapter) => INVITES_SETUP.has(adapter.hookWiring)),
-    unreadable: hookAdapters
-      .filter((adapter) => adapter.hookWiring === "unavailable")
-      .map((adapter) => adapter.hookWiringDetail)
-      .filter(Boolean),
+    ...hookAdapters
+      .filter((adapter) => adapter.hookWiring === "unavailable" && adapter.hookWiringDetail)
+      .slice(0, 1)
+      .map((adapter) => ({ unreadableReason: adapter.hookWiringDetail }))[0],
     // No adapters at all is "we have not been told", not "nothing is wired":
     // it is what every disconnected and every pre-snapshot render looks like.
     unknown: hookAdapters.length === 0
@@ -59,9 +59,8 @@ export function hostHookWiring(adapters: readonly AgentAdapterDescriptor[]): Hos
 export function hookWiringNotice(wiring: HostHookWiring): string | undefined {
   if (wiring.reports || wiring.unknown) return undefined;
   if (wiring.setupTargets.length > 0) return "Agent status unavailable on this host — set up hooks";
-  const [reason] = wiring.unreadable;
-  return reason
-    ? `Agent status unavailable on this host — ${reason}`
+  return wiring.unreadableReason
+    ? `Agent status unavailable on this host — ${wiring.unreadableReason}`
     : "Agent status unavailable on this host — its agent configuration could not be read";
 }
 
@@ -76,9 +75,4 @@ export function hookWiringNotice(wiring: HostHookWiring): string | undefined {
  */
 export function shouldPromptForSetup(wiring: HostHookWiring): boolean {
   return !wiring.reports && !wiring.unknown && wiring.setupTargets.length > 0;
-}
-
-/** Adapter IDs an install would target, in the order they are offered. */
-export function setupAdapterIds(wiring: HostHookWiring): AgentAdapterId[] {
-  return wiring.setupTargets.map((adapter) => adapter.id);
 }

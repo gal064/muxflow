@@ -39,8 +39,12 @@ describe("the honest empty state", () => {
       onSetUpHost: noop,
     });
     expect(html).toContain("Agent status unavailable on this host — set up hooks");
-    expect(html).toContain('class="agents-notice"');
-    expect(html).toContain("<button");
+    expect(html).toContain(String.raw`class="agents-notice"`);
+    // Text, not a control: the shell's resting-control budget is eight and is
+    // spent, and this line is on screen for as long as the host is unwired.
+    // The action is on the section's context menu and in Settings.
+    expect(html).toContain(String.raw`role="note"`);
+    expect(html).not.toContain(String.raw`<button class="agents-notice"`);
   });
 
   it("still lists the agents that genuinely exist, marked as unknown", () => {
@@ -55,12 +59,6 @@ describe("the honest empty state", () => {
     expect(html).toContain("inductive");
     expect(html).toContain("state-dot unknown");
     expect(html).not.toContain("state-dot working");
-  });
-
-  it("keeps a notice that cannot be acted on out of the tab order", () => {
-    const html = sidebar({ hookNotice: "Agent status unavailable on this host — its agent configuration could not be read" });
-    expect(html).toContain('role="note"');
-    expect(html).not.toContain("<button class=\"agents-notice\"");
   });
 
   it("draws an unknown dot as an outline, and never as a visible glyph by default", () => {

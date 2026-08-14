@@ -27,10 +27,13 @@ pub(super) fn consume(
         Err(error) => return Err(error.into()),
     };
     // Sorted, because these are a sequence and not a set. The writer names each
-    // file with fixed-width nanoseconds, so the file name orders the events the
-    // way they happened; replaying a turn's `UserPromptSubmit` after its
-    // `PermissionRequest` would have the daemon apply the block and then
-    // discard it as a late event from a finished turn.
+    // file `hook-fallback-<adapter>-<pane>-<nanoseconds>-<random>.pb`, so
+    // sorting by name orders each *pane's* events the way they happened, which
+    // is the ordering that matters: a turn belongs to one pane, and replaying
+    // its `UserPromptSubmit` after its `PermissionRequest` would have the
+    // daemon apply the block and then discard it as a late event from a turn
+    // that had already finished. Two different panes interleave arbitrarily,
+    // and are genuinely independent.
     let mut waiting: Vec<_> = entries
         .flatten()
         .filter(|entry| {

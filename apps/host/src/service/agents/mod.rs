@@ -103,9 +103,16 @@ impl AgentRuntime {
             // the store came from evidence — a hook, or a screen the observer
             // confirmed — and both go silent the same way; process detection
             // only ever writes Unknown, so there is no third case to carve out.
+            //
+            // The clock is the lifecycle observation, not `updated_at`, which
+            // reconciliation also moves when the agent merely changes pane.
             .filter(|record| {
+                let observed = match record.lifecycle_observed_at_unix_millis {
+                    0 => record.updated_at_unix_millis,
+                    value => value,
+                };
                 record.lifecycle == v1::AgentLifecycleState::Working as i32
-                    && now.saturating_sub(record.updated_at_unix_millis) > STALE_WORKING_TTL_MILLIS
+                    && now.saturating_sub(observed) > STALE_WORKING_TTL_MILLIS
             })
             .map(|record| record.agent_id.clone())
             .collect();
@@ -383,6 +390,7 @@ impl AgentRuntime {
             latest_source_generation,
             present: true,
             hook_terminal,
+            lifecycle_observed_at_unix_millis: observed_now,
         };
         state.agents.insert(agent_id, record.clone());
         if let Err(error) = self.persist_locked(&state) {
@@ -536,6 +544,7 @@ impl AgentRuntime {
         record.authority = v1::AgentAuthority::Screen as i32;
         record.state_generation = generation;
         record.updated_at_unix_millis = now;
+        record.lifecycle_observed_at_unix_millis = now;
         let record = snapshot::record(record);
         if let Err(error) = self.persist_locked(&state) {
             *state = original;
@@ -1385,9 +1394,35 @@ mod tests {
             let record = state.agents.get_mut(&working.agent_id).unwrap();
             record.lifecycle = v1::AgentLifecycleState::Working as i32;
             record.updated_at_unix_millis = now_millis() - millis;
+            record.lifecycle_observed_at_unix_millis = now_millis() - millis;
         };
         age(STALE_WORKING_TTL_MILLIS);
         assert!(runtime.sweep_stale().is_empty());
+
+        // Moving the agent's pane is not evidence of what it is doing, and
+        // reconciliation writes `updated_at` when it happens. A dead agent
+        // whose pane moved must not get its silence clock reset.
+        age(STALE_WORKING_TTL_MILLIS + 1_000);
+        {
+            let mut state = runtime.state.lock().unwrap();
+            state
+                .agents
+                .get_mut(&working.agent_id)
+                .unwrap()
+                .updated_at_unix_millis = now_millis();
+        }
+        assert_eq!(
+            runtime.sweep_stale().len(),
+            1,
+            "a route change reset the staleness clock"
+        );
+        runtime
+            .ingest_hook_with_context(
+                &event("re-working", 0, "UserPromptSubmit"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
         age(STALE_WORKING_TTL_MILLIS + 1_000);
         let events = runtime.sweep_stale();
         assert_eq!(events.len(), 1);

@@ -334,22 +334,39 @@ impl HookManager {
 /// is per-runtime and reachable from a test.
 #[derive(Debug, Default)]
 pub(crate) struct WiringCache {
+    /// Built once. `HookManager::system_default` resolves and canonicalizes
+    /// this process's own executable, and doing that per snapshot puts
+    /// syscalls back on the path the cache exists to keep clear. Neither the
+    /// home directory nor the running executable changes under a live daemon.
+    manager: Option<HookManager>,
     observed: Option<(Vec<u8>, Vec<AdapterWiring>)>,
 }
 
 impl WiringCache {
     pub(crate) fn current(&mut self) -> Vec<AdapterWiring> {
-        let Ok(manager) = HookManager::system_default() else {
-            return adapters::all()
-                .map(|adapter| AdapterWiring {
-                    adapter_id: adapter.id(),
-                    config_path: PathBuf::new(),
-                    state: v1::AgentHookWiring::Unavailable,
-                    detail: "hook configuration home is unavailable".into(),
-                })
-                .collect();
+        let manager = match self
+            .manager
+            .take()
+            .or_else(|| HookManager::system_default().ok())
+        {
+            Some(manager) => manager,
+            // An environment without a resolvable home or executable, not a
+            // configuration file that failed to parse — the desktop renders
+            // this reason verbatim, so it must describe what actually happened.
+            None => {
+                return adapters::all()
+                    .map(|adapter| AdapterWiring {
+                        adapter_id: adapter.id(),
+                        config_path: PathBuf::new(),
+                        state: v1::AgentHookWiring::Unavailable,
+                        detail: "this host did not report a home directory to look in".into(),
+                    })
+                    .collect();
+            }
         };
-        self.for_manager(&manager)
+        let wiring = self.for_manager(&manager);
+        self.manager = Some(manager);
+        wiring
     }
 
     fn for_manager(&mut self, manager: &HookManager) -> Vec<AdapterWiring> {

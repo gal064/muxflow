@@ -162,11 +162,12 @@ export interface AgentHookReview {
 /**
  * What the host did with the recommended tmux window naming.
  *
- * `alreadyConfigured` is a success: the user's own tmux config already syncs
- * pane titles to window names, and theirs is kept — it may carry exemptions
- * this app knows nothing about.
+ * Two of the three are successes. `alreadyCurrent` is this app's own hook,
+ * already covering every adapter it knows about. `userConfigured` is the
+ * user's own arrangement, kept — it may carry exemptions this app knows
+ * nothing about.
  */
-export type AgentHostNamingOutcome = "applied" | "alreadyConfigured" | "unavailable";
+export type AgentHostNamingOutcome = "applied" | "alreadyCurrent" | "userConfigured" | "unavailable";
 
 export interface AgentRequestScope {
   clientId: string;
