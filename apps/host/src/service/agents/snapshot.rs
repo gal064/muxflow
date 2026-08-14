@@ -7,7 +7,7 @@ use super::{StoredAgent, StoredState, adapters};
 pub(super) fn build(
     state: &StoredState,
     server_identity: &str,
-    wiring: &[super::hooks::AdapterWiring],
+    wiring: &[super::hooks::ObservedAdapter],
 ) -> v1::AgentSnapshot {
     let agents = state
         .agents

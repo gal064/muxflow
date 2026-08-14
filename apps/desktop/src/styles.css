@@ -315,16 +315,13 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .state-dot.idle, .state-dot.none { border: 1.5px solid var(--chrome-faint); color: var(--chrome-faint); }
 
 /* The agents section's one honest line, when this host cannot report status at
-   all. A button when there is something to do about it, and a paragraph when
-   there is not; both are quiet, because it is a fact, not an alarm. */
+   all. Quiet, because it is a fact and not an alarm — and text rather than a
+   control, because the shell's resting-control budget is eight and spent; the
+   action is on the section's context menu and in Settings. */
 .agents-notice {
-  display: block; width: 100%; flex: 0 0 auto;
-  padding: 5px 8px; margin: 0; border: 0; border-radius: 4px;
-  background: transparent; text-align: left;
+  flex: 0 0 auto; padding: 5px 8px; margin: 0;
   font-size: var(--type-secondary); line-height: 1.35; color: var(--chrome-dim);
 }
-button.agents-notice { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
-button.agents-notice:hover { background: var(--chrome-hover); color: var(--chrome-ink); }
 
 .host-row {
   display: flex; align-items: center; gap: 7px;
@@ -960,6 +957,34 @@ button.agents-notice:hover { background: var(--chrome-hover); color: var(--chrom
 }
 .hook-preview-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .hook-review h3 { margin: 6px 0 2px; font-size: 11px; }
+
+/* The one-time "set up this host" prompt.
+   Its own card, for the same reason the hook review has one: there is no
+   `.modal` rule in this stylesheet — each dialog names its own class — so a
+   dialog that only claimed `.modal` rendered as unstyled full-bleed text
+   across the whole window, with its buttons in the top-left corner and the
+   sidebar showing through. Caught on a real screenshot, not in a test. */
+.modal-backdrop.host-setup-backdrop { place-items: center; padding: 12px; }
+.host-setup {
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 24px); padding: 20px; overflow: hidden;
+  border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
+  background: var(--chrome-raised); box-shadow: 0 18px 60px rgb(0 0 0 / .6);
+}
+.host-setup h2 { margin: 2px 0 0; font-size: 16px; }
+.host-setup header small { color: var(--chrome-faint); }
+.host-setup-body { display: grid; gap: 10px; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+.host-setup-body p { margin: 0; color: var(--chrome-dim); line-height: 1.45; }
+.host-setup-body .quiet-note { color: var(--chrome-faint); font-size: var(--type-secondary); }
+.host-setup-paths { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.host-setup-paths li {
+  display: grid; gap: 2px; padding: 8px 10px;
+  border: 1px solid var(--chrome-hairline); border-radius: var(--radius-control);
+  background: var(--chrome-bg);
+}
+.host-setup-paths code { font-size: var(--type-meta); color: var(--chrome-dim); overflow-wrap: anywhere; }
+.host-setup footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--chrome-hairline); }
+.host-setup footer button { padding: 6px 11px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control); background: var(--chrome-bg); }
 
 /* ── Toasts ────────────────────────────────────────────────────────────── */
 

@@ -59,10 +59,13 @@ pub(crate) trait AgentAdapter: Send + Sync {
         home: &Path,
         observed: &super::hooks::AdapterWiring,
     ) -> v1::AgentAdapterDescriptor {
-        debug_assert_eq!(observed.adapter_id, self.id());
         v1::AgentAdapterDescriptor {
             hook_wiring: observed.state.into(),
             hook_wiring_detail: observed.detail.clone(),
+            // The host decides, because the host is what observed the wiring.
+            // The desktop had its own copy of this rule, in TypeScript, and it
+            // had already drifted from the helper's.
+            hook_setup_recommended: observed.state.invites_setup(),
             adapter: self.legacy_kind().into(),
             id: self.id().into(),
             display_name: self.display_name().into(),
@@ -320,14 +323,14 @@ pub(crate) fn all() -> impl Iterator<Item = &'static dyn AgentAdapter> {
     .filter_map(adapter)
 }
 
-/// `wiring` comes from [`super::hooks::HookManager::wiring`], which walks the
-/// same registry in the same order, so this is a zip rather than a join.
+/// Each adapter renders its own observation, as
+/// [`super::hooks::HookManager::wiring`] already paired them.
 pub(crate) fn descriptors(
     home: &Path,
-    wiring: &[super::hooks::AdapterWiring],
+    wiring: &[super::hooks::ObservedAdapter],
 ) -> Vec<v1::AgentAdapterDescriptor> {
-    all()
-        .zip(wiring)
+    wiring
+        .iter()
         .map(|(adapter, observed)| adapter.descriptor(home, observed))
         .collect()
 }
@@ -470,13 +473,18 @@ mod tests {
     #[test]
     fn registry_owns_descriptors_manifests_paths_and_commands() {
         let home = Path::new("/fixture/home");
-        let observed: Vec<_> = all()
+        let observed: Vec<super::super::hooks::ObservedAdapter> = all()
             .zip([v1::AgentHookWiring::Wired, v1::AgentHookWiring::NotWired])
-            .map(|(adapter, state)| super::super::hooks::AdapterWiring {
-                adapter_id: adapter.id(),
-                config_path: adapter.hook_path(home),
-                state,
-                detail: String::new(),
+            .map(|(adapter, state)| {
+                (
+                    adapter,
+                    super::super::hooks::AdapterWiring {
+                        adapter_id: adapter.id(),
+                        config_path: adapter.hook_path(home),
+                        state,
+                        detail: String::new(),
+                    },
+                )
             })
             .collect();
         let descriptors = descriptors(home, &observed);
@@ -484,23 +492,28 @@ mod tests {
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
         assert_eq!(codex.hook_events().len(), 7);
-        assert_eq!(codex.descriptor(home, &observed[0]).id, "codex");
+        assert_eq!(codex.descriptor(home, &observed[0].1).id, "codex");
         assert_eq!(
             codex.hook_command(Path::new("/opt/tmux-ide-host")),
             "'/opt/tmux-ide-host' hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 3"
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));
-        assert!(claude.descriptor(home, &observed[1]).supports_resume);
-        // Each descriptor carries its own adapter's observation and no other's.
+        assert!(claude.descriptor(home, &observed[1].1).supports_resume);
+        // Each descriptor carries its own adapter's observation and no other's,
+        // and the host is what decides whether an install would act on it.
         assert_eq!(
             descriptors
                 .iter()
-                .map(|descriptor| (descriptor.id.as_str(), descriptor.hook_wiring))
+                .map(|descriptor| (
+                    descriptor.id.as_str(),
+                    descriptor.hook_wiring,
+                    descriptor.hook_setup_recommended
+                ))
                 .collect::<Vec<_>>(),
             [
-                ("codex", v1::AgentHookWiring::Wired as i32),
-                ("claude-code", v1::AgentHookWiring::NotWired as i32),
+                ("codex", v1::AgentHookWiring::Wired as i32, false),
+                ("claude-code", v1::AgentHookWiring::NotWired as i32, true),
             ]
         );
     }

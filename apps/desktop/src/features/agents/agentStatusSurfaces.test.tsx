@@ -90,6 +90,17 @@ describe("the honest empty state", () => {
     const working = stylesCss.slice(stylesCss.indexOf(".state-dot.working {"));
     expect(working.slice(0, working.indexOf("}"))).toContain("background: var(--state-working)");
   });
+
+  it("gives every dialog a card class this stylesheet actually defines", () => {
+    // There is no `.modal` rule in this stylesheet — each dialog names its own
+    // class — so a dialog that claimed only `.modal` rendered as unstyled
+    // full-bleed text across the window with its buttons in the corner. That
+    // was the setup prompt, and it took a screenshot of the real app to see it.
+    expect(stylesCss).not.toContain("\n.modal {");
+    for (const card of ["host-setup", "hook-review", "settings-dialog", "palette"]) {
+      expect(stylesCss).toContain(`.${card} {`);
+    }
+  });
 });
 
 describe("one derivation, three surfaces", () => {

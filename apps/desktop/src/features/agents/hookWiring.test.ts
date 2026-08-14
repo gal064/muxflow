@@ -6,7 +6,8 @@ const adapter = (id: string, hookWiring: AgentHookWiring, overrides: Partial<Age
   id, displayName: id, supportsLaunch: true, supportsResume: true, supportsHooks: true,
   supportsProcessDetection: true, supportsScreenFallback: true,
   hookConfigPath: `/home/user/.${id}/settings.json`, hookEvents: [], placements: ["window", "split"],
-  hookWiring, hookWiringDetail: "", ...overrides,
+  hookWiring, hookWiringDetail: "", hookSetupRecommended: hookWiring === "notWired" || hookWiring === "partial",
+  ...overrides,
 });
 
 describe("what this host is allowed to say about agent status", () => {

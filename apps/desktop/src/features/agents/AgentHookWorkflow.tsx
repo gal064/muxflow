@@ -24,8 +24,13 @@ interface AgentWorkflowOptions {
    * the sidebar reads comes from the snapshot, and nothing had asked the host
    * for a new one. The one-time setup prompt refreshed and this path did not,
    * which is precisely the kind of divergence two flows accumulate.
+   *
+   * `action` matters: removing this app's hooks through the review is the user
+   * withdrawing their consent to keep this host set up. Without that, the
+   * per-host "accepted" would put the hooks straight back on the next connect,
+   * and the uninstall the user just confirmed would silently not stick.
    */
-  onHooksChanged(): void;
+  onHooksChanged(action: "install" | "uninstall"): void;
 }
 
 export interface AgentWorkflow {
@@ -102,7 +107,7 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
       setError(undefined);
       void runtime.applyHooks(review).then(() => {
         onStatus(`${adapterName(review.adapterId)} reviewed hooks ${review.action === "install" ? "installed" : "removed"}.`);
-        onHooksChanged();
+        onHooksChanged(review.action);
         setReview(undefined);
       }).catch((cause) => setError(String(cause))).finally(() => setApplying(false));
     }}

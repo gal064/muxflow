@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { AgentHostSetupDialog } from "./AgentHostSetupDialog";
 import { hostHookWiring, hookWiringNotice, shouldPromptForSetup } from "./hookWiring";
 import type { HostSetupDecision } from "../shell/types";
-import type { AgentAdapterDescriptor, AgentHookReview, AgentHostNamingOutcome } from "./types";
+import type { AgentAdapterDescriptor, AgentAdapterId, AgentHookReview, AgentHostNamingOutcome } from "./types";
 
 export interface AgentHostSetupOptions {
   adapters: readonly AgentAdapterDescriptor[];
@@ -22,10 +22,10 @@ export interface AgentHostSetupOptions {
    */
   applyHostNaming(): Promise<AgentHostNamingOutcome>;
   /**
-   * Identity of the live connection. A tmux server restart produces a new one,
-   * and that is exactly when the in-memory naming has to be re-asserted.
+   * Adapters with an agent actually running here. A running agent is proof it
+   * is installed, whatever the host's `PATH`-based probe concluded.
    */
-  connectionKey: string;
+  liveAdapterIds: readonly AgentAdapterId[];
   /** Re-asks the host what its wiring is now, after a change to it. */
   refreshWiring(): void;
   onStatus(message: string): void;
@@ -68,7 +68,14 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  const wiring = useMemo(() => hostHookWiring(options.adapters), [options.adapters]);
+  const wiring = useMemo(
+    () => hostHookWiring(options.adapters, options.liveAdapterIds),
+    [options.adapters, options.liveAdapterIds],
+  );
+  // Read by callbacks that must act on what the dialog was rendered from,
+  // rather than deriving it a second time and risking a different answer.
+  const wiringRef = useRef(wiring);
+  wiringRef.current = wiring;
   // Two different questions. `offerable` is "is there anything left to set up",
   // which is what Settings and the sidebar's line ask about. Raising the modal
   // unasked needs the stronger one: this host reports nothing at all.
@@ -93,23 +100,19 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     if (!options.connected) setOpen(false);
   }, [options.connected]);
 
-  // One key, not a set: connections are sequential, so remembering the last one
-  // answers "have I already asserted this on the server I am talking to now",
-  // and a set keyed by an ever-incrementing epoch only ever grows.
-  const namedConnection = useRef<string | undefined>(undefined);
+  // No local dedupe: `applyHostNaming` is idempotent on the host and answers
+  // `alreadyCurrent` from two cheap `show-options` calls. A ref and a
+  // hand-assembled connection key existed here to avoid those two round trips,
+  // which is a second copy of an answer the daemon already gives.
   const assertNaming = useCallback(() => {
     const current = optionsRef.current;
-    if (namedConnection.current === current.connectionKey) return;
-    namedConnection.current = current.connectionKey;
     void current.applyHostNaming().then((outcome) => {
       // A change to the user's running tmux server is worth one line; finding
       // that their own config already does it is not.
       if (outcome === "applied") current.onStatus("Recommended tmux window naming applied to this host's tmux server.");
     }).catch((cause) => {
-      // Not retried within this connection: nothing that could change the
-      // answer happens until the connection does, and the next one has its own
-      // key. Non-fatal by design — agent status works without it, and the phase
-      // that introduced it declared it non-gating — but never silent.
+      // Non-fatal by design — agent status works without it, and the phase that
+      // introduced it declared it non-gating — but never silent.
       current.onStatus(`Recommended tmux window naming was not applied: ${String(cause)}`);
     });
   }, []);
@@ -150,21 +153,28 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // unavailable" forever and the one-time prompt, already answered, could never
   // come back to fix it. Merge-only, backed up and idempotent, so re-running it
   // on a host that is already current writes nothing at all.
-  const reasserted = useRef<string | undefined>(undefined);
+  const reasserting = useRef(false);
   useEffect(() => {
     if (!options.connected || options.decision !== "accepted") return;
-    assertNaming();
-    if (wiring.setupTargets.length === 0 || reasserted.current === options.connectionKey) return;
-    reasserted.current = options.connectionKey;
+    // The guard is against re-entering while the install is in flight, not
+    // against repeating it: the install is idempotent, and what stops it
+    // looping is that a successful one empties `setupTargets`.
+    if (wiring.setupTargets.length === 0 || reasserting.current) {
+      // `install` asserts the naming itself when it succeeds; this is the
+      // nothing-to-install path, which still has a tmux server to talk to.
+      if (!reasserting.current) assertNaming();
+      return;
+    }
+    reasserting.current = true;
     const named = wiring.setupTargets.map((adapter) => adapter.displayName).join(" and ");
     void install(wiring.setupTargets).then((ok) => {
       if (ok) optionsRef.current.onStatus(`Updated the agent status hooks for ${named} on this host.`);
-    });
-  }, [assertNaming, install, options.connected, options.connectionKey, options.decision, wiring.setupTargets]);
+    }).finally(() => { reasserting.current = false; });
+  }, [assertNaming, install, options.connected, options.decision, wiring.setupTargets]);
 
   const accept = useCallback(() => {
     const current = optionsRef.current;
-    void install(hostHookWiring(current.adapters).setupTargets).then((ok) => {
+    void install(wiringRef.current.setupTargets).then((ok) => {
       if (ok) current.onStatus(`Agent status hooks installed on ${current.hostLabel}.`);
     });
   }, [install]);

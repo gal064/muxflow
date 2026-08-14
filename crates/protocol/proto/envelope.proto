@@ -720,13 +720,13 @@ enum AgentHookWiring {
   // so some transitions can never arrive.
   AGENT_HOOK_WIRING_PARTIAL = 2;
   AGENT_HOOK_WIRING_NOT_WIRED = 3;
+  // The configuration could not be inspected; the wiring is unknown rather
+  // than absent, and the desktop must not offer to overwrite it blindly.
+  AGENT_HOOK_WIRING_UNAVAILABLE = 4;
   // The agent itself is not on this host: no configuration and no executable.
   // There is nothing to wire, and offering to create configuration for a tool
   // the user does not have is worse than saying nothing.
   AGENT_HOOK_WIRING_ABSENT = 5;
-  // The configuration could not be inspected; the wiring is unknown rather
-  // than absent, and the desktop must not offer to overwrite it blindly.
-  AGENT_HOOK_WIRING_UNAVAILABLE = 4;
 }
 
 message AgentRoute {
@@ -759,6 +759,10 @@ message AgentAdapterDescriptor {
   AgentHookWiring hook_wiring = 11;
   // Why the wiring could not be inspected; empty in every other state.
   string hook_wiring_detail = 12;
+  // Whether an install would act on this adapter. Decided by the host, which
+  // is what observed the wiring; the desktop had a second copy of the rule,
+  // in another language, and the two had already diverged.
+  bool hook_setup_recommended = 13;
 }
 
 message AgentRecord {
@@ -871,9 +875,9 @@ message AgentResponse {
   string window_id = 5;
   string pane_id = 6;
   uint64 accepted_generation = 7;
-  // "applied" or "alreadyConfigured"; empty for every other operation. A tmux
-  // server that refused the command fails the request outright rather than
-  // returning a third value nobody branches on.
+  // "applied", "alreadyCurrent" or "userConfigured"; empty for every other
+  // operation. A tmux server that refused the command fails the request
+  // outright rather than returning a fourth value nobody branches on.
   string host_naming = 8;
 }
 

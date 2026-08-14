@@ -92,7 +92,7 @@ describe("application shell accessibility contracts", () => {
     const adapters: AgentAdapterDescriptor[] = [{
       id: "codex", displayName: "Codex", supportsLaunch: true, supportsResume: true, supportsHooks: true,
       supportsProcessDetection: true, supportsScreenFallback: false, hookConfigPath: "~/.codex/config.toml",
-      hookEvents: [], placements: ["window", "split"], hookWiring: "wired", hookWiringDetail: "",
+      hookEvents: [], placements: ["window", "split"], hookWiring: "wired", hookWiringDetail: "", hookSetupRecommended: false,
     }];
     let renderer!: ReturnType<typeof create>;
     const element = (rows: typeof agents, canMutate = true) => <WorkspaceSidebar
@@ -264,7 +264,7 @@ describe("saved host picker", () => {
   ] as const;
 
   const settings = (overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}) => <SettingsDialog
-    agentSetup={{ available: false, reports: true, onSetUp: noop }}
+    agentSetup={{ available: false, connected: true, reports: true, onSetUp: noop }}
     connectionMode="local"
     helper={{ phase: "idle" }}
     onClose={noop}

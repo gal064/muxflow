@@ -118,6 +118,75 @@ fn default_present() -> bool {
 mod tests {
     use super::*;
 
+    /// A store written by the build that shipped before this phase.
+    ///
+    /// It is schema 2, so it is *not* invalidated — the records must load with
+    /// their manual detections, their attention and their seen generations
+    /// intact, and the fields this phase added must degrade to defaults rather
+    /// than taking the whole file down. This is exactly the file sitting on the
+    /// user's machine right now.
+    #[test]
+    fn a_store_written_before_this_phase_loads_with_its_records_intact() {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase13-agent-state-{}.json", uuid::Uuid::new_v4()));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            br#"{
+              "schema_version": 2,
+              "generation": 7,
+              "agents": {
+                "claude-code:field": {
+                  "agent_id": "claude-code:field",
+                  "adapter": 2,
+                  "adapter_id": "claude-code",
+                  "native_session_id": "",
+                  "display_name": "Claude Code",
+                  "route": {
+                    "host_profile_id": "",
+                    "server_identity": "tmux:server",
+                    "session_id": "$1",
+                    "session_name_fallback": "inductive",
+                    "window_id": "@4",
+                    "window_name_fallback": "claude",
+                    "pane_id": "%120",
+                    "pane_index_fallback": 0
+                  },
+                  "lifecycle": 4,
+                  "authority": 2,
+                  "state_generation": 7,
+                  "attention_generation": 2,
+                  "attention_kind": "blocked",
+                  "seen_generation": 1,
+                  "updated_at_unix_millis": 1786000000000,
+                  "hook_authority_expires_at_unix_millis": 0,
+                  "detected_manually": true,
+                  "source_event_ids": [],
+                  "latest_source_generation": 0,
+                  "present": true,
+                  "hook_terminal": false
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let state = load(&path);
+        assert_eq!(state.schema_version, STATE_SCHEMA_VERSION);
+        assert_eq!(state.generation, 7);
+        let record = &state.agents["claude-code:field"];
+        assert!(record.detected_manually);
+        assert_eq!(record.attention_generation, 2);
+        assert_eq!(record.seen_generation, 1);
+        assert_eq!(record.attention_kind, "blocked");
+        assert_eq!(record.route.pane_id, "%120");
+        // The field this phase added is absent from the file, and its default
+        // is what the staleness sweep reads as "fall back to `updated_at`".
+        assert_eq!(record.lifecycle_observed_at_unix_millis, 0);
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn state_without_the_current_schema_is_invalidated_for_topology_rebuild() {
         let path = std::env::current_dir()

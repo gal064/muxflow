@@ -389,32 +389,33 @@ function launchItems(
   onReviewHooks: (adapter: AgentAdapterId, action: "install" | "uninstall") => void,
   onSetUpHost?: () => void,
 ) {
-  // First, and only when there is something to set up: on a host that cannot
-  // report status this is the only thing in the menu anyone wants, and it is
-  // the way back for someone who answered "not now".
-  const setUp = onSetUpHost
-    ? [{ id: "set-up-host", label: "Set up agent status on this host…", disabled: !canMutate, run: onSetUpHost }]
-    : [];
-  const launches = adapters
-    .filter((adapter) => adapter.supportsLaunch)
-    .flatMap((adapter) => adapter.placements.map((placement) => ({
-      id: `launch-${adapter.id}-${placement}`,
-      label: `New ${adapter.displayName} in a ${placement}`,
-      disabled: !canMutate,
-      run: () => onLaunch(adapter.id, placement),
-    })));
-  const hooks = adapters
-    .filter((adapter) => adapter.supportsHooks)
-    .flatMap((adapter) => (["install", "uninstall"] as const).map((action) => ({
-      id: `hooks-${adapter.id}-${action}`,
-      label: `${action === "install" ? "Review" : "Remove"} ${adapter.displayName} hooks…`,
-      disabled: !canMutate,
-      run: () => onReviewHooks(adapter.id, action),
-    })));
-  if (launches.length === 0 && hooks.length === 0) {
-    if (setUp.length > 0) return setUp;
+  // Three optional sections, separated where two meet. `setUp` comes first and
+  // only when there is something to set up: on a host that cannot report status
+  // it is the only item anyone wants, and it is the way back for someone who
+  // answered "not now".
+  const sections = [
+    onSetUpHost
+      ? [{ id: "set-up-host", label: "Set up agent status on this host…", disabled: !canMutate, run: onSetUpHost }]
+      : [],
+    adapters
+      .filter((adapter) => adapter.supportsLaunch)
+      .flatMap((adapter) => adapter.placements.map((placement) => ({
+        id: `launch-${adapter.id}-${placement}`,
+        label: `New ${adapter.displayName} in a ${placement}`,
+        disabled: !canMutate,
+        run: () => onLaunch(adapter.id, placement),
+      }))),
+    adapters
+      .filter((adapter) => adapter.supportsHooks)
+      .flatMap((adapter) => (["install", "uninstall"] as const).map((action) => ({
+        id: `hooks-${adapter.id}-${action}`,
+        label: `${action === "install" ? "Review" : "Remove"} ${adapter.displayName} hooks…`,
+        disabled: !canMutate,
+        run: () => onReviewHooks(adapter.id, action),
+      }))),
+  ].filter((section) => section.length > 0);
+  if (sections.length === 0) {
     return [{ id: "none", label: "No agent adapters available", disabled: true, run: () => undefined }];
   }
-  const rest = hooks.length > 0 ? [...launches, "separator" as const, ...hooks] : launches;
-  return setUp.length > 0 ? [...setUp, "separator" as const, ...rest] : rest;
+  return sections.flatMap((section, index) => index === 0 ? section : ["separator" as const, ...section]);
 }

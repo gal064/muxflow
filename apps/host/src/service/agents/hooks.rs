@@ -99,15 +99,23 @@ impl HookManager {
             .unwrap_or_else(|| adapter.hook_path(&self.home))
     }
 
-    /// Per-adapter answer to "can a lifecycle event from this agent ever reach
-    /// this daemon on this host". Failure to inspect is reported as
-    /// `Unavailable`, never as `NotWired`: proposing an install over a
-    /// configuration nobody could read is how unrelated hooks get lost.
-    pub(crate) fn wiring(&self) -> Vec<AdapterWiring> {
+    /// Each adapter paired with its own answer to "can a lifecycle event from
+    /// this agent ever reach this daemon on this host".
+    ///
+    /// Failure to inspect is reported as `Unavailable`, never as `NotWired`:
+    /// proposing an install over a configuration nobody could read is how
+    /// unrelated hooks get lost.
+    ///
+    /// Pairs rather than two parallel lists: the consumer that builds the
+    /// snapshot's descriptors used to walk the registry a second time and zip
+    /// the results, which made "these two functions iterate the same registry
+    /// in the same order" a rule enforced by a comment and a debug assertion,
+    /// with silent truncation if it were ever broken.
+    pub(crate) fn wiring(&self) -> Vec<(&'static dyn adapters::AgentAdapter, AdapterWiring)> {
         adapters::all()
             .map(|adapter| {
                 let config_path = self.config_path(adapter);
-                match self.inspect_wiring(adapter, &config_path) {
+                let observed = match self.inspect_wiring(adapter, &config_path) {
                     Ok(state) => AdapterWiring {
                         adapter_id: adapter.id(),
                         config_path,
@@ -120,7 +128,8 @@ impl HookManager {
                         state: v1::AgentHookWiring::Unavailable,
                         detail: error.to_string(),
                     },
-                }
+                };
+                (adapter, observed)
             })
             .collect()
     }
@@ -332,44 +341,55 @@ impl HookManager {
 ///
 /// Owned by whoever builds snapshots rather than by a file-scoped static, so it
 /// is per-runtime and reachable from a test.
-#[derive(Debug, Default)]
+///
+/// One adapter and its own observation, as [`HookManager::wiring`] pairs them.
+pub(crate) type ObservedAdapter = (&'static dyn adapters::AgentAdapter, AdapterWiring);
+
+#[derive(Default)]
 pub(crate) struct WiringCache {
     /// Built once. `HookManager::system_default` resolves and canonicalizes
     /// this process's own executable, and doing that per snapshot puts
     /// syscalls back on the path the cache exists to keep clear. Neither the
     /// home directory nor the running executable changes under a live daemon.
     manager: Option<HookManager>,
-    observed: Option<(Vec<u8>, Vec<AdapterWiring>)>,
+    observed: Option<(Vec<u8>, Vec<ObservedAdapter>)>,
 }
 
 impl WiringCache {
-    pub(crate) fn current(&mut self) -> Vec<AdapterWiring> {
-        let manager = match self
-            .manager
-            .take()
-            .or_else(|| HookManager::system_default().ok())
-        {
+    pub(crate) fn current(&mut self) -> Vec<ObservedAdapter> {
+        let manager = match self.manager.take() {
             Some(manager) => manager,
-            // An environment without a resolvable home or executable, not a
-            // configuration file that failed to parse — the desktop renders
-            // this reason verbatim, so it must describe what actually happened.
-            None => {
-                return adapters::all()
-                    .map(|adapter| AdapterWiring {
-                        adapter_id: adapter.id(),
-                        config_path: PathBuf::new(),
-                        state: v1::AgentHookWiring::Unavailable,
-                        detail: "this host did not report a home directory to look in".into(),
-                    })
-                    .collect();
-            }
+            None => match HookManager::system_default() {
+                Ok(manager) => manager,
+                // An environment without a resolvable home or executable, not
+                // a configuration file that failed to parse. The desktop
+                // renders this reason verbatim, so it carries the real error
+                // rather than a fixed sentence guessing which of the several
+                // ways `system_default` can fail actually happened.
+                Err(error) => {
+                    let detail = error.to_string();
+                    return adapters::all()
+                        .map(|adapter| {
+                            (
+                                adapter,
+                                AdapterWiring {
+                                    adapter_id: adapter.id(),
+                                    config_path: PathBuf::new(),
+                                    state: v1::AgentHookWiring::Unavailable,
+                                    detail: detail.clone(),
+                                },
+                            )
+                        })
+                        .collect();
+                }
+            },
         };
         let wiring = self.for_manager(&manager);
         self.manager = Some(manager);
         wiring
     }
 
-    fn for_manager(&mut self, manager: &HookManager) -> Vec<AdapterWiring> {
+    fn for_manager(&mut self, manager: &HookManager) -> Vec<ObservedAdapter> {
         let fingerprint = manager.wiring_fingerprint();
         if let Some((observed, wiring)) = self.observed.as_ref()
             && observed == &fingerprint
@@ -1297,8 +1317,9 @@ mod tests {
             manager
                 .wiring()
                 .iter()
-                .find(|entry| entry.adapter_id == "claude-code")
+                .find(|(_, entry)| entry.adapter_id == "claude-code")
                 .unwrap()
+                .1
                 .state,
             v1::AgentHookWiring::NotWired,
             "hooks that all belong to another tool are not this app's wiring"
@@ -1329,8 +1350,9 @@ mod tests {
             manager
                 .wiring()
                 .iter()
-                .find(|entry| entry.adapter_id == "claude-code")
+                .find(|(_, entry)| entry.adapter_id == "claude-code")
                 .unwrap()
+                .1
                 .state,
             v1::AgentHookWiring::Wired
         );
@@ -1423,8 +1445,9 @@ mod tests {
             manager
                 .wiring()
                 .into_iter()
-                .find(|entry| entry.adapter_id == id)
+                .find(|(_, entry)| entry.adapter_id == id)
                 .unwrap()
+                .1
                 .config_path
         };
         assert_eq!(path("claude-code"), elsewhere);
@@ -1449,8 +1472,9 @@ mod tests {
             manager
                 .wiring()
                 .into_iter()
-                .find(|entry| entry.adapter_id == "claude-code")
+                .find(|(_, entry)| entry.adapter_id == "claude-code")
                 .unwrap()
+                .1
         };
         assert_eq!(state(&manager).state, v1::AgentHookWiring::NotWired);
 
@@ -1491,8 +1515,9 @@ mod tests {
             manager
                 .wiring()
                 .into_iter()
-                .find(|entry| entry.adapter_id == id)
+                .find(|(_, entry)| entry.adapter_id == id)
                 .unwrap()
+                .1
                 .state
         };
         // Nothing at all: no config, no directory, nothing on the search path.
@@ -1532,11 +1557,12 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let manager = HookManager::for_home(&home);
         let mut cache = WiringCache::default();
-        let state = |wiring: &[AdapterWiring]| {
+        let state = |wiring: &[ObservedAdapter]| {
             wiring
                 .iter()
-                .find(|entry| entry.adapter_id == "claude-code")
+                .find(|(_, entry)| entry.adapter_id == "claude-code")
                 .unwrap()
+                .1
                 .state
         };
         assert_eq!(
@@ -1565,8 +1591,8 @@ mod tests {
         );
         // And an unchanged configuration is not re-parsed into a new answer.
         assert_eq!(
-            cache.for_manager(&manager),
-            cache.for_manager(&manager),
+            state(&cache.for_manager(&manager)),
+            state(&cache.for_manager(&manager)),
             "a stable configuration must produce a stable observation"
         );
         assert_eq!(adapter.id(), "claude-code");

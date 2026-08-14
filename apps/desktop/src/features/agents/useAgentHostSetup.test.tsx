@@ -8,7 +8,7 @@ const adapter = (id: string, hookWiring: AgentHookWiring): AgentAdapterDescripto
   id, displayName: id, supportsLaunch: true, supportsResume: true, supportsHooks: true,
   supportsProcessDetection: true, supportsScreenFallback: true,
   hookConfigPath: `/home/user/.${id}/settings.json`, hookEvents: [], placements: ["window", "split"],
-  hookWiring, hookWiringDetail: "",
+  hookWiring, hookWiringDetail: "", hookSetupRecommended: hookWiring === "notWired" || hookWiring === "partial",
 });
 
 const review = (adapterId: string, alreadyInstalled = false): AgentHookReview => ({
@@ -29,10 +29,10 @@ function harness(overrides: Partial<AgentHostSetupOptions> = {}) {
   const options: AgentHostSetupOptions = {
     adapters: [adapter("claude-code", "notWired")],
     connected: true,
-    connectionKey: "ssh-omarchy\0server-a\u00001",
     hostProfileId: "ssh-omarchy",
     hostLabel: "omarchy",
     decision: undefined,
+    liveAdapterIds: [],
     ...calls,
     ...overrides,
   };
@@ -144,10 +144,11 @@ describe("the one-time set-up prompt", () => {
 
   /**
    * Phase 13.5: the window naming lives in the tmux server's memory, so it is
-   * asserted per connection rather than installed once — but only where the
-   * user has already said yes, and never twice for the same connection.
+   * asserted rather than installed — but only where the user has already said
+   * yes. Repetition is the host's problem: `applyHostNaming` is idempotent and
+   * answers `alreadyCurrent` without writing.
    */
-  it("re-asserts the tmux window naming once per connection, only after a yes", async () => {
+  it("asserts the tmux window naming only after a yes", async () => {
     const setup = harness({ decision: undefined });
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<setup.Harness />); });
@@ -158,11 +159,14 @@ describe("the one-time set-up prompt", () => {
 
     await act(async () => renderer.update(<setup.Harness decision="accepted" />));
     expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(1);
-    // A re-render on the same connection is not a new tmux server.
+    // Exactly once per pass: the install path asserts it itself, so an
+    // already-current host and a just-installed one both get one call.
     await act(async () => renderer.update(<setup.Harness decision="accepted" />));
     expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(1);
-    // A replaced server is, and it dropped the in-memory hook with it.
-    await act(async () => renderer.update(<setup.Harness connectionKey="ssh-omarchy\0server-b 2" decision="accepted" />));
+    // A reconnect is a new tmux server as far as this is concerned, and a
+    // restarted one dropped the in-memory hook with it.
+    await act(async () => renderer.update(<setup.Harness connected={false} decision="accepted" />));
+    await act(async () => renderer.update(<setup.Harness decision="accepted" />));
     expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(2);
     await act(async () => renderer.unmount());
   });
