@@ -180,6 +180,38 @@ describe("the one-time set-up prompt", () => {
     await act(async () => renderer.unmount());
   });
 
+  /**
+   * The consent is to keeping this host set up, not to one particular set of
+   * hook events. When the managed set grows — which it did this phase, 2 to 3 —
+   * an already-consented host reads as partially wired; without this it would
+   * say "agent status unavailable" forever, with the one-time prompt already
+   * answered and unable to come back and fix it.
+   */
+  it("brings an already-consented host up to date without asking again", async () => {
+    const setup = harness({ decision: "accepted" });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    expect(renderer.toJSON()).toEqual({ type: "div", props: {}, children: null });
+    expect(setup.calls.applyHooks).toHaveBeenCalledTimes(1);
+    expect(setup.calls.refreshWiring).toHaveBeenCalled();
+    expect(setup.calls.onStatus).toHaveBeenCalledWith(expect.stringContaining("Updated the agent status hooks"));
+
+    // Once per connection, not once per render.
+    await act(async () => renderer.update(<setup.Harness decision="accepted" />));
+    expect(setup.calls.applyHooks).toHaveBeenCalledTimes(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it("writes nothing on a consented host that is already current", async () => {
+    const setup = harness({ decision: "accepted", adapters: [adapter("claude-code", "wired")] });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    expect(setup.calls.reviewHooks).not.toHaveBeenCalled();
+    expect(setup.calls.applyHooks).not.toHaveBeenCalled();
+    expect(setup.current.notice).toBeUndefined();
+    await act(async () => renderer.unmount());
+  });
+
   it("takes its question away with the host it was about", async () => {
     const setup = harness();
     let renderer!: ReturnType<typeof create>;

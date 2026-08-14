@@ -50,20 +50,19 @@ pub(crate) trait AgentAdapter: Send + Sync {
         )
     }
 
+    /// `observed` is this adapter's own wiring, not a list to search. Passing
+    /// the list meant a linear lookup with a fallback for an adapter the probe
+    /// said nothing about — a state its producer, which walks the same
+    /// registry, cannot construct.
     fn descriptor(
         &self,
         home: &Path,
-        wiring: &[super::hooks::AdapterWiring],
+        observed: &super::hooks::AdapterWiring,
     ) -> v1::AgentAdapterDescriptor {
-        let observed = wiring.iter().find(|entry| entry.adapter_id == self.id());
+        debug_assert_eq!(observed.adapter_id, self.id());
         v1::AgentAdapterDescriptor {
-            hook_wiring: observed
-                .map(|entry| entry.state)
-                .unwrap_or(v1::AgentHookWiring::Unspecified)
-                .into(),
-            hook_wiring_detail: observed
-                .map(|entry| entry.detail.clone())
-                .unwrap_or_default(),
+            hook_wiring: observed.state.into(),
+            hook_wiring_detail: observed.detail.clone(),
             adapter: self.legacy_kind().into(),
             id: self.id().into(),
             display_name: self.display_name().into(),
@@ -321,12 +320,15 @@ pub(crate) fn all() -> impl Iterator<Item = &'static dyn AgentAdapter> {
     .filter_map(adapter)
 }
 
+/// `wiring` comes from [`super::hooks::HookManager::wiring`], which walks the
+/// same registry in the same order, so this is a zip rather than a join.
 pub(crate) fn descriptors(
     home: &Path,
     wiring: &[super::hooks::AdapterWiring],
 ) -> Vec<v1::AgentAdapterDescriptor> {
     all()
-        .map(|adapter| adapter.descriptor(home, wiring))
+        .zip(wiring)
+        .map(|(adapter, observed)| adapter.descriptor(home, observed))
         .collect()
 }
 
@@ -468,34 +470,38 @@ mod tests {
     #[test]
     fn registry_owns_descriptors_manifests_paths_and_commands() {
         let home = Path::new("/fixture/home");
-        let observed = [super::super::hooks::AdapterWiring {
-            adapter_id: "codex",
-            config_path: home.join(".codex/hooks.json"),
-            state: v1::AgentHookWiring::Wired,
-            detail: String::new(),
-        }];
+        let observed: Vec<_> = all()
+            .zip([v1::AgentHookWiring::Wired, v1::AgentHookWiring::NotWired])
+            .map(|(adapter, state)| super::super::hooks::AdapterWiring {
+                adapter_id: adapter.id(),
+                config_path: adapter.hook_path(home),
+                state,
+                detail: String::new(),
+            })
+            .collect();
         let descriptors = descriptors(home, &observed);
         assert_eq!(descriptors.len(), 2);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
         assert_eq!(codex.hook_events().len(), 7);
-        assert_eq!(codex.descriptor(home, &observed).id, "codex");
+        assert_eq!(codex.descriptor(home, &observed[0]).id, "codex");
         assert_eq!(
             codex.hook_command(Path::new("/opt/tmux-ide-host")),
             "'/opt/tmux-ide-host' hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 3"
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));
-        assert!(claude.descriptor(home, &observed).supports_resume);
-        // An adapter the wiring probe said nothing about must not inherit
-        // another adapter's answer.
+        assert!(claude.descriptor(home, &observed[1]).supports_resume);
+        // Each descriptor carries its own adapter's observation and no other's.
         assert_eq!(
-            codex.descriptor(home, &observed).hook_wiring,
-            v1::AgentHookWiring::Wired as i32
-        );
-        assert_eq!(
-            claude.descriptor(home, &observed).hook_wiring,
-            v1::AgentHookWiring::Unspecified as i32
+            descriptors
+                .iter()
+                .map(|descriptor| (descriptor.id.as_str(), descriptor.hook_wiring))
+                .collect::<Vec<_>>(),
+            [
+                ("codex", v1::AgentHookWiring::Wired as i32),
+                ("claude-code", v1::AgentHookWiring::NotWired as i32),
+            ]
         );
     }
 

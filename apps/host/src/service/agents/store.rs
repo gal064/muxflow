@@ -50,6 +50,16 @@ pub(super) struct StoredAgent {
     pub present: bool,
     #[serde(default)]
     pub hook_terminal: bool,
+    /// When something last said what this agent was *doing*.
+    ///
+    /// Distinct from `updated_at_unix_millis`, which also moves when the agent
+    /// merely changes pane — reconciliation rewrites it on a pure route change,
+    /// so moving a pane between windows reset a dead agent's staleness clock
+    /// with no lifecycle evidence involved. Zero means a record written before
+    /// this field existed; the staleness sweep falls back to `updated_at` for
+    /// those rather than treating them as infinitely old.
+    #[serde(default)]
+    pub lifecycle_observed_at_unix_millis: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

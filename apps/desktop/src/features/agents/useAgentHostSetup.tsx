@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { AgentHostSetupDialog } from "./AgentHostSetupDialog";
-import { hostHookWiring, hookWiringNotice, shouldPromptForSetup, type HostHookWiring } from "./hookWiring";
+import { hostHookWiring, hookWiringNotice, shouldPromptForSetup } from "./hookWiring";
 import type { HostSetupDecision } from "../shell/types";
 import type { AgentAdapterDescriptor, AgentHookReview, AgentHostNamingOutcome } from "./types";
 
@@ -40,7 +40,8 @@ export interface AgentHostSetup {
   open: boolean;
   /** The agents section's honest line, or `undefined` when status works. */
   notice?: string;
-  wiring: HostHookWiring;
+  /** Whether anything on this host can report what an agent is doing. */
+  reports: boolean;
   /** True when Settings should offer to set this host up. */
   offerable: boolean;
   /** Re-opens the prompt from Settings or the sidebar's notice. */
@@ -74,23 +75,23 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   const offerable = options.connected && wiring.setupTargets.length > 0;
   const promptable = options.connected && shouldPromptForSetup(wiring);
 
-  const close = useCallback((next: boolean) => {
-    setOpen(next);
+  const offer = useCallback(() => {
+    setError(undefined);
+    setOpen(true);
   }, []);
 
   // Asked once, when the host has actually answered. `decision` being undefined
   // is the whole condition: a recorded answer of either kind ends this forever.
   useEffect(() => {
     if (!promptable || options.decision !== undefined) return;
-    setError(undefined);
-    close(true);
-  }, [close, promptable, options.decision]);
+    offer();
+  }, [offer, promptable, options.decision]);
 
   // A host that goes away takes its question with it, rather than leaving a
   // modal over a disconnected app that would act on the next host to connect.
   useEffect(() => {
-    if (!options.connected) close(false);
-  }, [close, options.connected]);
+    if (!options.connected) setOpen(false);
+  }, [options.connected]);
 
   // One key, not a set: connections are sequential, so remembering the last one
   // answers "have I already asserted this on the server I am talking to now",
@@ -99,36 +100,25 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   const assertNaming = useCallback(() => {
     const current = optionsRef.current;
     if (namedConnection.current === current.connectionKey) return;
-    const key = current.connectionKey;
-    namedConnection.current = key;
+    namedConnection.current = current.connectionKey;
     void current.applyHostNaming().then((outcome) => {
       // A change to the user's running tmux server is worth one line; finding
       // that their own config already does it is not.
       if (outcome === "applied") current.onStatus("Recommended tmux window naming applied to this host's tmux server.");
     }).catch((cause) => {
-      if (namedConnection.current === key) namedConnection.current = undefined;
-      // Non-fatal by design: agent status works without it, and the phase that
-      // introduced it declared it non-gating. It still must not fail silently.
+      // Not retried within this connection: nothing that could change the
+      // answer happens until the connection does, and the next one has its own
+      // key. Non-fatal by design — agent status works without it, and the phase
+      // that introduced it declared it non-gating — but never silent.
       current.onStatus(`Recommended tmux window naming was not applied: ${String(cause)}`);
     });
   }, []);
 
-  // Window naming is not installed, it is asserted: it lives in the running
-  // tmux server, so a restarted server — a new connection key — silently loses
-  // it. Re-sent once per connection, and only where the user already said yes.
-  // The host's own detection is what keeps this from overwriting a config the
-  // user wrote themselves.
-  useEffect(() => {
-    if (!options.connected || options.decision !== "accepted") return;
-    assertNaming();
-  }, [assertNaming, options.connected, options.connectionKey, options.decision]);
-
-  const accept = useCallback(() => {
+  const install = useCallback((targets: readonly AgentAdapterDescriptor[]) => {
     const current = optionsRef.current;
-    const targets = hostHookWiring(current.adapters).setupTargets;
     setApplying(true);
     setError(undefined);
-    void (async () => {
+    return (async () => {
       for (const adapter of targets) {
         const review = await current.reviewHooks(adapter.id, "install");
         // The host's own idempotence answer, so a re-run writes nothing.
@@ -136,15 +126,14 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       }
     })().then(() => {
       current.recordDecision(current.hostProfileId, "accepted");
-      close(false);
-      current.onStatus(`Agent status hooks installed on ${current.hostLabel}.`);
+      setOpen(false);
       // Part of the same "set up this host" answer, and deliberately after it:
       // a tmux server that refuses the naming must not lose the hooks.
       assertNaming();
+      return true;
     }).catch((cause) => {
-      // Nothing is recorded on failure: the user has not been asked and
-      // answered, they have been shown a broken attempt.
       setError(String(cause));
+      return false;
     }).finally(() => {
       // Unconditionally, including after a failure part-way through: an adapter
       // that was installed before the one that threw *is* wired now, and
@@ -152,18 +141,39 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       setApplying(false);
       current.refreshWiring();
     });
-  }, [assertNaming, close]);
+  }, [assertNaming]);
+
+  // Consent is to keeping this host set up, not to one particular set of hook
+  // events. The managed event set moves when a vendor adds an event worth
+  // taking, and a host set up before that reads as partially wired — so without
+  // this, the sidebar on every already-consented host would say "agent status
+  // unavailable" forever and the one-time prompt, already answered, could never
+  // come back to fix it. Merge-only, backed up and idempotent, so re-running it
+  // on a host that is already current writes nothing at all.
+  const reasserted = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!options.connected || options.decision !== "accepted") return;
+    assertNaming();
+    if (wiring.setupTargets.length === 0 || reasserted.current === options.connectionKey) return;
+    reasserted.current = options.connectionKey;
+    const named = wiring.setupTargets.map((adapter) => adapter.displayName).join(" and ");
+    void install(wiring.setupTargets).then((ok) => {
+      if (ok) optionsRef.current.onStatus(`Updated the agent status hooks for ${named} on this host.`);
+    });
+  }, [assertNaming, install, options.connected, options.connectionKey, options.decision, wiring.setupTargets]);
+
+  const accept = useCallback(() => {
+    const current = optionsRef.current;
+    void install(hostHookWiring(current.adapters).setupTargets).then((ok) => {
+      if (ok) current.onStatus(`Agent status hooks installed on ${current.hostLabel}.`);
+    });
+  }, [install]);
 
   const decline = useCallback(() => {
     const current = optionsRef.current;
     if (current.decision === undefined) current.recordDecision(current.hostProfileId, "declined");
-    close(false);
-  }, [close]);
-
-  const offer = useCallback(() => {
-    setError(undefined);
-    close(true);
-  }, [close]);
+    setOpen(false);
+  }, []);
 
   const dialog = open
     ? <AgentHostSetupDialog
@@ -176,11 +186,18 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       onReview={() => {
         const first = wiring.setupTargets[0];
         if (!first) return;
-        close(false);
+        setOpen(false);
         options.openReview(first.id);
       }}
     />
     : null;
 
-  return { dialog, open, notice: hookWiringNotice(wiring), wiring, offerable, offer };
+  return {
+    dialog,
+    open,
+    notice: hookWiringNotice(wiring),
+    reports: wiring.reports,
+    offerable,
+    offer,
+  };
 }

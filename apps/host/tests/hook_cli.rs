@@ -101,14 +101,30 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
         "--adapter scopes the report"
     );
 
+    let applied = |report: &serde_json::Value, id: &str| -> serde_json::Value {
+        report["applied"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["adapterId"] == id)
+            .expect("every adapter is reported, acted on or not")
+            .clone()
+    };
+
     let installed = run("install");
-    assert_eq!(installed["applied"][0]["changed"], true);
+    assert_eq!(applied(&installed, "claude-code")["changed"], true);
+    assert_eq!(
+        applied(&installed, "codex")["skipped"],
+        "not selected",
+        "an adapter the caller did not name is reported rather than silently dropped"
+    );
     assert_eq!(installed["adapters"][0]["wiring"], "wired");
     let after_install = fs::read(&settings).unwrap();
 
     let repeated = run("install");
     assert_eq!(
-        repeated["applied"][0]["changed"], false,
+        applied(&repeated, "claude-code")["changed"],
+        false,
         "install must be idempotent"
     );
     assert_eq!(fs::read(&settings).unwrap(), after_install);
@@ -128,5 +144,32 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
         .output()
         .unwrap();
     assert!(!ambiguous.status.success());
+
+    // Without `--adapter`, an install must not create configuration for an
+    // agent that is not on this host — the exact thing the desktop refuses.
+    let unscoped = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        .args(["hook", "install", "--home"])
+        .arg(&home)
+        .env_remove("PATH")
+        .output()
+        .unwrap();
+    assert!(
+        unscoped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unscoped.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&unscoped.stdout).unwrap();
+    let codex = report["applied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["adapterId"] == "codex")
+        .unwrap()
+        .clone();
+    assert_eq!(codex["skipped"], "agent is not installed here");
+    assert!(
+        !home.join(".codex").exists(),
+        "an absent agent's configuration directory was created anyway"
+    );
     fs::remove_dir_all(home).unwrap();
 }

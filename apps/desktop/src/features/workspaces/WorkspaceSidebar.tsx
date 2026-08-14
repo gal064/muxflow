@@ -224,10 +224,15 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           agent exists — and what is missing is any way to know what they are
           doing, which is what this line says and the neutral "unknown" dot on
           each row repeats. Replacing the rows would hide something true to
-          avoid saying something honest. */}
-      {props.hookNotice && (props.onSetUpHost
-        ? <button className="agents-notice" onClick={props.onSetUpHost} type="button">{props.hookNotice}</button>
-        : <p className="agents-notice" role="note">{props.hookNotice}</p>)}
+          avoid saying something honest.
+
+          Text, never a button. The shell's resting-control budget is eight and
+          is spent (Phase 11 gate 5); a control that appears on every un-wired
+          host — which is this host until it is set up, and permanently after a
+          "not now" — is a ninth at rest. The action lives where this section's
+          other host actions already live: its context menu, Settings, and the
+          one-time prompt itself. */}
+      {props.hookNotice && <p className="agents-notice" role="note">{props.hookNotice}</p>}
       <div aria-labelledby="sidebar-agents-label" className="sidebar-scroll" role="list">
         {props.agents.length === 0
           ? <p className="quiet-empty">No agents detected.</p>
@@ -365,7 +370,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             run: () => props.onResumeAgent(agentMenu.row!.agent, placement),
           })),
         ]
-        : launchItems(props.adapters, props.canMutate, props.onLaunchAgent, props.onReviewHooks)}
+        : launchItems(props.adapters, props.canMutate, props.onLaunchAgent, props.onReviewHooks, props.onSetUpHost)}
       label={agentMenu.row ? `Actions for ${agentMenu.row.agent.displayName}` : "Agent actions"}
       onClose={() => setAgentMenu(undefined)}
     />}
@@ -382,7 +387,14 @@ function launchItems(
   canMutate: boolean,
   onLaunch: (adapter: AgentAdapterId, placement: AgentPlacement) => void,
   onReviewHooks: (adapter: AgentAdapterId, action: "install" | "uninstall") => void,
+  onSetUpHost?: () => void,
 ) {
+  // First, and only when there is something to set up: on a host that cannot
+  // report status this is the only thing in the menu anyone wants, and it is
+  // the way back for someone who answered "not now".
+  const setUp = onSetUpHost
+    ? [{ id: "set-up-host", label: "Set up agent status on this host…", disabled: !canMutate, run: onSetUpHost }]
+    : [];
   const launches = adapters
     .filter((adapter) => adapter.supportsLaunch)
     .flatMap((adapter) => adapter.placements.map((placement) => ({
@@ -400,7 +412,9 @@ function launchItems(
       run: () => onReviewHooks(adapter.id, action),
     })));
   if (launches.length === 0 && hooks.length === 0) {
+    if (setUp.length > 0) return setUp;
     return [{ id: "none", label: "No agent adapters available", disabled: true, run: () => undefined }];
   }
-  return hooks.length > 0 ? [...launches, "separator" as const, ...hooks] : launches;
+  const rest = hooks.length > 0 ? [...launches, "separator" as const, ...hooks] : launches;
+  return setUp.length > 0 ? [...setUp, "separator" as const, ...rest] : rest;
 }

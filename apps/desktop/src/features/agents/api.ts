@@ -200,7 +200,8 @@ export class TauriAgentClient implements AgentClient {
 
   async applyHostNaming(scope: AgentRequestScope): Promise<AgentHostNamingOutcome> {
     const response = await this.#request(scope, { operation: "hostNaming" });
-    return response.hostNaming === "applied" || response.hostNaming === "alreadyConfigured"
+    return response.hostNaming === "applied" || response.hostNaming === "alreadyCurrent"
+      || response.hostNaming === "userConfigured"
       ? response.hostNaming
       : "unavailable";
   }

@@ -77,29 +77,53 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
         "uninstall" => Some(v1::HookManagementAction::Uninstall),
         _ => bail!("usage: tmux-ide-host hook <ingest|status|install|uninstall>"),
     };
+    let observed = manager.wiring();
     let mut report = Vec::new();
+    let mut failed = false;
     if let Some(action) = action {
-        let targets: Vec<_> = match selected {
-            Some(adapter) => vec![adapter],
-            None => crate::service::agents::adapters::all().collect(),
-        };
-        for adapter in targets {
-            let review = manager.review(adapter.legacy_kind(), action)?;
-            // `already_current` is the installer's own idempotence answer, so a
-            // second run reports "unchanged" rather than rewriting a file and
-            // claiming it did something.
-            let changed = !review.already_current;
-            if changed {
-                manager.apply(adapter.legacy_kind(), action, &review.confirmation_token)?;
+        for entry in &observed {
+            // Named explicitly, or chosen for us. Choosing for us means
+            // skipping an agent that is not on this host at all — installing
+            // there creates a configuration directory and file for a tool the
+            // user does not use — and skipping one whose configuration could
+            // not be read, because writing over what nobody could parse is how
+            // unrelated hooks get lost. `--adapter` overrides the first;
+            // nothing overrides the second.
+            let explicit = adapter_id.as_deref() == Some(entry.adapter_id);
+            let skip = match entry.state {
+                v1::AgentHookWiring::Unavailable => Some("configuration could not be read"),
+                v1::AgentHookWiring::Absent if !explicit => Some("agent is not installed here"),
+                _ if adapter_id.is_some() && !explicit => Some("not selected"),
+                _ => None,
+            };
+            if let Some(reason) = skip {
+                report.push(serde_json::json!({
+                    "adapterId": entry.adapter_id,
+                    "configPath": entry.config_path,
+                    "skipped": reason,
+                }));
+                continue;
             }
-            report.push(serde_json::json!({
-                "adapterId": adapter.id(),
-                "configPath": review.config_path,
-                "backupPath": review.backup_path,
-                "changed": changed,
-            }));
+            let adapter = crate::service::agents::adapters::by_id(entry.adapter_id)
+                .context("agent adapter is required")?;
+            // Every adapter is reported even when an earlier one failed: a
+            // merge-only installer whose pitch is "you can see exactly what
+            // changed" must not exit silently having already written a file.
+            match apply_one(&manager, adapter.legacy_kind(), action) {
+                Ok(value) => report.push(value),
+                Err(error) => {
+                    failed = true;
+                    report.push(serde_json::json!({
+                        "adapterId": entry.adapter_id,
+                        "configPath": entry.config_path,
+                        "error": error.to_string(),
+                    }));
+                }
+            }
         }
     }
+    // Re-read: what the wiring is *after* whatever just happened is the
+    // useful answer, and the pre-action observation above was only a plan.
     let wiring: Vec<_> = manager
         .wiring()
         .into_iter()
@@ -125,7 +149,31 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
             "adapters": wiring,
         })
     );
+    if failed {
+        bail!("one or more adapters could not be updated; see the reported result");
+    }
     Ok(())
+}
+
+fn apply_one(
+    manager: &crate::service::agents::HookManager,
+    adapter: v1::AgentAdapterKind,
+    action: v1::HookManagementAction,
+) -> anyhow::Result<serde_json::Value> {
+    let review = manager.review(adapter, action)?;
+    // `already_current` is the installer's own idempotence answer, so a second
+    // run reports "unchanged" rather than rewriting a file and claiming it did
+    // something.
+    let changed = !review.already_current;
+    if changed {
+        manager.apply(adapter, action, &review.confirmation_token)?;
+    }
+    Ok(serde_json::json!({
+        "adapterId": review.adapter_id,
+        "configPath": review.config_path,
+        "backupPath": review.backup_path,
+        "changed": changed,
+    }))
 }
 
 fn wiring_label(state: v1::AgentHookWiring) -> &'static str {

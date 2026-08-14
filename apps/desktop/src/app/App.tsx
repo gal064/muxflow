@@ -984,7 +984,7 @@ export function App() {
     {settingsOpen && <SettingsDialog
       agentSetup={{
         available: agentHostSetup.offerable,
-        reports: agentHostSetup.wiring.reports,
+        reports: agentHostSetup.reports,
         onSetUp: () => { setSettingsOpen(false); agentHostSetup.offer(); },
       }}
       connectionMode={connectionMode}
