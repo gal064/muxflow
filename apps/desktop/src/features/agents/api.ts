@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { agentGeneration, zeroGeneration, type AgentGeneration } from "./generation";
 import { canonicalAdapterId } from "./adapterDefinitions";
-import { AGENT_HOOK_WIRINGS } from "./types";
+import { AGENT_HOOK_WIRINGS, AGENT_HOST_NAMING_OUTCOMES } from "./types";
 import type {
   AgentAdapterDescriptor,
   AgentAdapterId,
@@ -202,10 +202,8 @@ export class TauriAgentClient implements AgentClient {
 
   async applyHostNaming(scope: AgentRequestScope, action: "install" | "uninstall" = "install"): Promise<AgentHostNamingOutcome> {
     const response = await this.#request(scope, { operation: action === "install" ? "hostNaming" : "hostNamingRemove" });
-    const known: readonly string[] = ["applied", "alreadyCurrent", "userConfigured", "removed"];
-    return known.includes(response.hostNaming ?? "")
-      ? response.hostNaming as AgentHostNamingOutcome
-      : "unavailable";
+    const known = AGENT_HOST_NAMING_OUTCOMES.find((outcome) => outcome === response.hostNaming);
+    return known ?? "unavailable";
   }
 
   async applyHooks(scope: AgentRequestScope, review: AgentHookReview): Promise<void> {
