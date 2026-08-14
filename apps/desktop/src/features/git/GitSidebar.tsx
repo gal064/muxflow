@@ -1,7 +1,9 @@
 import { useMemo, useRef, useState } from "react";
-import { keyboardEventIsComposing } from "../../commands/registry";
+import { keyboardEventIsComposing, type CommandId } from "../../commands/registry";
+import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
+import { SurfaceError } from "../../ui/SurfaceError";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { GitCommandResult, GitDiffTarget, GitMutationRequest, GitStatusEntry, GitStatusSnapshot, GitWorkspaceClient } from "./types";
 
@@ -31,6 +33,7 @@ export function GitSidebar(props: Props) {
   // open; a flag frozen at open time left the item enabled with `props.scope`
   // already gone, and the click handler threw.
   const [menu, setMenu] = useState<{ entry: GitStatusEntry; target: GitDiffTarget; anchor: ContextMenuAnchor }>();
+  const [focusedRow, setFocusedRow] = useState<{ path: string; target: GitDiffTarget }>();
   const [busyPath, setBusyPath] = useState<string>();
   const [commitMessage, setCommitMessage] = useState("");
   const [commitOutput, setCommitOutput] = useState<GitCommandResult>();
@@ -76,6 +79,43 @@ export function GitSidebar(props: Props) {
     } catch (cause) { setCommitError(String(cause)); }
   };
 
+  // Git has no tree cursor to borrow, so the row the palette means is the last
+  // one focused or right-clicked. It is stored by path rather than by object:
+  // a status refresh replaces every entry, and a captured object would go on
+  // describing a change that has since been staged.
+  const focusedEntry = focusedRow && props.status
+    ? props.status.entries.find((entry) => entry.path === focusedRow.path)
+    : undefined;
+  const rowActions = useMemo<readonly CommandId[]>(() => {
+    if (!focusedEntry || !focusedRow) return [];
+    const ids: CommandId[] = [];
+    if (!focusedEntry.ignored) ids.push("git.openDiff");
+    const mutable = !unavailable && !focusedEntry.conflicted && !focusedEntry.submodule
+      && Boolean(props.scope) && Boolean(props.root) && Boolean(props.status);
+    if (mutable) ids.push(focusedRow.target === "staged" ? "git.unstage" : "git.stage", "git.discard");
+    return ids;
+  }, [focusedEntry, focusedRow, props.root, props.scope, props.status, unavailable]);
+  const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
+  runRowCommand.current = (commandId) => {
+    if (!focusedEntry || !focusedRow) return;
+    switch (commandId) {
+      case "git.openDiff": props.onOpenDiff(focusedEntry, focusedRow.target); return;
+      case "git.stage": void mutateFile(focusedEntry, "unstaged", "stageFile"); return;
+      case "git.unstage": void mutateFile(focusedEntry, "staged", "unstageFile"); return;
+      case "git.discard":
+        if (props.status && props.root && props.scope) {
+          setPendingDiscard({ entry: focusedEntry, target: focusedRow.target, status: props.status, rootToken: props.root.token, connectionEpoch: props.scope.terminalEpoch });
+        }
+        return;
+    }
+  };
+  const rowSource = useMemo<RowCommandSource | undefined>(() => rowActions.length === 0 || !focusedEntry ? undefined : {
+    subject: focusedEntry.displayPath,
+    available: rowActions,
+    run: (commandId) => runRowCommand.current(commandId),
+  }, [focusedEntry, rowActions]);
+  usePublishedRowCommands("git", rowSource);
+
   if (!props.root) return <GitEmpty detail="Select a terminal pane to discover its repository." />;
   if (!props.root.gitWorktree) return <GitEmpty detail="The active pane is outside a Git worktree." />;
   if (props.loading && !props.status) return <GitEmpty detail="Reading Git status…" />;
@@ -84,22 +124,25 @@ export function GitSidebar(props: Props) {
   if (props.status.oversized) return <GitEmpty detail={`Repository status is too large. ${props.status.error || "The host bounded this snapshot to keep the terminal connection responsive."} ${props.status.totalEntryCount ?? "Unknown"} entries were detected.`} action={props.onRefresh} />;
 
   const stagedCount = groups.staged.length;
-  const openMenu = (entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor) =>
+  const openMenu = (entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor) => {
+    setFocusedRow({ path: entry.path, target });
     setMenu({ entry, target, anchor });
+  };
+  const focusRow = (entry: GitStatusEntry, target: GitDiffTarget) => setFocusedRow({ path: entry.path, target });
   return <section className="git-sidebar" aria-label="Source Control">
     <header className="git-sidebar-header">
       <strong>{props.status.repository.headName || (props.status.repository.initial ? "Initial repository" : "Detached HEAD")}</strong>
       <small title={props.status.repository.worktreeRoot}>{props.status.repository.worktreeRoot}</small>
     </header>
-    {props.error && <div className="surface-error" role="alert">{props.error}</div>}
+    {props.error && <SurfaceError detail={props.error} />}
     {props.status.copyDetectionIncomplete && <div className="surface-note" role="status">Copy detection was bounded for this large change set; some copies may appear as additions.</div>}
     {!props.status.authoritative && <div className="surface-error" role="alert">Git status is resynchronizing. Mutations are disabled.</div>}
     <div className="git-status-groups">
-      <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor)} />
-      <GitGroup title="Staged" entries={groups.staged} target="staged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "staged", anchor)} />
-      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor)} />
-      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor)} />
-      <GitGroup title="Ignored" entries={groups.ignored} target="unstaged" onOpen={props.onOpenDiff} />
+      <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" onFocusEntry={focusRow} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor)} />
+      <GitGroup title="Staged" entries={groups.staged} target="staged" busyPath={busyPath} onFocusEntry={focusRow} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "staged", anchor)} />
+      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" busyPath={busyPath} onFocusEntry={focusRow} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor)} />
+      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" busyPath={busyPath} onFocusEntry={focusRow} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor)} />
+      <GitGroup title="Ignored" entries={groups.ignored} target="unstaged" onFocusEntry={focusRow} onOpen={props.onOpenDiff} />
       {props.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
     </div>
     {/* The commit form is not permanent chrome any more: it exists exactly when
@@ -109,7 +152,7 @@ export function GitSidebar(props: Props) {
         if (!keyboardEventIsComposing(event.nativeEvent) && event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void commit(); }
       }} value={commitMessage} />
       <button className="primary" disabled={unavailable} type="submit">Commit {stagedCount} staged</button>
-      {commitError && <span className="surface-error" role="alert">{commitError}</span>}
+      {commitError && <SurfaceError detail={commitError} />}
       {commitOutput && <pre aria-label="Git commit output" className={commitOutput.outcome === "applied" && !commitOutput.refreshFailed ? "git-output" : "git-output error"}>{commandDetails(commitOutput, "Commit created.")}</pre>}
     </form>}
     {menu && <ContextMenu
@@ -154,6 +197,7 @@ export function GitSidebar(props: Props) {
 function GitGroup(props: {
   title: string; entries: GitStatusEntry[]; target: GitDiffTarget; busyPath?: string;
   onOpen(entry: GitStatusEntry, target: GitDiffTarget): void;
+  onFocusEntry(entry: GitStatusEntry, target: GitDiffTarget): void;
   onMenu?(entry: GitStatusEntry, anchor: ContextMenuAnchor): void;
 }) {
   const [limit, setLimit] = useState(200);
@@ -168,6 +212,9 @@ function GitGroup(props: {
           className="git-file"
           disabled={entry.ignored}
           onClick={() => props.onOpen(entry, props.target)}
+          // What "the selected change" means for the palette and for a bound
+          // shortcut: whichever row the keyboard or the pointer last landed on.
+          onFocus={() => props.onFocusEntry(entry, props.target)}
           onContextMenu={(event) => {
             if (!props.onMenu) return;
             event.preventDefault();

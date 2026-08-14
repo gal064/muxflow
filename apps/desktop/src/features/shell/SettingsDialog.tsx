@@ -1,5 +1,6 @@
 import { useId, useState } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
+import { SurfaceError } from "../../ui/SurfaceError";
 import type { ConnectionSpec, HostProfile } from "../../app/types";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
@@ -108,9 +109,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
             </button>}
             {props.helper.phase === "ready" && <HelperDetails probe={props.helper.probe} />}
             {props.helper.phase === "upgrading" && <p role="status">Upgrading the remote helper; the previous one is retained until the new handshake succeeds.</p>}
-            {props.helper.phase === "failed" && <p className="surface-error" role="alert">
-              {props.helper.rollback === "restored" ? "Upgrade failed; previous helper restored." : props.helper.rollback === "failed" ? "Upgrade and rollback failed." : "Helper check failed."} {props.helper.message}
-            </p>}
+            {props.helper.phase === "failed" && <SurfaceError
+              detail={props.helper.message}
+              summary={props.helper.rollback === "restored" ? "Upgrade failed; the previous helper was restored." : props.helper.rollback === "failed" ? "Upgrade and rollback both failed — check the helper on the host before reconnecting." : "The helper check failed."}
+            />}
             {props.helper.phase === "succeeded" && <p role="status">Helper {props.helper.operation === "install" ? "installed" : "upgraded"}. {props.helper.message}</p>}
           </div>}
         </>}

@@ -21,6 +21,7 @@ const context = (overrides: Partial<CommandContext> = {}): CommandContext => ({
   canMutate: true, hasPane: true, hasSession: true, hasWindow: true, hasTab: true,
   canMoveSessionUp: true, canMoveSessionDown: true,
   canMoveTabLeft: true, canMoveTabRight: true,
+  rowCommands: [],
   run: () => undefined, ...overrides,
 });
 
@@ -178,6 +179,46 @@ describe("command registry", () => {
     expect(commandsForSurface("menu").filter((command) => command.destructive).map((command) => command.id)).toEqual([
       "session.close", "window.close", "pane.close",
     ]);
+  });
+
+  it("offers a row command only while a row surface publishes it", () => {
+    const stage = commandRegistry.find((command) => command.id === "git.stage")!;
+    const rename = commandRegistry.find((command) => command.id === "files.rename")!;
+    // Nothing focused in a row surface: the palette shows them unavailable
+    // rather than pretending it knows which row is meant.
+    expect(commandAvailable(stage, context())).toBe(false);
+    expect(commandAvailable(rename, context())).toBe(false);
+    expect(commandAvailable(stage, context({ rowCommands: ["git.stage"] }))).toBe(true);
+    // The publishing surface is the whole rule. It already applied read-only
+    // state, submodule state and panel visibility before publishing, so a
+    // second copy of those conditions here could only disagree with it.
+    expect(commandAvailable(stage, context({ canMutate: false, rowCommands: ["git.stage"] }))).toBe(true);
+    expect(commandAvailable(rename, context({ rowCommands: ["git.stage"] }))).toBe(false);
+  });
+
+  it("keeps every row action reachable from the palette, and never as a tmux confirmation", () => {
+    const rowCommands = commandRegistry.filter((command) => command.requires === "row");
+    // Every removed per-row button, as a searchable command.
+    expect(rowCommands.map((command) => command.id)).toEqual([
+      "agents.focusRow", "agents.renameRow", "agents.resumeRow",
+      "files.open", "files.rename", "files.move", "files.duplicate", "files.download",
+      "files.delete", "files.newFile", "files.newFolder", "files.refresh",
+      "git.openDiff", "git.stage", "git.unstage", "git.discard",
+    ]);
+    expect(rowCommands.every((command) => !command.paletteHidden)).toBe(true);
+    // `destructive` here means "confirm as a tmux action". Deleting a file and
+    // discarding a diff confirm inside the surface that owns them; marking them
+    // would produce a second, wrongly-worded prompt.
+    expect(rowCommands.some((command) => command.destructive)).toBe(false);
+    // No defaults: every free chord is spent, and these are bindable in the
+    // shortcut editor like anything else in the one registry.
+    expect(rowCommands.some((command) => command.defaults)).toBe(false);
+    // The palette prints a group heading whenever the group changes going down
+    // the registry, so each group has to occupy one contiguous run.
+    const groupRuns = commandsForSurface("palette").reduce<string[]>(
+      (runs, command) => runs.at(-1) === command.group ? runs : [...runs, command.group], [],
+    );
+    expect(groupRuns).toEqual([...new Set(groupRuns)]);
   });
 
   it("closes app-owned tabs while disconnected but never sends terminal-window close while frozen", () => {

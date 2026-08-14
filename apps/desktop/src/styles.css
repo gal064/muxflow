@@ -59,6 +59,22 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   padding: 5px 12px; color: var(--danger-ink); background: var(--danger-wash);
   font-size: var(--type-secondary); overflow-wrap: anywhere;
 }
+/* A rejection reads as a sentence; the host's own diagnostic is one disclosure
+   away and still selectable, per 11.4.4 / M10-E059. */
+.surface-error-summary { display: block; }
+.surface-error-details { margin-top: 4px; }
+.surface-error-details > summary {
+  color: var(--chrome-dim); font-size: var(--type-label);
+  letter-spacing: var(--tracking-label); text-transform: uppercase;
+}
+.surface-error-details > summary:focus-visible {
+  outline: var(--focus-ring) solid var(--accent); outline-offset: 1px;
+}
+.surface-error-details > pre {
+  margin: 4px 0 0; max-height: 132px; overflow: auto;
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: var(--type-meta);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 .surface-note {
   padding: 5px 12px; color: var(--chrome-dim);
   font-size: var(--type-secondary); overflow-wrap: anywhere;
@@ -842,6 +858,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .toast[role="alert"], .toast-problem { border-color: var(--danger); }
 .toast-problem > span { color: var(--danger-ink); }
 .toast span { color: var(--chrome-dim); overflow-wrap: anywhere; }
+/* The problem toast carries a SurfaceError rather than a bare line, so the
+   summary is what is read and the raw rejection is one disclosure down. No
+   padding or wash of its own — the toast already is the container. */
+.toast-body { padding: 0; background: none; font-size: inherit; }
+.toast-body > .surface-error-summary { color: var(--danger-ink); }
 .toast > div { display: flex; gap: 6px; }
 .toast button {
   justify-self: start; padding: 5px 9px;
