@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
+import { SurfaceError } from "../../ui/SurfaceError";
 import type { AgentHookReview } from "./types";
 
 interface HookReviewDialogProps {
@@ -35,7 +36,7 @@ export function HookReviewDialog(props: HookReviewDialogProps) {
         {props.review.trustGuidance && <p className="hook-trust" role="note">{props.review.trustGuidance}</p>}
         {props.review.backupPath && <p className="hook-backup">Backup: <code>{props.review.backupPath}</code></p>}
         {props.review.alreadyInstalled && <p role="status">The managed hook is already current. Confirming is idempotent.</p>}
-        {props.error && <p className="dialog-error" role="alert">{props.error}</p>}
+        {props.error && <SurfaceError className="dialog-error" detail={props.error} />}
       </div>
       <footer>
         <button disabled={props.applying} onClick={props.onCancel} type="button">Cancel</button>

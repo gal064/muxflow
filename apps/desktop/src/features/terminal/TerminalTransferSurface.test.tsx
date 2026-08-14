@@ -226,7 +226,7 @@ describe("TerminalTransferSurface", () => {
       ><div /></TerminalTransferSurface>);
     });
     await act(async () => { expect(await controller!.pasteClipboard()).toBe(true); });
-    expect(renderer!.root.findByProps({ role: "alert" }).children.join("")).toContain("25 MiB");
+    expect(alertText(renderer!.root.findByProps({ role: "alert" }))).toContain("25 MiB");
     expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining("25 MiB"));
   });
 
@@ -319,8 +319,8 @@ describe("TerminalTransferSurface", () => {
     });
     expect(transferClient.cancel).toHaveBeenCalledWith("transfer-second");
     expect(view.onPaste).not.toHaveBeenCalled();
-    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => node.children.join("").includes("disk full"))).toBe(true);
-    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => node.children.join("").includes("Partial cleanup failed: permission denied"))).toBe(true);
+    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => alertText(node).includes("disk full"))).toBe(true);
+    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => alertText(node).includes("Partial cleanup failed: permission denied"))).toBe(true);
   });
 
   it("surfaces source rejection and never starts or pastes", async () => {
@@ -330,7 +330,7 @@ describe("TerminalTransferSurface", () => {
       view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onPasteCapture(clipboardEvent("file:///tmp/folder"));
       await Promise.resolve(); await Promise.resolve();
     });
-    expect(view.renderer.root.findByProps({ role: "alert" }).children.join("")).toContain("Directories");
+    expect(alertText(view.renderer.root.findByProps({ role: "alert" }))).toContain("Directories");
     expect(transferClient.start).not.toHaveBeenCalled();
     expect(view.onPaste).not.toHaveBeenCalled();
   });
@@ -350,7 +350,7 @@ describe("TerminalTransferSurface", () => {
       view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onPasteCapture(clipboardEvent("file:///tmp/timeout"));
       await Promise.resolve(); await Promise.resolve();
     });
-    const alerts = view.renderer.root.findAllByProps({ role: "alert" }).map((node) => node.children.join(""));
+    const alerts = view.renderer.root.findAllByProps({ role: "alert" }).map((node) => alertText(node));
     expect(alerts).toContain("Upload timed out before an authoritative result arrived.");
     expect(alerts).toContain("The upload outcome is unknown. Inspect the destination before retrying or pasting.");
     expect(view.onPaste).not.toHaveBeenCalled();
@@ -366,7 +366,7 @@ describe("TerminalTransferSurface", () => {
       await Promise.resolve(); await Promise.resolve();
     });
     expect(view.renderer.root.findByProps({ role: "dialog" })).toBeDefined();
-    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => node.children.join("").includes("500 MiB"))).toBe(true);
+    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => alertText(node).includes("500 MiB"))).toBe(true);
     await act(async () => {
       view.renderer.root.findByProps({ "aria-label": "Upload collision behavior" }).props.onChange({ target: { value: "overwriteConfirmed" } });
     });
@@ -665,3 +665,17 @@ describe("u64-safe transfer presentation", () => {
     expect(pointIsInside(element as HTMLElement, { x: 5, y: 5 }, 2)).toBe(false);
   });
 });
+
+/**
+ * A rejection banner is a summary plus a `<details>` disclosure now, so its
+ * text no longer sits directly under the alert node.
+ */
+function alertText(node: { children: readonly unknown[] }): string {
+  const walk = (value: unknown): string => {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return value.map(walk).join("");
+    if (value && typeof value === "object" && "children" in value) return walk((value as { children: unknown }).children ?? []);
+    return "";
+  };
+  return walk(node.children);
+}

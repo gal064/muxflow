@@ -13,6 +13,7 @@ import {
 import { fuzzyRank } from "./fuzzy";
 import { shortcutGlyphs, shortcutSpoken } from "./shortcutGlyphs";
 import { useModalDialog } from "./useModalDialog";
+import { Icon } from "../ui/Icon";
 
 interface Props {
   context: CommandContext;
@@ -63,6 +64,7 @@ export function CommandPalette({ context, onClose, onInvoke, platform, shortcuts
     <section aria-labelledby={titleId} aria-modal="true" className="palette" ref={dialog} role="dialog">
       <h2 className="sr-only" id={titleId}>Command palette</h2>
       <div className="palette-input">
+        <Icon className="palette-search" name="search" size={13} />
         <input
           aria-activedescendant={commands[activeIndex] ? `command-${commands[activeIndex].id}` : undefined}
           aria-controls="command-results"

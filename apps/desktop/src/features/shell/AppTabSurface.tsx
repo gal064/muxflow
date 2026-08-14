@@ -6,6 +6,7 @@ import { AutosaveController, type AutosaveView } from "../files/autosave";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { renderSafeMarkdown, renderSafeSvg } from "../files/markdown";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
+import { SurfaceError } from "../../ui/SurfaceError";
 import type { AppOwnedTab } from "./types";
 import "../files/monaco";
 
@@ -166,7 +167,7 @@ export function AppTabSurface(props: Props) {
       </div>}
       <button onClick={() => props.onDownload(props.tab.resource, "file", root)} type="button">Download…</button>
     </header>
-    {view?.error && <div className="editor-error" role="alert">{view.error}</div>}
+    {view?.error && <SurfaceError className="editor-error" detail={view.error} />}
     {mode !== "preview" && <div className="monaco-host">
       <Editor
         language={languageForPath(props.tab.resource)}

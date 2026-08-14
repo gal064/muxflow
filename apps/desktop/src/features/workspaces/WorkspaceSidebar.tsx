@@ -261,7 +261,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               <span className="agent-line">
                 {/* Decorative: the row button's own accessible name already
                     says the state, and a role="img" here announced it twice. */}
-                <span aria-hidden="true" className={`state-dot `}>{props.stateGlyphs ? STATE_GLYPH[row.state] : ""}</span>
+                {/* The state is in the class, not just the glyph: color is the
+                    encoding (yellow working, red blocked, teal done-unread,
+                    hollow idle) and the shape is the opt-in accessible
+                    alternative to it. */}
+                <span aria-hidden="true" className={`state-dot ${row.state}`}>{props.stateGlyphs ? STATE_GLYPH[row.state] : ""}</span>
                 <span className="agent-location">{row.location.workspaceName}</span>
                 {row.location.tabIndex !== undefined && <span className="agent-tab">{row.location.tabIndex}</span>}
               </span>

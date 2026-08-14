@@ -39,6 +39,27 @@ const ROUTINE_PREFIXES = [
   "Resuming ",
 ];
 
+/**
+ * Internal bookkeeping that fails as a *consequence* of something already being
+ * reported, and never as the thing a person should act on.
+ *
+ * Marking a pane hidden or visible is how the app tells the host which panes it
+ * is showing. When the link drops, every mounted pane's teardown fails at once
+ * and the last one wins the status channel — so a disconnect surfaced as a
+ * permanent red alert reading "Could not mark %129 hidden: terminal client is
+ * no longer attached", naming an internal pane id, offering nothing to do, and
+ * never auto-dismissing. Measured on the packaged app. The disconnected strip
+ * and the host row already say the true thing, and the full text stays in the
+ * live region.
+ *
+ * Matched on the whole message shape, so a bookkeeping failure that is *not* a
+ * disconnect consequence still shows.
+ */
+const CONSEQUENTIAL = [
+  /^Could not mark %\d+ (hidden|visible): /u,
+  /^Could not mark agent attention seen: /u,
+];
+
 export interface StatusNotice {
   message: string;
   /** Distinguishes two identical messages so a repeat re-shows the notice. */
@@ -54,6 +75,7 @@ export function noticeForStatus(message: string, id: number): StatusNotice | und
   if (trimmed === "") return undefined;
   if (ROUTINE.has(trimmed)) return undefined;
   if (ROUTINE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return undefined;
+  if (CONSEQUENTIAL.some((pattern) => pattern.test(trimmed))) return undefined;
   return { message: trimmed, id, severity: PROBLEM.test(trimmed) ? "problem" : "info" };
 }
 

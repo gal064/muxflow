@@ -41,7 +41,7 @@ export function TitleBar(props: TitleBarProps) {
     ><Icon name="sidebarLeft" /></button>
     <div className="titlebar-title" data-tauri-drag-region>
       <span className="titlebar-workspace">{props.workspaceName ?? "No workspace"}</span>
-      {props.branch && <span className="titlebar-branch" title={`Git branch ${props.branch}`}>{props.branch}</span>}
+      {props.branch && <span className="titlebar-branch" title={`Git branch ${props.branch}`}><Icon name="branch" size={11} />{props.branch}</span>}
     </div>
     <div className="titlebar-spacer" data-tauri-drag-region />
     <button

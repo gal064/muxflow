@@ -121,6 +121,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   color: var(--chrome-ink); font-size: var(--type-row); font-weight: 550;
 }
 .titlebar-branch {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0;
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -134,6 +135,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .bar-button:hover:not(:disabled) { background: var(--chrome-hover); color: var(--chrome-ink); }
 .bar-button[aria-pressed="true"] { color: var(--chrome-ink-strong); }
+/* A frozen control has to look frozen. While the connection was read-only the
+   titlebar's new-workspace `+` and the strip's split and `+` were disabled and
+   drawn identically to the live ones, so the only feedback from pressing one
+   was nothing happening. */
+.bar-button:disabled { color: var(--chrome-faint); cursor: default; }
 
 .badge {
   display: inline-flex; align-items: center; justify-content: center;
@@ -291,8 +297,30 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 /* ── Workspace column ──────────────────────────────────────────────────── */
 
+/*
+ * `grid-template-columns` is not optional here.
+ *
+ * Without it the grid has one implicit `auto` column, and an `auto` track is
+ * floored by its content's min-content size. The tab strip's content is a row
+ * of `flex: 0 0 auto` tabs, so that floor is "every tab at its natural width" —
+ * and the column, and everything laid out in it, grew past the column's own
+ * box. Measured on the packaged app at 1280x800 with the right panel open and
+ * four long tab names: the tiled terminal surface ran to x=1129 while the panel
+ * began at x=1097, so the panel's Files/Git tabs and its file rows were painted
+ * over by the tab strip and the terminal.
+ *
+ * `minmax(0, 1fr)` gives the track no min-content floor, which is what makes
+ * `.tabstrip-tabs`'s `overflow-x: auto` reachable: the strip scrolls instead of
+ * pushing.
+ *
+ * This matters beyond the smear. The tmux client size is measured from the
+ * tiled surface's pixel box (Stage 12.10), so an overflowing surface asks the
+ * user's tmux server for a wider grid than the window actually shows.
+ */
 .workspace {
-  display: grid; grid-template-rows: var(--bar-height) minmax(0, 1fr);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--bar-height) minmax(0, 1fr);
   flex: 1 1 auto; min-width: 0; min-height: 0;
   background: var(--term-bg);
 }
@@ -303,7 +331,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 .tabstrip {
   display: flex; align-items: stretch;
-  height: var(--bar-height); padding: 0 4px; gap: 1px;
+  /* `min-width: 0` for the same reason as the grid track above: the strip must
+     never be the thing that decides how wide the workspace column is. */
+  height: var(--bar-height); min-width: 0; padding: 0 4px; gap: 1px;
   background: var(--chrome-bg); border-bottom: 1px solid var(--chrome-hairline);
 }
 .tabstrip-tabs { display: flex; min-width: 0; overflow-x: auto; scrollbar-width: none; }
@@ -620,6 +650,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .git-target.staged { color: var(--term-2); }
 .git-diff-toolbar .danger, .git-hunk-actions .danger { color: var(--danger-ink); }
 .git-diff-error { padding: 5px 8px; border-bottom: 1px solid var(--danger); background: var(--danger-wash); color: var(--danger-ink); font-size: 11px; }
+/* The editor's own rejection banner. It had no rule at all before — it
+   inherited whatever the tab header left behind — and now that it carries a
+   disclosure it needs the same treatment as every other one. */
+.editor-error { padding: 5px 10px; background: var(--danger-wash); color: var(--danger-ink); font-size: 11px; overflow-wrap: anywhere; }
 .git-diff-content { min-width: 0; min-height: 0; }
 .git-diff-empty { min-height: 0; display: grid; align-content: center; justify-items: center; padding: 30px; color: var(--chrome-dim); text-align: center; }
 .git-diff-empty h1 { margin: 10px 0 3px; color: var(--chrome-ink); font-size: 15px; }
@@ -709,7 +743,14 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    and under forced-colors an unringed one is invisible. */
 .palette-input input:focus-visible { outline-offset: -1px; }
 .palette-hint { flex: 0 0 auto; color: var(--chrome-faint); font-size: var(--type-meta); }
-.palette-list { max-height: min(420px, 60vh); padding: 4px 0 8px; overflow-y: auto; }
+/* A whole number of rows, plus the padding. 420px was not one, so the list
+   ended by slicing its last row through the middle — the mock's palette ends on
+   a row boundary. */
+.palette-list {
+  max-height: min(calc(var(--palette-row-height) * 14 + 12px), 60vh);
+  padding: 4px 0 8px; overflow-y: auto;
+}
+.palette-search { flex: 0 0 auto; color: var(--chrome-faint); }
 .palette-group { padding: 8px 14px 2px; }
 .palette-group { font-size: var(--type-label); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--chrome-faint); }
 .palette-row {
@@ -918,6 +959,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   }
   .pane-frame.attention::after { border-color: Highlight; }
   .state-dot, .tab-dot, .link-dot, .badge { border: 1px solid ButtonText; }
+  .bar-button:disabled { color: GrayText; }
   .link-strip { border-bottom: 2px solid ButtonText; }
   /* Read-only and reconnecting are two different situations and the colors
      that separate them do not survive here, so the words carry it. */

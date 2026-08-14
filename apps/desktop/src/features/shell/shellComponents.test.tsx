@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import stylesCss from "../../styles.css?raw";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
@@ -118,6 +119,25 @@ describe("application shell accessibility contracts", () => {
     await act(async () => { renderer.update(element([])); });
     expect(rowCommandRegistry.available()).toEqual([]);
     await act(async () => { renderer.unmount(); });
+  });
+
+  it("encodes every agent state in the dot's class, which is where the color comes from", () => {
+    // The dot has no background of its own: `.state-dot.working` and friends
+    // carry it. A dot rendered as bare `state-dot` is an invisible 8x8 box, and
+    // the agents section loses the whole encoding the mock is built around —
+    // which is exactly what shipped when this class stopped interpolating.
+    for (const [lifecycle, expected] of [["working", "working"], ["blocked", "blocked"], ["idle", "idle"]] as const) {
+      const html = sidebar({
+        agents: buildAgentRows([agent({ displayName: "A", lifecycle })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "grouped"),
+      });
+      expect(html, lifecycle).toContain(`class="state-dot ${expected}"`);
+    }
+    // Every state the list can produce must have a rule to match, or the same
+    // defect returns for one state instead of all of them.
+    // Read the same way `theme.test.ts` reads `tokens.css`: the real file.
+    for (const state of ["working", "blocked", "done", "unknown", "idle"]) {
+      expect(stylesCss, state).toContain(`.state-dot.${state}`);
+    }
   });
 
   it("states empty sidebar sections in one line each", () => {

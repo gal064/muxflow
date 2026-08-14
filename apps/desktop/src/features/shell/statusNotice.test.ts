@@ -48,3 +48,18 @@ describe("status notices", () => {
     expect(noticeForStatus("same", 2)?.id).toBe(2);
   });
 });
+
+describe("consequential bookkeeping failures", () => {
+  it("does not turn a disconnect's pane teardown into a permanent red alert", () => {
+    // Measured on the packaged app: dropping the link made every mounted pane's
+    // hide request fail, and the last one became a non-dismissing alert naming
+    // an internal pane id. The strip and the host row already say what happened.
+    expect(noticeForStatus("Could not mark %129 hidden: terminal client is no longer attached", 1)).toBeUndefined();
+    expect(noticeForStatus("Could not mark %7 visible: connection closed", 2)).toBeUndefined();
+    expect(noticeForStatus("Could not mark agent attention seen: request timed out", 3)).toBeUndefined();
+    // Anything that is not that exact bookkeeping shape still shows: the module
+    // is a denylist of known chatter, not an allowlist of known problems.
+    expect(noticeForStatus("Could not mark the file read-only", 4)?.severity).toBe("problem");
+    expect(noticeForStatus("Could not save application tabs; changes will be retried: nope", 5)?.severity).toBe("problem");
+  });
+});
