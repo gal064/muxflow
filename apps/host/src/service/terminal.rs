@@ -543,12 +543,17 @@ fn register_mounted_panes(
 /// pane is being captured. `input.rs` upholds the same rule for its own marker,
 /// and `capture_marker_and_capture_command_are_never_split_by_concurrent_input`
 /// proves it under concurrency.
+///
+/// The marker is untargeted, for the same reason `queue_input`'s is: a marker
+/// targeted at a pane that has just vanished fails, and a failed marker block
+/// carries no pane, so its `%error` would be attributed to the whole connection
+/// and resnapshot every pane in every workspace. The pane the capture belongs to
+/// is still verified authoritatively — the `__ADE_META__` line inside the
+/// capture carries tmux's own `#{pane_id}` and `capture_metadata` refuses a
+/// capture whose metadata names a different pane.
 fn queue_capture(stdin: &mut impl Write, pane_id: &str) -> anyhow::Result<()> {
     validate_tmux_id(pane_id, '%')?;
-    writeln!(
-        stdin,
-        "display-message -p -t {pane_id} '__ADE_CAPTURE__:#{{pane_id}}'"
-    )?;
+    writeln!(stdin, "{}", queue_marker("__ADE_CAPTURE__", pane_id))?;
     writeln!(stdin, "{}", capture_command(pane_id))?;
     Ok(())
 }
@@ -609,6 +614,9 @@ fn write_capture_request_resuming<W: Write>(
         .lock()
         .map_err(|_| anyhow::anyhow!("tmux control stdin is poisoned"))?;
     if resume_first {
+        // The marker names the pane this resume belongs to, so a rejected
+        // resume resnapshots one pane instead of the whole connection.
+        writeln!(writer, "{}", queue_marker("__ADE_RESUME__", pane_id))?;
         // The quotes are load-bearing. tmux's command lexer (`cmd-parse.y`
         // `yylex`) treats an unquoted word beginning with `%` as a `%if`-style
         // conditional directive unless the rest of the word is digits or `%`;
@@ -623,18 +631,24 @@ fn write_capture_request_resuming<W: Write>(
     Ok(())
 }
 
-/// The correlation marker an in-band input request writes ahead of its
-/// `send-keys`. It is deliberately untargeted so it cannot fail when the pane
-/// has vanished: the marker's job is to name the pane whose command block is
-/// about to fail, which requires the marker itself to always succeed.
+/// The correlation marker written ahead of a command whose `%error` has to be
+/// attributed to one pane: an in-band `send-keys`, a flow-control resume, or a
+/// capture. It is deliberately untargeted so it cannot fail when the pane has
+/// vanished — the marker's job is to name the pane whose command block is about
+/// to fail, which requires the marker itself to always succeed.
 ///
 /// The pane's `%` sigil is stripped rather than written literally. tmux runs a
 /// display message through `strftime`, which silently swallows `%0` as an
 /// unknown conversion — the marker looked correct and matched nothing. The
 /// reader restores the sigil.
-pub(super) fn queue_input(pane_id: &str) -> String {
+fn queue_marker(kind: &str, pane_id: &str) -> String {
     let digits = pane_id.strip_prefix('%').unwrap_or(pane_id);
-    format!("display-message -p '__ADE_INPUT__:{digits}'")
+    format!("display-message -p '{kind}:{digits}'")
+}
+
+/// The marker an in-band input request writes ahead of its `send-keys`.
+pub(super) fn queue_input(pane_id: &str) -> String {
+    queue_marker("__ADE_INPUT__", pane_id)
 }
 
 fn capture_command(pane_id: &str) -> String {
@@ -670,16 +684,20 @@ mod tests {
         let sink = Arc::new(Mutex::new(Vec::new()));
         write_capture_request_resuming(&sink, "%5", true).unwrap();
         let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
-        let resume = written.lines().next().unwrap();
-        assert_eq!(resume, "refresh-client -A '%5:continue'");
-        // The resume shares the lock hold with the reseed tmux drops output
-        // during a pause, so the capture that follows it is mandatory.
-        assert!(written.contains("__ADE_CAPTURE__"));
+        let lines: Vec<_> = written.lines().collect();
+        assert_eq!(lines[0], "display-message -p '__ADE_RESUME__:5'");
+        assert_eq!(lines[1], "refresh-client -A '%5:continue'");
+        // tmux drops output produced while a pane is paused rather than
+        // replaying it, so the capture that shares this lock hold is what
+        // actually recovers the screen. The resume alone would leave a hole.
+        assert_eq!(lines[2], "display-message -p '__ADE_CAPTURE__:5'");
+        assert!(lines[3].starts_with("capture-pane -p -e -J -S -2000 -t %5"));
 
         let sink = Arc::new(Mutex::new(Vec::new()));
         write_capture_request_resuming(&sink, "%5", false).unwrap();
         let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
         assert!(!written.contains("refresh-client"));
+        assert!(!written.contains("__ADE_RESUME__"));
     }
 
     #[test]

@@ -145,6 +145,15 @@ pub(super) enum CommandBlock {
     Input {
         tag: CommandTag,
         pane_id: String,
+        lines: Vec<Vec<u8>>,
+    },
+    /// One `refresh-client -A '%N:continue'`, correlated to the pane its marker
+    /// named. A rejected resume leaves that pane paused forever, so it must be
+    /// reported against the pane rather than the connection.
+    Resume {
+        tag: CommandTag,
+        pane_id: String,
+        lines: Vec<Vec<u8>>,
     },
     CapturePrimary {
         tag: CommandTag,
@@ -173,6 +182,7 @@ pub(super) struct StreamState {
     pub(super) pane_states: HashMap<String, PaneSeedState>,
     pub(super) expected_capture: Option<String>,
     pub(super) expected_input: Option<String>,
+    pub(super) expected_resume: Option<String>,
     pub(super) pending_alternate: Option<(String, Vec<Vec<u8>>, u64)>,
     pub(super) pending_metadata: Option<PendingCaptureMetadata>,
     command_block: CommandBlock,
@@ -213,6 +223,7 @@ impl StreamState {
                 .collect(),
             expected_capture: None,
             expected_input: None,
+            expected_resume: None,
             pending_alternate: None,
             pending_metadata: None,
             command_block: CommandBlock::None,
@@ -293,7 +304,16 @@ impl StreamState {
                     }
                     lines.push(line);
                 }
-                CommandBlock::Input { .. } => {}
+                // `send-keys` and `refresh-client` print nothing when they
+                // succeed; a line here is the rejection reason, and carrying a
+                // few of them is what makes the `%error` below readable. The
+                // bound keeps a misrouted block from growing a log detail
+                // without limit.
+                CommandBlock::Input { lines, .. } | CommandBlock::Resume { lines, .. } => {
+                    if lines.len() < MAX_ERROR_DETAIL_LINES {
+                        lines.push(line);
+                    }
+                }
                 CommandBlock::CapturePrimary { lines, .. }
                 | CommandBlock::CaptureAlternate { lines, .. }
                 | CommandBlock::CaptureMetadata { lines, .. } => lines.push(line),
@@ -327,11 +347,21 @@ impl StreamState {
                 // rejected keystroke reaches the user only here. Scoping the
                 // recovery to the pane keeps one dead pane from resnapshotting
                 // the whole connection, and the detail names the cause.
+                //
+                // `arguments` is only the `%error` header's three numbers. What
+                // tmux actually objected to arrived as the block's output lines
+                // ("parse error: syntax error"), so a detail without them names
+                // no cause at all — that is why P12-U001 was invisible in every
+                // log it produced.
+                let reason = error_reason(&arguments, self.block_lines());
                 let detail = match &self.command_block {
                     CommandBlock::Input { pane_id, .. } => {
-                        format!("terminal input for {pane_id} was rejected by tmux: {arguments}")
+                        format!("terminal input for {pane_id} was rejected by tmux: {reason}")
                     }
-                    _ => arguments,
+                    CommandBlock::Resume { pane_id, .. } => format!(
+                        "tmux rejected the flow-control resume for {pane_id}; the pane stays paused until it is reseeded: {reason}"
+                    ),
+                    _ => reason,
                 };
                 // An error abandons whatever multi-block sequence was running,
                 // so every correlation slot has to be released too — otherwise
@@ -340,6 +370,7 @@ impl StreamState {
                 self.command_block = CommandBlock::None;
                 self.expected_capture = None;
                 self.expected_input = None;
+                self.expected_resume = None;
                 self.pending_alternate = None;
                 self.pending_metadata = None;
                 // No automatic retry here. The event above already asks the
@@ -437,13 +468,19 @@ impl StreamState {
             CommandBlock::Unknown { pane_id, lines, .. } => {
                 match classify_marker_block(pane_id, &lines) {
                     MarkerBlock::Input(pane_id) => self.expected_input = Some(pane_id),
+                    MarkerBlock::Resume(pane_id) => self.expected_resume = Some(pane_id),
                     MarkerBlock::Capture(pane_id) => {
                         self.expected_capture =
                             pane_id.filter(|pane_id| self.pane_states.contains_key(pane_id));
                     }
                 }
             }
-            CommandBlock::Input { .. } => {}
+            // A resume that ends without an error is not an ack: tmux emits
+            // `%continue` only when a pane really was paused, and says nothing
+            // at all otherwise. The capture written with it is what actually
+            // recovers the pane, because output produced while paused is
+            // dropped rather than replayed.
+            CommandBlock::Input { .. } | CommandBlock::Resume { .. } => {}
             CommandBlock::CapturePrimary { pane_id, lines, .. } => {
                 // tmux emits one %begin/%end block per command separated by
                 // `;`: capture-pane and its following display-message metadata
@@ -612,6 +649,7 @@ impl StreamState {
         match &self.command_block {
             CommandBlock::Unknown { tag: active, .. }
             | CommandBlock::Input { tag: active, .. }
+            | CommandBlock::Resume { tag: active, .. }
             | CommandBlock::CapturePrimary { tag: active, .. }
             | CommandBlock::CaptureAlternate { tag: active, .. }
             | CommandBlock::CaptureMetadata { tag: active, .. } => *active == tag,
@@ -626,6 +664,7 @@ impl StreamState {
                 ..
             }
             | CommandBlock::Input { pane_id, .. }
+            | CommandBlock::Resume { pane_id, .. }
             | CommandBlock::CapturePrimary { pane_id, .. }
             | CommandBlock::CaptureAlternate { pane_id, .. }
             | CommandBlock::CaptureMetadata { pane_id, .. } => pane_id.clone(),
@@ -633,9 +672,33 @@ impl StreamState {
         }
     }
 
+    /// The active block's collected output, which for a failing block is the
+    /// text tmux printed to explain itself.
+    fn block_lines(&self) -> &[Vec<u8>] {
+        match &self.command_block {
+            CommandBlock::Unknown { lines, .. }
+            | CommandBlock::Input { lines, .. }
+            | CommandBlock::Resume { lines, .. }
+            | CommandBlock::CapturePrimary { lines, .. }
+            | CommandBlock::CaptureAlternate { lines, .. }
+            | CommandBlock::CaptureMetadata { lines, .. } => lines,
+            CommandBlock::None => &[],
+        }
+    }
+
     pub(super) fn start_block(&mut self, tag: CommandTag) -> CommandBlock {
-        if let Some(pane_id) = self.expected_input.take() {
-            CommandBlock::Input { tag, pane_id }
+        if let Some(pane_id) = self.expected_resume.take() {
+            CommandBlock::Resume {
+                tag,
+                pane_id,
+                lines: Vec::new(),
+            }
+        } else if let Some(pane_id) = self.expected_input.take() {
+            CommandBlock::Input {
+                tag,
+                pane_id,
+                lines: Vec::new(),
+            }
         } else if let Some(pane_id) = self.expected_capture.take() {
             self.pane_states.insert(
                 pane_id.clone(),
@@ -689,6 +752,9 @@ impl StreamState {
                     }
                     if self.expected_input.as_deref() == Some(&pane_id) {
                         self.expected_input = None;
+                    }
+                    if self.expected_resume.as_deref() == Some(&pane_id) {
+                        self.expected_resume = None;
                     }
                     if self
                         .pending_alternate
@@ -748,6 +814,7 @@ impl StreamState {
     fn resnapshot_all(&mut self, writer: &std_mpsc::Sender<super::ControlWrite>) {
         self.expected_capture = None;
         self.expected_input = None;
+        self.expected_resume = None;
         self.pending_alternate = None;
         self.pending_metadata = None;
         self.command_block = CommandBlock::None;
@@ -764,12 +831,13 @@ impl StreamState {
 
 /// What an uncorrelated command block establishes about the block after it.
 ///
-/// Both markers are ordinary `display-message` output, so the only thing that
+/// Every marker is ordinary `display-message` output, so the only thing that
 /// separates them is their prefix; classifying once keeps the reader from
 /// having to know which marker shapes exist.
 #[derive(Debug, PartialEq, Eq)]
 enum MarkerBlock {
     Input(String),
+    Resume(String),
     Capture(Option<String>),
 }
 
@@ -777,7 +845,32 @@ fn classify_marker_block(pane_id: Option<String>, lines: &[Vec<u8>]) -> MarkerBl
     if let Some(pane_id) = lines.iter().find_map(|line| input_marker_pane(line)) {
         return MarkerBlock::Input(pane_id);
     }
+    if let Some(pane_id) = lines.iter().find_map(|line| resume_marker_pane(line)) {
+        return MarkerBlock::Resume(pane_id);
+    }
     MarkerBlock::Capture(pane_id.or_else(|| lines.iter().find_map(|line| marker_pane(line))))
+}
+
+/// How many of a failing block's output lines are carried into its event.
+const MAX_ERROR_DETAIL_LINES: usize = 4;
+
+/// Renders an `%error` as one readable line.
+///
+/// `header` is tmux's three-number command tag, which on its own says only that
+/// *something* failed; `lines` is what tmux printed inside the block, which is
+/// the actual reason.
+fn error_reason(header: &str, lines: &[Vec<u8>]) -> String {
+    let text: Vec<_> = lines
+        .iter()
+        .take(MAX_ERROR_DETAIL_LINES)
+        .map(|line| String::from_utf8_lossy(line).trim().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect();
+    if text.is_empty() {
+        header.to_owned()
+    } else {
+        format!("{header}: {}", text.join("; "))
+    }
 }
 
 fn emit_resnapshot(
@@ -835,19 +928,19 @@ fn marker_pane(line: &[u8]) -> Option<String> {
     marker_pane_with_prefix(line, b"__ADE_CAPTURE__:")
 }
 
-/// Restores the `%` sigil `queue_input` had to strip: tmux's display message
-/// goes through `strftime`, which eats a literal `%0`.
 fn input_marker_pane(line: &[u8]) -> Option<String> {
-    let digits = std::str::from_utf8(line.strip_prefix(b"__ADE_INPUT__:")?).ok()?;
-    let pane = format!("%{digits}");
-    validate_tmux_id(&pane, '%').ok()?;
-    Some(pane)
+    marker_pane_with_prefix(line, b"__ADE_INPUT__:")
 }
 
+fn resume_marker_pane(line: &[u8]) -> Option<String> {
+    marker_pane_with_prefix(line, b"__ADE_RESUME__:")
+}
+
+/// Restores the `%` sigil `queue_marker` had to strip: tmux's display message
+/// goes through `strftime`, which eats a literal `%0`.
 fn marker_pane_with_prefix(line: &[u8], prefix: &[u8]) -> Option<String> {
-    let pane = std::str::from_utf8(line.strip_prefix(prefix)?)
-        .ok()?
-        .to_owned();
+    let digits = std::str::from_utf8(line.strip_prefix(prefix)?).ok()?;
+    let pane = format!("%{digits}");
     validate_tmux_id(&pane, '%').ok()?;
     Some(pane)
 }
@@ -897,19 +990,24 @@ mod tests {
     }
 
     #[test]
-    fn input_marker_survives_the_strftime_pass_that_eats_a_literal_pane_sigil() {
-        // `queue_input` strips the sigil because tmux expands a display message
+    fn every_marker_survives_the_strftime_pass_that_eats_a_literal_pane_sigil() {
+        // `queue_marker` strips the sigil because tmux expands a display message
         // through strftime and drops `%0` as an unknown conversion; the reader
-        // has to put it back or every in-band input goes uncorrelated.
+        // has to put it back or every marked block goes uncorrelated.
         assert_eq!(
             input_marker_pane(b"__ADE_INPUT__:12").as_deref(),
+            Some("%12")
+        );
+        assert_eq!(marker_pane(b"__ADE_CAPTURE__:12").as_deref(), Some("%12"));
+        assert_eq!(
+            resume_marker_pane(b"__ADE_RESUME__:12").as_deref(),
             Some("%12")
         );
         assert_eq!(input_marker_pane(b"__ADE_INPUT__:%12"), None);
         assert_eq!(input_marker_pane(b"__ADE_INPUT__:"), None);
         assert_eq!(input_marker_pane(b"__ADE_INPUT__:1a"), None);
-        assert_eq!(input_marker_pane(b"__ADE_CAPTURE__:%12"), None);
-        assert_eq!(marker_pane(b"__ADE_CAPTURE__:%12").as_deref(), Some("%12"));
+        assert_eq!(input_marker_pane(b"__ADE_CAPTURE__:12"), None);
+        assert_eq!(marker_pane(b"__ADE_CAPTURE__:%12"), None);
     }
 
     #[test]
@@ -919,8 +1017,12 @@ mod tests {
             MarkerBlock::Input("%2".into())
         );
         assert_eq!(
-            classify_marker_block(None, &[b"__ADE_CAPTURE__:%2".to_vec()]),
+            classify_marker_block(None, &[b"__ADE_CAPTURE__:2".to_vec()]),
             MarkerBlock::Capture(Some("%2".into()))
+        );
+        assert_eq!(
+            classify_marker_block(None, &[b"__ADE_RESUME__:2".to_vec()]),
+            MarkerBlock::Resume("%2".into())
         );
         assert_eq!(
             classify_marker_block(None, &[b"__ADE_MEMBERSHIP__".to_vec()]),
@@ -953,10 +1055,72 @@ mod tests {
             lines: Vec::new(),
         };
         if let CommandBlock::Unknown { pane_id, .. } = &mut block {
-            *pane_id = marker_pane(b"__ADE_CAPTURE__:%2");
+            *pane_id = marker_pane(b"__ADE_CAPTURE__:2");
         }
         let mut state = StreamState::new(&["%2".into()]);
         state.command_block = block;
         assert_eq!(state.active_scope(), "%2");
+    }
+
+    /// P12-U001's compounding bugs: a rejected `refresh-client -A` reported
+    /// only the `%error` header's numbers (so the actual "parse error" was
+    /// invisible in every log) and was attributed to the connection, which is
+    /// what turned each one into a full resync — the P12-Q005 signature.
+    #[test]
+    fn a_rejected_resume_names_its_pane_and_carries_the_reason_tmux_printed() {
+        let tag = CommandTag {
+            timestamp: 1786682005,
+            number: 425,
+            flags: 1,
+        };
+        let mut state = StreamState::new(&["%1".into(), "%5".into()]);
+        state.expected_resume = Some("%5".into());
+        state.command_block = state.start_block(tag);
+        assert!(matches!(
+            state.command_block,
+            CommandBlock::Resume { ref pane_id, .. } if pane_id == "%5"
+        ));
+        assert_eq!(state.active_scope(), "%5");
+
+        let mut runtime_lines = Vec::new();
+        if let CommandBlock::Resume { lines, .. } = &mut state.command_block {
+            lines.push(b"parse error: syntax error".to_vec());
+            runtime_lines.clone_from(lines);
+        }
+        let detail = error_reason("1786682005 425 1", &runtime_lines);
+        assert_eq!(detail, "1786682005 425 1: parse error: syntax error");
+        assert_eq!(error_reason("1786682005 425 1", &[]), "1786682005 425 1");
+    }
+
+    /// tmux emits `%continue` only when a pane really was paused and says
+    /// nothing otherwise, so neither the notification nor a clean `%end` on the
+    /// resume is an acknowledgement. Only the capture written with it restores
+    /// the pane — output produced while paused is dropped, never replayed.
+    #[test]
+    fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
+        let tag = CommandTag {
+            timestamp: 1,
+            number: 7,
+            flags: 1,
+        };
+        let mut state = StreamState::new(&["%5".into()]);
+        state.expected_resume = Some("%5".into());
+        state.command_block = state.start_block(tag);
+        let (sender, _receiver) = mpsc::channel(8);
+        let overflowed = AtomicBool::new(false);
+        let resources = Arc::new(Mutex::new(PaneResourceStore::with_total_limit(
+            4, 1024, 4096,
+        )));
+        let generation = Arc::new(AtomicU64::new(0));
+        let (writer, _writes) = std_mpsc::channel();
+        state.finish_block(tag, &sender, &overflowed, &resources, &generation, &writer);
+        assert!(matches!(state.command_block, CommandBlock::None));
+        assert!(
+            matches!(
+                state.pane_states.get("%5"),
+                Some(PaneSeedState::Pending { .. })
+            ),
+            "a resume must not mark the pane live; its capture does that"
+        );
     }
 }
