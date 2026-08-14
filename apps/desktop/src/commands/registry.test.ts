@@ -23,6 +23,7 @@ const context = (overrides: Partial<CommandContext> = {}): CommandContext => ({
   canMutate: true, hasPane: true, hasSession: true, hasWindow: true, hasTab: true,
   canMoveSessionUp: true, canMoveSessionDown: true,
   canMoveTabLeft: true, canMoveTabRight: true,
+  canDeleteHostProfile: true,
   rowCommands: [],
   run: () => undefined, ...overrides,
 });
@@ -191,13 +192,21 @@ describe("command registry", () => {
     expect(commandAvailable(left, context({ canMutate: false, hasWindow: true, hasTab: true }))).toBe(false);
   });
 
-  it("marks exactly the session, window, and pane close menu commands for confirmation", () => {
-    expect(commandRegistry.filter((command) => command.destructive).map((command) => command.id)).toEqual([
-      "session.close", "window.close", "pane.close",
-    ]);
-    expect(commandsForSurface("menu").filter((command) => command.destructive).map((command) => command.id)).toEqual([
-      "session.close", "window.close", "pane.close",
-    ]);
+  it("marks exactly the host-delete and the session, window, and pane closes for confirmation", () => {
+    const destructive = ["host.delete", "session.close", "window.close", "pane.close"];
+    expect(commandRegistry.filter((command) => command.destructive).map((command) => command.id)).toEqual(destructive);
+    // Every one of them is reachable from the searchable surfaces too: a
+    // destructive command that only a shortcut can reach is one nobody can find.
+    expect(commandsForSurface("menu").filter((command) => command.destructive).map((command) => command.id)).toEqual(destructive);
+  });
+
+  it("keeps a saved host deletable while the tmux server it names is unreachable", () => {
+    const remove = commandRegistry.find((command) => command.id === "host.delete")!;
+    // A saved host is a local preference. Gating it on `canMutate` — which is
+    // about the *host's* tmux server being writable — would make the host you
+    // cannot reach the one you cannot remove.
+    expect(commandAvailable(remove, context({ canMutate: false }))).toBe(true);
+    expect(commandAvailable(remove, context({ canDeleteHostProfile: false }))).toBe(false);
   });
 
   it("offers a row command only while a row surface publishes it", () => {

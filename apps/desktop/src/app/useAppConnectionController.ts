@@ -39,6 +39,19 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   const [sshTarget, setSshTarget] = useState("");
   const [sshConfigPath, setSshConfigPath] = useState("");
   const [profiles, setProfiles] = useState<HostProfile[]>([]);
+  /**
+   * The saved host the *picker* is showing, which is not the one the app is
+   * connected to.
+   *
+   * The picker used to derive its value by matching each saved profile against
+   * the live `connection`, so choosing a different host filled the form in and
+   * then snapped the control straight back to the connected one — the selection
+   * was invisible until Connect made it the connection. Selecting is its own
+   * state; Connect is what turns it into a connection. Empty means "current
+   * values": either nothing is chosen, or the form has been edited away from
+   * whatever was.
+   */
+  const [selectedProfileId, setSelectedProfileId] = useState("");
   const [profilesHydrated, setProfilesHydrated] = useState(false);
   const [profileRecovery, setProfileRecovery] = useState<PersistedProfiles["recovery"]>();
   const [connectionDetail, setConnectionDetail] = useState("");
@@ -102,6 +115,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
         : selected.connection;
       setConnection(selectedConnection);
       setConnectionMode(selected.connection.mode);
+      setSelectedProfileId(selected.id);
       if (selected.connection.mode === "ssh") {
         setSshTarget(selected.connection.target);
         setSshConfigPath(selected.connection.configPath ?? "");
@@ -198,9 +212,9 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     activeSessionId, activeWindowId, appFocused, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
-    profiles, profilesHydrated, setActiveSessionId, setActiveWindowId,
+    profiles, profilesHydrated, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
-    setProfileRecovery, setProfiles, setSshConfigPath, setSshTarget, snapshot,
-    snapshotRef, sshConfigPath, sshTarget, terminalEpoch, terminalEpochRef, windows,
+    setProfileRecovery, setProfiles, setSelectedProfileId, setSshConfigPath, setSshTarget,
+    snapshot, snapshotRef, sshConfigPath, sshTarget, terminalEpoch, terminalEpochRef, windows,
   };
 }

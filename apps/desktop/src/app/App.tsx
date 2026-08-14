@@ -70,7 +70,7 @@ import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
-import type { ConnectionSpec, HostProfile, Pane } from "./types";
+import type { ConnectionSpec, HostProfile, Pane, PersistedProfiles } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { requestActiveWindow } from "./windowSelection";
 import { useAppConnectionController } from "./useAppConnectionController";
@@ -109,16 +109,29 @@ export function App() {
     activeSessionId, activeWindowId, appFocused, clientId, clientIdRef, connection,
     connectionDetail, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
-    profiles, setActiveSessionId, setActiveWindowId,
+    profiles, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
-    setProfileRecovery, setProfiles, setSshConfigPath, setSshTarget, snapshot,
-    snapshotRef, sshConfigPath, sshTarget, terminalEpoch, windows,
+    setProfileRecovery, setProfiles, setSelectedProfileId, setSshConfigPath, setSshTarget,
+    snapshot, snapshotRef, sshConfigPath, sshTarget, terminalEpoch, windows,
   } = connectionController;
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus);
   const [compactViewport, setCompactViewport] = useState(() => window.matchMedia?.(COMPACT_VIEWPORT_QUERY).matches ?? false);
   const [windowWidth, setWindowWidth] = useState(() => window.innerWidth || 1280);
   const [helperState, dispatchHelper] = useReducer(helperUpgradeReducer, initialHelperUpgradeState);
   const [profileResetConfirmation, setProfileResetConfirmation] = useState(false);
+  const [hostDeleteConfirmation, setHostDeleteConfirmation] = useState<HostProfile>();
+  // The store refuses to empty the list, so the last saved host is not offered
+  // for deletion here either — a disabled control beats a refusal after a
+  // confirmation dialog.
+  const deletableProfile = profiles.find((profile) => profile.id === selectedProfileId && profiles.length > 1);
+  const deleteSelectedProfile = (profile: HostProfile) => {
+    void invoke<PersistedProfiles>("delete_host_profile", { profileId: profile.id }).then((saved) => {
+      // The store's surviving list, not a locally filtered guess at it.
+      setProfiles(saved.profiles);
+      setSelectedProfileId("");
+      setStatus(`Deleted the saved host ${profile.label}.`);
+    }).catch((error) => setStatus(`Could not delete the saved host ${profile.label}: ${String(error)}`));
+  };
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [workspaceSwitcherOpen, setWorkspaceSwitcherOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -476,15 +489,15 @@ export function App() {
   const { commandContext, runCommand } = useShellCommands({
     activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
 
-    combinedTabs, controllers, currentHostProfileId, focusDirection,
-    generation: hostState.generation, hostScope: currentHostScope,
+    combinedTabs, controllers, currentHostProfileId, deletableHostProfile: deletableProfile,
+    focusDirection, generation: hostState.generation, hostScope: currentHostScope,
     isHostScopeCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
     jumpToUnreadAgent: () => {
       const target = jumpTarget(agentRows);
       if (!target) return setStatus("No agent is waiting on you.");
       selectAgentRow(target);
     },
-    performAction, rowCommands, selectedAppTab,
+    performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
     selectCreatedSession: (sessionId) => { setActiveSessionId(sessionId); setActiveWindowId(undefined); },
     selectRelativeTab: (direction) => {
       const index = combinedTabs.findIndex((tab) => tab.key === activeCombinedTabKey);
@@ -646,12 +659,22 @@ export function App() {
     });
   };
 
-  const selectProfile = (profile: HostProfile) => {
+  const selectProfile = (profile: HostProfile | undefined) => {
+    setSelectedProfileId(profile?.id ?? "");
+    if (!profile) return;
     setConnectionMode(profile.connection.mode);
     if (profile.connection.mode === "ssh") {
       setSshTarget(profile.connection.target);
       setSshConfigPath(profile.connection.configPath ?? "");
     }
+  };
+
+  // Typing in the form is how the picker stops describing what is on screen, so
+  // it drops back to "Current values" rather than naming a saved host whose
+  // details are no longer the ones shown.
+  const editConnectionForm = <T,>(apply: (value: T) => void) => (value: T) => {
+    setSelectedProfileId("");
+    apply(value);
   };
 
   const probeHelper = async () => {
@@ -701,6 +724,7 @@ export function App() {
     if (connectionMode === "local") {
       const profile: HostProfile = { id: "local", label: "Local", connection: { mode: "local" } };
       setConnection(profile.connection);
+      setSelectedProfileId(profile.id);
       // An explicit Connect is also the user's retry control. The selected
       // profile may already have updated `connection`, so changing that state
       // alone is not guaranteed to reconstruct a stalled bridge.
@@ -717,6 +741,7 @@ export function App() {
     const profile: HostProfile = { id: profileId, label: target, connection: nextConnection };
     setConnection(nextConnection);
     setConnectionEpoch((value) => value + 1);
+    setSelectedProfileId(profile.id);
     setProfiles((current) => [...current.filter((item) => item.id !== profile.id), profile]);
     void invoke("save_host_profile", { profile }).catch((error) => setStatus(String(error)));
     setStatus(`Connecting to ${target}…`);
@@ -932,21 +957,23 @@ export function App() {
     <TerminalTransferHistory client={terminalTransferClient} onError={(error) => setStatus(String(error))} registry={terminalTransferRegistry} />
     {agentWorkflow.dialog}
     {settingsOpen && <SettingsDialog
-      connection={connection}
       connectionMode={connectionMode}
+      deletableProfile={deletableProfile}
       helper={helperState}
       onClose={() => setSettingsOpen(false)}
       onConnect={() => { connect(); setSettingsOpen(false); }}
-      onConnectionMode={setConnectionMode}
+      onConnectionMode={editConnectionForm(setConnectionMode)}
+      onDeleteProfile={() => void runCommand("host.delete")}
       onProbeHelper={() => void probeHelper()}
       onProfile={selectProfile}
       onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
       onShell={updateShell}
       onSounds={(preferences) => { setAgentSounds(preferences); saveAgentSoundPreferences(preferences); }}
-      onSshConfigPath={setSshConfigPath}
-      onSshTarget={setSshTarget}
+      onSshConfigPath={editConnectionForm(setSshConfigPath)}
+      onSshTarget={editConnectionForm(setSshTarget)}
       profiles={profiles}
       remote={connection.mode === "ssh"}
+      selectedProfileId={selectedProfileId}
       shell={appState.shell}
       sounds={agentSounds}
       sshConfigPath={sshConfigPath}
@@ -964,6 +991,7 @@ export function App() {
       commandContext={commandContext}
       confirmation={confirmation}
       helperState={helperState}
+      hostDelete={hostDeleteConfirmation}
       onAppRecoveryDiscardCancel={() => setAppRecoveryDiscardConfirmation(false)}
       onAppRecoveryDiscardConfirm={() => {
         if (!pendingAppRecovery) return;
@@ -988,6 +1016,11 @@ export function App() {
       }}
       onHelperCancel={() => dispatchHelper({ type: "cancelUpgrade" })}
       onHelperConfirm={() => void confirmHelperInstall()}
+      onHostDeleteCancel={() => setHostDeleteConfirmation(undefined)}
+      onHostDeleteConfirm={(profile) => {
+        setHostDeleteConfirmation(undefined);
+        deleteSelectedProfile(profile);
+      }}
       onPaletteClose={() => setPaletteOpen(false)}
       onProfileResetCancel={() => setProfileResetConfirmation(false)}
       onProfileResetConfirm={() => {
