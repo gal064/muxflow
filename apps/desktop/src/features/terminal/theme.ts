@@ -72,13 +72,27 @@ const TOKEN_BY_THEME_KEY: Record<keyof typeof GHOSTTY_DEFAULT_DARK, string> = {
  */
 const SLIDER_ALPHAS = { idle: "40", hover: "66", active: "99" } as const;
 
+/**
+ * The chrome tokens this module falls back to with no stylesheet, and the
+ * tokens they stand in for. Same contract as `GHOSTTY_DEFAULT_DARK`: these are
+ * not a second source of truth, and `theme.test.ts` fails if they ever stop
+ * matching `tokens.css`.
+ */
+export const CHROME_FALLBACKS = {
+  "--accent": "#0091ff",
+  "--chrome-dim": "#7d848e",
+  "--font-mono": '"JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace',
+  "--term-font-size": "13px",
+  "--term-line-height": "1.42",
+} as const;
+
 export function terminalTheme(root: Element | undefined = globalThis.document?.documentElement): ITheme {
   const read = tokenReader(root);
   const theme: Record<string, string> = {};
   for (const [key, token] of Object.entries(TOKEN_BY_THEME_KEY)) {
     theme[key] = read(token) ?? GHOSTTY_DEFAULT_DARK[key as keyof typeof GHOSTTY_DEFAULT_DARK];
   }
-  const slider = read("--chrome-dim") ?? "#7d848e";
+  const slider = read("--chrome-dim") ?? CHROME_FALLBACKS["--chrome-dim"];
   return {
     ...theme,
     scrollbarSliderBackground: `${slider}${SLIDER_ALPHAS.idle}`,
@@ -102,8 +116,8 @@ export function searchDecorations(root: Element | undefined = globalThis.documen
   activeMatchColorOverviewRuler: string;
 } {
   const read = tokenReader(root);
-  const accent = read("--accent") ?? "#0091ff";
-  const muted = read("--chrome-dim") ?? "#7d848e";
+  const accent = read("--accent") ?? CHROME_FALLBACKS["--accent"];
+  const muted = read("--chrome-dim") ?? CHROME_FALLBACKS["--chrome-dim"];
   return {
     // Semi-transparent so the glyph underneath stays legible; the overview
     // ruler is a solid 1px mark and cannot be.
@@ -121,12 +135,12 @@ export function terminalFont(root: Element | undefined = globalThis.document?.do
   lineHeight: number;
 } {
   const read = tokenReader(root);
-  const size = Number.parseFloat(read("--term-font-size") ?? "");
-  const height = Number.parseFloat(read("--term-line-height") ?? "");
+  const size = Number.parseFloat(read("--term-font-size") ?? CHROME_FALLBACKS["--term-font-size"]);
+  const height = Number.parseFloat(read("--term-line-height") ?? CHROME_FALLBACKS["--term-line-height"]);
   return {
-    fontFamily: read("--font-mono") ?? '"JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace',
-    fontSize: Number.isFinite(size) && size > 0 ? size : 13,
-    lineHeight: Number.isFinite(height) && height > 0 ? height : 1.42,
+    fontFamily: read("--font-mono") ?? CHROME_FALLBACKS["--font-mono"],
+    fontSize: Number.isFinite(size) && size > 0 ? size : Number.parseFloat(CHROME_FALLBACKS["--term-font-size"]),
+    lineHeight: Number.isFinite(height) && height > 0 ? height : Number.parseFloat(CHROME_FALLBACKS["--term-line-height"]),
   };
 }
 
