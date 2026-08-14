@@ -244,7 +244,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                 setFocusedAgentId(row.agent.id);
                 setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY } });
               }}
+              // Focus and pointer both: macOS WebKit does not focus a button on
+              // click, so without the second one the palette's "selected agent"
+              // would ignore every agent the user clicked.
               onFocus={() => setFocusedAgentId(row.agent.id)}
+              onPointerDown={() => setFocusedAgentId(row.agent.id)}
               onKeyDown={(event) => {
                 if (isContextMenuKey(event)) {
                   event.preventDefault();

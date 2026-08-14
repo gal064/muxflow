@@ -85,6 +85,16 @@ describe("ExplorerTree", () => {
       "files.open", "files.download", "files.rename", "files.move", "files.duplicate", "files.delete",
       "files.newFile", "files.newFolder", "files.refresh",
     ]);
+    // Clicking a row is pointing at it. macOS WebKit does not focus a button on
+    // click, so a tree that only listened for focus went on offering actions for
+    // whichever row the keyboard last visited — measured on the packaged app,
+    // where clicking README.md left `.git` as the palette's subject.
+    const gitDirectory = renderer.root.findAllByProps({ "data-tree-index": 2 })[0];
+    await act(async () => { gitDirectory.props.onPointerDown(); });
+    expect(rowCommandRegistry.available()).not.toContain("files.open");
+    const dotEnv = renderer.root.findAllByProps({ "data-tree-index": 0 })[0];
+    await act(async () => { dotEnv.props.onPointerDown(); });
+    expect(rowCommandRegistry.available()).toContain("files.open");
     // Row 0 is `.env`; the tree's own focus cursor is what "selected" means.
     await act(async () => { rowCommandRegistry.run("files.download"); });
     expect(onDownload).toHaveBeenCalledWith({ path: "/r/.env", kind: "file", collision: "fail" });

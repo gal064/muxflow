@@ -102,6 +102,11 @@ export function ExplorerTree(props: Props) {
   // The row the palette means is the one the tree has focus on — the same row
   // its arrow keys walk and its Shift+F10 opens a menu for. Nothing new to aim
   // with, and the disabled state published here is the same one the menu draws.
+  //
+  // `onPointerDown` on the row is why clicking counts as pointing at it: macOS
+  // WebKit does not focus a button on click (that is the platform convention),
+  // so without it the palette went on offering actions for whichever row the
+  // keyboard last visited while the user was clicking a different one.
   const focusedRow = rows[focusIndex];
   const focusedEntry = focusedRow?.kind === "entry" ? focusedRow.entry : undefined;
   const rowActions = useMemo<readonly CommandId[]>(() => {
@@ -196,7 +201,7 @@ export function ExplorerTree(props: Props) {
           event.preventDefault();
           focusRow(index);
           setMenu({ entry, anchor: { x: event.clientX, y: event.clientY } });
-        }} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => navigateEntry(event, index, depth, entry)} role="treeitem" style={{ paddingLeft: `${8 + depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1}>
+        }} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => navigateEntry(event, index, depth, entry)} onPointerDown={() => setFocusIndex(index)} role="treeitem" style={{ paddingLeft: `${8 + depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1}>
           <button className="file-main" onClick={() => entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry)} tabIndex={-1} type="button">
             <span className="file-twisty">{entry.expandable ? <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={11} /> : null}</span>
             <span className={`file-state ${entry.kind}`}>{entry.kind === "directory" ? "d" : entry.kind === "symlink" ? "l" : "·"}</span>
