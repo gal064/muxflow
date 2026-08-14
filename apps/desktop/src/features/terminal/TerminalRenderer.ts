@@ -3,7 +3,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { terminalFont, terminalTheme } from "./theme";
+import { terminalScreenReaderMode } from "./accessibilityPreference";
+import { searchDecorations, terminalFont, terminalTheme } from "./theme";
 
 export interface TerminalSize {
   columns: number;
@@ -462,17 +463,17 @@ export class XtermRenderer implements TerminalRenderer {
       ignoreBracketedPasteMode: false,
       macOptionClickForcesSelection: true,
       rightClickSelectsWord: true,
-      // Off deliberately (P12-U002/U003). xterm's screen-reader mode allocates
-      // a string and dispatches an emitter event for every printed codepoint
-      // and rewrites a DOM mirror of every row on every render, which an agent
-      // TUI repainting at 1 Hz pays thousands of times a second; its mirror also
+      // Off by default (P12-U002/U003). xterm's screen-reader mode allocates a
+      // string and dispatches an emitter event for every printed codepoint and
+      // rewrites a DOM mirror of every row on every render, which an agent TUI
+      // repainting at 1 Hz pays thousands of times a second; its mirror also
       // sits over the WebGL canvas with an un-overridden `::selection`
       // background, which is what painted highlight rectangles at stale
       // positions. The pane's own AX label and role, keyboard operability and
-      // xterm's input textarea are unaffected. Making terminal *content*
-      // readable to a screen reader again belongs behind a user setting; there
-      // is no preferences surface to hang one on yet.
-      screenReaderMode: false,
+      // xterm's input textarea are unaffected either way. Phase 11 added the
+      // settings surface that Phase 12 deferred this to, so a user who needs
+      // terminal content read aloud can now turn it on.
+      screenReaderMode: terminalScreenReaderMode(),
       scrollback: 10_000,
       scrollOnUserInput: true,
       smoothScrollDuration: SMOOTH_SCROLL_DURATION_MS,
@@ -653,14 +654,7 @@ export class XtermRenderer implements TerminalRenderer {
 
   search(query: string, direction: "next" | "previous" = "next"): boolean {
     if (!query) return false;
-    const options = {
-      decorations: {
-        matchBackground: "#394a5e",
-        matchOverviewRuler: "#6f8dab",
-        activeMatchBackground: "#8a6d32",
-        activeMatchColorOverviewRuler: "#d6a84d",
-      },
-    };
+    const options = { decorations: searchDecorations() };
     return direction === "next" ? this.#search.findNext(query, options) : this.#search.findPrevious(query, options);
   }
 

@@ -2,7 +2,8 @@ import { useCallback, useMemo, type Dispatch, type MutableRefObject, type SetSta
 import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { createTmuxConfirmation, type PendingTmuxConfirmation } from "../../commands/destructiveConfirmation";
 import type { PendingTextPrompt } from "../../commands/TextInputDialog";
-import { commandRegistry, type CommandContext, type CommandId, type CommandTarget } from "../../commands/registry";
+import { commandRegistry, selectionIndex, type CommandContext, type CommandId, type CommandTarget } from "../../commands/registry";
+import { nextSortMode } from "../agents/agentsList";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
 import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
 import { relativeWindowReorderAction } from "../../app/windowSelection";
@@ -38,11 +39,21 @@ interface ShellCommandOptions {
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
   setConfirmation: Dispatch<SetStateAction<PendingTmuxConfirmation | undefined>>;
   setPaletteOpen: Dispatch<SetStateAction<boolean>>;
+  setSettingsOpen: Dispatch<SetStateAction<boolean>>;
   setShortcutEditorOpen: Dispatch<SetStateAction<boolean>>;
   setStatus: Dispatch<SetStateAction<string>>;
   setTextPrompt: Dispatch<SetStateAction<PendingTextPrompt | undefined>>;
+  setWorkspaceSwitcherOpen: Dispatch<SetStateAction<boolean>>;
   snapshot: TmuxSnapshot;
   windows: readonly TmuxWindow[];
+  /** ⌘1–9: the nth workspace in the sidebar's order. */
+  selectWorkspaceByIndex(index: number): void;
+  /** ⌃1–9 and ⌘⇧[/]: positions in the one combined tab strip. */
+  selectTabByIndex(index: number): void;
+  selectRelativeTab(direction: -1 | 1): void;
+  /** ⌘⇧U. */
+  jumpToUnreadAgent(): void;
+  stepFocusHistory(direction: "back" | "forward"): void;
 }
 
 export function useShellCommands(options: ShellCommandOptions): {
@@ -109,20 +120,35 @@ export function useShellCommands(options: ShellCommandOptions): {
       ));
       return;
     }
+    const workspaceIndex = selectionIndex(commandId, "workspace.select");
+    if (workspaceIndex !== undefined) return options.selectWorkspaceByIndex(workspaceIndex - 1);
+    const tabIndex = selectionIndex(commandId, "tab.select");
+    if (tabIndex !== undefined) return options.selectTabByIndex(tabIndex - 1);
+
     switch (commandId) {
       case "commands.show": options.setPaletteOpen(true); return;
+      case "workspaces.switch": options.setWorkspaceSwitcherOpen(true); return;
       case "shortcuts.configure": options.setShortcutEditorOpen(true); return;
-      case "view.toggleExplorer":
-      case "view.toggleAgents":
-      case "view.showExplorer":
+      case "settings.show": options.setSettingsOpen(true); return;
+      case "view.toggleSidebar":
+      case "view.togglePanel":
+      case "view.showFiles":
       case "view.showGit":
         options.setAppState((current) => ({
           ...current,
           shell: shellAfterSidebarCommand(current.shell, commandId, options.compactViewport),
         }));
         return;
-      case "focus.workspaces": document.querySelector<HTMLButtonElement>(".workspace-select[aria-current=page], .workspace-select")?.focus(); return;
-      case "focus.tabs": document.querySelector<HTMLButtonElement>(".combined-tab-select[aria-selected=true], .combined-tab-select")?.focus(); return;
+      case "agents.toggleSort":
+        options.setAppState((current) => ({ ...current, shell: { ...current.shell, agentSort: nextSortMode(current.shell.agentSort) } }));
+        return;
+      case "agents.jumpUnread": options.jumpToUnreadAgent(); return;
+      case "focus.workspaces": document.querySelector<HTMLButtonElement>(".workspace-button[aria-current=true], .workspace-button")?.focus(); return;
+      case "focus.tabs": document.querySelector<HTMLButtonElement>(".tab-select[aria-selected=true], .tab-select")?.focus(); return;
+      case "focus.back": options.stepFocusHistory("back"); return;
+      case "focus.forward": options.stepFocusHistory("forward"); return;
+      case "tab.previous": options.selectRelativeTab(-1); return;
+      case "tab.next": options.selectRelativeTab(1); return;
       case "session.new": {
         const scope = options.hostScope;
         options.setTextPrompt({ title: "New workspace", label: "Workspace name", submit: (name) => {

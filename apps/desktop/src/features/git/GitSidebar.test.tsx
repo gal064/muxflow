@@ -7,15 +7,27 @@ import { GitSidebar } from "./GitSidebar";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+/**
+ * Per-row stage/discard buttons became one right-click menu in Phase 11, so
+ * every row action is reached the way a user reaches it: open the row's menu,
+ * then pick the item out of it.
+ */
+async function rowMenuItem(renderer: ReturnType<typeof create>, displayPath: string, itemId: string) {
+  const row = renderer.root.findAll((node) => node.props.className === "git-file"
+    && typeof node.props.title === "string" && node.props.title.startsWith(`${displayPath} ·`))[0];
+  await act(async () => { row.props.onContextMenu({ preventDefault: vi.fn(), clientX: 10, clientY: 10 }); });
+  return renderer.root.findByProps({ "data-menu-item": itemId });
+}
+
 describe("GitSidebar", () => {
   it("groups staged, unstaged, untracked, conflict and ignored entries with exact counts", async () => {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...baseProps()} status={status()} />); });
     const text = JSON.stringify(renderer.toJSON());
-    expect(text).toContain("Staged Changes");
+    expect(text).toContain("Staged");
     expect(text).toContain("Changes");
     expect(text).toContain("Untracked");
-    expect(text).toContain("Merge Changes");
+    expect(text).toContain("Merge changes");
     expect(text).toContain("Ignored");
     await act(async () => { renderer.unmount(); });
   });
@@ -24,7 +36,7 @@ describe("GitSidebar", () => {
     const props = baseProps();
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...props} status={status()} />); });
-    const discard = renderer.root.findByProps({ "aria-label": "Discard changed.txt" });
+    const discard = await rowMenuItem(renderer, "changed.txt", "discard");
     await act(async () => { discard.props.onClick(); });
     expect(renderer.root.findAllByProps({ role: "alertdialog" })).toHaveLength(1);
     const cancel = renderer.root.findAllByType("button").find((button) => button.props.children === "Cancel");
@@ -74,7 +86,8 @@ describe("GitSidebar", () => {
     const props = baseProps();
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...props} status={status()} />); });
-    await act(async () => { renderer.root.findByProps({ "aria-label": "Discard changed.txt" }).props.onClick(); });
+    const discard = await rowMenuItem(renderer, "changed.txt", "discard");
+    await act(async () => { discard.props.onClick(); });
     await act(async () => { renderer.update(<GitSidebar {...props} scope={{ ...scope, terminalEpoch: 2 }} status={status()} />); });
     const confirm = renderer.root.findAllByType("button").find((button) => button.props.children === "Discard");
     await act(async () => { confirm?.props.onClick(); await settle(); });
@@ -88,7 +101,8 @@ describe("GitSidebar", () => {
     const props = baseProps();
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...props} status={status()} />); });
-    await act(async () => { renderer.root.findByProps({ "aria-label": "Discard staged.txt" }).props.onClick(); });
+    const discard = await rowMenuItem(renderer, "staged.txt", "discard");
+    await act(async () => { discard.props.onClick(); });
     expect(props.client.prepareDiscard).not.toHaveBeenCalled();
     const confirm = renderer.root.findAllByType("button").find((button) => button.props.children === "Discard");
     await act(async () => { confirm?.props.onClick(); await settle(); });
@@ -115,8 +129,8 @@ describe("GitSidebar", () => {
     value.entries.push(entry("module", { submodule: true, submoduleState: "S.M.", worktreeKind: "modified" }));
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...baseProps()} status={value} />); });
-    expect(renderer.root.findByProps({ "aria-label": "Stage module" }).props.disabled).toBe(true);
-    expect(renderer.root.findByProps({ "aria-label": "Discard module" }).props.disabled).toBe(true);
+    expect((await rowMenuItem(renderer, "module", "stage")).props.disabled).toBe(true);
+    expect((await rowMenuItem(renderer, "module", "discard")).props.disabled).toBe(true);
     expect(JSON.stringify(renderer.toJSON())).toContain("actions unavailable");
     await act(async () => { renderer.unmount(); });
   });

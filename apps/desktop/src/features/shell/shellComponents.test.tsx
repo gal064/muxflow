@@ -1,34 +1,81 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { Session } from "../../app/types";
-import { AgentSidebar } from "../agents/AgentSidebar";
 import { agent } from "../agents/testFixtures";
+import { buildAgentRows } from "../agents/agentsList";
 import { HookReviewDialog } from "../agents/HookReviewDialog";
-import { WorkspaceRail } from "../workspaces/WorkspaceRail";
-import { CombinedTabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../workspaces/CombinedTabStrip";
-import { ConnectionBanner } from "./ConnectionBanner";
-import { ExplorerGitSidebar } from "./ExplorerGitSidebar";
+import { WorkspaceSidebar } from "../workspaces/WorkspaceSidebar";
+import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../workspaces/TabStrip";
+import type { WorkspaceRowModel } from "../workspaces/workspaceRows";
+import { DisconnectedStrip } from "./DisconnectedStrip";
+import { RightPanel } from "./RightPanel";
+import { TitleBar } from "./TitleBar";
 
 const noop = vi.fn();
-const sessions: Session[] = [{ id: "$1", name: "A very long workspace name", windowCount: 3, attachedClients: 1, order: 0 }];
+const session: Session = { id: "$1", name: "A very long workspace name", windowCount: 3, attachedClients: 1, order: 0 };
+const rows: WorkspaceRowModel[] = [{
+  session, active: true, attention: "blocked", unread: 2, working: true,
+  activity: "codex · blocked", metadata: "main* · ~/dev/muxflow",
+}];
+
+const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
+  adapters={[]}
+  agents={buildAgentRows([agent({ displayName: "Codex one", lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "grouped")}
+  agentSort="grouped"
+  agentsRatio={0.4}
+  canMutate
+  hostLabel="omarchy"
+  latencyMs={41}
+  onAgentsRatio={noop}
+  onLaunchAgent={noop}
+  onOpenSettings={noop}
+  onRenameAgent={noop}
+  onResumeAgent={noop}
+  onReviewHooks={noop}
+  onSelectAgent={noop}
+  onSelectWorkspace={noop}
+  onSortMode={noop}
+  onWorkspaceCommand={noop}
+  phase="connected"
+  rows={rows}
+  stateGlyphs={false}
+  transport="ssh"
+  {...overrides}
+/>);
 
 describe("application shell accessibility contracts", () => {
-  it("renders a named, selected, full-name workspace rail with mutation routes", () => {
-    const html = renderToStaticMarkup(<WorkspaceRail activeSessionId="$1" canMutate sessions={sessions}
-      onCommand={noop} onCreate={noop} onSelect={noop} />);
-    expect(html).toContain('aria-label="tmux workspaces"');
-    expect(html).toContain('aria-current="page"');
+  it("renders one named sidebar holding both workspaces and agents", () => {
+    const html = sidebar();
+    expect(html).toContain('aria-label="Workspaces and agents"');
+    expect(html).toContain('aria-current="true"');
     expect(html).toContain("A very long workspace name");
-    expect(html).toContain("Move up");
-    expect(html).toContain("Close…");
+    expect(html).toContain("codex · blocked");
+    expect(html).toContain("main* · ~/dev/muxflow");
+    // The one control in the agents header names both its state and its effect.
+    expect(html).toContain("Agent ordering: grouped. Switch to priority.");
+    // The only resting connection indicator, and it is the way into settings.
+    expect(html).toContain("Host omarchy over ssh, connected. Open connection settings.");
+    expect(html).toContain("41 ms");
+  });
+
+  it("badges only the workspaces and agents that are waiting on a human", () => {
+    expect(sidebar()).toContain("2 agents waiting in A very long workspace name");
+    const quiet = sidebar({ rows: [{ ...rows[0], unread: 0, attention: "working", working: true, activity: undefined }] });
+    expect(quiet).not.toContain("agents waiting in");
+  });
+
+  it("states empty sidebar sections in one line each", () => {
+    const html = sidebar({ rows: [], agents: [] });
+    expect(html).toContain("No tmux sessions on this host yet.");
+    expect(html).toContain("No agents detected.");
   });
 
   it("renders combined terminal/app tabs as one selected tablist", () => {
-    const html = renderToStaticMarkup(<CombinedTabStrip
-      activeKey="app:file" canMutate commandMenu={null} onClose={noop} onMove={noop}
-      onNewTerminal={noop} onOpenPalette={noop} onRenameTerminal={noop} onSelect={noop}
+    const html = renderToStaticMarkup(<TabStrip
+      activeKey="app:file" canMutate canSplit onClose={noop} onMove={noop}
+      onNewTerminal={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
       tabs={[
-        { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 0, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none" },
+        { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked" },
         { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, canMoveLeft: false, canMoveRight: false },
       ]}
     />);
@@ -37,44 +84,60 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain(`id="${workspaceTabDomId("app:file")}"`);
     expect(html).toContain(`aria-controls="${workspaceTabPanelDomId("app:file")}"`);
     expect(html).toContain("README.md");
+    // A document tab closes in place; a terminal tab does not, because closing
+    // a tmux window destroys live processes and goes through confirmation.
     expect(html).toContain("Close README.md");
+    expect(html).not.toContain("Close shell");
+    expect(html).toContain('aria-label="Agent blocked"');
   });
 
-  it("keeps Explorer/Git mutually exclusive and the agent shell explicit when empty", () => {
-    const sidebar = renderToStaticMarkup(<ExplorerGitSidebar
-      activePane={undefined} collapsed={false} connection={{ mode: "local" }} connectionMode="local"
-      onConnect={noop} onConnectionMode={noop} onProfile={noop} onSshConfigPath={noop}
-      onSshTarget={noop} onSurface={noop} onToggleCollapsed={noop} profiles={[]}
-      sshConfigPath="" sshTarget="" surface="git"
+  it("keeps Files and Git mutually exclusive in the one right panel", () => {
+    const html = renderToStaticMarkup(<RightPanel
+      files={<p>files surface</p>} git={<p>git surface</p>} onSurface={noop} surface="git"
     />);
-    expect(sidebar).toContain('aria-selected="false"');
-    expect(sidebar).toContain('aria-selected="true"');
-    expect(sidebar).toContain('aria-labelledby="workspace-sidebar-tab-git"');
-    expect(sidebar).toContain('id="workspace-sidebar-panel-git"');
-    expect(sidebar).toContain('tabindex="-1"');
-    expect(sidebar).toContain("Git changes for the active pane will appear here.");
-    const agents = renderToStaticMarkup(<AgentSidebar agents={[]} collapsed={false} onSelect={noop} onToggle={noop} />);
-    expect(agents).toContain("No agents detected");
-    expect(agents).toContain("Supported agent sessions will appear here when detected.");
+    expect(html).toContain('aria-selected="false"');
+    expect(html).toContain('aria-selected="true"');
+    expect(html).toContain('aria-labelledby="panel-tab-git"');
+    expect(html).toContain('id="panel-surface-git"');
+    expect(html).toContain("git surface");
+    expect(html).not.toContain("files surface");
   });
 
-  it("renders semantic agent attention, location, launch, hooks, and rename affordances", () => {
-    const adapters = [{ id: "future-agent", displayName: "Future Agent", supportsLaunch: true, supportsResume: true, supportsHooks: true, supportsProcessDetection: true, supportsScreenFallback: false, hookConfigPath: "/future/hooks", hookEvents: ["Stop", "Blocked"], placements: ["window", "split"] as ("window" | "split")[] }];
-    const html = renderToStaticMarkup(<AgentSidebar adapters={adapters} agents={[agent({ adapterId: "future-agent", lifecycle: "idle", attentionGeneration: 4, attentionKind: "completed", seenGeneration: 2 })]} collapsed={false}
-      onLaunch={noop} onRename={noop} onResume={noop} onReviewHooks={noop} onSelect={noop} onToggle={noop} />);
-    expect(html).toContain("Codex one, done, work, agent");
-    expect(html).toContain("Unseen completion");
-    expect(html).toContain("Rename agent Codex one");
-    expect(html).toContain("Future Agent · new window");
-    expect(html).toContain("Review Future Agent hooks");
-    expect(html).toContain("Resume in new split");
-    expect(html).toContain("process detection, 2 hook events");
+  it("puts four controls and an unread count on the titlebar, and no more", () => {
+    const html = renderToStaticMarkup(<TitleBar
+      branch="main*" canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      onToggleSidebar={noop} panelOpen={false} platform="mac" sidebarOpen unread={3} workspaceName="muxflow"
+    />);
+    expect([...html.matchAll(/<button/gu)]).toHaveLength(4);
+    expect(html).toContain("3 agents waiting; jump to the loudest");
+    expect(html).toContain("muxflow");
+    expect(html).toContain("main*");
+    const quiet = renderToStaticMarkup(<TitleBar
+      canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen={false} unread={0}
+    />);
+    expect(quiet).toContain("No agents waiting");
+    expect(quiet).toContain("No workspace");
   });
 
-  it("keeps unmapped agents visible and non-routable", () => {
-    const html = renderToStaticMarkup(<AgentSidebar agents={[agent({ sessionId: "", windowId: "", paneId: "" })]} collapsed={false} onSelect={noop} onToggle={noop} />);
-    expect(html).toContain("unmapped · navigation unavailable");
-    expect(html).toContain("disabled");
+  it("shows nothing while connected, and one explained line while not", () => {
+    expect(renderToStaticMarkup(<DisconnectedStrip
+      detail="" hasSnapshot onOpenSettings={noop} onReconnect={noop} phase="connected"
+    />)).toBe("");
+    const reconnecting = renderToStaticMarkup(<DisconnectedStrip
+      detail="network unreachable" hasSnapshot onOpenSettings={noop} onReconnect={noop} phase="reconnecting"
+    />);
+    expect(reconnecting).toContain("Reconnecting to tmux…");
+    expect(reconnecting).toContain("network unreachable");
+    expect(reconnecting).toContain("Reconnect");
+    expect(reconnecting).toContain('role="status"');
+    const frozen = renderToStaticMarkup(<DisconnectedStrip
+      detail="" hasSnapshot onOpenSettings={noop} onReconnect={noop} phase="readOnly"
+    />);
+    expect(frozen).toContain('role="alert"');
+    expect(frozen).toContain("writes are frozen");
+    // Read-only is not something "Reconnect" fixes, so it is not offered.
+    expect(frozen).not.toContain(">Reconnect<");
   });
 
   it("shows exact hook events, command, owner, path, and Codex trust guidance", () => {
@@ -96,23 +159,5 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('class="modal-backdrop hook-review-backdrop"');
     expect(html).toContain('class="hook-review-scroll"');
     expect(html).not.toContain("trust is managed");
-  });
-
-  it("explains stale write-frozen state and exposes explicit recovery", () => {
-    const disconnected = renderToStaticMarkup(<ConnectionBanner
-      detail="network unreachable" hasSnapshot helper={{ phase: "idle" }} onProbeHelper={noop}
-      onReconnect={noop} onRequestHelperInstall={noop} phase="reconnecting" remote
-    />);
-    expect(disconnected).toContain("Writes are frozen and will not be queued");
-    expect(disconnected).toContain("Reconnect now");
-    expect(disconnected).toContain('role="status"');
-    expect(disconnected).toContain("Check helper");
-    const missing = renderToStaticMarkup(<ConnectionBanner detail="missing" hasSnapshot={false}
-      helper={{ phase: "ready", connectionKey: "host", probe: { operatingSystem: "linux", architecture: "x86_64", tmuxVersion: "3.3a", gitVersion: "2", installed: false, compatible: false, remotePath: "/home/me/.local/bin/tmux-ide-host" } }}
-      onProbeHelper={noop} onReconnect={noop} onRequestHelperInstall={noop} phase="disconnected" remote />);
-    expect(missing).toContain("Install helper…");
-    const live = renderToStaticMarkup(<ConnectionBanner detail="Action failed visibly" hasSnapshot
-      helper={{ phase: "idle" }} onProbeHelper={noop} onReconnect={noop} onRequestHelperInstall={noop} phase="connected" remote={false} />);
-    expect(live).toContain("Action failed visibly");
   });
 });

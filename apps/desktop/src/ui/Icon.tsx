@@ -1,3 +1,5 @@
+import type { ReactElement } from "react";
+
 /**
  * The app's only icon set.
  *
@@ -33,7 +35,7 @@ export type IconName =
   | "folder"
   | "zoom";
 
-const paths: Record<IconName, JSX.Element> = {
+const paths: Record<IconName, ReactElement> = {
   sidebarLeft: <>
     <rect height="11" rx="2" width="13" x="1.5" y="2.5" />
     <path d="M6 2.5v11" />

@@ -1,7 +1,18 @@
 import type { ConnectionSpec } from "../../app/types";
+import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
 
 export type AppTabKind = "file" | "markdown" | "gitDiff";
-export type ExplorerSurface = "explorer" | "git";
+/** The two halves of the right panel; they share one 300px surface. */
+export type PanelSurface = "files" | "git";
+
+/** Sidebar geometry, from the plan's token table (cmux). */
+export const SIDEBAR_MIN_WIDTH = 240;
+/** Fraction of the window a dragged sidebar may not exceed. */
+export const SIDEBAR_MAX_WINDOW_FRACTION = 1 / 3;
+/** Share of the sidebar's height the agents section takes by default. */
+export const AGENTS_SECTION_DEFAULT_RATIO = 0.42;
+export const AGENTS_SECTION_MIN_RATIO = 0.15;
+export const AGENTS_SECTION_MAX_RATIO = 0.75;
 
 export interface AppOwnedTab {
   id: string;
@@ -33,29 +44,56 @@ export interface WorkspaceUiRecord {
   selectedAppTabId?: string;
 }
 
+export interface ShellState {
+  /** Which half of the right panel is showing when it is open. */
+  panelSurface: PanelSurface;
+  /** ⌘B. Collapsed means 0px, not a 44px icon strip. */
+  sidebarCollapsed: boolean;
+  /** Drag-resizable; clamped against the window at render time. */
+  sidebarWidth: number;
+  /** ⌥⌘B. Closed by default, and it reserves no space when closed. */
+  panelOpen: boolean;
+  /** The agents section's one control. */
+  agentSort: AgentSortMode;
+  /** Position of the sidebar's internal divider, as a share of its height. */
+  agentsSectionRatio: number;
+  /** Draws a shape inside each state dot as well as coloring it. */
+  agentStateGlyphs: boolean;
+  /**
+   * Makes terminal *content* readable to a screen reader. Off by default
+   * because xterm's screen-reader mode costs a string allocation and an
+   * emitter dispatch per printed codepoint (P12-U002); this is the setting
+   * that Phase 12 deferred to Phase 11's settings surface.
+   */
+  terminalScreenReader: boolean;
+  /** Physical geometry plus the capture scale, used to preserve logical size across monitors. */
+  windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
+}
+
 export interface PersistedAppState {
   schemaVersion: 1;
   appTabs: AppOwnedTab[];
   workspaceUi: WorkspaceUiRecord[];
-  shell: {
-    explorerSurface: ExplorerSurface;
-    explorerCollapsed: boolean;
-    agentSidebarCollapsed: boolean;
-    /** Physical geometry plus the capture scale, used to preserve logical size across monitors. */
-    windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
-  };
+  shell: ShellState;
   commands: { shortcutOverrides: Record<string, string | null> };
 }
+
+export const defaultShellState: ShellState = {
+  panelSurface: "files",
+  sidebarCollapsed: false,
+  sidebarWidth: SIDEBAR_MIN_WIDTH,
+  panelOpen: false,
+  agentSort: "grouped",
+  agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
+  agentStateGlyphs: false,
+  terminalScreenReader: false,
+};
 
 export const defaultAppState: PersistedAppState = {
   schemaVersion: 1,
   appTabs: [],
   workspaceUi: [],
-  shell: {
-    explorerSurface: "explorer",
-    explorerCollapsed: false,
-    agentSidebarCollapsed: false,
-  },
+  shell: defaultShellState,
   commands: { shortcutOverrides: {} },
 };
 
@@ -69,20 +107,49 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
   if (candidate.schemaVersion !== 1 || !Array.isArray(candidate.appTabs) || !Array.isArray(candidate.workspaceUi)) {
     return defaultAppState;
   }
-  const surface = candidate.shell?.explorerSurface === "git" ? "git" : "explorer";
+  // Phase 11 replaced the shell preferences wholesale (three collapsible rails
+  // became one sidebar plus one panel). The schema version stays at 1
+  // deliberately: bumping it would throw away the user's open document tabs,
+  // workspace selections and shortcut overrides to reset four booleans. Every
+  // shell field is read defensively instead, so state written by the previous
+  // build loads with the new preferences at their defaults.
+  const shell = candidate.shell as Partial<ShellState> | undefined;
   return {
     schemaVersion: 1,
     appTabs: candidate.appTabs,
     workspaceUi: candidate.workspaceUi,
     shell: {
-      explorerSurface: surface,
-      explorerCollapsed: Boolean(candidate.shell?.explorerCollapsed),
-      agentSidebarCollapsed: Boolean(candidate.shell?.agentSidebarCollapsed),
-      ...(candidate.shell?.windowGeometry && validWindowGeometry(candidate.shell.windowGeometry)
-        ? { windowGeometry: candidate.shell.windowGeometry } : {}),
+      panelSurface: shell?.panelSurface === "git" ? "git" : "files",
+      sidebarCollapsed: Boolean(shell?.sidebarCollapsed),
+      sidebarWidth: clampedSidebarWidth(shell?.sidebarWidth),
+      panelOpen: Boolean(shell?.panelOpen),
+      agentSort: isAgentSortMode(shell?.agentSort) ? shell.agentSort : defaultShellState.agentSort,
+      agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
+      agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
+      terminalScreenReader: Boolean(shell?.terminalScreenReader),
+      ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
+        ? { windowGeometry: shell.windowGeometry } : {}),
     },
     commands: { shortcutOverrides: normalizeShortcutRecord(candidate.commands?.shortcutOverrides) },
   };
+}
+
+/** Never narrower than the token width; the window cap is applied at render. */
+export function clampedSidebarWidth(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > SIDEBAR_MIN_WIDTH
+    ? Math.min(Math.round(value), 4_000)
+    : SIDEBAR_MIN_WIDTH;
+}
+
+export function clampedAgentsRatio(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return AGENTS_SECTION_DEFAULT_RATIO;
+  return Math.min(AGENTS_SECTION_MAX_RATIO, Math.max(AGENTS_SECTION_MIN_RATIO, value));
+}
+
+/** The sidebar may never eat more than a third of the window (cmux rule). */
+export function sidebarWidthForWindow(width: number, windowWidth: number): number {
+  const cap = Math.max(SIDEBAR_MIN_WIDTH, Math.floor(windowWidth * SIDEBAR_MAX_WINDOW_FRACTION));
+  return Math.min(clampedSidebarWidth(width), cap);
 }
 
 function validWindowGeometry(value: unknown): value is NonNullable<PersistedAppState["shell"]["windowGeometry"]> {
