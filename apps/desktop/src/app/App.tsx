@@ -375,18 +375,24 @@ export function App() {
   }), [activePane?.id, activeSessionId, activeWindowId, appFocused, currentHostProfileId, hostState.serverIdentity, notificationActivation.automaticSeen, selectedAppTab]);
   const agentRuntime = useAgentRuntime({ client: agentClient, scope: agentScope, focus: agentFocus, soundPreferences: agentSounds, onStatus: setStatus });
 
+  const recordHostSetupDecision = useCallback((hostProfileId: string, decision: HostSetupDecision) => {
+    setAppState((current) => ({
+      ...current,
+      hostSetup: { ...current.hostSetup, [hostProfileId]: decision },
+    }));
+  }, [setAppState]);
   const agentWorkflow = useAgentWorkflow({
     launchContext: activeSession && activeWindow && activePane && workspaceFiles.root
       ? { sessionId: activeSession.id, windowId: activeWindow.id, paneId: activePane.id, root: workspaceFiles.root }
       : undefined,
     onHooksChanged: (action) => {
       agentRuntime.refreshSnapshot();
-      // Removing the managed hooks is withdrawing consent for this host: the
-      // per-host "accepted" would otherwise reinstall them on the next connect,
-      // and the tmux hook would keep renaming windows until the server
-      // restarted.
+      // Installing through the exact-diff review *is* consent for this host,
+      // and removing is withdrawing it. Recording only one of the two left a
+      // user who took the review door with no decision at all: the one-time
+      // prompt could re-raise, and the tmux naming was never asserted.
+      recordHostSetupDecision(currentHostProfileId, action === "install" ? "accepted" : "declined");
       if (action === "uninstall") {
-        recordHostSetupDecision(currentHostProfileId, "declined");
         void agentRuntime.removeHostNaming().catch((cause) => setStatus(String(cause)));
       }
     },
@@ -395,12 +401,6 @@ export function App() {
     runtime: agentRuntime,
   });
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
-  const recordHostSetupDecision = useCallback((hostProfileId: string, decision: HostSetupDecision) => {
-    setAppState((current) => ({
-      ...current,
-      hostSetup: { ...current.hostSetup, [hostProfileId]: decision },
-    }));
-  }, [setAppState]);
   const agentHostSetup = useAgentHostSetup({
     adapters: agentRuntime.adapters,
     applyHooks: agentRuntime.applyHooks,

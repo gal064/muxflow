@@ -76,6 +76,11 @@ pub(crate) enum NamingOutcome {
     UserConfigured,
     /// This app's hook was taken back off the server.
     Removed,
+    /// There was nothing of this app's to remove. Distinct from
+    /// `UserConfigured`, which says the *user* configured something: a caller
+    /// that removes naming from a server that never had it must not be told
+    /// its owner arranged that.
+    NothingToRemove,
 }
 
 impl NamingOutcome {
@@ -85,6 +90,7 @@ impl NamingOutcome {
             Self::AlreadyCurrent => "alreadyCurrent",
             Self::UserConfigured => "userConfigured",
             Self::Removed => "removed",
+            Self::NothingToRemove => "nothingToRemove",
         }
     }
 }
@@ -110,11 +116,8 @@ pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
     {
         return Ok(NamingOutcome::UserConfigured);
     }
-    if !existing.is_empty()
-        && existing
-            .iter()
-            .all(|value| value.contains(&guard_condition()))
-    {
+    let guard = guard_condition();
+    if !existing.is_empty() && existing.iter().all(|value| value.contains(&guard)) {
         return Ok(NamingOutcome::AlreadyCurrent);
     }
     if existing.is_empty() && syncs_titles_by_format()? {
@@ -150,10 +153,12 @@ pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
 /// carrying a hook of the user's is left exactly as it is.
 pub(crate) fn remove_recommended_naming() -> anyhow::Result<NamingOutcome> {
     let existing = setting(PANE_TITLE_HOOK)?;
-    if existing.is_empty()
-        || existing
-            .iter()
-            .any(|value| !value.contains(OWNED_HOOK_BODY))
+    if existing.is_empty() {
+        return Ok(NamingOutcome::NothingToRemove);
+    }
+    if existing
+        .iter()
+        .any(|value| !value.contains(OWNED_HOOK_BODY))
     {
         return Ok(NamingOutcome::UserConfigured);
     }
@@ -201,7 +206,14 @@ fn setting(name: &str) -> anyhow::Result<Vec<String>> {
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.split_once(' '))
-        .filter(|(option, _)| option.starts_with(name))
+        // `name` or `name[N]`, never merely a prefix: `automatic-rename` and
+        // `automatic-rename-format` are two different options.
+        .filter(|(option, _)| {
+            *option == name
+                || option
+                    .strip_prefix(name)
+                    .is_some_and(|index| index.starts_with('[') && index.ends_with(']'))
+        })
         .map(|(_, value)| value.trim().to_owned())
         .collect())
 }
@@ -239,6 +251,7 @@ mod tests {
         assert_eq!(NamingOutcome::AlreadyCurrent.label(), "alreadyCurrent");
         assert_eq!(NamingOutcome::UserConfigured.label(), "userConfigured");
         assert_eq!(NamingOutcome::Removed.label(), "removed");
+        assert_eq!(NamingOutcome::NothingToRemove.label(), "nothingToRemove");
     }
 
     /// The identity has to survive a change to the guard, because the guard is

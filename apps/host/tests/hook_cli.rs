@@ -171,5 +171,49 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
         !home.join(".codex").exists(),
         "an absent agent's configuration directory was created anyway"
     );
+
+    // And an unscoped uninstall must actually remove. Install asks "would this
+    // act here", which a wired adapter answers no to; sharing that predicate
+    // with uninstall meant `hook uninstall` with no `--adapter` removed nothing
+    // and reported that the agents were not installed.
+    fs::write(&settings, &original).unwrap();
+    let unscoped_verb = |verb: &str| -> serde_json::Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+            .args(["hook", verb, "--home"])
+            .arg(&home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    unscoped_verb("install");
+    assert!(
+        fs::read_to_string(&settings)
+            .unwrap()
+            .contains("tmux-agent-ide"),
+        "the unscoped install did not wire the adapter that is present"
+    );
+    let removed = unscoped_verb("uninstall");
+    let claude = removed["applied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["adapterId"] == "claude-code")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        claude["changed"], true,
+        "unscoped uninstall did nothing: {removed}"
+    );
+    assert!(
+        !fs::read_to_string(&settings)
+            .unwrap()
+            .contains("tmux-agent-ide"),
+        "a managed entry survived an unscoped uninstall"
+    );
     fs::remove_dir_all(home).unwrap();
 }

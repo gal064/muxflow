@@ -81,20 +81,36 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
     let mut failed = false;
     if let Some(action) = action {
         for (adapter, entry) in manager.wiring() {
-            // `invites_setup` is the shared policy: it excludes an agent that
-            // is not on this host — installing there creates a configuration
-            // directory and file for a tool the user does not use — and one
-            // whose configuration could not be read, because writing over what
-            // nobody could parse is how unrelated hooks get lost. `--adapter`
-            // overrides the first, since an operator naming an adapter has
-            // said something the probe cannot; nothing overrides the second.
+            // The two verbs ask opposite questions and had been sharing one
+            // predicate. Install asks "would this act here" — `invites_setup`,
+            // which excludes an agent that is not on the host, because
+            // installing there creates a configuration directory and file for
+            // a tool the user does not use. Uninstall asks "do we own anything
+            // here", and a `Wired` adapter answers no to the first and yes to
+            // the second: unscoped `hook uninstall` removed nothing at all and
+            // reported that the agents were not installed.
+            //
+            // `--adapter` overrides absence, since an operator naming an
+            // adapter has said something the probe cannot. Nothing overrides an
+            // unreadable configuration: writing over what nobody could parse is
+            // how unrelated hooks get lost.
             let explicit = adapter_id.as_deref() == Some(entry.adapter_id);
+            let acts_here = match action {
+                v1::HookManagementAction::Uninstall => {
+                    entry.state == v1::AgentHookWiring::Wired
+                        || entry.state == v1::AgentHookWiring::Partial
+                }
+                _ => entry.state.invites_setup(),
+            };
             let skip = if adapter_id.is_some() && !explicit {
                 Some("not selected")
             } else if entry.state == v1::AgentHookWiring::Unavailable {
                 Some("configuration could not be read")
-            } else if !entry.state.invites_setup() && !explicit {
-                Some("agent is not installed here")
+            } else if !acts_here && !explicit {
+                Some(match action {
+                    v1::HookManagementAction::Uninstall => "nothing of ours is installed here",
+                    _ => "agent is not installed here",
+                })
             } else {
                 None
             };

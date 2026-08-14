@@ -135,8 +135,8 @@ describe("the one-time set-up prompt", () => {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); });
     expect(setup.current.offerable).toBe(false);
-    expect(setup.current.notice)
-      .toBe("Agent status unavailable on this host — its agent configuration could not be read");
+    // No reason invented: the fixture gave no detail, so the line stops.
+    expect(setup.current.notice).toBe("Agent status unavailable on this host");
     expect(setup.current.open).toBe(false);
     await act(async () => renderer.unmount());
   });
