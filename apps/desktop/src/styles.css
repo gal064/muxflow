@@ -478,6 +478,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 1px solid var(--danger); border-radius: 4px;
   color: var(--danger-ink); background: var(--chrome-raised);
   box-shadow: 0 8px 26px rgb(0 0 0 / .55); font-size: var(--type-meta); overflow-wrap: anywhere;
+  display: grid; gap: 6px; justify-items: start;
 }
 .terminal-upload-review { display: grid; gap: 10px; width: min(620px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 24px)); overflow: auto; }
 .terminal-upload-review ul { max-height: 190px; margin: 0; padding-left: 22px; overflow: auto; color: var(--chrome-dim); font-size: 11px; }
@@ -842,6 +843,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .settings-check { display: flex !important; align-items: center; gap: 8px; color: var(--chrome-ink) !important; }
 .settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-faint); font-size: var(--type-secondary); line-height: 1.5; }
+/* The picker takes the row; Delete sits on its baseline, not under it. */
+.settings-host { display: flex; gap: 8px; align-items: flex-end; }
+.settings-host label { flex: 1; min-width: 0; }
 .settings-modes { display: flex; gap: 16px; padding: 0; border: 0; }
 .settings-modes legend { padding: 0 0 4px; color: var(--chrome-faint); font-size: var(--type-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .settings-modes label { display: flex !important; align-items: center; gap: 5px; }

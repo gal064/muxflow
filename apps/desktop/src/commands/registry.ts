@@ -10,6 +10,8 @@ export interface CommandContext {
   canMoveSessionDown: boolean;
   canMoveTabLeft: boolean;
   canMoveTabRight: boolean;
+  /** Whether a saved host is picked in Settings and the store will part with it. */
+  canDeleteHostProfile: boolean;
   /**
    * Row commands (`requires: "row"`) published by whichever row surface holds
    * the row the user last pointed at. See `rowCommands.ts`: the publishing
@@ -36,6 +38,7 @@ export type CommandId =
   | "workspaces.switch"
   | "shortcuts.configure"
   | "settings.show"
+  | "host.delete"
   | "view.toggleSidebar" | "view.togglePanel" | "view.showFiles" | "view.showGit"
   | "focus.workspaces" | "focus.tabs" | "focus.back" | "focus.forward"
   | "tab.previous" | "tab.next"
@@ -111,6 +114,12 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "workspaces.switch", title: "Switch workspace…", group: "Application", defaults: { mac: "Meta+P", linux: "Ctrl+P" } },
   { id: "shortcuts.configure", title: "Configure keyboard shortcuts", group: "Application" },
   { id: "settings.show", title: "Settings", group: "Application", defaults: { mac: "Meta+,", linux: "Ctrl+," } },
+  // Deliberately not `mutates`: `canMutate` is about the *tmux server* being
+  // writable, and a saved host is a local preference that stays deletable while
+  // the connection to it is read-only or gone. Its availability is
+  // `canDeleteHostProfile` instead — the picked host, if it is one the store
+  // will part with.
+  { id: "host.delete", title: "Delete the selected saved host…", group: "Application", destructive: true },
   { id: "view.toggleSidebar", title: "Toggle sidebar", group: "View", defaults: { mac: "Meta+B", linux: "Ctrl+B" } },
   { id: "view.togglePanel", title: "Toggle right panel", group: "View", defaults: { mac: "Meta+Alt+B", linux: "Ctrl+Alt+B" } },
   { id: "view.showFiles", title: "Show Files", group: "View", defaults: { mac: "Meta+Shift+E", linux: "Ctrl+Shift+E" } },
@@ -210,6 +219,7 @@ export function commandAvailable(command: CommandDefinition, context: CommandCon
   // all of them before publishing, and a second, weaker copy of those rules
   // here is how the palette and the context menu would drift apart.
   if (command.requires === "row") return context.rowCommands.includes(command.id);
+  if (command.id === "host.delete") return context.canDeleteHostProfile;
   if (command.mutates && !context.canMutate) return false;
   if (command.id === "window.close" && context.hasWindow && !context.canMutate) return false;
   if (command.requires === "session" && !context.hasSession) return false;

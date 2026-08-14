@@ -1,5 +1,5 @@
 import { useCallback, useMemo, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
-import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
+import type { HostProfile, Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { createTmuxConfirmation, type PendingTmuxConfirmation } from "../../commands/destructiveConfirmation";
 import type { PendingTextPrompt } from "../../commands/TextInputDialog";
 import { commandRegistry, selectionIndex, type CommandContext, type CommandId, type CommandTarget } from "../../commands/registry";
@@ -26,6 +26,10 @@ interface ShellCommandOptions {
   appState: PersistedAppState;
   canMutate: boolean;
   combinedTabs: readonly CombinedTab[];
+  /** The saved host Settings has picked, when it is one that can be deleted. */
+  deletableHostProfile?: HostProfile;
+  /** Asks for the destructive confirmation; App owns the dialog and the store call. */
+  requestHostProfileDelete(profile: HostProfile): void;
 
   controllers: MutableRefObject<Map<string, TerminalPaneController>>;
   currentHostProfileId: string;
@@ -110,6 +114,14 @@ export function useShellCommands(options: ShellCommandOptions): {
         { kind: "closeSession", sessionId: targetSession.id },
         { serverIdentity: options.serverIdentity, generation: options.generation },
       ));
+      return;
+    }
+    // Before the tmux branch below, which captures a server identity and a
+    // topology generation: a saved host is a local preference, and gating its
+    // deletion on a live tmux server would make the host you cannot reach the
+    // one you cannot remove.
+    if (commandId === "host.delete") {
+      if (options.deletableHostProfile) options.requestHostProfileDelete(options.deletableHostProfile);
       return;
     }
     if (definition.destructive) {
@@ -241,6 +253,7 @@ export function useShellCommands(options: ShellCommandOptions): {
     canMoveTabRight: options.selectedAppTab
       ? Boolean(options.combinedTabs.find((tab) => tab.key === `app:${options.selectedAppTab!.id}`)?.canMoveRight)
       : Boolean(options.activeWindow && relativeWindowReorderAction(options.windows, options.activeWindow.id, "right")),
+    canDeleteHostProfile: Boolean(options.deletableHostProfile),
     rowCommands: options.rowCommands,
     run: runCommand,
   }), [options, runCommand]);

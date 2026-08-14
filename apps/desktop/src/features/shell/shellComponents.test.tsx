@@ -3,7 +3,7 @@ import stylesCss from "../../styles.css?raw";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
-import type { Session } from "../../app/types";
+import type { HostProfile, Session } from "../../app/types";
 import { rowCommandRegistry } from "../../commands/rowCommands";
 import { agent } from "../agents/testFixtures";
 import type { AgentAdapterDescriptor } from "../agents/types";
@@ -14,6 +14,8 @@ import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../workspac
 import type { WorkspaceRowModel } from "../workspaces/workspaceRows";
 import { DisconnectedStrip } from "./DisconnectedStrip";
 import { RightPanel } from "./RightPanel";
+import type { ShellState } from "./types";
+import { SettingsDialog } from "./SettingsDialog";
 import { TitleBar } from "./TitleBar";
 
 const noop = vi.fn();
@@ -252,5 +254,66 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('class="modal-backdrop hook-review-backdrop"');
     expect(html).toContain('class="hook-review-scroll"');
     expect(html).not.toContain("trust is managed");
+  });
+});
+
+describe("saved host picker", () => {
+  const profiles = [
+    { id: "local", label: "Local", connection: { mode: "local" } },
+    { id: "ssh-omarchy", label: "omarchy", connection: { mode: "ssh", profileId: "ssh-omarchy", target: "omarchy" } },
+  ] as const;
+
+  const settings = (overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}) => <SettingsDialog
+    connectionMode="local"
+    helper={{ phase: "idle" }}
+    onClose={noop}
+    onConnect={noop}
+    onConnectionMode={noop}
+    onDeleteProfile={noop}
+    onProbeHelper={noop}
+    onProfile={noop}
+    onRequestHelperInstall={noop}
+    onShell={noop}
+    onSounds={noop}
+    onSshConfigPath={noop}
+    onSshTarget={noop}
+    profiles={profiles as unknown as HostProfile[]}
+    remote={false}
+    selectedProfileId=""
+    shell={{ agentStateGlyphs: false, terminalScreenReader: false } as ShellState}
+    sounds={{ enabled: true, blocked: "subtle", completed: "subtle", volume: 0.5 }}
+    sshConfigPath=""
+    sshTarget=""
+    {...overrides}
+  />;
+
+  it("shows the host the user picked, not the one the app is connected to", () => {
+    // The defect: the control derived its value by matching each saved profile
+    // against the *live* connection, so picking a different host left the
+    // picker showing the connected one until Connect was pressed.
+    const onProfile = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    act(() => { renderer = create(settings({ onProfile })); });
+    const picker = renderer.root.findByProps({ "aria-label": "Saved host" });
+    expect(picker.props.value).toBe("");
+    act(() => picker.props.onChange({ target: { value: "ssh-omarchy" } }));
+    expect(onProfile).toHaveBeenCalledWith(profiles[1]);
+    act(() => { renderer.update(settings({ onProfile, selectedProfileId: "ssh-omarchy" })); });
+    expect(renderer.root.findByProps({ "aria-label": "Saved host" }).props.value).toBe("ssh-omarchy");
+    act(() => renderer.unmount());
+  });
+
+  it("offers Delete only for a picked host, and asks the command that confirms", () => {
+    const onDeleteProfile = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    act(() => { renderer = create(settings({ onDeleteProfile })); });
+    const disabled = renderer.root.findAllByType("button").find((node) => node.children.includes("Delete host…"))!;
+    expect(disabled.props.disabled).toBe(true);
+    act(() => { renderer.update(settings({ onDeleteProfile, deletableProfile: profiles[1] as unknown as HostProfile, selectedProfileId: "ssh-omarchy" })); });
+    const enabled = renderer.root.findAllByType("button").find((node) => node.children.includes("Delete host…"))!;
+    expect(enabled.props.disabled).toBe(false);
+    act(() => enabled.props.onClick());
+    expect(onDeleteProfile).toHaveBeenCalled();
+    act(() => renderer.unmount());
   });
 });

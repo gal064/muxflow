@@ -1,15 +1,18 @@
 import { useId, useState } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { SurfaceError } from "../../ui/SurfaceError";
-import type { ConnectionSpec, HostProfile } from "../../app/types";
+import type { HostProfile } from "../../app/types";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
 import type { ShellState } from "./types";
 
 interface SettingsDialogProps {
-  connection: ConnectionSpec;
   connectionMode: "local" | "ssh";
   profiles: readonly HostProfile[];
+  /** The picked saved host; empty is the "Current values" entry. */
+  selectedProfileId: string;
+  /** The saved host Delete would remove, or undefined while there is none. */
+  deletableProfile?: HostProfile;
   sshTarget: string;
   sshConfigPath: string;
   helper: HelperUpgradeState;
@@ -19,7 +22,8 @@ interface SettingsDialogProps {
   onClose(): void;
   onConnect(): void;
   onConnectionMode(mode: "local" | "ssh"): void;
-  onProfile(profile: HostProfile): void;
+  onDeleteProfile(): void;
+  onProfile(profile: HostProfile | undefined): void;
   onSshTarget(value: string): void;
   onSshConfigPath(value: string): void;
   onProbeHelper(): void;
@@ -97,15 +101,25 @@ export function SettingsDialog(props: SettingsDialogProps) {
         tabIndex={0}
       >
         {tab === "connection" && <>
-          <label>Saved host
-            <select aria-label="Saved host" onChange={(event) => {
-              const profile = props.profiles.find((item) => item.id === event.target.value);
-              if (profile) props.onProfile(profile);
-            }} value={props.profiles.find((profile) => JSON.stringify(profile.connection) === JSON.stringify(props.connection))?.id ?? ""}>
-              <option value="">Current values</option>
-              {props.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
-            </select>
-          </label>
+          <div className="settings-host">
+            <label>Saved host
+              {/* Bound to what the user picked, not to what the app is
+                  connected to. Connect is what turns one into the other. */}
+              <select aria-label="Saved host" onChange={(event) => {
+                const profile = props.profiles.find((item) => item.id === event.target.value);
+                if (profile) props.onProfile(profile);
+                else props.onProfile(undefined);
+              }} value={props.selectedProfileId}>
+                <option value="">Current values</option>
+                {props.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
+              </select>
+            </label>
+            <button
+              disabled={!props.deletableProfile}
+              onClick={props.onDeleteProfile}
+              type="button"
+            >Delete host…</button>
+          </div>
           <fieldset className="settings-modes">
             <legend>Transport</legend>
             <label><input checked={props.connectionMode === "local"} name="connection-mode" onChange={() => props.onConnectionMode("local")} type="radio" /> Local</label>
