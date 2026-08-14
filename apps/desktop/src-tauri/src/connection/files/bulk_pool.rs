@@ -2,7 +2,8 @@ use std::{
     io::BufReader,
     os::fd::AsRawFd,
     process::{Child, ChildStdin, ChildStdout},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Condvar, Mutex, OnceLock},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -98,8 +99,84 @@ impl<T> IdlePool<T> {
         expired.into_iter().map(|(_, value, _)| value).collect()
     }
 
-    fn drain(&mut self) -> Vec<T> {
-        self.entries.drain(..).map(|(_, value, _)| value).collect()
+    /// How long until the oldest entry times out. `None` means there is nothing
+    /// here to time out, which is a wait with no deadline rather than a wait of
+    /// zero — the difference between a parked reaper and a spinning one.
+    fn time_to_next_expiry(&self, now: Instant) -> Option<Duration> {
+        let oldest = self.entries.iter().map(|(_, _, since)| *since).min()?;
+        Some(self.idle_timeout.saturating_sub(now.duration_since(oldest)))
+    }
+
+    fn drain_matching(&mut self, mut matches: impl FnMut(&BulkKey) -> bool) -> Vec<T> {
+        let (drained, kept): (Vec<_>, Vec<_>) =
+            self.entries.drain(..).partition(|(key, _, _)| matches(key));
+        self.entries = kept;
+        drained.into_iter().map(|(_, value, _)| value).collect()
+    }
+}
+
+/// The pool, plus the way the reaper is told to look again.
+///
+/// `IDLE_TIMEOUT` is a promise about wall-clock time, and expiry that only runs
+/// inside `take` and `release` cannot keep it: after the last file operation
+/// nothing calls either, so the entry left behind — an ssh child, a remote
+/// helper process and a stdin held open — would sit there until the control
+/// connection stopped. One thread parked on this condition variable is what
+/// makes the number above mean what it says.
+struct SharedPool<T> {
+    idle: Mutex<IdlePool<T>>,
+    changed: Condvar,
+}
+
+impl<T> SharedPool<T> {
+    fn new(idle_timeout: Duration, capacity: usize) -> Self {
+        Self {
+            idle: Mutex::new(IdlePool::new(idle_timeout, capacity)),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// No wake: removing an entry can only move the next deadline later, and the
+    /// reaper recomputes the deadline from scratch every time it wakes.
+    fn take(&self, key: &BulkKey) -> (Option<T>, Vec<T>) {
+        self.idle.lock().unwrap().take(key, Instant::now())
+    }
+
+    fn release(&self, key: BulkKey, value: T) -> Vec<T> {
+        let retired = self
+            .idle
+            .lock()
+            .unwrap()
+            .release(key, value, Instant::now());
+        // After the entry is in and outside the lock. A reaper with nothing to
+        // watch waits without a deadline, so this notification is the only thing
+        // that ever starts its clock.
+        self.changed.notify_all();
+        retired
+    }
+
+    fn drain_matching(&self, matches: impl FnMut(&BulkKey) -> bool) -> Vec<T> {
+        self.idle.lock().unwrap().drain_matching(matches)
+    }
+
+    /// Blocks until at least one entry has timed out, and hands them over.
+    ///
+    /// Returns with the lock released, so whoever closes these is not holding
+    /// every other file operation up behind two `waitpid` calls. Only ever waits
+    /// on this pool's mutex, in the order `take` and `release` take it, so a
+    /// reaper cannot deadlock against either.
+    fn reap(&self) -> Vec<T> {
+        let mut idle = self.idle.lock().unwrap();
+        loop {
+            let expired = idle.expire(Instant::now());
+            if !expired.is_empty() {
+                return expired;
+            }
+            idle = match idle.time_to_next_expiry(Instant::now()) {
+                Some(wait) => self.changed.wait_timeout(idle, wait).unwrap().0,
+                None => self.changed.wait(idle).unwrap(),
+            };
+        }
     }
 }
 
@@ -140,9 +217,13 @@ impl Bridge {
     /// either EOF or bytes nobody asked for, and hangup means the far end is
     /// gone. Neither is something to hand to the next job.
     fn reusable(&mut self) -> bool {
-        if !self.clean {
-            return false;
-        }
+        self.clean && self.alive()
+    }
+
+    /// Whether the process and its stream are still in the state an idle bulk
+    /// connection is in. Split from `reusable` because the release path pairs it
+    /// with a fact this type does not have — see `returnable`.
+    fn alive(&mut self) -> bool {
         if !matches!(self.child.try_wait(), Ok(None)) {
             return false;
         }
@@ -166,9 +247,51 @@ impl Drop for Bridge {
     }
 }
 
-fn pool() -> &'static Mutex<IdlePool<Bridge>> {
-    static POOL: OnceLock<Mutex<IdlePool<Bridge>>> = OnceLock::new();
-    POOL.get_or_init(|| Mutex::new(IdlePool::new(IDLE_TIMEOUT, MAX_IDLE)))
+fn pool() -> &'static SharedPool<Bridge> {
+    static POOL: OnceLock<SharedPool<Bridge>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        // Started with the pool it watches, so there is no window in which an
+        // entry can be pooled and nothing is waiting for it to time out.
+        start_reaper();
+        SharedPool::new(IDLE_TIMEOUT, MAX_IDLE)
+    })
+}
+
+/// The one thread that makes `IDLE_TIMEOUT` a wall-clock promise.
+///
+/// Parked, not polling: it holds no lock while it waits and wakes only for an
+/// entry that exists. It is deliberately never joined — a thread that is not the
+/// main one cannot hold the process open, since the runtime exits when `main`
+/// returns whatever this is doing, and it owns nothing whose drop has to run.
+fn start_reaper() {
+    let started = thread::Builder::new()
+        .name("bulk-pool-reaper".into())
+        .spawn(|| {
+            loop {
+                // `reap` returns with the lock released, so the kill and reap
+                // each of these performs on the way out happens off it.
+                drop(pool().reap());
+            }
+        });
+    if let Err(error) = started {
+        // Worth saying, not worth failing a file operation over: expiry still
+        // happens inside the next `take` or `release`, as it always did.
+        eprintln!("bulk pool reaper could not start: {error}");
+    }
+}
+
+/// Whether a finished lease may put its bridge back.
+///
+/// Three facts, one predicate, so the one that is easiest to lose can be pinned
+/// by a test: `cancelled` is not implied by either of the others, and the case
+/// that matters is a cancelled lease whose bridge still looks perfect.
+/// `CancelState::cancel_for` sets `requested` *before* it swaps the pid out to
+/// kill it, and those two steps are not atomic — so a watcher can hold this
+/// bridge's pid, be descheduled, and deliver its SIGKILL after the pool has
+/// handed the same process to an unrelated job, killing a healthy transfer.
+/// Reading the flag the watcher already published is what closes that window.
+fn returnable(cancelled: bool, clean: bool, alive: bool) -> bool {
+    !cancelled && clean && alive
 }
 
 /// A bulk bridge held for the duration of one job.
@@ -200,7 +323,7 @@ impl BulkLease {
             server_identity: binding.expected_server_identity.clone(),
             connection_epoch: binding.connection_epoch,
         };
-        let (mut pooled, _expired) = pool().lock().unwrap().take(&key, Instant::now());
+        let (mut pooled, _expired) = pool().take(&key);
         if let Some(bridge) = pooled.as_mut()
             && !bridge.reusable()
         {
@@ -270,37 +393,38 @@ impl Drop for BulkLease {
         let Some(mut bridge) = self.bridge.take() else {
             return;
         };
-        // A cancellation that has begun must never leave a pooled bridge behind.
-        // `CancelState::cancel_for` sets `requested` *before* it swaps the pid
-        // out to kill it, and those two steps are not atomic — so a watcher can
-        // hold this bridge's pid, be descheduled, and deliver its SIGKILL after
-        // the pool has handed the same process to an unrelated job, killing a
-        // healthy transfer. Reading the flag the watcher already published is
-        // what closes that window: if the kill is coming, this bridge is not
-        // reusable, whatever its pipes currently say.
-        if self.cancellation.is_cancelled() || !bridge.reusable() {
+        // All three facts are read before the decision, rather than short-cut
+        // one by one, because `alive` is a `try_wait` and a zero-timeout `poll`:
+        // it costs nothing and consumes nothing even when the answer is already
+        // no.
+        if !returnable(
+            self.cancellation.is_cancelled(),
+            bridge.clean,
+            bridge.alive(),
+        ) {
             return;
         }
         // The retired entries are closed here, outside the lock, by dropping.
-        let _retired = pool()
-            .lock()
-            .unwrap()
-            .release(self.key.clone(), bridge, Instant::now());
+        let _retired = pool().release(self.key.clone(), bridge);
     }
 }
 
-/// Drops every pooled connection.
+/// Drops the pooled connections belonging to one control connection.
 ///
-/// Deliberately not filtered: a pooled bridge is keyed by the control
-/// connection's identity and epoch, so when a control connection stops, every
-/// bridge that could still be handed out belongs to the connection that is
-/// going away. Anything left is unreachable, and closing it now frees an ssh
-/// channel and a remote helper process rather than waiting out the idle timeout.
-pub(crate) fn close_pooled_bulk_bridges() {
+/// Filtered by the server identity the bridges handshook against, because a
+/// second connection to another host can be live at the same moment: draining
+/// everything would close bridges that are still perfectly reachable and make
+/// the next file operation over there pay a handshake it had already paid. This
+/// connection's own entries are unreachable once it stops — a pooled bridge is
+/// only ever handed to a job whose binding matches its key — and closing them
+/// now frees an ssh channel and a remote helper process rather than waiting out
+/// the idle timeout. An identity that never completed a handshake is empty and
+/// matches nothing, which is right: no bridge can be pooled under one.
+pub(crate) fn close_pooled_bulk_bridges(server_identity: &str) {
     // Taken out of the lock first: closing a bridge kills and reaps a process,
     // and doing that under the pool mutex would block every other file
     // operation for the length of two `waitpid` calls.
-    let closing = pool().lock().unwrap().drain();
+    let closing = pool().drain_matching(|key| key.server_identity == server_identity);
     drop(closing);
 }
 
@@ -372,6 +496,71 @@ mod tests {
         // The third eviction retires the oldest, not the one just released.
         assert_eq!(pool.release(key("server", 1), "third", now), vec!["first"]);
         assert_eq!(pool.entries.len(), 2);
-        assert_eq!(pool.drain(), vec!["second", "third"]);
+        assert_eq!(pool.drain_matching(|_| true), vec!["second", "third"]);
+    }
+
+    /// The timeout is a wall-clock promise, so nothing in here is allowed to
+    /// touch the pool after the release: no take, no release, no second job.
+    /// Before the reaper existed this test could only end in a timeout.
+    #[test]
+    fn an_idle_entry_is_reaped_with_nothing_else_touching_the_pool() {
+        let idle_timeout = Duration::from_millis(30);
+        let pool = Arc::new(SharedPool::new(idle_timeout, MAX_IDLE));
+        assert!(pool.release(key("server", 1), "idle").is_empty());
+
+        let reaping = {
+            let pool = Arc::clone(&pool);
+            thread::spawn(move || {
+                let started = Instant::now();
+                (pool.reap(), started.elapsed())
+            })
+        };
+        let (reaped, waited) = reaping.join().expect("the reaper thread");
+        assert_eq!(reaped, vec!["idle"]);
+        // Waited the timeout out rather than spinning it away.
+        assert!(waited >= idle_timeout, "reaped after only {waited:?}");
+        assert!(pool.idle.lock().unwrap().entries.is_empty());
+    }
+
+    /// A reaper with nothing to watch must park rather than spin, and must still
+    /// notice the next entry: `release` is what starts its clock.
+    #[test]
+    fn a_release_wakes_a_reaper_that_had_nothing_to_wait_for() {
+        let pool = Arc::new(SharedPool::<&str>::new(Duration::from_millis(20), MAX_IDLE));
+        let reaping = {
+            let pool = Arc::clone(&pool);
+            thread::spawn(move || pool.reap())
+        };
+        // Released after the reaper is already waiting, which is the waiting it
+        // has no deadline for.
+        thread::sleep(Duration::from_millis(10));
+        pool.release(key("server", 1), "late");
+        assert_eq!(reaping.join().expect("the reaper thread"), vec!["late"]);
+    }
+
+    /// The round-2 pid race, as a fact rather than as a comment: a cancellation
+    /// that has begun is not visible in the bridge's own state, so a bridge that
+    /// looks perfect must still not be pooled once the flag is set.
+    #[test]
+    fn a_cancelled_lease_never_returns_its_bridge_however_healthy_it_looks() {
+        assert!(!returnable(true, true, true));
+        assert!(returnable(false, true, true));
+        assert!(!returnable(false, false, true));
+        assert!(!returnable(false, true, false));
+    }
+
+    #[test]
+    fn stopping_one_connection_leaves_another_connections_bridges_pooled() {
+        let mut pool = IdlePool::new(IDLE_TIMEOUT, MAX_IDLE);
+        let now = Instant::now();
+        pool.release(key("stopping", 1), "theirs", now);
+        pool.release(key("staying", 1), "ours", now);
+
+        assert_eq!(
+            pool.drain_matching(|key| key.server_identity == "stopping"),
+            vec!["theirs"]
+        );
+        // The second live connection keeps the bridge it had warm.
+        assert_eq!(pool.take(&key("staying", 1), now).0, Some("ours"));
     }
 }

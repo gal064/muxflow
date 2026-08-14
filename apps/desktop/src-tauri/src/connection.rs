@@ -475,10 +475,14 @@ pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> 
             let _ = child.wait();
         }
         // Pooled bulk bridges are bound to a control connection's server
-        // identity and epoch, so once that connection is gone none of them can
-        // be handed to anything: closing them here frees the ssh channels and
-        // the remote helper processes now rather than at the idle timeout.
-        files::bulk_pool::close_pooled_bulk_bridges();
+        // identity and epoch, so once that connection is gone none of *its*
+        // bridges can be handed to anything: closing them here frees their ssh
+        // channels and remote helper processes now rather than at the idle
+        // timeout. Only this connection's, though — another window can be
+        // connected to another host at the same time, and its warm bridges are
+        // still reachable.
+        let server_identity = client.server_identity.lock().unwrap().clone();
+        files::bulk_pool::close_pooled_bulk_bridges(&server_identity);
     }
     Ok(())
 }
