@@ -1,4 +1,4 @@
-import type { AgentAdapterDescriptor, AgentAdapterId, AgentHookWiring } from "./types";
+import type { AgentAdapterDescriptor, AgentAdapterId } from "./types";
 
 /**
  * What the app is allowed to say about agent status on this host.
@@ -17,7 +17,7 @@ import type { AgentAdapterDescriptor, AgentAdapterId, AgentHookWiring } from "./
 export interface HostHookWiring {
   /** At least one adapter's events reach this daemon. */
   reports: boolean;
-  /** Adapters that are on this host and whose events do not reach it yet. */
+  /** Adapters the host says an install would act on, in display order. */
   setupTargets: AgentAdapterDescriptor[];
   /**
    * Why the host could not be read, when that is why it reports nothing.
@@ -28,21 +28,40 @@ export interface HostHookWiring {
   unknown: boolean;
 }
 
-const INVITES_SETUP: ReadonlySet<AgentHookWiring> = new Set<AgentHookWiring>(["notWired", "partial"]);
-
-export function hostHookWiring(adapters: readonly AgentAdapterDescriptor[]): HostHookWiring {
-  // `absent` adapters are excluded everywhere below. An agent that is not
-  // installed on this host has nothing to wire, and treating it as a gap means
-  // prompting to create configuration for a vendor the user does not use.
-  const hookAdapters = adapters
-    .filter((adapter) => adapter.supportsHooks && adapter.hookWiring !== "absent");
+/**
+ * @param adapters the host's descriptors, carrying its own wiring observation
+ * @param liveAdapterIds adapters with an agent actually running on this host
+ *
+ * `liveAdapterIds` exists because the host's presence probe reads the *daemon
+ * process's* `PATH`, and a daemon started by launchd, systemd or a non-login
+ * SSH exec routinely has a `PATH` without `~/.local/bin` or `/opt/homebrew/bin`.
+ * An agent that is running is proof it is installed, whatever that probe
+ * concluded — and without this, a host with a live agent and no config
+ * directory yet would be reported as having no agent at all, and the app would
+ * silently offer nothing. That is the original failure with the volume turned
+ * down.
+ */
+export function hostHookWiring(
+  adapters: readonly AgentAdapterDescriptor[],
+  liveAdapterIds: readonly AgentAdapterId[] = [],
+): HostHookWiring {
+  const live = new Set(liveAdapterIds);
+  // `absent` adapters are excluded everywhere below: an agent that is not
+  // installed has nothing to wire, and treating it as a gap means prompting to
+  // create configuration for a vendor the user does not use.
+  const hookAdapters = adapters.filter((adapter) =>
+    adapter.supportsHooks && (adapter.hookWiring !== "absent" || live.has(adapter.id)));
+  const unreadable = hookAdapters
+    .find((adapter) => adapter.hookWiring === "unavailable" && adapter.hookWiringDetail);
   return {
     reports: hookAdapters.some((adapter) => adapter.hookWiring === "wired"),
-    setupTargets: hookAdapters.filter((adapter) => INVITES_SETUP.has(adapter.hookWiring)),
-    ...hookAdapters
-      .filter((adapter) => adapter.hookWiring === "unavailable" && adapter.hookWiringDetail)
-      .slice(0, 1)
-      .map((adapter) => ({ unreadableReason: adapter.hookWiringDetail }))[0],
+    // The host decides what an install would act on; this used to be a second
+    // copy of that rule, in another language, and the two had already diverged.
+    // A live agent the host called absent is the one exception, and it is one
+    // the host could not have known about.
+    setupTargets: hookAdapters.filter((adapter) =>
+      adapter.hookSetupRecommended || (adapter.hookWiring === "absent" && live.has(adapter.id))),
+    ...(unreadable ? { unreadableReason: unreadable.hookWiringDetail } : {}),
     // No adapters at all is "we have not been told", not "nothing is wired":
     // it is what every disconnected and every pre-snapshot render looks like.
     unknown: hookAdapters.length === 0

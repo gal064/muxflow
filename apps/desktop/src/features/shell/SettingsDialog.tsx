@@ -36,7 +36,7 @@ interface SettingsDialogProps {
    * the app" — and someone whose hooks were later removed by another tool
    * needs the same door.
    */
-  agentSetup: { available: boolean; reports: boolean; onSetUp(): void };
+  agentSetup: { available: boolean; reports: boolean; connected: boolean; onSetUp(): void };
 }
 
 type SettingsTab = "connection" | "sounds" | "accessibility";
@@ -199,7 +199,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
 function agentSetupHint(setup: SettingsDialogProps["agentSetup"]): string {
   if (setup.available) return "Adds this app’s lifecycle hooks alongside the ones already configured on this host.";
   if (setup.reports) return "This host already reports agent status.";
-  return "Connect to a host to check whether it can report agent status.";
+  // Three reasons the button can be unavailable, and they are different
+  // answers. Collapsing them told a connected user to connect.
+  if (!setup.connected) return "Connect to a host to check whether it can report agent status.";
+  return "Nothing here to set up: no supported agent is installed on this host, or its configuration could not be read.";
 }
 
 /** Why Delete is unavailable, in the words of the reason it is unavailable. */

@@ -311,14 +311,9 @@ fn adapter_descriptor_json(value: &v1::AgentAdapterDescriptor) -> Value {
 }
 
 fn hook_wiring_name(value: i32) -> &'static str {
-    match v1::AgentHookWiring::try_from(value).unwrap_or_default() {
-        v1::AgentHookWiring::Wired => "wired",
-        v1::AgentHookWiring::Partial => "partial",
-        v1::AgentHookWiring::NotWired => "notWired",
-        v1::AgentHookWiring::Absent => "absent",
-        v1::AgentHookWiring::Unavailable => "unavailable",
-        v1::AgentHookWiring::Unspecified => "unspecified",
-    }
+    v1::AgentHookWiring::try_from(value)
+        .unwrap_or_default()
+        .label()
 }
 
 fn adapter_name(value: i32) -> &'static str {

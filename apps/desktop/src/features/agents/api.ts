@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { agentGeneration, zeroGeneration, type AgentGeneration } from "./generation";
 import { canonicalAdapterId } from "./adapterDefinitions";
+import { AGENT_HOOK_WIRINGS } from "./types";
 import type {
   AgentAdapterDescriptor,
   AgentAdapterId,
   AgentAuthority,
   AgentHookReview,
+  AgentHookWiring,
   AgentHostNamingOutcome,
   AgentLaunchRequest,
   AgentLifecycle,
@@ -58,7 +60,7 @@ export interface WireAgentSnapshot {
     adapter: string; id: string; displayName: string; supportsLaunch?: boolean; supportsResume?: boolean;
     supportsHooks?: boolean; supportsProcessDetection?: boolean; supportsScreenFallback?: boolean;
     hookConfigPath?: string; hookEvents?: string[];
-    hookWiring?: string; hookWiringDetail?: string;
+    hookWiring?: string; hookWiringDetail?: string; hookSetupRecommended?: boolean;
   }>;
 }
 
@@ -324,6 +326,7 @@ function mapAdapterDescriptor(value: NonNullable<WireAgentSnapshot["adapters"]>[
     placements: value.supportsLaunch ? ["window", "split"] : [],
     hookWiring: mapHookWiring(value.hookWiring),
     hookWiringDetail: value.hookWiringDetail ?? "",
+    hookSetupRecommended: Boolean(value.hookSetupRecommended),
   };
 }
 
@@ -333,10 +336,9 @@ function mapAdapterDescriptor(value: NonNullable<WireAgentSnapshot["adapters"]>[
  * guessing "not wired" would put an install prompt in front of the user for a
  * configuration that may already be correct.
  */
-function mapHookWiring(value: string | undefined): AgentAdapterDescriptor["hookWiring"] {
-  return value === "wired" || value === "partial" || value === "notWired"
-    || value === "absent" || value === "unavailable"
-    ? value : "unspecified";
+function mapHookWiring(value: string | undefined): AgentHookWiring {
+  const known = AGENT_HOOK_WIRINGS.find((state) => state === value);
+  return known ?? "unspecified";
 }
 
 function mapLifecycle(value: string): AgentLifecycle {

@@ -379,19 +379,33 @@ export function App() {
     launchContext: activeSession && activeWindow && activePane && workspaceFiles.root
       ? { sessionId: activeSession.id, windowId: activeWindow.id, paneId: activePane.id, root: workspaceFiles.root }
       : undefined,
-    onHooksChanged: () => agentRuntime.refreshSnapshot(),
+    onHooksChanged: (action) => {
+      agentRuntime.refreshSnapshot();
+      // Removing the managed hooks is withdrawing consent for this host;
+      // otherwise the per-host "accepted" reinstalls them on the next connect.
+      if (action === "uninstall") setAppState((current) => ({
+        ...current,
+        hostSetup: { ...current.hostSetup, [currentHostProfileId]: "declined" },
+      }));
+    },
     onModalChange: setAgentModalOpen,
     onStatus: setStatus,
     runtime: agentRuntime,
   });
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
+  // A running agent proves its vendor is installed here, whatever the host's
+  // own `PATH`-based probe concluded from a daemon started by launchd.
+  const liveAgentAdapterIds = useMemo(
+    () => [...new Set(agentRuntime.agents.map((record) => record.adapterId))],
+    [agentRuntime.agents],
+  );
   const agentHostSetup = useAgentHostSetup({
     adapters: agentRuntime.adapters,
     applyHooks: agentRuntime.applyHooks,
     applyHostNaming: agentRuntime.applyHostNaming,
     connected: Boolean(agentScope),
-    connectionKey: `${currentHostProfileId}\0${hostState.serverIdentity ?? ""}\0${terminalEpoch}`,
     decision: appState.hostSetup[currentHostProfileId],
+    liveAdapterIds: liveAgentAdapterIds,
     hostLabel,
     hostProfileId: currentHostProfileId,
     onStatus: setStatus,
@@ -984,6 +998,7 @@ export function App() {
     {settingsOpen && <SettingsDialog
       agentSetup={{
         available: agentHostSetup.offerable,
+        connected: Boolean(agentScope),
         reports: agentHostSetup.reports,
         onSetUp: () => { setSettingsOpen(false); agentHostSetup.offer(); },
       }}

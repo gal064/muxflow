@@ -13,6 +13,39 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/tmux_agent.protocol.v1.rs"));
+
+    impl AgentHookWiring {
+        /// The name this state travels under across the WebView boundary.
+        ///
+        /// Here, beside the enum, because it was three copies: one in the
+        /// helper's CLI, a byte-identical one in the desktop's Tauri bridge,
+        /// and a third as a TypeScript union. Adding a state meant editing all
+        /// three, and missing one degraded silently to "unspecified" with no
+        /// compile error in either language.
+        pub fn label(self) -> &'static str {
+            match self {
+                Self::Wired => "wired",
+                Self::Partial => "partial",
+                Self::NotWired => "notWired",
+                Self::Absent => "absent",
+                Self::Unavailable => "unavailable",
+                Self::Unspecified => "unspecified",
+            }
+        }
+
+        /// Whether this state is one an install would act on.
+        ///
+        /// The policy, once. It was written twice — the helper's CLI decided
+        /// which adapters to install into, and the desktop decided which to
+        /// offer — in two languages, and the two were already diverging.
+        /// `Absent` is not here: an agent that is not on the host has nothing
+        /// to wire, and installing there writes configuration for a tool the
+        /// user does not use. Neither is `Unavailable`: writing over what
+        /// nobody could parse is how unrelated hooks get lost.
+        pub fn invites_setup(self) -> bool {
+            matches!(self, Self::NotWired | Self::Partial)
+        }
+    }
 }
 
 // Phase 9 removes obsolete topology and agent-route fields. The major bump

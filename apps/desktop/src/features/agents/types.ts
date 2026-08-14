@@ -15,7 +15,9 @@ export type AgentPlacement = "window" | "split";
  * wired perfectly, and offering to write over it is how unrelated hooks get
  * lost. `unspecified` is a host too old to answer.
  */
-export type AgentHookWiring = "wired" | "partial" | "notWired" | "absent" | "unavailable" | "unspecified";
+/** The states the host can report, once. `mapHookWiring` validates against it. */
+export const AGENT_HOOK_WIRINGS = ["wired", "partial", "notWired", "absent", "unavailable", "unspecified"] as const;
+export type AgentHookWiring = typeof AGENT_HOOK_WIRINGS[number];
 
 export interface AgentAdapterDescriptor {
   id: AgentAdapterId;
@@ -31,6 +33,12 @@ export interface AgentAdapterDescriptor {
   hookWiring: AgentHookWiring;
   /** Why the wiring could not be read; empty in every other state. */
   hookWiringDetail: string;
+  /**
+   * Whether the host says an install would act on this adapter. The host is
+   * what observed the wiring, so the host decides; the desktop used to keep a
+   * second copy of the rule and the two had already diverged.
+   */
+  hookSetupRecommended: boolean;
 }
 
 export interface AgentRoute {

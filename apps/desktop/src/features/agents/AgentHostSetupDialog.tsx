@@ -31,8 +31,8 @@ export function AgentHostSetupDialog(props: AgentHostSetupDialogProps) {
   const titleId = useId();
   const detailId = useId();
   const dialog = useModalDialog<HTMLElement>(() => { if (!props.applying) props.onDecline(); });
-  return <div className="modal-backdrop" role="presentation">
-    <section aria-describedby={detailId} aria-labelledby={titleId} aria-modal="true" className="modal host-setup" ref={dialog} role="alertdialog">
+  return <div className="modal-backdrop host-setup-backdrop" role="presentation">
+    <section aria-describedby={detailId} aria-labelledby={titleId} aria-modal="true" className="host-setup" ref={dialog} role="alertdialog">
       <header>
         <div><small>One-time setup</small><h2 id={titleId}>Set up agent status on {props.hostLabel}?</h2></div>
       </header>

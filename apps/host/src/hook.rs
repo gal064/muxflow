@@ -77,24 +77,26 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
         "uninstall" => Some(v1::HookManagementAction::Uninstall),
         _ => bail!("usage: tmux-ide-host hook <ingest|status|install|uninstall>"),
     };
-    let observed = manager.wiring();
     let mut report = Vec::new();
     let mut failed = false;
     if let Some(action) = action {
-        for entry in &observed {
-            // Named explicitly, or chosen for us. Choosing for us means
-            // skipping an agent that is not on this host at all — installing
-            // there creates a configuration directory and file for a tool the
-            // user does not use — and skipping one whose configuration could
-            // not be read, because writing over what nobody could parse is how
-            // unrelated hooks get lost. `--adapter` overrides the first;
-            // nothing overrides the second.
+        for (adapter, entry) in manager.wiring() {
+            // `invites_setup` is the shared policy: it excludes an agent that
+            // is not on this host — installing there creates a configuration
+            // directory and file for a tool the user does not use — and one
+            // whose configuration could not be read, because writing over what
+            // nobody could parse is how unrelated hooks get lost. `--adapter`
+            // overrides the first, since an operator naming an adapter has
+            // said something the probe cannot; nothing overrides the second.
             let explicit = adapter_id.as_deref() == Some(entry.adapter_id);
-            let skip = match entry.state {
-                v1::AgentHookWiring::Unavailable => Some("configuration could not be read"),
-                v1::AgentHookWiring::Absent if !explicit => Some("agent is not installed here"),
-                _ if adapter_id.is_some() && !explicit => Some("not selected"),
-                _ => None,
+            let skip = if adapter_id.is_some() && !explicit {
+                Some("not selected")
+            } else if entry.state == v1::AgentHookWiring::Unavailable {
+                Some("configuration could not be read")
+            } else if !entry.state.invites_setup() && !explicit {
+                Some("agent is not installed here")
+            } else {
+                None
             };
             if let Some(reason) = skip {
                 report.push(serde_json::json!({
@@ -104,8 +106,6 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
                 }));
                 continue;
             }
-            let adapter = crate::service::agents::adapters::by_id(entry.adapter_id)
-                .context("agent adapter is required")?;
             // Every adapter is reported even when an earlier one failed: a
             // merge-only installer whose pitch is "you can see exactly what
             // changed" must not exit silently having already written a file.
@@ -123,10 +123,11 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
         }
     }
     // Re-read: what the wiring is *after* whatever just happened is the
-    // useful answer, and the pre-action observation above was only a plan.
+    // useful answer, and the observation above was only a plan.
     let wiring: Vec<_> = manager
         .wiring()
         .into_iter()
+        .map(|(_, entry)| entry)
         .filter(|entry| {
             adapter_id
                 .as_deref()
@@ -136,7 +137,7 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
             serde_json::json!({
                 "adapterId": entry.adapter_id,
                 "configPath": entry.config_path,
-                "wiring": wiring_label(entry.state),
+                "wiring": entry.state.label(),
                 "detail": entry.detail,
             })
         })
@@ -174,17 +175,6 @@ fn apply_one(
         "backupPath": review.backup_path,
         "changed": changed,
     }))
-}
-
-fn wiring_label(state: v1::AgentHookWiring) -> &'static str {
-    match state {
-        v1::AgentHookWiring::Wired => "wired",
-        v1::AgentHookWiring::Partial => "partial",
-        v1::AgentHookWiring::NotWired => "notWired",
-        v1::AgentHookWiring::Absent => "absent",
-        v1::AgentHookWiring::Unavailable => "unavailable",
-        v1::AgentHookWiring::Unspecified => "unspecified",
-    }
 }
 
 fn flag(arguments: &[String], name: &str) -> Option<String> {
