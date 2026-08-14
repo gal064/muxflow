@@ -59,6 +59,17 @@ const SMOOTH_SCROLL_DURATION_MS = 80;
 /** Queue depth past which animating each scroll step is wasted work. */
 const SMOOTH_SCROLL_SUSPEND_BYTES = 256 * 1024;
 
+function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
+  if (pieces.length === 1) return pieces[0];
+  const joined = new Uint8Array(length);
+  let offset = 0;
+  for (const piece of pieces) {
+    joined.set(piece, offset);
+    offset += piece.byteLength;
+  }
+  return joined;
+}
+
 /** A byte-preserving queue bounded across both JS and xterm's async parser. */
 export class TerminalWriteScheduler {
   readonly #queue: Array<{ bytes: Uint8Array; onRendered?: () => void }> = [];
@@ -180,16 +191,39 @@ export class TerminalWriteScheduler {
     });
   }
 
+  /**
+   * Hands xterm one frame's worth of bytes: as many queued events as the byte
+   * budget covers, coalesced into a single write.
+   *
+   * Draining one *event* per frame was the renderer half of P12-U002. tmux
+   * splits an agent-TUI repaint across many output records, so a repaint cost a
+   * frame per record — measured at 23 frames (~383 ms) for a 4 KiB 24-record
+   * repaint — and the keystroke echo queued behind it waited for all of them.
+   * The budget is bytes, so a flood is paced exactly as before, and coalescing
+   * keeps the "one write outstanding in xterm at a time" bound that the pending
+   * accounting, the overflow bound and the drain all rest on.
+   */
   #flush(): void {
     this.#frame = undefined;
     if (this.#disposed || this.#inFlightBytes || this.#queue.length === 0) return;
-    const first = this.#queue[0];
-    const length = Math.min(first.bytes.byteLength, this.maxBytesPerFrame);
-    const chunk = first.bytes.subarray(0, length);
-    const completesWrite = length === first.bytes.byteLength;
-    const onRendered = completesWrite ? first.onRendered : undefined;
-    if (completesWrite) this.#queue.shift();
-    else first.bytes = first.bytes.subarray(length);
+    const pieces: Uint8Array[] = [];
+    const rendered: Array<() => void> = [];
+    let length = 0;
+    while (length < this.maxBytesPerFrame && this.#queue.length > 0) {
+      const first = this.#queue[0];
+      const take = Math.min(first.bytes.byteLength, this.maxBytesPerFrame - length);
+      pieces.push(first.bytes.subarray(0, take));
+      length += take;
+      if (take === first.bytes.byteLength) {
+        this.#queue.shift();
+        // A partially written event has not reached xterm yet, so its
+        // completion belongs to the frame that finishes it.
+        if (first.onRendered) rendered.push(first.onRendered);
+      } else {
+        first.bytes = first.bytes.subarray(take);
+      }
+    }
+    const chunk = joinChunks(pieces, length);
     this.#inFlightBytes = length;
     let completed = false;
     const done = () => {
@@ -198,7 +232,7 @@ export class TerminalWriteScheduler {
       this.#pendingBytes -= this.#inFlightBytes;
       this.#inFlightBytes = 0;
       this.onPendingBytes?.(this.#pendingBytes);
-      onRendered?.();
+      for (const onRendered of rendered) onRendered();
       this.#resolveDrainWaiters();
       this.#schedule();
     };
@@ -248,7 +282,17 @@ export class XtermRenderer implements TerminalRenderer {
       ignoreBracketedPasteMode: false,
       macOptionClickForcesSelection: true,
       rightClickSelectsWord: true,
-      screenReaderMode: true,
+      // Off deliberately (P12-U002/U003). xterm's screen-reader mode allocates
+      // a string and dispatches an emitter event for every printed codepoint
+      // and rewrites a DOM mirror of every row on every render, which an agent
+      // TUI repainting at 1 Hz pays thousands of times a second; its mirror also
+      // sits over the WebGL canvas with an un-overridden `::selection`
+      // background, which is what painted highlight rectangles at stale
+      // positions. The pane's own AX label and role, keyboard operability and
+      // xterm's input textarea are unaffected. Making terminal *content*
+      // readable to a screen reader again belongs behind a user setting; there
+      // is no preferences surface to hang one on yet.
+      screenReaderMode: false,
       scrollback: 10_000,
       scrollOnUserInput: true,
       smoothScrollDuration: SMOOTH_SCROLL_DURATION_MS,

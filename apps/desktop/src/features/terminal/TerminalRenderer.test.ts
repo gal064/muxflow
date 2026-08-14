@@ -20,18 +20,19 @@ describe("TerminalWriteScheduler", () => {
     );
     scheduler.enqueue(Uint8Array.from([1, 2, 3, 4]));
     scheduler.enqueue(Uint8Array.from([5, 6]));
+    // The first event took the idle fast path and was cut at the 3-byte budget.
     frames.shift()!(0);
     expect(written).toEqual([[1, 2, 3]]);
     expect(scheduler.pendingBytes).toBe(6);
     expect(frames).toHaveLength(0);
     completions.shift()!();
     expect(scheduler.pendingBytes).toBe(3);
+    // One frame carries the rest of the split event and the event behind it,
+    // coalesced into a single write, still in byte order.
     frames.shift()!(16);
-    expect(written.flat()).toEqual([1, 2, 3, 4]);
+    expect(written).toEqual([[1, 2, 3], [4, 5, 6]]);
     completions.shift()!();
-    frames.shift()!(32);
-    completions.shift()!();
-    expect(written.flat()).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(scheduler.pendingBytes).toBe(0);
     expect(pending.at(-1)).toBe(0);
   });
 
@@ -187,11 +188,74 @@ describe("TerminalWriteScheduler", () => {
     completions.shift()!();
     frames.shift()!(16);
     completions.shift()!();
-    frames.shift()!(32);
-    completions.shift()!();
     expect(written.flat()).toEqual([1, 2, 3, 4, 0x1b, 0x63, 20, 21, 22]);
     expect(overflow).toEqual([11]);
     expect(scheduler.pendingBytes).toBe(0);
+  });
+});
+
+/**
+ * Stage 12.9 item 3 measurement lane (P12-U002).
+ *
+ * An agent TUI repaint does not arrive as one write: tmux splits it across many
+ * `%output`/`%extended-output` records, so the renderer sees K queued events for
+ * one frame of screen. The number this lane reports is how many animation frames
+ * pass before the last of those bytes — and the keystroke echo queued behind
+ * them — reach xterm. It is the renderer-side half of the typing-lag budget, and
+ * it is deterministic: the frame clock and the write completions are injected,
+ * so the figure is a count, not a stopwatch reading.
+ */
+describe("agent-repaint frame cost", () => {
+  const FRAME_MS = 1000 / 60;
+
+  const measure = (eventCount: number, bytesPerEvent: number) => {
+    const frames: FrameRequestCallback[] = [];
+    const completions: Array<() => void> = [];
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      256 * 1024,
+      8 * 1024 * 1024,
+    );
+    let echoReached = false;
+    for (let index = 0; index < eventCount; index += 1) {
+      scheduler.enqueue(new Uint8Array(bytesPerEvent));
+    }
+    // The user's keystroke echo is one small event queued behind the repaint.
+    scheduler.enqueue(Uint8Array.of(0x61), () => { echoReached = true; });
+
+    let framesElapsed = 0;
+    while (!echoReached && framesElapsed < 500) {
+      // xterm parses what it was handed before the next frame is serviced.
+      while (completions.length) completions.shift()!();
+      if (echoReached) break;
+      const due = frames.splice(0, frames.length);
+      if (due.length === 0) break;
+      framesElapsed += 1;
+      for (const callback of due) callback(framesElapsed * FRAME_MS);
+    }
+    while (completions.length) completions.shift()!();
+    return { framesElapsed, echoReached, latencyMs: framesElapsed * FRAME_MS };
+  };
+
+  it("delivers a 4 KiB 24-event repaint and the echo behind it within one frame", () => {
+    const repaint = measure(24, 170);
+    const singleEcho = measure(0, 0);
+    // eslint-disable-next-line no-console -- this line is the measurement record.
+    console.log(`agent-repaint frame cost: 24-event 4 KiB repaint + echo = ${repaint.framesElapsed} frames (${repaint.latencyMs.toFixed(1)} ms at 60 Hz); idle echo = ${singleEcho.framesElapsed} frames`);
+    expect(repaint.echoReached).toBe(true);
+    expect(singleEcho.framesElapsed).toBe(0);
+    // One frame of budget for a whole repaint, not one frame per event.
+    expect(repaint.framesElapsed).toBeLessThanOrEqual(1);
+  });
+
+  it("still paces a flood at the per-frame byte budget", () => {
+    const flood = measure(8, 256 * 1024);
+    // eslint-disable-next-line no-console -- this line is the measurement record.
+    console.log(`agent-repaint frame cost: 2 MiB flood + echo = ${flood.framesElapsed} frames (${flood.latencyMs.toFixed(1)} ms at 60 Hz)`);
+    expect(flood.echoReached).toBe(true);
+    expect(flood.framesElapsed).toBeGreaterThanOrEqual(7);
   });
 });
 
