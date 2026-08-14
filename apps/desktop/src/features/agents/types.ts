@@ -159,6 +159,15 @@ export interface AgentHookReview {
   backupPath?: string;
 }
 
+/**
+ * What the host did with the recommended tmux window naming.
+ *
+ * `alreadyConfigured` is a success: the user's own tmux config already syncs
+ * pane titles to window names, and theirs is kept — it may carry exemptions
+ * this app knows nothing about.
+ */
+export type AgentHostNamingOutcome = "applied" | "alreadyConfigured" | "unavailable";
+
 export interface AgentRequestScope {
   clientId: string;
   hostProfileId: string;

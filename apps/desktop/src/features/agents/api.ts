@@ -6,6 +6,7 @@ import type {
   AgentAdapterId,
   AgentAuthority,
   AgentHookReview,
+  AgentHostNamingOutcome,
   AgentLaunchRequest,
   AgentLifecycle,
   AgentRecord,
@@ -93,6 +94,8 @@ interface WireResponse {
   windowId?: string;
   paneId?: string;
   acceptedGeneration?: string | number;
+  hostNaming?: string;
+  hostNamingDetail?: string;
 }
 
 export interface WireAgentEvent {
@@ -112,6 +115,7 @@ export interface AgentClient {
   markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void>;
   reviewHooks(scope: AgentRequestScope, adapter: AgentAdapterId, action?: "install" | "uninstall"): Promise<AgentHookReview>;
   applyHooks(scope: AgentRequestScope, review: AgentHookReview): Promise<void>;
+  applyHostNaming(scope: AgentRequestScope): Promise<AgentHostNamingOutcome>;
   publishWireEvent(scope: AgentRequestScope, event: WireAgentEvent): void;
   publishWireSnapshot(scope: AgentRequestScope, snapshot: WireAgentSnapshot): void;
   subscribe(listener: (event: AgentWireEvent) => void): () => void;
@@ -193,6 +197,13 @@ export class TauriAgentClient implements AgentClient {
       ...(plan.trustGuidance ? { trustGuidance: plan.trustGuidance } : {}),
       ...(plan.backupPath ? { backupPath: plan.backupPath } : {}),
     };
+  }
+
+  async applyHostNaming(scope: AgentRequestScope): Promise<AgentHostNamingOutcome> {
+    const response = await this.#request(scope, { operation: "hostNaming" });
+    return response.hostNaming === "applied" || response.hostNaming === "alreadyConfigured"
+      ? response.hostNaming
+      : "unavailable";
   }
 
   async applyHooks(scope: AgentRequestScope, review: AgentHookReview): Promise<void> {

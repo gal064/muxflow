@@ -97,6 +97,11 @@ enum Operation {
   OPERATION_COMMIT_TERMINAL_UPLOAD = 39;
   OPERATION_CANCEL_TERMINAL_UPLOAD = 40;
   OPERATION_RECONCILE_TERMINAL_UPLOAD = 41;
+  // Applies the recommended tmux window naming this app's "tabs are tmux
+  // windows" contract depends on. Consent-gated by the same one-time host
+  // prompt as hook installation, and re-asserted on every connect because it
+  // lives in the tmux server's memory rather than in a config file.
+  OPERATION_AGENT_HOST_NAMING = 42;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -862,6 +867,11 @@ message AgentResponse {
   string window_id = 5;
   string pane_id = 6;
   uint64 accepted_generation = 7;
+  // "applied", "alreadyConfigured", or "unavailable"; empty for every other
+  // operation. Never a silent success: a host whose tmux refused the command
+  // has to be able to say so.
+  string host_naming = 8;
+  string host_naming_detail = 9;
 }
 
 message AgentEvent {

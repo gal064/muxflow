@@ -80,6 +80,14 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        // The same code path the desktop drives after the one-time host
+        // prompt, reachable without one — which is how it is tested against
+        // real tmux servers on isolated sockets rather than a developer's own.
+        Some("host-naming") => {
+            let outcome = service::apply_recommended_tmux_naming()?;
+            println!("{}", serde_json::json!({ "outcome": outcome.label() }));
+            Ok(())
+        }
         Some("discover") => {
             let snapshot = if let Some(name) = std::env::var_os("ADE_TMUX_SOCKET_NAME") {
                 tmux_control::discover_with_socket_name(&name.to_string_lossy())?
@@ -105,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(debug_assertions)]
         Some("phase1-client") => phase1_client::run(std::env::args().skip(2).collect()),
         _ => bail!(
-            "usage: tmux-ide-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|helper|version|doctor [--json]|support-bundle --output PATH|discover>"
+            "usage: tmux-ide-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover>"
         ),
     }
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { AgentHostSetupDialog } from "./AgentHostSetupDialog";
 import { hostHookWiring, hookWiringNotice, type HostHookWiring } from "./hookWiring";
 import type { HostSetupDecision } from "../shell/types";
-import type { AgentAdapterDescriptor, AgentHookReview } from "./types";
+import type { AgentAdapterDescriptor, AgentHookReview, AgentHostNamingOutcome } from "./types";
 
 export interface AgentHostSetupOptions {
   adapters: readonly AgentAdapterDescriptor[];
@@ -15,6 +15,17 @@ export interface AgentHostSetupOptions {
   recordDecision(hostProfileId: string, decision: HostSetupDecision): void;
   reviewHooks(adapter: string, action: "install" | "uninstall"): Promise<AgentHookReview>;
   applyHooks(review: AgentHookReview): Promise<void>;
+  /**
+   * Applies the recommended tmux window naming. Separate from the hooks
+   * because it lives in the tmux server's memory rather than a config file,
+   * so it has to be re-asserted rather than installed once.
+   */
+  applyHostNaming(): Promise<AgentHostNamingOutcome>;
+  /**
+   * Identity of the live connection. A tmux server restart produces a new one,
+   * and that is exactly when the in-memory naming has to be re-asserted.
+   */
+  connectionKey: string;
   /** Re-asks the host what its wiring is now, after a change to it. */
   refreshWiring(): void;
   onStatus(message: string): void;
@@ -77,6 +88,25 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     if (!options.connected) close(false);
   }, [close, options.connected]);
 
+  // Window naming is not installed, it is asserted: it lives in the running
+  // tmux server, so a restarted server — a new connection key — silently loses
+  // it. Re-sent once per connection, and only where the user already said yes.
+  // The host's own detection is what keeps this from overwriting a config the
+  // user wrote themselves.
+  const namedConnections = useRef(new Set<string>());
+  useEffect(() => {
+    const current = optionsRef.current;
+    if (!current.connected || current.decision !== "accepted") return;
+    if (namedConnections.current.has(current.connectionKey)) return;
+    namedConnections.current.add(current.connectionKey);
+    void current.applyHostNaming().catch((cause) => {
+      namedConnections.current.delete(current.connectionKey);
+      // Non-fatal by design: agent status works without it, and the phase that
+      // introduced it declared it non-gating. It still must not fail silently.
+      current.onStatus(`Recommended tmux window naming was not applied: ${String(cause)}`);
+    });
+  }, [options.connected, options.connectionKey, options.decision]);
+
   const accept = useCallback(() => {
     const current = optionsRef.current;
     const targets = hostHookWiring(current.adapters).setupTargets;
@@ -93,6 +123,10 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       current.refreshWiring();
       close(false);
       current.onStatus(`Agent status hooks installed on ${current.hostLabel}.`);
+      // Part of the same "set up this host" answer, and deliberately after it:
+      // a tmux server that refuses the naming must not lose the hooks.
+      void current.applyHostNaming().then(() => namedConnections.current.add(current.connectionKey))
+        .catch((cause) => current.onStatus(`Recommended tmux window naming was not applied: ${String(cause)}`));
     }).catch((cause) => {
       // Nothing is recorded on failure: the user has not been asked and
       // answered, they have been shown a broken attempt.
