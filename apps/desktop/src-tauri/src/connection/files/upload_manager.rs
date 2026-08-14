@@ -874,7 +874,18 @@ fn open_regular_source(path: &Path) -> Result<(File, SourceIdentity), String> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|error| format!("upload source is unavailable or unsafe: {error}"))?;
+        // The path is in the message because without it this refusal is not
+        // diagnosable: `Not a directory (os error 20)` on a file the user can
+        // see in Finder says nothing about *which* string was opened, and the
+        // one that produced it was a file reference URL the clipboard reader
+        // forwarded verbatim (`native_clipboard::file_path_url`). It is the
+        // user's own path, already shown in the transfer history.
+        .map_err(|error| {
+            format!(
+                "upload source is unavailable or unsafe: {error} ({})",
+                path.display()
+            )
+        })?;
     let metadata = file.metadata().map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("only regular files may be uploaded".into());
