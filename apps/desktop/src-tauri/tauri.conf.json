@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.dev.tmux-agent-ide",
   "build": {
-    "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build",
+    "beforeDevCommand": "pnpm stage-host-helper && pnpm dev",
+    "beforeBuildCommand": "pnpm build && pnpm stage-host-helper",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
@@ -26,6 +26,7 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "externalBin": ["binaries/tmux-ide-host"],
     "resources": {
       "binaries/linux-helpers/*": ".",
       "../../../release/macos/package-owner": "."
