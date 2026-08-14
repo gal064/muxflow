@@ -73,6 +73,9 @@ impl TopologyActor {
                 if !self.subscribed.load(Ordering::Acquire) {
                     continue;
                 }
+                // Every wakeup, notification or backstop: an agent that stopped
+                // reporting has no event of its own left to arrive.
+                super::agents::sweep_stale_and_publish();
                 if notified && self.signal.epoch.load(Ordering::Acquire) == last_reconciled_epoch {
                     continue;
                 }

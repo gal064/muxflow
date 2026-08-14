@@ -19,7 +19,7 @@ pub(super) fn build(state: &StoredState, server_identity: &str) -> v1::AgentSnap
         agents,
         authoritative: true,
         notification_watermark: state.generation,
-        adapters: adapters::descriptors(&home),
+        adapters: adapters::descriptors(&home, &super::hooks::cached_wiring()),
         accepted_generation: state.generation,
     }
 }

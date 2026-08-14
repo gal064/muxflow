@@ -45,12 +45,15 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         Some("helper") => remote_helper::run_cli(std::env::args().skip(2).collect()),
-        Some("hook") => {
-            if std::env::args().nth(2).as_deref() != Some("ingest") {
-                bail!("usage: tmux-ide-host hook ingest --adapter codex|claude-code");
+        Some("hook") => match std::env::args().nth(2).as_deref() {
+            Some("ingest") => hook::run(std::env::args().skip(3).collect()).await,
+            Some(verb @ ("status" | "install" | "uninstall")) => {
+                hook::manage(verb, std::env::args().skip(3).collect())
             }
-            hook::run(std::env::args().skip(3).collect()).await
-        }
+            _ => bail!(
+                "usage: tmux-ide-host hook <ingest --adapter ID|status|install|uninstall> [--adapter ID] [--home PATH] [--settings-path PATH]"
+            ),
+        },
         Some("version") => {
             println!(
                 "{}",
@@ -102,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(debug_assertions)]
         Some("phase1-client") => phase1_client::run(std::env::args().skip(2).collect()),
         _ => bail!(
-            "usage: tmux-ide-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook ingest|hooks-status|helper|version|doctor [--json]|support-bundle --output PATH|discover>"
+            "usage: tmux-ide-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|helper|version|doctor [--json]|support-bundle --output PATH|discover>"
         ),
     }
 }
