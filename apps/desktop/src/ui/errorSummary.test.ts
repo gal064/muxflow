@@ -13,6 +13,15 @@ describe("summarizeSurfaceError", () => {
     expect(long.detail).toContain("os error 63");
   });
 
+  it("answers the refusal a mid-reconcile Git action produces", () => {
+    // Seen on the packaged app as a full-width red banner over the diff,
+    // enumerating three internal states and naming "mutation".
+    const raw = "mutation_rejected: host connection is not writable (disconnected, reconciling, or read-only)";
+    expect(summarizeSurfaceError(raw).summary)
+      .toBe("The connection is read-only while it settles, so that change was not sent. Try again once the link is live.");
+    expect(summarizeSurfaceError(raw).detail).toBe(raw);
+  });
+
   it("never loses the diagnostic it summarizes", () => {
     const raw = "git_rejected: fatal: pathspec 'x' did not match any files";
     expect(summarizeSurfaceError(raw).detail).toBe(raw);

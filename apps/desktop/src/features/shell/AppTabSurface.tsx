@@ -8,7 +8,7 @@ import { renderSafeMarkdown, renderSafeSvg } from "../files/markdown";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { AppOwnedTab } from "./types";
-import "../files/monaco";
+import { ADE_MONACO_THEME } from "../files/monaco";
 
 interface Props {
   tab: AppOwnedTab;
@@ -175,7 +175,7 @@ export function AppTabSurface(props: Props) {
         options={{ automaticLayout: true, minimap: { enabled: false }, readOnly: !props.canWrite, scrollBeyondLastLine: false, wordWrap: props.tab.kind === "markdown" ? "on" : "off" }}
         path={modelPath(props.tab)}
         saveViewState
-        theme="vs-dark"
+        theme={ADE_MONACO_THEME}
         value={source}
       />
     </div>}

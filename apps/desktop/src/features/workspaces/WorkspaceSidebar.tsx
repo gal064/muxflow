@@ -3,6 +3,7 @@ import type { Session } from "../../app/types";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
+import { StateDot } from "../../ui/StateDot";
 import { needsAttention, nextSortMode, type AgentListRow, type AgentSortMode } from "../agents/agentsList";
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPlacement, AgentRecord } from "../agents/types";
 import type { ConnectionPhase } from "../../state/connectionReducer";
@@ -41,14 +42,6 @@ interface WorkspaceSidebarProps {
   onRenameAgent(agent: AgentRecord): void;
   onReviewHooks(adapter: AgentAdapterId, action: "install" | "uninstall"): void;
 }
-
-const STATE_GLYPH: Record<AgentDisplayState, string> = {
-  blocked: "!",
-  done: "✓",
-  working: "•",
-  unknown: "?",
-  idle: "",
-};
 
 /**
  * The one 240px rail: workspaces on top, a flat agents list below, the host row
@@ -237,8 +230,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               ].filter(Boolean).join(", ")}
               className="agent-button"
               data-agent-index={index}
-              disabled={!row.routable}
-              onClick={() => props.onSelectAgent(row)}
+              // `aria-disabled`, not `disabled`. `focus()` on a disabled button
+              // is a no-op, so an unmapped agent stopped ArrowDown dead and made
+              // every routable agent below it unreachable from the keyboard —
+              // and its own context menu, which still offers Rename, could never
+              // be opened. Same reasoning as the palette's unavailable rows.
+              aria-disabled={!row.routable}
+              data-unavailable={row.routable ? undefined : "true"}
+              onClick={() => { if (row.routable) props.onSelectAgent(row); }}
               onContextMenu={(event) => {
                 event.preventDefault();
                 setFocusedAgentId(row.agent.id);
@@ -265,11 +264,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               <span className="agent-line">
                 {/* Decorative: the row button's own accessible name already
                     says the state, and a role="img" here announced it twice. */}
-                {/* The state is in the class, not just the glyph: color is the
-                    encoding (yellow working, red blocked, teal done-unread,
-                    hollow idle) and the shape is the opt-in accessible
-                    alternative to it. */}
-                <span aria-hidden="true" className={`state-dot ${row.state}`}>{props.stateGlyphs ? STATE_GLYPH[row.state] : ""}</span>
+                <StateDot glyphs={props.stateGlyphs} state={row.state} />
                 <span className="agent-location">{row.location.workspaceName}</span>
                 {row.location.tabIndex !== undefined && <span className="agent-tab">{row.location.tabIndex}</span>}
               </span>

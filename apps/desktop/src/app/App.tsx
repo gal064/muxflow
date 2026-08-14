@@ -45,7 +45,7 @@ import { helperConnectionKey, helperUpgradeReducer, initialHelperUpgradeState, t
 import { profileIdForSshConnection } from "../features/shell/hostProfiles";
 import { sameHostConnection, sameHostScope, type HostScopeToken } from "../features/shell/hostScope";
 import { useShellCommands } from "../features/shell/useShellCommands";
-import { collapseSidebarsForCompactViewport } from "../features/shell/responsiveShell";
+import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import { clampedAgentsRatio, sidebarWidthForWindow, SIDEBAR_MIN_WIDTH, type ShellState } from "../features/shell/types";
 import {
@@ -171,18 +171,17 @@ export function App() {
   // nothing about it.
   useEffect(() => { resetHostLatency(); }, [clientId]);
 
+  // Width is observed, never saved. What a narrow window does to the rails is
+  // decided at render time by `effectiveRails`; writing it into the preferences
+  // meant one narrow moment overwrote the user's arrangement permanently.
   useEffect(() => {
     if (!window.matchMedia) return;
     const query = window.matchMedia(COMPACT_VIEWPORT_QUERY);
-    const acceptViewport = (compact: boolean) => {
-      setCompactViewport(compact);
-      if (compact) setAppState((current) => ({ ...current, shell: collapseSidebarsForCompactViewport(current.shell) }));
-    };
-    acceptViewport(query.matches);
-    const handleChange = (event: MediaQueryListEvent) => acceptViewport(event.matches);
+    setCompactViewport(query.matches);
+    const handleChange = (event: MediaQueryListEvent) => setCompactViewport(event.matches);
     query.addEventListener("change", handleChange);
     return () => query.removeEventListener("change", handleChange);
-  }, [setAppState]);
+  }, []);
 
   // The sidebar may be dragged wider, but never past a third of the window, so
   // the terminal keeps its share when the window shrinks under a wide sidebar.
@@ -476,7 +475,7 @@ export function App() {
   const rowCommands = useRowCommands();
   const { commandContext, runCommand } = useShellCommands({
     activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
-    compactViewport,
+
     combinedTabs, controllers, currentHostProfileId, focusDirection,
     generation: hostState.generation, hostScope: currentHostScope,
     isHostScopeCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
@@ -727,13 +726,14 @@ export function App() {
     setAppState((current) => ({ ...current, shell: { ...current.shell, ...update } }));
 
   const sidebarWidth = sidebarWidthForWindow(appState.shell.sidebarWidth, windowWidth);
-  const sidebarOpen = !appState.shell.sidebarCollapsed;
+  // Derived, never stored: see `effectiveRails`.
+  const { panelOpen, sidebarOpen } = effectiveRails(appState.shell, compactViewport);
 
   return <main
     className={[
       "shell",
       sidebarOpen ? "" : "sidebar-collapsed",
-      appState.shell.panelOpen ? "panel-open" : "",
+      panelOpen ? "panel-open" : "",
       compactViewport ? "compact" : "",
       platform === "mac" ? "platform-mac" : "platform-linux",
     ].filter(Boolean).join(" ")}
@@ -746,7 +746,7 @@ export function App() {
       onNewWorkspace={() => void runCommand("session.new")}
       onTogglePanel={() => void runCommand("view.togglePanel")}
       onToggleSidebar={() => void runCommand("view.toggleSidebar")}
-      panelOpen={appState.shell.panelOpen}
+      panelOpen={panelOpen}
       platform={platform}
       sidebarOpen={sidebarOpen}
       unread={unread}
@@ -806,6 +806,7 @@ export function App() {
           onNewTerminal={() => void runCommand("window.new")}
           onRenameTerminal={(tab) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id })}
           onSelect={selectCombinedTab}
+      stateGlyphs={appState.shell.agentStateGlyphs}
           onSplit={() => void runCommand("pane.splitRight")}
           tabs={combinedTabs}
         />
@@ -859,7 +860,7 @@ export function App() {
           />}
         </div>
       </section>
-      {appState.shell.panelOpen && <RightPanel
+      {panelOpen && <RightPanel
         files={<ExplorerTree
           disabled={!hostState.canMutate}
           error={workspaceFiles.error}
@@ -955,6 +956,7 @@ export function App() {
       onClose={() => setWorkspaceSwitcherOpen(false)}
       onSelect={selectSession}
       rows={sidebarRows}
+      stateGlyphs={appState.shell.agentStateGlyphs}
     />}
     <AppDialogLayer
       appRecoveryDiscard={appRecoveryDiscardConfirmation ? pendingAppRecovery : undefined}
@@ -1012,6 +1014,10 @@ export function App() {
       shortcutEditorOpen={shortcutEditorOpen}
       textPrompt={textPrompt}
     />
-    <div className="sr-only" aria-live="polite">{status}</div>
+    {/* The screen-reader half of the status channel — and only the half the
+        visible notice does not already carry. Both regions holding the same
+        text announced every refusal twice, and the routine "Live" sat here at
+        rest as a second connection indicator beside the host row. */}
+    <div className="sr-only" aria-live="polite">{notice ? "" : status}</div>
   </main>;
 }

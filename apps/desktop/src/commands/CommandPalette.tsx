@@ -109,6 +109,10 @@ export function CommandPalette({ context, onClose, onInvoke, platform, shortcuts
               onMouseEnter={() => setActiveIndex(index)}
               onClick={() => { if (enabled) { onInvoke(command.id); onClose(); } }}
               role="option"
+              // The input owns focus and points here with `aria-activedescendant`;
+              // leaving these as tab stops made the modal focus trap cycle through
+              // every row before it came back to the field.
+              tabIndex={-1}
               type="button"
             >
               <span className="palette-title">{command.title}</span>

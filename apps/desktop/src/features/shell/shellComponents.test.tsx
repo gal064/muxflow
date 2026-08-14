@@ -148,7 +148,7 @@ describe("application shell accessibility contracts", () => {
 
   it("renders combined terminal/app tabs as one selected tablist", () => {
     const html = renderToStaticMarkup(<TabStrip
-      activeKey="app:file" canMutate canSplit onClose={noop} onMove={noop}
+      activeKey="app:file" canMutate canSplit stateGlyphs={false} onClose={noop} onMove={noop}
       onNewTerminal={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
       tabs={[
         { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked" },

@@ -244,8 +244,13 @@ impl TerminalClient {
         git_operation_id: Option<String>,
     ) -> Result<v1::Response, String> {
         if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
+            // Coded like the host's own refusals, so the frontend can lead with
+            // a sentence and keep this behind the disclosure (11.4.4). The
+            // uncoded form reached the user verbatim as a full-width red banner
+            // that enumerated three internal states and named "mutation".
             return Err(
-                "host is disconnected, reconciling, or read-only; mutation was not sent".into(),
+                "mutation_rejected: host connection is not writable (disconnected, reconciling, or read-only)"
+                    .into(),
             );
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
@@ -796,7 +801,10 @@ mod tests {
                 ..Default::default()
             })
             .unwrap_err();
-        assert!(error.contains("not sent"));
+        // Coded, so the frontend leads with a sentence and keeps the internal
+        // state list behind a disclosure rather than printing it as a banner.
+        assert!(error.starts_with("mutation_rejected: "), "{error}");
+        assert!(error.contains("not writable"));
         assert!(client.pending.lock().unwrap().is_empty());
 
         client.ready.store(true, Ordering::Release);

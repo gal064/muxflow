@@ -98,7 +98,13 @@ export function ContextMenu(props: ContextMenuProps) {
     openMenus += 1;
     for (const listener of openMenuListeners) listener(true);
     opener.current = document.activeElement;
-    container.current?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
+    // Falling back to the menu itself is not a nicety. An open menu suppresses
+    // every global shortcut (`openMenus` feeds `modalOpen`), and Escape is
+    // handled by a listener on this container — so a menu whose items are all
+    // disabled, which happens on a read-only connection, left focus outside it
+    // and made ⌘K, ⌘P, ⌘B and ⌘, all dead with no keyboard way out.
+    const first = container.current?.querySelector<HTMLButtonElement>("button:not([disabled])");
+    (first ?? container.current)?.focus();
     const onPointerDown = (event: PointerEvent) => {
       if (!container.current?.contains(event.target as Node)) props.onClose();
     };
@@ -129,6 +135,10 @@ export function ContextMenu(props: ContextMenuProps) {
     onKeyDown={(event) => {
       if (event.key === "Escape") { event.stopPropagation(); props.onClose(); return; }
       const target = event.target as HTMLElement;
+      // Tab must not walk out of an open menu. Focus leaving while the menu
+      // stayed mounted kept `openMenus` above zero — global shortcuts off,
+      // Escape out of reach — with only the mouse left to recover.
+      if (event.key === "Tab") { event.preventDefault(); move(target, event.shiftKey ? -1 : 1); return; }
       if (event.key === "ArrowDown") { event.preventDefault(); move(target, 1); }
       else if (event.key === "ArrowUp") { event.preventDefault(); move(target, -1); }
       else if (event.key === "Home") { event.preventDefault(); move(target, "first"); }
@@ -136,6 +146,8 @@ export function ContextMenu(props: ContextMenuProps) {
     }}
     ref={container}
     role="menu"
+    // Focusable only as the fallback target above; it never enters the tab order.
+    tabIndex={-1}
     style={{
       // Kept inside the viewport rather than clipped by it; a menu opened near
       // the bottom-right of the window is the common case, not the exception.

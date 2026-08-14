@@ -37,6 +37,7 @@ const CODE_SUMMARY: readonly (readonly [RegExp, string])[] = [
   [/^tmux_action_rejected$/, "tmux refused that action."],
   [/^tmux_unavailable$/, "The tmux server is not reachable right now."],
   [/^terminal_.*_rejected$/, "The terminal connection refused that request."],
+  [/^mutation_rejected$/, "The connection to the host is not accepting changes right now."],
   [/^confirmation_required$/, "That change needs an explicit confirmation first."],
   [/^cancelled$/, "That request was cancelled."],
 ];
@@ -62,6 +63,7 @@ const REASON_SUMMARY: readonly (readonly [RegExp, string])[] = [
   [/nul byte/i, "That name contains a character the filesystem cannot store."],
   [/timed out|timeout/i, "The host did not answer in time. Check the connection and try again."],
   [/server is unavailable|connection (closed|lost)|not connected/i, "The connection to the host is down. Reconnect and try again."],
+  [/not writable|read-only/i, "The connection is read-only while it settles, so that change was not sent. Try again once the link is live."],
 ];
 
 /** How much of an unmapped message reads as a summary before it is a wall. */

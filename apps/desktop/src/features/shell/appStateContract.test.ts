@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import contract from "./persistedAppState.contract.json";
-import { defaultAppState, defaultShellState, type PersistedAppState } from "./types";
+import { defaultAppState, defaultShellState, type AppOwnedTab, type PersistedAppState, type WorkspaceUiRecord } from "./types";
 
 /**
  * The TypeScript end of the `save_app_state` contract.
@@ -26,6 +26,23 @@ describe("persisted app state contract", () => {
     // exactly the kind that goes unnoticed when it stops being saved.
     expect(Object.keys(contract.shell).sort())
       .toEqual([...Object.keys(defaultShellState), "windowGeometry"].sort());
+  });
+
+  it("names every field of the two record types that also cross the boundary", () => {
+    // `appTabs` carries eighteen fields and `workspaceUi` five. Pinning only
+    // the shell object would have left the same silent-drop failure open on the
+    // two largest structs.
+    const tab: Required<AppOwnedTab> = {
+      id: "", hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "",
+      kind: "file", resource: "", title: "", order: 0, rootPath: "", rootToken: "",
+      viewMode: "source", gitRepositoryId: "", gitPath: "", gitOriginalPath: "",
+      gitTarget: "staged", gitStatusGeneration: "", gitSourceGeneration: "",
+    };
+    const workspace: Required<WorkspaceUiRecord> = {
+      hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", selectedAppTabId: "",
+    };
+    expect(Object.keys(contract.appTabs[0]).sort()).toEqual(Object.keys(tab).sort());
+    expect(Object.keys(contract.workspaceUi[0]).sort()).toEqual(Object.keys(workspace).sort());
   });
 
   it("is a value this side would actually produce", () => {

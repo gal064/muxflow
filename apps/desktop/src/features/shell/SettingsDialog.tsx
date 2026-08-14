@@ -52,6 +52,7 @@ const TABS: readonly { id: SettingsTab; label: string }[] = [
 export function SettingsDialog(props: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsTab>("connection");
   const titleId = useId();
+  const settingsPanelId = useId();
   const dialog = useModalDialog<HTMLElement>(props.onClose);
 
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
@@ -62,16 +63,24 @@ export function SettingsDialog(props: SettingsDialogProps) {
         <h2 id={titleId}>Settings</h2>
         <div aria-label="Settings sections" className="segmented" role="tablist">
           {TABS.map((item) => <button
+            aria-controls={tab === item.id ? settingsPanelId : undefined}
             aria-selected={tab === item.id}
             className={tab === item.id ? "segment active" : "segment"}
+            id={`settings-tab-${item.id}`}
             key={item.id}
             onClick={() => setTab(item.id)}
+            // Arrow keys move the selection *and* the focus with it. Leaving
+            // focus on a tab that now reports `aria-selected={false}` is how a
+            // screen-reader user ends up being told they are on a tab that is
+            // not the one showing.
             onKeyDown={(event) => {
               const delta = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
               if (!delta) return;
               event.preventDefault();
               const index = TABS.findIndex((candidate) => candidate.id === tab);
-              setTab(TABS[(index + delta + TABS.length) % TABS.length].id);
+              const next = TABS[(index + delta + TABS.length) % TABS.length].id;
+              setTab(next);
+              window.requestAnimationFrame(() => document.getElementById(`settings-tab-${next}`)?.focus());
             }}
             role="tab"
             tabIndex={tab === item.id ? 0 : -1}
@@ -80,7 +89,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
         </div>
       </header>
 
-      <div className="settings-body">
+      <div
+        aria-labelledby={`settings-tab-${tab}`}
+        className="settings-body"
+        id={settingsPanelId}
+        role="tabpanel"
+        tabIndex={0}
+      >
         {tab === "connection" && <>
           <label>Saved host
             <select aria-label="Saved host" onChange={(event) => {
