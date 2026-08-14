@@ -45,6 +45,7 @@ pub struct ControlParser {
     ready: VecDeque<Result<ControlRecord, ControlParseError>>,
     max_line_bytes: usize,
     discarding_oversized_line: bool,
+    inside_command_block: bool,
 }
 
 impl Default for ControlParser {
@@ -61,6 +62,7 @@ impl ControlParser {
             ready: VecDeque::new(),
             max_line_bytes,
             discarding_oversized_line: false,
+            inside_command_block: false,
         }
     }
 
@@ -77,7 +79,15 @@ impl ControlParser {
                     self.buffered.pop();
                 }
                 let line = std::mem::take(&mut self.buffered);
-                self.ready.push_back(parse_line(&line));
+                let record = parse_line(&line, self.inside_command_block);
+                match &record {
+                    Ok(ControlRecord::Begin { .. }) => self.inside_command_block = true,
+                    Ok(ControlRecord::End { .. } | ControlRecord::Error { .. }) => {
+                        self.inside_command_block = false;
+                    }
+                    _ => {}
+                }
+                self.ready.push_back(record);
             } else if self.buffered.len() == self.max_line_bytes {
                 self.buffered.clear();
                 self.discarding_oversized_line = true;
@@ -109,7 +119,53 @@ impl ControlParser {
     }
 }
 
-fn parse_line(line: &[u8]) -> Result<ControlRecord, ControlParseError> {
+/// tmux's own control-mode record and notification names.
+///
+/// Inside a command block, a line beginning with `%` is ambiguous: it is either
+/// a notification tmux interleaved into the block (the man page says this cannot
+/// happen; it does) or a line of the command's own output. `capture-pane` of a
+/// pane showing `%50 complete` or a zsh prompt is the common case, and treating
+/// that content as protocol both loses the line and — for `%begin`-shaped
+/// content — reports a parse failure that resnapshots the whole connection.
+/// Restricting in-block records to names tmux actually emits keeps the real
+/// notifications and returns everything else as output. The residual ambiguity
+/// (pane content that is byte-identical to a real notification line) is
+/// unavoidable: the protocol does not escape command output.
+fn known_record_name(name: &str) -> bool {
+    matches!(
+        name,
+        "begin"
+            | "end"
+            | "error"
+            | "exit"
+            | "output"
+            | "extended-output"
+            | "client-detached"
+            | "client-session-changed"
+            | "config-error"
+            | "continue"
+            | "layout-change"
+            | "message"
+            | "pane-mode-changed"
+            | "pause"
+            | "paste-buffer-changed"
+            | "paste-buffer-deleted"
+            | "session-changed"
+            | "session-renamed"
+            | "session-window-changed"
+            | "sessions-changed"
+            | "subscription-changed"
+            | "unlinked-window-add"
+            | "unlinked-window-close"
+            | "unlinked-window-renamed"
+            | "window-add"
+            | "window-close"
+            | "window-pane-changed"
+            | "window-renamed"
+    )
+}
+
+fn parse_line(line: &[u8], inside_command_block: bool) -> Result<ControlRecord, ControlParseError> {
     if !line.starts_with(b"%") {
         return Ok(ControlRecord::CommandOutput(line.to_vec()));
     }
@@ -120,20 +176,23 @@ fn parse_line(line: &[u8]) -> Result<ControlRecord, ControlParseError> {
         None => (&line[1..], &[][..]),
     };
     let name = String::from_utf8_lossy(name).into_owned();
+    if inside_command_block && !known_record_name(&name) {
+        return Ok(ControlRecord::CommandOutput(line.to_vec()));
+    }
 
-    match name.as_str() {
+    let record = match name.as_str() {
         "output" => parse_output(arguments),
         "extended-output" => parse_extended_output(arguments),
-        "begin" => Ok(ControlRecord::Begin {
-            tag: parse_command_tag(arguments, "begin")?,
+        "begin" => parse_command_tag(arguments, "begin").map(|tag| ControlRecord::Begin {
+            tag,
             arguments: String::from_utf8_lossy(arguments).into_owned(),
         }),
-        "end" => Ok(ControlRecord::End {
-            tag: parse_command_tag(arguments, "end")?,
+        "end" => parse_command_tag(arguments, "end").map(|tag| ControlRecord::End {
+            tag,
             arguments: String::from_utf8_lossy(arguments).into_owned(),
         }),
-        "error" => Ok(ControlRecord::Error {
-            tag: parse_command_tag(arguments, "error")?,
+        "error" => parse_command_tag(arguments, "error").map(|tag| ControlRecord::Error {
+            tag,
             arguments: String::from_utf8_lossy(arguments).into_owned(),
         }),
         "exit" => Ok(ControlRecord::Exit {
@@ -143,6 +202,17 @@ fn parse_line(line: &[u8]) -> Result<ControlRecord, ControlParseError> {
             name,
             arguments: String::from_utf8_lossy(arguments).into_owned(),
         }),
+    };
+    // A record header that does not parse inside a block is command output that
+    // happens to look like protocol — `%begin` in a captured screen, say.
+    // Reporting it as a parse failure costs a connection-wide resnapshot for
+    // what is only text. An escape that does not decode is left as a failure:
+    // its header did parse, so it is far more likely to be a real desync.
+    match record {
+        Err(ControlParseError::InvalidRecord { .. }) if inside_command_block => {
+            Ok(ControlRecord::CommandOutput(line.to_vec()))
+        }
+        record => record,
     }
 }
 
@@ -378,6 +448,67 @@ mod tests {
                 pane_id: "%2".into(),
                 data: b"a\x1bb".to_vec(),
             }
+        );
+    }
+
+    /// tmux interleaves notifications into command blocks (the man page says it
+    /// cannot; a raw `-C` probe says otherwise), and it does not escape command
+    /// output, so a captured screen can contain lines that look exactly like
+    /// records. Both halves have to work: the notification is recognised, and
+    /// pane content is returned as output instead of being lost — or, for
+    /// `%begin`-shaped content, reported as a parse failure that resnapshots
+    /// every pane on the connection.
+    #[test]
+    fn in_block_lines_are_records_only_for_names_tmux_actually_emits() {
+        let mut parser = ControlParser::default();
+        parser.push(b"%begin 1 2 1\n");
+        parser.push(b"%pause %3\n");
+        parser.push(b"%50 percent line\n");
+        parser.push(b"%begin fake\n");
+        parser.push(b"%output %3 live\n");
+        parser.push(b"plain capture line\n");
+        parser.push(b"%end 1 2 1\n");
+        let records: Vec<_> = std::iter::from_fn(|| parser.next_record())
+            .map(|record| record.expect("no in-block line may be a parse failure"))
+            .collect();
+        assert_eq!(
+            records,
+            vec![
+                ControlRecord::Begin {
+                    tag: CommandTag {
+                        timestamp: 1,
+                        number: 2,
+                        flags: 1
+                    },
+                    arguments: "1 2 1".into()
+                },
+                ControlRecord::Notification {
+                    name: "pause".into(),
+                    arguments: "%3".into()
+                },
+                ControlRecord::CommandOutput(b"%50 percent line".to_vec()),
+                ControlRecord::CommandOutput(b"%begin fake".to_vec()),
+                ControlRecord::Output {
+                    pane_id: "%3".into(),
+                    data: b"live".to_vec()
+                },
+                ControlRecord::CommandOutput(b"plain capture line".to_vec()),
+                ControlRecord::End {
+                    tag: CommandTag {
+                        timestamp: 1,
+                        number: 2,
+                        flags: 1
+                    },
+                    arguments: "1 2 1".into()
+                },
+            ]
+        );
+        // Outside a block the same line can only have come from tmux, so a
+        // malformed record there is still a real desync.
+        parser.push(b"%begin oops\n");
+        assert_eq!(
+            parser.next_record().unwrap().unwrap_err(),
+            ControlParseError::InvalidRecord { record: "begin" }
         );
     }
 

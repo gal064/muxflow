@@ -122,6 +122,44 @@ impl IsolatedTmux {
         panic!("ordinary tmux client did not attach");
     }
 
+    /// Feeds one script to a `-C` control client and returns what it wrote back.
+    fn control_records(&self, script: &str) -> Vec<ControlRecord> {
+        let mut client = Command::new("tmux")
+            .env_remove("TMUX")
+            .args([
+                "-L",
+                &self.socket_name,
+                "-C",
+                "attach-session",
+                "-t",
+                "phase0",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = client.stdin.take().unwrap();
+        stdin.write_all(script.as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        thread::sleep(Duration::from_millis(300));
+        client.kill().unwrap();
+        let mut bytes = Vec::new();
+        client
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        client.wait().unwrap();
+        let mut parser = ControlParser::default();
+        parser.push(&bytes);
+        parser.finish();
+        std::iter::from_fn(|| parser.next_record())
+            .filter_map(Result::ok)
+            .collect()
+    }
+
     fn assert_compound_capture_metadata(&self, pane_id: &str) {
         let mut client = Command::new("tmux")
             .env_remove("TMUX")
@@ -185,6 +223,53 @@ impl Drop for IsolatedTmux {
             .stderr(Stdio::null())
             .status();
     }
+}
+
+/// P12-U001, against the tmux that is actually installed.
+///
+/// Three behaviours the host depends on, none of them documented:
+/// 1. `refresh-client -A %N:continue` unquoted is a **parse error** — tmux's
+///    lexer reads an unquoted `%`-word with a non-digit suffix as a `%if`
+///    conditional — so the only command that resumes a paused pane silently
+///    never ran, and the pane stayed paused for the life of the session.
+/// 2. The reason for a rejection is written as command output *inside* the
+///    block; the `%error` record carries only three numbers. A reader that
+///    reports the `%error` alone reports nothing usable.
+/// 3. The quoted form against a pane that is not paused is a silent success, so
+///    a blanket re-continue during recovery is safe.
+#[test]
+fn tmux_rejects_an_unquoted_pane_continue_and_accepts_the_quoted_one() {
+    let Some(server) = IsolatedTmux::start() else {
+        return;
+    };
+    let pane_id = discover_with_socket_name(&server.socket_name)
+        .unwrap()
+        .panes[0]
+        .id
+        .clone();
+
+    let rejected = server.control_records(&format!("refresh-client -A {pane_id}:continue\n"));
+    assert!(
+        rejected
+            .iter()
+            .any(|record| matches!(record, ControlRecord::Error { .. })),
+        "unquoted continue should be a parse error: {rejected:?}"
+    );
+    assert!(
+        rejected.iter().any(|record| matches!(
+            record,
+            ControlRecord::CommandOutput(line) if line.starts_with(b"parse error")
+        )),
+        "the rejection reason must arrive as block output: {rejected:?}"
+    );
+
+    let accepted = server.control_records(&format!("refresh-client -A '{pane_id}:continue'\n"));
+    assert!(
+        !accepted
+            .iter()
+            .any(|record| matches!(record, ControlRecord::Error { .. })),
+        "quoted continue on a pane that was never paused must be a silent success: {accepted:?}"
+    );
 }
 
 #[test]
