@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SearchAddon } from "@xterm/addon-search";
-import { TerminalWriteScheduler } from "./TerminalRenderer";
-import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan } from "./TerminalPane";
+import { SerializeAddon } from "@xterm/addon-serialize";
+import { restoreDecision, TerminalWriteScheduler, type TerminalSize } from "./TerminalRenderer";
+import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan, reconcilePaneGrid } from "./TerminalPane";
+import type { Pane } from "../../app/types";
 
 describe("TerminalWriteScheduler", () => {
   it("preserves byte order and respects the per-frame budget", () => {
@@ -242,7 +244,7 @@ describe("agent-repaint frame cost", () => {
   it("delivers a 4 KiB 24-event repaint and the echo behind it within one frame", () => {
     const repaint = measure(24, 170);
     const singleEcho = measure(0, 0);
-    // eslint-disable-next-line no-console -- this line is the measurement record.
+
     console.log(`agent-repaint frame cost: 24-event 4 KiB repaint + echo = ${repaint.framesElapsed} frames (${repaint.latencyMs.toFixed(1)} ms at 60 Hz); idle echo = ${singleEcho.framesElapsed} frames`);
     expect(repaint.echoReached).toBe(true);
     expect(singleEcho.framesElapsed).toBe(0);
@@ -252,10 +254,104 @@ describe("agent-repaint frame cost", () => {
 
   it("still paces a flood at the per-frame byte budget", () => {
     const flood = measure(8, 256 * 1024);
-    // eslint-disable-next-line no-console -- this line is the measurement record.
+
     console.log(`agent-repaint frame cost: 2 MiB flood + echo = ${flood.framesElapsed} frames (${flood.latencyMs.toFixed(1)} ms at 60 Hz)`);
     expect(flood.echoReached).toBe(true);
     expect(flood.framesElapsed).toBeGreaterThanOrEqual(7);
+  });
+});
+
+describe("synchronized output holds", () => {
+  it("never leaves a DEC 2026 bracket open for more than the frame that closed it", async () => {
+    // xterm force-clears a synchronized-output hold 1000 ms after the first
+    // held refresh and repaints a half-applied frame — the mid-word tearing in
+    // P12-U003.2. What delayed the closing bracket was the scheduler, so the
+    // check is that a bracketed repaint split across many output events closes
+    // inside one frame.
+    const terminal = new HeadlessTerminal({ cols: 40, rows: 8, allowProposedApi: true });
+    const frames: FrameRequestCallback[] = [];
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => terminal.write(chunk, done),
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+    );
+    const encoder = new TextEncoder();
+    const events = [encoder.encode("\u001b[?2026h")];
+    for (let row = 1; row <= 6; row += 1) events.push(encoder.encode(`\u001b[${row};1H` + "x".repeat(30)));
+    events.push(encoder.encode("\u001b[?2026l"));
+    for (const event of events) scheduler.enqueue(event);
+
+    const settle = () => new Promise<void>((resolve) => terminal.write("", resolve));
+    await settle();
+    expect(terminal.modes.synchronizedOutputMode).toBe(true);
+    for (const frame of frames.splice(0, frames.length)) frame(16);
+    await settle();
+    expect(terminal.modes.synchronizedOutputMode).toBe(false);
+    expect(scheduler.pendingBytes).toBe(0);
+    terminal.dispose();
+  });
+});
+
+describe("serialize/restore attribute parity", () => {
+  it("round-trips bold, dim and colour through the snapshot the hide handoff sends", async () => {
+    // Every hide snapshot and every cached restore flows through this addon.
+    // Until this upgrade the installed copy declared a peer of xterm ^5 against
+    // an installed 6.0.0 while reaching into private internals, which is the
+    // suspected source of the bold/dim wrongness reported after a reveal
+    // (P12-U003.5). The check is a full-cell comparison, not a text one.
+    const write = (terminal: HeadlessTerminal, value: string) =>
+      new Promise<void>((resolve) => terminal.write(value, resolve));
+    const source = new HeadlessTerminal({ cols: 40, rows: 4, allowProposedApi: true });
+    const serialize = new SerializeAddon();
+    source.loadAddon(serialize as unknown as Parameters<HeadlessTerminal["loadAddon"]>[0]);
+    await write(source, "\u001b[1mWor\u001b[22m\u001b[2mking\u001b[0m \u001b[31mred\u001b[39m λ🚀\r\nplain");
+
+    const restored = new HeadlessTerminal({ cols: 40, rows: 4, allowProposedApi: true });
+    await write(restored, serialize.serialize({ scrollback: 0 }));
+
+    for (let row = 0; row < 4; row += 1) {
+      const before = source.buffer.active.getLine(row);
+      const after = restored.buffer.active.getLine(row);
+      expect(after?.translateToString(true)).toBe(before?.translateToString(true));
+      for (let column = 0; column < 40; column += 1) {
+        const cell = before?.getCell(column);
+        const copy = after?.getCell(column);
+        expect(`${row}:${column} ${copy?.getChars()}/${copy?.isBold()}/${copy?.isDim()}/${copy?.getFgColor()}/${copy?.getBgColor()}`)
+          .toBe(`${row}:${column} ${cell?.getChars()}/${cell?.isBold()}/${cell?.isDim()}/${cell?.getFgColor()}/${cell?.getBgColor()}`);
+      }
+    }
+    source.dispose();
+    restored.dispose();
+  });
+});
+
+describe("restore admission", () => {
+  it("recovers from the host instead of replacing newer output with an older screen", () => {
+    expect(restoreDecision(5, 5, false)).toEqual({ kind: "apply" });
+    expect(restoreDecision(9, 5, false)).toEqual({ kind: "apply" });
+    expect(restoreDecision(4, 5, false).kind).toBe("reseed");
+    // An overflowed pane owes the host a seed; a cached screen is not one, and
+    // silently doing nothing marks the pane ready while it shows nothing.
+    expect(restoreDecision(9, 5, true).kind).toBe("reseed");
+  });
+});
+
+describe("pane grid reconciliation", () => {
+  const pane = { id: "%2", width: 49, height: 14 } as Pane;
+
+  it("renders at tmux's grid, not at the grid its CSS box measured", () => {
+    const applied: TerminalSize[] = [];
+    const renderer = {
+      setGrid: (size: TerminalSize) => { applied.push(size); return size; },
+    };
+    reconcilePaneGrid(renderer, pane, { columns: 50, rows: 15 });
+    expect(applied).toEqual([{ columns: 49, rows: 14 }]);
+  });
+
+  it("passes tmux's numbers through even with nothing measured", () => {
+    const applied: TerminalSize[] = [];
+    reconcilePaneGrid({ setGrid: (size) => { applied.push(size); return undefined; } }, pane);
+    expect(applied).toEqual([{ columns: 49, rows: 14 }]);
   });
 });
 
