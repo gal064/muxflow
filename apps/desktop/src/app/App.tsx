@@ -14,7 +14,7 @@ import {
 import type { TerminalPaneController } from "../features/terminal/TerminalPane";
 import { adjacentPane, resizeCellsFromPixels, windowGrid, type PaneDirection } from "../features/terminal/layout";
 import { sendBinaryInput, sendInput } from "../features/terminal/api";
-import type { TerminalInput, TerminalMeasurements } from "../features/terminal/TerminalRenderer";
+import type { TerminalInput } from "../features/terminal/TerminalRenderer";
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
@@ -76,18 +76,6 @@ const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then(
  * as "action to interactive pane", so the instrumentation spans have to start
  * at the action and end at the paint rather than at the tmux ack.
  */
-/**
- * Two terminals report the same numbers; a new object every time would restart
- * the client-size effect for no reason.
- */
-function sameMeasurements(left: TerminalMeasurements | undefined, right: TerminalMeasurements): boolean {
-  return left !== undefined
-    && left.cell.width === right.cell.width && left.cell.height === right.cell.height
-    && left.chrome.horizontal === right.chrome.horizontal
-    && left.chrome.vertical === right.chrome.vertical
-    && left.chrome.scrollbar === right.chrome.scrollbar;
-}
-
 const INTERACTION_SPAN_BY_ACTION: Partial<Record<TmuxAction["kind"], PanePaintSpan>> = {
   createSession: "create.workspace",
   createWindow: "create.tab",
@@ -127,10 +115,6 @@ export function App() {
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const controllers = useRef(new Map<string, TerminalPaneController>());
-  // What a terminal turns pixels into, reported by whichever pane is alive.
-  // Every terminal answers identically, so the value — not its source — is what
-  // the client size is computed from.
-  const [terminalMeasurements, setTerminalMeasurements] = useState<TerminalMeasurements>();
   const platform = useMemo(() => currentPlatform(), []);
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
   const currentHelperConnectionKey = helperConnectionKey(connection);
@@ -364,11 +348,12 @@ export function App() {
     void request.catch((error) => { if (clientIdRef.current === clientId) setStatus(String(error)); });
   }, [clientId, hostState.canMutate]);
 
-  const { surfaceRef } = useClientResize({
+  // The client size is computed from the tiled surface and from what a live
+  // terminal turns pixels into. Both arrive here; neither is a pane's geometry.
+  const { onMeasurements, surfaceRef } = useClientResize({
     activeWindowId,
     canMutate: hostState.canMutate,
     clientId,
-    measurements: terminalMeasurements,
     onStatus: setStatus,
   });
 
@@ -720,7 +705,7 @@ export function App() {
           beginDividerDrag={beginDividerDrag}
           clientId={clientId}
           controllers={controllers}
-          onMeasurements={(measurements) => setTerminalMeasurements((current) => sameMeasurements(current, measurements) ? current : measurements)}
+          onMeasurements={onMeasurements}
           grid={grid}
           handleInput={handleInput}
           hub={hub}
