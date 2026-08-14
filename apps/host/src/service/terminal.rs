@@ -609,7 +609,14 @@ fn write_capture_request_resuming<W: Write>(
         .lock()
         .map_err(|_| anyhow::anyhow!("tmux control stdin is poisoned"))?;
     if resume_first {
-        writeln!(writer, "refresh-client -A {pane_id}:continue")?;
+        // The quotes are load-bearing. tmux's command lexer (`cmd-parse.y`
+        // `yylex`) treats an unquoted word beginning with `%` as a `%if`-style
+        // conditional directive unless the rest of the word is digits or `%`;
+        // `%5:continue` contains `:`, so the unquoted form is a
+        // `parse error: syntax error` and the pane stays paused forever.
+        // `resume_command_quotes_the_pause_argument_tmux_lexer_rejects` pins the
+        // byte-exact form.
+        writeln!(writer, "refresh-client -A '{pane_id}:continue'")?;
     }
     queue_capture(&mut *writer, pane_id)?;
     writer.flush()?;
@@ -654,6 +661,26 @@ pub(super) fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tmux's lexer rejects `refresh-client -A %5:continue`, and a rejected
+    /// resume leaves the pane paused for the rest of the session (P12-U001).
+    /// The assertion is byte-exact because the quoting *is* the fix.
+    #[test]
+    fn resume_command_quotes_the_pause_argument_tmux_lexer_rejects() {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        write_capture_request_resuming(&sink, "%5", true).unwrap();
+        let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
+        let resume = written.lines().next().unwrap();
+        assert_eq!(resume, "refresh-client -A '%5:continue'");
+        // The resume shares the lock hold with the reseed tmux drops output
+        // during a pause, so the capture that follows it is mandatory.
+        assert!(written.contains("__ADE_CAPTURE__"));
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        write_capture_request_resuming(&sink, "%5", false).unwrap();
+        let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
+        assert!(!written.contains("refresh-client"));
+    }
 
     #[test]
     fn membership_changes_are_in_place_and_deterministic() {
