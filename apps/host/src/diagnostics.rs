@@ -254,6 +254,22 @@ fn update_active_counter(update: impl FnOnce(&mut FlowCounters)) {
     }
 }
 
+/// Names a rejected client resize in the daemon log.
+///
+/// The size is the whole point: a rejection without it cannot be told apart
+/// from a transport failure afterwards, and the size is what identifies which
+/// side computed nonsense. Cell counts carry no terminal content, no path and
+/// no hostname, so this stays inside the privacy declaration above.
+pub fn write_rejected_client_resize_log(columns: u32, rows: u32) {
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "terminalClientResizeRejected",
+        "columns": columns,
+        "rows": rows,
+    });
+    eprintln!("{line}");
+}
+
 pub fn write_safe_log(class: SafeErrorClass) {
     let line = serde_json::json!({
         "subsystem": "host_daemon",

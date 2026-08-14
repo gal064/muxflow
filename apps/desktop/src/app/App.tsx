@@ -13,8 +13,8 @@ import {
 } from "../commands/registry";
 import type { TerminalPaneController } from "../features/terminal/TerminalPane";
 import { adjacentPane, resizeCellsFromPixels, windowGrid, type PaneDirection } from "../features/terminal/layout";
-import { resizeClient, sendBinaryInput, sendInput } from "../features/terminal/api";
-import type { TerminalInput, TerminalSize } from "../features/terminal/TerminalRenderer";
+import { sendBinaryInput, sendInput } from "../features/terminal/api";
+import type { PixelBox, TerminalInput } from "../features/terminal/TerminalRenderer";
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
@@ -63,6 +63,7 @@ import type { ConnectionSpec, HostProfile, Pane, PersistedProfiles } from "./typ
 import { resolveTerminalDestination } from "./paneRouting";
 import { requestActiveWindow } from "./windowSelection";
 import { useAppConnectionController } from "./useAppConnectionController";
+import { useClientResize } from "./useClientResize";
 import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
 import { AppDialogLayer } from "./AppDialogLayer";
 import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
@@ -94,7 +95,7 @@ export function App() {
     activeSessionId, activeWindowId, appFocused, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
-    profiles, profilesHydrated, resizeTimer, setActiveSessionId, setActiveWindowId,
+    profiles, profilesHydrated, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
     setProfileRecovery, setProfiles, setSshConfigPath, setSshTarget, snapshot,
     snapshotRef, sshConfigPath, sshTarget, terminalEpoch, windows,
@@ -347,15 +348,21 @@ export function App() {
     void request.catch((error) => { if (clientIdRef.current === clientId) setStatus(String(error)); });
   }, [clientId, hostState.canMutate]);
 
-  const handleResize = useCallback((pane: Pane, size: TerminalSize) => {
-    if (!clientId || !hostState.canMutate || !pane.active || size.columns < 2 || size.rows < 2) return;
-    window.clearTimeout(resizeTimer.current);
-    resizeTimer.current = window.setTimeout(() => {
-      const columns = Math.max(2, Math.round((size.columns * grid.width) / pane.width));
-      const rows = Math.max(2, Math.round((size.rows * grid.height) / pane.height));
-      void resizeClient(clientId, columns, rows).catch((error) => { if (clientIdRef.current === clientId) setStatus(String(error)); });
-    }, 60);
-  }, [clientId, grid.height, grid.width, hostState.canMutate]);
+  // Font metrics only: every mounted terminal answers this identically, and the
+  // client size must not depend on which pane happens to be active.
+  const measureBox = useCallback((box: PixelBox) => {
+    const controller = (activePane && controllers.current.get(activePane.id))
+      ?? controllers.current.values().next().value;
+    return controller?.measureBox(box);
+  }, [activePane?.id]);
+  const { surfaceRef } = useClientResize({
+    activeWindowId,
+    canMutate: hostState.canMutate,
+    clientId,
+    measureBox,
+    metricsKey: activePane?.id,
+    onStatus: setStatus,
+  });
 
   const beginDividerDrag = (event: React.PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical") => {
     if (!hostState.canMutate) return;
@@ -707,13 +714,13 @@ export function App() {
           controllers={controllers}
           grid={grid}
           handleInput={handleInput}
-          handleResize={handleResize}
           hub={hub}
           mountedPanes={mountedPanes}
           panes={panes}
           performAction={performAction}
           setStatus={setStatus}
           snapshot={snapshot}
+          surfaceRef={surfaceRef}
           terminalTransferClient={terminalTransferClient}
           terminalTransferRegistry={terminalTransferRegistry}
           terminalTransferScope={terminalTransferScope}
