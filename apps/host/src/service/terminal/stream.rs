@@ -16,6 +16,9 @@ use tmux_control::{
 use tokio::sync::mpsc;
 
 use super::super::{SequencerControl, emit_event};
+use super::correlation::{
+    MarkerBlock, classify_marker_block, error_reason, marker_pane, wants_error_line,
+};
 use super::{
     build_seed_with_metadata, capture_metadata, selected_capture_boundary, validate_tmux_id,
 };
@@ -310,7 +313,7 @@ impl StreamState {
                 // bound keeps a misrouted block from growing a log detail
                 // without limit.
                 CommandBlock::Input { lines, .. } | CommandBlock::Resume { lines, .. } => {
-                    if lines.len() < MAX_ERROR_DETAIL_LINES {
+                    if wants_error_line(lines.len()) {
                         lines.push(line);
                     }
                 }
@@ -353,15 +356,22 @@ impl StreamState {
                 // ("parse error: syntax error"), so a detail without them names
                 // no cause at all — that is why P12-U001 was invisible in every
                 // log it produced.
-                let reason = error_reason(&arguments, self.block_lines());
+                //
+                // Only the blocks that print nothing on success contribute
+                // their lines. A capture block's lines are the user's screen;
+                // quoting four rows of it into an event that reaches the
+                // desktop and the logs would leak the pane, not explain the
+                // failure.
                 let detail = match &self.command_block {
-                    CommandBlock::Input { pane_id, .. } => {
-                        format!("terminal input for {pane_id} was rejected by tmux: {reason}")
-                    }
-                    CommandBlock::Resume { pane_id, .. } => format!(
-                        "tmux rejected the flow-control resume for {pane_id}; the pane stays paused until it is reseeded: {reason}"
+                    CommandBlock::Input { pane_id, lines, .. } => format!(
+                        "terminal input for {pane_id} was rejected by tmux: {}",
+                        error_reason(&arguments, lines)
                     ),
-                    _ => reason,
+                    CommandBlock::Resume { pane_id, lines, .. } => format!(
+                        "tmux rejected the flow-control resume for {pane_id}; the pane stays paused until it is reseeded: {}",
+                        error_reason(&arguments, lines)
+                    ),
+                    _ => arguments,
                 };
                 // An error abandons whatever multi-block sequence was running,
                 // so every correlation slot has to be released too — otherwise
@@ -672,20 +682,6 @@ impl StreamState {
         }
     }
 
-    /// The active block's collected output, which for a failing block is the
-    /// text tmux printed to explain itself.
-    fn block_lines(&self) -> &[Vec<u8>] {
-        match &self.command_block {
-            CommandBlock::Unknown { lines, .. }
-            | CommandBlock::Input { lines, .. }
-            | CommandBlock::Resume { lines, .. }
-            | CommandBlock::CapturePrimary { lines, .. }
-            | CommandBlock::CaptureAlternate { lines, .. }
-            | CommandBlock::CaptureMetadata { lines, .. } => lines,
-            CommandBlock::None => &[],
-        }
-    }
-
     pub(super) fn start_block(&mut self, tag: CommandTag) -> CommandBlock {
         if let Some(pane_id) = self.expected_resume.take() {
             CommandBlock::Resume {
@@ -829,50 +825,6 @@ impl StreamState {
     }
 }
 
-/// What an uncorrelated command block establishes about the block after it.
-///
-/// Every marker is ordinary `display-message` output, so the only thing that
-/// separates them is their prefix; classifying once keeps the reader from
-/// having to know which marker shapes exist.
-#[derive(Debug, PartialEq, Eq)]
-enum MarkerBlock {
-    Input(String),
-    Resume(String),
-    Capture(Option<String>),
-}
-
-fn classify_marker_block(pane_id: Option<String>, lines: &[Vec<u8>]) -> MarkerBlock {
-    if let Some(pane_id) = lines.iter().find_map(|line| input_marker_pane(line)) {
-        return MarkerBlock::Input(pane_id);
-    }
-    if let Some(pane_id) = lines.iter().find_map(|line| resume_marker_pane(line)) {
-        return MarkerBlock::Resume(pane_id);
-    }
-    MarkerBlock::Capture(pane_id.or_else(|| lines.iter().find_map(|line| marker_pane(line))))
-}
-
-/// How many of a failing block's output lines are carried into its event.
-const MAX_ERROR_DETAIL_LINES: usize = 4;
-
-/// Renders an `%error` as one readable line.
-///
-/// `header` is tmux's three-number command tag, which on its own says only that
-/// *something* failed; `lines` is what tmux printed inside the block, which is
-/// the actual reason.
-fn error_reason(header: &str, lines: &[Vec<u8>]) -> String {
-    let text: Vec<_> = lines
-        .iter()
-        .take(MAX_ERROR_DETAIL_LINES)
-        .map(|line| String::from_utf8_lossy(line).trim().to_owned())
-        .filter(|line| !line.is_empty())
-        .collect();
-    if text.is_empty() {
-        header.to_owned()
-    } else {
-        format!("{header}: {}", text.join("; "))
-    }
-}
-
 fn emit_resnapshot(
     sender: &mpsc::Sender<SequencerControl>,
     overflowed: &AtomicBool,
@@ -924,27 +876,6 @@ fn emit_terminal(
     );
 }
 
-fn marker_pane(line: &[u8]) -> Option<String> {
-    marker_pane_with_prefix(line, b"__ADE_CAPTURE__:")
-}
-
-fn input_marker_pane(line: &[u8]) -> Option<String> {
-    marker_pane_with_prefix(line, b"__ADE_INPUT__:")
-}
-
-fn resume_marker_pane(line: &[u8]) -> Option<String> {
-    marker_pane_with_prefix(line, b"__ADE_RESUME__:")
-}
-
-/// Restores the `%` sigil `queue_marker` had to strip: tmux's display message
-/// goes through `strftime`, which eats a literal `%0`.
-fn marker_pane_with_prefix(line: &[u8], prefix: &[u8]) -> Option<String> {
-    let digits = std::str::from_utf8(line.strip_prefix(prefix)?).ok()?;
-    let pane = format!("%{digits}");
-    validate_tmux_id(&pane, '%').ok()?;
-    Some(pane)
-}
-
 fn is_topology_notification(name: &str) -> bool {
     matches!(
         name,
@@ -990,45 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn every_marker_survives_the_strftime_pass_that_eats_a_literal_pane_sigil() {
-        // `queue_marker` strips the sigil because tmux expands a display message
-        // through strftime and drops `%0` as an unknown conversion; the reader
-        // has to put it back or every marked block goes uncorrelated.
-        assert_eq!(
-            input_marker_pane(b"__ADE_INPUT__:12").as_deref(),
-            Some("%12")
-        );
-        assert_eq!(marker_pane(b"__ADE_CAPTURE__:12").as_deref(), Some("%12"));
-        assert_eq!(
-            resume_marker_pane(b"__ADE_RESUME__:12").as_deref(),
-            Some("%12")
-        );
-        assert_eq!(input_marker_pane(b"__ADE_INPUT__:%12"), None);
-        assert_eq!(input_marker_pane(b"__ADE_INPUT__:"), None);
-        assert_eq!(input_marker_pane(b"__ADE_INPUT__:1a"), None);
-        assert_eq!(input_marker_pane(b"__ADE_CAPTURE__:12"), None);
-        assert_eq!(marker_pane(b"__ADE_CAPTURE__:%12"), None);
-    }
-
-    #[test]
     fn an_in_band_input_block_is_correlated_to_the_pane_that_was_typed_into() {
-        assert_eq!(
-            classify_marker_block(None, &[b"__ADE_INPUT__:2".to_vec()]),
-            MarkerBlock::Input("%2".into())
-        );
-        assert_eq!(
-            classify_marker_block(None, &[b"__ADE_CAPTURE__:2".to_vec()]),
-            MarkerBlock::Capture(Some("%2".into()))
-        );
-        assert_eq!(
-            classify_marker_block(None, &[b"__ADE_RESUME__:2".to_vec()]),
-            MarkerBlock::Resume("%2".into())
-        );
-        assert_eq!(
-            classify_marker_block(None, &[b"__ADE_MEMBERSHIP__".to_vec()]),
-            MarkerBlock::Capture(None)
-        );
-
         // Input correlation is consumed by the block that follows its marker,
         // so an error inside that block recovers only the pane typed into.
         let mut state = StreamState::new(&["%1".into(), "%2".into()]);

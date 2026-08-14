@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { restoreDecision, TerminalWriteScheduler, type TerminalSize } from "./TerminalRenderer";
+import { restoreDecision, TerminalWriteScheduler, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
 import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan, reconcilePaneGrid } from "./TerminalPane";
 import type { Pane } from "../../app/types";
 
@@ -338,20 +338,32 @@ describe("restore admission", () => {
 
 describe("pane grid reconciliation", () => {
   const pane = { id: "%2", width: 49, height: 14 } as Pane;
+  const recordingRenderer = (outcome: (size: TerminalSize) => GridOutcome) => {
+    const applied: TerminalSize[] = [];
+    return {
+      applied,
+      renderer: { setGrid: (size: TerminalSize) => { applied.push(size); return outcome(size); } },
+    };
+  };
 
   it("renders at tmux's grid, not at the grid its CSS box measured", () => {
-    const applied: TerminalSize[] = [];
-    const renderer = {
-      setGrid: (size: TerminalSize) => { applied.push(size); return size; },
-    };
-    reconcilePaneGrid(renderer, pane, { columns: 50, rows: 15 });
+    const { applied, renderer } = recordingRenderer((size) => ({ kind: "applied", size }));
+    const report = reconcilePaneGrid(renderer, pane, { columns: 50, rows: 15 });
     expect(applied).toEqual([{ columns: 49, rows: 14 }]);
+    expect(report).toContain("tmux reports 49x14");
   });
 
-  it("passes tmux's numbers through even with nothing measured", () => {
-    const applied: TerminalSize[] = [];
-    reconcilePaneGrid({ setGrid: (size) => { applied.push(size); return undefined; } }, pane);
-    expect(applied).toEqual([{ columns: 49, rows: 14 }]);
+  it("says nothing when the box already agreed with tmux", () => {
+    const { renderer } = recordingRenderer(() => ({ kind: "unchanged" }));
+    expect(reconcilePaneGrid(renderer, pane, { columns: 49, rows: 14 })).toBeUndefined();
+  });
+
+  it("falls back to the measured box only when tmux reports no usable grid", () => {
+    const { applied, renderer } = recordingRenderer((size) =>
+      size.columns < 2 ? { kind: "rejected", reason: "0x0 is not a usable terminal grid" } : { kind: "applied", size });
+    const report = reconcilePaneGrid(renderer, { ...pane, width: 0, height: 0 } as Pane, { columns: 50, rows: 15 });
+    expect(applied.at(-1)).toEqual({ columns: 50, rows: 15 });
+    expect(report).toContain("no usable grid");
   });
 });
 

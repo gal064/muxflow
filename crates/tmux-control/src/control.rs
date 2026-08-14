@@ -45,7 +45,10 @@ pub struct ControlParser {
     ready: VecDeque<Result<ControlRecord, ControlParseError>>,
     max_line_bytes: usize,
     discarding_oversized_line: bool,
-    inside_command_block: bool,
+    /// The tag of the `%begin` that is currently open, if any. Holding the tag
+    /// rather than a flag is what lets the parser tell tmux's own `%end`/
+    /// `%error` from a captured screen that happens to contain one.
+    open_command_block: Option<CommandTag>,
 }
 
 impl Default for ControlParser {
@@ -62,7 +65,7 @@ impl ControlParser {
             ready: VecDeque::new(),
             max_line_bytes,
             discarding_oversized_line: false,
-            inside_command_block: false,
+            open_command_block: None,
         }
     }
 
@@ -79,11 +82,11 @@ impl ControlParser {
                     self.buffered.pop();
                 }
                 let line = std::mem::take(&mut self.buffered);
-                let record = parse_line(&line, self.inside_command_block);
+                let record = parse_line(&line, self.open_command_block);
                 match &record {
-                    Ok(ControlRecord::Begin { .. }) => self.inside_command_block = true,
+                    Ok(ControlRecord::Begin { tag, .. }) => self.open_command_block = Some(*tag),
                     Ok(ControlRecord::End { .. } | ControlRecord::Error { .. }) => {
-                        self.inside_command_block = false;
+                        self.open_command_block = None;
                     }
                     _ => {}
                 }
@@ -119,7 +122,7 @@ impl ControlParser {
     }
 }
 
-/// tmux's own control-mode record and notification names.
+/// tmux's own asynchronous notification names.
 ///
 /// Inside a command block, a line beginning with `%` is ambiguous: it is either
 /// a notification tmux interleaved into the block (the man page says this cannot
@@ -127,17 +130,14 @@ impl ControlParser {
 /// pane showing `%50 complete` or a zsh prompt is the common case, and treating
 /// that content as protocol both loses the line and — for `%begin`-shaped
 /// content — reports a parse failure that resnapshots the whole connection.
-/// Restricting in-block records to names tmux actually emits keeps the real
-/// notifications and returns everything else as output. The residual ambiguity
-/// (pane content that is byte-identical to a real notification line) is
-/// unavoidable: the protocol does not escape command output.
-fn known_record_name(name: &str) -> bool {
+/// Restricting in-block notifications to names tmux actually emits keeps the
+/// real ones and returns everything else as output. The residual ambiguity
+/// (pane content byte-identical to a real notification line) is unavoidable:
+/// the protocol does not escape command output.
+fn known_notification_name(name: &str) -> bool {
     matches!(
         name,
-        "begin"
-            | "end"
-            | "error"
-            | "exit"
+        "exit"
             | "output"
             | "extended-output"
             | "client-detached"
@@ -165,7 +165,10 @@ fn known_record_name(name: &str) -> bool {
     )
 }
 
-fn parse_line(line: &[u8], inside_command_block: bool) -> Result<ControlRecord, ControlParseError> {
+fn parse_line(
+    line: &[u8],
+    open_command_block: Option<CommandTag>,
+) -> Result<ControlRecord, ControlParseError> {
     if !line.starts_with(b"%") {
         return Ok(ControlRecord::CommandOutput(line.to_vec()));
     }
@@ -176,8 +179,23 @@ fn parse_line(line: &[u8], inside_command_block: bool) -> Result<ControlRecord, 
         None => (&line[1..], &[][..]),
     };
     let name = String::from_utf8_lossy(name).into_owned();
-    if inside_command_block && !known_record_name(&name) {
-        return Ok(ControlRecord::CommandOutput(line.to_vec()));
+    let output = || Ok(ControlRecord::CommandOutput(line.to_vec()));
+    if let Some(open) = open_command_block {
+        match name.as_str() {
+            // tmux does not nest command blocks, so a `%begin` inside one is
+            // always the captured screen. Taking it as protocol would abandon
+            // the capture in progress and resnapshot the connection.
+            "begin" => return output(),
+            // A block ends on its own tag and no other. Screen content that
+            // happens to read `%end 1 2 1` closes nothing.
+            "end" | "error" => {
+                if parse_command_tag(arguments, "end") != Ok(open) {
+                    return output();
+                }
+            }
+            other if !known_notification_name(other) => return output(),
+            _ => {}
+        }
     }
 
     let record = match name.as_str() {
@@ -204,14 +222,13 @@ fn parse_line(line: &[u8], inside_command_block: bool) -> Result<ControlRecord, 
         }),
     };
     // A record header that does not parse inside a block is command output that
-    // happens to look like protocol — `%begin` in a captured screen, say.
-    // Reporting it as a parse failure costs a connection-wide resnapshot for
-    // what is only text. An escape that does not decode is left as a failure:
-    // its header did parse, so it is far more likely to be a real desync.
+    // happens to look like protocol — `%output not-a-pane` in a captured
+    // screen, say. Reporting it as a parse failure costs a connection-wide
+    // resnapshot for what is only text. An escape that does not decode is left
+    // as a failure: its header did parse, so it is far more likely to be a real
+    // desync.
     match record {
-        Err(ControlParseError::InvalidRecord { .. }) if inside_command_block => {
-            Ok(ControlRecord::CommandOutput(line.to_vec()))
-        }
+        Err(ControlParseError::InvalidRecord { .. }) if open_command_block.is_some() => output(),
         record => record,
     }
 }
@@ -465,6 +482,12 @@ mod tests {
         parser.push(b"%pause %3\n");
         parser.push(b"%50 percent line\n");
         parser.push(b"%begin fake\n");
+        // A captured screen showing a well-formed `%begin`, and one showing an
+        // `%end` for a different command, are the dangerous shapes: taken as
+        // protocol the first abandons the capture in progress and the second
+        // closes the block early, both of which resnapshot the connection.
+        parser.push(b"%begin 9 9 1\n");
+        parser.push(b"%end 9 9 1\n");
         parser.push(b"%output %3 live\n");
         parser.push(b"plain capture line\n");
         parser.push(b"%end 1 2 1\n");
@@ -488,6 +511,8 @@ mod tests {
                 },
                 ControlRecord::CommandOutput(b"%50 percent line".to_vec()),
                 ControlRecord::CommandOutput(b"%begin fake".to_vec()),
+                ControlRecord::CommandOutput(b"%begin 9 9 1".to_vec()),
+                ControlRecord::CommandOutput(b"%end 9 9 1".to_vec()),
                 ControlRecord::Output {
                     pane_id: "%3".into(),
                     data: b"live".to_vec()

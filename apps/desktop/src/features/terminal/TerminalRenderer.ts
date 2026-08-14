@@ -29,17 +29,34 @@ export interface TerminalRendererOptions {
   onResnapshotRequired?: (reason: string) => void;
 }
 
+/** Why a grid was not applied, or the size that now governs the terminal. */
+export type GridOutcome =
+  | { kind: "applied"; size: TerminalSize }
+  | { kind: "unchanged" }
+  | { kind: "rejected"; reason: string };
+
 export interface TerminalRenderer {
   open(element: HTMLElement): void;
   seed(bytes: Uint8Array, onRendered?: () => void, generation?: number): void;
-  restore(serialized: string, onRendered?: () => void, generation?: number): void;
-  write(bytes: Uint8Array, onRendered?: () => void, generation?: number): void;
-  fit(): TerminalSize;
   /**
-   * Forces the grid tmux says this pane has, whatever the CSS box measured.
-   * Returns the size that was applied, or `undefined` when it already matched.
+   * Replaces the screen with a cached or host-owned snapshot, unless doing so
+   * would erase newer output or stand in for a seed the pane owes the host.
+   * Returns whether it was applied: a caller that follows a restore with a raw
+   * tail must not write that tail onto a screen the restore did not lay down.
    */
-  setGrid(size: TerminalSize): TerminalSize | undefined;
+  restore(
+    serialized: string,
+    onRendered?: () => void,
+    generation?: number,
+    throughGeneration?: number,
+  ): boolean;
+  write(bytes: Uint8Array, onRendered?: () => void, generation?: number): void;
+  /** Measures the CSS box in cells. Does not resize the terminal. */
+  measure(): TerminalSize | undefined;
+  /** Forces the grid tmux says this pane has, whatever the CSS box measured. */
+  setGrid(size: TerminalSize): GridOutcome;
+  /** Clears the one-shot latch that suppresses repeated seed requests. */
+  resetSeedRequest(): void;
   focus(): void;
   blur(): void;
   onInput(listener: (input: TerminalInput) => void): () => void;
@@ -74,14 +91,14 @@ const SMOOTH_SCROLL_SUSPEND_BYTES = 256 * 1024;
  * ready while it shows nothing. Both cases recover from the host instead.
  */
 export function restoreDecision(
-  generation: number,
+  throughGeneration: number,
   lastAppliedGeneration: number,
   overflowed: boolean,
 ): { kind: "apply" } | { kind: "reseed"; reason: string } {
-  if (generation < lastAppliedGeneration) {
+  if (throughGeneration < lastAppliedGeneration) {
     return {
       kind: "reseed",
-      reason: `A restore through generation ${generation} arrived for a pane that has already applied ${lastAppliedGeneration}; requesting a fresh seed.`,
+      reason: `A restore through generation ${throughGeneration} arrived for a pane that has already applied ${lastAppliedGeneration}; requesting a fresh seed.`,
     };
   }
   if (overflowed) {
@@ -231,8 +248,10 @@ export class TerminalWriteScheduler {
    *
    * Draining one *event* per frame was the renderer half of P12-U002. tmux
    * splits an agent-TUI repaint across many output records, so a repaint cost a
-   * frame per record — measured at 23 frames (~383 ms) for a 4 KiB 24-record
-   * repaint — and the keystroke echo queued behind it waited for all of them.
+   * frame per record: 23 frames for a 4 KiB 24-record repaint, counted
+   * deterministically against an injected frame clock in
+   * `TerminalRenderer.test.ts` (a modelled frame count, not a wall-clock
+   * measurement) — and the keystroke echo queued behind it waited for all.
    * The budget is bytes, so a flood is paced exactly as before, and coalescing
    * keeps the "one write outstanding in xterm at a time" bound that the pending
    * accounting, the overflow bound and the drain all rest on.
@@ -379,11 +398,16 @@ export class XtermRenderer implements TerminalRenderer {
   open(element: HTMLElement): void {
     this.#terminal.open(element);
     this.#mountWebgl();
-    this.fit();
   }
 
   seed(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
     this.#newOutput = false;
+    // A seed is the whole screen, so it also re-bases the applied-generation
+    // watermark. Without that reset, a seed from a new terminal epoch — whose
+    // generations restart at 1 — would sit below a watermark the previous epoch
+    // left behind, and every later restore and hide checkpoint would be
+    // measured against a number from a stream that no longer exists.
+    this.#lastAppliedGeneration = 0;
     // The seed is the recovery this pane may have asked for; the next refusal
     // is allowed to ask again.
     this.#seedRequested = false;
@@ -391,15 +415,21 @@ export class XtermRenderer implements TerminalRenderer {
     this.#emitViewport();
   }
 
-  restore(serialized: string, onRendered?: () => void, generation = 0): void {
-    const decision = restoreDecision(generation, this.#lastAppliedGeneration, this.#scheduler.overflowed);
+  restore(
+    serialized: string,
+    onRendered?: () => void,
+    generation = 0,
+    throughGeneration = generation,
+  ): boolean {
+    const decision = restoreDecision(throughGeneration, this.#lastAppliedGeneration, this.#scheduler.overflowed);
     if (decision.kind === "reseed") {
       this.#requestSeed(decision.reason);
-      return;
+      return false;
     }
     this.#newOutput = false;
     this.#scheduler.replace(new TextEncoder().encode(serialized), false, this.#applied(generation, onRendered));
     this.#emitViewport();
+    return true;
   }
 
   write(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
@@ -413,9 +443,18 @@ export class XtermRenderer implements TerminalRenderer {
     this.#emitViewport();
   }
 
-  fit(): TerminalSize {
-    this.#fit.fit();
-    return { columns: this.#terminal.cols, rows: this.#terminal.rows };
+  /**
+   * Measures the CSS box in cells without touching the terminal.
+   *
+   * Deliberately propose-only: `setGrid` is the single writer of cols/rows, so
+   * a measurement can never reflow the buffer to the box and back to tmux's
+   * grid within one observer callback — a shrink-then-grow reflow is not
+   * lossless in xterm.
+   */
+  measure(): TerminalSize | undefined {
+    const proposed = this.#fit.proposeDimensions();
+    if (!proposed || !Number.isFinite(proposed.cols) || !Number.isFinite(proposed.rows)) return undefined;
+    return { columns: proposed.cols, rows: proposed.rows };
   }
 
   /**
@@ -423,15 +462,21 @@ export class XtermRenderer implements TerminalRenderer {
    * rows, and a cursor-addressed frame rendered against any other grid puts
    * text on the wrong lines (P12-U003.1). The CSS box can only ever approximate
    * that grid — tmux splits 100 columns into 50 and 49 with a divider column,
-   * while the box is a percentage that rounds per pane — so the measured fit
+   * while the box is a percentage that rounds per pane — so the measurement
    * decides how big a *client* to ask tmux for, and this decides what the
    * terminal actually renders at.
    */
-  setGrid({ columns, rows }: TerminalSize): TerminalSize | undefined {
-    if (!Number.isInteger(columns) || !Number.isInteger(rows) || columns < 2 || rows < 2) return undefined;
-    if (this.#terminal.cols === columns && this.#terminal.rows === rows) return undefined;
+  setGrid({ columns, rows }: TerminalSize): GridOutcome {
+    if (!Number.isInteger(columns) || !Number.isInteger(rows) || columns < 2 || rows < 2) {
+      return { kind: "rejected", reason: `${columns}x${rows} is not a usable terminal grid` };
+    }
+    if (this.#terminal.cols === columns && this.#terminal.rows === rows) return { kind: "unchanged" };
     this.#terminal.resize(columns, rows);
-    return { columns, rows };
+    return { kind: "applied", size: { columns, rows } };
+  }
+
+  resetSeedRequest(): void {
+    this.#seedRequested = false;
   }
 
   focus(): void {
@@ -537,12 +582,16 @@ export class XtermRenderer implements TerminalRenderer {
     };
   }
 
-  /** One recovery request per episode; repeating it per refused chunk would
-   * turn one overflow into a reseed storm. */
+  /**
+   * The diagnostic is never suppressed — a refused write or a refused restore
+   * is exactly the silence P12-U003.7 was about. Only the *request* is deduped,
+   * so one overflow cannot become a reseed storm; `resetSeedRequest` reopens it
+   * when the request itself failed, and a seed landing clears it.
+   */
   #requestSeed(reason: string): void {
+    this.#options.onDiagnostic?.(reason);
     if (this.#seedRequested) return;
     this.#seedRequested = true;
-    this.#options.onDiagnostic?.(reason);
     this.#options.onResnapshotRequired?.(reason);
   }
 
