@@ -28,7 +28,7 @@ use input::{InputDispatch, run_input_dispatch};
 mod seed;
 #[cfg(test)]
 use seed::{build_seed, parse_capture_metadata};
-use seed::{build_seed_with_metadata, capture_metadata, selected_capture_boundary};
+use seed::{build_seed_with_metadata, capture_metadata};
 
 pub(super) struct TerminalAttachment {
     pane_ids: HashSet<String>,
@@ -835,61 +835,54 @@ mod tests {
             buffered.push((1, b"already captured".to_vec()));
             *buffered_bytes = b"already captured".len();
         }
-        state.pending_alternate = Some((pane_id, vec![b"captured primary".to_vec()], 1));
+        state.pending_alternate = Some((pane_id, vec![b"visible screen".to_vec()], 1));
         let PaneSeedState::Pending { buffered, .. } = state.pane_states.get("%1").unwrap() else {
             panic!("pane stopped awaiting its seed");
         };
         assert_eq!(buffered.len(), 1);
         let CommandBlock::CaptureAlternate {
             pane_id,
-            primary_lines,
-            primary_boundary,
+            visible_lines,
             ..
         } = state.start_block(tag(3))
         else {
-            panic!("alternate block was not correlated with primary capture");
+            panic!("second capture block was not correlated with the first");
         };
         state.pending_metadata = Some(PendingCaptureMetadata {
             pane_id: pane_id.clone(),
-            primary_lines: primary_lines.clone(),
-            alternate_lines: vec![b"captured alternate".to_vec()],
-            primary_boundary,
-            alternate_boundary: 2,
+            visible_lines: visible_lines.clone(),
+            saved_normal_lines: vec![b"saved normal screen".to_vec()],
+            visible_boundary: 1,
         });
         let CommandBlock::CaptureMetadata {
-            alternate_lines, ..
+            saved_normal_lines, ..
         } = state.start_block(tag(4))
         else {
             panic!("metadata block was not correlated with both screen captures");
         };
         let seed = build_seed(
             &pane_id,
-            primary_lines,
-            alternate_lines,
+            visible_lines,
+            saved_normal_lines,
             &[b"__ADE_META__:%1:0:0:1:1:0:0:0:0:0:1:0:0:1:80:".to_vec()],
         )
         .expect("metadata should complete seed");
-        assert!(
+        let position = |needle: &[u8]| {
             seed.bytes
-                .windows(b"captured primary".len())
-                .any(|window| window == b"captured primary")
-        );
-        assert!(
-            seed.bytes
-                .windows(b"captured alternate".len())
-                .any(|window| window == b"captured alternate")
-        );
+                .windows(needle.len())
+                .position(|window| window == needle)
+        };
+        // The pane is in the alternate screen, so what tmux displays — the
+        // first capture — has to land *after* the switch to it, and the saved
+        // normal grid before. Painting them the other way round is what made
+        // every agent-pane seed come up blank (P12-U003).
+        let switch = position(b"\x1b[?1049h").expect("alternate screen switch");
+        assert!(position(b"saved normal screen").unwrap() < switch);
+        assert!(position(b"visible screen").unwrap() > switch);
     }
 
     #[test]
     fn capture_boundary_tracks_the_active_screen_without_duplicate_replay() {
-        let primary =
-            parse_capture_metadata(b"__ADE_META__:%1:0:0:0:0:0:0:0:0:0:1:0:0:1:80:", "%1").unwrap();
-        let alternate =
-            parse_capture_metadata(b"__ADE_META__:%1:0:0:1:0:0:0:0:0:0:1:0:0:1:80:", "%1").unwrap();
-        assert_eq!(selected_capture_boundary(primary, 10, 12), 10);
-        assert_eq!(selected_capture_boundary(alternate, 10, 12), 12);
-
         let mut seeder = ScreenSeeder::default();
         seeder.buffer(10, b"in primary capture".to_vec());
         seeder.buffer(11, b"between captures".to_vec());
