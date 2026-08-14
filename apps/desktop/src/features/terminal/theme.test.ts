@@ -66,7 +66,10 @@ describe("terminal theme derivation", () => {
     expect(token("--font-mono")).toContain("JetBrains Mono");
     const font = terminalFont(undefined);
     expect(font.fontSize).toBe(13);
-    expect(font.lineHeight).toBe(1.42);
+    // The token is a CSS line-height: a ratio of the font size. What the
+    // renderer needs is the pixel pitch it describes, because xterm's own
+    // `lineHeight` is a ratio of something else entirely (`xtermLineHeight`).
+    expect(font.rowPitch).toBeCloseTo(13 * 1.42, 10);
     expect(font.fontFamily).toContain("JetBrains Mono");
   });
 

@@ -128,19 +128,32 @@ export function searchDecorations(root: Element | undefined = globalThis.documen
   };
 }
 
-/** The terminal's font, from the same tokens the rest of the app uses. */
+/**
+ * The terminal's font, from the same tokens the rest of the app uses.
+ *
+ * `rowPitch` is the token's ratio *applied to the font size* — CSS's meaning of
+ * `line-height`, and the meaning every other surface in the app gives
+ * `--term-line-height`. It is deliberately not xterm's `lineHeight` option,
+ * which multiplies the measured character cell instead; converting between the
+ * two is `xtermLineHeight` in `./TerminalRenderer`, and passing this ratio to
+ * xterm directly is what rendered 13 px rows at a ~1.86 pitch.
+ */
 export function terminalFont(root: Element | undefined = globalThis.document?.documentElement): {
   fontFamily: string;
   fontSize: number;
-  lineHeight: number;
+  rowPitch: number;
 } {
   const read = tokenReader(root);
   const size = Number.parseFloat(read("--term-font-size") ?? CHROME_FALLBACKS["--term-font-size"]);
-  const height = Number.parseFloat(read("--term-line-height") ?? CHROME_FALLBACKS["--term-line-height"]);
+  const ratio = Number.parseFloat(read("--term-line-height") ?? CHROME_FALLBACKS["--term-line-height"]);
+  const fontSize = Number.isFinite(size) && size > 0 ? size : Number.parseFloat(CHROME_FALLBACKS["--term-font-size"]);
+  const lineHeight = Number.isFinite(ratio) && ratio > 0
+    ? ratio
+    : Number.parseFloat(CHROME_FALLBACKS["--term-line-height"]);
   return {
     fontFamily: read("--font-mono") ?? CHROME_FALLBACKS["--font-mono"],
-    fontSize: Number.isFinite(size) && size > 0 ? size : Number.parseFloat(CHROME_FALLBACKS["--term-font-size"]),
-    lineHeight: Number.isFinite(height) && height > 0 ? height : Number.parseFloat(CHROME_FALLBACKS["--term-line-height"]),
+    fontSize,
+    rowPitch: fontSize * lineHeight,
   };
 }
 
