@@ -257,7 +257,6 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     let metadata_response = protocol.request_cancellable(
-        2,
         v1::Request {
             operation: v1::Operation::ReadFile.into(),
             file: Some(v1::FileServiceRequest {
@@ -320,7 +319,6 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
         return Ok(());
     }
     let started = protocol.request_cancellable(
-        3,
         v1::Request {
             operation: v1::Operation::StartDownload.into(),
             file: Some(v1::FileServiceRequest {
@@ -349,15 +347,13 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
         return Err("file version changed between metadata and bulk preflight".into());
     }
     let mut offset = 0_u64;
-    let mut request_id = 10_u64;
     let mut hasher = blake3::Hasher::new();
     loop {
         if job.cancellation.is_cancelled() {
-            let _ = protocol.cancel_download(&job.transfer_id, request_id);
+            let _ = protocol.cancel_download(&job.transfer_id);
             return Err("file read cancelled".into());
         }
         let response = protocol.request_cancellable(
-            request_id,
             v1::Request {
                 operation: v1::Operation::ReadDownloadChunk.into(),
                 file: Some(v1::FileServiceRequest {
@@ -373,7 +369,6 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
             &_deadline,
         )?;
         _deadline.touch();
-        request_id = request_id.saturating_add(1);
         let chunk = response
             .file
             .and_then(|file| file.transfer_chunk)
@@ -431,7 +426,6 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     protocol.request_cancellable(
-        2,
         v1::Request {
             operation: v1::Operation::BeginFileWrite.into(),
             file: Some(v1::FileServiceRequest {
@@ -451,17 +445,15 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
     )?;
     _deadline.touch();
     let mut offset = 0_u64;
-    let mut request_id = 10_u64;
     for chunk in job.content.chunks(BULK_CHUNK_BYTES as usize) {
         if job.cancellation.is_cancelled() {
-            let _ = protocol.cancel_write(&job.operation_id, &job.transfer_id, request_id);
+            let _ = protocol.cancel_write(&job.operation_id, &job.transfer_id);
             return Err("file write cancelled".into());
         }
         let next = offset
             .checked_add(chunk.len() as u64)
             .ok_or("file write byte counter overflow")?;
         protocol.request_cancellable(
-            request_id,
             v1::Request {
                 operation: v1::Operation::WriteFileChunk.into(),
                 file: Some(v1::FileServiceRequest {
@@ -478,7 +470,6 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
             &_deadline,
         )?;
         _deadline.touch();
-        request_id = request_id.saturating_add(1);
         offset = next;
         emit_scoped_file_json(
             &job.channel,
@@ -495,7 +486,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
     }
     let digest = blake3::hash(&job.content).to_hex().to_string();
     if job.cancellation.is_cancelled() {
-        let _ = protocol.cancel_write(&job.operation_id, &job.transfer_id, request_id);
+        let _ = protocol.cancel_write(&job.operation_id, &job.transfer_id);
         return Err("file write cancelled before commit".into());
     }
     job.binding.validate()?;
@@ -514,7 +505,6 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
     );
     let response = protocol
         .request_classified_with_deadline(
-            request_id,
             v1::Request {
                 operation: v1::Operation::CommitFileWrite.into(),
                 file: Some(v1::FileServiceRequest {

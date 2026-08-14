@@ -222,23 +222,36 @@ mod tests {
     #[cfg(target_os = "macos")]
     mod macos_file_urls {
         use super::super::file_path_url;
+        use objc2_foundation::{NSString, NSURL};
         use std::fs;
 
+        /// A name with everything a `file:` URL has to escape, so the round trip
+        /// is exercised rather than asserted. Foundation does the encoding on
+        /// the way in and the decoding on the way out — a hand-rolled codec here
+        /// would only be testing itself.
         #[test]
-        fn a_path_url_survives_with_its_percent_encoding_intact() {
+        fn a_path_url_survives_its_percent_encoding_both_ways() {
             let directory = std::env::temp_dir().join(format!("ade-clip-{}", std::process::id()));
             fs::create_dir_all(&directory).expect("scratch directory");
-            let file = directory.join("a file #1 100%.txt");
+            let file = directory.join("a file #1 100% ?x.txt");
             fs::write(&file, b"x").expect("scratch file");
 
-            let raw = format!(
-                "file://{}",
-                percent_encode(file.to_str().expect("utf-8 path"))
+            let raw =
+                NSURL::fileURLWithPath(&NSString::from_str(file.to_str().expect("utf-8 path")))
+                    .absoluteString()
+                    .expect("a file URL")
+                    .to_string();
+            assert!(
+                raw.contains("%23"),
+                "the fixture must exercise escaping: {raw}"
             );
+
             let resolved = file_path_url(&raw).expect("a real file resolves");
-            // What matters is that the round trip names the same file, not that
-            // it is byte-identical: Foundation may re-encode.
-            let path = percent_decode(resolved.trim_start_matches("file://"));
+            let path = NSURL::URLWithString(&NSString::from_str(&resolved))
+                .expect("a URL")
+                .path()
+                .expect("a filesystem path")
+                .to_string();
             assert_eq!(
                 fs::canonicalize(path).unwrap(),
                 fs::canonicalize(&file).unwrap()
@@ -259,35 +272,6 @@ mod tests {
         fn a_non_file_url_is_refused() {
             assert_eq!(file_path_url("https://example.test/x"), None);
             assert_eq!(file_path_url("file:///tmp/a\nb"), None);
-        }
-
-        fn percent_encode(value: &str) -> String {
-            let mut out = String::new();
-            for byte in value.bytes() {
-                if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
-                    out.push(byte as char);
-                } else {
-                    out.push_str(&format!("%{byte:02X}"));
-                }
-            }
-            out
-        }
-
-        fn percent_decode(value: &str) -> String {
-            let bytes = value.as_bytes();
-            let mut out = Vec::with_capacity(bytes.len());
-            let mut index = 0;
-            while index < bytes.len() {
-                if bytes[index] == b'%' && index + 2 < bytes.len() {
-                    let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap();
-                    out.push(u8::from_str_radix(hex, 16).unwrap());
-                    index += 3;
-                } else {
-                    out.push(bytes[index]);
-                    index += 1;
-                }
-            }
-            String::from_utf8(out).unwrap()
         }
     }
 }

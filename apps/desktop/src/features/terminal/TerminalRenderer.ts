@@ -146,7 +146,10 @@ export type MeasurableTerminal = Pick<Terminal, "options"> & {
   _core?: {
     _renderService?: { dimensions?: { css?: { cell?: Partial<PixelBox> } } };
     /** What xterm measured one character to be, in CSS pixels. See `xtermLineHeight`. */
-    _charSizeService?: { height?: number };
+    _charSizeService?: {
+      height?: number;
+      onCharSizeChange?: (listener: () => void) => IDisposable;
+    };
   };
 };
 
@@ -167,15 +170,30 @@ export type MeasurableTerminal = Pick<Terminal, "options"> & {
  * reads the resulting `css.cell`, so all of them stay in agreement by
  * construction.
  *
+ * A row is a whole number of *device* pixels, and xterm floors into them, so the
+ * multiplier aims at the middle of the device row it wants rather than at its
+ * edge. 13 × 1.42 = 18.46 CSS px is 36.92 device pixels on a Retina display;
+ * a multiplier that lands exactly there floors to 36 and renders an 18.0 px row
+ * — measurably short of the token. Aiming at 37.5 floors to 37, i.e. 18.5 px,
+ * which is the closest a whole device pixel gets to the design value.
+ *
  * Returns undefined when there is nothing to derive from, which leaves xterm at
  * its unit multiplier: rows one measured character tall, slightly tighter than
  * the design, never a grid the surface cannot show. xterm rejects a `lineHeight`
  * below 1 outright, so a face measuring taller than the requested pitch clamps
  * there rather than throwing.
  */
-export function xtermLineHeight(rowPitch: number, measuredCharHeight: number | undefined): number | undefined {
+export function xtermLineHeight(
+  rowPitch: number,
+  measuredCharHeight: number | undefined,
+  devicePixelRatio = 1,
+): number | undefined {
   if (!(rowPitch > 0) || !(measuredCharHeight !== undefined && measuredCharHeight > 0)) return undefined;
-  return Math.max(1, rowPitch / measuredCharHeight);
+  const ratio = devicePixelRatio > 0 ? devicePixelRatio : 1;
+  // The same two roundings xterm performs, in the same order.
+  const deviceCharHeight = Math.ceil(measuredCharHeight * ratio);
+  const deviceRowHeight = Math.round(rowPitch * ratio);
+  return Math.max(1, (deviceRowHeight + 0.5) / deviceCharHeight);
 }
 
 /** Everything needed to turn a pixel box into a terminal grid. */
@@ -557,6 +575,14 @@ export class XtermRenderer implements TerminalRenderer {
     // After `open`, not in the constructor: xterm builds its char-size service
     // out of the helper elements `open` creates, and measures there.
     this.#applyRowPitch();
+    // And again whenever that measurement changes. A one-shot application is a
+    // latch: a terminal opened before the face resolved, or moved to a display
+    // of a different pixel ratio, would keep a multiplier derived from a
+    // measurement that no longer holds — and the only symptom is a grid that
+    // does not fit its surface, which nobody would trace back to here.
+    const charSize = (this.#terminal as MeasurableTerminal)._core?._charSizeService;
+    const subscribe = charSize?.onCharSizeChange;
+    if (subscribe) this.#disposables.push(subscribe.call(charSize, () => this.#applyRowPitch()));
     this.#mountWebgl();
   }
 
@@ -806,16 +832,22 @@ export class XtermRenderer implements TerminalRenderer {
    * Restates the token's row pitch in xterm's units, now that xterm has
    * measured the face.
    *
-   * Applied once. The measurement depends on the font family and size, both of
-   * which are constants read from `tokens.css`, and the app waits for the
-   * bundled face before it builds a terminal at all (`main.tsx`) — so there is
-   * no later moment at which this answer changes. A missing measurement is
-   * reported rather than guessed at: it means xterm moved the service, and the
-   * next reader should hear about it the way `measureBox.test.ts` will.
+   * Re-applied whenever xterm re-measures, not latched at open. The font family
+   * and size are constants from `tokens.css` and the app waits for the bundled
+   * face before it builds a terminal at all (`main.tsx`), so in practice the
+   * first answer is the only one — but a measurement that arrived late, or a
+   * window dragged to a display of a different pixel ratio, would otherwise
+   * leave a multiplier derived from a measurement that no longer holds, and the
+   * only symptom would be a grid that does not fit its surface. The pane's
+   * observer re-reports the cell metric that follows from this, so the tmux
+   * client size stays derived from what is actually rendered either way.
+   *
+   * A missing measurement is reported rather than guessed at: it means xterm
+   * moved the service, which is what `measureBox.test.ts` fails on.
    */
   #applyRowPitch(): void {
     const measured = (this.#terminal as MeasurableTerminal)._core?._charSizeService?.height;
-    const lineHeight = xtermLineHeight(this.#rowPitch, measured);
+    const lineHeight = xtermLineHeight(this.#rowPitch, measured, window.devicePixelRatio);
     if (lineHeight === undefined) {
       console.warn("xterm reported no character height; terminal rows keep xterm's unit line height");
       return;

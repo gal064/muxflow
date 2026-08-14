@@ -386,7 +386,6 @@ fn run_upload_preflight(job: &UploadPreflightJob) -> Result<(), String> {
     let mut protocol = lease.client();
     let descriptor = prepare_remote(
         &mut protocol,
-        2,
         &job.transfer_id,
         &job.destination_name,
         job.source_identity.size,
@@ -397,7 +396,7 @@ fn run_upload_preflight(job: &UploadPreflightJob) -> Result<(), String> {
         &_deadline,
     )?;
     _deadline.touch();
-    let cleanup = protocol.cancel_terminal_upload(&job.transfer_id, 3);
+    let cleanup = protocol.cancel_terminal_upload(&job.transfer_id);
     _deadline.touch();
     let (cleanup_status, cleanup_error) = classify_upload_cleanup(cleanup);
     let mut cleanup = CleanupReport::new(cleanup_status, cleanup_error);
@@ -483,7 +482,6 @@ fn run_upload(job: &UploadJob) -> TransferResult {
         let mut protocol = lease.client();
         prepare_remote(
             &mut protocol,
-            2,
             &job.transfer_id,
             &job.destination_name,
             identity.size,
@@ -496,9 +494,8 @@ fn run_upload(job: &UploadJob) -> TransferResult {
         match stream_upload(job, &mut protocol, &mut source, &deadline) {
             Ok(session) => Ok(session),
             Err(mut failure) => {
-                let (status, error) = classify_upload_cleanup(
-                    protocol.cancel_terminal_upload(&job.transfer_id, u64::MAX - 1),
-                );
+                let (status, error) =
+                    classify_upload_cleanup(protocol.cancel_terminal_upload(&job.transfer_id));
                 failure.merge_cleanup(status, error);
                 Err(failure)
             }
@@ -556,7 +553,6 @@ fn stream_upload(
     let mut last_progress = Instant::now() - Duration::from_secs(1);
     let mut hasher = blake3::Hasher::new();
     let mut offset = 0_u64;
-    let mut request_id = 10_u64;
     let mut buffer = vec![0_u8; BULK_CHUNK_BYTES as usize];
     loop {
         job.binding.validate()?;
@@ -577,7 +573,6 @@ fn stream_upload(
         }
         hasher.update(&buffer[..count]);
         let response = protocol.request_cancellable(
-            request_id,
             v1::Request {
                 operation: v1::Operation::WriteTerminalUploadChunk.into(),
                 file: Some(v1::FileServiceRequest {
@@ -602,7 +597,6 @@ fn stream_upload(
             return Err("upload destination acknowledged an unexpected offset".into());
         }
         offset = next;
-        request_id = request_id.saturating_add(1);
         let elapsed = started.elapsed().as_secs_f64().max(0.001);
         let throughput = offset as f64 / elapsed;
         let eta = job.source_identity.size.saturating_sub(offset) as f64 / throughput.max(1.0);
@@ -638,7 +632,6 @@ fn stream_upload(
     emit(job, TransferState::Verifying, json!({}));
     let digest = hasher.finalize().to_hex().to_string();
     let commit_response = protocol.request_classified_with_deadline(
-        request_id,
         v1::Request {
             operation: v1::Operation::CommitTerminalUpload.into(),
             file: Some(v1::FileServiceRequest {
@@ -723,7 +716,6 @@ fn reconcile_upload_outcome(
     let mut protocol = lease.client();
     deadline.touch();
     let response = protocol.request_with_deadline(
-        2,
         v1::Request {
             operation: v1::Operation::ReconcileTerminalUpload.into(),
             file: Some(v1::FileServiceRequest {
@@ -799,7 +791,6 @@ fn emit_verified_upload(
 #[allow(clippy::too_many_arguments)]
 fn prepare_remote(
     protocol: &mut BulkProtocolClient<'_>,
-    request_id: u64,
     transfer_id: &str,
     destination_name: &str,
     total: u64,
@@ -811,7 +802,6 @@ fn prepare_remote(
 ) -> Result<v1::UploadDescriptor, String> {
     protocol
         .request_cancellable(
-            request_id,
             v1::Request {
                 operation: v1::Operation::PrepareTerminalUpload.into(),
                 file: Some(v1::FileServiceRequest {

@@ -10,8 +10,8 @@ export interface CommandContext {
   canMoveSessionDown: boolean;
   canMoveTabLeft: boolean;
   canMoveTabRight: boolean;
-  /** Whether a saved host is picked in Settings and the store will part with it. */
-  canDeleteHostProfile: boolean;
+  /** Whether Settings is showing a picked saved host the store will part with. */
+  hasHostProfile: boolean;
   /**
    * Row commands (`requires: "row"`) published by whichever row surface holds
    * the row the user last pointed at. See `rowCommands.ts`: the publishing
@@ -73,7 +73,7 @@ export interface CommandDefinition {
     | "Files" | "Source control";
   defaults?: Partial<Record<Platform, string>>;
   mutates?: boolean;
-  requires?: "session" | "window" | "pane" | "tab" | "row";
+  requires?: "session" | "window" | "pane" | "tab" | "row" | "hostProfile";
   destructive?: boolean;
   /**
    * Positional selectors (⌘4, ⌃7) are muscle memory, not things anyone searches
@@ -114,12 +114,15 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "workspaces.switch", title: "Switch workspace…", group: "Application", defaults: { mac: "Meta+P", linux: "Ctrl+P" } },
   { id: "shortcuts.configure", title: "Configure keyboard shortcuts", group: "Application" },
   { id: "settings.show", title: "Settings", group: "Application", defaults: { mac: "Meta+,", linux: "Ctrl+," } },
-  // Deliberately not `mutates`: `canMutate` is about the *tmux server* being
-  // writable, and a saved host is a local preference that stays deletable while
-  // the connection to it is read-only or gone. Its availability is
-  // `canDeleteHostProfile` instead — the picked host, if it is one the store
-  // will part with.
-  { id: "host.delete", title: "Delete the selected saved host…", group: "Application", destructive: true },
+  // `requires: "hostProfile"` for the same reason `requires: "row"` exists: the
+  // surface that owns the picker is the only thing that knows which host is
+  // picked and whether the store will part with it. And deliberately not
+  // `mutates`, which is about the *tmux server* being writable — a saved host is
+  // a local preference that stays deletable while the host is unreachable. No
+  // `destructive` either: in this registry that flag routes a command through
+  // the tmux confirmation builder, and this one carries its own dialog, exactly
+  // as `files.delete` and `git.discard` do.
+  { id: "host.delete", title: "Delete the selected saved host…", group: "Application", requires: "hostProfile" },
   { id: "view.toggleSidebar", title: "Toggle sidebar", group: "View", defaults: { mac: "Meta+B", linux: "Ctrl+B" } },
   { id: "view.togglePanel", title: "Toggle right panel", group: "View", defaults: { mac: "Meta+Alt+B", linux: "Ctrl+Alt+B" } },
   { id: "view.showFiles", title: "Show Files", group: "View", defaults: { mac: "Meta+Shift+E", linux: "Ctrl+Shift+E" } },
@@ -219,7 +222,7 @@ export function commandAvailable(command: CommandDefinition, context: CommandCon
   // all of them before publishing, and a second, weaker copy of those rules
   // here is how the palette and the context menu would drift apart.
   if (command.requires === "row") return context.rowCommands.includes(command.id);
-  if (command.id === "host.delete") return context.canDeleteHostProfile;
+  if (command.requires === "hostProfile") return context.hasHostProfile;
   if (command.mutates && !context.canMutate) return false;
   if (command.id === "window.close" && context.hasWindow && !context.canMutate) return false;
   if (command.requires === "session" && !context.hasSession) return false;

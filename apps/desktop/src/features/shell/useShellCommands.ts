@@ -116,14 +116,6 @@ export function useShellCommands(options: ShellCommandOptions): {
       ));
       return;
     }
-    // Before the tmux branch below, which captures a server identity and a
-    // topology generation: a saved host is a local preference, and gating its
-    // deletion on a live tmux server would make the host you cannot reach the
-    // one you cannot remove.
-    if (commandId === "host.delete") {
-      if (options.deletableHostProfile) options.requestHostProfileDelete(options.deletableHostProfile);
-      return;
-    }
     if (definition.destructive) {
       if (!options.serverIdentity) return;
       const captured = commandId === "window.close" && targetWindow
@@ -154,6 +146,10 @@ export function useShellCommands(options: ShellCommandOptions): {
       case "workspaces.switch": options.setWorkspaceSwitcherOpen(true); return;
       case "shortcuts.configure": options.setShortcutEditorOpen(true); return;
       case "settings.show": options.setSettingsOpen(true); return;
+      // The confirmation is the host picker's own, not the tmux one the
+      // `destructive` flag routes to — a saved host is a local preference, and
+      // there is no server identity or topology generation to capture.
+      case "host.delete": if (options.deletableHostProfile) options.requestHostProfileDelete(options.deletableHostProfile); return;
       case "view.toggleSidebar":
       case "view.togglePanel":
       case "view.showFiles":
@@ -253,7 +249,7 @@ export function useShellCommands(options: ShellCommandOptions): {
     canMoveTabRight: options.selectedAppTab
       ? Boolean(options.combinedTabs.find((tab) => tab.key === `app:${options.selectedAppTab!.id}`)?.canMoveRight)
       : Boolean(options.activeWindow && relativeWindowReorderAction(options.windows, options.activeWindow.id, "right")),
-    canDeleteHostProfile: Boolean(options.deletableHostProfile),
+    hasHostProfile: Boolean(options.deletableHostProfile),
     rowCommands: options.rowCommands,
     run: runCommand,
   }), [options, runCommand]);

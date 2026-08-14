@@ -23,7 +23,7 @@ const context = (overrides: Partial<CommandContext> = {}): CommandContext => ({
   canMutate: true, hasPane: true, hasSession: true, hasWindow: true, hasTab: true,
   canMoveSessionUp: true, canMoveSessionDown: true,
   canMoveTabLeft: true, canMoveTabRight: true,
-  canDeleteHostProfile: true,
+  hasHostProfile: true,
   rowCommands: [],
   run: () => undefined, ...overrides,
 });
@@ -192,12 +192,18 @@ describe("command registry", () => {
     expect(commandAvailable(left, context({ canMutate: false, hasWindow: true, hasTab: true }))).toBe(false);
   });
 
-  it("marks exactly the host-delete and the session, window, and pane closes for confirmation", () => {
-    const destructive = ["host.delete", "session.close", "window.close", "pane.close"];
-    expect(commandRegistry.filter((command) => command.destructive).map((command) => command.id)).toEqual(destructive);
-    // Every one of them is reachable from the searchable surfaces too: a
-    // destructive command that only a shortcut can reach is one nobody can find.
-    expect(commandsForSurface("menu").filter((command) => command.destructive).map((command) => command.id)).toEqual(destructive);
+  it("marks exactly the session, window, and pane close menu commands for confirmation", () => {
+    expect(commandRegistry.filter((command) => command.destructive).map((command) => command.id)).toEqual([
+      "session.close", "window.close", "pane.close",
+    ]);
+    expect(commandsForSurface("menu").filter((command) => command.destructive).map((command) => command.id)).toEqual([
+      "session.close", "window.close", "pane.close",
+    ]);
+    // `host.delete` destroys something too, and is deliberately not marked: in
+    // this registry the flag routes a command through the *tmux* confirmation
+    // builder, and a saved host has no server identity or topology generation to
+    // capture. It carries its own dialog, exactly as `files.delete` does.
+    expect(commandRegistry.find((command) => command.id === "host.delete")!.destructive).toBeUndefined();
   });
 
   it("keeps a saved host deletable while the tmux server it names is unreachable", () => {
@@ -206,7 +212,8 @@ describe("command registry", () => {
     // about the *host's* tmux server being writable — would make the host you
     // cannot reach the one you cannot remove.
     expect(commandAvailable(remove, context({ canMutate: false }))).toBe(true);
-    expect(commandAvailable(remove, context({ canDeleteHostProfile: false }))).toBe(false);
+    // And it is offered only while the surface that shows the picker says so.
+    expect(commandAvailable(remove, context({ hasHostProfile: false }))).toBe(false);
   });
 
   it("offers a row command only while a row surface publishes it", () => {
