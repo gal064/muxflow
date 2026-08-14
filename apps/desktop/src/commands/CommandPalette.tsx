@@ -90,15 +90,22 @@ export function CommandPalette({ context, onClose, onInvoke, platform, shortcuts
           const glyphs = shortcutGlyphs(shortcut, platform);
           const heading = grouped && command.group !== previousGroup ? command.group : undefined;
           previousGroup = command.group;
-          return <div key={command.id}>
+          // `role="presentation"` on the wrapper: a generic element between a
+          // listbox and its options breaks ownership.
+          return <div key={command.id} role="presentation">
             {heading && <div className="palette-group" role="presentation">{heading}</div>}
             <button
+              aria-disabled={!enabled}
               aria-selected={index === activeIndex}
               className={index === activeIndex ? "palette-row selected" : "palette-row"}
-              disabled={!enabled}
+              // `aria-disabled` rather than `disabled`: `aria-activedescendant`
+              // may point here, and several screen readers drop a disabled
+              // element from the tree entirely, leaving the combobox pointing
+              // at nothing.
+              data-unavailable={enabled ? undefined : "true"}
               id={`command-${command.id}`}
               onMouseEnter={() => setActiveIndex(index)}
-              onClick={() => { onInvoke(command.id); onClose(); }}
+              onClick={() => { if (enabled) { onInvoke(command.id); onClose(); } }}
               role="option"
               type="button"
             >

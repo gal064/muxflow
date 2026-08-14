@@ -17,22 +17,15 @@ import type { ReactElement } from "react";
 export type IconName =
   | "sidebarLeft"
   | "panelRight"
-  | "back"
-  | "forward"
   | "bell"
   | "plus"
   | "splitRight"
-  | "splitDown"
   | "close"
   | "chevronRight"
   | "chevronDown"
-  | "search"
-  | "branch"
-  | "terminal"
   | "file"
   | "markdown"
   | "diff"
-  | "folder"
   | "zoom";
 
 const paths: Record<IconName, ReactElement> = {
@@ -46,8 +39,6 @@ const paths: Record<IconName, ReactElement> = {
     <path d="M10 2.5v11" />
     <path d="M11.4 5.6h1.2M11.4 8h1.2" />
   </>,
-  back: <path d="M9.75 3.5 5.25 8l4.5 4.5" />,
-  forward: <path d="M6.25 3.5 10.75 8l-4.5 4.5" />,
   bell: <>
     <path d="M4 6.75a4 4 0 0 1 8 0c0 3 .9 4 1.4 4.5H2.6C3.1 10.75 4 9.75 4 6.75Z" />
     <path d="M6.6 13.2a1.6 1.6 0 0 0 2.8 0" />
@@ -57,27 +48,9 @@ const paths: Record<IconName, ReactElement> = {
     <rect height="11" rx="2" width="13" x="1.5" y="2.5" />
     <path d="M8 2.5v11" />
   </>,
-  splitDown: <>
-    <rect height="11" rx="2" width="13" x="1.5" y="2.5" />
-    <path d="M1.5 8h13" />
-  </>,
   close: <path d="m4.25 4.25 7.5 7.5M11.75 4.25l-7.5 7.5" />,
   chevronRight: <path d="M6.25 3.75 10.5 8l-4.25 4.25" />,
   chevronDown: <path d="M3.75 6.25 8 10.5l4.25-4.25" />,
-  search: <>
-    <circle cx="7.25" cy="7.25" r="4.25" />
-    <path d="m10.5 10.5 3 3" />
-  </>,
-  branch: <>
-    <circle cx="4.5" cy="3.75" r="1.75" />
-    <circle cx="4.5" cy="12.25" r="1.75" />
-    <circle cx="11.5" cy="3.75" r="1.75" />
-    <path d="M4.5 5.5v5M11.5 5.5v1.25a2.5 2.5 0 0 1-2.5 2.5H7a2.5 2.5 0 0 0-2.5 2.5" />
-  </>,
-  terminal: <>
-    <path d="m3.25 5 2.75 3-2.75 3" />
-    <path d="M8.25 11.25h4.5" />
-  </>,
   file: <>
     <path d="M4 2.5h4.5L12 6v7.5H4Z" />
     <path d="M8.25 2.6V6H11.9" />
@@ -91,7 +64,6 @@ const paths: Record<IconName, ReactElement> = {
     <path d="M4.5 3v6.5M2.5 5h4" />
     <path d="M9.5 11h4" />
   </>,
-  folder: <path d="M1.75 12.5v-9h4l1.5 2h7v7Z" />,
   zoom: <>
     <path d="M2.75 6V2.75H6M10 2.75h3.25V6M13.25 10v3.25H10M6 13.25H2.75V10" />
   </>,

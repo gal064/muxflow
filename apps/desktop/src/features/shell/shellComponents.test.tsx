@@ -38,8 +38,10 @@ const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}
   onWorkspaceCommand={noop}
   phase="connected"
   rows={rows}
+  onWidth={noop}
   stateGlyphs={false}
   transport="ssh"
+  width={240}
   {...overrides}
 />);
 
@@ -59,9 +61,16 @@ describe("application shell accessibility contracts", () => {
   });
 
   it("badges only the workspaces and agents that are waiting on a human", () => {
-    expect(sidebar()).toContain("2 agents waiting in A very long workspace name");
-    const quiet = sidebar({ rows: [{ ...rows[0], unread: 0, attention: "working", working: true, activity: undefined }] });
-    expect(quiet).not.toContain("agents waiting in");
+    // The badge itself is decorative, so the count has to be in the row's own
+    // accessible name or a screen reader never hears it.
+    expect(sidebar()).toContain('aria-label="A very long workspace name, codex · blocked, 2 agents waiting, main* · ~/dev/muxflow"');
+    expect(sidebar()).toContain("Codex one, blocked, waiting, work, tab 1");
+    const quiet = sidebar({
+      agents: buildAgentRows([agent({ displayName: "Claude", lifecycle: "working" })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "grouped"),
+      rows: [{ ...rows[0], unread: 0, attention: "working", working: true, activity: undefined }],
+    });
+    expect(quiet).not.toContain("waiting");
+    expect(quiet).not.toContain('class="badge badge-row"');
   });
 
   it("states empty sidebar sections in one line each", () => {

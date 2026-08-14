@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 export interface ContextMenuItem {
   id: string;
@@ -17,6 +17,25 @@ export interface ContextMenuAnchor {
   y: number;
 }
 
+/**
+ * The keyboard's way of saying "right-click".
+ *
+ * Every row action in this app lives in a context menu, so without this a
+ * keyboard-only user could not rename a file, stage a change, or resume an
+ * agent at all. `Shift+F10` is the cross-platform convention and works on a
+ * Mac keyboard through Fn+F10; the dedicated `ContextMenu` key exists on most
+ * PC keyboards.
+ */
+export function isContextMenuKey(event: Pick<KeyboardEvent, "key" | "shiftKey">): boolean {
+  return event.key === "ContextMenu" || (event.shiftKey && event.key === "F10");
+}
+
+/** Where a keyboard-opened menu goes: under the row that has focus. */
+export function anchorForElement(element: Element): ContextMenuAnchor {
+  const box = element.getBoundingClientRect();
+  return { x: Math.round(box.left + 8), y: Math.round(box.bottom) };
+}
+
 interface ContextMenuProps {
   label: string;
   anchor: ContextMenuAnchor;
@@ -27,6 +46,7 @@ interface ContextMenuProps {
 
 /** Desktop scale, per the token table: 13px text, 24px rows. */
 const ROW_HEIGHT = 24;
+/** Only used for the first paint, before the menu has a measured width. */
 const ESTIMATED_WIDTH = 200;
 
 /**
@@ -45,6 +65,16 @@ const ESTIMATED_WIDTH = 200;
 export function ContextMenu(props: ContextMenuProps) {
   const container = useRef<HTMLDivElement>(null);
   const opener = useRef<Element | null>(null);
+  // Menus are as wide as their widest label, which no constant can know. The
+  // first paint uses an estimate; this corrects it before the browser draws.
+  const [size, setSize] = useState({ width: ESTIMATED_WIDTH, height: props.items.length * ROW_HEIGHT + 12 });
+  useLayoutEffect(() => {
+    const box = container.current?.getBoundingClientRect();
+    if (!box) return;
+    setSize((current) => current.width === box.width && current.height === box.height
+      ? current
+      : { width: box.width, height: box.height });
+  }, [props.items]);
 
   useEffect(() => {
     opener.current = document.activeElement;
@@ -71,7 +101,6 @@ export function ContextMenu(props: ContextMenuProps) {
     buttons[next]?.focus();
   };
 
-  const rows = props.items.length;
   return <div
     aria-label={props.label}
     className="context-menu"
@@ -88,8 +117,8 @@ export function ContextMenu(props: ContextMenuProps) {
     style={{
       // Kept inside the viewport rather than clipped by it; a menu opened near
       // the bottom-right of the window is the common case, not the exception.
-      left: Math.max(4, Math.min(props.anchor.x, window.innerWidth - ESTIMATED_WIDTH - 4)),
-      top: Math.max(4, Math.min(props.anchor.y, window.innerHeight - rows * ROW_HEIGHT - 12)),
+      left: Math.max(4, Math.min(props.anchor.x, window.innerWidth - size.width - 4)),
+      top: Math.max(4, Math.min(props.anchor.y, window.innerHeight - size.height - 4)),
     }}
   >
     {props.items.map((item, index) => item === "separator"

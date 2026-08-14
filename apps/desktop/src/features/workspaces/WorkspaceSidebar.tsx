@@ -1,10 +1,11 @@
 import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import type { Session } from "../../app/types";
 import type { CommandId } from "../../commands/registry";
-import { ContextMenu, type ContextMenuAnchor } from "../../ui/ContextMenu";
+import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { needsAttention, nextSortMode, type AgentListRow, type AgentSortMode } from "../agents/agentsList";
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPlacement, AgentRecord } from "../agents/types";
 import type { ConnectionPhase } from "../../state/connectionReducer";
+import { SIDEBAR_MIN_WIDTH } from "../shell/types";
 import type { WorkspaceRowModel } from "./workspaceRows";
 
 export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close">;
@@ -28,6 +29,9 @@ interface WorkspaceSidebarProps {
   onSelectAgent(row: AgentListRow): void;
   onSortMode(mode: AgentSortMode): void;
   onAgentsRatio(ratio: number): void;
+  /** Current width in CSS pixels, already clamped against the window. */
+  width: number;
+  onWidth(width: number): void;
   onOpenSettings(): void;
   onLaunchAgent(adapter: AgentAdapterId, placement: AgentPlacement): void;
   onResumeAgent(agent: AgentRecord, placement: AgentPlacement): void;
@@ -96,6 +100,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           : props.rows.map((row, index) => <div className="workspace-row" key={row.session.id} role="listitem">
             <button
               aria-current={row.active ? "true" : undefined}
+              // The badge beside this row is a decorative span, so the count
+              // has to be part of the row's own name to be announced at all.
+              aria-label={[
+                row.session.name,
+                row.activity,
+                row.unread > 0 ? `${row.unread} agent${row.unread === 1 ? "" : "s"} waiting` : undefined,
+                row.metadata,
+              ].filter(Boolean).join(", ")}
               className={row.active ? "workspace-button active" : "workspace-button"}
               data-workspace-index={index}
               onClick={() => props.onSelectWorkspace(row.session.id)}
@@ -104,7 +116,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                 setMenu({ session: row.session, anchor: { x: event.clientX, y: event.clientY }, index });
               }}
               onDoubleClick={() => props.canMutate && props.onWorkspaceCommand(row.session, "session.rename")}
-              onKeyDown={(event) => focusRelative(event, "[data-workspace-index]", index, props.rows.length)}
+              onKeyDown={(event) => {
+                if (isContextMenuKey(event)) {
+                  event.preventDefault();
+                  setMenu({ session: row.session, anchor: anchorForElement(event.currentTarget), index });
+                  return;
+                }
+                focusRelative(event, "[data-workspace-index]", index, props.rows.length);
+              }}
               type="button"
             >
               <span className="workspace-title">
@@ -114,10 +133,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               {row.activity && <span className="workspace-activity">{row.activity}</span>}
               {row.metadata && <span className="workspace-meta">{row.metadata}</span>}
             </button>
-            {row.unread > 0 && <span
-              aria-label={`${row.unread} agent${row.unread === 1 ? "" : "s"} waiting in ${row.session.name}`}
-              className="badge badge-row"
-            >{row.unread > 99 ? "99+" : row.unread}</span>}
+            {row.unread > 0 && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
           </div>)}
       </div>
     </div>
@@ -153,6 +169,13 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           aria-label={`Agent ordering: ${props.agentSort}. Switch to ${nextSortMode(props.agentSort)}.`}
           className="sort-toggle"
           onClick={() => props.onSortMode(nextSortMode(props.agentSort))}
+          // The section's launch and hook actions are on its context menu; this
+          // is the focusable thing in the header, so it is the keyboard's way in.
+          onKeyDown={(event) => {
+            if (!isContextMenuKey(event)) return;
+            event.preventDefault();
+            setAgentMenu({ anchor: anchorForElement(event.currentTarget) });
+          }}
           type="button"
         >{props.agentSort}</button>
       </div>
@@ -161,6 +184,16 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           ? <p className="quiet-empty">No agents detected.</p>
           : props.agents.map((row, index) => <div className="agent-row" key={row.agent.id} role="listitem">
             <button
+              // Same reason as the workspace row: the badge is decorative, and
+              // "waiting" is the whole point of this list.
+              aria-label={[
+                row.agent.displayName,
+                row.state,
+                needsAttention(row.state) ? "waiting" : undefined,
+                row.location.workspaceName,
+                row.location.tabIndex === undefined ? undefined : `tab ${row.location.tabIndex}`,
+                row.routable ? undefined : "unmapped, navigation unavailable",
+              ].filter(Boolean).join(", ")}
               className="agent-button"
               data-agent-index={index}
               disabled={!row.routable}
@@ -169,7 +202,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                 event.preventDefault();
                 setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY } });
               }}
-              onKeyDown={(event) => focusRelative(event, "[data-agent-index]", index, props.agents.length)}
+              onKeyDown={(event) => {
+                if (isContextMenuKey(event)) {
+                  event.preventDefault();
+                  setAgentMenu({ row, anchor: anchorForElement(event.currentTarget) });
+                  return;
+                }
+                focusRelative(event, "[data-agent-index]", index, props.agents.length);
+              }}
               title={row.routable
                 ? `${row.agent.displayName} · ${row.state} · ${row.location.workspaceName}`
                 : `${row.agent.displayName} has no exact pane; navigation is unavailable`}
@@ -220,6 +260,37 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       label={`Actions for ${menu.session.name}`}
       onClose={() => setMenu(undefined)}
     />}
+
+    {/* The sidebar's own width. The token table calls for 240px minimum,
+        drag-resizable and capped at a third of the window; the cap is applied
+        by the caller, which is the only thing that knows the window. */}
+    <div
+      aria-label="Resize the sidebar"
+      aria-orientation="vertical"
+      aria-valuemin={SIDEBAR_MIN_WIDTH}
+      aria-valuenow={Math.round(props.width)}
+      className="sidebar-resize"
+      onKeyDown={(event) => {
+        const delta = event.key === "ArrowLeft" ? -16 : event.key === "ArrowRight" ? 16 : 0;
+        if (!delta) return;
+        event.preventDefault();
+        props.onWidth(props.width + delta);
+      }}
+      onPointerDown={(event) => {
+        const left = container.current?.getBoundingClientRect().left ?? 0;
+        const target = event.currentTarget;
+        target.setPointerCapture(event.pointerId);
+        const move = (pointer: globalThis.PointerEvent) => props.onWidth(pointer.clientX - left);
+        const stop = () => {
+          target.removeEventListener("pointermove", move as EventListener);
+          target.removeEventListener("pointerup", stop);
+        };
+        target.addEventListener("pointermove", move as EventListener);
+        target.addEventListener("pointerup", stop);
+      }}
+      role="separator"
+      tabIndex={0}
+    />
 
     {agentMenu && <ContextMenu
       anchor={agentMenu.anchor}
