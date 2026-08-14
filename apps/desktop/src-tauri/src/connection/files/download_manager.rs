@@ -202,7 +202,7 @@ fn run_download(job: &DownloadJob) -> TransferResult {
     // descriptor, so a parent rename/symlink swap cannot redirect them.
     let destination = PreparedDestination::open(&requested_destination, job.collision)?;
     let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     let descriptor_response = match protocol.request_classified_cancellable(
@@ -291,7 +291,7 @@ fn run_download(job: &DownloadJob) -> TransferResult {
 fn cancel_download_out_of_band(job: &DownloadJob) -> Result<(), String> {
     job.binding.validate()?;
     let deadline = job.cancellation.arm_inactivity_deadline();
-    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     let result = protocol.cancel_download(&job.transfer_id);

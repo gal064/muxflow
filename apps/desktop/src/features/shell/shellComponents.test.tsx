@@ -303,17 +303,30 @@ describe("saved host picker", () => {
     act(() => renderer.unmount());
   });
 
-  it("offers Delete only for a picked host, and asks the command that confirms", () => {
+  it("offers Delete only for a picked host, names it, and says why when it cannot", () => {
     const onDeleteProfile = vi.fn();
+    const deleteButton = (renderer: ReturnType<typeof create>) =>
+      renderer.root.findAllByType("button").find((node) => String(node.children).includes("Delete"))!;
     let renderer!: ReturnType<typeof create>;
     act(() => { renderer = create(settings({ onDeleteProfile })); });
-    const disabled = renderer.root.findAllByType("button").find((node) => node.children.includes("Delete host…"))!;
-    expect(disabled.props.disabled).toBe(true);
+    expect(deleteButton(renderer).props.disabled).toBe(true);
+    // A disabled control that does not say why reads as broken.
+    expect(JSON.stringify(renderer.toJSON())).toContain("Pick a saved host above to remove it.");
+
     act(() => { renderer.update(settings({ onDeleteProfile, deletableProfile: profiles[1] as unknown as HostProfile, selectedProfileId: "ssh-omarchy" })); });
-    const enabled = renderer.root.findAllByType("button").find((node) => node.children.includes("Delete host…"))!;
+    const enabled = deleteButton(renderer);
     expect(enabled.props.disabled).toBe(false);
+    // A verb with an object: "Delete host…" beside a combobox names nothing.
+    expect(String(enabled.children)).toContain("omarchy");
     act(() => enabled.props.onClick());
     expect(onDeleteProfile).toHaveBeenCalled();
+    act(() => renderer.unmount());
+  });
+
+  it("explains the one refusal the store makes rather than leaving it a mystery", () => {
+    let renderer!: ReturnType<typeof create>;
+    act(() => { renderer = create(settings({ profiles: [profiles[0]] as unknown as HostProfile[], selectedProfileId: "local" })); });
+    expect(JSON.stringify(renderer.toJSON())).toContain("The last saved host cannot be removed.");
     act(() => renderer.unmount());
   });
 });

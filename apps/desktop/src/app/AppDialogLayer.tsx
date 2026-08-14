@@ -72,6 +72,7 @@ export function AppDialogLayer(props: AppDialogLayerProps) {
     />}
     {hostDelete && <ConfirmationDialog
       confirmLabel="Delete host"
+      destructive
       detail={`“${hostDelete.label}” will be removed from the saved hosts on this machine. Nothing on the host is changed: its tmux sessions, its helper and your SSH config are untouched, and connecting to it again saves it again.`}
       title="Delete saved host?"
       onCancel={props.onHostDeleteCancel}

@@ -13,7 +13,7 @@ import {
   uploadInOriginalOrder,
   validateAgentImagePath,
 } from "./terminalTransfers";
-import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
+import { canCancelTransfer, isTerminalTransferState, transferStateLabel } from "../transfers/transferState";
 import { SurfaceError } from "../../ui/SurfaceError";
 import { useTerminalTransferRegistry, type TerminalTransferRegistry } from "./terminalTransferRegistry";
 
@@ -532,10 +532,12 @@ export function TerminalTransferHistory({ registry, client, onError }: {
         {canCancelTransfer(transfer.state) && <button aria-label={`Cancel upload ${transfer.name}`} onClick={() => void client.cancel(transfer.id).then((disposition) => {
           if (disposition.disposition === "awaitingAuthoritativeOutcome") registry.markVerifying(record.key);
         }).catch((reason) => onError?.(reason))} type="button">Cancel</button>}
-        {/* Only finished records reach this list at all now — a success removes
-            itself — so what is left is a failure, a cancellation or an unknown
-            outcome, and every one of those is the user's to close. */}
-        {!canCancelTransfer(transfer.state) && transfer.state !== "verifying" && <button
+        {/* A finished record is one a delivered success would already have
+            removed, so what is left here is a failure, a cancellation or an
+            unknown outcome — every one of them the user's to close. The same
+            predicate the registry uses, so the button cannot appear on a
+            record `dismiss` would refuse. */}
+        {isTerminalTransferState(transfer.state) && <button
           aria-label={`Dismiss upload ${transfer.name}`}
           onClick={() => registry.dismiss(record.key)}
           type="button"

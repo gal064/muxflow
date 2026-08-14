@@ -2,7 +2,7 @@ use std::{
     io::BufReader,
     os::fd::AsRawFd,
     process::{Child, ChildStdin, ChildStdout},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -10,7 +10,7 @@ use tmux_agent_protocol::FrameAccumulator;
 
 use super::super::{ConnectionSpec, transport::spawn_bulk_bridge};
 use super::bulk_protocol::BulkProtocolClient;
-use super::scheduler::BulkBinding;
+use super::scheduler::{BulkBinding, CancelState};
 
 /// How long a bulk connection is kept alive with nothing to do.
 ///
@@ -185,13 +185,16 @@ fn pool() -> &'static Mutex<IdlePool<Bridge>> {
 pub(super) struct BulkLease {
     key: BulkKey,
     bridge: Option<Bridge>,
+    cancellation: Arc<CancelState>,
 }
 
 impl BulkLease {
     pub(super) fn acquire(
         connection: &ConnectionSpec,
         binding: &BulkBinding,
+        cancellation: &Arc<CancelState>,
     ) -> Result<Self, String> {
+        let cancellation = Arc::clone(cancellation);
         let key = BulkKey {
             connection: connection.clone(),
             server_identity: binding.expected_server_identity.clone(),
@@ -213,6 +216,7 @@ impl BulkLease {
             return Ok(Self {
                 key,
                 bridge: Some(bridge),
+                cancellation,
             });
         }
 
@@ -237,14 +241,11 @@ impl BulkLease {
         Ok(Self {
             key,
             bridge: Some(bridge),
+            cancellation,
         })
     }
 
     /// The process id a cancellation kills. See `CancelState::bind_process`.
-    ///
-    /// Whoever binds it must drop that binding before this lease — every caller
-    /// declares the binding after the lease, which is exactly that — or a
-    /// cancellation could reach a pid the pool has since handed to another job.
     pub(super) fn process_id(&self) -> u32 {
         self.bridge
             .as_ref()
@@ -269,7 +270,15 @@ impl Drop for BulkLease {
         let Some(mut bridge) = self.bridge.take() else {
             return;
         };
-        if !bridge.reusable() {
+        // A cancellation that has begun must never leave a pooled bridge behind.
+        // `CancelState::cancel_for` sets `requested` *before* it swaps the pid
+        // out to kill it, and those two steps are not atomic — so a watcher can
+        // hold this bridge's pid, be descheduled, and deliver its SIGKILL after
+        // the pool has handed the same process to an unrelated job, killing a
+        // healthy transfer. Reading the flag the watcher already published is
+        // what closes that window: if the kill is coming, this bridge is not
+        // reusable, whatever its pipes currently say.
+        if self.cancellation.is_cancelled() || !bridge.reusable() {
             return;
         }
         // The retired entries are closed here, outside the lock, by dropping.

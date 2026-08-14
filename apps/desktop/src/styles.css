@@ -58,7 +58,18 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .surface-error {
   padding: 5px 12px; color: var(--danger-ink); background: var(--danger-wash);
   font-size: var(--type-secondary); overflow-wrap: anywhere;
+  display: grid; gap: 6px; justify-items: start;
 }
+/* Filed here, with the component that renders it, and not beside the one
+   surface that first passed `onDismiss` — the prop is on the shared
+   `SurfaceError`, so the layout it needs has to come from the shared rule or
+   the second caller gets an unaligned word. */
+.surface-error-dismiss {
+  justify-self: end; padding: 2px 8px;
+  border: 1px solid currentcolor; border-radius: var(--radius-control);
+  background: transparent; color: inherit; font-size: var(--type-meta);
+}
+.surface-error-dismiss:hover { background: var(--danger); color: var(--accent-ink); }
 /* A rejection reads as a sentence; the host's own diagnostic is one disclosure
    away and still selectable, per 11.4.4 / M10-E059. */
 .surface-error-summary { display: block; }
@@ -478,9 +489,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 1px solid var(--danger); border-radius: 4px;
   color: var(--danger-ink); background: var(--chrome-raised);
   box-shadow: 0 8px 26px rgb(0 0 0 / .55); font-size: var(--type-meta); overflow-wrap: anywhere;
-  display: grid; gap: 6px; justify-items: start;
 }
-.surface-error-dismiss { justify-self: end; }
 .terminal-upload-review { display: grid; gap: 10px; width: min(620px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 24px)); overflow: auto; }
 .terminal-upload-review ul { max-height: 190px; margin: 0; padding-left: 22px; overflow: auto; color: var(--chrome-dim); font-size: 11px; }
 .terminal-upload-review li + li { margin-top: 4px; }
@@ -808,9 +817,23 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   background: var(--chrome-bg); color: var(--chrome-ink);
 }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
-.dialog-actions button, .settings-dialog footer button, .settings-helper button, .download-destination button {
+/* Every button inside a dialog, rather than an allow-list of the surfaces that
+   happened to have one when this rule was written. The list version silently
+   left the saved-host Delete with no border, no padding and no background —
+   dim text that did not read as a control in either state — and would have
+   done the same to the next button added to any dialog. Opt out with
+   `.bar-button` / `.inline-action`, which bring their own chrome. */
+:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment),
+.download-destination button {
   padding: 6px 12px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
   background: var(--chrome-bg); color: var(--chrome-ink);
+}
+/* A destructive action that is not the confirmation itself: the danger ink of
+   `.context-menu-item.destructive`, which is the language this app already
+   uses for "this removes something", without the filled weight of `.danger`. */
+.danger-quiet { color: var(--danger-ink) !important; }
+.danger-quiet:hover:not(:disabled), .danger-quiet:focus-visible {
+  border-color: var(--danger) !important; background: var(--danger) !important; color: var(--accent-ink) !important;
 }
 .primary { border-color: var(--accent) !important; background: var(--accent) !important; color: var(--accent-ink) !important; }
 .primary:disabled { opacity: .5; }
@@ -844,9 +867,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .settings-check { display: flex !important; align-items: center; gap: 8px; color: var(--chrome-ink) !important; }
 .settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-faint); font-size: var(--type-secondary); line-height: 1.5; }
-/* The picker takes the row; Delete sits on its baseline, not under it. */
-.settings-host { display: flex; gap: 8px; align-items: flex-end; }
-.settings-host label { flex: 1; min-width: 0; }
+/* Its own row under the picker, so the panel keeps one full-width column and a
+   destructive control is not a misclick away from the control above it. */
+.settings-host-actions { display: grid; gap: 4px; justify-items: start; }
+.settings-host-actions .settings-hint { margin: 0; }
 .settings-modes { display: flex; gap: 16px; padding: 0; border: 0; }
 .settings-modes legend { padding: 0 0 4px; color: var(--chrome-faint); font-size: var(--type-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .settings-modes label { display: flex !important; align-items: center; gap: 5px; }
