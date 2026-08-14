@@ -388,7 +388,9 @@ export function App() {
   const agentHostSetup = useAgentHostSetup({
     adapters: agentRuntime.adapters,
     applyHooks: agentRuntime.applyHooks,
+    applyHostNaming: agentRuntime.applyHostNaming,
     connected: Boolean(agentScope),
+    connectionKey: `${currentHostProfileId}\0${hostState.serverIdentity ?? ""}\0${terminalEpoch}`,
     decision: appState.hostSetup[currentHostProfileId],
     hostLabel,
     hostProfileId: currentHostProfileId,

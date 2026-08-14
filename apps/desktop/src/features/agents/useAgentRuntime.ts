@@ -10,6 +10,7 @@ import type {
   AgentAdapterId,
   AgentFocus,
   AgentHookReview,
+  AgentHostNamingOutcome,
   AgentLaunchRequest,
   AgentNativeNotification,
   AgentNotificationInstrumentation,
@@ -164,8 +165,12 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     if (!optionsRef.current.scope) return Promise.reject(new Error("Hook installation requires a live authoritative host."));
     return optionsRef.current.client.applyHooks(optionsRef.current.scope, review);
   }, []);
+  const applyHostNaming = useCallback((): Promise<AgentHostNamingOutcome> => {
+    if (!optionsRef.current.scope) return Promise.reject(new Error("Host naming requires a live authoritative host."));
+    return optionsRef.current.client.applyHostNaming(optionsRef.current.scope);
+  }, []);
 
-  return { state, agents, adapters: state.adapters, rollups, accept, launch, resume, rename, reviewHooks, applyHooks, refreshSnapshot };
+  return { state, agents, adapters: state.adapters, rollups, accept, launch, resume, rename, reviewHooks, applyHooks, applyHostNaming, refreshSnapshot };
 }
 
 export type AgentRuntime = ReturnType<typeof useAgentRuntime>;

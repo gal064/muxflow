@@ -25,10 +25,12 @@ function harness(overrides: Partial<AgentHostSetupOptions> = {}) {
     onStatus: vi.fn(),
     onModalChange: vi.fn(),
     openReview: vi.fn(),
+    applyHostNaming: vi.fn(async () => "applied" as const),
   };
   const options: AgentHostSetupOptions = {
     adapters: [adapter("claude-code", "notWired")],
     connected: true,
+    connectionKey: "ssh-omarchy\0server-a\u00001",
     hostProfileId: "ssh-omarchy",
     hostLabel: "omarchy",
     decision: undefined,
@@ -138,6 +140,44 @@ describe("the one-time set-up prompt", () => {
     expect(setup.current.notice)
       .toBe("Agent status unavailable on this host — its agent configuration could not be read");
     expect(calls.onModalChange).not.toHaveBeenCalledWith(true);
+    await act(async () => renderer.unmount());
+  });
+
+  /**
+   * Phase 13.5: the window naming lives in the tmux server's memory, so it is
+   * asserted per connection rather than installed once — but only where the
+   * user has already said yes, and never twice for the same connection.
+   */
+  it("re-asserts the tmux window naming once per connection, only after a yes", async () => {
+    const setup = harness({ decision: undefined });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    expect(setup.calls.applyHostNaming).not.toHaveBeenCalled();
+
+    await act(async () => renderer.update(<setup.Harness decision="declined" />));
+    expect(setup.calls.applyHostNaming).not.toHaveBeenCalled();
+
+    await act(async () => renderer.update(<setup.Harness decision="accepted" />));
+    expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(1);
+    // A re-render on the same connection is not a new tmux server.
+    await act(async () => renderer.update(<setup.Harness decision="accepted" />));
+    expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(1);
+    // A replaced server is, and it dropped the in-memory hook with it.
+    await act(async () => renderer.update(<setup.Harness connectionKey="ssh-omarchy\0server-b 2" decision="accepted" />));
+    expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.unmount());
+  });
+
+  it("keeps the hooks when the tmux naming is refused, and says so", async () => {
+    // The naming is explicitly non-gating: agent status works without it.
+    const setup = harness({ applyHostNaming: vi.fn(async () => { throw new Error("tmux rejected the recommended window naming"); }) });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    const accept = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => String(node.children[0]).startsWith("Set up this host"))!;
+    await act(async () => accept.props.onClick());
+    expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-omarchy", "accepted");
+    expect(setup.calls.onStatus).toHaveBeenCalledWith(expect.stringContaining("window naming was not applied"));
     await act(async () => renderer.unmount());
   });
 

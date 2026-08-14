@@ -153,6 +153,11 @@ fn operation_from_name(
             Action::Unspecified,
             Hook::Uninstall,
         )),
+        "hostNaming" => Ok((
+            Operation::AgentHostNaming,
+            Action::Unspecified,
+            Hook::Unspecified,
+        )),
         _ => Err(format!("unsupported agent operation {value}")),
     }
 }
@@ -215,6 +220,8 @@ pub(crate) fn response_json(
         "paneId": value.pane_id,
         "acceptedGeneration": value.accepted_generation.to_string(),
         "connectionEpoch": connection_epoch.to_string(),
+        "hostNaming": value.host_naming,
+        "hostNamingDetail": value.host_naming_detail,
     })
 }
 
