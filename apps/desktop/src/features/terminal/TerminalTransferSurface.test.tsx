@@ -659,10 +659,15 @@ describe("u64-safe transfer presentation", () => {
     expect(progressPercent("9007199254740993", "18014398509481986")).toBe(50);
   });
 
-  it("maps native physical coordinates to CSS pixels", () => {
+  it("hit-tests a native drop against the box's own CSS pixels", () => {
     const element = { getBoundingClientRect: () => ({ left: 10, right: 110, top: 20, bottom: 120 }) };
-    expect(pointIsInside(element as HTMLElement, { x: 100, y: 120 }, 2)).toBe(true);
-    expect(pointIsInside(element as HTMLElement, { x: 5, y: 5 }, 2)).toBe(false);
+    expect(pointIsInside(element as HTMLElement, { x: 100, y: 120 })).toBe(true);
+    expect(pointIsInside(element as HTMLElement, { x: 5, y: 5 })).toBe(false);
+    // The regression: this point is inside the box, and dividing it by a
+    // Retina display's device pixel ratio put it outside — which is why
+    // dropping a file from Finder did nothing.
+    expect(pointIsInside(element as HTMLElement, { x: 60, y: 70 })).toBe(true);
+    expect(pointIsInside(element as HTMLElement, { x: 30, y: 35 })).toBe(true);
   });
 });
 

@@ -1,4 +1,4 @@
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWebview, type DragDropEvent as DragDropPayload } from "@tauri-apps/api/webview";
 import { useEffect, useId, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode, type RefObject } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import type { TerminalTransferClient, TerminalTransferProgress, TerminalTransferScope, UploadCollisionPolicy, UploadPreflight } from "./terminalTransfers";
@@ -33,11 +33,26 @@ export interface TerminalTransferSurfaceController {
   pasteClipboard(): Promise<boolean>;
 }
 
-export function pointIsInside(element: Pick<HTMLElement, "getBoundingClientRect">, physical: { x: number; y: number }, scale: number): boolean {
+/**
+ * Whether a Tauri drag-drop point lands on this element.
+ *
+ * Tauri types the point as a `PhysicalPosition`, and it is one on Windows. On
+ * the two platforms this app ships it is not: wry takes the macOS point from
+ * `NSDraggingInfo.draggingLocation` against `NSView.frame`, both AppKit points,
+ * and the GTK one from `drag-motion`/`drag-drop` widget coordinates. Both are
+ * logical — the same units `getBoundingClientRect` reports.
+ *
+ * Dividing by `devicePixelRatio` therefore halved every drop coordinate on a
+ * Retina display, so the hit test rejected the drop and nothing was uploaded:
+ * on a split, a right-hand pane needed a cursor position outside the window to
+ * pass, and could never be dropped onto at all.
+ */
+export function pointIsInside(
+  element: Pick<HTMLElement, "getBoundingClientRect">,
+  point: { x: number; y: number },
+): boolean {
   const rect = element.getBoundingClientRect();
-  const x = physical.x / Math.max(scale, 1);
-  const y = physical.y / Math.max(scale, 1);
-  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
 }
 
 export function basename(path: string): string {
@@ -284,25 +299,39 @@ export function TerminalTransferSurface({
     }
   };
 
+  // Kept current every render, and read through the ref by the one long-lived
+  // listener below. The handler closes over `scope` and `acceptPaths`, both new
+  // objects on every render, so making it the effect's dependency tore down four
+  // Tauri listeners and re-registered four more — over IPC, with a gap in which
+  // nothing was listening — on every render of every pane. `useHostLatency`
+  // ticks every five seconds, so that ran continuously.
+  const nativeDragDropRef = useRef<{
+    handle(payload: DragDropPayload): void;
+    fail(reason: unknown): void;
+  }>({ handle: () => undefined, fail: () => undefined });
+  nativeDragDropRef.current.fail = fail;
+  nativeDragDropRef.current.handle = (payload) => {
+    if (!target.current) return;
+    if (payload.type === "leave") return setDragging(false);
+    if (payload.type === "over") return;
+    const inside = pointIsInside(target.current, payload.position);
+    if (payload.type === "enter") return setDragging(inside);
+    setDragging(false);
+    if (inside) void acceptPaths(payload.paths).catch(fail);
+  };
+
   useEffect(() => {
     if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void getCurrentWebview().onDragDropEvent((event) => {
-      if (disposed || !target.current) return;
-      const payload = event.payload;
-      if (payload.type === "leave") return setDragging(false);
-      if (payload.type === "over") return;
-      const inside = pointIsInside(target.current, payload.position, window.devicePixelRatio || 1);
-      if (payload.type === "enter") return setDragging(inside);
-      setDragging(false);
-      if (inside) void acceptPaths(payload.paths).catch(fail);
+      if (!disposed) nativeDragDropRef.current.handle(event.payload);
     }).then((release) => {
       if (disposed) release();
       else unlisten = release;
-    }).catch(fail);
+    }).catch((reason) => nativeDragDropRef.current.fail(reason));
     return () => { disposed = true; unlisten?.(); };
-  }, [scope, target]);
+  }, [target]);
 
   const onPasteCapture = (event: ClipboardEvent<HTMLElement>) => {
     const copiedFiles = event.clipboardData.getData("x-special/gnome-copied-files");
