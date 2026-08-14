@@ -48,15 +48,16 @@ if [[ ${ADE_MACOS_PACKAGE_SMOKE:-0} != 1 ]]; then
   build_linux_helper x86_64
 fi
 
+# The helper is staged by the build hook and copied into Contents/MacOS by
+# tauri's own externalBin handling, so this flow and a plain `tauri build` ship
+# the same sidecar by the same mechanism. It used to be installed and re-signed
+# by hand here, which left the bundler's path exercised only by the bare flow.
 pnpm --dir apps/desktop tauri build --bundles app
 app="$repo/target/release/bundle/macos/tmux Agent IDE.app"
-install -m 0755 "$repo/target/release/tmux-ide-host" "$app/Contents/MacOS/tmux-ide-host"
-# Tauri signs before the helper replacement above, so its bundle seal is no
-# longer valid here. Re-seal with an ad-hoc identity: macOS UserNotifications
-# requires a stable application identity even for an internal build, while
-# this still makes no Developer ID, Gatekeeper, or notarization claim.
+# Re-seal with an ad-hoc identity after the plist edit: macOS UserNotifications
+# requires a stable application identity even for an internal build, while this
+# still makes no Developer ID, Gatekeeper, or notarization claim.
 /usr/libexec/PlistBuddy -c 'Delete :LSRequiresCarbon' "$app/Contents/Info.plist" 2>/dev/null || true
-codesign --force --sign - "$app/Contents/MacOS/tmux-ide-host"
 codesign --force --sign - "$app"
 "$repo/release/macos/verify-package.sh" "$app"
 dmg="$repo/target/release/bundle/dmg/tmux Agent IDE_0.1.0_aarch64.dmg"

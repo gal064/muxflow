@@ -182,20 +182,19 @@ export function TerminalPane({
           window.open(url, "_blank", "noopener,noreferrer");
         }
       },
-      onResnapshotRequired: (reason) => {
+      // Rejecting is how this tells the renderer the request did not go out,
+      // which reopens its latch so the pane can ask again.
+      onResnapshotRequired: async (reason) => {
         if (!rendererActive) return;
         terminalStateCache.delete(pane.id);
         const currentClientId = clientIdRef.current;
-        // A pane whose request did not go out has to be allowed to ask again,
-        // or one failure leaves it permanently unable to recover.
-        if (!currentClientId) {
-          renderer.resetSeedRequest();
-          return;
-        }
-        void requestTerminalSeed(currentClientId, pane.id).catch((error) => {
+        if (!currentClientId) throw new Error(`${reason} No connection to request a seed through.`);
+        try {
+          await requestTerminalSeed(currentClientId, pane.id);
+        } catch (error) {
           diagnosticRef.current?.(`${reason} Seed request failed: ${String(error)}`);
-          renderer.resetSeedRequest();
-        });
+          throw error;
+        }
       },
     });
     const commitRendered = (generation: number, terminalEpoch: number | undefined, establishesEpoch = false) => {
@@ -237,10 +236,14 @@ export function TerminalPane({
       : undefined;
     if (currentCached) {
       const cachedEpoch = currentCached.terminalEpoch;
-      renderer.restore(currentCached.serialized, () => {
+      const restored = renderer.restore(currentCached.serialized, () => {
         closePanePaintSpans();
         commitRendered(currentCached.outputGeneration, cachedEpoch, true);
       }, currentCached.outputGeneration);
+      // A fresh terminal cannot refuse a restore today, but a caller that
+      // ignores the answer is how the tail-splice bug happened; if it ever
+      // does refuse, the cache is not what this pane should show.
+      if (!restored) terminalStateCache.delete(pane.id);
     } else if (cached) {
       terminalStateCache.delete(pane.id);
     }
@@ -499,7 +502,12 @@ export function TerminalPane({
   // pane whose CSS box did not change never gets.
   useEffect(() => {
     const renderer = rendererRef.current;
-    if (renderer) reconcilePaneGrid(renderer, pane);
+    if (!renderer) return;
+    // The measurement is passed so the "tmux has no usable grid" fallback is
+    // available here too; without it that case silently leaves the pane on
+    // xterm's default 80x24 and says nothing.
+    const report = reconcilePaneGrid(renderer, pane, renderer.measure());
+    if (report) console.warn(report);
   }, [pane.id, pane.width, pane.height]);
 
   const find = (direction: "next" | "previous") => {

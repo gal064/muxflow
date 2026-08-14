@@ -56,8 +56,10 @@ fn marker_pane_with_prefix(line: &[u8], prefix: &[u8]) -> Option<String> {
 /// How many of a failing block's output lines are carried into its event.
 const MAX_ERROR_DETAIL_LINES: usize = 4;
 /// And how much of each. tmux's own messages are one short sentence; anything
-/// longer is not an explanation and does not belong in an event.
-const MAX_ERROR_DETAIL_LINE_BYTES: usize = 200;
+/// longer is not an explanation and does not belong in an event. Counted in
+/// characters, not bytes, because the truncation has to land on a boundary the
+/// text can be cut at.
+const MAX_ERROR_DETAIL_LINE_CHARS: usize = 200;
 
 /// Renders an `%error` as one readable line.
 ///
@@ -72,7 +74,7 @@ pub(super) fn error_reason(header: &str, lines: &[Vec<u8>]) -> String {
         .map(|line| {
             let text = String::from_utf8_lossy(line);
             let text = text.trim();
-            match text.char_indices().nth(MAX_ERROR_DETAIL_LINE_BYTES) {
+            match text.char_indices().nth(MAX_ERROR_DETAIL_LINE_CHARS) {
                 Some((index, _)) => format!("{}…", &text[..index]),
                 None => text.to_owned(),
             }
@@ -148,10 +150,9 @@ mod tests {
         );
         assert_eq!(error_reason("1786682005 425 1", &[]), "1786682005 425 1");
         let long = error_reason("1 2 1", &[vec![b'x'; 4096]]);
-        assert!(
-            long.len() < 260,
-            "unbounded error detail: {} bytes",
-            long.len()
+        assert_eq!(
+            long.chars().count(),
+            "1 2 1: ".len() + MAX_ERROR_DETAIL_LINE_CHARS + 1
         );
         assert!(long.ends_with('…'));
         assert!(!wants_error_line(MAX_ERROR_DETAIL_LINES));
