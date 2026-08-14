@@ -97,6 +97,40 @@ describe("command registry", () => {
     expect(shortcut("tab.select4", "linux")).toBe("Ctrl+4");
   });
 
+  it("resolves every default binding back from the keystroke that produces it", () => {
+    // The gap this closes: nothing round-tripped a binding through a real
+    // KeyboardEvent, so `Meta+Shift+[` sat in the registry, rendered as ⌘⇧[ in
+    // the palette, and could never fire — a shifted `[` arrives as `{`.
+    const CODE_BY_KEY: Record<string, string> = {
+      "[": "BracketLeft", "]": "BracketRight", ",": "Comma", ".": "Period", "/": "Slash",
+      ";": "Semicolon", "'": "Quote", "`": "Backquote", "\\": "Backslash", "-": "Minus", "=": "Equal",
+    };
+    const SHIFTED: Record<string, string> = { "[": "{", "]": "}", ",": "<", ".": ">", "/": "?", "=": "+", "-": "_" };
+    for (const platform of ["mac", "linux"] as const) {
+      for (const command of commandRegistry) {
+        const shortcut = shortcutFor(command, platform, {});
+        if (!shortcut) continue;
+        const parts = shortcut.split("+");
+        const key = parts.at(-1)!;
+        const shift = parts.includes("Shift");
+        const event = {
+          ctrlKey: parts.includes("Ctrl"),
+          altKey: parts.includes("Alt"),
+          shiftKey: shift,
+          metaKey: parts.includes("Meta"),
+          // What a browser actually reports: the typed glyph, plus the physical
+          // key that produced it.
+          key: shift && SHIFTED[key] ? SHIFTED[key] : key,
+          code: CODE_BY_KEY[key] ?? (key.length === 1 ? `Key${key.toUpperCase()}` : key),
+          isComposing: false,
+          keyCode: 0,
+        } as KeyboardEvent;
+        expect(commandForKeyboardEvent(event, platform, {})?.id, `${command.id} on ${platform} (${shortcut})`)
+          .toBe(command.id);
+      }
+    }
+  });
+
   it("resolves a positional selector to its 1-based index", () => {
     expect(selectionIndex("workspace.select7", "workspace.select")).toBe(7);
     expect(selectionIndex("tab.select1", "tab.select")).toBe(1);

@@ -39,13 +39,14 @@ import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
 import { emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
 import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
+import { noticeDismissDelay, noticeForStatus, type StatusNotice } from "../features/shell/statusNotice";
 import { helperConnectionKey, helperUpgradeReducer, initialHelperUpgradeState, type HelperInstallReport, type RemoteHelperProbe } from "../features/shell/helperUpgrade";
 import { profileIdForSshConnection } from "../features/shell/hostProfiles";
 import { sameHostConnection, sameHostScope, type HostScopeToken } from "../features/shell/hostScope";
 import { useShellCommands } from "../features/shell/useShellCommands";
 import { collapseSidebarsForCompactViewport } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
-import { clampedAgentsRatio, sidebarWidthForWindow, type ShellState } from "../features/shell/types";
+import { clampedAgentsRatio, sidebarWidthForWindow, SIDEBAR_MIN_WIDTH, type ShellState } from "../features/shell/types";
 import {
   combineWorkspaceTabs,
   discardServerAppState,
@@ -62,6 +63,7 @@ import {
   shellNavigationMode,
   type CombinedTab,
 } from "../features/shell/model";
+import { useContextMenusOpen } from "../ui/ContextMenu";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
@@ -128,6 +130,14 @@ export function App() {
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
+  const focusHistoryRef = useRef(focusHistory);
+  focusHistoryRef.current = focusHistory;
+  // Set while navigation itself is moving the app, so the effect that records
+  // where the app ended up does not record the intermediate state as a *new*
+  // destination — which truncated the forward branch on every back-step across
+  // workspaces.
+  const historyStep = useRef(false);
+  const [notice, setNotice] = useState<StatusNotice>();
   const controllers = useRef(new Map<string, TerminalPaneController>());
   const platform = useMemo(() => currentPlatform(), []);
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
@@ -140,6 +150,21 @@ export function App() {
   // Renderers read this once, when they are created; changing it must not tear
   // down live terminals, so the setting says panes pick it up as they appear.
   useEffect(() => setTerminalScreenReaderMode(appState.shell.terminalScreenReader), [appState.shell.terminalScreenReader]);
+
+  // Anything the app says that is not routine progress becomes a visible,
+  // dismissible notice. Without this the whole status channel — every refused
+  // action, every unreachable agent, the client-size refusal that is designed
+  // to be loud — reached only the screen-reader live region.
+  const noticeSequence = useRef(0);
+  useEffect(() => {
+    const next = noticeForStatus(status, (noticeSequence.current += 1));
+    setNotice(next);
+    if (!next) return;
+    const delay = noticeDismissDelay(next);
+    if (delay === undefined) return;
+    const timer = window.setTimeout(() => setNotice((current) => current?.id === next.id ? undefined : current), delay);
+    return () => window.clearTimeout(timer);
+  }, [status]);
   // A new bridge is a new link; the last one's measured round-trip describes
   // nothing about it.
   useEffect(() => { resetHostLatency(); }, [clientId]);
@@ -384,9 +409,12 @@ export function App() {
   }, [activeSession, currentHostProfileId, hostState.serverIdentity, selectedAppTab, windows]);
 
   // Focus history follows where the app actually ended up, whatever moved it —
-  // a click, a shortcut, an agent notification, or tmux itself.
+  // a click, a shortcut, an agent notification, or tmux itself. Except when
+  // ⌘[ / ⌘] moved it: that is a walk through the history, not a new
+  // destination, and recording it would truncate the branch being walked.
   useEffect(() => {
     if (!activeSessionId) return;
+    if (historyStep.current) { historyStep.current = false; return; }
     setFocusHistory((current) => visitFocus(current, { sessionId: activeSessionId, windowId: activeWindowId }));
   }, [activeSessionId, activeWindowId]);
   useEffect(() => {
@@ -470,22 +498,29 @@ export function App() {
     serverIdentity: hostState.serverIdentity, setAppState, setConfirmation,
     setPaletteOpen, setSettingsOpen, setShortcutEditorOpen, setStatus, setTextPrompt,
     setWorkspaceSwitcherOpen, snapshot,
+    // Navigation happens here, not inside a state updater. React invokes
+    // updaters twice under StrictMode, and an updater that dispatched tmux
+    // actions therefore sent each one twice, with one captured generation
+    // between them — the same double-dispatch the tab strip documents avoiding.
     stepFocusHistory: (direction) => {
-      setFocusHistory((current) => {
-        const stepped = stepFocus(current, direction);
-        if (!stepped.point) {
-          setStatus(direction === "back" ? "Nothing earlier to go back to." : "Nothing later to go forward to.");
-          return current;
-        }
-        const { sessionId, windowId } = stepped.point;
-        if (sessionId !== activeSessionId) selectSession(sessionId);
-        else if (windowId && windowId !== activeWindowId) selectWindow(windowId);
-        return stepped.history;
-      });
+      const stepped = stepFocus(focusHistoryRef.current, direction);
+      if (!stepped.point) {
+        setStatus(direction === "back" ? "Nothing earlier to go back to." : "Nothing later to go forward to.");
+        return;
+      }
+      const { sessionId, windowId } = stepped.point;
+      historyStep.current = true;
+      setFocusHistory(stepped.history);
+      if (sessionId !== activeSessionId) selectSession(sessionId);
+      else if (windowId && windowId !== activeWindowId) selectWindow(windowId);
+      else historyStep.current = false;
     },
     windows,
   });
-  const modalOpen = paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
+  // A context menu is an overlay like any other: with it open, ⌘W must not
+  // close the tab behind it.
+  const contextMenuOpen = useContextMenusOpen();
+  const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
     || Boolean(confirmation) || Boolean(textPrompt)
     || agentModalOpen || Boolean(pendingDownload) || appStateResetConfirmation || appRecoveryDiscardConfirmation || helperState.phase === "confirming";
 
@@ -734,6 +769,7 @@ export function App() {
         hostLabel={connection.mode === "local" ? "local" : connection.target}
         latencyMs={latency?.milliseconds}
         onAgentsRatio={(ratio) => updateShell({ agentsSectionRatio: clampedAgentsRatio(ratio) })}
+        maxWidth={Math.max(SIDEBAR_MIN_WIDTH, Math.floor(windowWidth / 3))}
         onWidth={(width) => updateShell({ sidebarWidth: sidebarWidthForWindow(width, windowWidth) })}
         width={sidebarWidth}
         onLaunchAgent={agentWorkflow.launch}
@@ -866,6 +902,13 @@ export function App() {
       />}
     </div>
 
+    {/* The visible half of the status channel. Fixed-position, so it never
+        takes a pixel from the terminal surface the client size is measured
+        from; the full text is also in the live region below. */}
+    {notice && <div className={notice.severity === "problem" ? "toast toast-problem" : "toast"} role={notice.severity === "problem" ? "alert" : "status"}>
+      <span>{notice.message}</span>
+      <button aria-label="Dismiss" onClick={() => setNotice(undefined)} type="button">Dismiss</button>
+    </div>}
     {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}
     {appStateRecovery && <div className="toast" role="alert"><strong>Saved shell state is write-frozen</strong><span>{appStateRecovery}</span><button onClick={() => setAppStateResetConfirmation(true)} type="button">Reset saved shell state…</button></div>}
     {pendingAppRecovery && <div className="toast" role="status"><strong>App tabs found from the replaced tmux server</strong><span>{pendingAppRecovery.count} tab{pendingAppRecovery.count === 1 ? "" : "s"} can be rebound by unique workspace name. Terminal and pane identities are never reused.</span><div><button onClick={() => {

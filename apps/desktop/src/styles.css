@@ -185,7 +185,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 .section-divider {
   position: relative; flex: 0 0 auto; height: 9px; margin: 2px 0;
-  border-top: 1px solid var(--chrome-hairline); cursor: row-resize;
+  border-top: 1px solid var(--chrome-hairline); cursor: row-resize; touch-action: none;
 }
 .section-divider::after {
   content: ""; position: absolute; top: 2px; left: 50%; width: 28px; height: 3px;
@@ -649,6 +649,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 .context-menu {
   position: fixed; z-index: 60; display: grid; min-width: 180px; padding: 4px;
+  max-height: calc(100vh - 16px); overflow-y: auto;
   border: 1px solid var(--chrome-border); border-radius: 7px;
   background: var(--chrome-raised); box-shadow: 0 10px 28px rgb(0 0 0 / .6);
   font-size: var(--type-menu);
@@ -838,7 +839,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   background: var(--chrome-raised); box-shadow: 0 12px 32px rgb(0 0 0 / .7);
   font-size: 11px;
 }
-.toast[role="alert"] { border-color: var(--danger); }
+.toast[role="alert"], .toast-problem { border-color: var(--danger); }
+.toast-problem > span { color: var(--danger-ink); }
 .toast span { color: var(--chrome-dim); overflow-wrap: anywhere; }
 .toast > div { display: flex; gap: 6px; }
 .toast button {

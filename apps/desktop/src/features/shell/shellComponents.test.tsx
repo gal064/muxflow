@@ -38,6 +38,7 @@ const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}
   onWorkspaceCommand={noop}
   phase="connected"
   rows={rows}
+  maxWidth={426}
   onWidth={noop}
   stateGlyphs={false}
   transport="ssh"
@@ -157,7 +158,10 @@ describe("application shell accessibility contracts", () => {
     const frozen = renderToStaticMarkup(<DisconnectedStrip
       detail="" hasSnapshot onOpenSettings={noop} onReconnect={noop} phase="readOnly"
     />);
-    expect(frozen).toContain('role="alert"');
+    // `status`, not `alert`: read-only is a persistent condition, and an
+    // assertive region would re-interrupt on every detail re-render.
+    expect(frozen).toContain('role="status"');
+    expect(frozen).toContain("Connected read-only");
     expect(frozen).toContain("writes are frozen");
     // Read-only is not something "Reconnect" fixes, so it is not offered.
     expect(frozen).not.toContain(">Reconnect<");

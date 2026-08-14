@@ -36,6 +36,24 @@ export function anchorForElement(element: Element): ContextMenuAnchor {
   return { x: Math.round(box.left + 8), y: Math.round(box.bottom) };
 }
 
+/**
+ * How many menus are open, so the shell can suppress global shortcuts while one
+ * is. Every row action in the app lives in a menu now; with one open, ⌘W has to
+ * mean "the menu", not "the tab behind it".
+ */
+let openMenus = 0;
+const openMenuListeners = new Set<(open: boolean) => void>();
+
+export function useContextMenusOpen(): boolean {
+  const [open, setOpen] = useState(openMenus > 0);
+  useEffect(() => {
+    openMenuListeners.add(setOpen);
+    setOpen(openMenus > 0);
+    return () => { openMenuListeners.delete(setOpen); };
+  }, []);
+  return open;
+}
+
 interface ContextMenuProps {
   label: string;
   anchor: ContextMenuAnchor;
@@ -77,6 +95,8 @@ export function ContextMenu(props: ContextMenuProps) {
   }, [props.items]);
 
   useEffect(() => {
+    openMenus += 1;
+    for (const listener of openMenuListeners) listener(true);
     opener.current = document.activeElement;
     container.current?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
     const onPointerDown = (event: PointerEvent) => {
@@ -87,6 +107,8 @@ export function ContextMenu(props: ContextMenuProps) {
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown, true);
+      openMenus = Math.max(0, openMenus - 1);
+      for (const listener of openMenuListeners) listener(openMenus > 0);
       if (opener.current instanceof HTMLElement && document.contains(opener.current)) opener.current.focus();
     };
   }, []);

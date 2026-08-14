@@ -81,14 +81,17 @@ export function TabStrip(props: TabStripProps) {
             }}
             onClick={() => props.onSelect(tab)}
             onContextMenu={(event) => {
+              // Opening a menu is not a selection: selecting first would make a
+              // right-click on a terminal tab issue a real tmux select-window.
               event.preventDefault();
-              props.onSelect(tab);
               setMenu({ tab, anchor: { x: event.clientX, y: event.clientY } });
             }}
             onDoubleClick={() => { if (tab.kind === "terminal" && props.canMutate) props.onRenameTerminal(tab); }}
             onKeyDown={(event) => onTabKeyDown(event, tab, index)}
             role="tab"
-            tabIndex={active ? 0 : -1}
+            // With nothing selected — a window closed by another client, briefly —
+            // a roving tabindex of all -1 makes the whole strip unreachable.
+            tabIndex={active || (!props.activeKey && index === 0) ? 0 : -1}
             title={tab.kind === "app" ? tab.resource : `tmux window ${tab.id}`}
             type="button"
           >
