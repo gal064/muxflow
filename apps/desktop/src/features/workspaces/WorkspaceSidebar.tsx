@@ -5,7 +5,7 @@ import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor
 import { needsAttention, nextSortMode, type AgentListRow, type AgentSortMode } from "../agents/agentsList";
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPlacement, AgentRecord } from "../agents/types";
 import type { ConnectionPhase } from "../../state/connectionReducer";
-import { SIDEBAR_MIN_WIDTH } from "../shell/types";
+import { AGENTS_SECTION_MAX_RATIO, AGENTS_SECTION_MIN_RATIO, SIDEBAR_MIN_WIDTH } from "../shell/types";
 import type { WorkspaceRowModel } from "./workspaceRows";
 
 export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close">;
@@ -31,6 +31,8 @@ interface WorkspaceSidebarProps {
   onAgentsRatio(ratio: number): void;
   /** Current width in CSS pixels, already clamped against the window. */
   width: number;
+  /** The cap the caller applies — a third of the window. */
+  maxWidth: number;
   onWidth(width: number): void;
   onOpenSettings(): void;
   onLaunchAgent(adapter: AgentAdapterId, placement: AgentPlacement): void;
@@ -86,9 +88,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     const stop = () => {
       target.removeEventListener("pointermove", move as EventListener);
       target.removeEventListener("pointerup", stop);
+      target.removeEventListener("pointercancel", stop);
     };
     target.addEventListener("pointermove", move as EventListener);
     target.addEventListener("pointerup", stop);
+    target.addEventListener("pointercancel", stop);
   };
 
   return <nav aria-label="Workspaces and agents" className="sidebar" ref={container}>
@@ -141,6 +145,9 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     <div
       aria-label="Resize the agents section"
       aria-orientation="horizontal"
+      aria-valuemax={Math.round(AGENTS_SECTION_MAX_RATIO * 100)}
+      aria-valuemin={Math.round(AGENTS_SECTION_MIN_RATIO * 100)}
+      aria-valuenow={Math.round(props.agentsRatio * 100)}
       className="section-divider"
       onKeyDown={(event) => {
         const delta = event.key === "ArrowUp" ? 0.04 : event.key === "ArrowDown" ? -0.04 : 0;
@@ -216,11 +223,9 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               type="button"
             >
               <span className="agent-line">
-                <span
-                  aria-label={`${row.state}`}
-                  className={`state-dot ${row.state}`}
-                  role="img"
-                >{props.stateGlyphs ? STATE_GLYPH[row.state] : ""}</span>
+                {/* Decorative: the row button's own accessible name already
+                    says the state, and a role="img" here announced it twice. */}
+                <span aria-hidden="true" className={`state-dot `}>{props.stateGlyphs ? STATE_GLYPH[row.state] : ""}</span>
                 <span className="agent-location">{row.location.workspaceName}</span>
                 {row.location.tabIndex !== undefined && <span className="agent-tab">{row.location.tabIndex}</span>}
               </span>
@@ -267,6 +272,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     <div
       aria-label="Resize the sidebar"
       aria-orientation="vertical"
+      aria-valuemax={Math.round(props.maxWidth)}
       aria-valuemin={SIDEBAR_MIN_WIDTH}
       aria-valuenow={Math.round(props.width)}
       className="sidebar-resize"

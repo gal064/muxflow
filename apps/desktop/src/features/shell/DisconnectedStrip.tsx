@@ -41,8 +41,11 @@ export function DisconnectedStrip(props: DisconnectedStripProps) {
       : "Workspace data appears after a complete authoritative snapshot.");
   return <div
     className={`link-strip ${readOnly ? "link-strip-frozen" : ""}`}
-    role={readOnly ? "alert" : "status"}
-    aria-live={readOnly ? "assertive" : "polite"}
+    // `status`/`polite` even for read-only: it is a persistent condition, and
+    // an assertive live region re-interrupts every time the detail text
+    // re-renders. The words say "read-only" and forced-colors appends it too.
+    role="status"
+    aria-live="polite"
   >
     <span className="link-strip-title">{title}</span>
     <span className="link-strip-detail" title={detail}>{detail}</span>

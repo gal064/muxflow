@@ -96,7 +96,14 @@ export function useClientResize({
     if (previous && previous.clientId === currentClientId && previous.columns === columns && previous.rows === rows) return;
     lastRequested.current = { clientId: currentClientId, columns, rows };
     lastReported.current = undefined;
-    void resizeClient(currentClientId, columns, rows).catch((error) => {
+    void resizeClient(currentClientId, columns, rows).then(() => {
+      // The retry budget is per *failure run*, not per connection. Counting it
+      // across the whole connection meant four transient failures early on left
+      // every later failure — including the first resize after a reconnect, the
+      // one the retry exists for — with no retry at all. Reset on a landed
+      // request, never on an attempted one, or the retry loop never terminates.
+      pending.current.attempt = 0;
+    }).catch((error) => {
       // The request never landed, so the next identical computation must not be
       // deduplicated away — unless a later request already replaced this
       // record, in which case it is not ours to clear.

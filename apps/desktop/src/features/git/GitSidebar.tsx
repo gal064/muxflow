@@ -26,7 +26,11 @@ export function GitSidebar(props: Props) {
   // Stage / unstage / discard used to be a cluster of hover buttons on every
   // row. They are one right-click menu now, which is also the only way they can
   // carry a readable label instead of `+`, `−` and `↶`.
-  const [menu, setMenu] = useState<{ entry: GitStatusEntry; target: GitDiffTarget; anchor: ContextMenuAnchor; actionable: boolean }>();
+  // Deliberately no `actionable` flag in here. Whether a mutation is offered
+  // depends on the connection, and the connection can drop while the menu is
+  // open; a flag frozen at open time left the item enabled with `props.scope`
+  // already gone, and the click handler threw.
+  const [menu, setMenu] = useState<{ entry: GitStatusEntry; target: GitDiffTarget; anchor: ContextMenuAnchor }>();
   const [busyPath, setBusyPath] = useState<string>();
   const [commitMessage, setCommitMessage] = useState("");
   const [commitOutput, setCommitOutput] = useState<GitCommandResult>();
@@ -80,8 +84,8 @@ export function GitSidebar(props: Props) {
   if (props.status.oversized) return <GitEmpty detail={`Repository status is too large. ${props.status.error || "The host bounded this snapshot to keep the terminal connection responsive."} ${props.status.totalEntryCount ?? "Unknown"} entries were detected.`} action={props.onRefresh} />;
 
   const stagedCount = groups.staged.length;
-  const openMenu = (entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor, actionable: boolean) =>
-    setMenu({ entry, target, anchor, actionable });
+  const openMenu = (entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor) =>
+    setMenu({ entry, target, anchor });
   return <section className="git-sidebar" aria-label="Source Control">
     <header className="git-sidebar-header">
       <strong>{props.status.repository.headName || (props.status.repository.initial ? "Initial repository" : "Detached HEAD")}</strong>
@@ -91,10 +95,10 @@ export function GitSidebar(props: Props) {
     {props.status.copyDetectionIncomplete && <div className="surface-note" role="status">Copy detection was bounded for this large change set; some copies may appear as additions.</div>}
     {!props.status.authoritative && <div className="surface-error" role="alert">Git status is resynchronizing. Mutations are disabled.</div>}
     <div className="git-status-groups">
-      <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor, false)} />
-      <GitGroup title="Staged" entries={groups.staged} target="staged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "staged", anchor, !unavailable)} />
-      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor, !unavailable)} />
-      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor, !unavailable)} />
+      <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor)} />
+      <GitGroup title="Staged" entries={groups.staged} target="staged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "staged", anchor)} />
+      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor)} />
+      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor)} />
       <GitGroup title="Ignored" entries={groups.ignored} target="unstaged" onOpen={props.onOpenDiff} />
       {props.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
     </div>
@@ -112,7 +116,7 @@ export function GitSidebar(props: Props) {
       anchor={menu.anchor}
       items={[
         { id: "open", label: "Open diff", disabled: menu.entry.ignored, run: () => props.onOpenDiff(menu.entry, menu.target) },
-        ...(menu.actionable && !menu.entry.conflicted ? [
+        ...(!unavailable && !menu.entry.conflicted && props.scope && props.root && props.status ? [
           menu.target === "staged"
             ? { id: "unstage", label: "Unstage", disabled: menu.entry.submodule, run: () => void mutateFile(menu.entry, "staged", "unstageFile") }
             : { id: "stage", label: "Stage", disabled: menu.entry.submodule, run: () => void mutateFile(menu.entry, "unstaged", "stageFile") },

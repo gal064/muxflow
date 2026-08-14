@@ -199,10 +199,28 @@ export function unsafeShortcutBindings(overrides: ShortcutOverrides): CommandId[
   });
 }
 
+/**
+ * The character a punctuation key produces with no Shift held.
+ *
+ * `event.key` reports what the keystroke *typed*, so ⌘⇧[ arrives as `{` and
+ * never matches a binding written `Meta+Shift+[` — which is how the cmux
+ * keymap's ⌘⇧[ / ⌘⇧] tab shortcuts came to be drawn in the palette while doing
+ * nothing at all. `event.code` names the physical key, so a Shift-modified
+ * binding can be matched against the key rather than the glyph. Only the US
+ * punctuation row needs this; letters and digits already round-trip, and the
+ * fallback is `event.key` for any layout `code` does not describe.
+ */
+const UNSHIFTED_BY_CODE: Record<string, string> = {
+  BracketLeft: "[", BracketRight: "]", Semicolon: ";", Quote: "'", Backquote: "`",
+  Comma: ",", Period: ".", Slash: "/", Backslash: "\\", Minus: "-", Equal: "=",
+};
+
 export function shortcutFromEvent(event: KeyboardEvent): string {
   const parts = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Meta"]
     .filter((part): part is string => Boolean(part));
-  const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  const unshifted = event.shiftKey ? UNSHIFTED_BY_CODE[event.code] : undefined;
+  const raw = unshifted ?? event.key;
+  const key = raw.length === 1 ? raw.toUpperCase() : raw;
   if (!["Control", "Alt", "Shift", "Meta"].includes(key)) parts.push(key);
   return normalizeShortcut(parts.join("+"));
 }

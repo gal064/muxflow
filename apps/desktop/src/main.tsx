@@ -33,11 +33,19 @@ async function fontsReady(): Promise<void> {
   ]);
 }
 
-void fontsReady().then(() => {
+function mount(): void {
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <App />
     </StrictMode>,
   );
+}
+
+// Rendering is never conditional on the font check succeeding: a rejection
+// between here and `render` would otherwise leave a permanently blank window
+// with nothing to look at and nothing logged.
+void fontsReady().then(mount, (error) => {
+  console.warn("font readiness check failed; rendering anyway", error);
+  mount();
 });
 
