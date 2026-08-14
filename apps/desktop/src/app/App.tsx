@@ -123,12 +123,16 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [workspaceSwitcherOpen, setWorkspaceSwitcherOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // Only while Settings is showing the picker. "The selected saved host" is a
-  // phrase with no referent anywhere else, and a destructive command whose
-  // subject is off screen is one the palette should not offer. The store also
-  // refuses to empty the list, so the last saved host is not offered here
-  // either — a disabled control beats a refusal after a confirmation dialog.
-  const deletableProfile = settingsOpen && profiles.length > 1
+  // Deliberately *not* gated on Settings being open. Every global shortcut is
+  // suppressed while a modal is up (`modalOpen` below) and the palette cannot
+  // be open at the same time as Settings, so a command available only there is
+  // a command the palette renders permanently greyed and a bound shortcut that
+  // can never fire. The subject stays legible without the picker on screen
+  // because nothing happens until the confirmation, which names the host.
+  //
+  // The store refuses to empty the list, so the last saved host is not offered
+  // here either — a disabled control beats a refusal after a confirmation.
+  const deletableProfile = profiles.length > 1
     ? profiles.find((profile) => profile.id === selectedProfileId)
     : undefined;
   const deleteSelectedProfile = (profile: HostProfile) => {
@@ -543,7 +547,8 @@ export function App() {
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
     || Boolean(confirmation) || Boolean(textPrompt)
-    || agentModalOpen || Boolean(pendingDownload) || appStateResetConfirmation || appRecoveryDiscardConfirmation || helperState.phase === "confirming";
+    || agentModalOpen || Boolean(pendingDownload) || appStateResetConfirmation || appRecoveryDiscardConfirmation
+    || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {

@@ -576,10 +576,12 @@ export class XtermRenderer implements TerminalRenderer {
     // out of the helper elements `open` creates, and measures there.
     this.#applyRowPitch();
     // And again whenever that measurement changes. A one-shot application is a
-    // latch: a terminal opened before the face resolved, or moved to a display
-    // of a different pixel ratio, would keep a multiplier derived from a
-    // measurement that no longer holds — and the only symptom is a grid that
-    // does not fit its surface, which nobody would trace back to here.
+    // latch: a terminal opened before the bundled face resolved would keep a
+    // multiplier derived from a measurement that no longer holds, and the only
+    // symptom is a grid that does not fit its surface — nobody would trace that
+    // back to here. xterm fires this only when the *measured* value moves, and
+    // the measurement is in CSS pixels, so a display change is deliberately not
+    // covered by it; see `#applyRowPitch`.
     const charSize = (this.#terminal as MeasurableTerminal)._core?._charSizeService;
     const subscribe = charSize?.onCharSizeChange;
     if (subscribe) this.#disposables.push(subscribe.call(charSize, () => this.#applyRowPitch()));

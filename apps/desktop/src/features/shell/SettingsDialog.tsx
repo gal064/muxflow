@@ -101,24 +101,34 @@ export function SettingsDialog(props: SettingsDialogProps) {
         tabIndex={0}
       >
         {tab === "connection" && <>
-          <div className="settings-host">
-            <label>Saved host
-              {/* Bound to what the user picked, not to what the app is
-                  connected to. Connect is what turns one into the other. */}
-              <select aria-label="Saved host" onChange={(event) => {
-                const profile = props.profiles.find((item) => item.id === event.target.value);
-                if (profile) props.onProfile(profile);
-                else props.onProfile(undefined);
-              }} value={props.selectedProfileId}>
-                <option value="">Current values</option>
-                {props.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
-              </select>
-            </label>
+          <label>Saved host
+            {/* Bound to what the user picked, not to what the app is connected
+                to. Connect is what turns one into the other. */}
+            <select aria-label="Saved host" onChange={(event) => {
+              const profile = props.profiles.find((item) => item.id === event.target.value);
+              props.onProfile(profile);
+            }} value={props.selectedProfileId}>
+              <option value="">Current values (not saved)</option>
+              {props.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
+            </select>
+          </label>
+          {/* Under the picker on its own line, not beside it: this is the one
+              control in the panel that destroys something, and putting it a
+              few pixels from the control the user reaches for most is how it
+              gets pressed by accident. It names its subject for the same
+              reason — "Delete host…" beside a combobox is a verb with no
+              object. */}
+          <div className="settings-host-actions">
             <button
+              className="danger-quiet"
               disabled={!props.deletableProfile}
               onClick={props.onDeleteProfile}
               type="button"
-            >Delete host…</button>
+            >{props.deletableProfile ? `Delete “${props.deletableProfile.label}”…` : "Delete saved host…"}</button>
+            {/* A disabled control that does not say why reads as broken, and
+                the picker is showing a host, so "why can't I delete this one?"
+                is the obvious question. */}
+            <span className="settings-hint">{hostDeleteHint(props)}</span>
           </div>
           <fieldset className="settings-modes">
             <legend>Transport</legend>
@@ -172,6 +182,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
       <footer><button className="primary" onClick={tab === "connection" ? props.onConnect : props.onClose} type="button">{tab === "connection" ? "Connect" : "Done"}</button></footer>
     </section>
   </div>;
+}
+
+/** Why Delete is unavailable, in the words of the reason it is unavailable. */
+function hostDeleteHint(props: Pick<SettingsDialogProps, "deletableProfile" | "profiles" | "selectedProfileId">): string {
+  if (props.deletableProfile) return "Removes it from this machine only. The host itself is not touched.";
+  if (props.profiles.length <= 1) return "The last saved host cannot be removed.";
+  return "Pick a saved host above to remove it.";
 }
 
 function helperCanInstall(state: HelperUpgradeState): state is Extract<HelperUpgradeState, { phase: "ready" }> {

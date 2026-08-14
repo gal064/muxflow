@@ -253,7 +253,7 @@ fn emit_file_job_state(job: &FileIoJob, kind: u8, state: TransferState) {
 fn run_file_read(job: &FileReadJob) -> Result<(), String> {
     job.binding.validate()?;
     let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     let metadata_response = protocol.request_cancellable(
@@ -422,7 +422,7 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
 fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
     job.binding.validate()?;
     let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     protocol.request_cancellable(
