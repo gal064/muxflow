@@ -33,7 +33,18 @@ fn cli_persists_an_exact_unsequenced_hook_envelope() {
         .unwrap();
     assert!(child.wait().unwrap().success());
 
-    let bytes = fs::read(runtime.join("hook-fallback-codex-77.pb")).unwrap();
+    let mailbox: Vec<_> = fs::read_dir(&runtime)
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("hook-fallback-codex-77-")
+        })
+        .collect();
+    assert_eq!(mailbox.len(), 1);
+    let bytes = fs::read(mailbox[0].path()).unwrap();
     let event = v1::AgentHookEvent::decode(bytes.as_slice()).unwrap();
     assert_eq!(event.pane_id, "%77");
     assert!(event.origin_server_identity.is_empty());

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { AgentHostSetupDialog } from "./AgentHostSetupDialog";
-import { hostHookWiring, hookWiringNotice, type HostHookWiring } from "./hookWiring";
+import { hostHookWiring, hookWiringNotice, shouldPromptForSetup, type HostHookWiring } from "./hookWiring";
 import type { HostSetupDecision } from "../shell/types";
 import type { AgentAdapterDescriptor, AgentHookReview, AgentHostNamingOutcome } from "./types";
 
@@ -29,7 +29,6 @@ export interface AgentHostSetupOptions {
   /** Re-asks the host what its wiring is now, after a change to it. */
   refreshWiring(): void;
   onStatus(message: string): void;
-  onModalChange(open: boolean): void;
   /** Opens the existing exact-diff review for one adapter. */
   openReview(adapter: string): void;
 }
@@ -37,6 +36,8 @@ export interface AgentHostSetupOptions {
 export interface AgentHostSetup {
   /** Rendered by the shell; null when nothing is being asked. */
   dialog: ReactElement | null;
+  /** The shell reads this rather than being told; one source of truth. */
+  open: boolean;
   /** The agents section's honest line, or `undefined` when status works. */
   notice?: string;
   wiring: HostHookWiring;
@@ -67,20 +68,23 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   optionsRef.current = options;
 
   const wiring = useMemo(() => hostHookWiring(options.adapters), [options.adapters]);
+  // Two different questions. `offerable` is "is there anything left to set up",
+  // which is what Settings and the sidebar's line ask about. Raising the modal
+  // unasked needs the stronger one: this host reports nothing at all.
   const offerable = options.connected && wiring.setupTargets.length > 0;
+  const promptable = options.connected && shouldPromptForSetup(wiring);
 
   const close = useCallback((next: boolean) => {
     setOpen(next);
-    optionsRef.current.onModalChange(next);
   }, []);
 
   // Asked once, when the host has actually answered. `decision` being undefined
   // is the whole condition: a recorded answer of either kind ends this forever.
   useEffect(() => {
-    if (!offerable || options.decision !== undefined) return;
+    if (!promptable || options.decision !== undefined) return;
     setError(undefined);
     close(true);
-  }, [close, offerable, options.decision]);
+  }, [close, promptable, options.decision]);
 
   // A host that goes away takes its question with it, rather than leaving a
   // modal over a disconnected app that would act on the next host to connect.
@@ -88,24 +92,36 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     if (!options.connected) close(false);
   }, [close, options.connected]);
 
+  // One key, not a set: connections are sequential, so remembering the last one
+  // answers "have I already asserted this on the server I am talking to now",
+  // and a set keyed by an ever-incrementing epoch only ever grows.
+  const namedConnection = useRef<string | undefined>(undefined);
+  const assertNaming = useCallback(() => {
+    const current = optionsRef.current;
+    if (namedConnection.current === current.connectionKey) return;
+    const key = current.connectionKey;
+    namedConnection.current = key;
+    void current.applyHostNaming().then((outcome) => {
+      // A change to the user's running tmux server is worth one line; finding
+      // that their own config already does it is not.
+      if (outcome === "applied") current.onStatus("Recommended tmux window naming applied to this host's tmux server.");
+    }).catch((cause) => {
+      if (namedConnection.current === key) namedConnection.current = undefined;
+      // Non-fatal by design: agent status works without it, and the phase that
+      // introduced it declared it non-gating. It still must not fail silently.
+      current.onStatus(`Recommended tmux window naming was not applied: ${String(cause)}`);
+    });
+  }, []);
+
   // Window naming is not installed, it is asserted: it lives in the running
   // tmux server, so a restarted server — a new connection key — silently loses
   // it. Re-sent once per connection, and only where the user already said yes.
   // The host's own detection is what keeps this from overwriting a config the
   // user wrote themselves.
-  const namedConnections = useRef(new Set<string>());
   useEffect(() => {
-    const current = optionsRef.current;
-    if (!current.connected || current.decision !== "accepted") return;
-    if (namedConnections.current.has(current.connectionKey)) return;
-    namedConnections.current.add(current.connectionKey);
-    void current.applyHostNaming().catch((cause) => {
-      namedConnections.current.delete(current.connectionKey);
-      // Non-fatal by design: agent status works without it, and the phase that
-      // introduced it declared it non-gating. It still must not fail silently.
-      current.onStatus(`Recommended tmux window naming was not applied: ${String(cause)}`);
-    });
-  }, [options.connected, options.connectionKey, options.decision]);
+    if (!options.connected || options.decision !== "accepted") return;
+    assertNaming();
+  }, [assertNaming, options.connected, options.connectionKey, options.decision]);
 
   const accept = useCallback(() => {
     const current = optionsRef.current;
@@ -120,19 +136,23 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       }
     })().then(() => {
       current.recordDecision(current.hostProfileId, "accepted");
-      current.refreshWiring();
       close(false);
       current.onStatus(`Agent status hooks installed on ${current.hostLabel}.`);
       // Part of the same "set up this host" answer, and deliberately after it:
       // a tmux server that refuses the naming must not lose the hooks.
-      void current.applyHostNaming().then(() => namedConnections.current.add(current.connectionKey))
-        .catch((cause) => current.onStatus(`Recommended tmux window naming was not applied: ${String(cause)}`));
+      assertNaming();
     }).catch((cause) => {
       // Nothing is recorded on failure: the user has not been asked and
       // answered, they have been shown a broken attempt.
       setError(String(cause));
-    }).finally(() => setApplying(false));
-  }, [close]);
+    }).finally(() => {
+      // Unconditionally, including after a failure part-way through: an adapter
+      // that was installed before the one that threw *is* wired now, and
+      // leaving the dialog claiming otherwise is the lie this phase is about.
+      setApplying(false);
+      current.refreshWiring();
+    });
+  }, [assertNaming, close]);
 
   const decline = useCallback(() => {
     const current = optionsRef.current;
@@ -162,5 +182,5 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     />
     : null;
 
-  return { dialog, notice: hookWiringNotice(wiring), wiring, offerable, offer };
+  return { dialog, open, notice: hookWiringNotice(wiring), wiring, offerable, offer };
 }

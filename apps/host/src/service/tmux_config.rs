@@ -17,7 +17,31 @@ use super::snapshot::tmux_command;
 /// Nothing cosmetic is included. The status bar, key bindings and colours
 /// remain entirely the user's business.
 const PANE_TITLE_HOOK: &str = "pane-title-changed";
-const RECOMMENDED_HOOK_COMMAND: &str = "rename-window \"#{pane_title}\"";
+const AUTOMATIC_RENAME_FORMAT: &str = "automatic-rename-format";
+
+/// The hook, built from the adapter registry so it cannot drift from the set of
+/// agents this app understands.
+///
+/// Scoped to agent panes, and this is the whole difference between a
+/// recommendation and an imposition. An unscoped `rename-window` fires for
+/// every pane, so a shell whose prompt sets the terminal title renames its
+/// window to `user@host:~/some/path` — measured on the field machine — and
+/// `rename-window` also turns tmux's own automatic renaming off for that
+/// window, permanently, which outlives this app's connection. Guarding with
+/// `if -F` means the command never runs for a non-agent pane at all, so an
+/// ordinary shell window keeps the name tmux would have given it.
+fn recommended_hook_command() -> String {
+    let mut condition = String::new();
+    for adapter in super::agents::adapters::all() {
+        let test = format!("#{{==:#{{pane_current_command}},{}}}", adapter.executable());
+        condition = if condition.is_empty() {
+            test
+        } else {
+            format!("#{{||:{condition},{test}}}")
+        };
+    }
+    format!("if -F \"{condition}\" \"rename-window \\\"#{{pane_title}}\\\"\"")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NamingOutcome {
@@ -47,11 +71,12 @@ impl NamingOutcome {
 /// lives in the running tmux server, so a server restart drops it and the next
 /// connect re-asserts it.
 pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
-    if !existing_hook()?.is_empty() {
+    if already_syncs_pane_titles()? {
         return Ok(NamingOutcome::AlreadyConfigured);
     }
+    let command = recommended_hook_command();
     let output = tmux_command()
-        .args(["set-hook", "-g", PANE_TITLE_HOOK, RECOMMENDED_HOOK_COMMAND])
+        .args(["set-hook", "-g", PANE_TITLE_HOOK, &command])
         .output()
         .context("apply the recommended tmux window naming")?;
     if !output.status.success() {
@@ -62,34 +87,48 @@ pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
     }
     // Read back rather than trusting the exit status: an option that did not
     // take is the failure mode worth catching, and it costs one command.
-    if existing_hook()?.is_empty() {
+    if setting(PANE_TITLE_HOOK)?.is_empty() {
         bail!("tmux accepted the recommended window naming but did not retain it");
     }
     Ok(NamingOutcome::Applied)
 }
 
-/// Every command bound to `pane-title-changed` on this server, one per line.
+/// Whether this server already puts pane titles into window names, by either
+/// of the two mechanisms that can.
 ///
-/// `show-options -g <hook>` prints nothing but the option name when the hook is
-/// unset and `pane-title-changed[0] <command>` for each bound command, so an
-/// empty result is the precise, positive test for "the user has not configured
-/// this" — and any non-empty result, whatever its shape, is left alone.
-fn existing_hook() -> anyhow::Result<Vec<String>> {
+/// A `pane-title-changed` hook is the direct one and the one this app would
+/// add. An `automatic-rename-format` that mentions `pane_title` reaches the
+/// same result by a different route, and a user who chose that route has
+/// configured this as deliberately as one who wrote the hook. Neither is
+/// overridden — theirs may carry exemptions this app knows nothing about.
+fn already_syncs_pane_titles() -> anyhow::Result<bool> {
+    Ok(!setting(PANE_TITLE_HOOK)?.is_empty()
+        || setting(AUTOMATIC_RENAME_FORMAT)?
+            .iter()
+            .any(|value| value.contains("pane_title")))
+}
+
+/// Every value bound to a global option, one per returned entry.
+///
+/// `show-options -g <name>` prints nothing but the option name when it is unset
+/// and `<name>[0] <value>` for each bound value, so an empty result is the
+/// precise, positive test for "the user has not configured this".
+fn setting(name: &str) -> anyhow::Result<Vec<String>> {
     let output = tmux_command()
-        .args(["show-options", "-g", PANE_TITLE_HOOK])
+        .args(["show-options", "-g", name])
         .output()
-        .context("read the tmux window-naming hook")?;
+        .with_context(|| format!("read the tmux {name} setting"))?;
     if !output.status.success() {
         bail!(
-            "tmux could not report its window-naming hook: {}",
+            "tmux could not report its {name} setting: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.split_once(' '))
-        .filter(|(name, _)| name.starts_with(PANE_TITLE_HOOK))
-        .map(|(_, command)| command.trim().to_owned())
+        .filter(|(option, _)| option.starts_with(name))
+        .map(|(_, value)| value.trim().to_owned())
         .collect())
 }
 
@@ -102,10 +141,26 @@ mod tests {
     /// is a change to what this app does to a user's tmux server, so it should
     /// have to move this assertion too.
     #[test]
-    fn the_recommended_set_is_one_noncosmetic_hook() {
+    fn the_recommended_set_is_one_noncosmetic_hook_scoped_to_agent_panes() {
         assert_eq!(PANE_TITLE_HOOK, "pane-title-changed");
-        assert_eq!(RECOMMENDED_HOOK_COMMAND, "rename-window \"#{pane_title}\"");
-        assert!(!RECOMMENDED_HOOK_COMMAND.contains("status"));
+        let command = recommended_hook_command();
+        // Every adapter the app understands, and nothing else: a pane running
+        // something else must not reach `rename-window` at all, because that
+        // command also disables tmux's automatic renaming for the window
+        // permanently.
+        for adapter in super::super::agents::adapters::all() {
+            assert!(
+                command.contains(&format!(
+                    "#{{==:#{{pane_current_command}},{}}}",
+                    adapter.executable()
+                )),
+                "{} is not covered by {command}",
+                adapter.id()
+            );
+        }
+        assert!(command.starts_with("if -F "), "{command}");
+        assert!(command.contains("rename-window"));
+        assert!(!command.contains("status"), "nothing cosmetic: {command}");
         assert_eq!(NamingOutcome::Applied.label(), "applied");
         assert_eq!(
             NamingOutcome::AlreadyConfigured.label(),

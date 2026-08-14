@@ -16,6 +16,16 @@ interface AgentWorkflowOptions {
   launchContext?: AgentLaunchContext;
   onStatus(message: string): void;
   onModalChange(open: boolean): void;
+  /**
+   * Called after this dialog changes a host's hook configuration.
+   *
+   * Without it, installing through the exact-diff review left the agents
+   * section still saying "Agent status unavailable on this host" — the wiring
+   * the sidebar reads comes from the snapshot, and nothing had asked the host
+   * for a new one. The one-time setup prompt refreshed and this path did not,
+   * which is precisely the kind of divergence two flows accumulate.
+   */
+  onHooksChanged(): void;
 }
 
 export interface AgentWorkflow {
@@ -38,7 +48,7 @@ export interface AgentWorkflow {
  * about to write and cannot be a fire-and-forget menu item.
  */
 export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
-  const { runtime, launchContext, onStatus, onModalChange } = options;
+  const { runtime, launchContext, onStatus, onModalChange, onHooksChanged } = options;
   const [review, setReviewState] = useState<Awaited<ReturnType<AgentRuntime["reviewHooks"]>>>();
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string>();
@@ -92,6 +102,7 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
       setError(undefined);
       void runtime.applyHooks(review).then(() => {
         onStatus(`${adapterName(review.adapterId)} reviewed hooks ${review.action === "install" ? "installed" : "removed"}.`);
+        onHooksChanged();
         setReview(undefined);
       }).catch((cause) => setError(String(cause))).finally(() => setApplying(false));
     }}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hookWiringNotice, hostHookWiring, setupAdapterIds } from "./hookWiring";
+import { hookWiringNotice, hostHookWiring, setupAdapterIds, shouldPromptForSetup } from "./hookWiring";
 import type { AgentAdapterDescriptor, AgentHookWiring } from "./types";
 
 const adapter = (id: string, hookWiring: AgentHookWiring, overrides: Partial<AgentAdapterDescriptor> = {}): AgentAdapterDescriptor => ({
@@ -37,9 +37,9 @@ describe("what this host is allowed to say about agent status", () => {
   it("never offers to write over a configuration it could not read", () => {
     const wiring = hostHookWiring([adapter("claude-code", "unavailable", { hookWiringDetail: "parse hook JSON configuration" })]);
     expect(wiring.setupTargets).toEqual([]);
-    expect(wiring.unreadable.map((item) => item.id)).toEqual(["claude-code"]);
+    expect(wiring.unreadable).toEqual(["parse hook JSON configuration"]);
     expect(hookWiringNotice(wiring))
-      .toBe("Agent status unavailable on this host — its agent configuration could not be read");
+      .toBe("Agent status unavailable on this host — parse hook JSON configuration");
   });
 
   it("says nothing at all before the host has answered", () => {
@@ -57,5 +57,35 @@ describe("what this host is allowed to say about agent status", () => {
     const wiring = hostHookWiring([adapter("screen-only", "notWired", { supportsHooks: false })]);
     expect(wiring.unknown).toBe(true);
     expect(wiring.setupTargets).toEqual([]);
+  });
+
+  it("never offers to set up an agent that is not installed on the host", () => {
+    // Absent looks exactly like unwired from a missing config file. Treating
+    // the two the same meant accepting the prompt created `~/.codex/hooks.json`
+    // on a machine that has never had Codex — configuration for a tool the
+    // user does not use, written on their behalf.
+    const wiring = hostHookWiring([adapter("claude-code", "wired"), adapter("codex", "absent")]);
+    expect(wiring.setupTargets).toEqual([]);
+    expect(wiring.reports).toBe(true);
+    expect(shouldPromptForSetup(wiring)).toBe(false);
+
+    const nothingHere = hostHookWiring([adapter("claude-code", "absent"), adapter("codex", "absent")]);
+    expect(nothingHere.unknown).toBe(true);
+    expect(hookWiringNotice(nothingHere)).toBeUndefined();
+  });
+
+  it("only raises the prompt by itself when the whole host reports nothing", () => {
+    // The gap is still offered from Settings and from the section's own line;
+    // what it does not do is interrupt someone whose status already works.
+    const partlyWired = hostHookWiring([adapter("claude-code", "wired"), adapter("codex", "notWired")]);
+    expect(shouldPromptForSetup(partlyWired)).toBe(false);
+    expect(setupAdapterIds(partlyWired)).toEqual(["codex"]);
+
+    const silent = hostHookWiring([adapter("claude-code", "notWired"), adapter("codex", "notWired")]);
+    expect(shouldPromptForSetup(silent)).toBe(true);
+
+    // And never before the host has said anything at all.
+    expect(shouldPromptForSetup(hostHookWiring([]))).toBe(false);
+    expect(shouldPromptForSetup(hostHookWiring([adapter("claude-code", "unspecified")]))).toBe(false);
   });
 });

@@ -95,7 +95,6 @@ interface WireResponse {
   paneId?: string;
   acceptedGeneration?: string | number;
   hostNaming?: string;
-  hostNamingDetail?: string;
 }
 
 export interface WireAgentEvent {
@@ -334,7 +333,8 @@ function mapAdapterDescriptor(value: NonNullable<WireAgentSnapshot["adapters"]>[
  * configuration that may already be correct.
  */
 function mapHookWiring(value: string | undefined): AgentAdapterDescriptor["hookWiring"] {
-  return value === "wired" || value === "partial" || value === "notWired" || value === "unavailable"
+  return value === "wired" || value === "partial" || value === "notWired"
+    || value === "absent" || value === "unavailable"
     ? value : "unspecified";
 }
 

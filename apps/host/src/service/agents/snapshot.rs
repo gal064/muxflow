@@ -4,7 +4,11 @@ use tmux_agent_protocol::v1;
 
 use super::{StoredAgent, StoredState, adapters};
 
-pub(super) fn build(state: &StoredState, server_identity: &str) -> v1::AgentSnapshot {
+pub(super) fn build(
+    state: &StoredState,
+    server_identity: &str,
+    wiring: &[super::hooks::AdapterWiring],
+) -> v1::AgentSnapshot {
     let agents = state
         .agents
         .values()
@@ -19,7 +23,7 @@ pub(super) fn build(state: &StoredState, server_identity: &str) -> v1::AgentSnap
         agents,
         authoritative: true,
         notification_watermark: state.generation,
-        adapters: adapters::descriptors(&home, &super::hooks::cached_wiring()),
+        adapters: adapters::descriptors(&home, wiring),
         accepted_generation: state.generation,
     }
 }

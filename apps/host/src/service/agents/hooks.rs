@@ -35,10 +35,14 @@ pub(crate) struct AdapterWiring {
 pub(crate) struct HookManager {
     home: PathBuf,
     helper_path: PathBuf,
-    /// Replaces the adapter's own configuration path. Set only by the CLI's
-    /// `--settings-path`, which is how QA exercises a real-shaped fixture
-    /// without touching a real `~/.claude`.
-    config_override: Option<PathBuf>,
+    /// Replaces one named adapter's configuration path, and only that
+    /// adapter's. Set by the CLI's `--settings-path`, which is how QA exercises
+    /// a real-shaped fixture without touching a real `~/.claude`.
+    ///
+    /// The adapter is part of the value rather than a rule enforced at the call
+    /// site: an override that silently applied to every adapter had Codex's
+    /// wiring read out of Claude Code's settings file.
+    config_override: Option<(&'static str, PathBuf)>,
 }
 
 impl HookManager {
@@ -56,10 +60,10 @@ impl HookManager {
     }
 
     /// The CLI's entry point. `home` relocates every adapter's configuration;
-    /// `config_override` relocates the one adapter being acted on.
+    /// `config_override` relocates exactly the adapter it names.
     pub(crate) fn with_overrides(
         home: Option<PathBuf>,
-        config_override: Option<PathBuf>,
+        config_override: Option<(&'static str, PathBuf)>,
     ) -> anyhow::Result<Self> {
         let home = match home {
             Some(home) => home,
@@ -68,7 +72,7 @@ impl HookManager {
         if !home.is_absolute() {
             bail!("hook home must be an absolute path");
         }
-        if let Some(path) = config_override.as_ref()
+        if let Some((_, path)) = config_override.as_ref()
             && !path.is_absolute()
         {
             bail!("hook settings path must be absolute");
@@ -89,7 +93,9 @@ impl HookManager {
 
     fn config_path(&self, adapter: &dyn adapters::AgentAdapter) -> PathBuf {
         self.config_override
-            .clone()
+            .as_ref()
+            .filter(|(id, _)| *id == adapter.id())
+            .map(|(_, path)| path.clone())
             .unwrap_or_else(|| adapter.hook_path(&self.home))
     }
 
@@ -125,17 +131,50 @@ impl HookManager {
         path: &Path,
     ) -> anyhow::Result<v1::AgentHookWiring> {
         inspect_config_path(path)?;
-        let value = parse_config(&read_config(path)?)?;
+        let bytes = read_config(path)?;
+        let value = parse_config(&bytes)?;
         validate_hook_shape(&value, adapter.hook_events())?;
         Ok(
             if managed_entries_are_current(&value, adapter, &self.helper_path) {
                 v1::AgentHookWiring::Wired
             } else if managed_entry_count(&value, adapter) > 0 {
                 v1::AgentHookWiring::Partial
+            } else if bytes.is_empty() && !self.agent_is_present(adapter) {
+                v1::AgentHookWiring::Absent
             } else {
                 v1::AgentHookWiring::NotWired
             },
         )
+    }
+
+    /// Whether this agent exists on the host at all.
+    ///
+    /// Without this the desktop offers to "set up" an agent nobody has
+    /// installed, and accepting creates a configuration directory and file for
+    /// a vendor the user does not use — because an absent config reads exactly
+    /// like an unwired one. Any of three things counts as present: a
+    /// configuration file, the directory that would hold it, or the
+    /// executable on PATH.
+    fn agent_is_present(&self, adapter: &dyn adapters::AgentAdapter) -> bool {
+        self.agent_is_present_in(adapter, std::env::var_os("PATH"))
+    }
+
+    /// The search path is a parameter so a test can ask the question without
+    /// the answer depending on what happens to be installed on the machine
+    /// running it.
+    fn agent_is_present_in(
+        &self,
+        adapter: &dyn adapters::AgentAdapter,
+        search_path: Option<std::ffi::OsString>,
+    ) -> bool {
+        let config = self.config_path(adapter);
+        if config.exists() || config.parent().is_some_and(Path::exists) {
+            return true;
+        }
+        let executable = adapter.executable();
+        search_path
+            .map(|path| std::env::split_paths(&path).any(|dir| dir.join(executable).exists()))
+            .unwrap_or(false)
     }
 
     /// Return the adapters whose configuration still contains a hook owned by
@@ -281,8 +320,8 @@ impl HookManager {
     }
 }
 
-/// The wiring every agent snapshot carries, re-read only when a configuration
-/// file actually changed.
+/// The wiring an agent snapshot carries, re-read only when a configuration file
+/// actually changed.
 ///
 /// Snapshots are requested on every topology generation, so parsing two
 /// configuration files each time would put file I/O on a path the phase budgets
@@ -290,34 +329,46 @@ impl HookManager {
 /// have to alter — path, size, modification time, and the helper the command
 /// would name — so an install performed a millisecond ago is still observed
 /// immediately, unlike a time-based cache.
-pub(crate) fn cached_wiring() -> Vec<AdapterWiring> {
-    /// The fingerprint the observation was taken at, and the observation.
-    type Observed = std::sync::Mutex<Option<(Vec<u8>, Vec<AdapterWiring>)>>;
-    static CACHE: std::sync::OnceLock<Observed> = std::sync::OnceLock::new();
-    let Ok(manager) = HookManager::system_default() else {
-        return adapters::all()
-            .map(|adapter| AdapterWiring {
-                adapter_id: adapter.id(),
-                config_path: PathBuf::new(),
-                state: v1::AgentHookWiring::Unavailable,
-                detail: "hook configuration home is unavailable".into(),
-            })
-            .collect();
-    };
-    let fingerprint = manager.wiring_fingerprint();
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    let mut cache = cache.lock().unwrap();
-    if let Some((cached_fingerprint, wiring)) = cache.as_ref()
-        && cached_fingerprint == &fingerprint
-    {
-        return wiring.clone();
+///
+/// Owned by whoever builds snapshots rather than by a file-scoped static, so it
+/// is per-runtime and reachable from a test.
+#[derive(Debug, Default)]
+pub(crate) struct WiringCache {
+    observed: Option<(Vec<u8>, Vec<AdapterWiring>)>,
+}
+
+impl WiringCache {
+    pub(crate) fn current(&mut self) -> Vec<AdapterWiring> {
+        let Ok(manager) = HookManager::system_default() else {
+            return adapters::all()
+                .map(|adapter| AdapterWiring {
+                    adapter_id: adapter.id(),
+                    config_path: PathBuf::new(),
+                    state: v1::AgentHookWiring::Unavailable,
+                    detail: "hook configuration home is unavailable".into(),
+                })
+                .collect();
+        };
+        self.for_manager(&manager)
     }
-    let wiring = manager.wiring();
-    *cache = Some((fingerprint, wiring.clone()));
-    wiring
+
+    fn for_manager(&mut self, manager: &HookManager) -> Vec<AdapterWiring> {
+        let fingerprint = manager.wiring_fingerprint();
+        if let Some((observed, wiring)) = self.observed.as_ref()
+            && observed == &fingerprint
+        {
+            return wiring.clone();
+        }
+        let wiring = manager.wiring();
+        self.observed = Some((fingerprint, wiring.clone()));
+        wiring
+    }
 }
 
 impl HookManager {
+    /// `symlink_metadata`, deliberately: a symlinked configuration is refused
+    /// by `read_config`'s `O_NOFOLLOW` and always reports `Unavailable`, so the
+    /// link's own identity is both cheaper and the right thing to key on.
     fn wiring_fingerprint(&self) -> Vec<u8> {
         let mut fingerprint = Vec::new();
         fingerprint.extend_from_slice(self.helper_path.to_string_lossy().as_bytes());
@@ -1334,9 +1385,40 @@ mod tests {
         fs::remove_dir_all(home).unwrap();
     }
 
-    /// Wiring is an observation with three failure modes that must not be
-    /// confused: nothing installed, something installed but incomplete, and a
-    /// configuration nobody could read. Only the first two invite an install.
+    /// The override names one adapter, and relocating Claude Code's settings
+    /// must not silently relocate Codex's — a single path applied to every
+    /// adapter had Codex's wiring read out of Claude Code's file.
+    #[test]
+    fn a_settings_override_moves_only_the_adapter_it_names() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase13-hook-override-{}", uuid::Uuid::new_v4()));
+        let elsewhere = home.join("fixture/settings.json");
+        fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        fs::write(&elsewhere, b"{}").unwrap();
+        let manager = HookManager::with_overrides(
+            Some(home.clone()),
+            Some(("claude-code", elsewhere.clone())),
+        )
+        .unwrap();
+        let path = |id: &str| {
+            manager
+                .wiring()
+                .into_iter()
+                .find(|entry| entry.adapter_id == id)
+                .unwrap()
+                .config_path
+        };
+        assert_eq!(path("claude-code"), elsewhere);
+        assert_eq!(path("codex"), home.join(".codex/hooks.json"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// Wiring is an observation with four failure modes that must not be
+    /// confused: the agent is not here at all, nothing installed, something
+    /// installed but incomplete, and a configuration nobody could read. Only
+    /// the middle two invite an install.
     #[test]
     fn wiring_separates_absent_incomplete_and_unreadable_configuration() {
         let home = std::env::current_dir()
@@ -1373,6 +1455,104 @@ mod tests {
         let unreadable = state(&manager);
         assert_eq!(unreadable.state, v1::AgentHookWiring::Unavailable);
         assert!(!unreadable.detail.is_empty(), "unavailable must say why");
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// An agent that is not installed here is not a gap to be filled. Reported
+    /// as unwired, the desktop offered to "set up" a vendor the user has never
+    /// run — and accepting created its configuration directory and file.
+    #[test]
+    fn an_agent_that_is_not_on_this_host_is_absent_rather_than_unwired() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase13-hook-absent-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let manager = HookManager::for_home(&home);
+        let codex = adapters::adapter(v1::AgentAdapterKind::Codex).unwrap();
+        let state = |id: &str| {
+            manager
+                .wiring()
+                .into_iter()
+                .find(|entry| entry.adapter_id == id)
+                .unwrap()
+                .state
+        };
+        // Nothing at all: no config, no directory, nothing on the search path.
+        // The path is passed rather than read so this does not depend on
+        // whether the machine running the test happens to have Codex.
+        assert!(!manager.agent_is_present_in(codex, None));
+        assert!(!manager.agent_is_present_in(codex, Some(home.as_os_str().to_owned())));
+
+        // The directory alone is enough to prove the agent has been here.
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        assert!(manager.agent_is_present_in(codex, None));
+        assert_eq!(state("codex"), v1::AgentHookWiring::NotWired);
+
+        // And so is a configuration file with no managed entries in it.
+        fs::write(home.join(".codex/hooks.json"), b"{}").unwrap();
+        assert_eq!(state("codex"), v1::AgentHookWiring::NotWired);
+
+        // And an executable on the search path, with no configuration at all.
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join(codex.executable()), b"#!/bin/sh\n").unwrap();
+        fs::remove_dir_all(home.join(".codex")).unwrap();
+        assert!(!manager.agent_is_present_in(codex, None));
+        assert!(manager.agent_is_present_in(codex, Some(bin.as_os_str().to_owned())));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// The cache is on the snapshot path, so it has to answer immediately after
+    /// an install rather than after a timeout — a fingerprint, not a clock.
+    #[test]
+    fn the_wiring_cache_re_reads_a_configuration_the_moment_it_changes() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase13-wiring-cache-{}", uuid::Uuid::new_v4()));
+        let path = home.join(".claude/settings.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let manager = HookManager::for_home(&home);
+        let mut cache = WiringCache::default();
+        let state = |wiring: &[AdapterWiring]| {
+            wiring
+                .iter()
+                .find(|entry| entry.adapter_id == "claude-code")
+                .unwrap()
+                .state
+        };
+        assert_eq!(
+            state(&cache.for_manager(&manager)),
+            v1::AgentHookWiring::NotWired
+        );
+
+        let adapter = adapters::adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
+        let review = manager
+            .review(
+                v1::AgentAdapterKind::ClaudeCode,
+                v1::HookManagementAction::Install,
+            )
+            .unwrap();
+        manager
+            .apply(
+                v1::AgentAdapterKind::ClaudeCode,
+                v1::HookManagementAction::Install,
+                &review.confirmation_token,
+            )
+            .unwrap();
+        assert_eq!(
+            state(&cache.for_manager(&manager)),
+            v1::AgentHookWiring::Wired,
+            "an install a moment ago must not be hidden behind a cached answer"
+        );
+        // And an unchanged configuration is not re-parsed into a new answer.
+        assert_eq!(
+            cache.for_manager(&manager),
+            cache.for_manager(&manager),
+            "a stable configuration must produce a stable observation"
+        );
+        assert_eq!(adapter.id(), "claude-code");
         fs::remove_dir_all(home).unwrap();
     }
 

@@ -15,7 +15,7 @@ export type AgentPlacement = "window" | "split";
  * wired perfectly, and offering to write over it is how unrelated hooks get
  * lost. `unspecified` is a host too old to answer.
  */
-export type AgentHookWiring = "wired" | "partial" | "notWired" | "unavailable" | "unspecified";
+export type AgentHookWiring = "wired" | "partial" | "notWired" | "absent" | "unavailable" | "unspecified";
 
 export interface AgentAdapterDescriptor {
   id: AgentAdapterId;

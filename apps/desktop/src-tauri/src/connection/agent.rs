@@ -221,7 +221,6 @@ pub(crate) fn response_json(
         "acceptedGeneration": value.accepted_generation.to_string(),
         "connectionEpoch": connection_epoch.to_string(),
         "hostNaming": value.host_naming,
-        "hostNamingDetail": value.host_naming_detail,
     })
 }
 
@@ -316,6 +315,7 @@ fn hook_wiring_name(value: i32) -> &'static str {
         v1::AgentHookWiring::Wired => "wired",
         v1::AgentHookWiring::Partial => "partial",
         v1::AgentHookWiring::NotWired => "notWired",
+        v1::AgentHookWiring::Absent => "absent",
         v1::AgentHookWiring::Unavailable => "unavailable",
         v1::AgentHookWiring::Unspecified => "unspecified",
     }

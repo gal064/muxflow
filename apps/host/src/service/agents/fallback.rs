@@ -26,13 +26,23 @@ pub(super) fn consume(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(error.into()),
     };
+    // Sorted, because these are a sequence and not a set. The writer names each
+    // file with fixed-width nanoseconds, so the file name orders the events the
+    // way they happened; replaying a turn's `UserPromptSubmit` after its
+    // `PermissionRequest` would have the daemon apply the block and then
+    // discard it as a late event from a finished turn.
+    let mut waiting: Vec<_> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("hook-fallback-") && name.ends_with(".pb"))
+        })
+        .collect();
+    waiting.sort_by_key(|entry| entry.file_name());
     let mut ingested = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if !name.starts_with("hook-fallback-") || !name.ends_with(".pb") {
-            continue;
-        }
+    for entry in waiting {
         let Ok(metadata) = entry.metadata() else {
             continue;
         };

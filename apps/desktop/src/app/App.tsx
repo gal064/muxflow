@@ -153,7 +153,6 @@ export function App() {
   const [pendingDownload, setPendingDownload] = useState<PendingDownload>();
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
-  const [agentSetupOpen, setAgentSetupOpen] = useState(false);
   const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
   const focusHistoryRef = useRef(focusHistory);
   focusHistoryRef.current = focusHistory;
@@ -380,6 +379,7 @@ export function App() {
     launchContext: activeSession && activeWindow && activePane && workspaceFiles.root
       ? { sessionId: activeSession.id, windowId: activeWindow.id, paneId: activePane.id, root: workspaceFiles.root }
       : undefined,
+    onHooksChanged: () => agentRuntime.refreshSnapshot(),
     onModalChange: setAgentModalOpen,
     onStatus: setStatus,
     runtime: agentRuntime,
@@ -394,7 +394,6 @@ export function App() {
     decision: appState.hostSetup[currentHostProfileId],
     hostLabel,
     hostProfileId: currentHostProfileId,
-    onModalChange: setAgentSetupOpen,
     onStatus: setStatus,
     openReview: (adapter) => agentWorkflow.reviewHooks(adapter, "install"),
     recordDecision: (hostProfileId, decision) => setAppState((current) => ({
@@ -569,7 +568,7 @@ export function App() {
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
     || Boolean(confirmation) || Boolean(textPrompt)
-    || agentModalOpen || agentSetupOpen || Boolean(pendingDownload) || appStateResetConfirmation || appRecoveryDiscardConfirmation
+    || agentModalOpen || agentHostSetup.open || Boolean(pendingDownload) || appStateResetConfirmation || appRecoveryDiscardConfirmation
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
   useEffect(() => {

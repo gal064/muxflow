@@ -720,6 +720,10 @@ enum AgentHookWiring {
   // so some transitions can never arrive.
   AGENT_HOOK_WIRING_PARTIAL = 2;
   AGENT_HOOK_WIRING_NOT_WIRED = 3;
+  // The agent itself is not on this host: no configuration and no executable.
+  // There is nothing to wire, and offering to create configuration for a tool
+  // the user does not have is worse than saying nothing.
+  AGENT_HOOK_WIRING_ABSENT = 5;
   // The configuration could not be inspected; the wiring is unknown rather
   // than absent, and the desktop must not offer to overwrite it blindly.
   AGENT_HOOK_WIRING_UNAVAILABLE = 4;
@@ -867,11 +871,10 @@ message AgentResponse {
   string window_id = 5;
   string pane_id = 6;
   uint64 accepted_generation = 7;
-  // "applied", "alreadyConfigured", or "unavailable"; empty for every other
-  // operation. Never a silent success: a host whose tmux refused the command
-  // has to be able to say so.
+  // "applied" or "alreadyConfigured"; empty for every other operation. A tmux
+  // server that refused the command fails the request outright rather than
+  // returning a third value nobody branches on.
   string host_naming = 8;
-  string host_naming_detail = 9;
 }
 
 message AgentEvent {
