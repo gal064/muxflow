@@ -663,10 +663,11 @@ describe("u64-safe transfer presentation", () => {
     const element = { getBoundingClientRect: () => ({ left: 10, right: 110, top: 20, bottom: 120 }) };
     expect(pointIsInside(element as HTMLElement, { x: 100, y: 120 })).toBe(true);
     expect(pointIsInside(element as HTMLElement, { x: 5, y: 5 })).toBe(false);
-    // The regression: this point is inside the box, and dividing it by a
-    // Retina display's device pixel ratio put it outside — which is why
-    // dropping a file from Finder did nothing.
-    expect(pointIsInside(element as HTMLElement, { x: 60, y: 70 })).toBe(true);
+    // The regression, and the only point that discriminates: it is inside the
+    // box, and halving it for a Retina display's device pixel ratio moves it
+    // above the top edge — which is why dropping a file from Finder did
+    // nothing. A point further from an edge stays inside even when halved, so
+    // it says nothing about this.
     expect(pointIsInside(element as HTMLElement, { x: 30, y: 35 })).toBe(true);
   });
 });
