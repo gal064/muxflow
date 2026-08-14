@@ -9,6 +9,12 @@ export interface TerminalSize {
   rows: number;
 }
 
+/** A CSS-pixel box. The outer box of an element, borders and padding included. */
+export interface PixelBox {
+  width: number;
+  height: number;
+}
+
 export type TerminalInput =
   | { kind: "text"; data: string }
   | { kind: "binary"; data: Uint8Array };
@@ -58,6 +64,13 @@ export interface TerminalRenderer {
   write(bytes: Uint8Array, onRendered?: () => void, generation?: number): void;
   /** Measures the CSS box in cells. Does not resize the terminal. */
   measure(): TerminalSize | undefined;
+  /**
+   * Measures an arbitrary pixel box in cells: how big a grid a terminal like
+   * this one would have if it filled a host element of that outer size. Reads
+   * this terminal's font metrics and chrome, never its own box, so any live
+   * terminal answers the same question.
+   */
+  measureBox(box: PixelBox): TerminalSize | undefined;
   /** Forces the grid tmux says this pane has, whatever the CSS box measured. */
   setGrid(size: TerminalSize): GridOutcome;
   focus(): void;
@@ -112,6 +125,44 @@ export function restoreDecision(
     };
   }
   return { kind: "apply" };
+}
+
+/** Chrome a terminal spends out of the box it is given, in CSS pixels. */
+export interface TerminalBoxChrome {
+  horizontal: number;
+  vertical: number;
+  scrollbar: number;
+}
+
+/**
+ * Cells that fit a pixel box, given one cell's size and the terminal's own
+ * chrome. Extracted from `measureBox` so the arithmetic that decides how big a
+ * tmux client to ask for is testable without a DOM: it is the arithmetic
+ * `FitAddon.proposeDimensions` performs, with an explicit box.
+ *
+ * Floors, never rounds. Half a cell of terminal is not a cell of terminal, and
+ * rounding up asks tmux for a grid the surface cannot show — which is how a
+ * pane ends up with its bottom row cut off.
+ */
+export function cellsForBox(
+  box: PixelBox,
+  cell: PixelBox,
+  chrome: TerminalBoxChrome,
+): TerminalSize | undefined {
+  if (!(cell.width > 0) || !(cell.height > 0)) return undefined;
+  const width = box.width - chrome.horizontal - chrome.scrollbar;
+  const height = box.height - chrome.vertical;
+  if (!(width > 0) || !(height > 0)) return undefined;
+  return { columns: Math.floor(width / cell.width), rows: Math.floor(height / cell.height) };
+}
+
+/** Padding plus border an element spends on the named sides, in CSS pixels. */
+function edges(style: CSSStyleDeclaration, ...sides: Array<"top" | "bottom" | "left" | "right">): number {
+  return sides.reduce((total, side) => {
+    const padding = Number.parseInt(style.getPropertyValue(`padding-${side}`), 10);
+    const border = Number.parseInt(style.getPropertyValue(`border-${side}-width`), 10);
+    return total + (Number.isFinite(padding) ? padding : 0) + (Number.isFinite(border) ? border : 0);
+  }, 0);
 }
 
 function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
@@ -464,6 +515,55 @@ export class XtermRenderer implements TerminalRenderer {
     const proposed = this.#fit.proposeDimensions();
     if (!proposed || !Number.isFinite(proposed.cols) || !Number.isFinite(proposed.rows)) return undefined;
     return { columns: proposed.cols, rows: proposed.rows };
+  }
+
+  /**
+   * Cells that fit a pixel box that is not this terminal's own.
+   *
+   * This is `FitAddon.proposeDimensions` with the caller's box substituted for
+   * the terminal's parent element: the same cell metrics, the same terminal
+   * padding, the same scrollbar allowance. It exists so the tmux *client* size
+   * can be derived from the tiled surface's pixel box rather than from any
+   * pane's geometry (P12-U006) — the answer describes the box that was passed
+   * in, and nothing about the pane this renderer happens to be rendering.
+   */
+  measureBox(box: PixelBox): TerminalSize | undefined {
+    const cell = this.#cellSize();
+    const element = this.#terminal.element;
+    // The element xterm was opened into. FitAddon measures this element's
+    // content box and then subtracts the terminal's own padding, so an *outer*
+    // box has to give up both before it is worth any cells.
+    const host = element?.parentElement;
+    if (!cell || !element || !host) return undefined;
+    const hostStyle = window.getComputedStyle(host);
+    const terminalStyle = window.getComputedStyle(element);
+    return cellsForBox(box, cell, {
+      horizontal: edges(hostStyle, "left", "right") + edges(terminalStyle, "left", "right"),
+      vertical: edges(hostStyle, "top", "bottom") + edges(terminalStyle, "top", "bottom"),
+      // xterm reserves this on the right whenever there is scrollback, and
+      // FitAddon subtracts it before dividing; a terminal sized without it
+      // renders its last columns under the scrollbar.
+      scrollbar: this.#terminal.options.scrollback === 0
+        ? 0
+        : this.#terminal.options.overviewRuler?.width || 14,
+    });
+  }
+
+  /**
+   * The rendered size of one cell in CSS pixels.
+   *
+   * xterm exposes no public accessor, so this reads the same internal render
+   * service `FitAddon` reads. Everything is optional-chained and validated: if
+   * a future xterm moves it, the client-size computation reports that it has no
+   * metrics and asks for nothing, which is the safe outcome.
+   */
+  #cellSize(): PixelBox | undefined {
+    const core = (this.#terminal as unknown as {
+      _core?: { _renderService?: { dimensions?: { css?: { cell?: Partial<PixelBox> } } } };
+    })._core;
+    const cell = core?._renderService?.dimensions?.css?.cell;
+    if (!cell?.width || !cell.height) return undefined;
+    return { width: cell.width, height: cell.height };
   }
 
   /**

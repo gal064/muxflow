@@ -4,7 +4,7 @@ import { resolveTerminalDestination } from "./paneRouting";
 import { renderedPaneStyle, type WindowGrid } from "../features/terminal/layout";
 import { TerminalPane, type TerminalPaneController } from "../features/terminal/TerminalPane";
 import type { TerminalEventHub } from "../features/terminal/TerminalEventHub";
-import type { TerminalInput, TerminalSize } from "../features/terminal/TerminalRenderer";
+import type { TerminalInput } from "../features/terminal/TerminalRenderer";
 import type { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import type { TerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import type { TerminalTransferConnectionScope } from "../features/terminal/terminalTransfers";
@@ -20,19 +20,20 @@ type TerminalWorkspaceSurfaceProps = {
   mountedPanes: Pane[];
   panes: Pane[];
   snapshot: TmuxSnapshot;
+  /** Receives the tiled surface element the tmux client size is measured from. */
+  surfaceRef: (element: HTMLElement | null) => void;
   terminalTransferClient: TauriTerminalTransferClient;
   terminalTransferRegistry: TerminalTransferRegistry;
   terminalTransferScope?: TerminalTransferConnectionScope;
   beginDividerDrag(event: PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical"): void;
   handleInput(paneId: string, input: TerminalInput): void;
-  handleResize(pane: Pane, size: TerminalSize): void;
   performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
   setStatus(message: string): void;
 };
 
 export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
   const { activePane, activeWindow, grid } = props;
-  return <div className="terminal-window" aria-label={activeWindow ? `Terminal tab ${activeWindow.name}` : "Terminal"}>
+  return <div className="terminal-window" ref={props.surfaceRef} aria-label={activeWindow ? `Terminal tab ${activeWindow.name}` : "Terminal"}>
     {props.mountedPanes.map((pane) => <div className={pane.active ? "pane-frame active" : "pane-frame"} style={renderedPaneStyle(pane, grid, Boolean(activeWindow?.zoomed))} key={pane.id}>
       <div className="pane-label">{pane.id} · {pane.currentCommand}</div>
       <TerminalPane
@@ -43,7 +44,6 @@ export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
         onDiagnostic={props.setStatus}
         onFocus={(paneId) => { if (paneId !== activePane?.id) void props.performAction({ kind: "focusPane", paneId }); }}
         onInput={props.handleInput}
-        onResize={props.handleResize}
         transferClient={props.terminalTransferClient}
         transferRegistry={props.terminalTransferRegistry}
         transferScope={props.terminalTransferScope}

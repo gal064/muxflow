@@ -5,6 +5,7 @@ import type { Pane } from "../../app/types";
 import type { TerminalEventHub } from "./TerminalEventHub";
 import {
   XtermRenderer,
+  type PixelBox,
   type TerminalInput,
   type TerminalRenderer,
   type TerminalSize,
@@ -94,6 +95,12 @@ export interface TerminalPaneController {
   paste(): Promise<boolean>;
   showSearch(): void;
   scrollToBottom(): void;
+  /**
+   * Cells that fit an arbitrary pixel box, from this terminal's font metrics.
+   * Says nothing about this pane: any mounted pane answers identically, and the
+   * client-size computation only needs one of them to be alive.
+   */
+  measureBox(box: PixelBox): TerminalSize | undefined;
 }
 
 interface Props {
@@ -101,7 +108,6 @@ interface Props {
   pane: Pane;
   hub: TerminalEventHub;
   onInput: (paneId: string, input: TerminalInput) => void;
-  onResize: (pane: Pane, size: TerminalSize) => void;
   onFocus: (paneId: string) => void;
   onController: (paneId: string, controller: TerminalPaneController | undefined) => void;
   onDiagnostic?: (message: string) => void;
@@ -115,7 +121,6 @@ export function TerminalPane({
   pane,
   hub,
   onInput,
-  onResize,
   onFocus,
   onController,
   onDiagnostic,
@@ -134,7 +139,6 @@ export function TerminalPane({
   }
   const paneRef = useRef(pane);
   const inputRef = useRef(onInput);
-  const resizeRef = useRef(onResize);
   const focusRef = useRef(onFocus);
   const controllerRef = useRef(onController);
   const diagnosticRef = useRef(onDiagnostic);
@@ -154,7 +158,6 @@ export function TerminalPane({
   const searchComposing = useRef(false);
   paneRef.current = pane;
   inputRef.current = onInput;
-  resizeRef.current = onResize;
   focusRef.current = onFocus;
   controllerRef.current = onController;
   diagnosticRef.current = onDiagnostic;
@@ -343,10 +346,12 @@ export function TerminalPane({
         flushDeferredOutput();
       }
     });
+    // Render-side only. This observer once also computed the tmux client size
+    // to request from this pane's box and share of the topology, which is the
+    // defect in P12-U006; the client size now comes from the tiled surface's
+    // own box (`useClientResize`) and no pane feeds it.
     const observer = new ResizeObserver(() => {
-      const measured = renderer.measure();
-      if (measured) resizeRef.current(paneRef.current, measured);
-      reportGrid(reconcilePaneGrid(renderer, paneRef.current, measured));
+      reportGrid(reconcilePaneGrid(renderer, paneRef.current, renderer.measure()));
     });
     observer.observe(container.current);
 
@@ -364,6 +369,7 @@ export function TerminalPane({
       },
       showSearch: () => setSearching(true),
       scrollToBottom: () => renderer.scrollToBottom(),
+      measureBox: (box) => renderer.measureBox(box),
     };
     controllerRef.current(pane.id, controller);
     if (pane.active) renderer.focus();

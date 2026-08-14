@@ -43,7 +43,6 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   const [profileRecovery, setProfileRecovery] = useState<PersistedProfiles["recovery"]>();
   const [connectionDetail, setConnectionDetail] = useState("");
   const [appFocused, setAppFocused] = useState(() => typeof document === "undefined" || document.hasFocus());
-  const resizeTimer = useRef<number | undefined>(undefined);
   const frontendResyncActive = useRef(false);
   const serverIdentityRef = useRef<string | undefined>(undefined);
   const currentHostProfileId = hostProfileId(connection);
@@ -186,7 +185,6 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
 
     return () => {
       disposed = true;
-      window.clearTimeout(resizeTimer.current);
       if (clientIdRef.current === startedClient) clientIdRef.current = undefined;
       dispatchHost({ type: "connection", phase: "disconnected" });
       setClientId(undefined);
@@ -200,7 +198,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     activeSessionId, activeWindowId, appFocused, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
-    profiles, profilesHydrated, resizeTimer, setActiveSessionId, setActiveWindowId,
+    profiles, profilesHydrated, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
     setProfileRecovery, setProfiles, setSshConfigPath, setSshTarget, snapshot,
     snapshotRef, sshConfigPath, sshTarget, terminalEpoch, terminalEpochRef, windows,

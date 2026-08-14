@@ -30,6 +30,12 @@ mod seed;
 use seed::{build_seed, parse_capture_metadata};
 use seed::{build_seed_with_metadata, capture_metadata};
 
+/// Cells a control client may be resized to on either axis. See
+/// [`TerminalAttachment::resize`]; the desktop refuses the same range before it
+/// asks (`clientSize.ts`), so a request outside it is a defect on one side or
+/// the other and never a user's screen.
+const TERMINAL_CLIENT_CELL_BOUNDS: std::ops::RangeInclusive<u32> = 2..=500;
+
 pub(super) struct TerminalAttachment {
     pane_ids: HashSet<String>,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -200,10 +206,19 @@ impl TerminalAttachment {
             .map_err(anyhow::Error::msg)
     }
 
+    /// Resizes the control client, which resizes the *user's* windows.
+    ///
+    /// `refresh-client -C` is obeyed by tmux for every client that participates
+    /// in sizing, and the windows it sizes are shared with whatever plain
+    /// terminals are attached to the same session. A desktop that computes a
+    /// nonsense size therefore damages real work — P12-U006 asked for ~300 rows
+    /// and tmux complied on four of the user's windows. The bound is the blast
+    /// radius: no display is 500 cells on an axis, and a rejection is louder and
+    /// cheaper than a repair. The rejected size is named in the error the caller
+    /// surfaces and in the daemon log, because "resize failed" without a number
+    /// cannot be diagnosed after the fact.
     pub(super) fn resize(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {
-        if !(2..=1000).contains(&columns) || !(2..=1000).contains(&rows) {
-            bail!("terminal dimensions must be between 2 and 1000 cells");
-        }
+        check_client_size(columns, rows)?;
         let mut stdin = self.stdin.lock().unwrap();
         writeln!(stdin, "refresh-client -C {columns},{rows}")?;
         stdin.flush()?;
@@ -673,9 +688,46 @@ pub(super) fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> 
     }
 }
 
+/// Rejects a client size outside [`TERMINAL_CLIENT_CELL_BOUNDS`], naming the
+/// size in both the caller's error and the daemon log.
+fn check_client_size(columns: u32, rows: u32) -> anyhow::Result<()> {
+    if TERMINAL_CLIENT_CELL_BOUNDS.contains(&columns) && TERMINAL_CLIENT_CELL_BOUNDS.contains(&rows)
+    {
+        return Ok(());
+    }
+    crate::diagnostics::write_rejected_client_resize_log(columns, rows);
+    bail!(
+        "refusing a {columns}x{rows} tmux client size: terminal dimensions must be between {} and {} cells",
+        TERMINAL_CLIENT_CELL_BOUNDS.start(),
+        TERMINAL_CLIENT_CELL_BOUNDS.end()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bound is a blast radius, not the fix for P12-U006: the sizes that
+    /// actually damaged the user's windows (108x298, 108x314) are *inside* it,
+    /// and what stops those is the desktop no longer deriving the client size
+    /// from a pane's share of the topology. What this guarantees is that a
+    /// future computation can only be wrong by a bounded amount, loudly.
+    #[test]
+    fn client_resize_refuses_sizes_no_display_has_and_names_them() {
+        for (columns, rows) in [(80, 501), (501, 24), (2000, 2000), (80, 1), (1, 24), (0, 0)] {
+            let error = check_client_size(columns, rows)
+                .expect_err(&format!("{columns}x{rows} must never reach refresh-client"))
+                .to_string();
+            assert!(
+                error.contains(&format!("{columns}x{rows}")),
+                "rejection must name the size it refused, got {error}"
+            );
+            assert!(error.contains("between 2 and 500 cells"), "got {error}");
+        }
+        for (columns, rows) in [(2, 2), (188, 51), (239, 57), (500, 500)] {
+            check_client_size(columns, rows).unwrap();
+        }
+    }
 
     /// tmux's lexer rejects `refresh-client -A %5:continue`, and a rejected
     /// resume leaves the pane paused for the rest of the session (P12-U001).
