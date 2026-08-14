@@ -18,6 +18,12 @@ code, kbd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .app-shell {
   display: grid;
   grid-template-columns: 176px 246px minmax(300px, 1fr) 258px;
+  /* One row, exactly the window's height. Left implicit, the row is `auto` and
+     grows to the tallest sidebar, which stretches the terminal surface past the
+     bottom of the window — and the tmux client size is measured from that
+     surface, so the app then asks tmux for rows nobody can see. Measured at
+     57 px of overflow with a sidebar full of agents. */
+  grid-template-rows: minmax(0, 100%);
   width: 100%; height: 100%; min-width: 0; background: #0b0d10;
 }
 .app-shell.left-collapsed { grid-template-columns: 176px 44px minmax(300px, 1fr) 258px; }
@@ -32,7 +38,7 @@ code, kbd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .app-tab-recovery button { padding: 6px 9px; border: 1px solid #665e46; border-radius: 4px; background: #343023; }
 
 /* Workspace rail */
-.workspace-rail { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 10px; min-width: 0; padding: 10px 8px; background: #111419; border-right: 1px solid #272c34; }
+.workspace-rail { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 10px; min-width: 0; min-height: 0; padding: 10px 8px; background: #111419; border-right: 1px solid #272c34; }
 .brand { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 10px; background: linear-gradient(145deg, #edf2f7, #aebbc8); color: #11151a; font-weight: 900; }
 .workspace-list { display: flex; flex-direction: column; gap: 5px; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
 .workspace-row { position: relative; display: flex; min-width: 0; }
@@ -57,7 +63,7 @@ code, kbd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .workspace-new > span { font-size: 11px; }
 
 /* Shared left sidebar */
-.left-sidebar { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; background: #15191e; border-right: 1px solid #272c34; }
+.left-sidebar { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; background: #15191e; border-right: 1px solid #272c34; }
 .left-sidebar.collapsed { grid-template-rows: auto auto auto 1fr; justify-items: center; gap: 8px; padding: 8px 5px; }
 .left-sidebar.collapsed > button { width: 32px; height: 32px; border: 0; border-radius: 5px; background: transparent; color: #94a0ad; }
 .left-sidebar.collapsed > button[aria-pressed="true"] { background: #293540; color: #dce8f3; }
@@ -157,8 +163,15 @@ code, kbd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 /* Main workspace and connection states */
 .workspace { display: grid; grid-template-rows: auto 42px minmax(0, 1fr); min-width: 0; min-height: 0; }
 .connection-banner { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 7px 10px; border-bottom: 1px solid #303740; background: #20262d; color: #c6ced7; font-size: 11px; }
-.connection-banner.connected { min-height: 30px; padding: 4px 10px; border-color: #2e4e3a; background: #14241b; color: #91c9a1; }
-.connection-banner.connected small { margin-left: auto; color: #aeb8c2; }
+/* Fixed height, deliberately. This banner sits directly above the terminal
+   surface, and the terminal surface is what the tmux client size is measured
+   from, so a status line that grows by a wrapped row shrinks the user's tmux
+   windows by a row. Worse, it closes a loop: a resize produces a topology push,
+   the push sets "Topology changed; reconciling…", the longer text wraps, the
+   surface shrinks, and the app resizes again. The full text stays reachable in
+   the element's title and in the live region at the end of the shell. */
+.connection-banner.connected { height: 30px; padding: 4px 10px; border-color: #2e4e3a; background: #14241b; color: #91c9a1; }
+.connection-banner.connected small { min-width: 0; margin-left: auto; overflow: hidden; color: #aeb8c2; text-overflow: ellipsis; white-space: nowrap; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #68b27d; }
 .connection-banner > div:first-child { display: grid; flex: 1; min-width: 0; gap: 2px; }
 .connection-banner > div:first-child span { color: #aeb8c2; }
@@ -205,12 +218,16 @@ code, kbd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .command-menu button:hover:not(:disabled) { background: #2a323b; }
 
 /* Terminal split host */
-.terminal-window { position: absolute; inset: 0; min-height: 0; background: #0b0d10; }
-.pane-frame { position: absolute; padding: 1px; border: 1px solid #292f37; overflow: hidden; }
+/* The tiled surface is what the tmux client size is measured from, so the
+   breathing room around it is an inset on this element (outside the measured
+   box) rather than padding inside the panes: per-pane padding does not shrink
+   with the pane, so it costs a split pane its bottom row. */
+.terminal-window { position: absolute; inset: 6px; min-height: 0; background: #0b0d10; }
+.pane-frame { position: absolute; border: 1px solid #292f37; overflow: hidden; }
 .pane-frame.active { border-color: #55708a; box-shadow: inset 0 0 0 1px #33495e; }
 .pane-label { position: absolute; z-index: 3; right: 9px; top: 5px; color: #596573; font-size: 10px; pointer-events: none; }
 .terminal-transfer-surface { position: absolute; inset: 0; min-width: 0; min-height: 0; }
-.terminal-pane { width: 100%; height: 100%; padding: 6px; }
+.terminal-pane { width: 100%; height: 100%; }
 .terminal-pane .xterm { height: 100%; }
 .terminal-pane[data-local-selection-active="true"] { box-shadow: inset 0 0 0 1px #7189a2; }
 .terminal-pane .xterm-viewport { scrollbar-width: thin; scrollbar-color: #53617166 transparent; }

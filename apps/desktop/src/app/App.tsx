@@ -115,6 +115,10 @@ export function App() {
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const controllers = useRef(new Map<string, TerminalPaneController>());
+  // Bumped whenever a terminal registers or drops its controller. The
+  // client-size computation needs *some* live renderer for its font metrics;
+  // this is how it learns one arrived.
+  const [liveTerminals, setLiveTerminals] = useState(0);
   const platform = useMemo(() => currentPlatform(), []);
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
   const currentHelperConnectionKey = helperConnectionKey(connection);
@@ -349,7 +353,10 @@ export function App() {
   }, [clientId, hostState.canMutate]);
 
   // Font metrics only: every mounted terminal answers this identically, and the
-  // client size must not depend on which pane happens to be active.
+  // client size must not depend on which pane happens to be active. `liveTerminals`
+  // counts mounts and unmounts so the client-size computation is retried the
+  // moment a renderer exists to answer it, rather than only when a pane's
+  // identity changes.
   const measureBox = useCallback((box: PixelBox) => {
     const controller = (activePane && controllers.current.get(activePane.id))
       ?? controllers.current.values().next().value;
@@ -360,7 +367,7 @@ export function App() {
     canMutate: hostState.canMutate,
     clientId,
     measureBox,
-    metricsKey: activePane?.id,
+    metricsKey: liveTerminals,
     onStatus: setStatus,
   });
 
@@ -712,6 +719,7 @@ export function App() {
           beginDividerDrag={beginDividerDrag}
           clientId={clientId}
           controllers={controllers}
+          onTerminalRegistered={() => setLiveTerminals((value) => value + 1)}
           grid={grid}
           handleInput={handleInput}
           hub={hub}

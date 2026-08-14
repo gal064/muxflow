@@ -695,7 +695,7 @@ fn check_client_size(columns: u32, rows: u32) -> anyhow::Result<()> {
     {
         return Ok(());
     }
-    crate::diagnostics::write_rejected_client_resize_log(columns, rows);
+    crate::diagnostics::record_rejected_client_resize(columns, rows);
     bail!(
         "refusing a {columns}x{rows} tmux client size: terminal dimensions must be between {} and {} cells",
         TERMINAL_CLIENT_CELL_BOUNDS.start(),

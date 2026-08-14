@@ -2,7 +2,7 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cellsForBox, type PixelBox, type TerminalSize } from "../features/terminal/TerminalRenderer";
-import { CLIENT_RESIZE_DEBOUNCE_MS, useClientResize } from "./useClientResize";
+import { CLIENT_RESIZE_DEBOUNCE_MS, CLIENT_RESIZE_RETRIES, CLIENT_RESIZE_RETRY_MS, useClientResize } from "./useClientResize";
 
 const resizeClientMock = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock("../features/terminal/api", () => ({ resizeClient: resizeClientMock }));
@@ -79,6 +79,11 @@ async function settle() {
   await act(async () => { await vi.advanceTimersByTimeAsync(CLIENT_RESIZE_DEBOUNCE_MS + 1); });
 }
 
+/** Long enough for every retry the hook is allowed. */
+async function exhaustRetries() {
+  await act(async () => { await vi.advanceTimersByTimeAsync(CLIENT_RESIZE_RETRY_MS * (CLIENT_RESIZE_RETRIES + 1)); });
+}
+
 describe("useClientResize", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -94,8 +99,8 @@ describe("useClientResize", () => {
 
   it("asks for the surface's own size once the connection is live", async () => {
     await render({ clientId: "client-1" });
-    // 1000 − 4 frame − 12 padding − 14 scrollbar = 970 → 121 columns;
-    // 800 − 4 − 12 = 784 → 46 rows.
+    // 1000 − 2 frame − 12 padding − 14 scrollbar = 972 → 121 columns;
+    // 800 − 2 − 12 = 786 → 46 rows.
     expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46]]);
   });
 
@@ -103,8 +108,41 @@ describe("useClientResize", () => {
     await render({ clientId: undefined });
     await render({ clientId: "client-1", canMutate: false });
     await render({ clientId: "client-1", surfaceMounted: false });
-    await render({ clientId: "client-1", measure: () => undefined });
     expect(resizeClientMock).not.toHaveBeenCalled();
+  });
+
+  it("waits for a terminal to report metrics, then says so rather than staying silent", async () => {
+    const statuses: string[] = [];
+    let metrics: ((box: PixelBox) => TerminalSize | undefined) = () => undefined;
+    const { update } = await render({
+      clientId: "client-1",
+      measure: (box) => metrics(box),
+      onStatus: (message) => statuses.push(message),
+    });
+    // Nothing yet, and nothing said: a renderer is expected to arrive.
+    expect(resizeClientMock).not.toHaveBeenCalled();
+    expect(statuses).toEqual([]);
+    metrics = measureBox;
+    await act(async () => { await vi.advanceTimersByTimeAsync(CLIENT_RESIZE_RETRY_MS + 1); });
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46]]);
+
+    // A connection whose terminals never report metrics is a broken app that
+    // must not look like a working one.
+    metrics = () => undefined;
+    resizeClientMock.mockClear();
+    await update({ activeWindowId: "@2" });
+    await exhaustRetries();
+    expect(resizeClientMock).not.toHaveBeenCalled();
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toContain("could not be computed");
+  });
+
+  it("stays quiet when the window is merely too small for a terminal", async () => {
+    const statuses: string[] = [];
+    await render({ clientId: "client-1", onStatus: (message) => statuses.push(message) }, { width: 40, height: 800 });
+    await exhaustRetries();
+    expect(resizeClientMock).not.toHaveBeenCalled();
+    expect(statuses).toEqual([]);
   });
 
   it("follows the surface and coalesces a drag into one request", async () => {
@@ -118,7 +156,7 @@ describe("useClientResize", () => {
     });
     expect(resizeClientMock).not.toHaveBeenCalled();
     await settle();
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 83, 46]]);
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 84, 46]]);
     await act(async () => renderer.unmount());
   });
 
@@ -153,6 +191,6 @@ describe("useClientResize", () => {
     );
     expect(resizeClientMock).not.toHaveBeenCalled();
     expect(statuses).toHaveLength(1);
-    expect(statuses[0]).toContain("3970x3984");
+    expect(statuses[0]).toContain("3972x3986");
   });
 });

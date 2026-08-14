@@ -113,22 +113,28 @@ describe("clientSizeForSurface", () => {
     expect(legacyGrid.rows).toBeGreaterThan(250);
   });
 
-  it("refuses a size outside the sane bound instead of sending it", () => {
+  it("refuses a size above the bound, and stays quiet about a small window", () => {
     const tallCell: PixelBox = { width: 1, height: 1 };
     const refused = clientSizeForSurface({ width: 4000, height: 4000 }, (box) => cellsForBox(box, tallCell, CHROME));
     expect(refused.kind).toBe("refused");
-    expect(refused.kind === "refused" && refused.reason).toContain(`${MIN_CLIENT_CELLS}–${MAX_CLIENT_CELLS}`);
-    expect(refused.kind === "refused" && refused.reason).toContain("3970x3984");
+    expect(refused.kind === "refused" && refused.reason).toContain(`${MAX_CLIENT_CELLS} cell bound`);
+    expect(refused.kind === "refused" && refused.reason).toContain("3972x3986");
 
-    const tiny = clientSizeForSurface({ width: 30, height: 20 }, measureBox);
-    expect(tiny.kind).toBe("unmeasurable");
+    // Dragging the window narrow is not a defect and must not be reported as
+    // one: below the minimum the answer is the same "nothing to ask for" as an
+    // unmounted surface, and nothing retries it into a loop.
+    const narrow = clientSizeForSurface({ width: 40, height: 800 }, measureBox);
+    expect(narrow).toEqual({ kind: "unavailable", reason: expect.stringContaining("too small"), retry: false });
+    expect(clientSizeForSurface({ width: 30, height: 20 }, measureBox).kind).toBe("unavailable");
   });
 
   it("asks for nothing while the surface or the terminals cannot be measured", () => {
-    expect(clientSizeForSurface(undefined, measureBox).kind).toBe("unmeasurable");
-    expect(clientSizeForSurface({ width: Number.NaN, height: 800 }, measureBox).kind).toBe("unmeasurable");
-    expect(clientSizeForSurface({ width: 0, height: 0 }, measureBox).kind).toBe("unmeasurable");
-    expect(clientSizeForSurface(surface, () => undefined).kind).toBe("unmeasurable");
+    expect(clientSizeForSurface(undefined, measureBox)).toMatchObject({ kind: "unavailable", retry: false });
+    expect(clientSizeForSurface({ width: Number.NaN, height: 800 }, measureBox)).toMatchObject({ kind: "unavailable", retry: false });
+    expect(clientSizeForSurface({ width: 0, height: 0 }, measureBox)).toMatchObject({ kind: "unavailable", retry: false });
+    // No renderer has metrics yet. That resolves itself when one mounts, so it
+    // is the one case worth retrying rather than giving up on.
+    expect(clientSizeForSurface(surface, () => undefined)).toMatchObject({ kind: "unavailable", retry: true });
   });
 });
 

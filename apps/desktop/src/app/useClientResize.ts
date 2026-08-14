@@ -5,6 +5,9 @@ import type { PixelBox, TerminalSize } from "../features/terminal/TerminalRender
 
 /** Coalesces a drag of the window edge into one request, as before. */
 export const CLIENT_RESIZE_DEBOUNCE_MS = 60;
+/** Spacing and count of the retries that wait for a terminal to report metrics. */
+export const CLIENT_RESIZE_RETRY_MS = 250;
+export const CLIENT_RESIZE_RETRIES = 8;
 
 interface ClientResizeOptions {
   /** Recomputes when the workspace shows a different tmux window. */
@@ -12,11 +15,11 @@ interface ClientResizeOptions {
   canMutate: boolean;
   clientId?: string;
   /**
-   * Changes whenever the set of live terminals does. A computation that ran
-   * before any renderer existed has no cell metrics and asks for nothing; this
-   * is what brings it back once one is mounted.
+   * Changes whenever a terminal mounts or unmounts. A computation that ran
+   * before any renderer existed has no cell metrics; this is what brings it
+   * back as soon as one is alive, without waiting for the retry timer.
    */
-  metricsKey?: string;
+  metricsKey?: string | number;
   /** Cells that fit a pixel box, from a live terminal's font metrics. */
   measureBox(box: PixelBox): TerminalSize | undefined;
   onStatus(message: string): void;
@@ -30,7 +33,7 @@ interface ClientResizeOptions {
  * windows that client sees belong to a session other terminals may also be
  * attached to, so an over-large request damages sessions the app is not even
  * showing (P12-U006). The size therefore comes from the tiled surface's own
- * pixel box, never from a pane, and a size outside the sane bound is reported
+ * pixel box, never from a pane, and a size above the sane bound is reported
  * rather than sent.
  */
 export function useClientResize({
@@ -46,6 +49,7 @@ export function useClientResize({
   const measureBoxRef = useRef(measureBox);
   const statusRef = useRef(onStatus);
   const lastRequested = useRef<{ clientId: string; columns: number; rows: number } | undefined>(undefined);
+  const reportedUnavailable = useRef<string | undefined>(undefined);
   measureBoxRef.current = measureBox;
   statusRef.current = onStatus;
 
@@ -69,10 +73,36 @@ export function useClientResize({
   }, [surface]);
 
   useEffect(() => {
-    if (!clientId || !canMutate || !box) return;
-    const timer = window.setTimeout(() => {
-      const decision = clientSizeForSurface(box, (candidate) => measureBoxRef.current(candidate));
-      if (decision.kind === "unmeasurable") return;
+    if (!clientId || !canMutate || !surface || !box) return;
+    let disposed = false;
+    let attempt = 0;
+    let timer = 0;
+    const send = () => {
+      // Measured here rather than taken from the observer's last report. The
+      // surface moves while the connection banner grows and shrinks, and the
+      // request is gated on `canMutate`, so the box that arrives with the gate
+      // reopening can already be one layout out of date — and a request built
+      // from it moves tmux, which moves the banner, which moves the surface.
+      // Reading the live box at send time is what stops that loop.
+      const rect = surface.getBoundingClientRect();
+      const decision = clientSizeForSurface({ width: rect.width, height: rect.height }, (candidate) => measureBoxRef.current(candidate));
+      if (decision.kind === "unavailable") {
+        if (!decision.retry) return;
+        if (attempt < CLIENT_RESIZE_RETRIES) {
+          attempt += 1;
+          timer = window.setTimeout(send, CLIENT_RESIZE_RETRY_MS);
+          return;
+        }
+        // Out of retries: the app is connected, has a surface, and cannot size
+        // its client. Silence here is how a broken measurement would look
+        // exactly like a correct one (P12-U006's quiet direction).
+        if (reportedUnavailable.current !== decision.reason) {
+          reportedUnavailable.current = decision.reason;
+          statusRef.current(`The tmux client size could not be computed: ${decision.reason}.`);
+        }
+        return;
+      }
+      reportedUnavailable.current = undefined;
       if (decision.kind === "refused") {
         statusRef.current(decision.reason);
         return;
@@ -87,13 +117,23 @@ export function useClientResize({
       lastRequested.current = { clientId, columns, rows };
       void resizeClient(clientId, columns, rows).catch((error) => {
         // The request never landed, so the next identical computation must not
-        // be deduplicated away.
-        if (lastRequested.current?.clientId === clientId) lastRequested.current = undefined;
-        statusRef.current(String(error));
+        // be deduplicated away — unless a later request has already replaced
+        // this record, in which case it is not ours to clear.
+        const recorded = lastRequested.current;
+        if (recorded?.clientId === clientId && recorded.columns === columns && recorded.rows === rows) {
+          lastRequested.current = undefined;
+        }
+        // A rejection from a bridge that has already been replaced is not this
+        // connection's status.
+        if (!disposed) statusRef.current(String(error));
       });
-    }, CLIENT_RESIZE_DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
-  }, [activeWindowId, box, canMutate, clientId, metricsKey]);
+    };
+    timer = window.setTimeout(send, CLIENT_RESIZE_DEBOUNCE_MS);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeWindowId, box, canMutate, clientId, metricsKey, surface]);
 
   return { surfaceRef: setSurface };
 }
