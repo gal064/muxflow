@@ -8,11 +8,14 @@ import {
   isSafeShortcut,
   keyboardEventIsComposing,
   normalizeShortcut,
+  selectionIndex,
   shortcutFor,
   shortcutCollisions,
   unsafeShortcutBindings,
   type CommandContext,
 } from "./registry";
+
+const DIGITS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
 
 const context = (overrides: Partial<CommandContext> = {}): CommandContext => ({
   canMutate: true, hasPane: true, hasSession: true, hasWindow: true, hasTab: true,
@@ -62,12 +65,43 @@ describe("command registry", () => {
     expect(unsafeShortcutBindings({ "session.new": "A" })).toEqual(["session.new"]);
   });
 
-  it("makes every registered command reachable from both palette and Linux web menu", () => {
+  it("makes every registered command reachable, and only hides the positional selectors", () => {
     const registered = commandRegistry.map((command) => command.id);
-    expect(commandsForSurface("palette").map((command) => command.id)).toEqual(registered);
-    expect(commandsForSurface("menu").map((command) => command.id)).toEqual(registered);
-    expect(commandsForSurface("context").map((command) => command.id)).toEqual(registered);
-    expect(commandsForSurface("toolbar").map((command) => command.id)).toContain("commands.show");
+    const searchable = commandRegistry.filter((command) => !command.paletteHidden).map((command) => command.id);
+    expect(commandsForSurface("shortcuts").map((command) => command.id)).toEqual(registered);
+    expect(commandsForSurface("palette").map((command) => command.id)).toEqual(searchable);
+    expect(commandsForSurface("menu").map((command) => command.id)).toEqual(searchable);
+    expect(commandsForSurface("context").map((command) => command.id)).toEqual(searchable);
+    // Nothing but ⌘1–9 / ⌃1–9 may be kept out of the searchable surfaces.
+    expect(commandRegistry.filter((command) => command.paletteHidden).map((command) => command.id).sort())
+      .toEqual([...DIGITS.map((d) => `tab.select${d}`), ...DIGITS.map((d) => `workspace.select${d}`)].sort());
+  });
+
+  it("adopts the cmux keymap, with ⌘ mapped away from the Linux window manager", () => {
+    const shortcut = (id: string, platform: "mac" | "linux") =>
+      shortcutFor(commandRegistry.find((command) => command.id === id)!, platform, {});
+    expect(shortcut("commands.show", "mac")).toBe("Meta+K");
+    expect(shortcut("workspaces.switch", "mac")).toBe("Meta+P");
+    expect(shortcut("session.new", "mac")).toBe("Meta+N");
+    expect(shortcut("view.toggleSidebar", "mac")).toBe("Meta+B");
+    expect(shortcut("view.togglePanel", "mac")).toBe("Meta+Alt+B");
+    expect(shortcut("pane.splitRight", "mac")).toBe("Meta+D");
+    expect(shortcut("pane.splitDown", "mac")).toBe("Meta+Shift+D");
+    expect(shortcut("pane.zoom", "mac")).toBe("Meta+Shift+Enter");
+    expect(shortcut("agents.jumpUnread", "mac")).toBe("Meta+Shift+U");
+    expect(shortcut("workspace.select4", "mac")).toBe("Meta+4");
+    expect(shortcut("tab.select4", "mac")).toBe("Ctrl+4");
+    // Super is the compositor's on Linux, so workspaces move to Alt there and
+    // the two positional families stay distinct.
+    expect(shortcut("workspace.select4", "linux")).toBe("Alt+4");
+    expect(shortcut("tab.select4", "linux")).toBe("Ctrl+4");
+  });
+
+  it("resolves a positional selector to its 1-based index", () => {
+    expect(selectionIndex("workspace.select7", "workspace.select")).toBe(7);
+    expect(selectionIndex("tab.select1", "tab.select")).toBe(1);
+    expect(selectionIndex("tab.select1", "workspace.select")).toBeUndefined();
+    expect(selectionIndex("session.new", "workspace.select")).toBeUndefined();
   });
 
   it("never steals shortcuts from forms or overlays but keeps xterm's hidden textarea routable", () => {

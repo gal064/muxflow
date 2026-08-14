@@ -32,7 +32,11 @@ describe("ExplorerTree", () => {
     expect(html).toContain('role="treeitem"');
     expect(html).toContain('aria-level="1"');
     expect(html).toContain('tabindex="0"');
-    expect(html).toContain('aria-label="New file"');
+    // The tree carries no resting controls at all now: creating, renaming,
+    // downloading and refreshing are right-click items, not header buttons.
+    expect(html).not.toContain('aria-label="New file"');
+    expect(html).not.toContain('aria-label="Refresh Explorer"');
+    expect(html).not.toContain("•••");
   });
 
   it("exposes accessible cancellation for queued/running downloads but never terminal cancellation", () => {

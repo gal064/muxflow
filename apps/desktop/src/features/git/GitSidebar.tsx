@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
+import { ContextMenu, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { GitCommandResult, GitDiffTarget, GitMutationRequest, GitStatusEntry, GitStatusSnapshot, GitWorkspaceClient } from "./types";
 
@@ -22,6 +23,10 @@ type PendingDiscard = { entry: GitStatusEntry; target: GitDiffTarget; status: Gi
 
 export function GitSidebar(props: Props) {
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
+  // Stage / unstage / discard used to be a cluster of hover buttons on every
+  // row. They are one right-click menu now, which is also the only way they can
+  // carry a readable label instead of `+`, `−` and `↶`.
+  const [menu, setMenu] = useState<{ entry: GitStatusEntry; target: GitDiffTarget; anchor: ContextMenuAnchor; actionable: boolean }>();
   const [busyPath, setBusyPath] = useState<string>();
   const [commitMessage, setCommitMessage] = useState("");
   const [commitOutput, setCommitOutput] = useState<GitCommandResult>();
@@ -67,39 +72,63 @@ export function GitSidebar(props: Props) {
     } catch (cause) { setCommitError(String(cause)); }
   };
 
-  if (!props.root) return <GitEmpty title="Source Control" detail="Select a terminal pane to discover its repository." />;
-  if (!props.root.gitWorktree) return <GitEmpty title="No repository" detail="The active pane is outside a Git worktree." />;
-  if (props.loading && !props.status) return <GitEmpty title="Source Control" detail="Reading Git status…" />;
-  if (props.error && !props.status) return <GitEmpty title="Git unavailable" detail={props.error} action={props.onRefresh} />;
-  if (!props.status) return <GitEmpty title="Source Control" detail="Git status is unavailable." action={props.onRefresh} />;
-  if (props.status.oversized) return <GitEmpty title="Repository status is too large" detail={`${props.status.error || "The host bounded this snapshot to keep the terminal connection responsive."} ${props.status.totalEntryCount ?? "Unknown"} entries were detected.`} action={props.onRefresh} />;
+  if (!props.root) return <GitEmpty detail="Select a terminal pane to discover its repository." />;
+  if (!props.root.gitWorktree) return <GitEmpty detail="The active pane is outside a Git worktree." />;
+  if (props.loading && !props.status) return <GitEmpty detail="Reading Git status…" />;
+  if (props.error && !props.status) return <GitEmpty detail={`Git unavailable: ${props.error}`} action={props.onRefresh} />;
+  if (!props.status) return <GitEmpty detail="Git status is unavailable." action={props.onRefresh} />;
+  if (props.status.oversized) return <GitEmpty detail={`Repository status is too large. ${props.status.error || "The host bounded this snapshot to keep the terminal connection responsive."} ${props.status.totalEntryCount ?? "Unknown"} entries were detected.`} action={props.onRefresh} />;
 
   const stagedCount = groups.staged.length;
+  const openMenu = (entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor, actionable: boolean) =>
+    setMenu({ entry, target, anchor, actionable });
   return <section className="git-sidebar" aria-label="Source Control">
     <header className="git-sidebar-header">
-      <div><strong>{props.status.repository.headName || (props.status.repository.initial ? "Initial repository" : "Detached HEAD")}</strong><small title={props.status.repository.worktreeRoot}>{props.status.repository.worktreeRoot}</small></div>
-      <button aria-label="Refresh Git status" disabled={props.loading} onClick={props.onRefresh} type="button">↻</button>
+      <strong>{props.status.repository.headName || (props.status.repository.initial ? "Initial repository" : "Detached HEAD")}</strong>
+      <small title={props.status.repository.worktreeRoot}>{props.status.repository.worktreeRoot}</small>
     </header>
-    {props.error && <div className="git-error" role="alert">{props.error}</div>}
-    {props.status.copyDetectionIncomplete && <div className="git-error" role="status">Copy detection was bounded for this large change set; some copies may appear as additions.</div>}
-    {!props.status.authoritative && <div className="git-error" role="alert">Git status is resynchronizing. Mutations are disabled.</div>}
-    <form className="git-commit" onSubmit={(event) => { event.preventDefault(); if (!commitComposing.current) void commit(); }}>
-      <label htmlFor="git-commit-message">Commit message</label>
-      <textarea disabled={unavailable} id="git-commit-message" onChange={(event) => setCommitMessage(event.target.value)} onCompositionEnd={() => { commitComposing.current = false; }} onCompositionStart={() => { commitComposing.current = true; }} placeholder="Message (Ctrl+Enter to commit)" onKeyDown={(event) => {
+    {props.error && <div className="surface-error" role="alert">{props.error}</div>}
+    {props.status.copyDetectionIncomplete && <div className="surface-note" role="status">Copy detection was bounded for this large change set; some copies may appear as additions.</div>}
+    {!props.status.authoritative && <div className="surface-error" role="alert">Git status is resynchronizing. Mutations are disabled.</div>}
+    <div className="git-status-groups">
+      <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor, false)} />
+      <GitGroup title="Staged" entries={groups.staged} target="staged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "staged", anchor, !unavailable)} />
+      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor, !unavailable)} />
+      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" busyPath={busyPath} onOpen={props.onOpenDiff} onMenu={(entry, anchor) => openMenu(entry, "unstaged", anchor, !unavailable)} />
+      <GitGroup title="Ignored" entries={groups.ignored} target="unstaged" onOpen={props.onOpenDiff} />
+      {props.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
+    </div>
+    {/* The commit form is not permanent chrome any more: it exists exactly when
+        there is something staged to commit. */}
+    {stagedCount > 0 && <form className="git-commit" onSubmit={(event) => { event.preventDefault(); if (!commitComposing.current) void commit(); }}>
+      <textarea aria-label="Commit message" disabled={unavailable} id="git-commit-message" onChange={(event) => setCommitMessage(event.target.value)} onCompositionEnd={() => { commitComposing.current = false; }} onCompositionStart={() => { commitComposing.current = true; }} placeholder="Commit message…" onKeyDown={(event) => {
         if (!keyboardEventIsComposing(event.nativeEvent) && event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void commit(); }
       }} value={commitMessage} />
-      <button className="primary" disabled={unavailable || stagedCount === 0} type="submit">Commit {stagedCount ? `${stagedCount} staged` : ""}</button>
-      {commitError && <span className="git-error" role="alert">{commitError}</span>}
+      <button className="primary" disabled={unavailable} type="submit">Commit {stagedCount} staged</button>
+      {commitError && <span className="surface-error" role="alert">{commitError}</span>}
       {commitOutput && <pre aria-label="Git commit output" className={commitOutput.outcome === "applied" && !commitOutput.refreshFailed ? "git-output" : "git-output error"}>{commandDetails(commitOutput, "Commit created.")}</pre>}
-    </form>
-    <div className="git-status-groups">
-      <GitGroup title="Merge Changes" entries={groups.conflicts} target="unstaged" disabled={unavailable} busyPath={busyPath} onOpen={props.onOpenDiff} />
-      <GitGroup title="Staged Changes" entries={groups.staged} target="staged" disabled={unavailable} busyPath={busyPath} onOpen={props.onOpenDiff} onPrimary={(entry) => void mutateFile(entry, "staged", "unstageFile")} primaryLabel="Unstage" onDiscard={(entry) => setPendingDiscard({ entry, target: "staged", status: props.status!, rootToken: props.root!.token, connectionEpoch: props.scope!.terminalEpoch })} />
-      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" disabled={unavailable} busyPath={busyPath} onOpen={props.onOpenDiff} onPrimary={(entry) => void mutateFile(entry, "unstaged", "stageFile")} primaryLabel="Stage" onDiscard={(entry) => setPendingDiscard({ entry, target: "unstaged", status: props.status!, rootToken: props.root!.token, connectionEpoch: props.scope!.terminalEpoch })} />
-      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" disabled={unavailable} busyPath={busyPath} onOpen={props.onOpenDiff} onPrimary={(entry) => void mutateFile(entry, "unstaged", "stageFile")} primaryLabel="Stage" onDiscard={(entry) => setPendingDiscard({ entry, target: "unstaged", status: props.status!, rootToken: props.root!.token, connectionEpoch: props.scope!.terminalEpoch })} />
-      <GitGroup title="Ignored" entries={groups.ignored} target="unstaged" disabled entriesOnly busyPath={busyPath} onOpen={props.onOpenDiff} />
-      {props.status.entries.length === 0 && <div className="git-clean"><span>✓</span><strong>Working tree clean</strong></div>}
-    </div>
+    </form>}
+    {menu && <ContextMenu
+      anchor={menu.anchor}
+      items={[
+        { id: "open", label: "Open diff", disabled: menu.entry.ignored, run: () => props.onOpenDiff(menu.entry, menu.target) },
+        ...(menu.actionable && !menu.entry.conflicted ? [
+          menu.target === "staged"
+            ? { id: "unstage", label: "Unstage", disabled: menu.entry.submodule, run: () => void mutateFile(menu.entry, "staged", "unstageFile") }
+            : { id: "stage", label: "Stage", disabled: menu.entry.submodule, run: () => void mutateFile(menu.entry, "unstaged", "stageFile") },
+          "separator" as const,
+          {
+            id: "discard",
+            label: menu.entry.untracked ? "Delete untracked file…" : "Discard changes…",
+            destructive: true,
+            disabled: menu.entry.submodule,
+            run: () => setPendingDiscard({ entry: menu.entry, target: menu.target, status: props.status!, rootToken: props.root!.token, connectionEpoch: props.scope!.terminalEpoch }),
+          },
+        ] : []),
+      ]}
+      label={`Actions for ${menu.entry.displayPath}`}
+      onClose={() => setMenu(undefined)}
+    />}
     {pendingDiscard && <ConfirmationDialog
       confirmLabel="Discard"
       detail={`Discard ${pendingDiscard.entry.displayPath}? This cannot be undone by the app.`}
@@ -119,35 +148,49 @@ export function GitSidebar(props: Props) {
 }
 
 function GitGroup(props: {
-  title: string; entries: GitStatusEntry[]; target: GitDiffTarget; disabled: boolean; busyPath?: string; entriesOnly?: boolean;
-  primaryLabel?: string; onPrimary?(entry: GitStatusEntry): void; onDiscard?(entry: GitStatusEntry): void;
+  title: string; entries: GitStatusEntry[]; target: GitDiffTarget; busyPath?: string;
   onOpen(entry: GitStatusEntry, target: GitDiffTarget): void;
+  onMenu?(entry: GitStatusEntry, anchor: ContextMenuAnchor): void;
 }) {
   const [limit, setLimit] = useState(200);
   if (!props.entries.length) return null;
   const visible = props.entries.slice(0, limit);
-  return <details open className="git-group"><summary><span>{props.title}</span><span className="git-count">{props.entries.length}</span></summary><ul>
-    {visible.map((entry) => <li key={`${props.target}\0${entry.path}`} className={entry.conflicted ? "conflicted" : ""}>
-      <button className="git-file" disabled={entry.ignored} onClick={() => props.onOpen(entry, props.target)} title={entry.displayPath} type="button">
-        <span>{baseName(entry.displayPath)}</span><small>{parentName(entry.displayPath)}</small>
-        <abbr title={statusTitle(entry, props.target)}>{statusCode(entry, props.target)}</abbr>
-      </button>
-      {!props.entriesOnly && <div className="git-row-actions">
-        {props.onPrimary && !entry.conflicted && <button aria-label={`${props.primaryLabel} ${entry.displayPath}`} disabled={props.disabled || props.busyPath === entry.path || entry.submodule} onClick={() => props.onPrimary?.(entry)} title={entry.submodule ? "Submodule pointer operations are read-only in v1" : props.primaryLabel} type="button">{props.primaryLabel === "Stage" ? "+" : "−"}</button>}
-        {props.onDiscard && !entry.conflicted && <button aria-label={`Discard ${entry.displayPath}`} disabled={props.disabled || props.busyPath === entry.path || entry.submodule} onClick={() => props.onDiscard?.(entry)} title={entry.submodule ? "Submodule pointer operations are read-only in v1" : "Discard…"} type="button">↶</button>}
-      </div>}
-      {entry.submodule && <small className="git-entry-note">submodule {entry.submoduleState} · actions unavailable</small>}
-      {entry.displayOriginalPath && <small className="git-entry-note">{entry.indexKind === "copied" || entry.worktreeKind === "copied" ? "copied" : "renamed"} from {entry.displayOriginalPath}</small>}
-      {entry.symlink && <small className="git-entry-note">symbolic link</small>}
-      {entry.binary && <small className="git-entry-note">binary</small>}
-      {entry.conflicted && <small className="git-entry-note">conflict {entry.conflictCode}</small>}
-    </li>)}
-    {visible.length < props.entries.length && <li className="git-show-more"><button onClick={() => setLimit((current) => Math.min(current + 500, props.entries.length))} type="button">Show {Math.min(500, props.entries.length - visible.length)} more…</button></li>}
-  </ul></details>;
+  return <section className="git-group">
+    <h3 className="section-label">{props.title} · {props.entries.length}</h3>
+    <ul>
+      {visible.map((entry) => <li key={`${props.target}\0${entry.path}`} className={entry.conflicted ? "conflicted" : ""}>
+        <button
+          aria-busy={props.busyPath === entry.path}
+          className="git-file"
+          disabled={entry.ignored}
+          onClick={() => props.onOpen(entry, props.target)}
+          onContextMenu={(event) => {
+            if (!props.onMenu) return;
+            event.preventDefault();
+            props.onMenu(entry, { x: event.clientX, y: event.clientY });
+          }}
+          title={`${entry.displayPath} · ${statusTitle(entry, props.target)}`}
+          type="button"
+        >
+          <span className={`git-state ${statusTitle(entry, props.target)}`}>{statusCode(entry, props.target)}</span>
+          <span className="git-path">{entry.displayPath}</span>
+        </button>
+        {entry.submodule && <small className="git-entry-note">submodule {entry.submoduleState} · actions unavailable</small>}
+        {entry.displayOriginalPath && <small className="git-entry-note">{entry.indexKind === "copied" || entry.worktreeKind === "copied" ? "copied" : "renamed"} from {entry.displayOriginalPath}</small>}
+        {entry.symlink && <small className="git-entry-note">symbolic link</small>}
+        {entry.binary && <small className="git-entry-note">binary</small>}
+        {entry.conflicted && <small className="git-entry-note">conflict {entry.conflictCode}</small>}
+      </li>)}
+      {visible.length < props.entries.length && <li className="git-show-more"><button onClick={() => setLimit((current) => Math.min(current + 500, props.entries.length))} type="button">Show {Math.min(500, props.entries.length - visible.length)} more…</button></li>}
+    </ul>
+  </section>;
 }
 
-function GitEmpty({ title, detail, action }: { title: string; detail: string; action?: () => void }) {
-  return <section className="surface-placeholder"><div className="placeholder-icon" aria-hidden="true">±</div><h2>{title}</h2><p>{detail}</p>{action && <button onClick={action} type="button">Retry</button>}</section>;
+/** One quiet line, per the brief — not an illustrated card. */
+function GitEmpty({ detail, action }: { detail: string; action?: () => void }) {
+  return <section aria-label="Source Control" className="git-sidebar">
+    <p className="quiet-empty">{detail}{action && <> <button className="inline-action" onClick={action} type="button">Retry</button></>}</p>
+  </section>;
 }
 
 function groupEntries(entries: GitStatusEntry[]) {
@@ -172,8 +215,6 @@ function statusTitle(entry: GitStatusEntry, target: GitDiffTarget): string {
   return target === "staged" ? entry.indexKind : entry.worktreeKind;
 }
 
-function baseName(path: string): string { return path.split("/").at(-1) || path; }
-function parentName(path: string): string { const index = path.lastIndexOf("/"); return index < 0 ? "" : path.slice(0, index); }
 function labelFor(kind: GitMutationRequest["kind"]): string { return ({ stageFile: "Staged", unstageFile: "Unstaged", discardFile: "Discarded", stageHunk: "Staged", unstageHunk: "Unstaged", discardHunk: "Discarded" })[kind]; }
 function gitResultMessage(result: GitCommandResult, fallback: string): string {
   const command = [result.stdout.trim(), result.stderr.trim(), result.error].filter(Boolean).join(" · ") || (result.outcome === "applied" ? fallback : result.outcome === "partialOrUnknown" ? "Git outcome is partial or unknown; inspect the repository before retrying." : `Git failed with exit code ${result.exitCode}.`);

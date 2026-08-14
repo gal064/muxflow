@@ -1,9 +1,8 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+// The token file itself, as text: this test's whole purpose is to compare the
+// renderer's fallback against what tokens.css actually declares.
+import tokensCss from "../../tokens.css?raw";
 import { GHOSTTY_DEFAULT_DARK, terminalFont, terminalTheme } from "./theme";
-
-const tokensCss = readFileSync(fileURLToPath(new URL("../../tokens.css", import.meta.url)), "utf8");
 
 function token(name: string): string | undefined {
   return new RegExp(`^\\s*${name}:\\s*([^;]+);`, "mu").exec(tokensCss)?.[1].trim();

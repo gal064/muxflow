@@ -87,6 +87,33 @@ export function terminalTheme(root: Element | undefined = globalThis.document?.d
   } as ITheme;
 }
 
+/**
+ * Search-hit decorations, from the tokens too.
+ *
+ * xterm draws these itself, so they have to be passed as literal colors rather
+ * than picked up from a stylesheet — which is exactly how the last four hex
+ * literals in the app survived until they were routed through here. The accent
+ * marks the active hit; other hits get the muted chrome ink.
+ */
+export function searchDecorations(root: Element | undefined = globalThis.document?.documentElement): {
+  matchBackground: string;
+  matchOverviewRuler: string;
+  activeMatchBackground: string;
+  activeMatchColorOverviewRuler: string;
+} {
+  const read = tokenReader(root);
+  const accent = read("--accent") ?? "#0091ff";
+  const muted = read("--chrome-dim") ?? "#7d848e";
+  return {
+    // Semi-transparent so the glyph underneath stays legible; the overview
+    // ruler is a solid 1px mark and cannot be.
+    matchBackground: `${muted}66`,
+    matchOverviewRuler: muted,
+    activeMatchBackground: `${accent}99`,
+    activeMatchColorOverviewRuler: accent,
+  };
+}
+
 /** The terminal's font, from the same tokens the rest of the app uses. */
 export function terminalFont(root: Element | undefined = globalThis.document?.documentElement): {
   fontFamily: string;

@@ -5,25 +5,25 @@ import type { PendingTmuxConfirmation } from "../commands/destructiveConfirmatio
 import {
   commandAvailable,
   commandForKeyboardEvent,
-  commandsForSurface,
   currentPlatform,
   globalShortcutAllowed,
-  shortcutFor,
   type ShortcutOverrides,
 } from "../commands/registry";
 import type { TerminalPaneController } from "../features/terminal/TerminalPane";
 import { adjacentPane, resizeCellsFromPixels, windowGrid, type PaneDirection } from "../features/terminal/layout";
 import { sendBinaryInput, sendInput } from "../features/terminal/api";
 import type { TerminalInput } from "../features/terminal/TerminalRenderer";
+import { setTerminalScreenReaderMode } from "../features/terminal/accessibilityPreference";
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import { abandonPerfSpan, openPerfSpan, type PanePaintSpan } from "../perf/probe";
 import { requestTmuxAction, type TmuxAction } from "../features/tmux/actions";
 import { requestReconciledTmuxAction } from "../features/tmux/actionReconciliation";
-import { AgentPanel } from "../features/agents/AgentPanel";
+import { useAgentWorkflow } from "../features/agents/AgentHookWorkflow";
 import { TauriAgentClient } from "../features/agents/api";
-import { loadAgentSoundPreferences } from "../features/agents/sound";
+import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
+import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
 import { useAgentNotificationActivation, type PaneSurfaceResult } from "../features/agents/useAgentNotificationActivation";
 import { useAgentRuntime } from "../features/agents/useAgentRuntime";
 import { keyForScope, keyForTransferConnection, TauriFileWorkspaceClient } from "../features/files/api";
@@ -33,14 +33,19 @@ import type { PendingDownload } from "../features/files/DownloadDialog";
 import type { ActiveRoot, DownloadRequest, FileEntry, FileMutation } from "../features/files/types";
 import { TauriGitWorkspaceClient } from "../features/git/api";
 import { GitSidebar } from "../features/git/GitSidebar";
-import { ConnectionBanner } from "../features/shell/ConnectionBanner";
-import { ExplorerGitSidebar } from "../features/shell/ExplorerGitSidebar";
+import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
+import { RightPanel } from "../features/shell/RightPanel";
+import { SettingsDialog } from "../features/shell/SettingsDialog";
+import { TitleBar } from "../features/shell/TitleBar";
+import { canGoBack, canGoForward, emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
+import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
 import { helperConnectionKey, helperUpgradeReducer, initialHelperUpgradeState, type HelperInstallReport, type RemoteHelperProbe } from "../features/shell/helperUpgrade";
 import { profileIdForSshConnection } from "../features/shell/hostProfiles";
 import { sameHostConnection, sameHostScope, type HostScopeToken } from "../features/shell/hostScope";
 import { useShellCommands } from "../features/shell/useShellCommands";
 import { collapseSidebarsForCompactViewport } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
+import { sidebarWidthForWindow, type ShellState } from "../features/shell/types";
 import {
   combineWorkspaceTabs,
   discardServerAppState,
@@ -57,9 +62,11 @@ import {
   shellNavigationMode,
   type CombinedTab,
 } from "../features/shell/model";
-import { CombinedTabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/CombinedTabStrip";
-import { WorkspaceRail } from "../features/workspaces/WorkspaceRail";
-import type { ConnectionSpec, HostProfile, Pane, PersistedProfiles } from "./types";
+import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
+import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
+import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
+import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
+import type { ConnectionSpec, HostProfile, Pane } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { requestActiveWindow } from "./windowSelection";
 import { useAppConnectionController } from "./useAppConnectionController";
@@ -84,6 +91,9 @@ const INTERACTION_SPAN_BY_ACTION: Partial<Record<TmuxAction["kind"], PanePaintSp
   splitPaneRight: "pane.split",
 };
 
+/** Below this the sidebar overlays the terminal instead of taking space. */
+const COMPACT_VIEWPORT_QUERY = "(max-width: 880px)";
+
 export function App() {
   const [status, setStatus] = useState("Discovering local tmux…");
   const [activeDownloadStatus, setActiveDownloadStatus] = useState<ActiveDownloadStatus>();
@@ -93,18 +103,21 @@ export function App() {
   const connectionController = useAppConnectionController({ agentClient, fileClient, gitClient, setStatus });
   const {
     activeSessionId, activeWindowId, appFocused, clientId, clientIdRef, connection,
-    connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
+    connectionDetail, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
-    profiles, profilesHydrated, setActiveSessionId, setActiveWindowId,
+    profiles, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
     setProfileRecovery, setProfiles, setSshConfigPath, setSshTarget, snapshot,
     snapshotRef, sshConfigPath, sshTarget, terminalEpoch, windows,
   } = connectionController;
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus);
-  const [compactViewport, setCompactViewport] = useState(() => window.matchMedia?.("(max-width: 880px)").matches ?? false);
+  const [compactViewport, setCompactViewport] = useState(() => window.matchMedia?.(COMPACT_VIEWPORT_QUERY).matches ?? false);
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth || 1280);
   const [helperState, dispatchHelper] = useReducer(helperUpgradeReducer, initialHelperUpgradeState);
   const [profileResetConfirmation, setProfileResetConfirmation] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [workspaceSwitcherOpen, setWorkspaceSwitcherOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutEditorOpen, setShortcutEditorOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
@@ -114,18 +127,26 @@ export function App() {
   const [pendingDownload, setPendingDownload] = useState<PendingDownload>();
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
+  const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
   const controllers = useRef(new Map<string, TerminalPaneController>());
   const platform = useMemo(() => currentPlatform(), []);
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
   const currentHelperConnectionKey = helperConnectionKey(connection);
   const terminalTransferClient = useMemo(() => new TauriTerminalTransferClient(), []);
   const terminalTransferRegistry = useTerminalTransferRegistry();
+  const latency = useHostLatency();
 
   useEffect(() => dispatchHelper({ type: "reset" }), [currentHelperConnectionKey]);
+  // Renderers read this once, when they are created; changing it must not tear
+  // down live terminals, so the setting says panes pick it up as they appear.
+  useEffect(() => setTerminalScreenReaderMode(appState.shell.terminalScreenReader), [appState.shell.terminalScreenReader]);
+  // A new bridge is a new link; the last one's measured round-trip describes
+  // nothing about it.
+  useEffect(() => { resetHostLatency(); }, [clientId]);
 
   useEffect(() => {
     if (!window.matchMedia) return;
-    const query = window.matchMedia("(max-width: 880px)");
+    const query = window.matchMedia(COMPACT_VIEWPORT_QUERY);
     const acceptViewport = (compact: boolean) => {
       setCompactViewport(compact);
       if (compact) setAppState((current) => ({ ...current, shell: collapseSidebarsForCompactViewport(current.shell) }));
@@ -135,6 +156,14 @@ export function App() {
     query.addEventListener("change", handleChange);
     return () => query.removeEventListener("change", handleChange);
   }, [setAppState]);
+
+  // The sidebar may be dragged wider, but never past a third of the window, so
+  // the terminal keeps its share when the window shrinks under a wide sidebar.
+  useEffect(() => {
+    const onResize = () => setWindowWidth(window.innerWidth || 1280);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const lastReconciledIdentity = useRef<{ hostProfileId: string; serverIdentity?: string } | undefined>(undefined);
   useEffect(() => {
@@ -288,6 +317,42 @@ export function App() {
     automaticSeen: notificationActivation.automaticSeen,
   }), [activePane?.id, activeSessionId, activeWindowId, appFocused, currentHostProfileId, hostState.serverIdentity, notificationActivation.automaticSeen, selectedAppTab]);
   const agentRuntime = useAgentRuntime({ client: agentClient, scope: agentScope, focus: agentFocus, soundPreferences: agentSounds, onStatus: setStatus });
+
+  const agentWorkflow = useAgentWorkflow({
+    launchContext: activeSession && activeWindow && activePane && workspaceFiles.root
+      ? { sessionId: activeSession.id, windowId: activeWindow.id, paneId: activePane.id, root: workspaceFiles.root }
+      : undefined,
+    onModalChange: setAgentModalOpen,
+    onStatus: setStatus,
+    runtime: agentRuntime,
+  });
+
+  const home = useMemo(() => inferHome(snapshot.panes.map((pane) => pane.currentPath)), [snapshot.panes]);
+  const sidebarRows = useMemo(() => workspaceRows({
+    snapshot,
+    activeSessionId,
+    agents: agentRuntime.agents,
+    attentionByWorkspace: agentRuntime.rollups.byWorkspace,
+    activeBranch: workspaceGit.status?.repository.headName,
+    home,
+  }), [activeSessionId, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, snapshot, workspaceGit.status]);
+  const agentRows = useMemo(() => {
+    const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
+    const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
+    const paneIds = new Set(snapshot.panes.map((pane) => pane.id));
+    return buildAgentRows(
+      agentRuntime.agents,
+      (record) => ({
+        workspaceOrder: orderBySession.get(record.sessionId) ?? Number.MAX_SAFE_INTEGER,
+        workspaceName: record.sessionName || "unknown workspace",
+        tabIndex: windowIndexById.get(record.windowId),
+      }),
+      (record) => Boolean(record.paneId) && paneIds.has(record.paneId),
+      appState.shell.agentSort,
+    );
+  }, [agentRuntime.agents, appState.shell.agentSort, sidebarRows, snapshot.panes, snapshot.windows]);
+  const unread = useMemo(() => unreadCount(agentRows), [agentRows]);
+
   const combinedTabs = useMemo(
     () => combineWorkspaceTabs(windows, workspaceAppTabs, agentRuntime.rollups.byWindow),
     [agentRuntime.rollups.byWindow, windows, workspaceAppTabs],
@@ -309,11 +374,63 @@ export function App() {
     if (identityKey && authoritative) lastAuthoritativeWindow.current.set(identityKey, authoritative);
   }, [activeSession, currentHostProfileId, hostState.serverIdentity, selectedAppTab, windows]);
 
+  // Focus history follows where the app actually ended up, whatever moved it —
+  // a click, a shortcut, an agent notification, or tmux itself.
+  useEffect(() => {
+    if (!activeSessionId) return;
+    setFocusHistory((current) => visitFocus(current, { sessionId: activeSessionId, windowId: activeWindowId }));
+  }, [activeSessionId, activeWindowId]);
+  useEffect(() => {
+    setFocusHistory((current) => pruneFocusHistory(current, (point) =>
+      snapshot.sessions.some((session) => session.id === point.sessionId)
+      && (!point.windowId || snapshot.windows.some((item) => item.id === point.windowId))));
+  }, [snapshot.sessions, snapshot.windows]);
+
   const focusDirection = useCallback((direction: PaneDirection) => {
     if (!activePane) return;
     const target = adjacentPane(panes, activePane, direction);
     if (target) void performAction({ kind: "focusPane", paneId: target.id, windowId: target.windowId, sessionId: target.sessionId });
   }, [activePane, panes, performAction]);
+
+  const selectSession = useCallback((sessionId: string) => {
+    notificationActivation.clearNotificationFocusGuard();
+    if (sessionId === activeSessionId) return;
+    if (shellNavigationMode(hostState.canMutate) === "cached") {
+      setActiveSessionId(sessionId);
+      setStatus("Viewing the last known workspace. Writes remain frozen.");
+      return;
+    }
+    void performAction({ kind: "selectSession", sessionId }).then((accepted) => {
+      if (accepted) setActiveSessionId(sessionId);
+    });
+  }, [activeSessionId, hostState.canMutate, notificationActivation, performAction]);
+
+  const selectWindow = useCallback((windowId: string) => {
+    notificationActivation.clearNotificationFocusGuard();
+    if (activeSession && hostState.serverIdentity) setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, undefined));
+    if (shellNavigationMode(hostState.canMutate) === "cached") {
+      setActiveWindowId(windowId);
+      setStatus("Viewing the last known terminal tab. Writes remain frozen.");
+      return;
+    }
+    void requestActiveWindow(windows, activeWindowId, windowId, performAction, setActiveWindowId);
+  }, [activeSession, activeWindowId, currentHostProfileId, hostState.canMutate, hostState.serverIdentity, notificationActivation, performAction, setAppState, windows]);
+
+  const selectCombinedTab = useCallback((tab: CombinedTab) => {
+    if (tab.kind === "terminal") selectWindow(tab.id);
+    else if (activeSession && hostState.serverIdentity) {
+      setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, tab.id));
+      setStatus(`Opened ${tab.title}`);
+    }
+  }, [activeSession, currentHostProfileId, hostState.serverIdentity, selectWindow, setAppState]);
+
+  const selectAgentRow = useCallback((row: AgentListRow) => {
+    notificationActivation.clearNotificationFocusGuard();
+    if (!row.agent.paneId) return setStatus(`Agent ${row.agent.displayName} has no exact pane match; navigation is unavailable.`);
+    const destination = resolveTerminalDestination(snapshot.panes, row.agent.paneId);
+    if (destination.kind === "unavailable") return setStatus(`Agent destination ${row.agent.displayName} is no longer available: ${destination.reason}.`);
+    void surfacePaneDestination(destination.pane, `Agent ${row.agent.displayName}`);
+  }, [notificationActivation, snapshot.panes, surfacePaneDestination]);
 
   const { commandContext, runCommand } = useShellCommands({
     activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
@@ -321,12 +438,46 @@ export function App() {
     combinedTabs, controllers, currentHostProfileId, focusDirection,
     generation: hostState.generation, hostScope: currentHostScope,
     isHostScopeCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
+    jumpToUnreadAgent: () => {
+      const target = jumpTarget(agentRows);
+      if (!target) return setStatus("No agent is waiting on you.");
+      selectAgentRow(target);
+    },
     performAction, selectedAppTab,
     selectCreatedSession: (sessionId) => { setActiveSessionId(sessionId); setActiveWindowId(undefined); },
+    selectRelativeTab: (direction) => {
+      const index = combinedTabs.findIndex((tab) => tab.key === activeCombinedTabKey);
+      const next = combinedTabs[(index < 0 ? 0 : index + direction + combinedTabs.length) % Math.max(1, combinedTabs.length)];
+      if (next) selectCombinedTab(next);
+    },
+    selectTabByIndex: (index) => {
+      const tab = combinedTabs[index];
+      if (tab) selectCombinedTab(tab);
+    },
+    selectWorkspaceByIndex: (index) => {
+      const row = sidebarRows[index];
+      if (row) selectSession(row.session.id);
+    },
     serverIdentity: hostState.serverIdentity, setAppState, setConfirmation,
-    setPaletteOpen, setShortcutEditorOpen, setStatus, setTextPrompt, snapshot, windows,
+    setPaletteOpen, setSettingsOpen, setShortcutEditorOpen, setStatus, setTextPrompt,
+    setWorkspaceSwitcherOpen, snapshot,
+    stepFocusHistory: (direction) => {
+      setFocusHistory((current) => {
+        const stepped = stepFocus(current, direction);
+        if (!stepped.point) {
+          setStatus(direction === "back" ? "Nothing earlier to go back to." : "Nothing later to go forward to.");
+          return current;
+        }
+        const { sessionId, windowId } = stepped.point;
+        if (sessionId !== activeSessionId) selectSession(sessionId);
+        else if (windowId && windowId !== activeWindowId) selectWindow(windowId);
+        return stepped.history;
+      });
+    },
+    windows,
   });
-  const modalOpen = paletteOpen || shortcutEditorOpen || Boolean(confirmation) || Boolean(textPrompt)
+  const modalOpen = paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
+    || Boolean(confirmation) || Boolean(textPrompt)
     || agentModalOpen || Boolean(pendingDownload) || appStateResetConfirmation || appRecoveryDiscardConfirmation || helperState.phase === "confirming";
 
   useEffect(() => {
@@ -373,37 +524,6 @@ export function App() {
       if (Math.abs(delta) >= 4) void performAction({ kind, paneId: pane.id, resizeCells: cells });
       target.onpointerup = null;
     };
-  };
-
-  const selectSession = (sessionId: string) => {
-    notificationActivation.clearNotificationFocusGuard();
-    if (sessionId === activeSessionId) return;
-    if (shellNavigationMode(hostState.canMutate) === "cached") {
-      setActiveSessionId(sessionId);
-      setStatus("Viewing the last known workspace. Writes remain frozen.");
-      return;
-    }
-    void performAction({ kind: "selectSession", sessionId }).then((accepted) => {
-      if (accepted) setActiveSessionId(sessionId);
-    });
-  };
-  const selectWindow = (windowId: string) => {
-    notificationActivation.clearNotificationFocusGuard();
-    if (activeSession && hostState.serverIdentity) setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, undefined));
-    if (shellNavigationMode(hostState.canMutate) === "cached") {
-      setActiveWindowId(windowId);
-      setStatus("Viewing the last known terminal tab. Writes remain frozen.");
-      return;
-    }
-    void requestActiveWindow(windows, activeWindowId, windowId, performAction, setActiveWindowId);
-  };
-
-  const selectCombinedTab = (tab: CombinedTab) => {
-    if (tab.kind === "terminal") selectWindow(tab.id);
-    else if (activeSession && hostState.serverIdentity) {
-      setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, tab.id));
-      setStatus(`Opened ${tab.title}`);
-    }
   };
 
   const closeCombinedTab = (tab: CombinedTab) => {
@@ -554,192 +674,218 @@ export function App() {
     setStatus(`Connecting to ${target}…`);
   };
 
-  const commandMenu = <details className="command-menu">
-          <summary aria-label="Workspace and terminal actions">•••</summary>
-          <div aria-label="Workspace and terminal commands">
-            {(["Application", "View", "Workspace", "Terminal tab", "Pane", "Terminal"] as const).map((group) => <section key={group}>
-              <small>{group}</small>
-              {commandsForSurface("menu").filter((command) => command.group === group).map((command) => <button
-                disabled={!commandAvailable(command, commandContext)}
-                key={command.id}
-                onClick={(event) => {
-                  void runCommand(command.id);
-                  (event.currentTarget.closest("details") as HTMLDetailsElement | null)?.removeAttribute("open");
-                }}
-                type="button"
-              >{command.title}<kbd>{shortcutFor(command, platform, shortcuts) ?? ""}</kbd></button>)}
-            </section>)}
-          </div>
-        </details>;
+  const updateShell = (update: Partial<ShellState>) =>
+    setAppState((current) => ({ ...current, shell: { ...current.shell, ...update } }));
 
-  return <main className={`app-shell ${appState.shell.explorerCollapsed ? "left-collapsed" : ""} ${appState.shell.agentSidebarCollapsed ? "agents-collapsed" : ""}`}>
-    {profileRecovery && <div className="app-state-recovery" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}
-    {appStateRecovery && <div className="app-state-recovery" role="alert"><strong>Saved shell state is write-frozen</strong><span>{appStateRecovery}</span><button onClick={() => setAppStateResetConfirmation(true)} type="button">Reset saved shell state…</button></div>}
-    {pendingAppRecovery && <div className="app-tab-recovery" role="status"><strong>App tabs found from the replaced tmux server</strong><span>{pendingAppRecovery.count} tab{pendingAppRecovery.count === 1 ? "" : "s"} can be rebound by unique workspace name. Terminal and pane identities are never reused.</span><div><button onClick={() => {
+  const sidebarWidth = sidebarWidthForWindow(appState.shell.sidebarWidth, windowWidth);
+  const sidebarOpen = !appState.shell.sidebarCollapsed;
+
+  return <main
+    className={[
+      "shell",
+      sidebarOpen ? "" : "sidebar-collapsed",
+      appState.shell.panelOpen ? "panel-open" : "",
+      compactViewport ? "compact" : "",
+      platform === "mac" ? "platform-mac" : "platform-linux",
+    ].filter(Boolean).join(" ")}
+    style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
+  >
+    <TitleBar
+      branch={workspaceGit.status?.repository.headName}
+      canMutate={hostState.canMutate}
+      onBell={() => void runCommand("agents.jumpUnread")}
+      onNewWorkspace={() => void runCommand("session.new")}
+      onTogglePanel={() => void runCommand("view.togglePanel")}
+      onToggleSidebar={() => void runCommand("view.toggleSidebar")}
+      panelOpen={appState.shell.panelOpen}
+      platform={platform}
+      sidebarOpen={sidebarOpen}
+      unread={unread}
+      workspaceName={activeSession?.name}
+    />
+    <DisconnectedStrip
+      detail={connectionDetail || (hostState.phase === "connected" ? "" : status)}
+      hasSnapshot={snapshot.sessions.length > 0}
+      onOpenSettings={() => setSettingsOpen(true)}
+      onReconnect={() => setConnectionEpoch((value) => value + 1)}
+      phase={hostState.phase}
+    />
+    <div className="shell-body">
+      {sidebarOpen && <WorkspaceSidebar
+        adapters={agentRuntime.adapters}
+        agents={agentRows}
+        agentSort={appState.shell.agentSort}
+        agentsRatio={appState.shell.agentsSectionRatio}
+        canMutate={hostState.canMutate}
+        hostLabel={connection.mode === "local" ? "local" : connection.target}
+        latencyMs={latency?.milliseconds}
+        onAgentsRatio={(ratio) => updateShell({ agentsSectionRatio: Math.min(0.75, Math.max(0.15, ratio)) })}
+        onLaunchAgent={agentWorkflow.launch}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onRenameAgent={(agent) => setTextPrompt({
+          title: "Rename agent",
+          label: "Agent name",
+          initialValue: agent.displayName,
+          submit: (name) => { setTextPrompt(undefined); agentWorkflow.rename(agent, name); },
+        })}
+        onResumeAgent={agentWorkflow.resume}
+        onReviewHooks={agentWorkflow.reviewHooks}
+        onSelectAgent={selectAgentRow}
+        onSelectWorkspace={selectSession}
+        onSortMode={(mode) => updateShell({ agentSort: mode })}
+        onWorkspaceCommand={(session, commandId) => void runCommand(commandId, { kind: "session", id: session.id })}
+        phase={hostState.phase}
+        rows={sidebarRows}
+        stateGlyphs={appState.shell.agentStateGlyphs}
+        transport={connection.mode}
+      />}
+      <section className="workspace" aria-label={activeSession ? `Workspace ${activeSession.name}` : "Workspace"}>
+        <TabStrip
+          activeKey={activeCombinedTabKey}
+          canMutate={hostState.canMutate && Boolean(activeSession)}
+          canSplit={hostState.canMutate && Boolean(activePane) && !selectedAppTab}
+          onClose={closeCombinedTab}
+          onMove={moveCombinedTab}
+          onNewTerminal={() => void runCommand("window.new")}
+          onRenameTerminal={(tab) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id })}
+          onSelect={selectCombinedTab}
+          onSplit={() => void runCommand("pane.splitRight")}
+          tabs={combinedTabs}
+        />
+        <div
+          aria-label={activeCombinedTabKey ? undefined : "Workspace content"}
+          aria-labelledby={activeCombinedTabKey ? workspaceTabDomId(activeCombinedTabKey) : undefined}
+          className="workspace-content"
+          id={activeCombinedTabKey ? workspaceTabPanelDomId(activeCombinedTabKey) : undefined}
+          role="tabpanel"
+          tabIndex={0}
+        >
+          {selectedAppTab ? <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>{selectedAppTab.kind === "gitDiff" ? <GitDiffSurface
+            activeRoot={workspaceFiles.root}
+            canWrite={hostState.canMutate}
+            client={gitClient}
+            onMessage={setStatus}
+            onStatus={(next) => { if (workspaceFiles.root?.path === next.repository.worktreeRoot) workspaceGit.accept(next); }}
+            scope={fileScope}
+            tab={selectedAppTab}
+            key={`${selectedAppTab.hostProfileId}\0${selectedAppTab.serverIdentity}\0${selectedAppTab.sessionId}\0${selectedAppTab.id}\0${selectedAppTab.gitRepositoryId}\0${selectedAppTab.gitPath}\0${selectedAppTab.gitTarget}`}
+          /> : <AppTabSurface
+            activeRoot={workspaceFiles.root}
+            canWrite={hostState.canMutate}
+            client={fileClient}
+            onDownload={(path, kind, root) => setPendingDownload({ path, kind, root })}
+            onStatus={setStatus}
+            onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, selectedAppTab.id, viewMode))}
+            scope={fileScope}
+            tab={selectedAppTab}
+            key={`${selectedAppTab.hostProfileId}\0${selectedAppTab.serverIdentity}\0${selectedAppTab.sessionId}\0${selectedAppTab.id}\0${selectedAppTab.resource}`}
+          />}</Suspense> : <TerminalWorkspaceSurface
+            activePane={activePane}
+            activeWindow={activeWindow}
+            beginDividerDrag={beginDividerDrag}
+            clientId={clientId}
+            controllers={controllers}
+            onMeasurements={onMeasurements}
+            grid={grid}
+            handleInput={handleInput}
+            hub={hub}
+            mountedPanes={mountedPanes}
+            paneAttention={agentRuntime.rollups.byPane}
+            panes={panes}
+            performAction={performAction}
+            setStatus={setStatus}
+            snapshot={snapshot}
+            surfaceRef={surfaceRef}
+            terminalTransferClient={terminalTransferClient}
+            terminalTransferRegistry={terminalTransferRegistry}
+            terminalTransferScope={terminalTransferScope}
+          />}
+        </div>
+      </section>
+      {appState.shell.panelOpen && <RightPanel
+        files={<ExplorerTree
+          disabled={!hostState.canMutate}
+          error={workspaceFiles.error}
+          expanded={workspaceFiles.expanded}
+          listings={workspaceFiles.listings}
+          loading={workspaceFiles.loading}
+          onCancelTransfer={async (id) => { if (fileScope) await fileClient.cancelTransfer(fileScope, id); }}
+          onDownload={async (request) => { if (workspaceFiles.root) setPendingDownload({ root: workspaceFiles.root, path: request.path, kind: request.kind }); }}
+          onLoadMore={workspaceFiles.loadMore}
+          onMutate={mutateFile}
+          onOpen={openExplorerEntry}
+          onRefresh={workspaceFiles.refresh}
+          onToggle={workspaceFiles.toggleDirectory}
+          root={workspaceFiles.root}
+          scopeIdentity={fileScope ? keyForScope(fileScope) : "disconnected"}
+          transfers={workspaceFiles.transfers}
+        />}
+        git={<GitSidebar
+          client={gitClient}
+          disabled={!hostState.canMutate}
+          error={workspaceGit.error}
+          loading={workspaceGit.loading}
+          onMessage={setStatus}
+          onOpenDiff={(entry, target) => {
+            if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
+            setAppState((current) => openGitDiffTab(
+              current,
+              currentHostProfileId,
+              hostState.serverIdentity!,
+              activeSession,
+              entry,
+              target,
+              workspaceGit.status!,
+              workspaceFiles.root!,
+            ));
+          }}
+          onRefresh={() => void workspaceGit.refresh()}
+          onStatus={workspaceGit.accept}
+          root={workspaceFiles.root}
+          scope={fileScope}
+          status={workspaceGit.status}
+        />}
+        onSurface={(surface) => void runCommand(surface === "files" ? "view.showFiles" : "view.showGit")}
+        surface={appState.shell.panelSurface}
+      />}
+    </div>
+
+    {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}
+    {appStateRecovery && <div className="toast" role="alert"><strong>Saved shell state is write-frozen</strong><span>{appStateRecovery}</span><button onClick={() => setAppStateResetConfirmation(true)} type="button">Reset saved shell state…</button></div>}
+    {pendingAppRecovery && <div className="toast" role="status"><strong>App tabs found from the replaced tmux server</strong><span>{pendingAppRecovery.count} tab{pendingAppRecovery.count === 1 ? "" : "s"} can be rebound by unique workspace name. Terminal and pane identities are never reused.</span><div><button onClick={() => {
       if (!sameHostScope(pendingAppRecovery.scope, hostScopeRef.current)) return setPendingAppRecovery(undefined);
       setAppState((current) => recoverAppTabsFromPreviousServer(current, pendingAppRecovery.hostProfileId, pendingAppRecovery.previousServerIdentity, pendingAppRecovery.currentServerIdentity, snapshot.sessions));
       setPendingAppRecovery(undefined);
     }} type="button">Restore app tabs</button><button onClick={() => setAppRecoveryDiscardConfirmation(true)} type="button">Discard old tabs…</button></div></div>}
-    <WorkspaceRail
-      activeSessionId={activeSessionId}
-      attentionByWorkspace={agentRuntime.rollups.byWorkspace}
-      canMutate={hostState.canMutate}
-      onCommand={(session, commandId) => void runCommand(commandId, { kind: "session", id: session.id })}
-      onCreate={() => void runCommand("session.new")}
-      onSelect={selectSession}
-      sessions={snapshot.sessions}
-    />
-    <ExplorerGitSidebar
-      activePane={activePane}
-      activeRoot={workspaceFiles.root?.path}
-      collapsed={appState.shell.explorerCollapsed}
+
+    <TerminalTransferHistory client={terminalTransferClient} onError={(error) => setStatus(String(error))} registry={terminalTransferRegistry} />
+    {agentWorkflow.dialog}
+    {settingsOpen && <SettingsDialog
       connection={connection}
       connectionMode={connectionMode}
-      onConnect={connect}
+      helper={helperState}
+      onClose={() => setSettingsOpen(false)}
+      onConnect={() => { connect(); setSettingsOpen(false); }}
       onConnectionMode={setConnectionMode}
+      onProbeHelper={() => void probeHelper()}
       onProfile={selectProfile}
+      onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
+      onShell={updateShell}
+      onSounds={(preferences) => { setAgentSounds(preferences); saveAgentSoundPreferences(preferences); }}
       onSshConfigPath={setSshConfigPath}
       onSshTarget={setSshTarget}
-      onSurface={(surface) => void runCommand(surface === "explorer" ? "view.showExplorer" : "view.showGit")}
-      onToggleCollapsed={() => void runCommand("view.toggleExplorer")}
       profiles={profiles}
+      remote={connection.mode === "ssh"}
+      shell={appState.shell}
+      sounds={agentSounds}
       sshConfigPath={sshConfigPath}
       sshTarget={sshTarget}
-      surface={appState.shell.explorerSurface}
-      explorer={<ExplorerTree
-        disabled={!hostState.canMutate}
-        error={workspaceFiles.error}
-        expanded={workspaceFiles.expanded}
-        listings={workspaceFiles.listings}
-        loading={workspaceFiles.loading}
-        onCancelTransfer={async (id) => { if (fileScope) await fileClient.cancelTransfer(fileScope, id); }}
-        onDownload={async (request) => { if (workspaceFiles.root) setPendingDownload({ root: workspaceFiles.root, path: request.path, kind: request.kind }); }}
-        onLoadMore={workspaceFiles.loadMore}
-        onMutate={mutateFile}
-        onOpen={openExplorerEntry}
-        onRefresh={workspaceFiles.refresh}
-        onToggle={workspaceFiles.toggleDirectory}
-        root={workspaceFiles.root}
-        scopeIdentity={fileScope ? keyForScope(fileScope) : "disconnected"}
-        transfers={workspaceFiles.transfers}
-      />}
-      git={<GitSidebar
-        client={gitClient}
-        disabled={!hostState.canMutate}
-        error={workspaceGit.error}
-        loading={workspaceGit.loading}
-        onMessage={setStatus}
-        onOpenDiff={(entry, target) => {
-          if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
-          setAppState((current) => openGitDiffTab(
-            current,
-            currentHostProfileId,
-            hostState.serverIdentity!,
-            activeSession,
-            entry,
-            target,
-            workspaceGit.status!,
-            workspaceFiles.root!,
-          ));
-        }}
-        onRefresh={() => void workspaceGit.refresh()}
-        onStatus={workspaceGit.accept}
-        root={workspaceFiles.root}
-        scope={fileScope}
-        status={workspaceGit.status}
-      />}
-    />
-    <section className="workspace" aria-label={activeSession ? `Workspace ${activeSession.name}` : "Workspace"}>
-      <ConnectionBanner
-        detail={connectionDetail || status}
-        hasSnapshot={snapshot.sessions.length > 0}
-        helper={helperState}
-        onProbeHelper={() => void probeHelper()}
-        onReconnect={() => setConnectionEpoch((value) => value + 1)}
-        onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
-        phase={hostState.phase}
-        remote={connection.mode === "ssh"}
-      />
-      <CombinedTabStrip
-        activeKey={activeCombinedTabKey}
-        canMutate={hostState.canMutate && Boolean(activeSession)}
-        commandMenu={commandMenu}
-        onClose={closeCombinedTab}
-        onMove={moveCombinedTab}
-        onNewTerminal={() => void runCommand("window.new")}
-        onOpenPalette={() => void runCommand("commands.show")}
-        onRenameTerminal={(tab) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id })}
-        onSelect={selectCombinedTab}
-        tabs={combinedTabs}
-      />
-      <div
-        aria-label={activeCombinedTabKey ? undefined : "Workspace content"}
-        aria-labelledby={activeCombinedTabKey ? workspaceTabDomId(activeCombinedTabKey) : undefined}
-        className="workspace-content"
-        id={activeCombinedTabKey ? workspaceTabPanelDomId(activeCombinedTabKey) : undefined}
-        role="tabpanel"
-        tabIndex={0}
-      >
-        {selectedAppTab ? <Suspense fallback={<div className="empty">Loading editor…</div>}>{selectedAppTab.kind === "gitDiff" ? <GitDiffSurface
-          activeRoot={workspaceFiles.root}
-          canWrite={hostState.canMutate}
-          client={gitClient}
-          onMessage={setStatus}
-          onStatus={(next) => { if (workspaceFiles.root?.path === next.repository.worktreeRoot) workspaceGit.accept(next); }}
-          scope={fileScope}
-          tab={selectedAppTab}
-          key={`${selectedAppTab.hostProfileId}\0${selectedAppTab.serverIdentity}\0${selectedAppTab.sessionId}\0${selectedAppTab.id}\0${selectedAppTab.gitRepositoryId}\0${selectedAppTab.gitPath}\0${selectedAppTab.gitTarget}`}
-        /> : <AppTabSurface
-          activeRoot={workspaceFiles.root}
-          canWrite={hostState.canMutate}
-          client={fileClient}
-          onDownload={(path, kind, root) => setPendingDownload({ path, kind, root })}
-          onStatus={setStatus}
-          onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, selectedAppTab.id, viewMode))}
-          scope={fileScope}
-          tab={selectedAppTab}
-          key={`${selectedAppTab.hostProfileId}\0${selectedAppTab.serverIdentity}\0${selectedAppTab.sessionId}\0${selectedAppTab.id}\0${selectedAppTab.resource}`}
-        />}</Suspense> : <TerminalWorkspaceSurface
-          activePane={activePane}
-          activeWindow={activeWindow}
-          beginDividerDrag={beginDividerDrag}
-          clientId={clientId}
-          controllers={controllers}
-          onMeasurements={onMeasurements}
-          grid={grid}
-          handleInput={handleInput}
-          hub={hub}
-          mountedPanes={mountedPanes}
-          panes={panes}
-          performAction={performAction}
-          setStatus={setStatus}
-          snapshot={snapshot}
-          surfaceRef={surfaceRef}
-          terminalTransferClient={terminalTransferClient}
-          terminalTransferRegistry={terminalTransferRegistry}
-          terminalTransferScope={terminalTransferScope}
-        />}
-      </div>
-    </section>
-    <TerminalTransferHistory client={terminalTransferClient} onError={(error) => setStatus(String(error))} registry={terminalTransferRegistry} />
-    <AgentPanel
-      canMutate={hostState.canMutate}
-      collapsed={appState.shell.agentSidebarCollapsed}
-      launchContext={activeSession && activeWindow && activePane && workspaceFiles.root ? { sessionId: activeSession.id, windowId: activeWindow.id, paneId: activePane.id, root: workspaceFiles.root } : undefined}
-      onModalChange={setAgentModalOpen}
-      onSelect={(agent) => {
-        notificationActivation.clearNotificationFocusGuard();
-        if (!agent.paneId) return setStatus(`Agent ${agent.displayName} has no exact pane match; navigation is unavailable.`);
-        const destination = resolveTerminalDestination(snapshot.panes, agent.paneId);
-        if (destination.kind === "unavailable") return setStatus(`Agent destination ${agent.displayName} is no longer available: ${destination.reason}.`);
-        void surfacePaneDestination(destination.pane, `Agent ${agent.displayName}`);
-      }}
-      onSoundPreferences={setAgentSounds}
-      onStatus={setStatus}
-      onToggle={() => void runCommand("view.toggleAgents")}
-      runtime={agentRuntime}
-      soundPreferences={agentSounds}
-    />
+    />}
+    {workspaceSwitcherOpen && <WorkspaceSwitcher
+      onClose={() => setWorkspaceSwitcherOpen(false)}
+      onSelect={selectSession}
+      rows={sidebarRows}
+    />}
     <AppDialogLayer
       appRecoveryDiscard={appRecoveryDiscardConfirmation ? pendingAppRecovery : undefined}
       appStateResetConfirmation={appStateResetConfirmation}
@@ -797,5 +943,7 @@ export function App() {
       textPrompt={textPrompt}
     />
     <div className="sr-only" aria-live="polite">{status}</div>
+    {/* Navigation history has no chrome; these keep it reachable and reported. */}
+    <div className="sr-only">{canGoBack(focusHistory) ? "Back available" : ""}{canGoForward(focusHistory) ? " Forward available" : ""}</div>
   </main>;
 }

@@ -1,5 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
+import { ContextMenu, type ContextMenuAnchor } from "../../ui/ContextMenu";
+import { Icon } from "../../ui/Icon";
 import type { ActiveRoot, DirectoryListing, DownloadRequest, FileEntry, FileMutation, TransferStatus } from "./types";
 import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
 
@@ -24,7 +26,10 @@ interface Props {
 type PendingAction = { action: "newFile" | "newDirectory" | "rename" | "move" | "duplicate" | "delete"; rootToken: string; scopeIdentity: string; entry?: FileEntry };
 
 export function ExplorerTree(props: Props) {
-  const [menu, setMenu] = useState<string>();
+  // One right-click menu replaces the per-row `•••` button that used to appear
+  // on hover, and the three header buttons above it. Nothing in this tree is a
+  // resting control any more.
+  const [menu, setMenu] = useState<{ entry?: FileEntry; anchor: ContextMenuAnchor }>();
   const [pending, setPending] = useState<PendingAction>();
   const [value, setValue] = useState("");
   const [overwrite, setOverwrite] = useState(false);
@@ -32,7 +37,6 @@ export function ExplorerTree(props: Props) {
   const [dialogError, setDialogError] = useState<string>();
   const [focusIndex, setFocusIndex] = useState(0);
   const treeRef = useRef<HTMLDivElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
   const composing = useRef(false);
   const dialogTitleId = useId();
   const closeDialog = () => setPending(undefined);
@@ -41,9 +45,6 @@ export function ExplorerTree(props: Props) {
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded) : [], [props.expanded, props.listings, props.root]);
   useEffect(() => setFocusIndex((current) => Math.min(current, Math.max(0, rows.length - 1))), [rows.length]);
   useEffect(() => setPending(undefined), [props.root?.token, props.scopeIdentity]);
-  useEffect(() => {
-    if (menu) menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
-  }, [menu]);
 
   const focusRow = (index: number) => {
     const next = Math.max(0, Math.min(rows.length - 1, index));
@@ -116,15 +117,22 @@ export function ExplorerTree(props: Props) {
   return <div className="explorer-tree">
     <header className="explorer-root">
       <span title={props.root?.path}>{rootName}</span>
-      {props.root && <small>{props.root.gitWorktree ? "Git worktree" : "pane CWD"}</small>}
-      <div>
-        <button aria-label="New file" disabled={props.disabled || !props.root} onClick={() => begin("newFile")} type="button">＋F</button>
-        <button aria-label="New folder" disabled={props.disabled || !props.root} onClick={() => begin("newDirectory")} type="button">＋D</button>
-        <button aria-label="Refresh Explorer" onClick={() => props.onRefresh()} type="button">↻</button>
-      </div>
+      {props.root && <small>{props.root.gitWorktree ? "git worktree" : "pane cwd"}</small>}
     </header>
-    {props.error && <div className="explorer-error" role="alert">{props.error}</div>}
-    <div aria-label="Files" className="file-tree" ref={treeRef} role="tree">
+    {props.error && <div className="surface-error" role="alert">{props.error}</div>}
+    <div
+      aria-label="Files"
+      className="file-tree"
+      onContextMenu={(event) => {
+        // Right-clicking the empty area below the tree acts on the root, which
+        // is where "new file" and "refresh" went when the header buttons did.
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        setMenu({ anchor: { x: event.clientX, y: event.clientY } });
+      }}
+      ref={treeRef}
+      role="tree"
+    >
       {rows.map((row, index) => {
         if (row.kind === "more") return <button aria-level={row.depth + 1} className="load-more-files" data-tree-index={index} disabled={props.loading.has(row.directory)} key={`more:${row.directory}`} onClick={() => props.onLoadMore(row.directory)} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
@@ -132,36 +140,46 @@ export function ExplorerTree(props: Props) {
         const { entry, depth } = row;
         const isDirectory = entry.kind === "directory";
         const isOpen = props.expanded.has(entry.path);
-        return <div aria-expanded={entry.expandable ? isOpen : undefined} aria-level={depth + 1} aria-selected={index === focusIndex} className="file-row" data-tree-index={index} key={entry.path} onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry); }} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => navigateEntry(event, index, depth, entry)} role="treeitem" style={{ paddingLeft: `${8 + depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1}>
+        return <div aria-expanded={entry.expandable ? isOpen : undefined} aria-level={depth + 1} aria-selected={index === focusIndex} className="file-row" data-tree-index={index} key={entry.path} onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry); }} onContextMenu={(event) => {
+          event.preventDefault();
+          focusRow(index);
+          setMenu({ entry, anchor: { x: event.clientX, y: event.clientY } });
+        }} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => navigateEntry(event, index, depth, entry)} role="treeitem" style={{ paddingLeft: `${8 + depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1}>
           <button className="file-main" onClick={() => entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry)} tabIndex={-1} type="button">
-            <span aria-hidden="true">{entry.expandable ? (isOpen ? "⌄" : "›") : "·"}</span>
-            <span aria-hidden="true">{isDirectory ? "▱" : entry.kind === "symlink" ? "↗" : "▧"}</span>
+            <span className="file-twisty">{entry.expandable ? <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={11} /> : null}</span>
+            <span className={`file-state ${entry.kind}`}>{entry.kind === "directory" ? "d" : entry.kind === "symlink" ? "l" : "·"}</span>
             <span title={entryTooltip(entry)}>{entry.name}</span>
           </button>
-          <button aria-label={`Actions for ${entry.name}`} className="file-actions" onClick={() => setMenu(menu === entry.path ? undefined : entry.path)} type="button">•••</button>
-          {menu === entry.path && <div className="file-menu" onKeyDown={(event) => {
-            const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
-            const current = items.indexOf(document.activeElement as HTMLButtonElement);
-            let next: number | undefined;
-            if (event.key === "ArrowDown") next = (current + 1) % items.length;
-            else if (event.key === "ArrowUp") next = (current - 1 + items.length) % items.length;
-            else if (event.key === "Home") next = 0;
-            else if (event.key === "End") next = items.length - 1;
-            else if (event.key === "Escape") { event.preventDefault(); setMenu(undefined); return; }
-            if (next !== undefined) { event.preventDefault(); items[next]?.focus(); }
-          }} ref={menuRef} role="menu">
-            {!isDirectory && <button onClick={() => props.onOpen(entry)} role="menuitem" type="button">Open</button>}
-            <button disabled={props.disabled} onClick={() => begin("rename", entry)} role="menuitem" type="button">Rename…</button>
-            <button disabled={props.disabled} onClick={() => { setValue(""); begin("move", entry); }} role="menuitem" type="button">Move…</button>
-            <button disabled={props.disabled} onClick={() => begin("duplicate", entry)} role="menuitem" type="button">Duplicate…</button>
-            <button onClick={() => void props.onDownload({ path: entry.path, kind: isDirectory ? "folder" : "file", collision: "fail" })} role="menuitem" type="button">Download{isDirectory ? " Folder" : ""}…</button>
-            <button className="danger-text" disabled={props.disabled} onClick={() => begin("delete", entry)} role="menuitem" type="button">Delete…</button>
-          </div>}
         </div>;
       })}
-      {props.root && props.loading.has(props.root.path) && <div className="tree-loading" role="status">Loading…</div>}
-      {!props.root && <div className="tree-empty">Select a live terminal pane.</div>}
+      {props.root && props.loading.has(props.root.path) && <p className="quiet-empty" role="status">Loading…</p>}
+      {!props.root && <p className="quiet-empty">Select a live terminal pane.</p>}
+      {props.root && rows.length === 0 && !props.loading.has(props.root.path) && <p className="quiet-empty">This directory is empty.</p>}
     </div>
+    {menu && <ContextMenu
+      anchor={menu.anchor}
+      items={menu.entry
+        ? [
+          ...(menu.entry.kind === "directory" ? [] : [{ id: "open", label: "Open", run: () => props.onOpen(menu.entry!) }]),
+          { id: "rename", label: "Rename…", disabled: props.disabled, run: () => begin("rename", menu.entry) },
+          { id: "move", label: "Move…", disabled: props.disabled, run: () => { setValue(""); begin("move", menu.entry); } },
+          { id: "duplicate", label: "Duplicate…", disabled: props.disabled, run: () => begin("duplicate", menu.entry) },
+          { id: "download", label: menu.entry.kind === "directory" ? "Download folder…" : "Download…", run: () => void props.onDownload({ path: menu.entry!.path, kind: menu.entry!.kind === "directory" ? "folder" : "file", collision: "fail" }) },
+          "separator" as const,
+          { id: "newFile", label: "New file…", disabled: props.disabled || !props.root, run: () => begin("newFile", menu.entry) },
+          { id: "newDirectory", label: "New folder…", disabled: props.disabled || !props.root, run: () => begin("newDirectory", menu.entry) },
+          "separator" as const,
+          { id: "delete", label: "Delete…", destructive: true, disabled: props.disabled, run: () => begin("delete", menu.entry) },
+        ]
+        : [
+          { id: "newFile", label: "New file…", disabled: props.disabled || !props.root, run: () => begin("newFile") },
+          { id: "newDirectory", label: "New folder…", disabled: props.disabled || !props.root, run: () => begin("newDirectory") },
+          "separator" as const,
+          { id: "refresh", label: "Refresh", run: () => props.onRefresh() },
+        ]}
+      label={menu.entry ? `Actions for ${menu.entry.name}` : "Explorer actions"}
+      onClose={() => setMenu(undefined)}
+    />}
     {props.transfers.length > 0 && <section aria-label="Downloads" className="transfers">
       <h3>Downloads</h3>
       {props.transfers.map((transfer) => <div aria-label={`Download ${transfer.path}: ${transferStateLabel(transfer.state)}`} className={`transfer ${transfer.state}`} key={transfer.id}>
@@ -186,7 +204,7 @@ export function ExplorerTree(props: Props) {
       </label>}
       {["rename", "move", "duplicate"].includes(pending.action) && <label className="overwrite"><input checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} type="checkbox" /> Allow overwrite after confirmation</label>}
       {["rename", "move", "duplicate"].includes(pending.action) && overwrite && <label className="overwrite"><input checked={nonEmptyOverwrite} onChange={(event) => setNonEmptyOverwrite(event.target.checked)} type="checkbox" /> Also replace a non-empty destination directory</label>}
-      {dialogError && <div className="explorer-error" role="alert">{dialogError}</div>}
+      {dialogError && <div className="surface-error" role="alert">{dialogError}</div>}
       <div className="dialog-actions"><button onClick={() => setPending(undefined)} type="button">Cancel</button><button className={pending.action === "delete" ? "danger" : "primary"} type="submit">{pending.action === "delete" ? "Delete" : "Apply"}</button></div>
     </form></div>}
   </div>;
