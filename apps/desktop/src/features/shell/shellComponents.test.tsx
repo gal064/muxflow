@@ -129,6 +129,20 @@ describe("application shell accessibility contracts", () => {
     expect(quiet).toContain("No workspace");
   });
 
+  it("reserves traffic-light room on macOS only, because only macOS overlays them", () => {
+    const bar = (platform: "mac" | "linux") => renderToStaticMarkup(<TitleBar
+      canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      onToggleSidebar={noop} panelOpen={false} platform={platform} sidebarOpen unread={0}
+    />);
+    // `titleBarStyle: "Overlay"` is a macOS-only Tauri option; a Linux window
+    // keeps its native decorations, so the 78px reservation there would be
+    // dead space beside a real title bar.
+    expect(bar("mac")).toContain("titlebar-overlay");
+    expect(bar("linux")).not.toContain("titlebar-overlay");
+    // Everything else about the bar is identical across platforms.
+    expect([...bar("linux").matchAll(/<button/gu)]).toHaveLength([...bar("mac").matchAll(/<button/gu)].length);
+  });
+
   it("shows nothing while connected, and one explained line while not", () => {
     expect(renderToStaticMarkup(<DisconnectedStrip
       detail="" hasSnapshot onOpenSettings={noop} onReconnect={noop} phase="connected"
