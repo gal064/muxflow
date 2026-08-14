@@ -64,13 +64,17 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 /* ── Shell ─────────────────────────────────────────────────────────────── */
 
+/* A column, not a grid with named rows. The disconnected strip renders nothing
+   at all while the link is healthy, and under grid auto-placement its absent
+   row let the body land in the `auto` track — where it sized to its own content
+   and left 136px of empty window below it. A flex column has no positional
+   dependency on how many children happen to exist. */
 .shell {
-  display: grid;
-  grid-template-rows: var(--bar-height) auto minmax(0, 1fr);
+  display: flex; flex-direction: column;
   width: 100%; height: 100%; min-width: 0;
   background: var(--chrome-bg);
 }
-.shell-body { display: flex; min-width: 0; min-height: 0; }
+.shell-body { flex: 1 1 auto; display: flex; min-width: 0; min-height: 0; }
 
 /* ── Titlebar ──────────────────────────────────────────────────────────── */
 
@@ -79,7 +83,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   height: var(--bar-height); padding: 0 6px;
   background: var(--chrome-bg); border-bottom: 1px solid var(--chrome-hairline);
 }
-/* macOS draws its traffic lights over this bar; leave them room. */
+/* macOS draws its traffic lights over this bar, because the window is
+   configured `titleBarStyle: "Overlay"` with `hiddenTitle` in
+   src-tauri/tauri.conf.json. If that config is ever changed, this reservation
+   becomes 78px of dead space beside a native title bar — the two belong
+   together. */
 .titlebar-overlay { padding-left: 78px; }
 .titlebar-title {
   display: flex; align-items: baseline; gap: 7px; min-width: 0;
@@ -144,10 +152,15 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* ── Sidebar ───────────────────────────────────────────────────────────── */
 
 .sidebar {
+  position: relative;
   display: flex; flex-direction: column;
   width: var(--sidebar-width); flex: 0 0 var(--sidebar-width);
   min-height: 0; padding: 6px 6px 0;
   background: var(--chrome-bg); border-right: 1px solid var(--chrome-hairline);
+}
+.sidebar-resize {
+  position: absolute; z-index: 8; top: 0; bottom: 0; right: -3px; width: 7px;
+  cursor: col-resize; touch-action: none;
 }
 .sidebar-section { display: flex; flex-direction: column; min-height: 0; }
 .sidebar-workspaces { flex: 1 1 auto; }
@@ -664,8 +677,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 0; background: transparent; color: var(--chrome-ink);
   font-size: var(--type-row); text-align: left;
 }
-.palette-row.selected:not(:disabled) { background: var(--accent); color: var(--accent-ink); }
-.palette-row.selected:not(:disabled) kbd, .palette-row.selected:not(:disabled) .palette-meta { color: color-mix(in srgb, var(--accent-ink) 80%, transparent); }
+.palette-row[data-unavailable] { opacity: .42; cursor: not-allowed; }
+.palette-row.selected:not([data-unavailable]) { background: var(--accent); color: var(--accent-ink); }
+.palette-row.selected:not([data-unavailable]) kbd,
+.palette-row.selected:not([data-unavailable]) .palette-meta { color: color-mix(in srgb, var(--accent-ink) 80%, transparent); }
 .palette-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-meta {
   margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -813,13 +828,17 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* Below 880px the sidebar and the panel overlay the terminal rather than
    taking width from it, so the product stays visible at any window size. */
 @media (max-width: 880px) {
+  /* Positioned inside `.shell-body`, not against the viewport: anchoring to a
+     fixed offset from the top would cover the disconnected strip whenever it
+     is showing, which is exactly when it matters. */
+  .shell.compact .shell-body { position: relative; }
   .shell.compact .sidebar {
-    position: fixed; z-index: 25; top: var(--bar-height); bottom: 0; left: 0;
+    position: absolute; z-index: 25; top: 0; bottom: 0; left: 0;
     width: min(var(--sidebar-width), 80vw);
     box-shadow: 12px 0 30px rgb(0 0 0 / .7);
   }
   .shell.compact .right-panel {
-    position: fixed; z-index: 25; top: var(--bar-height); bottom: 0; right: 0;
+    position: absolute; z-index: 25; top: 0; bottom: 0; right: 0;
     width: min(var(--panel-width), 80vw);
     box-shadow: -12px 0 30px rgb(0 0 0 / .7);
   }

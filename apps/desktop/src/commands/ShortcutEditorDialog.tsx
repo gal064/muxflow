@@ -28,7 +28,10 @@ export function ShortcutEditorDialog({ overrides, platform, onChange, onClose }:
             portable `Meta+Shift+P` form, because that is what the user types
             and what is stored; the glyphs beside it show what it will look
             like everywhere else. */}
-        {commandsForSurface("shortcuts").filter((command) => command.defaults).map((command, index) => {
+        {/* Everything bindable, not just what already has a default: a command
+            with no default binding is precisely the one a user needs this
+            dialog for. */}
+        {commandsForSurface("shortcuts").map((command, index) => {
           const value = draft[command.id] ?? shortcutFor(command, platform, {}) ?? "";
           return <label key={command.id}>
             <span><strong>{command.title}</strong><small>{command.group}</small></span>

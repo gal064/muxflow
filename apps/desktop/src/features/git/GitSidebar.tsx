@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
-import { ContextMenu, type ContextMenuAnchor } from "../../ui/ContextMenu";
+import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { GitCommandResult, GitDiffTarget, GitMutationRequest, GitStatusEntry, GitStatusSnapshot, GitWorkspaceClient } from "./types";
 
@@ -168,6 +168,13 @@ function GitGroup(props: {
             if (!props.onMenu) return;
             event.preventDefault();
             props.onMenu(entry, { x: event.clientX, y: event.clientY });
+          }}
+          // Stage, unstage and discard live only on that menu, so the keyboard
+          // gets the same way in.
+          onKeyDown={(event) => {
+            if (!props.onMenu || !isContextMenuKey(event)) return;
+            event.preventDefault();
+            props.onMenu(entry, anchorForElement(event.currentTarget));
           }}
           title={`${entry.displayPath} · ${statusTitle(entry, props.target)}`}
           type="button"

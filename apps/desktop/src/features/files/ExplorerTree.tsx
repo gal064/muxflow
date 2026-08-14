@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
-import { ContextMenu, type ContextMenuAnchor } from "../../ui/ContextMenu";
+import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { Icon } from "../../ui/Icon";
 import type { ActiveRoot, DirectoryListing, DownloadRequest, FileEntry, FileMutation, TransferStatus } from "./types";
 import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
@@ -54,6 +54,13 @@ export function ExplorerTree(props: Props) {
 
   const navigateEntry = (event: KeyboardEvent<HTMLDivElement>, index: number, depth: number, entry: FileEntry) => {
     if (event.target !== event.currentTarget) return;
+    // Every file action is on the context menu, so the keyboard needs a way to
+    // open it or a keyboard-only user cannot rename, move or delete anything.
+    if (isContextMenuKey(event)) {
+      event.preventDefault();
+      setMenu({ entry, anchor: anchorForElement(event.currentTarget) });
+      return;
+    }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); return;
     }

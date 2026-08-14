@@ -37,7 +37,7 @@ import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
 import { RightPanel } from "../features/shell/RightPanel";
 import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
-import { canGoBack, canGoForward, emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
+import { emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
 import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
 import { helperConnectionKey, helperUpgradeReducer, initialHelperUpgradeState, type HelperInstallReport, type RemoteHelperProbe } from "../features/shell/helperUpgrade";
 import { profileIdForSshConnection } from "../features/shell/hostProfiles";
@@ -45,7 +45,7 @@ import { sameHostConnection, sameHostScope, type HostScopeToken } from "../featu
 import { useShellCommands } from "../features/shell/useShellCommands";
 import { collapseSidebarsForCompactViewport } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
-import { sidebarWidthForWindow, type ShellState } from "../features/shell/types";
+import { clampedAgentsRatio, sidebarWidthForWindow, type ShellState } from "../features/shell/types";
 import {
   combineWorkspaceTabs,
   discardServerAppState,
@@ -719,7 +719,9 @@ export function App() {
         canMutate={hostState.canMutate}
         hostLabel={connection.mode === "local" ? "local" : connection.target}
         latencyMs={latency?.milliseconds}
-        onAgentsRatio={(ratio) => updateShell({ agentsSectionRatio: Math.min(0.75, Math.max(0.15, ratio)) })}
+        onAgentsRatio={(ratio) => updateShell({ agentsSectionRatio: clampedAgentsRatio(ratio) })}
+        onWidth={(width) => updateShell({ sidebarWidth: sidebarWidthForWindow(width, windowWidth) })}
+        width={sidebarWidth}
         onLaunchAgent={agentWorkflow.launch}
         onOpenSettings={() => setSettingsOpen(true)}
         onRenameAgent={(agent) => setTextPrompt({
@@ -943,7 +945,5 @@ export function App() {
       textPrompt={textPrompt}
     />
     <div className="sr-only" aria-live="polite">{status}</div>
-    {/* Navigation history has no chrome; these keep it reachable and reported. */}
-    <div className="sr-only">{canGoBack(focusHistory) ? "Back available" : ""}{canGoForward(focusHistory) ? " Forward available" : ""}</div>
   </main>;
 }

@@ -32,10 +32,12 @@ const LINUX_MODIFIERS: Record<string, string> = {
   Meta: "Super",
 };
 
-/** The mock's order (⌃⌥⌘⇧), which is not the order shortcuts are stored in. */
-const MAC_MODIFIER_ORDER = ["Ctrl", "Alt", "Meta", "Shift"];
-/** Linux menus write the modifier words in this order. */
-const LINUX_MODIFIER_ORDER = ["Ctrl", "Alt", "Meta", "Shift"];
+/**
+ * Display order — the mock's ⌃⌥⌘⇧, which is not the order shortcuts are
+ * stored in. Both platforms order modifiers the same way; only the symbols
+ * differ.
+ */
+const MODIFIER_ORDER = ["Ctrl", "Alt", "Meta", "Shift"];
 
 const KEY_GLYPHS: Record<string, string> = {
   ArrowLeft: "←",
@@ -71,7 +73,7 @@ const LINUX_KEY_NAMES: Record<string, string> = {
 export function shortcutGlyphs(shortcut: string | undefined, platform: Platform): string | undefined {
   if (!shortcut) return undefined;
   const parts = shortcut.split("+").filter(Boolean);
-  const order = platform === "mac" ? MAC_MODIFIER_ORDER : LINUX_MODIFIER_ORDER;
+  const order = MODIFIER_ORDER;
   const table = platform === "mac" ? MAC_MODIFIERS : LINUX_MODIFIERS;
   const modifiers = order.filter((modifier) => parts.includes(modifier)).map((modifier) => table[modifier]);
   const rawKey = parts.find((part) => !order.includes(part));
@@ -96,8 +98,8 @@ export function shortcutSpoken(shortcut: string | undefined, platform: Platform)
     ? { Ctrl: "Control", Alt: "Option", Shift: "Shift", Meta: "Command" }
     : { Ctrl: "Control", Alt: "Alt", Shift: "Shift", Meta: "Super" };
   const parts = shortcut.split("+").filter(Boolean);
-  const modifiers = MAC_MODIFIER_ORDER.filter((modifier) => parts.includes(modifier)).map((modifier) => spokenModifiers[modifier]);
-  const rawKey = parts.find((part) => !MAC_MODIFIER_ORDER.includes(part));
+  const modifiers = MODIFIER_ORDER.filter((modifier) => parts.includes(modifier)).map((modifier) => spokenModifiers[modifier]);
+  const rawKey = parts.find((part) => !MODIFIER_ORDER.includes(part));
   const key = rawKey === undefined ? "" : rawKey.length === 1 ? rawKey.toUpperCase() : rawKey.replace(/([a-z])([A-Z])/gu, "$1 $2");
   const pieces = [...modifiers, key].filter(Boolean);
   return pieces.length ? pieces.join(" ") : undefined;

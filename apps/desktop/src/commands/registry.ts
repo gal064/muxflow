@@ -98,8 +98,8 @@ export const commandRegistry: readonly CommandDefinition[] = [
   // The mock draws these as titlebar arrows. They are commands instead: the
   // phase caps resting chrome, and two arrows that are usually both disabled
   // are the first thing that cap should spend.
-  { id: "focus.back", title: "Back to the previous terminal", group: "View" },
-  { id: "focus.forward", title: "Forward again", group: "View" },
+  { id: "focus.back", title: "Back to the previous terminal", group: "View", defaults: { mac: "Meta+[", linux: "Ctrl+[" } },
+  { id: "focus.forward", title: "Forward again", group: "View", defaults: { mac: "Meta+]", linux: "Ctrl+]" } },
   { id: "tab.previous", title: "Previous tab", group: "Terminal tab", defaults: { mac: "Meta+Shift+[", linux: "Ctrl+Shift+[" }, requires: "tab" },
   { id: "tab.next", title: "Next tab", group: "Terminal tab", defaults: { mac: "Meta+Shift+]", linux: "Ctrl+Shift+]" }, requires: "tab" },
   { id: "agents.jumpUnread", title: "Jump to the agent that needs you", group: "Agents", defaults: { mac: "Meta+Shift+U", linux: "Ctrl+Shift+U" } },

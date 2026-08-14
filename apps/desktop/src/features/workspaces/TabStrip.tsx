@@ -1,6 +1,6 @@
 import { useState, type KeyboardEvent } from "react";
 import { Icon, type IconName } from "../../ui/Icon";
-import { ContextMenu, type ContextMenuAnchor } from "../../ui/ContextMenu";
+import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import type { CombinedTab } from "../shell/model";
 
 interface TabStripProps {
@@ -39,13 +39,21 @@ const DOCUMENT_ICON: Record<string, IconName> = {
 export function TabStrip(props: TabStripProps) {
   const [menu, setMenu] = useState<{ tab: CombinedTab; anchor: ContextMenuAnchor }>();
 
-  const focusRelative = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: CombinedTab, index: number) => {
+    if (isContextMenuKey(event)) {
+      event.preventDefault();
+      setMenu({ tab, anchor: anchorForElement(event.currentTarget) });
+      return;
+    }
     let next = index;
     if (event.key === "ArrowLeft") next = Math.max(0, index - 1);
     else if (event.key === "ArrowRight") next = Math.min(props.tabs.length - 1, index + 1);
     else if (event.key === "Home") next = 0;
     else if (event.key === "End") next = props.tabs.length - 1;
-    else if (event.key === "Enter" || event.key === " ") return props.onSelect(props.tabs[index]);
+    // Enter and Space are deliberately not handled: a <button> already
+    // activates on both, and intercepting them here fired onSelect twice —
+    // which for a terminal tab meant two selectWindow actions sharing one
+    // captured generation, the second liable to be rejected as stale.
     else return;
     event.preventDefault();
     event.currentTarget.closest("[role=tablist]")?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
@@ -55,9 +63,14 @@ export function TabStrip(props: TabStripProps) {
     <div aria-label="Terminal tabs and documents" className="tabstrip-tabs" role="tablist">
       {props.tabs.map((tab, index) => {
         const active = tab.key === props.activeKey;
-        return <div className={active ? "tab active" : "tab"} key={tab.key}>
+        // `role="presentation"`: a generic element between a tablist and its
+        // tabs breaks ownership, and assistive technology then cannot say
+        // "tab 3 of 5".
+        return <div className={active ? "tab active" : "tab"} key={tab.key} role="presentation">
           <button
-            aria-controls={workspaceTabPanelDomId(tab.key)}
+            // Only the selected tab's panel exists in the DOM, so only the
+            // selected tab may claim to control one.
+            aria-controls={active ? workspaceTabPanelDomId(tab.key) : undefined}
             aria-selected={active}
             className="tab-select"
             id={workspaceTabDomId(tab.key)}
@@ -73,7 +86,7 @@ export function TabStrip(props: TabStripProps) {
               setMenu({ tab, anchor: { x: event.clientX, y: event.clientY } });
             }}
             onDoubleClick={() => { if (tab.kind === "terminal" && props.canMutate) props.onRenameTerminal(tab); }}
-            onKeyDown={(event) => focusRelative(event, index)}
+            onKeyDown={(event) => onTabKeyDown(event, tab, index)}
             role="tab"
             tabIndex={active ? 0 : -1}
             title={tab.kind === "app" ? tab.resource : `tmux window ${tab.id}`}
