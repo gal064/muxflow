@@ -324,11 +324,17 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    breathing room around it is an inset on this element (outside the measured
    box) rather than padding inside the panes: per-pane padding does not shrink
    with the pane, so it costs a split pane its bottom row. */
-.terminal-window { position: absolute; inset: 4px; min-height: 0; background: var(--chrome-bg); }
+/* Terminal-colored, not chrome-colored. tmux hands out whole rows and columns,
+   so a pane's pixel box is almost never an exact multiple of the cell size and
+   a few pixels are always left over at its edges. Painting the surface behind
+   the panes in chrome black turned that leftover into visible black bands
+   between splits; painting it in the terminal's own background makes it
+   disappear, and the dividers below are drawn deliberately instead. */
+.terminal-window { position: absolute; inset: 4px; min-height: 0; background: var(--term-bg); }
 /* The frame's edge is drawn, not laid out: an inset shadow costs no pixels,
    while a border costs each pane the same width however small the pane is, and
    the tmux client size can only give that allowance back in proportion. */
-.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); }
+.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); box-shadow: inset -1px -1px 0 var(--chrome-bg); }
 .pane-frame.active { box-shadow: inset 0 0 0 var(--focus-ring) var(--accent); }
 .pane-frame.attention::after {
   content: ""; position: absolute; inset: var(--attention-inset);
@@ -337,8 +343,13 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   pointer-events: none; opacity: .9;
 }
 .terminal-transfer-surface { position: absolute; inset: 0; min-width: 0; min-height: 0; }
-.terminal-pane { width: 100%; height: 100%; }
-.terminal-pane .xterm { height: 100%; }
+/* xterm.css paints the viewport and scroll area pure black by default, which
+   showed as a band wherever a pane box was not an exact multiple of the cell
+   height. Everything a pane can expose is the terminal background. */
+.terminal-pane { width: 100%; height: 100%; background: var(--term-bg); }
+.terminal-pane .xterm { height: 100%; background: var(--term-bg); }
+.terminal-pane .xterm .xterm-viewport,
+.terminal-pane .xterm .xterm-screen { background-color: var(--term-bg); }
 .terminal-pane[data-local-selection-active="true"] { box-shadow: inset 0 0 0 1px var(--chrome-dim); }
 .terminal-pane .xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--chrome-faint) transparent; }
 .divider-handle { position: absolute; z-index: 7; padding: 0; border: 0; background: transparent; touch-action: none; }

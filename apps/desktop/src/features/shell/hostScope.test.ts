@@ -16,6 +16,16 @@ describe("host scope token", () => {
     expect(sameHostConnection(token, { ...token, generation: 3 })).toBe(true);
   });
 
+  it("is the only guard usable after an action that moves tmux", () => {
+    // Focusing an agent's pane runs select-window then select-pane, and each
+    // one advances the topology generation. A post-action guard built on
+    // sameHostScope can therefore never hold, which is how tmux ended up on the
+    // agent's pane while the app stayed on the previous workspace.
+    const afterTwoActions = { ...token, generation: token.generation + 2 };
+    expect(sameHostScope(token, afterTwoActions)).toBe(false);
+    expect(sameHostConnection(token, afterTwoActions)).toBe(true);
+  });
+
   it("invalidates a dialog when the durable connection identity changes", () => {
     for (const changed of [
       { hostProfileId: "other" }, { connectionKey: "ssh:other" }, { connectionEpoch: 2 },
