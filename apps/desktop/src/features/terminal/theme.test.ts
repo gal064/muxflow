@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 // The token file itself, as text: this test's whole purpose is to compare the
 // renderer's fallback against what tokens.css actually declares.
 import tokensCss from "../../tokens.css?raw";
-import { GHOSTTY_DEFAULT_DARK, terminalFont, terminalTheme } from "./theme";
+import { CHROME_FALLBACKS, GHOSTTY_DEFAULT_DARK, searchDecorations, terminalFont, terminalTheme } from "./theme";
 
 function token(name: string): string | undefined {
   return new RegExp(`^\\s*${name}:\\s*([^;]+);`, "mu").exec(tokensCss)?.[1].trim();
@@ -68,5 +68,18 @@ describe("terminal theme derivation", () => {
     expect(font.fontSize).toBe(13);
     expect(font.lineHeight).toBe(1.42);
     expect(font.fontFamily).toContain("JetBrains Mono");
+  });
+
+  it("guards the chrome fallbacks too, not just the terminal palette", () => {
+    // The scrollbar sliders and the search decorations are drawn by xterm from
+    // literal values, so they are the one place chrome tokens can drift without
+    // anything on screen changing colour in a way a person would notice.
+    for (const [name, value] of Object.entries(CHROME_FALLBACKS)) {
+      expect(token(name), `tokens.css is missing ${name}`).toBeDefined();
+      expect(token(name), name).toBe(value);
+    }
+    const decorations = searchDecorations(undefined);
+    expect(decorations.activeMatchColorOverviewRuler).toBe(token("--accent"));
+    expect(decorations.matchOverviewRuler).toBe(token("--chrome-dim"));
   });
 });

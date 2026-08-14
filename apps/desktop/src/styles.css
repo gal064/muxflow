@@ -1,10 +1,17 @@
 /*
  * The application stylesheet.
  *
- * Every color, metric and type step here is a token from `tokens.css`. There
- * are no hex literals below this comment, and that is the point: the build this
- * replaces carried ~150 of them across one file, with a second palette inside
- * the terminal renderer.
+ * Every color comes from `tokens.css`: there is not one hex literal below this
+ * comment, and that is the point — the build this replaces carried ~150 of them
+ * across one file, with a second palette inside the terminal renderer. The only
+ * literal colors left are `rgb(0 0 0 / α)` shadows and the modal backdrop,
+ * which are opacities over whatever is behind them rather than palette entries.
+ *
+ * Metrics are tokenized where the token table names them (bar heights, sidebar
+ * and panel widths, rings, palette and menu rows, the type scale). One-off
+ * paddings, small radii and the handful of sizes the mock fixes per component
+ * are written inline on purpose; promoting each of those to a variable would
+ * make the token file a dictionary of single-use names.
  *
  * Layout follows the approved mock: a 28px titlebar, a 240px sidebar, a 28px
  * tab strip, and everything else is terminal.
@@ -652,7 +659,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 0; border-radius: 4px; background: transparent;
   color: var(--chrome-ink); text-align: left; white-space: nowrap;
 }
-.context-menu-item:hover:not(:disabled), .context-menu-item:focus-visible { background: var(--accent); color: var(--accent-ink); outline: none; }
+.context-menu-item:hover:not(:disabled) { background: var(--accent); color: var(--accent-ink); }
+/* Keeps the outline. Under forced-colors the accent fill flattens to a system
+   color and a menu item with `outline: none` would have no focus affordance at
+   all — on the surface that now carries every row action in the app. */
+.context-menu-item:focus-visible { background: var(--accent); color: var(--accent-ink); outline-offset: -2px; }
 .context-menu-item.destructive { color: var(--danger-ink); }
 .context-menu-item.destructive:hover:not(:disabled), .context-menu-item.destructive:focus-visible { background: var(--danger); color: var(--accent-ink); }
 
@@ -677,7 +688,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   flex: 1; min-width: 0; padding: 0; border: 0; background: transparent;
   color: var(--chrome-ink-strong); font-size: var(--type-menu);
 }
-.palette-input input:focus-visible { outline: none; }
+/* Inset, not removed: the input is the only focusable thing in the palette,
+   and under forced-colors an unringed one is invisible. */
+.palette-input input:focus-visible { outline-offset: -1px; }
 .palette-hint { flex: 0 0 auto; color: var(--chrome-faint); font-size: var(--type-meta); }
 .palette-list { max-height: min(420px, 60vh); padding: 4px 0 8px; overflow-y: auto; }
 .palette-group { padding: 8px 14px 2px; }
@@ -875,12 +888,17 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 @media (forced-colors: active) {
   /* Colors are replaced by the system palette here, so anything that carried
      meaning purely as a color has to carry it as a border or an outline. */
-  .workspace-button.active, .tab.active, .pane-frame.active, .palette-row.selected {
+  .workspace-button.active, .tab.active, .pane-frame.active, .palette-row.selected,
+  .panel-tab.active, .segment.active, .file-row[aria-selected="true"],
+  .bar-button[aria-pressed="true"] {
     outline: 2px solid Highlight; outline-offset: -2px;
   }
   .pane-frame.attention::after { border-color: Highlight; }
   .state-dot, .tab-dot, .link-dot, .badge { border: 1px solid ButtonText; }
   .link-strip { border-bottom: 2px solid ButtonText; }
+  /* Read-only and reconnecting are two different situations and the colors
+     that separate them do not survive here, so the words carry it. */
+  .link-strip-frozen .link-strip-title::after { content: " (read-only)"; }
   .context-menu, .palette, .settings-dialog, .confirmation, .shortcut-dialog { border: 1px solid ButtonText; }
 }
 
