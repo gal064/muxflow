@@ -1,4 +1,4 @@
-import type { PixelBox, TerminalSize } from "./TerminalRenderer";
+import { cellsForBox, type PixelBox, type TerminalMeasurements, type TerminalSize } from "./TerminalRenderer";
 
 /**
  * Smallest and largest tmux client the desktop is ever allowed to ask for.
@@ -19,16 +19,25 @@ export const MAX_CLIENT_CELLS = 500;
 
 /**
  * Chrome between the tiled surface's box and a pane's terminal, per axis, in
- * CSS pixels: the two 1px borders of one `.pane-frame`.
+ * CSS pixels: the two 1px borders of one `.pane-frame` (`styles.css`).
  *
- * Everything else in the frame is deliberately zero. Per-pane chrome does not
- * shrink with the pane, so a pane holding a fraction `f` of the window gets
- * only `f` of the surface's allowance back while spending the whole of its own
- * — the deficit is `chrome × (1 − f)`, and with 14 px of chrome (the frame plus
- * a 6 px terminal padding) a half-height pane came up ~7 px short and clipped
- * its bottom row. The surface's own breathing room is the `inset` on
- * `.terminal-window`, which is outside the box measured here and therefore
- * costs the panes nothing.
+ * Everything else in the frame is deliberately zero, because per-pane chrome
+ * does not shrink with the pane. A pane holding a fraction `f` of the window
+ * gets only `f` of the surface's allowance back while spending the whole of its
+ * own, so the shortfall is `chrome × (1 − f)`: with the 6 px terminal padding
+ * this used to carry, a half-height pane came up ~7 px short and clipped its
+ * bottom row. At 2 px the worst case is 2 px of a ~17 px cell. The surface's
+ * breathing room now comes from the `inset` on `.terminal-window`, which is
+ * outside the box measured here and costs the panes nothing.
+ *
+ * The horizontal axis carries one more term the surface pays once and each pane
+ * spends: xterm's scrollbar allowance (`chrome.scrollbar`, 14 px). It does not
+ * clip, because the allowance is subtracted from the whole surface while each
+ * pane keeps its full box: for N panes across, a pane's element exceeds its
+ * canvas by `(16 + r·cell − 2N)/N` px, which stays positive well past any
+ * usable split. What it costs is margin — with many panes across, the last
+ * column of each sits where a scrollbar would be drawn, and xterm's scrollbar
+ * overlays rather than reserves.
  */
 export const PANE_FRAME_CHROME_PIXELS = 2;
 
@@ -42,7 +51,7 @@ export const PANE_FRAME_CHROME_PIXELS = 2;
  */
 export type ClientSizeDecision =
   | { kind: "size"; size: TerminalSize }
-  | { kind: "unavailable"; reason: string; retry: boolean }
+  | { kind: "unavailable"; reason: string }
   | { kind: "refused"; reason: string };
 
 /**
@@ -58,39 +67,35 @@ export type ClientSizeDecision =
  * multiply the request instead of describing it, and tmux obeys.
  *
  * The surface is one tmux window's worth of pixels, so dividing it by one cell
- * is the whole computation. `measureBox` performs the division with the
- * terminal's own cell metrics, padding and scrollbar allowance — the same
- * quantities `FitAddon.proposeDimensions` uses for a pane.
+ * is the whole computation. The terminal's own measurements — cell size,
+ * padding, scrollbar allowance — arrive as values from whichever terminal is
+ * alive; they describe a terminal, not a pane.
  */
 export function clientSizeForSurface(
   surface: PixelBox | undefined,
-  measureBox: (box: PixelBox) => TerminalSize | undefined,
+  measurements: TerminalMeasurements | undefined,
 ): ClientSizeDecision {
   if (!surface || !Number.isFinite(surface.width) || !Number.isFinite(surface.height)) {
-    return { kind: "unavailable", reason: "the terminal surface has no measured pixel box yet", retry: false };
+    return { kind: "unavailable", reason: "the terminal surface has no measured pixel box yet" };
   }
-  const box = {
-    width: surface.width - PANE_FRAME_CHROME_PIXELS,
-    height: surface.height - PANE_FRAME_CHROME_PIXELS,
-  };
-  if (box.width <= 0 || box.height <= 0) {
-    return { kind: "unavailable", reason: "the terminal surface is not visible", retry: false };
+  if (!measurements) {
+    return { kind: "unavailable", reason: "no terminal has reported cell metrics yet" };
   }
-  const measured = measureBox(box);
+  const measured = cellsForBox(
+    {
+      width: surface.width - PANE_FRAME_CHROME_PIXELS,
+      height: surface.height - PANE_FRAME_CHROME_PIXELS,
+    },
+    measurements.cell,
+    measurements.chrome,
+  );
   if (!measured) {
-    // Either no terminal has reported cell metrics yet — which a retry fixes
-    // once one mounts — or the surface is smaller than a single cell, which it
-    // does not.
     return {
       kind: "unavailable",
-      reason: `no terminal could measure a ${Math.round(surface.width)}x${Math.round(surface.height)} pixel surface in cells`,
-      retry: true,
+      reason: `a ${Math.round(surface.width)}x${Math.round(surface.height)} pixel surface is smaller than one cell of terminal`,
     };
   }
   const { columns, rows } = measured;
-  if (!Number.isInteger(columns) || !Number.isInteger(rows)) {
-    return { kind: "refused", reason: `Refusing a ${columns}x${rows} tmux client size: it is not a whole number of cells.` };
-  }
   if (columns > MAX_CLIENT_CELLS || rows > MAX_CLIENT_CELLS) {
     return {
       kind: "refused",
@@ -100,7 +105,7 @@ export function clientSizeForSurface(
   if (columns < MIN_CLIENT_CELLS || rows < MIN_CLIENT_CELLS) {
     // An ordinary consequence of dragging the window small. Nothing is sent,
     // and nothing is said: the user can see how big their own window is.
-    return { kind: "unavailable", reason: `${columns}x${rows} is too small to be a terminal`, retry: false };
+    return { kind: "unavailable", reason: `${columns}x${rows} is too small to be a terminal` };
   }
   return { kind: "size", size: { columns, rows } };
 }

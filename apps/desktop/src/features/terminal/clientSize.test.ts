@@ -1,20 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Pane } from "../../app/types";
 import { windowGrid } from "./layout";
-import { cellsForBox, type PixelBox, type TerminalSize } from "./TerminalRenderer";
-import {
-  clientSizeForSurface,
-  MAX_CLIENT_CELLS,
-  MIN_CLIENT_CELLS,
-  PANE_FRAME_CHROME_PIXELS,
-} from "./clientSize";
+import { cellsForBox, type PixelBox, type TerminalMeasurements, type TerminalSize } from "./TerminalRenderer";
+import { clientSizeForSurface, MAX_CLIENT_CELLS, PANE_FRAME_CHROME_PIXELS } from "./clientSize";
 
-/** One terminal's metrics, fixed so every expectation below is exact. */
+/** One terminal's measurements, fixed so every expectation below is exact. */
 const CELL: PixelBox = { width: 8, height: 17 };
 const CHROME = { horizontal: 12, vertical: 12, scrollbar: 14 };
-
-/** A live terminal's answer, with this suite's metrics standing in for xterm's. */
-const measureBox = (box: PixelBox) => cellsForBox(box, CELL, CHROME);
+const MEASUREMENTS: TerminalMeasurements = { cell: CELL, chrome: CHROME };
 
 /** The size a surface of this many pixels is worth, independent of everything else. */
 function surfaceSize(surface: PixelBox): TerminalSize {
@@ -61,7 +54,7 @@ describe("clientSizeForSurface", () => {
     ];
     const legacy = shareScaled(panes, panes[0], measuredActiveBox);
     expect(legacy.rows).toBeGreaterThan(250); // 108x251: the shape of the damage.
-    expect(clientSizeForSurface(surface, measureBox)).toEqual({ kind: "size", size: surfaceSize(surface) });
+    expect(clientSizeForSurface(surface, MEASUREMENTS)).toEqual({ kind: "size", size: surfaceSize(surface) });
   });
 
   it("ignores a pane two columns wide", () => {
@@ -70,7 +63,7 @@ describe("clientSizeForSurface", () => {
       pane("%2", { left: 3, width: 105, height: 24 }),
     ];
     expect(shareScaled(panes, panes[0], measuredActiveBox).columns).toBeGreaterThan(MAX_CLIENT_CELLS);
-    expect(clientSizeForSurface(surface, measureBox)).toEqual({ kind: "size", size: surfaceSize(surface) });
+    expect(clientSizeForSurface(surface, MEASUREMENTS)).toEqual({ kind: "size", size: surfaceSize(surface) });
   });
 
   it("ignores a box and a topology snapshot that disagree mid-layout-change", () => {
@@ -83,7 +76,7 @@ describe("clientSizeForSurface", () => {
       pane("%2", { top: 25, width: 108, height: 25 }),
     ];
     expect(shareScaled(panes, panes[0], { columns: 108, rows: 23 }).rows).not.toBe(surfaceSize(surface).rows);
-    expect(clientSizeForSurface(surface, measureBox)).toEqual({ kind: "size", size: surfaceSize(surface) });
+    expect(clientSizeForSurface(surface, MEASUREMENTS)).toEqual({ kind: "size", size: surfaceSize(surface) });
   });
 
   it("is a fixed point: feeding the request back as the new topology cannot ratchet", () => {
@@ -93,7 +86,7 @@ describe("clientSizeForSurface", () => {
     // the whole window down to an eighth is exercised. The legacy formula runs
     // on the same loop so the property is visibly about the change and not
     // about a loop that never moves.
-    const first = clientSizeForSurface(surface, measureBox);
+    const first = clientSizeForSurface(surface, MEASUREMENTS);
     expect(first).toEqual({ kind: "size", size: surfaceSize(surface) });
     let legacyGrid = surfaceSize(surface);
     for (let round = 1; round <= 10; round += 1) {
@@ -105,7 +98,7 @@ describe("clientSizeForSurface", () => {
         ];
         legacyGrid = shareScaled(panes, panes[0], measuredActiveBox);
         // tmux applied whatever was asked for; ask again from the same surface.
-        expect(clientSizeForSurface(surface, measureBox)).toEqual(first);
+        expect(clientSizeForSurface(surface, MEASUREMENTS)).toEqual(first);
       }
     }
     // The loop is not vacuous: the replaced formula walks a 46-row surface into
@@ -115,7 +108,7 @@ describe("clientSizeForSurface", () => {
 
   it("refuses a size above the bound, and stays quiet about a small window", () => {
     const tallCell: PixelBox = { width: 1, height: 1 };
-    const refused = clientSizeForSurface({ width: 4000, height: 4000 }, (box) => cellsForBox(box, tallCell, CHROME));
+    const refused = clientSizeForSurface({ width: 4000, height: 4000 }, { cell: tallCell, chrome: CHROME });
     expect(refused.kind).toBe("refused");
     expect(refused.kind === "refused" && refused.reason).toContain(`${MAX_CLIENT_CELLS} cell bound`);
     expect(refused.kind === "refused" && refused.reason).toContain("3972x3986");
@@ -123,18 +116,20 @@ describe("clientSizeForSurface", () => {
     // Dragging the window narrow is not a defect and must not be reported as
     // one: below the minimum the answer is the same "nothing to ask for" as an
     // unmounted surface, and nothing retries it into a loop.
-    const narrow = clientSizeForSurface({ width: 40, height: 800 }, measureBox);
-    expect(narrow).toEqual({ kind: "unavailable", reason: expect.stringContaining("too small"), retry: false });
-    expect(clientSizeForSurface({ width: 30, height: 20 }, measureBox).kind).toBe("unavailable");
+    const narrow = clientSizeForSurface({ width: 40, height: 800 }, MEASUREMENTS);
+    expect(narrow).toEqual({ kind: "unavailable", reason: expect.stringContaining("too small") });
+    expect(clientSizeForSurface({ width: 30, height: 20 }, MEASUREMENTS).kind).toBe("unavailable");
   });
 
   it("asks for nothing while the surface or the terminals cannot be measured", () => {
-    expect(clientSizeForSurface(undefined, measureBox)).toMatchObject({ kind: "unavailable", retry: false });
-    expect(clientSizeForSurface({ width: Number.NaN, height: 800 }, measureBox)).toMatchObject({ kind: "unavailable", retry: false });
-    expect(clientSizeForSurface({ width: 0, height: 0 }, measureBox)).toMatchObject({ kind: "unavailable", retry: false });
-    // No renderer has metrics yet. That resolves itself when one mounts, so it
-    // is the one case worth retrying rather than giving up on.
-    expect(clientSizeForSurface(surface, () => undefined)).toMatchObject({ kind: "unavailable", retry: true });
+    expect(clientSizeForSurface(undefined, MEASUREMENTS).kind).toBe("unavailable");
+    expect(clientSizeForSurface({ width: Number.NaN, height: 800 }, MEASUREMENTS).kind).toBe("unavailable");
+    expect(clientSizeForSurface({ width: 0, height: 0 }, MEASUREMENTS).kind).toBe("unavailable");
+    // No terminal has reported yet; the effect recomputes when one does.
+    expect(clientSizeForSurface(surface, undefined)).toEqual({
+      kind: "unavailable",
+      reason: expect.stringContaining("no terminal has reported"),
+    });
   });
 });
 

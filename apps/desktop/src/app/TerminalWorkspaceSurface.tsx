@@ -4,7 +4,7 @@ import { resolveTerminalDestination } from "./paneRouting";
 import { renderedPaneStyle, type WindowGrid } from "../features/terminal/layout";
 import { TerminalPane, type TerminalPaneController } from "../features/terminal/TerminalPane";
 import type { TerminalEventHub } from "../features/terminal/TerminalEventHub";
-import type { TerminalInput } from "../features/terminal/TerminalRenderer";
+import type { TerminalInput, TerminalMeasurements } from "../features/terminal/TerminalRenderer";
 import type { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import type { TerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import type { TerminalTransferConnectionScope } from "../features/terminal/terminalTransfers";
@@ -27,8 +27,8 @@ type TerminalWorkspaceSurfaceProps = {
   terminalTransferScope?: TerminalTransferConnectionScope;
   beginDividerDrag(event: PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical"): void;
   handleInput(paneId: string, input: TerminalInput): void;
-  /** A terminal's controller was registered or dropped. */
-  onTerminalRegistered(): void;
+  /** A terminal reported what it turns pixels into. */
+  onMeasurements(measurements: TerminalMeasurements): void;
   performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
   setStatus(message: string): void;
 };
@@ -42,14 +42,11 @@ export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
         clientId={props.clientId}
         pane={pane}
         hub={props.hub}
-        onController={(paneId, controller) => {
-          if (controller) props.controllers.current.set(paneId, controller);
-          else props.controllers.current.delete(paneId);
-          props.onTerminalRegistered();
-        }}
+        onController={(paneId, controller) => { if (controller) props.controllers.current.set(paneId, controller); else props.controllers.current.delete(paneId); }}
         onDiagnostic={props.setStatus}
         onFocus={(paneId) => { if (paneId !== activePane?.id) void props.performAction({ kind: "focusPane", paneId }); }}
         onInput={props.handleInput}
+        onMeasurements={props.onMeasurements}
         transferClient={props.terminalTransferClient}
         transferRegistry={props.terminalTransferRegistry}
         transferScope={props.terminalTransferScope}

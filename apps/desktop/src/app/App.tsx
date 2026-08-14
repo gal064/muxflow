@@ -14,7 +14,7 @@ import {
 import type { TerminalPaneController } from "../features/terminal/TerminalPane";
 import { adjacentPane, resizeCellsFromPixels, windowGrid, type PaneDirection } from "../features/terminal/layout";
 import { sendBinaryInput, sendInput } from "../features/terminal/api";
-import type { PixelBox, TerminalInput } from "../features/terminal/TerminalRenderer";
+import type { TerminalInput, TerminalMeasurements } from "../features/terminal/TerminalRenderer";
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
@@ -76,6 +76,18 @@ const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then(
  * as "action to interactive pane", so the instrumentation spans have to start
  * at the action and end at the paint rather than at the tmux ack.
  */
+/**
+ * Two terminals report the same numbers; a new object every time would restart
+ * the client-size effect for no reason.
+ */
+function sameMeasurements(left: TerminalMeasurements | undefined, right: TerminalMeasurements): boolean {
+  return left !== undefined
+    && left.cell.width === right.cell.width && left.cell.height === right.cell.height
+    && left.chrome.horizontal === right.chrome.horizontal
+    && left.chrome.vertical === right.chrome.vertical
+    && left.chrome.scrollbar === right.chrome.scrollbar;
+}
+
 const INTERACTION_SPAN_BY_ACTION: Partial<Record<TmuxAction["kind"], PanePaintSpan>> = {
   createSession: "create.workspace",
   createWindow: "create.tab",
@@ -115,10 +127,10 @@ export function App() {
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const controllers = useRef(new Map<string, TerminalPaneController>());
-  // Bumped whenever a terminal registers or drops its controller. The
-  // client-size computation needs *some* live renderer for its font metrics;
-  // this is how it learns one arrived.
-  const [liveTerminals, setLiveTerminals] = useState(0);
+  // What a terminal turns pixels into, reported by whichever pane is alive.
+  // Every terminal answers identically, so the value — not its source — is what
+  // the client size is computed from.
+  const [terminalMeasurements, setTerminalMeasurements] = useState<TerminalMeasurements>();
   const platform = useMemo(() => currentPlatform(), []);
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
   const currentHelperConnectionKey = helperConnectionKey(connection);
@@ -352,22 +364,11 @@ export function App() {
     void request.catch((error) => { if (clientIdRef.current === clientId) setStatus(String(error)); });
   }, [clientId, hostState.canMutate]);
 
-  // Font metrics only: every mounted terminal answers this identically, and the
-  // client size must not depend on which pane happens to be active. `liveTerminals`
-  // counts mounts and unmounts so the client-size computation is retried the
-  // moment a renderer exists to answer it, rather than only when a pane's
-  // identity changes.
-  const measureBox = useCallback((box: PixelBox) => {
-    const controller = (activePane && controllers.current.get(activePane.id))
-      ?? controllers.current.values().next().value;
-    return controller?.measureBox(box);
-  }, [activePane?.id]);
   const { surfaceRef } = useClientResize({
     activeWindowId,
     canMutate: hostState.canMutate,
     clientId,
-    measureBox,
-    metricsKey: liveTerminals,
+    measurements: terminalMeasurements,
     onStatus: setStatus,
   });
 
@@ -719,7 +720,7 @@ export function App() {
           beginDividerDrag={beginDividerDrag}
           clientId={clientId}
           controllers={controllers}
-          onTerminalRegistered={() => setLiveTerminals((value) => value + 1)}
+          onMeasurements={(measurements) => setTerminalMeasurements((current) => sameMeasurements(current, measurements) ? current : measurements)}
           grid={grid}
           handleInput={handleInput}
           hub={hub}

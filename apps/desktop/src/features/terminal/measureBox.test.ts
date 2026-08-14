@@ -2,7 +2,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { cellsForBox } from "./TerminalRenderer";
+import { cellsForBox, terminalMeasurements } from "./TerminalRenderer";
 
 /**
  * The tmux client size is derived from cell metrics xterm does not expose
@@ -35,7 +35,10 @@ describe("xterm cell metrics", () => {
     terminal.dispose();
   });
 
-  it("produce the same cells as FitAddon for the same box", () => {
+  it("are read into the same cells FitAddon computes, chrome and all", () => {
+    // A host with padding and a border, so the chrome derivation is exercised
+    // rather than reimplemented: `terminalMeasurements` reads it from the DOM
+    // exactly where `FitAddon.proposeDimensions` reads its own.
     const host = document.createElement("div");
     host.style.width = "1000px";
     host.style.height = "800px";
@@ -49,12 +52,35 @@ describe("xterm cell metrics", () => {
     const cell = { width: 8, height: 17 };
     Object.assign(cellSize(terminal)!, cell);
 
-    // `measureBox`'s arithmetic, with the chrome an unpadded host spends: none
-    // of its own, and xterm's scrollbar allowance.
-    const mine = cellsForBox({ width: 1000, height: 800 }, cell, { horizontal: 0, vertical: 0, scrollbar: 14 });
+    const measurements = terminalMeasurements(terminal, host, terminal.element!);
+    expect(measurements).toEqual({
+      cell,
+      // An unpadded, unbordered host spends nothing; xterm still reserves its
+      // scrollbar because this terminal has scrollback.
+      chrome: { horizontal: 0, vertical: 0, scrollbar: 14 },
+    });
+    const mine = cellsForBox({ width: 1000, height: 800 }, measurements!.cell, measurements!.chrome);
     const theirs = fit.proposeDimensions();
     expect(mine).toEqual({ columns: theirs!.cols, rows: theirs!.rows });
     expect(mine).toEqual({ columns: 123, rows: 47 });
+
+    // The host's own padding and border are part of what a terminal spends.
+    host.style.padding = "6px";
+    host.style.border = "1px solid black";
+    expect(terminalMeasurements(terminal, host, terminal.element!)?.chrome).toEqual({
+      horizontal: 14, vertical: 14, scrollbar: 14,
+    });
+
+    // A terminal with no scrollback reserves nothing for a scrollbar. (Changing
+    // the option rebuilds xterm's buffers, so the stubbed cell is restated.)
+    terminal.options.scrollback = 0;
+    Object.assign(cellSize(terminal)!, cell);
+    expect(terminalMeasurements(terminal, host, terminal.element!)?.chrome.scrollbar).toBe(0);
+
+    // And a terminal whose metrics have gone reports nothing rather than a
+    // number the app would resize somebody's tmux window with.
+    Object.assign(cellSize(terminal)!, { width: 0, height: 0 });
+    expect(terminalMeasurements(terminal, host, terminal.element!)).toBeUndefined();
     terminal.dispose();
     host.remove();
   });
