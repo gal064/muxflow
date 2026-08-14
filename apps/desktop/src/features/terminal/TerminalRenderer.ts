@@ -3,6 +3,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { terminalFont, terminalTheme } from "./theme";
 
 export interface TerminalSize {
   columns: number;
@@ -445,13 +446,19 @@ export class XtermRenderer implements TerminalRenderer {
 
   constructor(options: TerminalRendererOptions = {}) {
     this.#options = options;
+    // Font and palette both come from `tokens.css` (see ./theme.ts), so the
+    // terminal is a Ghostty surface by derivation rather than by a second set
+    // of literals that drifted from the chrome.
+    const font = terminalFont();
     this.#terminal = new Terminal({
       allowProposedApi: false,
       altClickMovesCursor: false,
       convertEol: false,
       cursorBlink: true,
-      fontFamily: '"SFMono-Regular", "Cascadia Code", "JetBrains Mono", monospace',
-      fontSize: 13,
+      cursorStyle: "block",
+      fontFamily: font.fontFamily,
+      fontSize: font.fontSize,
+      lineHeight: font.lineHeight,
       ignoreBracketedPasteMode: false,
       macOptionClickForcesSelection: true,
       rightClickSelectsWord: true,
@@ -477,15 +484,7 @@ export class XtermRenderer implements TerminalRenderer {
       linkHandler: {
         activate: (_event, url) => this.#activateLink(url),
       },
-      theme: {
-        background: "#0d0f12",
-        foreground: "#d8dee9",
-        cursor: "#d8dee9",
-        selectionBackground: "#526173aa",
-        scrollbarSliderBackground: "#53617166",
-        scrollbarSliderHoverBackground: "#71819799",
-        scrollbarSliderActiveBackground: "#8da1b8bb",
-      },
+      theme: terminalTheme(),
     });
     this.#terminal.loadAddon(this.#fit);
     this.#terminal.loadAddon(this.#serialize);

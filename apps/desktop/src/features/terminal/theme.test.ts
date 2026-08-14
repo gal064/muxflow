@@ -1,0 +1,73 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import { GHOSTTY_DEFAULT_DARK, terminalFont, terminalTheme } from "./theme";
+
+const tokensCss = readFileSync(fileURLToPath(new URL("../../tokens.css", import.meta.url)), "utf8");
+
+function token(name: string): string | undefined {
+  return new RegExp(`^\\s*${name}:\\s*([^;]+);`, "mu").exec(tokensCss)?.[1].trim();
+}
+
+describe("terminal theme derivation", () => {
+  it("keeps the renderer fallback identical to the token file", () => {
+    // The fallback exists only for environments with no stylesheet. If it ever
+    // disagrees with tokens.css the app has two palettes again, which is the
+    // exact defect Phase 11 removed.
+    const expected: Record<string, string | undefined> = {
+      background: token("--term-bg"),
+      foreground: token("--term-fg"),
+      cursor: token("--term-cursor"),
+      cursorAccent: token("--term-cursor-text"),
+      selectionBackground: token("--term-selection-bg"),
+      selectionForeground: token("--term-selection-fg"),
+      black: token("--term-0"),
+      red: token("--term-1"),
+      green: token("--term-2"),
+      yellow: token("--term-3"),
+      blue: token("--term-4"),
+      magenta: token("--term-5"),
+      cyan: token("--term-6"),
+      white: token("--term-7"),
+      brightBlack: token("--term-8"),
+      brightRed: token("--term-9"),
+      brightGreen: token("--term-10"),
+      brightYellow: token("--term-11"),
+      brightBlue: token("--term-12"),
+      brightMagenta: token("--term-13"),
+      brightCyan: token("--term-14"),
+      brightWhite: token("--term-15"),
+    };
+    for (const [key, value] of Object.entries(expected)) {
+      expect(value, `tokens.css is missing the token behind ${key}`).toBeDefined();
+      expect(GHOSTTY_DEFAULT_DARK[key as keyof typeof GHOSTTY_DEFAULT_DARK], key).toBe(value);
+    }
+  });
+
+  it("is Ghostty Default Style Dark, so the terminal matches the user's own terminal", () => {
+    // Verbatim from the theme file shipped with Ghostty on this machine.
+    expect(GHOSTTY_DEFAULT_DARK.background).toBe("#282c34");
+    expect(GHOSTTY_DEFAULT_DARK.foreground).toBe("#ffffff");
+    expect(GHOSTTY_DEFAULT_DARK.cursor).toBe("#ffffff");
+    // Ghostty inverts the selection: white ground, terminal-background ink.
+    expect(GHOSTTY_DEFAULT_DARK.selectionBackground).toBe("#ffffff");
+    expect(GHOSTTY_DEFAULT_DARK.selectionForeground).toBe("#282c34");
+  });
+
+  it("falls back cleanly with no stylesheet, and derives the scrollbar from chrome ink", () => {
+    const theme = terminalTheme(undefined);
+    expect(theme.background).toBe(GHOSTTY_DEFAULT_DARK.background);
+    expect(theme.scrollbarSliderBackground).toBe("#7d848e40");
+    expect(theme.scrollbarSliderHoverBackground).toBe("#7d848e66");
+  });
+
+  it("takes the terminal font and metrics from tokens, not from a literal", () => {
+    expect(token("--term-font-size")).toBe("13px");
+    expect(token("--term-line-height")).toBe("1.42");
+    expect(token("--font-mono")).toContain("JetBrains Mono");
+    const font = terminalFont(undefined);
+    expect(font.fontSize).toBe(13);
+    expect(font.lineHeight).toBe(1.42);
+    expect(font.fontFamily).toContain("JetBrains Mono");
+  });
+});
