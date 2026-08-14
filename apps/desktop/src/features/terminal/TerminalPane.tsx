@@ -22,7 +22,6 @@ export { paneRecoveryPlan } from "./PaneRecovery";
 // visibility ownership keeps a late hide from overtaking the new reveal.
 const pendingPaneHandoffs = new Map<string, Promise<void>>();
 const paneLifecycleVersions = new Map<string, number>();
-const paneGridDivergence = new Map<string, string>();
 let nextTransferRenderLifetime = 0;
 
 /**
@@ -36,16 +35,27 @@ let nextTransferRenderLifetime = 0;
  * sent back to tmux, so every other mounted pane drifts silently. The measured
  * size still decides what client size to ask tmux for; it just no longer decides
  * what the terminal renders at.
+ *
+ * Falls back to the measurement only when tmux's numbers are unusable, so a pane
+ * missing from a topology snapshot still gets a sized terminal rather than
+ * xterm's 80x24 default. Returns what a caller should report, or `undefined`
+ * when there is nothing to say.
  */
-export function reconcilePaneGrid(renderer: Pick<TerminalRenderer, "setGrid">, pane: Pane, measured?: TerminalSize): void {
-  const applied = renderer.setGrid({ columns: pane.width, rows: pane.height });
-  if (!applied || !measured) return;
-  const divergence = `${measured.columns}x${measured.rows}->${applied.columns}x${applied.rows}`;
-  if (paneGridDivergence.get(pane.id) === divergence) return;
-  paneGridDivergence.set(pane.id, divergence);
-  console.warn(
-    `Pane ${pane.id} measured ${measured.columns}x${measured.rows} from its box but tmux reports ${applied.columns}x${applied.rows}; rendering at tmux's grid.`,
-  );
+export function reconcilePaneGrid(
+  renderer: Pick<TerminalRenderer, "setGrid">,
+  pane: Pane,
+  measured?: TerminalSize,
+): string | undefined {
+  const outcome = renderer.setGrid({ columns: pane.width, rows: pane.height });
+  if (outcome.kind === "rejected") {
+    const fallback = measured && renderer.setGrid(measured);
+    return `Pane ${pane.id}: tmux reports no usable grid (${outcome.reason}); ${
+      fallback?.kind === "applied" ? "rendering at the measured box size" : "the terminal keeps its current size"
+    }.`;
+  }
+  if (outcome.kind === "unchanged" || !measured) return undefined;
+  if (measured.columns === outcome.size.columns && measured.rows === outcome.size.rows) return undefined;
+  return `Pane ${pane.id} measured ${measured.columns}x${measured.rows} from its box but tmux reports ${outcome.size.columns}x${outcome.size.rows}; rendering at tmux's grid.`;
 }
 
 function visibleSeedDiagnostic(message: string | undefined): string | undefined {
@@ -176,9 +186,15 @@ export function TerminalPane({
         if (!rendererActive) return;
         terminalStateCache.delete(pane.id);
         const currentClientId = clientIdRef.current;
-        if (!currentClientId) return;
+        // A pane whose request did not go out has to be allowed to ask again,
+        // or one failure leaves it permanently unable to recover.
+        if (!currentClientId) {
+          renderer.resetSeedRequest();
+          return;
+        }
         void requestTerminalSeed(currentClientId, pane.id).catch((error) => {
           diagnosticRef.current?.(`${reason} Seed request failed: ${String(error)}`);
+          renderer.resetSeedRequest();
         });
       },
     });
@@ -199,6 +215,13 @@ export function TerminalPane({
     rendererRef.current = renderer;
     const terminalContainer = container.current;
     renderer.open(terminalContainer);
+    const reportGrid = (message: string | undefined) => {
+      // Divergence is the norm, not a fault the user can act on, so it goes to
+      // the console rather than the pane's diagnostic banner.
+      if (message) console.warn(message);
+    };
+    // Before any content: everything below is parsed against this grid.
+    reportGrid(reconcilePaneGrid(renderer, pane, renderer.measure()));
     const interceptPaste = (event: ClipboardEvent) => {
       // Native Edit > Paste bypasses the app command and targets xterm's
       // textarea. Own plain text in capture phase so xterm cannot wrap it in a
@@ -287,16 +310,27 @@ export function TerminalPane({
           closePanePaintSpans();
           commitRendered(effect.tailThroughGeneration, eventEpoch, true);
         };
-        renderer.restore(
+        // The snapshot and its raw tail are one screen in two pieces. If the
+        // snapshot was refused, the tail must not be written onto whatever the
+        // terminal happens to be showing, and nothing may be reported as
+        // rendered: the renderer has already asked the host for a seed, and
+        // this pane waits for it.
+        const restored = renderer.restore(
           effect.serialized,
           effect.rawTail.byteLength ? undefined : markRecoveryRendered,
           effect.rawTail.byteLength ? effect.snapshotGeneration : effect.tailThroughGeneration,
+          effect.tailThroughGeneration,
         );
-        if (effect.rawTail.byteLength) {
-          renderer.write(effect.rawTail, markRecoveryRendered, effect.tailThroughGeneration);
+        if (!restored) {
+          clearDeferredOutput();
+          revealStateRef.current = { ready: false, hasLocalState: false };
+        } else {
+          if (effect.rawTail.byteLength) {
+            renderer.write(effect.rawTail, markRecoveryRendered, effect.tailThroughGeneration);
+          }
+          flushDeferredOutput(effect.tailThroughGeneration);
+          setRendererDiagnostic(undefined);
         }
-        flushDeferredOutput(effect.tailThroughGeneration);
-        setRendererDiagnostic(undefined);
       } else if (effect.kind === "diagnostic") {
         // Seed diagnostics describe fidelity limitations in this pane only.
         // They do not invalidate recovery or escalate to connection status.
@@ -307,12 +341,11 @@ export function TerminalPane({
       }
     });
     const observer = new ResizeObserver(() => {
-      const measured = renderer.fit();
-      resizeRef.current(paneRef.current, measured);
-      reconcilePaneGrid(renderer, paneRef.current, measured);
+      const measured = renderer.measure();
+      if (measured) resizeRef.current(paneRef.current, measured);
+      reportGrid(reconcilePaneGrid(renderer, paneRef.current, measured));
     });
     observer.observe(container.current);
-    reconcilePaneGrid(renderer, pane, undefined);
 
     const controller: TerminalPaneController = {
       focus: () => renderer.focus(),
@@ -335,7 +368,6 @@ export function TerminalPane({
     return () => {
       rendererActive = false;
       lastRevealKeyRef.current = undefined;
-      paneGridDivergence.delete(pane.id);
       observer.disconnect();
       unsubscribeEvents();
       unsubscribeViewport();

@@ -657,6 +657,7 @@ fn capture_command(pane_id: &str) -> String {
     )
 }
 
+mod correlation;
 mod stream;
 #[cfg(test)]
 use stream::{CommandBlock, PaneSeedState, PendingCaptureMetadata, StreamState};
