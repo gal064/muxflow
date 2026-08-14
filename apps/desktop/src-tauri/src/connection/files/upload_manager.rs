@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{BufReader, Read, Seek},
+    io::{Read, Seek},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -13,16 +13,16 @@ use tauri::{State, ipc::Channel};
 use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
+use super::bulk_pool::BulkLease;
 use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
 use super::cleanup::CleanupReport;
 use super::clipboard_staging::lock_owned_source as lock_owned_clipboard_source;
-use super::scheduler::{BulkBinding, BulkChild, CancelState, cancel_transfer, enqueue_transfer};
+use super::scheduler::{BulkBinding, CancelState, cancel_transfer, enqueue_transfer};
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
     TransferResult, TransferState,
 };
 use super::{BULK_CHUNK_BYTES, parse_required_u64};
-use crate::connection::transport::spawn_bulk_bridge;
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
 
 const LARGE_UPLOAD_BYTES: u64 = 500 * 1024 * 1024;
@@ -381,20 +381,9 @@ fn run_upload_preflight(job: &UploadPreflightJob) -> Result<(), String> {
         return Err("upload source changed while preflight was queued".into());
     }
     let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-    let _process_binding = job.cancellation.bind_process(child.0.id())?;
-    let mut stdin = child
-        .0
-        .stdin
-        .take()
-        .ok_or("bulk bridge stdin unavailable")?;
-    let stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or("bulk bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+    let mut protocol = lease.client();
     let descriptor = prepare_remote(
         &mut protocol,
         2,
@@ -489,20 +478,9 @@ fn run_upload(job: &UploadJob) -> TransferResult {
     validate_png_if_requested(&mut source, &identity, job.image_png)?;
     let session = {
         let deadline = job.cancellation.arm_inactivity_deadline();
-        let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-        let _process_binding = job.cancellation.bind_process(child.0.id())?;
-        let mut stdin = child
-            .0
-            .stdin
-            .take()
-            .ok_or("bulk bridge stdin unavailable")?;
-        let stdout = child
-            .0
-            .stdout
-            .take()
-            .ok_or("bulk bridge stdout unavailable")?;
-        let mut reader = BufReader::new(stdout);
-        let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+        let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+        let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+        let mut protocol = lease.client();
         prepare_remote(
             &mut protocol,
             2,
@@ -738,20 +716,11 @@ fn reconcile_upload_outcome(
 ) -> Result<v1::UploadDescriptor, String> {
     job.binding.validate()?;
     let deadline = job.cancellation.arm_inactivity_deadline();
-    let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-    let _process_binding = job.cancellation.bind_authoritative_process(child.0.id())?;
-    let mut stdin = child
-        .0
-        .stdin
-        .take()
-        .ok_or("bulk bridge stdin unavailable")?;
-    let stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or("bulk bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding)?;
+    let _process_binding = job
+        .cancellation
+        .bind_authoritative_process(lease.process_id())?;
+    let mut protocol = lease.client();
     deadline.touch();
     let response = protocol.request_with_deadline(
         2,

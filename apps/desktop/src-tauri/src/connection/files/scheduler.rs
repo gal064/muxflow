@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
-    process::Child,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
@@ -272,7 +271,11 @@ impl Drop for ProcessBinding<'_> {
     }
 }
 
-pub(super) struct BulkChild(pub(super) Child);
+/// A bridge child that dies with its owner. Test-only since the bulk lane
+/// started pooling its connections (`bulk_pool`); the scheduler tests still
+/// build raw peers this way.
+#[cfg(test)]
+pub(super) struct BulkChild(pub(super) std::process::Child);
 pub(super) struct BulkPermit;
 static BULK_ACTIVE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
 
@@ -573,6 +576,7 @@ impl Drop for BulkPermit {
     }
 }
 
+#[cfg(test)]
 impl Drop for BulkChild {
     fn drop(&mut self) {
         let _ = self.0.kill();

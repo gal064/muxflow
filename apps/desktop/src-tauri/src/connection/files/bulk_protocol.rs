@@ -40,15 +40,28 @@ impl std::fmt::Display for RequestFailure {
 pub(super) struct BulkProtocolClient<'a> {
     stdin: &'a mut ChildStdin,
     reader: &'a mut BufReader<ChildStdout>,
-    decoder: FrameAccumulator,
+    /// Borrowed, not owned: a decoder can be holding bytes read past the last
+    /// response, and a bridge that outlives this client must keep them.
+    decoder: &'a mut FrameAccumulator,
+    /// Where this job's request ids sit in the connection's id space. See
+    /// `bulk_pool::LEASE_ID_SPAN`.
+    id_offset: u64,
+    /// The bridge's reusability flag, cleared here rather than by any job: only
+    /// this type knows whether a request left the stream mid-frame.
+    clean: &'a mut bool,
 }
 
 impl<'a> BulkProtocolClient<'a> {
-    pub(super) fn connect(
-        stdin: &'a mut ChildStdin,
-        reader: &'a mut BufReader<ChildStdout>,
+    /// Performs the bulk handshake on a freshly spawned bridge.
+    ///
+    /// Separate from `resumed` because it happens once per *connection* rather
+    /// than once per job: a pooled bridge has already made this exchange, and
+    /// re-making it is one of the round trips pooling exists to stop paying.
+    pub(super) fn handshake(
+        stdin: &mut ChildStdin,
+        reader: &mut BufReader<ChildStdout>,
         binding: &BulkBinding,
-    ) -> Result<Self, String> {
+    ) -> Result<(), String> {
         write_frame_sync(
             stdin,
             &envelope(
@@ -98,11 +111,37 @@ impl<'a> BulkProtocolClient<'a> {
                 ));
             }
         }
-        Ok(Self {
+        Ok(())
+    }
+
+    /// A client for one job on an already-handshaken bridge.
+    pub(super) fn resumed(
+        stdin: &'a mut ChildStdin,
+        reader: &'a mut BufReader<ChildStdout>,
+        decoder: &'a mut FrameAccumulator,
+        id_offset: u64,
+        clean: &'a mut bool,
+    ) -> Self {
+        Self {
             stdin,
             reader,
-            decoder: FrameAccumulator::default(),
-        })
+            decoder,
+            id_offset,
+            clean,
+        }
+    }
+
+    /// This job's request id on the wire.
+    ///
+    /// Request ids are per connection, and the response loop *skips* frames
+    /// that do not match rather than failing on them — so an id reused across
+    /// two jobs on one connection is a stale response silently accepted as the
+    /// answer to a new request, not an error anyone would see. Every lease
+    /// therefore gets its own span of the id space; exhausting one is refused
+    /// rather than wrapped into the next lease's.
+    fn wire_id(&self, request_id: u64) -> Result<u64, RequestFailure> {
+        super::bulk_pool::wire_request_id(self.id_offset, request_id)
+            .map_err(RequestFailure::Transport)
     }
 
     pub(super) fn request(
@@ -162,6 +201,11 @@ impl<'a> BulkProtocolClient<'a> {
         self.request_classified_inner(request_id, request, Some(cancellation), Some(deadline))
     }
 
+    /// Every request goes through here, so this is the one place that knows
+    /// whether the stream is still where the next request expects it. A remote
+    /// refusal is a complete response and leaves the bridge reusable; a
+    /// transport failure or a cancellation leaves a partial write or an
+    /// in-flight response behind, and the bridge must not be handed on.
     fn request_classified_inner(
         &mut self,
         request_id: u64,
@@ -169,6 +213,24 @@ impl<'a> BulkProtocolClient<'a> {
         cancellation: Option<&CancelState>,
         deadline: Option<&DeadlineGuard>,
     ) -> Result<v1::Response, RequestFailure> {
+        let outcome = self.request_framed(request_id, request, cancellation, deadline);
+        if matches!(
+            outcome,
+            Err(RequestFailure::Transport(_) | RequestFailure::Cancelled)
+        ) {
+            *self.clean = false;
+        }
+        outcome
+    }
+
+    fn request_framed(
+        &mut self,
+        request_id: u64,
+        request: v1::Request,
+        cancellation: Option<&CancelState>,
+        deadline: Option<&DeadlineGuard>,
+    ) -> Result<v1::Response, RequestFailure> {
+        let request_id = self.wire_id(request_id)?;
         self.write_envelope_cancellable(
             &envelope(request_id, 0, Payload::Request(request)),
             cancellation,
