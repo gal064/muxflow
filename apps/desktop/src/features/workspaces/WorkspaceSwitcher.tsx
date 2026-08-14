@@ -2,10 +2,13 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import { fuzzyRank } from "../../commands/fuzzy";
 import { useModalDialog } from "../../commands/useModalDialog";
+import { StateDot } from "../../ui/StateDot";
 import type { WorkspaceRowModel } from "./workspaceRows";
 
 interface WorkspaceSwitcherProps {
   rows: readonly WorkspaceRowModel[];
+  /** Draws a shape as well as a color in each state dot. */
+  stateGlyphs: boolean;
   onClose(): void;
   onSelect(sessionId: string): void;
 }
@@ -74,10 +77,12 @@ export function WorkspaceSwitcher(props: WorkspaceSwitcherProps) {
           onClick={() => choose(row.session.id)}
           onMouseEnter={() => setActiveIndex(index)}
           role="option"
+          // Focus stays in the input; see the palette for why.
+          tabIndex={-1}
           type="button"
         >
           <span className="palette-title">{row.session.name}</span>
-          {row.attention !== "none" && <span aria-label={`Agent ${row.attention}`} className={`state-dot ${row.attention}`} role="img" />}
+          {row.attention !== "none" && <StateDot glyphs={props.stateGlyphs} label={`Agent ${row.attention}`} state={row.attention} />}
           {row.metadata && <span className="palette-meta">{row.metadata}</span>}
         </button>)}
       </div>

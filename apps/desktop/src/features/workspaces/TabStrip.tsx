@@ -1,6 +1,7 @@
-import { useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon, type IconName } from "../../ui/Icon";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
+import { StateDot } from "../../ui/StateDot";
 import type { CombinedTab } from "../shell/model";
 
 interface TabStripProps {
@@ -8,6 +9,8 @@ interface TabStripProps {
   activeKey?: string;
   canMutate: boolean;
   canSplit: boolean;
+  /** Draws a shape as well as a color in each activity dot. */
+  stateGlyphs: boolean;
   onSelect(tab: CombinedTab): void;
   onClose(tab: CombinedTab): void;
   onMove(tab: CombinedTab, direction: "left" | "right"): void;
@@ -38,6 +41,19 @@ const DOCUMENT_ICON: Record<string, IconName> = {
  */
 export function TabStrip(props: TabStripProps) {
   const [menu, setMenu] = useState<{ tab: CombinedTab; anchor: ContextMenuAnchor }>();
+  const tabs = useRef<HTMLDivElement>(null);
+  // The strip scrolls rather than pushing its neighbours, which means the tab
+  // that just became active can be outside it. Measured with the right panel
+  // open and four long tmux window names: opening a git diff created its
+  // document tab at x=959 in a strip clipped at 923, so the surface took over
+  // the window while the tab representing it — and its close button — could
+  // not be seen or clicked. `nearest` scrolls the minimum distance and does
+  // nothing when the tab is already visible.
+  useEffect(() => {
+    if (!props.activeKey) return;
+    tabs.current?.querySelector<HTMLElement>(`#${CSS.escape(workspaceTabDomId(props.activeKey))}`)
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [props.activeKey, props.tabs]);
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: CombinedTab, index: number) => {
     if (isContextMenuKey(event)) {
@@ -60,7 +76,7 @@ export function TabStrip(props: TabStripProps) {
   };
 
   return <div className="tabstrip">
-    <div aria-label="Terminal tabs and documents" className="tabstrip-tabs" role="tablist">
+    <div aria-label="Terminal tabs and documents" className="tabstrip-tabs" ref={tabs} role="tablist">
       {props.tabs.map((tab, index) => {
         const active = tab.key === props.activeKey;
         // `role="presentation"`: a generic element between a tablist and its
@@ -100,10 +116,11 @@ export function TabStrip(props: TabStripProps) {
               : <span className={`tab-glyph ${tab.appKind}`}><Icon name={DOCUMENT_ICON[tab.appKind] ?? "file"} size={12} /></span>}
             <span className="tab-title">{tab.title}</span>
             {tab.kind === "terminal" && tab.zoomed && <span aria-label="Pane zoomed" className="tab-zoom"><Icon name="zoom" size={11} /></span>}
-            {tab.kind === "terminal" && tab.attention !== "none" && <span
-              aria-label={`Agent ${tab.attention}`}
-              className={`tab-dot ${tab.attention}`}
-              role="img"
+            {tab.kind === "terminal" && tab.attention !== "none" && <StateDot
+              className="tab-dot"
+              glyphs={props.stateGlyphs}
+              label={`Agent ${tab.attention}`}
+              state={tab.attention}
             />}
           </button>
           {tab.kind === "app" && <button

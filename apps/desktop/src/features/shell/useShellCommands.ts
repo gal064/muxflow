@@ -26,7 +26,7 @@ interface ShellCommandOptions {
   appState: PersistedAppState;
   canMutate: boolean;
   combinedTabs: readonly CombinedTab[];
-  compactViewport: boolean;
+
   controllers: MutableRefObject<Map<string, TerminalPaneController>>;
   currentHostProfileId: string;
   focusDirection(direction: "left" | "right" | "up" | "down"): void;
@@ -148,7 +148,7 @@ export function useShellCommands(options: ShellCommandOptions): {
       case "view.showGit":
         options.setAppState((current) => ({
           ...current,
-          shell: shellAfterSidebarCommand(current.shell, commandId, options.compactViewport),
+          shell: shellAfterSidebarCommand(current.shell, commandId),
         }));
         return;
       case "agents.toggleSort":

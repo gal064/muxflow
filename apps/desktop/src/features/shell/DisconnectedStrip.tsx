@@ -39,16 +39,17 @@ export function DisconnectedStrip(props: DisconnectedStripProps) {
     || (props.hasSnapshot
       ? "The last known workspace stays visible; writes are frozen and are not queued."
       : "Workspace data appears after a complete authoritative snapshot.");
-  return <div
-    className={`link-strip ${readOnly ? "link-strip-frozen" : ""}`}
-    // `status`/`polite` even for read-only: it is a persistent condition, and
-    // an assertive live region re-interrupts every time the detail text
-    // re-renders. The words say "read-only" and forced-colors appends it too.
-    role="status"
-    aria-live="polite"
-  >
-    <span className="link-strip-title">{title}</span>
-    <span className="link-strip-detail" title={detail}>{detail}</span>
+  return <div className={`link-strip ${readOnly ? "link-strip-frozen" : ""}`}>
+    {/* The live region wraps the *words* and not the buttons. With the buttons
+        inside it, every change of `detail` re-announced "Reconnect" and
+        "Connection…" along with it.
+        `status`/`polite` even for read-only: it is a persistent condition, and
+        an assertive region re-interrupts on every re-render. The words say
+        "read-only" and forced-colors appends it too. */}
+    <span aria-live="polite" className="link-strip-message" role="status">
+      <span className="link-strip-title">{title}</span>
+      <span className="link-strip-detail" title={detail}>{detail}</span>
+    </span>
     {!readOnly && <button className="link-strip-action" onClick={props.onReconnect} type="button">Reconnect</button>}
     <button className="link-strip-action" onClick={props.onOpenSettings} type="button">Connection…</button>
   </div>;

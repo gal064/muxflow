@@ -163,6 +163,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   color: var(--warn); font-size: var(--type-secondary);
   box-shadow: inset 2px 0 var(--warn);
 }
+/* The live region wrapping title + detail; it must not change the row's shape. */
+.link-strip-message { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; }
 .link-strip-frozen {
   background: var(--danger-wash); color: var(--danger-ink);
   box-shadow: inset 2px 0 var(--danger);
@@ -257,7 +259,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 0; border-radius: var(--radius-control);
   background: transparent; color: inherit; text-align: left;
 }
-.agent-button:hover:not(:disabled) { background: var(--chrome-hover); }
+.agent-button:hover:not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
+/* Reachable by keyboard, still clearly not actionable — see the note at the
+   call site for why this is not `disabled`. */
+.agent-button[data-unavailable] { opacity: .5; cursor: not-allowed; }
 .agent-line {
   display: flex; align-items: center; gap: 6px; min-width: 0;
   font-size: 11.5px; font-weight: var(--weight-row); color: var(--chrome-ink);
@@ -274,6 +279,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%;
   font-size: 6px; font-weight: 700; line-height: 1; color: var(--chrome-bg);
 }
+/* The glyph is always in the markup and hidden here, so `forced-colors` can
+   turn it on by itself: there every dot's background collapses to one system
+   color and the shape is the only thing left that separates the four states. */
+.state-dot, .tab-dot { overflow: hidden; }
+.state-dot:not(.glyphs), .tab-dot:not(.glyphs) { color: transparent; }
 .state-dot.working { background: var(--state-working); }
 .state-dot.blocked { background: var(--state-blocked); }
 .state-dot.done { background: var(--state-done); }
@@ -357,7 +367,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .tab-glyph.gitDiff { color: var(--state-working); }
 .tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab-zoom { display: inline-flex; color: var(--chrome-faint); }
-.tab-dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); }
+.tab-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%;
+  background: var(--accent);
+  font-size: 5px; font-weight: 700; line-height: 1; color: var(--chrome-bg);
+}
 .tab-dot.blocked { background: var(--state-blocked); }
 .tab-dot.done { background: var(--state-done); }
 .tab-dot.working { background: var(--state-working); }
@@ -740,8 +755,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   color: var(--chrome-ink-strong); font-size: var(--type-menu);
 }
 /* Inset, not removed: the input is the only focusable thing in the palette,
-   and under forced-colors an unringed one is invisible. */
-.palette-input input:focus-visible { outline-offset: -1px; }
+   and under forced-colors an unringed one is invisible. The color is stated
+   rather than inherited — the platform ring is the system accent, which is the
+   one place the app's single accent would otherwise vary by machine. */
+.palette-input input:focus-visible {
+  outline: var(--focus-ring) solid var(--accent); outline-offset: -1px;
+}
 .palette-hint { flex: 0 0 auto; color: var(--chrome-faint); font-size: var(--type-meta); }
 /* A whole number of rows, plus the padding. 420px was not one, so the list
    ended by slicing its last row through the middle — the mock's palette ends on
@@ -960,6 +979,15 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   .pane-frame.attention::after { border-color: Highlight; }
   .state-dot, .tab-dot, .link-dot, .badge { border: 1px solid ButtonText; }
   .bar-button:disabled { color: GrayText; }
+  /* Four state colors become one system color here, so the shape carries the
+     encoding whether or not the user turned the glyph option on. The dots grow
+     to fit a legible glyph. */
+  .state-dot, .tab-dot {
+    width: 11px; height: 11px; overflow: visible;
+    background: Canvas; color: ButtonText; font-size: 9px;
+  }
+  .state-dot:not(.glyphs), .tab-dot:not(.glyphs) { color: ButtonText; }
+  .state-dot.idle, .tab-dot.idle { border-style: dashed; }
   .link-strip { border-bottom: 2px solid ButtonText; }
   /* Read-only and reconnecting are two different situations and the colors
      that separate them do not survive here, so the words carry it. */

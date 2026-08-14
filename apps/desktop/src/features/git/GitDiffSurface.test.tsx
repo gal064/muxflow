@@ -8,7 +8,7 @@ import { GitDiffSurface } from "./GitDiffSurface";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.mock("@monaco-editor/react", () => ({ DiffEditor: (props: { original: string; modified: string }) => <div data-modified={props.modified} data-original={props.original}>diff editor</div> }));
-vi.mock("../files/monaco", () => ({}));
+vi.mock("../files/monaco", () => ({ ADE_MONACO_THEME: "ade-dark" }));
 
 describe("GitDiffSurface", () => {
   it("renders a read-only Monaco diff and exposes complete-hunk actions", async () => {

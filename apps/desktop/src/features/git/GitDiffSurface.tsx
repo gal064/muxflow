@@ -5,7 +5,7 @@ import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot, GitWorkspaceClient, GitWorkspaceEvent } from "./types";
-import "../files/monaco";
+import { ADE_MONACO_THEME } from "../files/monaco";
 
 interface Props {
   tab: AppOwnedTab;
@@ -219,7 +219,7 @@ export function GitDiffSurface(props: Props) {
             options={{ automaticLayout: true, enableSplitViewResizing: true, minimap: { enabled: false }, originalEditable: false, readOnly: true, renderSideBySide: true, scrollBeyondLastLine: false }}
             original={text.original}
             originalModelPath={modelUri(props.tab, "original")}
-            theme="vs-dark"
+            theme={ADE_MONACO_THEME}
           />}
     </div>
     {hunkActions && diff.hunkCount > 0 && <aside className="git-hunk-actions" aria-label="Complete hunk actions">

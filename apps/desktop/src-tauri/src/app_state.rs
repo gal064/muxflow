@@ -616,15 +616,27 @@ mod tests {
         assert!(value.shell.window_geometry.is_some());
         validate(&value).expect("the frontend's own payload must validate");
 
-        // Nothing may be stored that the frontend does not send: a field only
-        // this side knows about is a field that resets on the next save.
+        // Nothing may be stored that the frontend does not send, and nothing the
+        // frontend sends may be silently dropped. Checked for every struct that
+        // crosses, not just the one that broke: `appTabs` carries eighteen
+        // fields and `workspaceUi` five, and either could lose one the same way.
         let expected: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
-        let mut expected_shell: Vec<&String> = expected["shell"].as_object().unwrap().keys().collect();
         let stored = serde_json::to_value(&value).unwrap();
-        let mut stored_shell: Vec<&String> = stored["shell"].as_object().unwrap().keys().collect();
-        expected_shell.sort();
-        stored_shell.sort();
-        assert_eq!(stored_shell, expected_shell);
+        let keys = |value: &serde_json::Value| {
+            let mut names: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+            names.sort();
+            names
+        };
+        assert_eq!(keys(&stored["shell"]), keys(&expected["shell"]), "shell");
+        assert_eq!(keys(&stored["appTabs"][0]), keys(&expected["appTabs"][0]), "appTabs");
+        assert_eq!(keys(&stored["workspaceUi"][0]), keys(&expected["workspaceUi"][0]), "workspaceUi");
+        assert_eq!(keys(&stored["commands"]), keys(&expected["commands"]), "commands");
+        // And the envelope itself, so a whole section cannot go missing.
+        assert_eq!(keys(&stored), keys(&expected.as_object().unwrap().iter()
+            .filter(|(name, _)| !name.starts_with('_'))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<serde_json::Map<_, _>>()
+            .into()));
     }
 
     /// A file written by the build before Phase 11 must still load, with the

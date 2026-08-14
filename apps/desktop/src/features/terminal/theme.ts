@@ -144,7 +144,7 @@ export function terminalFont(root: Element | undefined = globalThis.document?.do
   };
 }
 
-function tokenReader(root: Element | undefined): (token: string) => string | undefined {
+export function tokenReader(root: Element | undefined): (token: string) => string | undefined {
   if (!root || typeof globalThis.getComputedStyle !== "function") return () => undefined;
   let style: CSSStyleDeclaration;
   try {
