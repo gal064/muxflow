@@ -32,7 +32,10 @@ mod terminal;
 use terminal::TerminalClients;
 mod tmux_actions;
 mod tmux_config;
-pub(crate) use tmux_config::apply_recommended_naming as apply_recommended_tmux_naming;
+pub(crate) use tmux_config::{
+    apply_recommended_naming as apply_recommended_tmux_naming,
+    remove_recommended_naming as remove_recommended_tmux_naming,
+};
 mod topology;
 #[cfg(test)]
 use terminal::validate_tmux_id;

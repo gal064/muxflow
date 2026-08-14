@@ -84,7 +84,11 @@ async fn main() -> anyhow::Result<()> {
         // prompt, reachable without one — which is how it is tested against
         // real tmux servers on isolated sockets rather than a developer's own.
         Some("host-naming") => {
-            let outcome = service::apply_recommended_tmux_naming()?;
+            let outcome = if std::env::args().any(|argument| argument == "--remove") {
+                service::remove_recommended_tmux_naming()?
+            } else {
+                service::apply_recommended_tmux_naming()?
+            };
             println!("{}", serde_json::json!({ "outcome": outcome.label() }));
             Ok(())
         }

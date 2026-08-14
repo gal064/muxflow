@@ -169,8 +169,12 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     if (!optionsRef.current.scope) return Promise.reject(new Error("Host naming requires a live authoritative host."));
     return optionsRef.current.client.applyHostNaming(optionsRef.current.scope);
   }, []);
+  const removeHostNaming = useCallback((): Promise<AgentHostNamingOutcome> => {
+    if (!optionsRef.current.scope) return Promise.reject(new Error("Host naming requires a live authoritative host."));
+    return optionsRef.current.client.applyHostNaming(optionsRef.current.scope, "uninstall");
+  }, []);
 
-  return { state, agents, adapters: state.adapters, rollups, accept, launch, resume, rename, reviewHooks, applyHooks, applyHostNaming, refreshSnapshot };
+  return { state, agents, adapters: state.adapters, rollups, accept, launch, resume, rename, reviewHooks, applyHooks, applyHostNaming, removeHostNaming, refreshSnapshot };
 }
 
 export type AgentRuntime = ReturnType<typeof useAgentRuntime>;

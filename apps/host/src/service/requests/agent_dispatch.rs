@@ -111,8 +111,18 @@ fn handle_inner(
             // Requires no confirmation token of its own: nothing is written to
             // disk, and the one-time host prompt that authorised it is the same
             // consent as the hook install. The desktop re-sends it on every
-            // connect because a tmux server restart drops the hook.
-            let outcome = super::super::tmux_config::apply_recommended_naming()?;
+            // connect because a tmux server restart drops the hook — and sends
+            // the uninstall alongside the file hooks' own, because without an
+            // explicit removal this would keep renaming the user's windows
+            // until their server happened to restart.
+            let outcome = if v1::HookManagementAction::try_from(request.hook_management)
+                .unwrap_or_default()
+                == v1::HookManagementAction::Uninstall
+            {
+                super::super::tmux_config::remove_recommended_naming()?
+            } else {
+                super::super::tmux_config::apply_recommended_naming()?
+            };
             response.host_naming = outcome.label().into();
         }
         v1::Operation::AgentAction => {

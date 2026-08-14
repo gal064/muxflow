@@ -1636,6 +1636,49 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The configuration probe reads the *daemon process's* `PATH`, and a
+    /// daemon started by launchd or a non-login SSH exec has one without
+    /// `~/.local/bin`. A running agent is proof its vendor is installed here,
+    /// and the snapshot is where both facts meet — reported as `Absent`, the
+    /// desktop offers nothing and says nothing, which is the original failure
+    /// with the volume turned down.
+    #[test]
+    fn a_running_agent_is_never_reported_as_an_agent_this_host_does_not_have() {
+        let runtime = runtime("absent-but-running");
+        let observed: Vec<_> = adapters::all()
+            .map(|adapter| {
+                (
+                    adapter,
+                    hooks::AdapterWiring {
+                        adapter_id: adapter.id(),
+                        config_path: PathBuf::new(),
+                        state: v1::AgentHookWiring::Absent,
+                        detail: String::new(),
+                    },
+                )
+            })
+            .collect();
+        runtime
+            .reconcile_topology(&topology("codex"), "server-a")
+            .unwrap();
+        let state = runtime.state.lock().unwrap();
+        let snapshot = snapshot::build(&state, "server-a", &observed);
+        let wiring = |id: &str| {
+            snapshot
+                .adapters
+                .iter()
+                .find(|descriptor| descriptor.id == id)
+                .unwrap()
+                .hook_wiring
+        };
+        assert_eq!(wiring("codex"), v1::AgentHookWiring::NotWired as i32);
+        assert_eq!(
+            wiring("claude-code"),
+            v1::AgentHookWiring::Absent as i32,
+            "an adapter with nothing running is still absent"
+        );
+    }
+
     #[test]
     fn malformed_fallback_is_removed_and_does_not_stop_the_scan() {
         let dir = std::env::current_dir()

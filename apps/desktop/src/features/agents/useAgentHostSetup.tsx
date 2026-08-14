@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { AgentHostSetupDialog } from "./AgentHostSetupDialog";
 import { hostHookWiring, hookWiringNotice, shouldPromptForSetup } from "./hookWiring";
 import type { HostSetupDecision } from "../shell/types";
-import type { AgentAdapterDescriptor, AgentAdapterId, AgentHookReview, AgentHostNamingOutcome } from "./types";
+import type { AgentAdapterDescriptor, AgentHookReview, AgentHostNamingOutcome } from "./types";
 
 export interface AgentHostSetupOptions {
   adapters: readonly AgentAdapterDescriptor[];
@@ -21,11 +21,6 @@ export interface AgentHostSetupOptions {
    * so it has to be re-asserted rather than installed once.
    */
   applyHostNaming(): Promise<AgentHostNamingOutcome>;
-  /**
-   * Adapters with an agent actually running here. A running agent is proof it
-   * is installed, whatever the host's `PATH`-based probe concluded.
-   */
-  liveAdapterIds: readonly AgentAdapterId[];
   /** Re-asks the host what its wiring is now, after a change to it. */
   refreshWiring(): void;
   onStatus(message: string): void;
@@ -68,10 +63,11 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  const wiring = useMemo(
-    () => hostHookWiring(options.adapters, options.liveAdapterIds),
-    [options.adapters, options.liveAdapterIds],
-  );
+  // Keyed on `options.adapters` alone, which the store replaces only when a
+  // snapshot arrives. It briefly also depended on which agents were running,
+  // which changes on every hook event — and the effect below, which installs,
+  // depended on this.
+  const wiring = useMemo(() => hostHookWiring(options.adapters), [options.adapters]);
   // Read by callbacks that must act on what the dialog was rendered from,
   // rather than deriving it a second time and risking a different answer.
   const wiringRef = useRef(wiring);
@@ -153,24 +149,42 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // unavailable" forever and the one-time prompt, already answered, could never
   // come back to fix it. Merge-only, backed up and idempotent, so re-running it
   // on a host that is already current writes nothing at all.
-  const reasserting = useRef(false);
+  const reassert = useRef<{ running: boolean; attempted: boolean }>({ running: false, attempted: false });
   useEffect(() => {
-    if (!options.connected || options.decision !== "accepted") return;
-    // The guard is against re-entering while the install is in flight, not
-    // against repeating it: the install is idempotent, and what stops it
-    // looping is that a successful one empties `setupTargets`.
-    if (wiring.setupTargets.length === 0 || reasserting.current) {
-      // `install` asserts the naming itself when it succeeds; this is the
-      // nothing-to-install path, which still has a tmux server to talk to.
-      if (!reasserting.current) assertNaming();
+    if (!options.connected) {
+      // A new connection is a new chance: the attempt is remembered only for
+      // the connection it happened on.
+      reassert.current = { running: false, attempted: false };
       return;
     }
-    reasserting.current = true;
-    const named = wiring.setupTargets.map((adapter) => adapter.displayName).join(" and ");
-    void install(wiring.setupTargets).then((ok) => {
-      if (ok) optionsRef.current.onStatus(`Updated the agent status hooks for ${named} on this host.`);
-    }).finally(() => { reasserting.current = false; });
+    if (options.decision !== "accepted") return;
+    // Only adapters this app already owns entries in. `partial` means the
+    // managed event set grew under a host the user already approved, which is
+    // what this exists for. A `notWired` adapter that appeared *later* is one
+    // the consent dialog never named, and writing its configuration without
+    // ever showing the user its path is not what "one-time consent" bought.
+    const outdated = wiring.setupTargets.filter((adapter) => adapter.hookWiring === "partial");
+    if (outdated.length === 0 || reassert.current.running || reassert.current.attempted) {
+      // `install` asserts the naming itself when it succeeds; this is the
+      // nothing-to-install path, which still has a tmux server to talk to.
+      if (!reassert.current.running) assertNaming();
+      return;
+    }
+    reassert.current.running = true;
+    const named = outdated.map((adapter) => adapter.displayName).join(" and ");
+    void install(outdated).then((ok) => {
+      // Once per connection, whatever happened. `install` finishes by
+      // refreshing the wiring, which produces a new snapshot and re-runs this
+      // effect; without this an install that cannot reach `wired` — a racing
+      // editor, a stale lock, an unwritable file, or simply a host that
+      // disagrees — would rewrite the user's configuration in a silent loop.
+      reassert.current = { running: false, attempted: true };
+      optionsRef.current.onStatus(ok
+        ? `Updated the agent status hooks for ${named} on this host.`
+        : `Could not update the agent status hooks for ${named} on this host.`);
+    });
   }, [assertNaming, install, options.connected, options.decision, wiring.setupTargets]);
+
 
   const accept = useCallback(() => {
     const current = optionsRef.current;

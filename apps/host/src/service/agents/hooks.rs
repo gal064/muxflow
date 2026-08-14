@@ -240,6 +240,12 @@ impl HookManager {
         } else {
             serde_json::to_vec_pretty(&proposed)?
         };
+        // Each once. Every one of these deep-clones a configuration of up to
+        // two megabytes, redacts it and pretty-prints it, and `apply` calls
+        // `review` three times.
+        let before_preview = preview(&value);
+        let after_preview = preview(&proposed);
+        let diff_preview = diff_preview(&value, &proposed);
         Ok(v1::HookManagementPlan {
             adapter: adapter.into(),
             adapter_id: adapter_impl.id().into(),
@@ -275,12 +281,10 @@ impl HookManager {
             after_hash: blake3::hash(&proposed_bytes).to_hex().to_string(),
             creates_config: bytes.is_empty() && action == v1::HookManagementAction::Install,
             removes_config,
-            before_preview: preview(&value).0,
-            after_preview: preview(&proposed).0,
-            diff_preview: diff_preview(&value, &proposed).0,
-            preview_truncated: preview(&value).1
-                || preview(&proposed).1
-                || diff_preview(&value, &proposed).1,
+            before_preview: before_preview.0,
+            after_preview: after_preview.0,
+            diff_preview: diff_preview.0,
+            preview_truncated: before_preview.1 || after_preview.1 || diff_preview.1,
         })
     }
 

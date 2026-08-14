@@ -71,8 +71,11 @@ pub(crate) enum NamingOutcome {
     /// by a hook of their own or by an `automatic-rename-format`. Theirs is
     /// kept: it may carry exemptions this app knows nothing about — the field
     /// machine's config exempts one window by name so a verbose editor title
-    /// cannot clobber it.
+    /// cannot clobber it. Also the answer when there is nothing of ours to
+    /// remove.
     UserConfigured,
+    /// This app's hook was taken back off the server.
+    Removed,
 }
 
 impl NamingOutcome {
@@ -81,6 +84,7 @@ impl NamingOutcome {
             Self::Applied => "applied",
             Self::AlreadyCurrent => "alreadyCurrent",
             Self::UserConfigured => "userConfigured",
+            Self::Removed => "removed",
         }
     }
 }
@@ -96,16 +100,20 @@ impl NamingOutcome {
 pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
     let command = recommended_hook_command();
     let existing = setting(PANE_TITLE_HOOK)?;
-    let ours: Vec<_> = existing
+    // Any entry that is not ours makes the whole hook theirs. `set-hook -g`
+    // replaces the entire array rather than appending to it, so a server
+    // carrying both our hook and one of the user's would have had theirs
+    // silently destroyed by an "update" of ours.
+    if existing
         .iter()
-        .filter(|value| value.contains(OWNED_HOOK_BODY))
-        .collect();
-    if !existing.is_empty() && ours.is_empty() {
+        .any(|value| !value.contains(OWNED_HOOK_BODY))
+    {
         return Ok(NamingOutcome::UserConfigured);
     }
-    if ours.len() == existing.len()
-        && ours.iter().all(|value| value.contains(&guard_condition()))
-        && !ours.is_empty()
+    if !existing.is_empty()
+        && existing
+            .iter()
+            .all(|value| value.contains(&guard_condition()))
     {
         return Ok(NamingOutcome::AlreadyCurrent);
     }
@@ -131,6 +139,38 @@ pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
         bail!("tmux accepted the recommended window naming but did not retain it");
     }
     Ok(NamingOutcome::Applied)
+}
+
+/// Take the recommended naming back off the server.
+///
+/// Withdrawing consent has to withdraw both halves. The configuration-file
+/// hooks are removed by their own uninstaller; without this, the tmux hook
+/// stayed live on the user's running server, renaming their windows, until the
+/// server happened to restart. Removes only what this app put there: a server
+/// carrying a hook of the user's is left exactly as it is.
+pub(crate) fn remove_recommended_naming() -> anyhow::Result<NamingOutcome> {
+    let existing = setting(PANE_TITLE_HOOK)?;
+    if existing.is_empty()
+        || existing
+            .iter()
+            .any(|value| !value.contains(OWNED_HOOK_BODY))
+    {
+        return Ok(NamingOutcome::UserConfigured);
+    }
+    let output = tmux_command()
+        .args(["set-hook", "-gu", PANE_TITLE_HOOK])
+        .output()
+        .context("remove the recommended tmux window naming")?;
+    if !output.status.success() {
+        bail!(
+            "tmux rejected removing the recommended window naming: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if !setting(PANE_TITLE_HOOK)?.is_empty() {
+        bail!("tmux accepted removing the recommended window naming but kept it");
+    }
+    Ok(NamingOutcome::Removed)
 }
 
 /// The other mechanism that reaches the same result. A user who put pane titles
@@ -198,6 +238,7 @@ mod tests {
         assert_eq!(NamingOutcome::Applied.label(), "applied");
         assert_eq!(NamingOutcome::AlreadyCurrent.label(), "alreadyCurrent");
         assert_eq!(NamingOutcome::UserConfigured.label(), "userConfigured");
+        assert_eq!(NamingOutcome::Removed.label(), "removed");
     }
 
     /// The identity has to survive a change to the guard, because the guard is
