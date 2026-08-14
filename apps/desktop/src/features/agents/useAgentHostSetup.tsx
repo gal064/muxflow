@@ -96,11 +96,15 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     if (!options.connected) setOpen(false);
   }, [options.connected]);
 
-  // No local dedupe: `applyHostNaming` is idempotent on the host and answers
-  // `alreadyCurrent` from two cheap `show-options` calls. A ref and a
-  // hand-assembled connection key existed here to avoid those two round trips,
-  // which is a second copy of an answer the daemon already gives.
+  // Once per connection. The host's answer is idempotent, but reaching it is
+  // two `tmux show-options` subprocesses over the link, and the effect below
+  // re-runs on every snapshot — which is every topology change. Asserting it
+  // per snapshot put subprocess spawns on the path this phase budgets at under
+  // a second end to end.
+  const asserted = useRef(false);
   const assertNaming = useCallback(() => {
+    if (asserted.current) return;
+    asserted.current = true;
     const current = optionsRef.current;
     void current.applyHostNaming().then((outcome) => {
       // A change to the user's running tmux server is worth one line; finding
@@ -152,9 +156,10 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   const reassert = useRef<{ running: boolean; attempted: boolean }>({ running: false, attempted: false });
   useEffect(() => {
     if (!options.connected) {
-      // A new connection is a new chance: the attempt is remembered only for
-      // the connection it happened on.
+      // A new connection is a new chance — and a restarted tmux server has
+      // dropped the in-memory naming, so both are reset together.
       reassert.current = { running: false, attempted: false };
+      asserted.current = false;
       return;
     }
     if (options.decision !== "accepted") return;
@@ -194,8 +199,11 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   }, [install]);
 
   const decline = useCallback(() => {
+    // Unconditionally, including over an earlier "accepted": this prompt is
+    // reachable from Settings, and someone who opens it there to say no is
+    // changing their mind, not restating it.
     const current = optionsRef.current;
-    if (current.decision === undefined) current.recordDecision(current.hostProfileId, "declined");
+    current.recordDecision(current.hostProfileId, "declined");
     setOpen(false);
   }, []);
 

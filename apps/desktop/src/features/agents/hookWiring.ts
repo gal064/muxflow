@@ -66,9 +66,12 @@ export function hostHookWiring(adapters: readonly AgentAdapterDescriptor[]): Hos
 export function hookWiringNotice(wiring: HostHookWiring): string | undefined {
   if (wiring.reports || wiring.unknown) return undefined;
   if (wiring.setupTargets.length > 0) return "Agent status unavailable on this host — set up hooks";
-  return wiring.unreadableReason
-    ? `Agent status unavailable on this host — ${wiring.unreadableReason}`
-    : "Agent status unavailable on this host — its agent configuration could not be read";
+  // No trailing else that names a cause. This branch used to assert "its agent
+  // configuration could not be read" for anything that reached it, which is
+  // true only when an unreadable adapter has no detail to quote — and was a
+  // fresh untruth on any other route in.
+  if (wiring.unreadableReason) return `Agent status unavailable on this host — ${wiring.unreadableReason}`;
+  return "Agent status unavailable on this host";
 }
 
 /**

@@ -312,7 +312,8 @@ fn adapter_descriptor_json(value: &v1::AgentAdapterDescriptor) -> Value {
         "supportsScreenFallback": value.supports_screen_fallback,
         "hookConfigPath": value.hook_config_path, "hookEvents": value.hook_events,
         "hookWiring": hook_wiring_name(value.hook_wiring),
-        "hookWiringDetail": value.hook_wiring_detail })
+        "hookWiringDetail": value.hook_wiring_detail,
+        "hookSetupRecommended": value.hook_setup_recommended })
 }
 
 fn hook_wiring_name(value: i32) -> &'static str {
@@ -378,6 +379,62 @@ mod tests {
         assert_eq!(json["route"]["hostProfileId"], "profile-1");
         let sideband = with_connection_epoch(json, (1_u64 << 53) + 3);
         assert_eq!(sideband["connectionEpoch"], ((1_u64 << 53) + 3).to_string());
+    }
+
+    /// Every field of the descriptor crosses the bridge.
+    ///
+    /// This is the only path a snapshot takes into the WebView, and it is
+    /// hand-written. `hook_setup_recommended` was added to the host, the
+    /// protocol and the TypeScript and omitted here — which silently turned
+    /// off the entire one-time setup flow, made the Settings entry and the
+    /// context-menu item unreachable, and made every un-wired host report that
+    /// its configuration could not be read. Seventy-seven green desktop tests
+    /// saw none of it, because they all build descriptors above this function.
+    #[test]
+    fn every_adapter_descriptor_field_crosses_the_bridge() {
+        let value = v1::AgentAdapterDescriptor {
+            adapter: v1::AgentAdapterKind::ClaudeCode.into(),
+            id: "claude-code".into(),
+            display_name: "Claude Code".into(),
+            supports_launch: true,
+            supports_resume: true,
+            supports_hooks: true,
+            supports_process_detection: true,
+            supports_screen_fallback: true,
+            hook_config_path: "/home/user/.claude/settings.json".into(),
+            hook_events: vec!["Stop".into()],
+            hook_wiring: v1::AgentHookWiring::Partial.into(),
+            hook_wiring_detail: String::new(),
+            hook_setup_recommended: true,
+        };
+        let json = adapter_descriptor_json(&value);
+        let mut carried: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        carried.sort_unstable();
+        assert_eq!(
+            carried,
+            [
+                "adapter",
+                "displayName",
+                "hookConfigPath",
+                "hookEvents",
+                "hookSetupRecommended",
+                "hookWiring",
+                "hookWiringDetail",
+                "id",
+                "supportsHooks",
+                "supportsLaunch",
+                "supportsProcessDetection",
+                "supportsResume",
+                "supportsScreenFallback",
+            ]
+        );
+        assert_eq!(json["hookWiring"], "partial");
+        assert_eq!(json["hookSetupRecommended"], true);
     }
 
     #[test]

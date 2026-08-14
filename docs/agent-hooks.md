@@ -23,6 +23,7 @@ adapter:
 | `notWired` | The agent is here and nothing routes its events to this app. |
 | `absent` | The agent is not on this host: no configuration, no directory, nothing on `PATH`. |
 | `unavailable` | The configuration could not be inspected. Deliberately not the same as absent — it is never written over. |
+| `unspecified` | The host has not answered: no snapshot yet, or a helper too old to have an opinion. Never treated as a definite answer. |
 
 On connect the desktop asks once per host profile whether to set it up, and only
 when the host reports nothing at all. The answer is remembered either way, and
@@ -43,7 +44,10 @@ tmux-ide-host hook uninstall [--adapter …] [--home …] [--settings-path …]
 
 `--home` relocates every adapter's configuration; `--settings-path` relocates
 exactly the adapter named by `--adapter`, which it requires. Without
-`--adapter`, install acts on every adapter that is actually on the host.
+`--adapter`, install acts on every adapter that is actually on the host, and
+uninstall on every adapter that has entries of this app's to remove. Either
+verb reports every adapter it did not act on and why, and exits non-zero if any
+adapter failed — after printing what the others did.
 
 ## Events taken, and the gaps
 

@@ -111,11 +111,25 @@ impl HookManager {
     /// the results, which made "these two functions iterate the same registry
     /// in the same order" a rule enforced by a comment and a debug assertion,
     /// with silent truncation if it were ever broken.
-    pub(crate) fn wiring(&self) -> Vec<(&'static dyn adapters::AgentAdapter, AdapterWiring)> {
+    pub(crate) fn wiring(&self) -> Vec<ObservedAdapter> {
+        self.wiring_with_running(&Default::default())
+    }
+
+    /// `running` names adapters with an agent live on this host right now.
+    ///
+    /// A running agent is proof its vendor is installed, whatever
+    /// [`Self::agent_is_present`] concluded — and that probe reads the *daemon
+    /// process's* `PATH`, which under launchd or a non-login SSH exec has no
+    /// `~/.local/bin` in it. Taken here so one function decides one answer;
+    /// the correction used to be applied afterwards, by the snapshot builder.
+    pub(crate) fn wiring_with_running(
+        &self,
+        running: &std::collections::BTreeSet<&str>,
+    ) -> Vec<ObservedAdapter> {
         adapters::all()
             .map(|adapter| {
                 let config_path = self.config_path(adapter);
-                let observed = match self.inspect_wiring(adapter, &config_path) {
+                let observed = match self.inspect_wiring(adapter, &config_path, running) {
                     Ok(state) => AdapterWiring {
                         adapter_id: adapter.id(),
                         config_path,
@@ -138,6 +152,7 @@ impl HookManager {
         &self,
         adapter: &'static dyn adapters::AgentAdapter,
         path: &Path,
+        running: &std::collections::BTreeSet<&str>,
     ) -> anyhow::Result<v1::AgentHookWiring> {
         inspect_config_path(path)?;
         let bytes = read_config(path)?;
@@ -148,7 +163,10 @@ impl HookManager {
                 v1::AgentHookWiring::Wired
             } else if managed_entry_count(&value, adapter) > 0 {
                 v1::AgentHookWiring::Partial
-            } else if bytes.is_empty() && !self.agent_is_present(adapter) {
+            } else if bytes.is_empty()
+                && !running.contains(adapter.id())
+                && !self.agent_is_present(adapter)
+            {
                 v1::AgentHookWiring::Absent
             } else {
                 v1::AgentHookWiring::NotWired
@@ -360,7 +378,10 @@ pub(crate) struct WiringCache {
 }
 
 impl WiringCache {
-    pub(crate) fn current(&mut self) -> Vec<ObservedAdapter> {
+    pub(crate) fn current(
+        &mut self,
+        running: &std::collections::BTreeSet<&str>,
+    ) -> Vec<ObservedAdapter> {
         let manager = match self.manager.take() {
             Some(manager) => manager,
             None => match HookManager::system_default() {
@@ -388,20 +409,34 @@ impl WiringCache {
                 }
             },
         };
-        let wiring = self.for_manager(&manager);
+        let wiring = Self::memoized(&mut self.observed, &manager, running);
         self.manager = Some(manager);
         wiring
     }
 
-    fn for_manager(&mut self, manager: &HookManager) -> Vec<ObservedAdapter> {
-        let fingerprint = manager.wiring_fingerprint();
-        if let Some((observed, wiring)) = self.observed.as_ref()
-            && observed == &fingerprint
+    /// Static, over the memo alone: as a method it needed `&mut self` while
+    /// `self.manager` was borrowed, which forced `current` to take its own
+    /// field out and put it back — and to lose it on any panic in between.
+    fn memoized(
+        observed: &mut Option<(Vec<u8>, Vec<ObservedAdapter>)>,
+        manager: &HookManager,
+        running: &std::collections::BTreeSet<&str>,
+    ) -> Vec<ObservedAdapter> {
+        // The running set is part of the fingerprint: an agent starting is a
+        // reason to re-read, and it is exactly the case the `PATH` probe gets
+        // wrong.
+        let mut fingerprint = manager.wiring_fingerprint();
+        for adapter in running {
+            fingerprint.push(0);
+            fingerprint.extend_from_slice(adapter.as_bytes());
+        }
+        if let Some((taken, wiring)) = observed.as_ref()
+            && taken == &fingerprint
         {
             return wiring.clone();
         }
-        let wiring = manager.wiring();
-        self.observed = Some((fingerprint, wiring.clone()));
+        let wiring = manager.wiring_with_running(running);
+        *observed = Some((fingerprint, wiring.clone()));
         wiring
     }
 }
@@ -1561,6 +1596,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let manager = HookManager::for_home(&home);
         let mut cache = WiringCache::default();
+        let nothing_running = Default::default();
         let state = |wiring: &[ObservedAdapter]| {
             wiring
                 .iter()
@@ -1570,7 +1606,11 @@ mod tests {
                 .state
         };
         assert_eq!(
-            state(&cache.for_manager(&manager)),
+            state(&WiringCache::memoized(
+                &mut cache.observed,
+                &manager,
+                &nothing_running
+            )),
             v1::AgentHookWiring::NotWired
         );
 
@@ -1589,14 +1629,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            state(&cache.for_manager(&manager)),
+            state(&WiringCache::memoized(
+                &mut cache.observed,
+                &manager,
+                &nothing_running
+            )),
             v1::AgentHookWiring::Wired,
             "an install a moment ago must not be hidden behind a cached answer"
         );
         // And an unchanged configuration is not re-parsed into a new answer.
         assert_eq!(
-            state(&cache.for_manager(&manager)),
-            state(&cache.for_manager(&manager)),
+            state(&WiringCache::memoized(
+                &mut cache.observed,
+                &manager,
+                &nothing_running
+            )),
+            state(&WiringCache::memoized(
+                &mut cache.observed,
+                &manager,
+                &nothing_running
+            )),
             "a stable configuration must produce a stable observation"
         );
         assert_eq!(adapter.id(), "claude-code");

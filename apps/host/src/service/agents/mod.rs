@@ -143,8 +143,16 @@ impl AgentRuntime {
     }
 
     pub(super) fn snapshot_for(&self, server_identity: &str) -> v1::AgentSnapshot {
-        let wiring = self.wiring.lock().unwrap().current();
         let state = self.state.lock().unwrap();
+        // Which agents are actually running here, which is what corrects a
+        // configuration probe that could not see the agent's executable.
+        let running: BTreeSet<&str> = state
+            .agents
+            .values()
+            .filter(|record| record.route.server_identity == server_identity)
+            .map(|record| record.adapter_id.as_str())
+            .collect();
+        let wiring = self.wiring.lock().unwrap().current(&running);
         snapshot::build(&state, server_identity, &wiring)
     }
 
@@ -1638,45 +1646,36 @@ mod tests {
 
     /// The configuration probe reads the *daemon process's* `PATH`, and a
     /// daemon started by launchd or a non-login SSH exec has one without
-    /// `~/.local/bin`. A running agent is proof its vendor is installed here,
-    /// and the snapshot is where both facts meet — reported as `Absent`, the
-    /// desktop offers nothing and says nothing, which is the original failure
-    /// with the volume turned down.
+    /// `~/.local/bin`. A running agent is proof its vendor is installed here —
+    /// reported as `Absent`, the desktop offers nothing and says nothing,
+    /// which is the original failure with the volume turned down.
+    ///
+    /// Asserted as an invariant over the running set rather than by observing
+    /// a machine without the agent installed: whether *this* machine has Codex
+    /// on its `PATH` is not something a test may depend on. The `Absent` half
+    /// is covered by `an_agent_that_is_not_on_this_host_is_absent_rather_than_unwired`,
+    /// which passes the search path in.
     #[test]
     fn a_running_agent_is_never_reported_as_an_agent_this_host_does_not_have() {
-        let runtime = runtime("absent-but-running");
-        let observed: Vec<_> = adapters::all()
-            .map(|adapter| {
-                (
-                    adapter,
-                    hooks::AdapterWiring {
-                        adapter_id: adapter.id(),
-                        config_path: PathBuf::new(),
-                        state: v1::AgentHookWiring::Absent,
-                        detail: String::new(),
-                    },
-                )
-            })
-            .collect();
-        runtime
-            .reconcile_topology(&topology("codex"), "server-a")
-            .unwrap();
-        let state = runtime.state.lock().unwrap();
-        let snapshot = snapshot::build(&state, "server-a", &observed);
-        let wiring = |id: &str| {
-            snapshot
-                .adapters
-                .iter()
-                .find(|descriptor| descriptor.id == id)
-                .unwrap()
-                .hook_wiring
-        };
-        assert_eq!(wiring("codex"), v1::AgentHookWiring::NotWired as i32);
-        assert_eq!(
-            wiring("claude-code"),
-            v1::AgentHookWiring::Absent as i32,
-            "an adapter with nothing running is still absent"
-        );
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase13-running-absent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let manager = hooks::HookManager::for_home(&home);
+        let running: BTreeSet<&str> = adapters::all().map(|adapter| adapter.id()).collect();
+        // Nothing is configured here at all, so every answer would otherwise be
+        // whatever the search path happened to say.
+        for (adapter, observed) in manager.wiring_with_running(&running) {
+            assert_eq!(
+                observed.state,
+                v1::AgentHookWiring::NotWired,
+                "{} is running and was reported as {:?}",
+                adapter.id(),
+                observed.state
+            );
+        }
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
