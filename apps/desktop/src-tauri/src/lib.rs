@@ -71,12 +71,19 @@ struct AgentNotificationContent {
     request_action: bool,
     /// Whether macOS should show this while the app itself is frontmost. The
     /// frontend is the only side that knows which pane the user is looking at.
-    /// Defaulted rather than required, and defaulted to the conservative
-    /// answer: a payload without it suppresses, exactly as every build before
-    /// the flag existed did.
-    #[serde(default)]
+    ///
+    /// Defaulted to *presenting*, not to suppressing. A missing field is a bug
+    /// either way, but its two failure modes are not equal: showing a banner
+    /// for a pane already on screen is a duplicate, while suppressing one is
+    /// silence — which is the exact defect this flag exists to end, and the
+    /// kind nobody reports because nothing happens.
+    #[serde(default = "present_by_default")]
     present_in_foreground: bool,
     route: AgentNotificationRouteContent,
+}
+
+fn present_by_default() -> bool {
+    true
 }
 
 #[tauri::command]

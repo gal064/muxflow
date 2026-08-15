@@ -143,13 +143,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               // The row lists up to three agents; the label names the loudest
               // and counts the rest. Reading every line back would make a busy
               // workspace four announcements long for one list item.
-              aria-label={[
-                row.session.name,
-                row.agents[0] && `${row.agents[0].name} · ${activityWord(row.agents[0].state)}`,
-                agentTotal(row) > 1 ? `${agentTotal(row)} agents` : undefined,
-                row.unread > 0 ? `${row.unread} agent${row.unread === 1 ? "" : "s"} waiting` : undefined,
-                row.branch,
-              ].filter(Boolean).join(", ")}
+              aria-label={rowLabel(row)}
               className={row.active ? "workspace-button active" : "workspace-button"}
               data-workspace-index={index}
               onClick={() => props.onSelectWorkspace(row.session.id)}
@@ -177,7 +171,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                   {/* Decorative: the button's own accessible name already
                       carries the loudest agent and the total. */}
                   <StateDot glyphs={props.stateGlyphs} state={agent.state} />
-                  <span className="workspace-activity-text">{agent.name} · {activityWord(agent.state)}</span>
+                  <span className="workspace-activity-text">{agentLine(agent)}</span>
                 </span>)}
                 {row.agentOverflow > 0 && <span className="workspace-activity-line workspace-activity-more">
                   <span className="workspace-activity-text">…{row.agentOverflow} more</span>
@@ -395,9 +389,27 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   </nav>;
 }
 
-/** Every agent in the workspace, listed or counted. */
-function agentTotal(row: WorkspaceRowModel): number {
-  return row.agents.length + row.agentOverflow;
+/** One agent's line, written the same way for the eye and for the label. */
+function agentLine(agent: WorkspaceRowModel["agents"][number]): string {
+  return `${agent.name} · ${activityWord(agent.state)}`;
+}
+
+/**
+ * The row's whole accessible name.
+ *
+ * It names the loudest agent and counts the rest rather than reading all four
+ * lines: a busy workspace is one list item, and four announcements for one
+ * item is how a list stops being navigable.
+ */
+function rowLabel(row: WorkspaceRowModel): string {
+  const total = row.agents.length + row.agentOverflow;
+  return [
+    row.session.name,
+    row.agents[0] && agentLine(row.agents[0]),
+    total > 1 ? `${total} agents` : undefined,
+    row.unread > 0 ? `${row.unread} agent${row.unread === 1 ? "" : "s"} waiting` : undefined,
+    row.branch,
+  ].filter(Boolean).join(", ");
 }
 
 function resumePlacements(adapters: readonly AgentAdapterDescriptor[], agent: AgentRecord): AgentPlacement[] {

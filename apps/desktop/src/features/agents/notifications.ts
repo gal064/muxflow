@@ -16,8 +16,18 @@ export interface NativeNotificationReceipt { id: number; actionable: boolean }
 export type NotificationPermissionStatus =
   | "authorized" | "denied" | "notDetermined" | "provisional" | "unsupported";
 
-export function notificationPermissionStatus(): Promise<NotificationPermissionStatus> {
-  return invoke("notification_permission_status");
+const PERMISSION_STATUSES: readonly NotificationPermissionStatus[] =
+  ["authorized", "denied", "notDetermined", "provisional", "unsupported"];
+
+/**
+ * The word is produced independently by three platform backends, so it is
+ * checked rather than asserted on the way in. An unrecognised one becomes
+ * `unsupported`: the surface reading this renders one sentence per status, and
+ * a word it has no sentence for would render an empty line.
+ */
+export async function notificationPermissionStatus(): Promise<NotificationPermissionStatus> {
+  const status = await invoke<string>("notification_permission_status");
+  return PERMISSION_STATUSES.find((known) => known === status) ?? "unsupported";
 }
 
 /**

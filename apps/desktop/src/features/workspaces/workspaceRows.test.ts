@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { agent } from "../agents/testFixtures";
-import { deriveAgentRollups } from "../agents/selectors";
+import { compareAgents, deriveAgentRollups } from "../agents/selectors";
 import type { TmuxSnapshot } from "../../app/types";
 import { WORKSPACE_ROW_AGENT_LIMIT, abbreviateHome, inferHome, sessionPath, workspaceRows } from "./workspaceRows";
 
@@ -74,19 +74,22 @@ describe("workspace sidebar rows", () => {
     expect(sampleco.agentOverflow).toBe(0);
   });
 
-  it("breaks ranking ties on recency and then on identity, so a redraw is stable", () => {
+  it("ranks a row's agents exactly the way the agents list below it does", () => {
+    // Two copies of "loudest" would put the same two agents in one order on
+    // the workspace row and another in the list directly beneath it.
     const tied = [
       agent({ id: "z", sessionId: "$1", displayName: "zed", lifecycle: "working", updatedAt: 7 }),
       agent({ id: "a", sessionId: "$1", displayName: "ada", lifecycle: "working", updatedAt: 7 }),
       agent({ id: "m", sessionId: "$1", displayName: "mia", lifecycle: "working", updatedAt: 8 }),
     ];
-    const order = () => workspaceRows({
-      snapshot, agents: tied, attentionByWorkspace: deriveAgentRollups(tied).byWorkspace,
+    const rowOrder = (agents: typeof tied) => workspaceRows({
+      snapshot, agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
     })[0].agents.map((row) => row.id);
-    expect(order()).toEqual(["m", "a", "z"]);
-    expect(workspaceRows({
-      snapshot, agents: [...tied].reverse(), attentionByWorkspace: deriveAgentRollups(tied).byWorkspace,
-    })[0].agents.map((row) => row.id)).toEqual(order());
+    expect(rowOrder(tied)).toEqual([...tied].sort(compareAgents).map((item) => item.id));
+    // Recency, then name: "ada" before "zed" at the same update time.
+    expect(rowOrder(tied)).toEqual(["m", "a", "z"]);
+    // And the input's own order never leaks into the answer.
+    expect(rowOrder([...tied].reverse())).toEqual(rowOrder(tied));
   });
 
   it("counts only agents waiting on a human as that workspace's unread badge", () => {

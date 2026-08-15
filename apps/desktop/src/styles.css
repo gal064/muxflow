@@ -906,6 +906,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .settings-host-actions { display: grid; gap: 4px; justify-items: start; }
 .settings-host-actions .settings-hint { margin: 0; }
 .settings-error { color: var(--danger); font-size: var(--type-secondary); line-height: 1.5; }
+.settings-heading {
+  margin: 4px 0 0; color: var(--chrome-faint); font-size: var(--type-label);
+  font-weight: inherit; letter-spacing: var(--tracking-label); text-transform: uppercase;
+}
 .settings-modes { display: flex; gap: 16px; padding: 0; border: 0; }
 .settings-modes legend { padding: 0 0 4px; color: var(--chrome-faint); font-size: var(--type-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .settings-modes label { display: flex !important; align-items: center; gap: 5px; }

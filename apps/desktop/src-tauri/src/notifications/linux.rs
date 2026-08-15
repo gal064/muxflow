@@ -12,6 +12,8 @@ use std::{
 };
 
 use phase0_core::NotificationRoute;
+
+use super::{TEST_BODY, TEST_TITLE};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use zbus::{blocking::Connection, proxy, zvariant::Value};
@@ -51,8 +53,6 @@ pub struct NativeNotifications {
 }
 
 const MAX_PENDING_ROUTES: usize = 512;
-const TEST_TITLE: &str = "tmux Agent IDE";
-const TEST_BODY: &str = "Test notification — delivery works.";
 const CLOSED_ACTION_GRACE: Duration = Duration::from_secs(5);
 const LISTENER_START_TIMEOUT: Duration = Duration::from_secs(1);
 

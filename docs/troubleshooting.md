@@ -38,13 +38,16 @@ notification does not arrive.
   is what raises the prompt.
 - *"Notifications are turned off for this app"* — grant them in System Settings →
   Notifications → tmux Agent IDE.
-- *"This system has nothing to deliver notifications through"* — on macOS this
-  means the running binary is not a bundle the system will register.
-  `pnpm tauri dev` runs an unbundled binary, and a plain `tauri build` bundle can
-  also be rejected when its signature seal is broken (M10-E016). **Only the
-  output of `release/macos/build-package.sh` is expected to deliver
-  notifications**; that script is what removes `LSRequiresCarbon` and re-signs
-  the bundle. Verify a bundle with `release/macos/verify-package.sh`.
+- *"macOS did not answer"* — the running binary is not a bundle the system will
+  register, so the permission query never comes back. There is no framework
+  status for this; the silence *is* the symptom. `pnpm tauri dev` runs an
+  unbundled binary, and a plain `tauri build` bundle can also be rejected when
+  its signature seal is broken (M10-E016). **Only the output of
+  `release/macos/build-package.sh` is expected to deliver notifications**; that
+  script is what removes `LSRequiresCarbon` and re-signs the bundle. Verify a
+  bundle with `release/macos/verify-package.sh`.
+- *"This system has nothing to deliver notifications through"* — Linux only: no
+  notification daemon is answering on the session bus.
 
 A notification for the pane you are currently looking at is suppressed on
 purpose — the app is already showing that agent's state. Every other pane's

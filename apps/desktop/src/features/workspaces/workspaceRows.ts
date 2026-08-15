@@ -1,5 +1,5 @@
 import type { Pane, Session, TmuxSnapshot, Window } from "../../app/types";
-import { displayState } from "../agents/selectors";
+import { compareAgents, displayState } from "../agents/selectors";
 import { needsAttention } from "../agents/agentsList";
 import type { AgentAttentionRollup, AgentDisplayState, AgentRecord } from "../agents/types";
 import { orderedSessions } from "../shell/model";
@@ -90,29 +90,27 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
 /**
  * The agents a workspace row inherits its state from, loudest first.
  *
- * One ranking, used for both the row's own state (`top[0]` is the agent the
- * rollup agrees with) and for which few of a busy workspace's agents get a
- * line. Ties break on recency and then on ID, so a row that is redrawn without
- * anything changing draws the same three names in the same order.
+ * `compareAgents` and nothing else. It is the same ranking the agents list
+ * below the sidebar sorts by, and a second copy of it here would mean two
+ * agents with the same state and the same update time appearing in one order
+ * on the workspace row and another in the list directly beneath it — same
+ * data, two answers, adjacent on screen.
  */
 function topAgentsBySession(
   agents: readonly AgentRecord[],
   limit: number,
 ): Map<string, { top: AgentRecord[]; total: number }> {
-  const rank: Record<AgentDisplayState, number> = { blocked: 4, done: 3, working: 2, unknown: 1, idle: 0 };
-  const bySession = new Map<string, AgentRecord[]>();
-  for (const agent of agents) {
-    const existing = bySession.get(agent.sessionId);
-    if (existing) existing.push(agent);
-    else bySession.set(agent.sessionId, [agent]);
-  }
   const loudest = new Map<string, { top: AgentRecord[]; total: number }>();
-  for (const [sessionId, here] of bySession) {
-    const ordered = [...here].sort((left, right) =>
-      rank[displayState(right)] - rank[displayState(left)]
-      || right.updatedAt - left.updatedAt
-      || left.id.localeCompare(right.id));
-    loudest.set(sessionId, { top: ordered.slice(0, limit), total: ordered.length });
+  // Sorted once, then grouped: a stable partition of an ordered list leaves
+  // every group ordered, so no group needs sorting again.
+  for (const agent of [...agents].sort(compareAgents)) {
+    const here = loudest.get(agent.sessionId);
+    if (!here) {
+      loudest.set(agent.sessionId, { top: [agent], total: 1 });
+      continue;
+    }
+    here.total += 1;
+    if (here.top.length < limit) here.top.push(agent);
   }
   return loudest;
 }
