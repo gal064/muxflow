@@ -107,9 +107,11 @@ const paths: Record<IconName, ReactElement> = {
     <path d="M8.25 2.6V6H11.9" />
     <path d="M5.9 8.6h4.2M5.9 10.8h3" />
   </>,
+  // Six teeth on a visible hub, not eight rays: at 14px an eight-spoke gear
+  // collapses into an asterisk. Checked on the QA render at 14px and 48px.
   fileConfig: <>
-    <circle cx="8" cy="8" r="2.5" />
-    <path d="M8 2.3v1.6M8 12.1v1.6M2.3 8h1.6M12.1 8h1.6M3.97 3.97 5.1 5.1M10.9 10.9l1.13 1.13M12.03 3.97 10.9 5.1M5.1 10.9l-1.13 1.13" />
+    <circle cx="8" cy="8" r="2.4" />
+    <path d="M11.5 8h1.9M4.5 8H2.6M9.75 11.03l.95 1.65M6.25 11.03l-.95 1.65M6.25 4.97l-.95-1.65M9.75 4.97l.95-1.65" />
   </>,
   fileImage: <>
     <rect height="9.5" rx="1.5" width="11" x="2.5" y="3.25" />
