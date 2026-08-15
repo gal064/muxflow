@@ -40,21 +40,6 @@ const ROUTINE_PREFIXES = [
 ];
 
 /**
- * Successes whose whole effect is the thing that just appeared on screen.
- *
- * A focus request that was accepted moved the workspace, the tab and the
- * terminal the user is looking at. Announcing it again in a six-second notice
- * — naming internal tmux ids, in the shape `Agent Codex focus request accepted
- * for $1/@1/%1.` — is the clearest case of the noise this module exists to
- * filter: nothing to act on, and nothing a person did not just watch happen.
- * The full text stays in the live region, where it is the only way a screen
- * reader learns the navigation landed.
- */
-const ROUTINE_PATTERNS = [
-  /[Ff]ocus request accepted\b/u,
-];
-
-/**
  * Internal bookkeeping that fails as a *consequence* of something already being
  * reported, and never as the thing a person should act on.
  *
@@ -90,7 +75,6 @@ export function noticeForStatus(message: string, id: number): StatusNotice | und
   if (trimmed === "") return undefined;
   if (ROUTINE.has(trimmed)) return undefined;
   if (ROUTINE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return undefined;
-  if (ROUTINE_PATTERNS.some((pattern) => pattern.test(trimmed))) return undefined;
   if (CONSEQUENTIAL.some((pattern) => pattern.test(trimmed))) return undefined;
   return { message: trimmed, id, severity: PROBLEM.test(trimmed) ? "problem" : "info" };
 }

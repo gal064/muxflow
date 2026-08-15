@@ -121,9 +121,17 @@ async fn notification_permission_status(
     notifications: tauri::State<'_, notifications::NativeNotifications>,
 ) -> Result<String, String> {
     let notifications = notifications.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || notifications.authorization_status())
+    let status = tauri::async_runtime::spawn_blocking(move || notifications.authorization_status())
         .await
-        .map_err(|error| format!("notification status worker failed: {error}"))?
+        .map_err(|error| format!("notification status worker failed: {error}"))??;
+    // Three backends write this vocabulary independently and the UI renders one
+    // sentence per word, so a sixth word would render as an empty status line.
+    // The frontend re-checks it too; this is where a new backend finds out.
+    debug_assert!(
+        notifications::PERMISSION_STATUSES.contains(&status.as_str()),
+        "{status} is not a notification permission the UI can render"
+    );
+    Ok(status)
 }
 
 /// The notification the user asks for from Settings.

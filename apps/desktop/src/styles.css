@@ -248,11 +248,16 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   display: flex; flex-direction: column; gap: 1px; min-width: 0;
   font-size: var(--type-secondary); line-height: 1.35; color: var(--chrome-dim);
 }
-.workspace-activity-line { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.workspace-activity { --activity-dot: 8px; --activity-gap: 5px; }
+.workspace-activity-line { display: flex; align-items: center; gap: var(--activity-gap); min-width: 0; }
 .workspace-activity-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Indented to where the agent names above it start, since it stands in for
-   more of them and has no state dot of its own to take up the gap. */
-.workspace-activity-more { padding-inline-start: 13px; color: var(--chrome-faint); }
+   more of them and has no state dot of its own to take up the gap. Derived
+   from the dot and the gap so it stays aligned if either changes. */
+.workspace-activity-more {
+  padding-inline-start: calc(var(--activity-dot) + var(--activity-gap));
+  color: var(--chrome-faint);
+}
 .workspace-meta {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
@@ -907,12 +912,13 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    destructive control is not a misclick away from the control above it. */
 .settings-host-actions { display: grid; gap: 4px; justify-items: start; }
 .settings-host-actions .settings-hint { margin: 0; }
-/* Same treatment the fieldset legend beside it gets; both are the panel's way
-   of naming a group of controls. */
-.settings-body .settings-heading, .settings-modes legend {
-  margin: 4px 0 0; padding: 0 0 4px; color: var(--chrome-faint); font-size: var(--type-label);
-  font-weight: inherit; letter-spacing: var(--tracking-label); text-transform: uppercase;
+/* The panel's two ways of naming a group of controls, kept identical on
+   purpose: a fieldset's legend, and a heading over a block that is not one. */
+.settings-modes legend, .settings-body .settings-heading {
+  padding: 0 0 4px; color: var(--chrome-faint); font-size: var(--type-label);
+  letter-spacing: var(--tracking-label); text-transform: uppercase;
 }
+.settings-body .settings-heading { margin: 4px 0 0; font-weight: inherit; }
 .settings-modes { display: flex; gap: 16px; padding: 0; border: 0; }
 .settings-modes label { display: flex !important; align-items: center; gap: 5px; }
 .settings-helper { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

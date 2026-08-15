@@ -538,12 +538,12 @@ export function App() {
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     if (tab.kind === "terminal") selectWindow(tab.id);
+    // No status: the tab the user asked for is now the tab on screen. The
+    // message that used to be written here reached nobody either way — the
+    // notice is the channel's only reader and it has classified "Opened …" as
+    // routine since it was written.
     else if (activeSession && hostState.serverIdentity) {
       setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, tab.id));
-      // Not a toast — `statusNotice` has classified "Opened …" as routine since
-      // it was written. This is the live region, and it is the only way ⌃1–9
-      // and ⌘⇧[ tell a screen reader which tab they landed on.
-      setStatus(`Opened ${tab.title}`);
     }
   }, [activeSession, currentHostProfileId, hostState.serverIdentity, selectWindow, setAppState]);
 
