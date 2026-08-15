@@ -210,16 +210,19 @@ export function ExplorerTree(props: Props) {
           </button>
         </div>;
       })}
-      {/* Only while there is nothing to wait in front of. This row lives inside
-          the scrolling box, so showing it for a refresh of a listing already on
-          screen grew the content by a row and shrank it again on every
-          filesystem event — the list flickering on a short listing, and the
-          overlay scrollbars revealing and re-hiding on a long one. A refresh is
-          `aria-busy` on the tree instead: the same fact, no layout, and no live
-          region re-announcing "Loading…" once per event. */}
-      {props.root && rows.length === 0 && props.loading.has(props.root.path) && <p className="quiet-empty" role="status">Loading…</p>}
+      {/* Only until this directory has answered once — "we have no listing yet",
+          not "we have no rows", so a directory that is genuinely empty does not
+          swap between these two lines every time it is re-read either.
+
+          These live inside the scrolling box, so showing one for a refresh of a
+          listing already on screen grew the content by a row and shrank it again
+          on every filesystem event: the list flickering on a short listing, and
+          the overlay scrollbars revealing and re-hiding on a long one. A refresh
+          is `aria-busy` on the tree instead — the same fact, no layout, and no
+          live region re-announcing "Loading…" once per event. */}
+      {props.root && !props.listings.has(props.root.path) && props.loading.has(props.root.path) && <p className="quiet-empty" role="status">Loading…</p>}
       {!props.root && <p className="quiet-empty">Select a live terminal pane.</p>}
-      {props.root && rows.length === 0 && !props.loading.has(props.root.path) && <p className="quiet-empty">This directory is empty.</p>}
+      {props.root && props.listings.has(props.root.path) && rows.length === 0 && <p className="quiet-empty">This directory is empty.</p>}
     </div>
     {menu && <ContextMenu
       anchor={menu.anchor}
