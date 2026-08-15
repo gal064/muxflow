@@ -188,23 +188,26 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     // would answer for a host that may end up with nothing installed, and the
     // migration path cannot repair that, because it only touches adapters this
     // app already owns entries in.
-    let wrote = false;
+    let answered = false;
+    const answer = () => {
+      // Against the host that was written, not the one that happens to be
+      // connected now, and once however many adapters it took.
+      if (answered) return;
+      answered = true;
+      current.recordDecision(host.profileId, "accepted");
+    };
     return (async () => {
       for (const adapter of targets) {
         const review = await current.reviewHooks(adapter.id, "install", host.identity);
         // The host's own idempotence answer, so a re-run writes nothing.
         if (review.alreadyInstalled) continue;
         await current.applyHooks(review, host.identity);
-        if (!wrote) {
-          wrote = true;
-          current.recordDecision(host.profileId, "accepted");
-        }
+        answer();
       }
     })().then(() => {
-      // Against the host that was written, not the one that happens to be
-      // connected now. Also for the nothing-to-do case: a host already current
-      // has been agreed to, and asking again every launch is not "once".
-      current.recordDecision(host.profileId, "accepted");
+      // Also for the nothing-to-do case: a host already current has been agreed
+      // to, and asking again every launch is not "once".
+      answer();
       setAsked(undefined);
       // Part of the same "set up this host" answer, and deliberately after it:
       // a tmux server that refuses the naming must not lose the hooks.
@@ -270,7 +273,7 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
         ? `Updated the agent status hooks for ${named} on this host.`
         : `Could not update the agent status hooks for ${named} on this host.`);
     });
-  }, [assertNaming, install, options.connected, options.decision, options.hostIdentity, options.hostProfileId, wiring.setupTargets]);
+  }, [assertNaming, install, options.connected, options.decision, options.decisionsArePersistable, options.hostIdentity, options.hostProfileId, wiring.setupTargets]);
 
   /**
    * `targets` is what the dialog listed, passed down from the render that
