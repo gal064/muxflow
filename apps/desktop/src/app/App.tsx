@@ -25,6 +25,7 @@ import { useAgentWorkflow } from "../features/agents/AgentHookWorkflow";
 import { TauriAgentClient } from "../features/agents/api";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
 import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
+import { agentHostIdentity } from "../features/agents/types";
 import { useAgentHostSetup } from "../features/agents/useAgentHostSetup";
 import { useAgentNotificationActivation, type PaneSurfaceResult } from "../features/agents/useAgentNotificationActivation";
 import { useAgentRuntime } from "../features/agents/useAgentRuntime";
@@ -375,6 +376,12 @@ export function App() {
   }), [activePane?.id, activeSessionId, activeWindowId, appFocused, currentHostProfileId, hostState.serverIdentity, notificationActivation.automaticSeen, selectedAppTab]);
   const agentRuntime = useAgentRuntime({ client: agentClient, scope: agentScope, focus: agentFocus, soundPreferences: agentSounds, onStatus: setStatus });
 
+  // The host every consent-bearing hook request is bound to: the profile the
+  // decision is remembered under, and the connection it is checked against.
+  const agentHost = useMemo(() => {
+    const identity = agentHostIdentity(agentScope);
+    return agentScope && identity ? { profileId: agentScope.hostProfileId, identity } : undefined;
+  }, [agentScope]);
   const recordHostSetupDecision = useCallback((hostProfileId: string, decision: HostSetupDecision) => {
     setAppState((current) => ({
       ...current,
@@ -385,13 +392,16 @@ export function App() {
     launchContext: activeSession && activeWindow && activePane && workspaceFiles.root
       ? { sessionId: activeSession.id, windowId: activeWindow.id, paneId: activePane.id, root: workspaceFiles.root }
       : undefined,
-    onHooksChanged: (action) => {
+    host: agentHost,
+    onHooksChanged: (action, hostProfileId) => {
       agentRuntime.refreshSnapshot();
       // Installing through the exact-diff review *is* consent for this host,
       // and removing is withdrawing it. Recording only one of the two left a
       // user who took the review door with no decision at all: the one-time
       // prompt could re-raise, and the tmux naming was never asserted.
-      recordHostSetupDecision(currentHostProfileId, action === "install" ? "accepted" : "declined");
+      //
+      // Against the host the review named, which is the host that was written.
+      recordHostSetupDecision(hostProfileId, action === "install" ? "accepted" : "declined");
       if (action === "uninstall") {
         void agentRuntime.removeHostNaming().catch((cause) => setStatus(String(cause)));
       }
@@ -407,6 +417,7 @@ export function App() {
     applyHostNaming: agentRuntime.applyHostNaming,
     connected: Boolean(agentScope),
     decision: appState.hostSetup[currentHostProfileId],
+    hostIdentity: agentHost?.identity,
     hostLabel,
     hostProfileId: currentHostProfileId,
     onStatus: setStatus,
