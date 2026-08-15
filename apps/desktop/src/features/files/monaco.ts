@@ -1,5 +1,5 @@
 import { loader } from "@monaco-editor/react";
-import { tokenReader } from "../terminal/theme";
+import { terminalTheme, tokenWithFallback } from "../terminal/theme";
 import * as monaco from "monaco-editor";
 import CssWorker from "monaco-editor/language/css/css.worker?worker";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -27,39 +27,83 @@ loader.config({ monaco });
  * 11.3 makes editors, diffs and Markdown first-class peers of the terminal, in
  * the same tab strip — and they were the one surface still painted by a foreign
  * palette, Monaco's built-in `vs-dark` at `#1E1E1E` with a `#3A3B3C` scrollbar.
- * Between a `#101114` tab strip and a `#101114` panel that reads as a pasted-in
+ * Between a tab strip and a panel that read the token file, that is a pasted-in
  * second application, and it is exactly what 11.1.1's "one token file" exists
  * to prevent.
  *
- * Only the *chrome* of the editor is overridden. Syntax colors stay `vs-dark`'s:
- * the token table says nothing about them, and inventing a language palette
- * here would be a bigger claim than this phase is making.
+ * The syntax colours are the terminal's ANSI palette. Phase 11 left them at
+ * `vs-dark`'s, on the argument that the token table said nothing about them —
+ * true then, when the editor ground was a near-black the vs-dark colours were
+ * tuned for. The ground is `--chrome-bg` and `--chrome-bg` is now the terminal
+ * background, which vs-dark's darker syntax colours sit on at a contrast they
+ * were never chosen for. The mapping below is deliberately small: Monaco's token
+ * names are coarse, and a full TextMate table would be a much larger claim than
+ * "an editor and a terminal showing the same file should agree about what a
+ * string looks like".
+ *
+ * Small also means each row has to earn its place, so two were checked against
+ * the bundled Monarch grammars rather than assumed:
+ *
+ *  - `function` and `variable` are absent, because nothing emits them where it
+ *    would show. TypeScript and Rust emit `identifier`, never `function`, and
+ *    `variable` appears only in Markdown's link definitions. A rule that colours
+ *    nothing is a rule nobody notices going wrong.
+ *  - `comment` is the one row that is deliberately *not* an ANSI colour.
+ *    `--term-8` is Ghostty's dim grey — dim against a terminal's brighter
+ *    neighbours, and only 2.44:1 on this ground, which is worse than the
+ *    `vs-dark` green it would replace (3.53:1) on the highest-volume quiet token
+ *    in an editor. It takes `--chrome-dim`, the app's own quiet ink, picked for
+ *    legibility on exactly this background (4.70:1) by exactly this argument.
  */
 export const ADE_MONACO_THEME = "ade-dark";
 
 export function defineAdeMonacoTheme(root: Element | undefined = globalThis.document?.documentElement): void {
-  const read = tokenReader(root);
-  const token = (name: string, fallback: string) => read(name) ?? fallback;
+  // Neither map below holds a colour of its own. The chrome half reads through
+  // the fallback reader, whose values `theme.test.ts` pins to `tokens.css`; the
+  // syntax half reads the resolved terminal palette, which the same test pins.
+  // The only literals left are the two diff washes at the bottom, which are
+  // blend colours rather than theme colours and are called out there.
+  //
+  // One asymmetry worth knowing before editing a token these read: `colors`
+  // takes any CSS colour, `rules` does not. A rule foreground must be six or
+  // eight hex digits — Monaco *throws* on anything else, at first editor mount
+  // rather than here — so a `--term-*` or `--chrome-dim` written as `rgb(…)` or
+  // as a `var()` reference would take the editor surface down rather than
+  // degrade. `theme.test.ts` pins every one of them to exact hex today, which
+  // is what makes that safe.
+  const token = tokenWithFallback(root);
+  const ansi = terminalTheme(root);
   monaco.editor.defineTheme(ADE_MONACO_THEME, {
     base: "vs-dark",
     inherit: true,
-    rules: [],
+    rules: [
+      { token: "comment", foreground: token("--chrome-dim"), fontStyle: "italic" },
+      { token: "keyword", foreground: ansi.magenta },
+      { token: "string", foreground: ansi.green },
+      { token: "number", foreground: ansi.yellow },
+      { token: "type", foreground: ansi.cyan },
+    ],
     colors: {
-      "editor.background": token("--chrome-bg", "#101114"),
-      "editor.foreground": token("--chrome-ink", "#c9cdd3"),
-      "editorGutter.background": token("--chrome-bg", "#101114"),
-      "editorLineNumber.foreground": token("--chrome-faint", "#4d545e"),
-      "editorLineNumber.activeForeground": token("--chrome-ink", "#c9cdd3"),
-      "editor.lineHighlightBackground": token("--chrome-hover", "#1a1d22"),
-      "editor.selectionBackground": token("--accent-wash", "#0091ff1f"),
-      "editorCursor.foreground": token("--accent", "#0091ff"),
-      "editorWidget.background": token("--chrome-raised", "#16181c"),
-      "editorWidget.border": token("--chrome-border", "#26292f"),
-      "editorIndentGuide.background1": token("--chrome-hairline", "#1c1e22"),
-      "editorOverviewRuler.border": token("--chrome-hairline", "#1c1e22"),
-      "scrollbarSlider.background": token("--chrome-border", "#26292f"),
-      "scrollbarSlider.hoverBackground": token("--chrome-hover", "#1a1d22"),
-      "scrollbarSlider.activeBackground": token("--chrome-dim", "#7d848e"),
+      "editor.background": token("--chrome-bg"),
+      "editor.foreground": token("--chrome-ink"),
+      "editorGutter.background": token("--chrome-bg"),
+      "editorLineNumber.foreground": token("--chrome-faint"),
+      "editorLineNumber.activeForeground": token("--chrome-ink"),
+      "editor.lineHighlightBackground": token("--chrome-hover"),
+      "editor.selectionBackground": token("--accent-wash"),
+      "editorCursor.foreground": token("--accent"),
+      "editorWidget.background": token("--chrome-raised"),
+      "editorWidget.border": token("--chrome-border"),
+      "editorIndentGuide.background1": token("--chrome-hairline"),
+      "editorOverviewRuler.border": token("--chrome-hairline"),
+      "scrollbarSlider.background": token("--chrome-border"),
+      "scrollbarSlider.hoverBackground": token("--chrome-hover"),
+      "scrollbarSlider.activeBackground": token("--chrome-dim"),
+      // Translucent additions over whatever line the diff lands on, so they are
+      // eight digits and not a token: the added-line green has no counterpart in
+      // the palette at all, and the removed-line red is `--danger` at an alpha
+      // `--danger-wash` does not carry. A `colors` entry takes any CSS colour,
+      // unlike a `rules` entry, which is why these can live here.
       "diffEditor.insertedTextBackground": "#2ea04326",
       "diffEditor.removedTextBackground": "#cc656626",
     },

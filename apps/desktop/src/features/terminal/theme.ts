@@ -73,18 +73,50 @@ const TOKEN_BY_THEME_KEY: Record<keyof typeof GHOSTTY_DEFAULT_DARK, string> = {
 const SLIDER_ALPHAS = { idle: "40", hover: "66", active: "99" } as const;
 
 /**
- * The chrome tokens this module falls back to with no stylesheet, and the
- * tokens they stand in for. Same contract as `GHOSTTY_DEFAULT_DARK`: these are
- * not a second source of truth, and `theme.test.ts` fails if they ever stop
- * matching `tokens.css`.
+ * Every non-palette token something outside the stylesheet has to name, and
+ * what it is worth when there is no stylesheet to read.
+ *
+ * Same contract as `GHOSTTY_DEFAULT_DARK`: not a second source of truth, and
+ * `theme.test.ts` fails if any entry stops matching `tokens.css`. The list is
+ * what is actually read, not every token that exists — an entry nobody reads is
+ * an entry nobody notices going stale. Exported for that test alone; everything
+ * else goes through `tokenWithFallback`.
  */
 export const CHROME_FALLBACKS = {
-  "--accent": "#0091ff",
-  "--chrome-dim": "#7d848e",
+  "--accent": "#7aa6da",
+  "--accent-wash": "#7aa6da1f",
+  "--chrome-bg": "#282c34",
+  "--chrome-raised": "#2c313a",
+  "--chrome-hairline": "#313640",
+  "--chrome-border": "#3e4451",
+  "--chrome-hover": "#2f343e",
+  "--chrome-ink": "#c4c8c6",
+  "--chrome-dim": "#8f96a1",
+  "--chrome-faint": "#636b78",
   "--font-mono": '"JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace',
   "--term-font-size": "13px",
   "--term-line-height": "1.42",
 } as const;
+
+/** A token `CHROME_FALLBACKS` — and therefore `theme.test.ts` — covers. */
+export type FallbackToken = keyof typeof CHROME_FALLBACKS;
+
+/**
+ * Reads one of those tokens off a root, or hands back the checked fallback.
+ *
+ * The reader is what is shared, not the map. Every caller wants the same
+ * sentence — "this token, or the value the test pins it to" — and the app had
+ * accumulated a copy of it per call site, which is how the editor theme
+ * (`../files/monaco`) ended up with twenty-two literals of its own instead. One
+ * function means a token can only be read one way, and the `FallbackToken` type
+ * means a caller cannot name a token the test does not cover.
+ */
+export function tokenWithFallback(
+  root: Element | undefined = globalThis.document?.documentElement,
+): (name: FallbackToken) => string {
+  const read = tokenReader(root);
+  return (name) => read(name) ?? CHROME_FALLBACKS[name];
+}
 
 export function terminalTheme(root: Element | undefined = globalThis.document?.documentElement): ITheme {
   const read = tokenReader(root);
@@ -92,7 +124,7 @@ export function terminalTheme(root: Element | undefined = globalThis.document?.d
   for (const [key, token] of Object.entries(TOKEN_BY_THEME_KEY)) {
     theme[key] = read(token) ?? GHOSTTY_DEFAULT_DARK[key as keyof typeof GHOSTTY_DEFAULT_DARK];
   }
-  const slider = read("--chrome-dim") ?? CHROME_FALLBACKS["--chrome-dim"];
+  const slider = tokenWithFallback(root)("--chrome-dim");
   return {
     ...theme,
     scrollbarSliderBackground: `${slider}${SLIDER_ALPHAS.idle}`,
@@ -115,9 +147,9 @@ export function searchDecorations(root: Element | undefined = globalThis.documen
   activeMatchBackground: string;
   activeMatchColorOverviewRuler: string;
 } {
-  const read = tokenReader(root);
-  const accent = read("--accent") ?? CHROME_FALLBACKS["--accent"];
-  const muted = read("--chrome-dim") ?? CHROME_FALLBACKS["--chrome-dim"];
+  const token = tokenWithFallback(root);
+  const accent = token("--accent");
+  const muted = token("--chrome-dim");
   return {
     // Semi-transparent so the glyph underneath stays legible; the overview
     // ruler is a solid 1px mark and cannot be.
@@ -127,6 +159,25 @@ export function searchDecorations(root: Element | undefined = globalThis.documen
     activeMatchColorOverviewRuler: accent,
   };
 }
+
+/**
+ * How heavy the terminal's text is allowed to get, as Ghostty answers it.
+ *
+ * These are xterm option values rather than colours, so they cannot live in
+ * `tokens.css`, but they are the same kind of fact as the palette above and
+ * they are wrong in the same way when they drift: `bold-is-bright` is off in
+ * Ghostty and xterm's `drawBoldTextInBrightColors` defaults to on, so a bold run
+ * in the app was being emphasised twice — bold face *and* the bright half of
+ * the palette — against a terminal that emphasises it once. The two weights are
+ * xterm's own defaults, stated because they are the two the bundled faces
+ * actually provide: anything else is synthesised, and a synthesised weight is
+ * the other way this terminal has been heavier than its font.
+ */
+export const GHOSTTY_TEXT_OPTIONS = {
+  drawBoldTextInBrightColors: false,
+  fontWeight: "normal",
+  fontWeightBold: "bold",
+} as const;
 
 /**
  * The terminal's font, from the same tokens the rest of the app uses.
@@ -143,15 +194,18 @@ export function terminalFont(root: Element | undefined = globalThis.document?.do
   fontSize: number;
   rowPitch: number;
 } {
-  const read = tokenReader(root);
-  const size = Number.parseFloat(read("--term-font-size") ?? CHROME_FALLBACKS["--term-font-size"]);
-  const ratio = Number.parseFloat(read("--term-line-height") ?? CHROME_FALLBACKS["--term-line-height"]);
+  const token = tokenWithFallback(root);
+  // A token that is present but not a number is a case the fallback above
+  // cannot catch, so these two are re-checked against the literal after
+  // parsing: `--term-font-size: inherit` would otherwise size the grid `NaN`.
+  const size = Number.parseFloat(token("--term-font-size"));
+  const ratio = Number.parseFloat(token("--term-line-height"));
   const fontSize = Number.isFinite(size) && size > 0 ? size : Number.parseFloat(CHROME_FALLBACKS["--term-font-size"]);
   const lineHeight = Number.isFinite(ratio) && ratio > 0
     ? ratio
     : Number.parseFloat(CHROME_FALLBACKS["--term-line-height"]);
   return {
-    fontFamily: read("--font-mono") ?? CHROME_FALLBACKS["--font-mono"],
+    fontFamily: token("--font-mono"),
     fontSize,
     rowPitch: fontSize * lineHeight,
   };
