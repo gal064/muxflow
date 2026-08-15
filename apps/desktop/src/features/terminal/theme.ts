@@ -157,6 +157,37 @@ export function terminalFont(root: Element | undefined = globalThis.document?.do
   };
 }
 
+/**
+ * Every CSS font shorthand the terminal can rasterise with.
+ *
+ * All four, not just the regular face: bold and italic runs are rasterised into
+ * the same texture atlas, and a face that lands after its neighbours splits that
+ * atlas between two typefaces just as visibly. One list, because the app waits
+ * on these before it mounts and the renderer waits on them again after a bounded
+ * timeout — two copies of that list drift, and the drift is invisible until a
+ * bold run comes out of a different face than the regular text beside it.
+ */
+export function terminalFontFaces(root: Element | undefined = globalThis.document?.documentElement): string[] {
+  const { fontFamily, fontSize } = terminalFont(root);
+  return ["", "700 ", "italic ", "italic 700 "].map((style) => `${style}${fontSize}px ${fontFamily}`);
+}
+
+let facesReady: Promise<FontFace[]> | undefined;
+
+/**
+ * Resolves once every terminal face is usable, or immediately where the document
+ * cannot say. Memoised: each pane asks, and they are all asking about the same
+ * four files.
+ */
+export function terminalFacesReady(): Promise<FontFace[]> {
+  facesReady ??= (async () => {
+    const fonts = globalThis.document?.fonts;
+    if (typeof fonts?.load !== "function") return [];
+    return (await Promise.all(terminalFontFaces().map((face) => fonts.load(face)))).flat();
+  })();
+  return facesReady;
+}
+
 export function tokenReader(root: Element | undefined): (token: string) => string | undefined {
   if (!root || typeof globalThis.getComputedStyle !== "function") return () => undefined;
   let style: CSSStyleDeclaration;

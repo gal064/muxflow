@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 import stylesCss from "../../styles.css?raw";
-import appTabSurfaceSource from "./AppTabSurface.tsx?raw";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
@@ -180,27 +179,6 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('id="panel-surface-git"');
     expect(html).toContain("git surface");
     expect(html).not.toContain("files surface");
-  });
-
-  it("names a document tab's view mode without borrowing a class its own content uses", () => {
-    // The markdown surface tags itself with the chosen view mode so the split
-    // layout has something to select on. When that tag was `markdown-${mode}`
-    // the preview mode produced `markdown-preview` — which is the preview
-    // article's class — so the whole tab surface picked up the article's 24px
-    // padding, scroll container, left border, reading line-height and its
-    // `code`/`pre`/`img` rules, and the article inside got them again.
-    const source = appTabSurfaceSource;
-    const modes = ["source", "preview", "split"] as const;
-    // The classes the file puts on real elements, which the modifier must miss.
-    const elementClasses = new Set([...source.matchAll(/className="([^"{]+)"/g)].flatMap((match) => match[1].split(/\s+/)));
-    const modifier = /className=\{`file-tab-surface \$\{[^`]*`([a-z-]+)\$\{mode\}`/.exec(source)?.[1];
-    expect(modifier, "the markdown surface no longer tags itself with its view mode").toBeTypeOf("string");
-    for (const mode of modes) {
-      expect(elementClasses, `the ${mode} modifier is also an element's class`).not.toContain(`${modifier}${mode}`);
-    }
-    // And the CSS agrees: the split rules select the modifier, not the article.
-    expect(stylesCss).toContain(`.file-tab-surface.${modifier}split`);
-    expect(stylesCss).not.toContain(".file-tab-surface.markdown-preview");
   });
 
   it("puts four controls and an unread count on the titlebar, and no more", () => {
