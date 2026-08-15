@@ -276,9 +276,13 @@ export function openFileTab(
 }
 
 /**
- * Promote a preview tab to a permanent one. Idempotent, because the callers
- * are "the user double-clicked" and "the buffer became dirty", and the second
- * fires on every keystroke.
+ * Promote a preview tab to a permanent one.
+ *
+ * Returns the *same* state object when there is nothing to do, and that
+ * identity is load-bearing: the callers are "the user double-clicked" and
+ * "the buffer became dirty", and a fresh object for a no-op would re-render
+ * the shell and re-run the persistence effect for a tab that is already
+ * pinned.
  */
 export function pinAppTab(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {
   const target = state.appTabs.find((tab) => tab.hostProfileId === currentHostProfileId && tab.id === tabId);

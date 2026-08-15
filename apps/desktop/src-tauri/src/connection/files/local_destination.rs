@@ -720,7 +720,7 @@ fn choose_name(
     requested: &OsStr,
     collision: DownloadCollisionPolicy,
 ) -> Result<(CString, Option<FileIdentity>), String> {
-    let name_max = directory_name_max(directory)?;
+    let name_max = naming::directory_name_max(directory)?;
     if requested.as_bytes().len() > name_max {
         return Err("destination basename exceeds filesystem NAME_MAX".into());
     }
@@ -741,129 +741,13 @@ fn choose_name(
                     .map_err(|_| "candidate contains a NUL byte")?;
                 Ok(metadata_at(directory, &candidate)?.is_some())
             };
-            let chosen = first_free_name(OsStr::from_bytes(requested.as_bytes()), name_max, taken)?;
+            let chosen =
+                naming::first_free_name(OsStr::from_bytes(requested.as_bytes()), name_max, taken)?;
             let chosen = CString::new(chosen.into_vec())
                 .map_err(|_| "destination basename contains a NUL byte")?;
             Ok((chosen, None))
         }
     }
-}
-
-/// The one collision walk: `name`, `name (1)`, `name (2)`, … until something is
-/// free, bounded the same way for every caller.
-///
-/// The two callers differ only in how they ask whether a name is taken — one
-/// holds a directory descriptor and one has only a path — so that is the single
-/// parameter. Writing the walk twice is how the panel's suggested name and the
-/// backend's `Rename` policy would eventually disagree about the bound, the
-/// starting index, or which entries count as occupied.
-fn first_free_name(
-    requested: &OsStr,
-    name_max: usize,
-    mut taken: impl FnMut(&OsStr) -> Result<bool, String>,
-) -> Result<std::ffi::OsString, String> {
-    if !taken(requested)? {
-        return Ok(requested.to_os_string());
-    }
-    for index in 1..=10_000 {
-        let candidate =
-            std::ffi::OsString::from_vec(renamed_name_bytes(requested, index, name_max)?);
-        if !taken(&candidate)? {
-            return Ok(candidate);
-        }
-    }
-    Err("could not choose a non-colliding destination name".into())
-}
-
-/// The name the save panel should open with: the spelling the `Rename`
-/// collision policy would eventually produce, applied *before* the panel opens
-/// instead of after the transfer.
-///
-/// Runs the same `first_free_name` walk `choose_name`'s `Rename` policy runs,
-/// so the panel's suggestion and the backend's eventual answer cannot drift.
-/// It deliberately does not open a directory descriptor: this is a default the
-/// user is about to confirm or overrule in the panel, and the authoritative
-/// check against a swapped-out parent still happens in
-/// `PreparedDestination::open`.
-pub(super) fn suggest_non_colliding_name(
-    directory: &Path,
-    requested: &OsStr,
-) -> Result<std::ffi::OsString, String> {
-    let bytes = requested.as_bytes();
-    if bytes.is_empty()
-        || bytes.contains(&b'/')
-        || bytes.contains(&0)
-        || requested == OsStr::new(".")
-        || requested == OsStr::new("..")
-    {
-        return Err("download name must be a single path component".into());
-    }
-    let name_max = path_name_max(directory);
-    if bytes.len() > name_max {
-        return Err("destination basename exceeds filesystem NAME_MAX".into());
-    }
-    // Any entry at all, symlinks included: the panel should step around a
-    // dangling symlink the same way it steps around a file.
-    first_free_name(requested, name_max, |candidate| {
-        Ok(std::fs::symlink_metadata(directory.join(candidate)).is_ok())
-    })
-}
-
-/// `NAME_MAX` for a directory named by path rather than by descriptor. Falls
-/// back to the POSIX floor when the filesystem will not say, which only ever
-/// makes the suggested name shorter than it had to be.
-fn path_name_max(directory: &Path) -> usize {
-    const FALLBACK_NAME_MAX: usize = 255;
-    let Ok(path) = CString::new(directory.as_os_str().as_bytes()) else {
-        return FALLBACK_NAME_MAX;
-    };
-    // SAFETY: `path` is a live NUL-terminated C string for the duration of the call.
-    let value = unsafe { libc::pathconf(path.as_ptr(), libc::_PC_NAME_MAX) };
-    usize::try_from(value).unwrap_or(FALLBACK_NAME_MAX).max(1)
-}
-
-fn directory_name_max(directory: &File) -> Result<usize, String> {
-    // SAFETY: the descriptor is a live O_DIRECTORY file descriptor.
-    let value = unsafe { libc::fpathconf(directory.as_raw_fd(), libc::_PC_NAME_MAX) };
-    if value <= 0 {
-        return Err("could not determine destination NAME_MAX".into());
-    }
-    usize::try_from(value).map_err(|_| "destination NAME_MAX is invalid".into())
-}
-
-fn renamed_name_bytes(requested: &OsStr, index: usize, name_max: usize) -> Result<Vec<u8>, String> {
-    let path = Path::new(requested);
-    let stem = path.file_stem().unwrap_or(requested).as_bytes();
-    let suffix = format!(" ({index})");
-    if suffix.len() >= name_max {
-        return Err("filesystem NAME_MAX is too small for collision suffix".into());
-    }
-    let extension = path
-        .extension()
-        .map(OsStr::as_bytes)
-        .filter(|value| suffix.len() + 2 + value.len() <= name_max);
-    let extension_bytes = extension.map_or(0, |value| value.len() + 1);
-    let budget = name_max - suffix.len() - extension_bytes;
-    let boundary = if let Ok(text) = std::str::from_utf8(stem) {
-        let mut boundary = text.len().min(budget);
-        while boundary > 0 && !text.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        boundary
-    } else {
-        stem.len().min(budget)
-    };
-    if boundary == 0 {
-        return Err("destination basename cannot fit collision suffix".into());
-    }
-    let mut candidate = stem[..boundary].to_vec();
-    candidate.extend_from_slice(suffix.as_bytes());
-    if let Some(extension) = extension {
-        candidate.push(b'.');
-        candidate.extend_from_slice(extension);
-    }
-    debug_assert!(candidate.len() <= name_max);
-    Ok(candidate)
 }
 
 struct EntryMetadata {
@@ -1026,6 +910,11 @@ fn exchange_at(_directory: &File, _left: &CString, _right: &CString) -> Result<(
 fn c_string(value: &OsStr, label: &str) -> Result<CString, String> {
     CString::new(value.as_bytes()).map_err(|_| format!("{label} contains a NUL byte"))
 }
+
+#[path = "local_destination/naming.rs"]
+mod naming;
+
+pub(super) use naming::suggest_non_colliding_name;
 
 #[cfg(test)]
 #[path = "local_destination/tests.rs"]

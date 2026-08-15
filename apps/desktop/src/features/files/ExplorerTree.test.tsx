@@ -43,9 +43,10 @@ describe("ExplorerTree", () => {
     expect(html).not.toContain("•••");
   });
 
-  it("hides what git calls ignored, including everything under a collapsed ignored directory", () => {
-    // Git reports `target/` once and never its contents, so the tree cannot
-    // ask "is this path in the set" — it has to ask about the ancestors too.
+  it("hides what git calls ignored, and stops descending into it", () => {
+    // Git reports `target/` once and never its contents, so what has to hold
+    // is that dropping the directory drops its whole subtree — an expanded
+    // `/r/target` whose listing is already cached must contribute no rows.
     const withTarget: DirectoryListing = {
       ...listing,
       entries: [
@@ -65,7 +66,7 @@ describe("ExplorerTree", () => {
 
     const filtered = shown(new Set(["/r/target", "/r/ignored.log"]));
     expect(filtered).not.toContain(">target<");
-    expect(filtered, "a child of a collapsed ignored directory survived").not.toContain(">debug<");
+    expect(filtered, "an already-cached child of a dropped directory still produced a row").not.toContain(">debug<");
     expect(filtered).not.toContain("ignored.log");
     expect(filtered).toContain(">src<");
     expect(filtered).toContain(".env");

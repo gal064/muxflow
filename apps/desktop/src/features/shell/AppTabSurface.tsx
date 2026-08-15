@@ -19,11 +19,11 @@ interface Props {
   canWrite: boolean;
   onDownload(path: string, kind: "file" | "folder", root: ActiveRoot): void;
   /**
-   * The buffer was edited. A preview tab stops being disposable here: the one
-   * thing that must never happen is the next single click in the Explorer
+   * The buffer became dirty. A preview tab stops being disposable here: the
+   * one thing that must never happen is the next single click in the Explorer
    * replacing a tab the user has typed into.
    */
-  onEdit(): void;
+  onDirty(): void;
   onStatus(message: string): void;
   onViewMode(mode: "source" | "preview" | "split"): void;
 }
@@ -118,6 +118,13 @@ export function AppTabSurface(props: Props) {
     await controller.current?.flush();
   }), [props.tab.id]);
 
+  // "The buffer is dirty" is a state this surface already tracks, so the tab
+  // hears about it once per clean→dirty transition rather than once per
+  // keystroke. `onDirty` is deliberately not a dependency: it closes over
+  // render-fresh state and would re-run this on every render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (view?.state === "dirty") props.onDirty(); }, [view?.state]);
+
   useEffect(() => {
     if (!props.scope || !root) return;
     let disposed = false;
@@ -193,11 +200,7 @@ export function AppTabSurface(props: Props) {
     {mode !== "preview" && <div className="monaco-host">
       <Editor
         language={languageForPath(props.tab.resource)}
-        onChange={(content) => {
-          if (!props.canWrite || typeof content !== "string") return;
-          controller.current?.edit(content, opened.file.lineEnding);
-          props.onEdit();
-        }}
+        onChange={(content) => { if (props.canWrite && typeof content === "string") controller.current?.edit(content, opened.file.lineEnding); }}
         onMount={(editor) => { detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor); }}
         options={{ automaticLayout: true, minimap: { enabled: false }, readOnly: !props.canWrite, scrollBeyondLastLine: false, wordWrap: props.tab.kind === "markdown" ? "on" : "off" }}
         path={modelPath(props.tab)}

@@ -239,7 +239,12 @@ export function ExplorerTree(props: Props) {
         const { entry, depth } = row;
         const isOpen = props.expanded.has(entry.path);
         const icon = fileIcon(entry, isOpen);
-        return <div aria-expanded={entry.expandable ? isOpen : undefined} aria-level={depth + 1} aria-selected={index === focusIndex} className="file-row" data-tree-index={index} key={entry.path} onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry, { preview: true }); }} onContextMenu={(event) => {
+        return <div aria-expanded={entry.expandable ? isOpen : undefined} aria-level={depth + 1} aria-selected={index === focusIndex} className="file-row" data-tree-index={index} key={entry.path} onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry, { preview: true }); }} onDoubleClick={(event) => {
+          // The row's indent strip is outside the button but inside the row,
+          // so without this a file reached by clicking its padding could be
+          // previewed forever and never pinned.
+          if (event.target === event.currentTarget && !entry.expandable) props.onOpen(entry, { preview: false });
+        }} onContextMenu={(event) => {
           event.preventDefault();
           focusRow(index);
           setMenu({ entry, anchor: { x: event.clientX, y: event.clientY } });
@@ -329,10 +334,18 @@ function flattenTree(
   ignored?: ReadonlySet<string>,
 ) {
   const rows: ({ kind: "entry"; entry: FileEntry; depth: number } | { kind: "more"; directory: string; depth: number })[] = [];
+  // Git reports `target/` once and never its ten thousand contents, which
+  // membership alone would miss — except that this walk only ever descends
+  // into a directory it has already decided to keep, so a dropped directory
+  // takes its whole subtree with it and there is nothing left to match. The
+  // set is absolute paths from the worktree root, and the Explorer root *is*
+  // the worktree root: the host refuses a status for anything else
+  // (`discover_repository`, `apps/host/src/service/git/status.rs`), so no row
+  // can sit under an ignored ancestor this walk never saw.
   const visit = (directory: string, depth: number) => {
     const listing = listings.get(directory);
     for (const entry of listing?.entries ?? []) {
-      if (ignored && isIgnoredPath(entry.path, ignored)) continue;
+      if (ignored?.has(entry.path)) continue;
       rows.push({ kind: "entry", entry, depth });
       if (entry.expandable && expanded.has(entry.path)) visit(entry.path, depth + 1);
     }
@@ -340,21 +353,6 @@ function flattenTree(
   };
   visit(root, 0);
   return rows;
-}
-
-/**
- * Git reports `target/` once, never its ten thousand contents, so membership
- * alone is not the question: an entry is ignored when it is in the set or when
- * any of its ancestors is. Walking the ancestors costs the path's depth and
- * needs no precomputed prefix list, which would have to be rebuilt on every
- * status generation.
- */
-function isIgnoredPath(path: string, ignored: ReadonlySet<string>): boolean {
-  if (ignored.has(path)) return true;
-  for (let cut = path.lastIndexOf("/"); cut > 0; cut = path.lastIndexOf("/", cut - 1)) {
-    if (ignored.has(path.slice(0, cut))) return true;
-  }
-  return false;
 }
 
 function labelForAction(action: PendingAction["action"]): string {

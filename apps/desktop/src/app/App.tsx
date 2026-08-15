@@ -32,7 +32,7 @@ import { useAgentRuntime } from "../features/agents/useAgentRuntime";
 import { keyForScope, keyForTransferConnection, TauriFileWorkspaceClient } from "../features/files/api";
 import { ExplorerTree } from "../features/files/ExplorerTree";
 import { reconcileDownloadStatus, type ActiveDownloadStatus, type DownloadCompletion } from "../features/files/downloadStatus";
-import { chooseDownloadDestination, openDownload, revealDownload, revealDownloadLabel, type DownloadIntent } from "../features/files/downloadFlow";
+import { chooseDownloadDestination, DownloadActions, type DownloadIntent } from "../features/files/downloadFlow";
 import { ignoredPathsFromStatus } from "../features/files/ignoredPaths";
 import type { ActiveRoot, DownloadRequest, FileEntry, FileMutation } from "../features/files/types";
 import { TauriGitWorkspaceClient } from "../features/git/api";
@@ -186,6 +186,11 @@ export function App() {
   useEffect(() => {
     const next = noticeForStatus(status, (noticeSequence.current += 1));
     setNotice(next);
+    // The completion's Open/reveal buttons belong to the notice announcing it
+    // and to no other. Dropping the record as soon as the channel moves on is
+    // what stops a finished download's destination being held for the rest of
+    // the session, waiting for some later message to read the same.
+    setCompletedDownload((current) => current && current.message === next?.message ? current : undefined);
     if (!next) return;
     const delay = noticeDismissDelay(next);
     if (delay === undefined) return;
@@ -736,18 +741,25 @@ export function App() {
    * no in-app step, so cancelling the panel ends it with nothing said.
    */
   const startDownloadFlow = async (intent: DownloadIntent, downloadRoot: ActiveRoot) => {
-    let destination: string | undefined;
+    let chosen: Awaited<ReturnType<typeof chooseDownloadDestination>>;
     try {
-      destination = await chooseDownloadDestination(intent);
+      chosen = await chooseDownloadDestination(intent);
     } catch (error) {
       setStatus(`Could not open the save panel: ${String(error)}`);
       return;
     }
-    if (!destination) return;
+    if (!chosen) return;
     // `overwrite`, not `rename`: the default name the panel opened with was
     // already unique, so reaching an existing file means the user aimed at one
-    // and answered the panel's own Replace prompt.
-    await startDownload({ path: intent.path, kind: intent.kind, destination, collision: "overwrite" }, downloadRoot);
+    // and answered the panel's own Replace prompt. Where the panel could not
+    // have asked — a folder archive the backend will rename to `.tar` — refuse
+    // instead, because nothing may be replaced without being confirmed.
+    await startDownload({
+      path: intent.path,
+      kind: intent.kind,
+      destination: chosen.destination,
+      collision: chosen.panelConfirmed ? "overwrite" : "fail",
+    }, downloadRoot);
   };
 
   const moveCombinedTab = (tab: CombinedTab, direction: "left" | "right") => {
@@ -950,7 +962,7 @@ export function App() {
             canWrite={hostState.canMutate}
             client={fileClient}
             onDownload={(path, kind, root) => void startDownloadFlow({ path, kind }, root)}
-            onEdit={() => pinOpenTab(selectedAppTab.id)}
+            onDirty={() => pinOpenTab(selectedAppTab.id)}
             onStatus={setStatus}
             onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, selectedAppTab.id, viewMode))}
             scope={fileScope}
@@ -1043,10 +1055,7 @@ export function App() {
       {/* Only on the notice this exact download raised: matching the message
           means a later status replaces the buttons along with the text, so
           they can never end up offering a file the toast is not about. */}
-      {completedDownload?.message === notice.message && <>
-        <button onClick={() => void openDownload(completedDownload.destination).catch((error) => setStatus(String(error)))} type="button">Open</button>
-        <button onClick={() => void revealDownload(completedDownload.destination).catch((error) => setStatus(String(error)))} type="button">{revealDownloadLabel()}</button>
-      </>}
+      {completedDownload?.message === notice.message && <DownloadActions destination={completedDownload.destination} onError={setStatus} />}
       <button aria-label="Dismiss" onClick={() => setNotice(undefined)} type="button">Dismiss</button>
     </div>}
     {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}

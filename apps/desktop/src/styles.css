@@ -396,8 +396,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
   font-variant-numeric: tabular-nums;
 }
-.tab-glyph { display: inline-flex; color: var(--chrome-faint); }
-.tab-glyph.gitDiff { color: var(--state-working); }
+/* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
+   inline color, so there is no rule here per document kind. */
+.tab-glyph { display: inline-flex; }
 .tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A preview tab is the one the next single click will replace. Italic is how
    VS Code says so, and the strip is on the sans stack, so it just works. */
@@ -583,7 +584,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .file-twisty { display: inline-flex; color: var(--chrome-faint); }
 /* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
    inline color, so there is no rule here per language. */
-.file-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--chrome-dim); }
+.file-icon { display: inline-flex; align-items: center; justify-content: center; }
 .load-more-files {
   display: block; margin: 3px 0; padding: 3px 8px;
   border: 1px solid var(--chrome-border); border-radius: 4px;
