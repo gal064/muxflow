@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Icon, type IconName } from "../../ui/Icon";
+import { Icon } from "../../ui/Icon";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { StateDot } from "../../ui/StateDot";
+import { fileIcon, type FileIconChoice } from "../files/fileIcons";
 import type { CombinedTab } from "../shell/model";
 
 interface TabStripProps {
@@ -19,11 +20,16 @@ interface TabStripProps {
   onSplit(): void;
 }
 
-const DOCUMENT_ICON: Record<string, IconName> = {
-  gitDiff: "diff",
-  markdown: "markdown",
-  file: "file",
-};
+/**
+ * A document tab shows the same icon its Explorer row does — one mapping, two
+ * surfaces, so a `.rs` tab and its row cannot disagree about what the file is.
+ * A diff is not a file type: it keeps the diff mark and the tint the strip's
+ * own rule gives it.
+ */
+function documentIcon(tab: Extract<CombinedTab, { kind: "app" }>): FileIconChoice | undefined {
+  if (tab.appKind === "gitDiff") return undefined;
+  return fileIcon({ name: tab.resource.split("/").filter(Boolean).at(-1) ?? tab.resource, kind: "file" });
+}
 
 /**
  * One strip, two kinds of tab: tmux windows and app-owned documents.
@@ -79,6 +85,7 @@ export function TabStrip(props: TabStripProps) {
     <div aria-label="Terminal tabs and documents" className="tabstrip-tabs" ref={tabs} role="tablist">
       {props.tabs.map((tab, index) => {
         const active = tab.key === props.activeKey;
+        const glyph = tab.kind === "app" ? documentIcon(tab) : undefined;
         // `role="presentation"`: a generic element between a tablist and its
         // tabs breaks ownership, and assistive technology then cannot say
         // "tab 3 of 5".
@@ -113,7 +120,7 @@ export function TabStrip(props: TabStripProps) {
           >
             {tab.kind === "terminal"
               ? <span className="tab-index">{tab.index}</span>
-              : <span className={`tab-glyph ${tab.appKind}`}><Icon name={DOCUMENT_ICON[tab.appKind] ?? "file"} size={12} /></span>}
+              : <span className={`tab-glyph ${tab.appKind}`} style={glyph ? { color: glyph.color } : undefined}><Icon name={glyph?.icon ?? "diff"} size={12} /></span>}
             <span className="tab-title">{tab.title}</span>
             {tab.kind === "terminal" && tab.zoomed && <span aria-label="Pane zoomed" className="tab-zoom"><Icon name="zoom" size={11} /></span>}
             {tab.kind === "terminal" && tab.attention !== "none" && <StateDot

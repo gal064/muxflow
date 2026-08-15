@@ -28,7 +28,19 @@ export type IconName =
   | "diff"
   | "zoom"
   | "search"
-  | "branch";
+  | "branch"
+  // The Explorer's file-type set. VS Code's Seti look is mostly *color*, so
+  // these are a handful of shape archetypes that a per-extension table tints
+  // (`features/files/fileIcons.ts`) rather than one drawing per language.
+  | "folder"
+  | "folderOpen"
+  | "fileCode"
+  | "fileText"
+  | "fileConfig"
+  | "fileImage"
+  | "fileLock"
+  | "fileShell"
+  | "fileData";
 
 const paths: Record<IconName, ReactElement> = {
   sidebarLeft: <>
@@ -81,6 +93,37 @@ const paths: Record<IconName, ReactElement> = {
     <circle cx="4.75" cy="12.25" r="1.75" />
     <circle cx="11.25" cy="3.75" r="1.75" />
     <path d="M4.75 5.5v5M11.25 5.5v1.25a2.5 2.5 0 0 1-2.5 2.5H6.5" />
+  </>,
+  folder: <path d="M1.75 12.25v-8A1.25 1.25 0 0 1 3 3h2.6l1.4 1.75h6A1.25 1.25 0 0 1 14.25 6v6.25a1.25 1.25 0 0 1-1.25 1.25H3a1.25 1.25 0 0 1-1.25-1.25Z" />,
+  // The open state is the same folder with its front panel swung forward, so a
+  // directory does not change silhouette when it expands — only its lid moves.
+  folderOpen: <>
+    <path d="M1.75 12.25v-8A1.25 1.25 0 0 1 3 3h2.6l1.4 1.75h6A1.25 1.25 0 0 1 14.25 6v1.5" />
+    <path d="M1.9 12.9 3.7 7.75h10.5l-1.8 5.15a1.25 1.25 0 0 1-1.18.85H3a1.25 1.25 0 0 1-1.1-.85Z" />
+  </>,
+  fileCode: <path d="m6 4.75-3.25 3.3L6 11.25M10 4.75l3.25 3.3L10 11.25" />,
+  fileText: <>
+    <path d="M4 2.5h4.5L12 6v7.5H4Z" />
+    <path d="M8.25 2.6V6H11.9" />
+    <path d="M5.9 8.6h4.2M5.9 10.8h3" />
+  </>,
+  fileConfig: <>
+    <circle cx="8" cy="8" r="2.5" />
+    <path d="M8 2.3v1.6M8 12.1v1.6M2.3 8h1.6M12.1 8h1.6M3.97 3.97 5.1 5.1M10.9 10.9l1.13 1.13M12.03 3.97 10.9 5.1M5.1 10.9l-1.13 1.13" />
+  </>,
+  fileImage: <>
+    <rect height="9.5" rx="1.5" width="11" x="2.5" y="3.25" />
+    <circle cx="6" cy="6.6" r="1" />
+    <path d="m2.9 11.9 3.35-3.3 2.2 2.15 2.3-2.25 2.7 2.65" />
+  </>,
+  fileLock: <>
+    <rect height="6.25" rx="1.4" width="9" x="3.5" y="7" />
+    <path d="M5.75 7V5.4a2.25 2.25 0 0 1 4.5 0V7" />
+  </>,
+  fileShell: <path d="m3.25 4.9 3.1 3.1-3.1 3.1M8.4 11.6h4.35" />,
+  fileData: <>
+    <path d="M6.9 2.9c-1.3 0-1.9.6-1.9 1.9v1.3c0 1.1-.55 1.9-1.5 1.9.95 0 1.5.8 1.5 1.9v1.3c0 1.3.6 1.9 1.9 1.9" />
+    <path d="M9.1 2.9c1.3 0 1.9.6 1.9 1.9v1.3c0 1.1.55 1.9 1.5 1.9-.95 0-1.5.8-1.5 1.9v1.3c0 1.3-.6 1.9-1.9 1.9" />
   </>,
 };
 

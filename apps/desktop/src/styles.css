@@ -556,7 +556,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .explorer-refreshing { margin-left: auto; color: var(--state-working); }
 .explorer-root > span {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--chrome-ink); font-size: 11px; font-weight: 600;
+  color: var(--chrome-ink); font-family: var(--font-sans); font-size: var(--type-row); font-weight: 600;
 }
 .explorer-root > small { color: var(--chrome-faint); font-size: var(--type-label); }
 .file-tree { min-height: 0; padding: 4px 0 12px; overflow: auto; outline: 0; }
@@ -566,17 +566,21 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .file-row:hover, .file-row:focus-within { background: var(--chrome-hover); }
 .file-row[aria-selected="true"] { background: var(--chrome-selected); }
+/* The tree is UI text, not code: it was 11px monospace, which is the one place
+   in the app where a proportional stack reads better — VS Code's explorer is
+   the UI font at the row size, on the same 22px rows. Nothing depends on
+   monospace alignment any more; the letter glyphs that did are icons now. */
 .file-main {
-  display: grid; grid-template-columns: 12px 12px minmax(90px, 1fr);
+  display: grid; grid-template-columns: 12px 16px minmax(90px, 1fr);
   align-items: center; gap: 4px; flex: 1; min-width: 0; height: 100%;
   padding: 0; border: 0; background: transparent;
-  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px; text-align: left;
+  color: var(--chrome-ink); font-family: var(--font-sans); font-size: var(--type-row); text-align: left;
 }
 .file-main span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-twisty { display: inline-flex; color: var(--chrome-faint); }
-.file-state { color: var(--chrome-faint); }
-.file-state.directory { color: var(--term-4); }
-.file-state.symlink { color: var(--term-6); }
+/* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
+   inline color, so there is no rule here per language. */
+.file-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--chrome-dim); }
 .load-more-files {
   display: block; margin: 3px 0; padding: 3px 8px;
   border: 1px solid var(--chrome-border); border-radius: 4px;
