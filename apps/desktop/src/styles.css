@@ -714,8 +714,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .git-hunk-actions > div { display: flex; align-items: center; gap: 4px; flex: none; padding-left: 6px; border-left: 1px solid var(--chrome-hairline); }
 .git-hunk-actions span { color: var(--chrome-dim); font-size: var(--type-meta); }
-.file-tab-surface.markdown-split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-.file-tab-surface.markdown-split .editor-toolbar { grid-column: 1 / -1; }
+.file-tab-surface.markdown-view-split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.file-tab-surface.markdown-view-split .editor-toolbar { grid-column: 1 / -1; }
 .monaco-host { min-width: 0; min-height: 0; overflow: hidden; }
 .markdown-preview {
   min-width: 0; min-height: 0; margin: 0; padding: 24px clamp(18px, 5vw, 56px); overflow: auto;
@@ -1032,8 +1032,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
     box-shadow: -12px 0 30px rgb(0 0 0 / .7);
   }
   .tab { max-width: 150px; }
-  .file-tab-surface.markdown-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--bar-height) minmax(180px, 1fr) minmax(180px, 1fr); }
-  .file-tab-surface.markdown-split .editor-toolbar { grid-column: 1; }
+  .file-tab-surface.markdown-view-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--bar-height) minmax(180px, 1fr) minmax(180px, 1fr); }
+  .file-tab-surface.markdown-view-split .editor-toolbar { grid-column: 1; }
   .markdown-preview { border-left: 0; border-top: 1px solid var(--chrome-hairline); }
   .terminal-upload-progress { right: 6px; bottom: 6px; width: calc(100% - 12px); max-height: 44%; }
 }

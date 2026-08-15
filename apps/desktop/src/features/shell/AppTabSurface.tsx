@@ -158,7 +158,13 @@ export function AppTabSurface(props: Props) {
 
   const mode = props.tab.kind === "markdown" ? props.tab.viewMode ?? "split" : "source";
   const source = view?.content ?? opened.file.content;
-  return <section className={`file-tab-surface ${props.tab.kind === "markdown" ? `markdown-${mode}` : ""}`} role="tabpanel" aria-label={props.tab.title}>
+  // `markdown-view-*`, not `markdown-*`: the modifier for the *preview* mode
+  // would otherwise be `markdown-preview`, which is the preview article's own
+  // class, so every rule written for the article — 24px of padding, a scroll
+  // container, a left border, a reading line-height, and the `code`/`pre`/`img`
+  // rules — also landed on the whole tab surface whenever the user chose that
+  // mode, and the article inside then got all of it a second time.
+  return <section className={`file-tab-surface ${props.tab.kind === "markdown" ? `markdown-view-${mode}` : ""}`} role="tabpanel" aria-label={props.tab.title}>
     <header className="editor-toolbar">
       <code title={props.tab.resource}>{props.tab.resource}</code>
       <span className={`save-state ${view?.state ?? "saved"}`} role="status">{view?.state === "saving" ? "Saving…" : view?.state === "dirty" ? "Unsaved" : view?.state === "error" ? "Save failed" : "Saved"}</span>
