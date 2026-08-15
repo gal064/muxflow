@@ -79,8 +79,8 @@ const SLIDER_ALPHAS = { idle: "40", hover: "66", active: "99" } as const;
  * matching `tokens.css`.
  */
 export const CHROME_FALLBACKS = {
-  "--accent": "#0091ff",
-  "--chrome-dim": "#7d848e",
+  "--accent": "#7aa6da",
+  "--chrome-dim": "#8a919c",
   "--font-mono": '"JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace',
   "--term-font-size": "13px",
   "--term-line-height": "1.42",

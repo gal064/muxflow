@@ -438,7 +438,13 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* The frame's edge is drawn, not laid out: an inset shadow costs no pixels,
    while a border costs each pane the same width however small the pane is, and
    the tmux client size can only give that allowance back in proportion. */
-.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); box-shadow: inset -1px -1px 0 var(--chrome-bg); }
+/* The edge was `--chrome-bg` while chrome was a near-black: a dark line drawn
+   against the pane's own background. `--chrome-bg` is the terminal background
+   now, so that line would be invisible and two panes either side of a split
+   would read as one — this is the one place the chrome/terminal merge takes
+   something away rather than giving it. `--chrome-border` restores a drawn edge
+   from the same ramp every other divider in the app comes from. */
+.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); box-shadow: inset -1px -1px 0 var(--chrome-border); }
 .pane-frame.active { box-shadow: inset 0 0 0 var(--focus-ring) var(--accent); }
 .pane-frame.attention::after {
   content: ""; position: absolute; inset: var(--attention-inset);

@@ -10,11 +10,16 @@
  * literals).
  *
  * Values are authoritative, not approximate:
- *  - chrome surfaces + accent + destructive: plan/phases-11-12.md token table
- *    (cmux-derived), matching plan/phase11-ui-mock.html.
  *  - terminal palette: `Ghostty Default Style Dark` verbatim, copied from
  *    /Applications/Ghostty.app/Contents/Resources/ghostty/themes on this
  *    machine, ANSI 0-15 included.
+ *  - chrome surfaces + accent + destructive: derived from that palette. Phase 11
+ *    took them from plan/phases-11-12.md's cmux table instead — a near-black
+ *    `#101114` ramp under a `#282c34` terminal — which put a hard seam down every
+ *    edge where chrome met a pane. The chrome now starts *at* the terminal
+ *    background and steps lighter, and the accent and the destructive colour are
+ *    Ghostty's own bright blue and red, so there is one scheme on screen rather
+ *    than two that merely coexist.
  *  - metrics: cmux `sharedChromeBarHeight` (28), sidebar 240, right panel 300,
  *    `PaneChromeSettings` / `PanelOverlayRingMetrics` rings.
  */
@@ -50,23 +55,34 @@
 
 :root {
   /* ── Chrome surfaces ─────────────────────────────────────────────────── */
-  --chrome-bg: #101114;
-  --chrome-raised: #16181c;
-  --chrome-hairline: #1c1e22;
-  --chrome-border: #26292f;
-  --chrome-hover: #1a1d22;
-  --chrome-selected: #1d2026;
+  /* The base *is* the terminal background, and every other surface is a step
+     lighter than it. Note the direction: before this ramp, hairline/hover/
+     selected were all darker than the base, because the base was near-black and
+     there was nowhere else to go. */
+  --chrome-bg: #282c34;
+  --chrome-raised: #2c313a;
+  --chrome-hairline: #313640;
+  --chrome-border: #3e4451;
+  --chrome-hover: #2f343e;
+  --chrome-selected: #353b45;
 
   /* ── Chrome ink ──────────────────────────────────────────────────────── */
-  --chrome-ink: #c9cdd3;
+  --chrome-ink: #c4c8c6;
   --chrome-ink-strong: #ffffff;
-  --chrome-dim: #7d848e;
-  --chrome-faint: #4d545e;
+  /* Dim and faint are lifted a step from the near-black ramp's values: the same
+     greys that read as "quiet" on #101114 read as "illegible" on #282c34. */
+  --chrome-dim: #8a919c;
+  --chrome-faint: #565e6a;
 
   /* ── The one accent, and the one destructive treatment ───────────────── */
-  --accent: #0091ff;
-  --accent-ink: #ffffff;
-  --accent-wash: #0091ff1f;
+  /* Ghostty's bright blue and red (--term-12 / --term-1), so a selected row and
+     a terminal's own bright text are the same two colours. `--accent-ink` is the
+     knockout on top of both fills, and it is the terminal background for the
+     same reason Ghostty's own selection foreground is: these fills are light,
+     and white on them is not readable. */
+  --accent: #7aa6da;
+  --accent-ink: #282c34;
+  --accent-wash: #7aa6da1f;
   --danger: #cc6566;
   --danger-ink: #e79596;
   --danger-wash: #cc656622;

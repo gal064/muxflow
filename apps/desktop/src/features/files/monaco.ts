@@ -27,13 +27,19 @@ loader.config({ monaco });
  * 11.3 makes editors, diffs and Markdown first-class peers of the terminal, in
  * the same tab strip — and they were the one surface still painted by a foreign
  * palette, Monaco's built-in `vs-dark` at `#1E1E1E` with a `#3A3B3C` scrollbar.
- * Between a `#101114` tab strip and a `#101114` panel that reads as a pasted-in
+ * Between a tab strip and a panel that read the token file, that is a pasted-in
  * second application, and it is exactly what 11.1.1's "one token file" exists
  * to prevent.
  *
- * Only the *chrome* of the editor is overridden. Syntax colors stay `vs-dark`'s:
- * the token table says nothing about them, and inventing a language palette
- * here would be a bigger claim than this phase is making.
+ * The syntax colours are the terminal's ANSI palette. Phase 11 left them at
+ * `vs-dark`'s, on the argument that the token table said nothing about them —
+ * true then, when the editor ground was a near-black the vs-dark colours were
+ * tuned for. The ground is `--chrome-bg` and `--chrome-bg` is now the terminal
+ * background, which vs-dark's darker syntax colours sit on at a contrast they
+ * were never chosen for. The mapping below is deliberately small: Monaco's token
+ * names are coarse, and a full TextMate table would be a much larger claim than
+ * "an editor and a terminal showing the same file should agree about what a
+ * string looks like".
  */
 export const ADE_MONACO_THEME = "ade-dark";
 
@@ -43,27 +49,50 @@ export function defineAdeMonacoTheme(root: Element | undefined = globalThis.docu
   monaco.editor.defineTheme(ADE_MONACO_THEME, {
     base: "vs-dark",
     inherit: true,
-    rules: [],
+    rules: [
+      { token: "comment", foreground: syntaxColor(token("--term-8", "#666666")), fontStyle: "italic" },
+      { token: "keyword", foreground: syntaxColor(token("--term-5", "#b294bb")) },
+      { token: "string", foreground: syntaxColor(token("--term-2", "#b6bd68")) },
+      { token: "number", foreground: syntaxColor(token("--term-3", "#f0c674")) },
+      { token: "type", foreground: syntaxColor(token("--term-6", "#8abeb7")) },
+      { token: "function", foreground: syntaxColor(token("--term-4", "#82a2be")) },
+      { token: "variable", foreground: syntaxColor(token("--term-7", "#c4c8c6")) },
+    ],
     colors: {
-      "editor.background": token("--chrome-bg", "#101114"),
-      "editor.foreground": token("--chrome-ink", "#c9cdd3"),
-      "editorGutter.background": token("--chrome-bg", "#101114"),
-      "editorLineNumber.foreground": token("--chrome-faint", "#4d545e"),
-      "editorLineNumber.activeForeground": token("--chrome-ink", "#c9cdd3"),
-      "editor.lineHighlightBackground": token("--chrome-hover", "#1a1d22"),
-      "editor.selectionBackground": token("--accent-wash", "#0091ff1f"),
-      "editorCursor.foreground": token("--accent", "#0091ff"),
-      "editorWidget.background": token("--chrome-raised", "#16181c"),
-      "editorWidget.border": token("--chrome-border", "#26292f"),
-      "editorIndentGuide.background1": token("--chrome-hairline", "#1c1e22"),
-      "editorOverviewRuler.border": token("--chrome-hairline", "#1c1e22"),
-      "scrollbarSlider.background": token("--chrome-border", "#26292f"),
-      "scrollbarSlider.hoverBackground": token("--chrome-hover", "#1a1d22"),
-      "scrollbarSlider.activeBackground": token("--chrome-dim", "#7d848e"),
+      "editor.background": token("--chrome-bg", "#282c34"),
+      "editor.foreground": token("--chrome-ink", "#c4c8c6"),
+      "editorGutter.background": token("--chrome-bg", "#282c34"),
+      "editorLineNumber.foreground": token("--chrome-faint", "#565e6a"),
+      "editorLineNumber.activeForeground": token("--chrome-ink", "#c4c8c6"),
+      "editor.lineHighlightBackground": token("--chrome-hover", "#2f343e"),
+      "editor.selectionBackground": token("--accent-wash", "#7aa6da1f"),
+      "editorCursor.foreground": token("--accent", "#7aa6da"),
+      "editorWidget.background": token("--chrome-raised", "#2c313a"),
+      "editorWidget.border": token("--chrome-border", "#3e4451"),
+      "editorIndentGuide.background1": token("--chrome-hairline", "#313640"),
+      "editorOverviewRuler.border": token("--chrome-hairline", "#313640"),
+      "scrollbarSlider.background": token("--chrome-border", "#3e4451"),
+      "scrollbarSlider.hoverBackground": token("--chrome-hover", "#2f343e"),
+      "scrollbarSlider.activeBackground": token("--chrome-dim", "#8a919c"),
       "diffEditor.insertedTextBackground": "#2ea04326",
       "diffEditor.removedTextBackground": "#cc656626",
     },
   });
+}
+
+/**
+ * A syntax rule's colour, or nothing if the token cannot be one.
+ *
+ * The `colors` map above accepts any CSS colour; a `rules` entry does not.
+ * Monaco matches a rule's `foreground` against `/^#?[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/`
+ * and **throws** on anything else — from `defineTheme`, which this module calls
+ * at import time, so one unparseable token would take the whole editor bundle
+ * down rather than mis-colour a keyword. Omitting the foreground instead leaves
+ * that rule inheriting `vs-dark`'s, which is the state this table replaced and a
+ * safe place to land.
+ */
+function syntaxColor(value: string): string | undefined {
+  return /^#?[0-9a-fA-F]{6}$/.test(value) ? value : undefined;
 }
 
 defineAdeMonacoTheme();
