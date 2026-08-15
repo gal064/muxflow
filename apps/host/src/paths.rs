@@ -68,6 +68,14 @@ fn runtime_pointer_path(environment: impl Fn(&str) -> Option<OsString>) -> Optio
 }
 
 pub fn record_runtime_dir(runtime: &Path) -> anyhow::Result<()> {
+    publish_runtime_dir(runtime, environment, unsafe { libc::geteuid() })
+}
+
+fn publish_runtime_dir(
+    runtime: &Path,
+    environment: impl Fn(&str) -> Option<OsString> + Copy,
+    uid: libc::uid_t,
+) -> anyhow::Result<()> {
     // Only the directory this environment resolves on its own, and only when
     // nothing pinned it — by `ADE_HOST_RUNTIME_DIR` or by an explicit
     // `--socket` somewhere else. Every test fixture on this machine pins its
@@ -77,7 +85,9 @@ pub fn record_runtime_dir(runtime: &Path) -> anyhow::Result<()> {
     // held a daemon, so their undelivered events would follow it there too.
     // Symmetric with `candidate_runtime_dirs`, which collapses to exactly one
     // directory under the same condition.
-    if environment("ADE_HOST_RUNTIME_DIR").is_some() || runtime != default_runtime_dir() {
+    if environment("ADE_HOST_RUNTIME_DIR").is_some()
+        || runtime != resolved_runtime_dir(environment, uid)
+    {
         return Ok(());
     }
     let Some(pointer) = runtime_pointer_path(environment) else {
@@ -295,6 +305,53 @@ mod tests {
             Some(&PathBuf::from("/run/user/4242/tmux-agent-ide")),
             "this process's own resolution still comes first"
         );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// A fixture must not publish. Every lane in `tests/` pins its runtime
+    /// directory — with `ADE_HOST_RUNTIME_DIR` or an explicit `--socket` — while
+    /// inheriting the developer's real `HOME`, so a daemon that published
+    /// whatever directory it was given would point that developer's own hooks
+    /// at a directory that is deleted when the lane ends. This one was found
+    /// after it had already happened on the machine the fix was written on.
+    #[test]
+    fn only_a_daemon_this_environment_placed_itself_publishes_where_it_is() {
+        let home = std::env::temp_dir().join(format!("ade-publish-{}", uuid::Uuid::new_v4()));
+        let fixture = home.join("fixture-runtime");
+        fs::create_dir_all(&home).unwrap();
+        let unpinned = |name: &str| match name {
+            "HOME" => Some(OsString::from(home.as_os_str())),
+            "XDG_RUNTIME_DIR" => Some(OsString::from(home.as_os_str())),
+            _ => None,
+        };
+        let pointer = runtime_pointer_path(unpinned).unwrap();
+        let pinned = |name: &str| match name {
+            "HOME" => Some(OsString::from(home.as_os_str())),
+            "ADE_HOST_RUNTIME_DIR" => Some(OsString::from(fixture.as_os_str())),
+            _ => None,
+        };
+
+        publish_runtime_dir(&fixture, pinned, 11).unwrap();
+        assert!(
+            !pointer.exists(),
+            "a pinned fixture published its directory"
+        );
+        // Pinned the other way: the directory came from `--socket`, not from
+        // anything this environment would have resolved.
+        publish_runtime_dir(&fixture, unpinned, 11).unwrap();
+        assert!(
+            !pointer.exists(),
+            "a daemon published a directory its environment does not name"
+        );
+
+        publish_runtime_dir(&home.join("tmux-agent-ide"), unpinned, 11).unwrap();
+        assert_eq!(
+            fs::read(&pointer).unwrap(),
+            home.join("tmux-agent-ide").as_os_str().as_encoded_bytes(),
+            "the real daemon's own directory was not published"
+        );
+        // And it round-trips as bytes rather than as text.
+        assert!(candidate_runtime_dirs(unpinned, 11).contains(&home.join("tmux-agent-ide")));
         fs::remove_dir_all(home).unwrap();
     }
 
