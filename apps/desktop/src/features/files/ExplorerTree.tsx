@@ -178,6 +178,7 @@ export function ExplorerTree(props: Props) {
     </header>
     {props.error && <SurfaceError detail={props.error} />}
     <div
+      aria-busy={props.root && props.loading.has(props.root.path) ? true : undefined}
       aria-label="Files"
       className="file-tree"
       onContextMenu={(event) => {
@@ -209,7 +210,14 @@ export function ExplorerTree(props: Props) {
           </button>
         </div>;
       })}
-      {props.root && props.loading.has(props.root.path) && <p className="quiet-empty" role="status">Loading…</p>}
+      {/* Only while there is nothing to wait in front of. This row lives inside
+          the scrolling box, so showing it for a refresh of a listing already on
+          screen grew the content by a row and shrank it again on every
+          filesystem event — the list flickering on a short listing, and the
+          overlay scrollbars revealing and re-hiding on a long one. A refresh is
+          `aria-busy` on the tree instead: the same fact, no layout, and no live
+          region re-announcing "Loading…" once per event. */}
+      {props.root && rows.length === 0 && props.loading.has(props.root.path) && <p className="quiet-empty" role="status">Loading…</p>}
       {!props.root && <p className="quiet-empty">Select a live terminal pane.</p>}
       {props.root && rows.length === 0 && !props.loading.has(props.root.path) && <p className="quiet-empty">This directory is empty.</p>}
     </div>

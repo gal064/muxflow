@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { keyForScope, keyForTransferConnection, sameRoot } from "./api";
-import { startPerfSpan } from "../../perf/probe";
+import { measurePerf } from "../../perf/probe";
 import { isTerminalTransferState, mergeCanonicalTransfer } from "../transfers/transferState";
 import type {
   ActiveRoot,
@@ -63,7 +63,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
 
-  const loadDirectory = useCallback(async (path: string, force = false, append = false, announce = true) => {
+  const loadDirectory = useCallback(async (path: string, force = false, append = false) => {
     const activeScope = scopeRef.current;
     if (!activeScope || keyForScope(activeScope) !== scopeKey) return;
     const root = stateRef.current.root;
@@ -73,26 +73,15 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const epoch = scopeEpoch.current;
     const serial = (directorySerial.current.get(path) ?? 0) + 1;
     directorySerial.current.set(path, serial);
-    // A wait is announced when there is nothing to wait in front of, or when a
-    // person asked for this read and is owed an acknowledgement.
-    //
-    // Marking *every* re-read as loading put a "Loading…" row at the end of the
-    // tree each time — inside the scrolling box, so the content grew by a row
-    // and shrank again on every filesystem event. On a link where the re-read
-    // takes a visible moment that is the flicker the user reported twice over:
-    // the row itself on a short listing, and, on a long one, macOS revealing
-    // and re-hiding the overlay scrollbars as the content height oscillated. It
-    // also announced "Loading…" to a screen reader once per event, because that
-    // row is a live region. Rows already on screen now stay on screen and are
-    // replaced when the answer lands, which is what a refresh should look like
-    // — but a refresh nobody asked for is the only kind that goes quiet, so
-    // pressing Refresh still says something on a link slow enough to need it.
-    const announcesWait = announce || append || !previous;
-    if (announcesWait) setState((current) => ({ ...current, loading: new Set(current.loading).add(path), error: undefined }));
-    else setState((current) => (current.error === undefined ? current : { ...current, error: undefined }));
-    const finishSpan = startPerfSpan(append ? "files.listDirectory.page" : "files.listDirectory");
+    setState((current) => ({ ...current, loading: new Set(current.loading).add(path), error: undefined }));
     try {
-      const listing = await client.listDirectory(activeScope, root, path, append ? previous?.nextPageToken : undefined);
+      // What a directory read costs on this link, when `ADE_PERF_LOG` is set and
+      // nothing otherwise. The flicker this hook was reported for is only ever
+      // visible when this number is large, and until now nothing measured it.
+      const listing = await measurePerf(
+        append ? "files.listDirectory.page" : "files.listDirectory",
+        () => client.listDirectory(activeScope, root, path, append ? previous?.nextPageToken : undefined),
+      );
       if (epoch !== scopeEpoch.current || directorySerial.current.get(path) !== serial || keyForScope(activeScope) !== scopeKey) return;
       setState((current) => {
         if (!sameRoot(current.root, root) || listing.rootToken !== root.token) return current;
@@ -112,11 +101,6 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
         loading.delete(path);
         return sameRoot(current.root, root) ? { ...current, loading, error: String(error) } : current;
       });
-    } finally {
-      // What a directory read costs on this link, when `ADE_PERF_LOG` is set and
-      // nothing otherwise. The flicker this hook was reported for is only ever
-      // visible when this number is large, and until now nothing measured it.
-      finishSpan();
     }
   }, [client, scopeKey]);
 
@@ -127,13 +111,24 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
    * The timer is started by the first event of a burst and deliberately not
    * pushed back by the ones behind it: a directory an agent is writing into
    * continuously would otherwise never be re-read at all.
+   *
+   * The root token the event arrived under is carried through the wait and
+   * re-checked on the far side. Before there was a wait, the caller's "is this
+   * event for the root we are showing?" test and the request it authorised were
+   * the same instant; a delay puts a root change between them — the active root
+   * is re-resolved every two seconds, and an agent's `cd` moves it — and without
+   * this the timer would list a path from the old root against the new one. The
+   * completion guards cannot catch that, because they compare against the root
+   * the request was issued with, which is the new one.
    */
-  const coalesceRefresh = useCallback((path: string) => {
+  const coalesceRefresh = useCallback((rootToken: string, path: string) => {
     const timers = refreshTimers.current;
-    if (timers.has(path)) return;
-    timers.set(path, setTimeout(() => {
-      timers.delete(path);
-      void loadDirectory(path, true, false, false);
+    const key = `${rootToken}\0${path}`;
+    if (timers.has(key)) return;
+    timers.set(key, setTimeout(() => {
+      timers.delete(key);
+      if (stateRef.current.root?.token !== rootToken) return;
+      void loadDirectory(path, true);
     }, DIRECTORY_REFRESH_COALESCE_MS));
   }, [loadDirectory]);
 
@@ -153,8 +148,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       return;
     }
     if (!current.root || event.rootToken !== current.root.token) return;
-    if (event.kind === "directoryChanged") coalesceRefresh(event.directory);
-    else if (event.kind === "fileChanged" || event.kind === "fileDeleted") coalesceRefresh(parentPath(event.path));
+    if (event.kind === "directoryChanged") coalesceRefresh(event.rootToken, event.directory);
+    else if (event.kind === "fileChanged" || event.kind === "fileDeleted") coalesceRefresh(event.rootToken, parentPath(event.path));
   }, [coalesceRefresh]);
 
   useEffect(() => {

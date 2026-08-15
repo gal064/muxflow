@@ -63,21 +63,41 @@ describe("xterm cell metrics", () => {
     // grid. A whole CSS pixel is the constraint, so 18.0 it is, at any ratio.
     expect(rendered(13 * 1.42, 17, 2)).toBe(18);
     expect(rendered(13 * 1.42, 17, 1)).toBe(18);
-    // The property that matters, over the ratios and faces a display can hand
-    // us: the rendered row is a whole number of CSS pixels, so `rows × cell`
-    // divides by the ratio exactly however many rows the window ends up with.
-    for (const ratio of [1, 2, 3]) {
-      for (const charHeight of [15, 16.4, 17, 17.6, 18]) {
+    // 1.5 has a whole row too — any even one — and 18 CSS px is 27 device px,
+    // which divides exactly at every row count.
+    expect(rendered(13 * 1.42, 17, 1.5)).toBe(18);
+    // Two properties, swept over the ratios a display can report and the faces a
+    // 13px monospace stack can measure.
+    for (const ratio of [1, 1.25, 1.5, 2, 3]) {
+      for (const charHeight of [12, 15, 16.4, 17, 17.6, 18, 18.3, 19.2, 24]) {
         const row = rendered(13 * 1.42, charHeight, ratio);
-        expect(Number.isInteger(row), `ratio ${ratio}, char ${charHeight} rendered a ${row}px row`).toBe(true);
+        const label = `ratio ${ratio}, char ${charHeight} rendered a ${row}px row`;
+        // Unconditional: the row fits the face, so xterm's own below-1 clamp
+        // never takes over and hands back a height nothing chose.
+        expect(row * ratio, label).toBeGreaterThanOrEqual(Math.ceil(charHeight * ratio));
+        expect(xtermLineHeight(13 * 1.42, charHeight, ratio), label).toBeGreaterThanOrEqual(1);
+        // Where the app actually lives — a face shorter than the pitch, on a
+        // ratio with a cheap whole row — `rows × cell` divides by the ratio
+        // exactly, however many rows the window ends up with.
+        // The face after xterm's own ceil, which is what has to fit under the
+        // pitch for a cheap whole row to exist at all.
+        if (ratio !== 1.25 && Math.ceil(charHeight * ratio) / ratio <= 13 * 1.42) {
+          expect(Number.isInteger(row), label).toBe(true);
+          for (const rows of [1, 7, 39, 40, 53]) {
+            expect(Number.isInteger(rows * row * ratio), `${label} at ${rows} rows`).toBe(true);
+          }
+        }
       }
     }
-    // A fractional ratio has no row that is whole in both spaces; it keeps the
-    // nearest device row rather than pretending otherwise. 18.46 × 1.5 = 27.69,
-    // so 28 device px — 18.667 CSS px.
-    expect(rendered(13 * 1.42, 17, 1.5)).toBeCloseTo(28 / 1.5, 6);
-    // xterm throws below 1, so a face taller than the requested pitch clamps.
-    expect(xtermLineHeight(18.46, 20, 1)).toBe(1);
+    // The two documented places the snap is refused, both deliberate, so that
+    // changing the budget has to change this test and say why.
+    //
+    // 1.25 needs a multiple of 4 CSS px to be whole in both spaces, which would
+    // drag an 18.46px pitch to 20 — 8% of the design, worse than the stretch.
+    expect(rendered(13 * 1.42, 17, 1.25)).toBe(23 / 1.25);
+    // And a face so tall that the shortest whole row fitting it is 20 CSS px,
+    // for the same reason. The row still fits the face, asserted above.
+    expect(rendered(13 * 1.42, 18.3, 1.5)).toBe(28 / 1.5);
     // Nothing measured, nothing derived: the caller leaves xterm alone.
     expect(xtermLineHeight(18.46, undefined)).toBeUndefined();
     expect(xtermLineHeight(18.46, 0)).toBeUndefined();

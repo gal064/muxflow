@@ -7,7 +7,7 @@ import "./tokens.css";
 import "./styles.css";
 import { App } from "./app/App";
 import { bootstrapPerfProbe } from "./perf/bootstrap";
-import { terminalFont } from "./features/terminal/theme";
+import { terminalFacesReady } from "./features/terminal/theme";
 
 void bootstrapPerfProbe();
 
@@ -45,13 +45,9 @@ const FONT_READY_TIMEOUT_MS = 2_000;
 async function fontsReady(): Promise<void> {
   const fonts = document.fonts;
   if (!fonts) return;
-  const { fontFamily, fontSize } = terminalFont();
-  const faces = typeof fonts.load === "function"
-    ? Promise.all(["", "700 ", "italic ", "italic 700 "].map((style) => fonts.load(`${style}${fontSize}px ${fontFamily}`)))
-      // `ready` still follows, so the chrome's own faces are settled too, and a
-      // face this list missed is no worse off than it was before.
-      .then(() => fonts.ready)
-    : fonts.ready;
+  // `ready` still follows, so the chrome's own faces are settled too, and a face
+  // the terminal's list does not name is no worse off than it was before.
+  const faces = terminalFacesReady().then(() => fonts.ready);
   await Promise.race([
     faces.then(() => undefined, () => undefined),
     new Promise<void>((resolve) => setTimeout(resolve, FONT_READY_TIMEOUT_MS)),

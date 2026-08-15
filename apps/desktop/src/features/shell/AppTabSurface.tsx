@@ -158,13 +158,19 @@ export function AppTabSurface(props: Props) {
 
   const mode = props.tab.kind === "markdown" ? props.tab.viewMode ?? "split" : "source";
   const source = view?.content ?? opened.file.content;
-  // `markdown-view-*`, not `markdown-*`: the modifier for the *preview* mode
-  // would otherwise be `markdown-preview`, which is the preview article's own
-  // class, so every rule written for the article — 24px of padding, a scroll
+  // The view mode is data, not a class. As a class it was `markdown-${mode}`,
+  // and in preview mode that is `markdown-preview` — the preview article's own
+  // class — so every rule written for the article landed on the whole tab
+  // surface too: 24px of padding, a scroll container around the scroll
   // container, a left border, a reading line-height, and the `code`/`pre`/`img`
-  // rules — also landed on the whole tab surface whenever the user chose that
-  // mode, and the article inside then got all of it a second time.
-  return <section className={`file-tab-surface ${props.tab.kind === "markdown" ? `markdown-view-${mode}` : ""}`} role="tabpanel" aria-label={props.tab.title}>
+  // rules restyling the toolbar's path chip. An attribute value shares no
+  // namespace with a class name, so the collision cannot come back.
+  return <section
+    aria-label={props.tab.title}
+    className="file-tab-surface"
+    data-view-mode={props.tab.kind === "markdown" ? mode : undefined}
+    role="tabpanel"
+  >
     <header className="editor-toolbar">
       <code title={props.tab.resource}>{props.tab.resource}</code>
       <span className={`save-state ${view?.state ?? "saved"}`} role="status">{view?.state === "saving" ? "Saving…" : view?.state === "dirty" ? "Unsaved" : view?.state === "error" ? "Save failed" : "Saved"}</span>

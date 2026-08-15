@@ -4,7 +4,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { terminalScreenReaderMode } from "./accessibilityPreference";
-import { searchDecorations, terminalFont, terminalTheme } from "./theme";
+import { searchDecorations, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
 
 export interface TerminalSize {
   columns: number;
@@ -176,9 +176,7 @@ export type MeasurableTerminal = Pick<Terminal, "options"> & {
  *
  * Returns undefined when there is nothing to derive from, which leaves xterm at
  * its unit multiplier: rows one measured character tall, slightly tighter than
- * the design, never a grid the surface cannot show. xterm rejects a `lineHeight`
- * below 1 outright, so a face measuring taller than the requested pitch clamps
- * there rather than throwing.
+ * the design, never a grid the surface cannot show.
  */
 export function xtermLineHeight(
   rowPitch: number,
@@ -189,40 +187,70 @@ export function xtermLineHeight(
   const ratio = devicePixelRatio > 0 ? devicePixelRatio : 1;
   // The same rounding xterm performs on the measured character.
   const deviceCharHeight = Math.ceil(measuredCharHeight * ratio);
-  return Math.max(1, (wholeDeviceRowHeight(rowPitch, ratio) + 0.5) / deviceCharHeight);
+  // Never below the face: xterm refuses a multiplier under 1, and the row that
+  // clamp produces is `deviceCharHeight` — a number nothing chose, and as likely
+  // to be the odd one this whole function exists to avoid.
+  return (unresampledRowHeight(rowPitch, ratio, deviceCharHeight) + 0.5) / deviceCharHeight;
 }
 
 /**
- * The device row height to aim at: as close to the token's pitch as a row can
- * be *while staying a whole number of CSS pixels*.
+ * How much of the designed pitch a row may give up to avoid being resampled.
  *
- * The CSS-pixel constraint is not cosmetic. xterm sizes the WebGL canvas's
- * backing store from `rows × device.cell.height` but its CSS box from
- * `Math.round(that / devicePixelRatio)`, and a `DevicePixelObserver` then
- * resizes the backing store to whatever that rounded box actually measures. So
- * whenever `rows × device.cell.height` is not a whole multiple of the ratio, the
- * two disagree by up to one device pixel, the glyph quads are placed in a clip
- * space one pixel shorter than the viewport they are drawn into, and the whole
- * grid is stretched by that pixel: every row lands on a different subpixel
- * offset, the GPU's linear filter smears each one differently, and text that is
- * crisp at the top of the pane is visibly soft and displaced by the bottom.
+ * At a ratio of 1.25 the smallest row that is whole in both spaces is a multiple
+ * of 4 CSS px, which would drag a 18.46 px pitch to 20 — 8% of the design, and a
+ * worse trade than the resampling. So the snap is only taken when it is cheap,
+ * and the budget is stated here rather than falling out of an integer check.
+ */
+const MAX_PITCH_SACRIFICE_PX = 1;
+
+/**
+ * The device row height to aim at: as close to the token's pitch as a row can be
+ * while `rows × row` still divides by the device pixel ratio exactly.
+ *
+ * That constraint is not cosmetic. xterm sizes the WebGL canvas's backing store
+ * from `rows × device.cell.height` but its CSS box from
+ * `Math.round(that / devicePixelRatio)`, and a `DevicePixelObserver` then resizes
+ * the backing store to whatever that rounded box actually measures. So whenever
+ * the product does not divide exactly, the two disagree by up to one device
+ * pixel, the glyph quads are placed in a clip space one pixel shorter than the
+ * viewport they are drawn into, and the whole grid is stretched by that pixel:
+ * every row lands on a different subpixel offset, the GPU's linear filter smears
+ * each one differently, and text that is crisp at the top of the pane is visibly
+ * soft and displaced by the bottom.
  *
  * Measured on the packaged app at 13 px / 1.42 on a 2× display: a 37-device-pixel
  * row (18.5 CSS px) drifted each row's glyph centroid by 0.0257 device px, 1.0 px
- * across the 39-row pane, against a within-row spread of 0.003 px. A row that is
- * a whole multiple of the ratio makes `Math.round` exact at every grid size, so
- * the stretch cannot arise at any window height.
+ * across the 39-row pane, against a within-row spread of 0.003 px.
  *
- * 13 × 1.42 = 18.46 CSS px, so the nearest whole CSS row is 18 — 1.385 font
- * sizes rather than the token's 1.42, the price of a grid that is not resampled.
+ * The rule is one predicate rather than a special case per ratio: a row of `h`
+ * CSS pixels survives every grid size when `h` and `h × ratio` are both whole, so
+ * `h` must be a multiple of the smallest `step` with `step × ratio` whole — 1 at
+ * an integer ratio, 2 at 1.5, 4 at 1.25. 13 × 1.42 = 18.46 CSS px, so a 2×
+ * display gets 18.0 (1.385 font sizes rather than the token's 1.42) and a 1.5×
+ * display gets the same 18.0, which is 27 device pixels and exact.
  *
- * A fractional ratio (1.25, 1.5 on some Linux and Windows displays) has no whole
- * CSS row that is also a whole device row, so there is nothing to snap to and
- * this returns the nearest device row, which is what it did before.
+ * A ratio with no such step inside `MAX_SNAP_STEP`, or one whose step costs more
+ * pitch than the budget allows, keeps the nearest device row and accepts the
+ * stretch — stated, rather than silently produced by a rounding.
  */
-export function wholeDeviceRowHeight(rowPitch: number, devicePixelRatio: number): number {
-  if (!Number.isInteger(devicePixelRatio)) return Math.max(1, Math.round(rowPitch * devicePixelRatio));
-  return Math.max(devicePixelRatio, Math.round(rowPitch) * devicePixelRatio);
+function unresampledRowHeight(rowPitch: number, ratio: number, deviceCharHeight: number): number {
+  const nearest = Math.max(deviceCharHeight, Math.round(rowPitch * ratio));
+  const step = cssRowStep(ratio);
+  if (step === undefined) return nearest;
+  let cssRow = Math.max(step, Math.round(rowPitch / step) * step);
+  // A row shorter than the face would clamp; step up until it is not.
+  while (cssRow * ratio < deviceCharHeight) cssRow += step;
+  return Math.abs(cssRow - rowPitch) <= MAX_PITCH_SACRIFICE_PX ? cssRow * ratio : nearest;
+}
+
+/** How far a whole-CSS-pixel row has to be from the next one at this ratio. */
+const MAX_SNAP_STEP = 4;
+
+function cssRowStep(ratio: number): number | undefined {
+  for (let step = 1; step <= MAX_SNAP_STEP; step += 1) {
+    if (Number.isInteger(step * ratio)) return step;
+  }
+  return undefined;
 }
 
 /** Everything needed to turn a pixel box into a terminal grid. */
@@ -514,8 +542,6 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #options: TerminalRendererOptions;
   /** CSS pixels the token asks one row to occupy. See `xtermLineHeight`. */
   readonly #rowPitch: number;
-  /** A CSS font shorthand for the terminal face. See `#discardFallbackAtlas`. */
-  readonly #fontShorthand: string;
   #webgl?: WebglAddon;
   #newOutput = false;
   #lastViewport?: TerminalViewportState;
@@ -535,7 +561,6 @@ export class XtermRenderer implements TerminalRenderer {
     // of literals that drifted from the chrome.
     const font = terminalFont();
     this.#rowPitch = font.rowPitch;
-    this.#fontShorthand = `${font.fontSize}px ${font.fontFamily}`;
     this.#terminal = new Terminal({
       allowProposedApi: false,
       altClickMovesCursor: false,
@@ -915,7 +940,9 @@ export class XtermRenderer implements TerminalRenderer {
    * finds it already there and does nothing. It stays because that wait is
    * bounded: a face that resolves after the bound would otherwise leave a
    * two-typeface atlas on screen until the pane is closed, and nothing about
-   * that failure is recoverable by the user.
+   * that failure is recoverable by the user. The wait is the same one `main.tsx`
+   * performs, shared, so it covers every style the atlas can hold rather than
+   * only the regular face — a late *bold* face splits the atlas just as visibly.
    *
    * Only the glyphs are recovered here, not the metrics: xterm re-measures the
    * cell on a `fontFamily`/`fontSize` change and on nothing else, so a face that
@@ -933,7 +960,7 @@ export class XtermRenderer implements TerminalRenderer {
     // panes with the same appearance share one — and clearing it on each new
     // pane would drop every other pane's glyphs to re-rasterise them.
     if ([...fonts].every((face) => face.status === "loaded")) return;
-    void fonts.load(this.#fontShorthand).then((faces) => {
+    void terminalFacesReady().then((faces) => {
       // An empty match means the stack resolved to a system face that was never
       // going to load; there is no later rasterisation to be inconsistent with.
       if (this.#disposed || faces.length === 0) return;
