@@ -578,6 +578,29 @@ fn process_event(
                 ));
             }
         }
+        // `TerminalFlowPaused` is deliberately absent. It is the start of a
+        // flow-control episode the host resumes and re-captures by itself, and
+        // a second recovery raced in from here would only re-photograph a pane
+        // that is already being re-photographed. What reaches the renderer is
+        // the case the host could not fix.
+        v1::EventKind::TerminalFlowStalled => {
+            if let Some(pane_id) = scoped_terminal_recovery(&event.scope) {
+                send_protocol_event(
+                    channel,
+                    event_sequence,
+                    TerminalEvent::FlowStalled {
+                        pane_id: pane_id.clone(),
+                        message: event.detail,
+                    },
+                )?;
+                // The seed is the recovery, not the notice: `request_seed`
+                // carries the resume for a pane the host knows is paused, so
+                // this is what actually takes it out of tmux's flow control.
+                scoped_seed = Some(pane_id);
+            } else {
+                return Err(format!("host reported a stalled pane: {}", event.detail));
+            }
+        }
         v1::EventKind::TerminalSeedDiagnostic => {
             send_protocol_event(
                 channel,

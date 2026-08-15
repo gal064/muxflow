@@ -235,6 +235,14 @@ describe("binary terminal IPC", () => {
     expect(() => decodeTerminalEvent(frame(11, "%7", 1, Uint8Array.of(0xff)))).toThrow("UTF-8");
   });
 
+  it("decodes a pane-scoped flow stall and rejects malformed values", () => {
+    expect(decodeTerminalEvent(frame(15, "%7", 21, textEncoder.encode("tmux rejected the resume λ")))).toEqual({
+      kind: "flowStalled", paneId: "%7", message: "tmux rejected the resume λ", sequence: 21,
+    });
+    expect(() => decodeTerminalEvent(frame(15, "terminal", 1, Uint8Array.of(65)))).toThrow("pane label");
+    expect(() => decodeTerminalEvent(frame(15, "%7", 1, Uint8Array.of(0xff)))).toThrow("UTF-8");
+  });
+
   it("keeps one initially-empty bridge lifecycle stable across session and topology UI changes", () => {
     const connection = { mode: "local" } as const;
     const initialKey = terminalBridgeKey(connection, 2);

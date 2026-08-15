@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Pane } from "../../app/types";
 import { windowGrid } from "./layout";
 import { cellsForBox, type PixelBox, type TerminalMeasurements, type TerminalSize } from "./TerminalRenderer";
-import { clientSizeForSurface, MAX_CLIENT_CELLS } from "./clientSize";
+import { clientSizeForSurface, MAX_CLIENT_CELLS, windowCellSize } from "./clientSize";
 
 /** One terminal's measurements, fixed so every expectation below is exact. */
 const CELL: PixelBox = { width: 8, height: 17 };
@@ -157,5 +157,52 @@ describe("cellsForBox", () => {
     expect(cellsForBox({ width: 20, height: 800 }, CELL, CHROME)).toBeUndefined();
     expect(cellsForBox({ width: 1000, height: 8 }, CELL, CHROME)).toBeUndefined();
     expect(cellsForBox({ width: 1000, height: 800 }, { width: 0, height: 17 }, CHROME)).toBeUndefined();
+  });
+});
+
+describe("windowCellSize", () => {
+  /**
+   * tmux counts the separator row and column into the *following* pane's
+   * offset, so the bottom-right pane's offset plus its own size lands exactly
+   * on the window's edge — which is the only reason this can be read off pane
+   * geometry at all.
+   */
+  it("reads the window's grid off its bottom-right pane", () => {
+    // The bottom-right pane is listed *first* on purpose. Snapshot pane order
+    // is not a guaranteed property, so a fixture that happened to end on the
+    // widest and tallest pane would pass on an implementation that simply took
+    // the last one — and a wrong answer here is a permanent `actualSize`
+    // mismatch, which spends the reassertion budget resizing real windows on
+    // every focus gain.
+    const panes = [
+      pane("%3", { left: 95, top: 25, width: 93, height: 25 }),
+      pane("%1", { left: 0, top: 0, width: 94, height: 50 }),
+      pane("%2", { left: 95, top: 0, width: 93, height: 24 }),
+    ];
+    expect(windowCellSize(panes, "@1")).toEqual({ columns: 188, rows: 50 });
+    // Widest and tallest come from different panes, so neither axis can be
+    // satisfied by picking one pane and reading both numbers off it.
+    expect(windowCellSize([
+      pane("%1", { left: 0, top: 0, width: 200, height: 10 }),
+      pane("%2", { left: 0, top: 11, width: 20, height: 40 }),
+    ], "@1")).toEqual({ columns: 200, rows: 51 });
+  });
+
+  it("ignores panes belonging to other windows", () => {
+    const panes = [
+      pane("%1", { windowId: "@1", width: 80, height: 24 }),
+      pane("%2", { windowId: "@2", width: 200, height: 60 }),
+    ];
+    expect(windowCellSize(panes, "@1")).toEqual({ columns: 80, rows: 24 });
+  });
+
+  /**
+   * "No answer", never a window of zero cells: the caller compares this against
+   * a requested size, and a zero would read as every request being ignored.
+   */
+  it("answers nothing for a window it cannot describe", () => {
+    expect(windowCellSize([pane("%1", {})], "@missing")).toBeUndefined();
+    expect(windowCellSize([pane("%1", {})], undefined)).toBeUndefined();
+    expect(windowCellSize([], "@1")).toBeUndefined();
   });
 });

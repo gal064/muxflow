@@ -102,6 +102,12 @@ enum Operation {
   // prompt as hook installation, and re-asserted on every connect because it
   // lives in the tmux server's memory rather than in a config file.
   OPERATION_AGENT_HOST_NAMING = 42;
+  // Names the session the desktop is *showing*, which is the one tmux must
+  // size from. Distinct from ATTACH_TERMINAL, which also sets the control
+  // client's pane membership and reseeds it: a workspace switch changes which
+  // client participates in sizing and nothing else, and paying an attach for
+  // that reseeds every pane of the session on every switch.
+  OPERATION_SELECT_TERMINAL_SESSION = 43;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -173,6 +179,12 @@ enum EventKind {
   EVENT_KIND_TRANSFER_PROGRESS = 14;
   EVENT_KIND_GIT_STATUS = 15;
   EVENT_KIND_AGENT_STATE = 16;
+  // A pane tmux paused that the host could not get resumed. Distinct from
+  // TERMINAL_FLOW_PAUSED, which is the ordinary start of a flow-control
+  // episode the host recovers from by itself: this one says the recovery ran
+  // out of attempts and the pane is delivering nothing until something reseeds
+  // it.
+  EVENT_KIND_TERMINAL_FLOW_STALLED = 17;
 }
 
 message HostEvent {

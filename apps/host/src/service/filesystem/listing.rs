@@ -60,14 +60,7 @@ pub(super) fn list_directory_impl(
     } else {
         root.anchor(&logical_target)?.open_directory()?
     };
-    let relative = logical_target
-        .strip_prefix(root.logical_root())
-        .expect("resolved path is in root");
-    if relative.components().any(|component| {
-        matches!(component, Component::Normal(value) if value == OsStr::new(".git") || value == OsStr::new("node_modules"))
-    }) {
-        bail!(".git, node_modules, and directory symlinks are collapsed and unwatched by default");
-    }
+    ensure_enterable(root, &logical_target)?;
     let page_size = if page_size == 0 {
         DEFAULT_DIRECTORY_PAGE
     } else {
@@ -83,6 +76,12 @@ pub(super) fn list_directory_impl(
         root.anchor(&logical_target)?.directory_entries()?
     };
     for name in entries {
+        // Before the page window, not after it: the entry is not in this
+        // listing at all, so it must not consume a page slot or become the
+        // pagination token the next page resumes from.
+        if is_always_hidden(&name) {
+            continue;
+        }
         let entry = AnchoredPath::in_directory(&directory, name.clone())?;
         let metadata = metadata_for_directory_entry(&entry, &logical_target.join(&name))?;
         let rank = u8::from(metadata.kind != i32::from(v1::FileKind::Directory));
@@ -137,15 +136,30 @@ pub(super) fn resolve_watch_directory(
     } else {
         root.anchor(&logical_target)?.open_directory()?
     };
+    ensure_enterable(root, &logical_target)?;
+    Ok((logical_target, directory))
+}
+
+/// Refuses a path that runs through a directory this service never enumerates.
+///
+/// Asking for the path directly is the way around a listing, so it answers the
+/// same predicate the listing does. Otherwise a hidden directory would only be
+/// absent from one view rather than hidden, and `expandable: false` on a
+/// collapsed one would be a suggestion. This is also what keeps a watch off
+/// those subtrees, which is why the guard was written in the first place:
+/// `node_modules` is where the descriptor budget goes to die.
+fn ensure_enterable(root: &RootCapability, logical_target: &Path) -> anyhow::Result<()> {
     let relative = logical_target
         .strip_prefix(root.logical_root())
         .expect("resolved path is in root");
-    if relative.components().any(|component| {
-        matches!(component, Component::Normal(value) if value == OsStr::new(".git") || value == OsStr::new("node_modules"))
-    }) {
-        bail!(".git, node_modules, and directory symlinks are collapsed and unwatched by default");
+    if relative.components().any(
+        |component| matches!(component, Component::Normal(value) if is_never_enumerated(value)),
+    ) {
+        bail!(
+            "hidden and collapsed directories, and directory symlinks, are not listed or watched"
+        );
     }
-    Ok((logical_target, directory))
+    Ok(())
 }
 
 fn encode_page_token(key: &(u8, Vec<u8>)) -> String {

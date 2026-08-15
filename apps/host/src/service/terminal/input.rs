@@ -426,7 +426,8 @@ mod tests {
             let capture_stdin = Arc::clone(&stdin);
             workers.push(thread::spawn(move || {
                 for _ in 0..50 {
-                    super::super::write_capture_request(&capture_stdin, "%1").unwrap();
+                    super::super::write_capture_request_resuming(&capture_stdin, "%1", false)
+                        .unwrap();
                     let _ = index;
                 }
             }));

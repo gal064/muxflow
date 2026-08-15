@@ -159,6 +159,17 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
           setTerminalEpoch(event.epoch);
         } else if (event.kind === "topologyDirty") {
           setStatus("Topology changed; reconciling…");
+        } else if (event.kind === "flowStalled") {
+          // Deliberately not "recovering it". The host has asked for a seed, so
+          // the pane repaints — but that seed no longer carries a resume, and
+          // it cannot: the host has established that this pane's resume is
+          // refused, and attaching another is what made the recovery re-trigger
+          // itself. So the screen comes back and the *stream* may not, and a
+          // message promising recovery would be the second time this defect
+          // told the user something untrue. The pane id stays out of it too;
+          // `%7` names nothing anyone can see.
+          terminalStateCache.delete(event.paneId);
+          setStatus("A terminal stopped receiving live output; its last screen was restored.");
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
           setConnectionDetail(detail);

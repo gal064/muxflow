@@ -530,6 +530,32 @@ fn decode_terminal_input_frame(body: &[u8]) -> Result<(&str, &str, &[u8]), Strin
     Ok((client_id, pane_id, &body[offset..]))
 }
 
+/// Tells the host which session the desktop is showing, so tmux sizes from
+/// that one's control client. `useVisibleTerminalSession.ts` owns why this
+/// exists and when it is sent.
+///
+/// Async and spawn_blocking for the same reason `set_terminal_visibility` is:
+/// this runs on a workspace switch, and holding the WebView's main thread for
+/// an SSH round trip is a visibly frozen switch.
+#[tauri::command]
+pub async fn select_terminal_session(
+    client_id: String,
+    session_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    validate_tmux_id(&session_id, '$')?;
+    let client = get_client(&clients, &client_id)?;
+    let request = v1::Request {
+        operation: v1::Operation::SelectTerminalSession.into(),
+        session_id,
+        ..Default::default()
+    };
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal session selection task failed: {error}"))??;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn resize_terminal_client(
     client_id: String,
