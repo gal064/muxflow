@@ -43,6 +43,70 @@ describe("ExplorerTree", () => {
     expect(html).not.toContain("•••");
   });
 
+  it("hides what git calls ignored, including everything under a collapsed ignored directory", () => {
+    // Git reports `target/` once and never its contents, so the tree cannot
+    // ask "is this path in the set" — it has to ask about the ancestors too.
+    const withTarget: DirectoryListing = {
+      ...listing,
+      entries: [
+        ...listing.entries,
+        { path: "/r/target", name: "target", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true },
+        { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true },
+      ],
+    };
+    const targetListing: DirectoryListing = {
+      rootToken: "root-1", directory: "/r/target", revision: "2", overflowRecovery: false, complete: true,
+      entries: [{ path: "/r/target/debug", name: "debug", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true }],
+    };
+    const listings = new Map([["/r", withTarget], ["/r/target", targetListing]]);
+    const expanded = new Set(["/r", "/r/target"]);
+    const shown = (ignoredPaths?: ReadonlySet<string>) => renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={listings} expanded={expanded} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined} ignoredPaths={ignoredPaths}
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+
+    const filtered = shown(new Set(["/r/target", "/r/ignored.log"]));
+    expect(filtered).not.toContain(">target<");
+    expect(filtered, "a child of a collapsed ignored directory survived").not.toContain(">debug<");
+    expect(filtered).not.toContain("ignored.log");
+    expect(filtered).toContain(">src<");
+    expect(filtered).toContain(".env");
+
+    // A path that merely shares a prefix is a different file, not a child.
+    expect(shown(new Set(["/r/tar"]))).toContain(">target<");
+
+    // Degradation: no authoritative status means no set at all, and the tree
+    // shows everything rather than guessing.
+    const everything = shown(undefined);
+    expect(everything).toContain(">target<");
+    expect(everything).toContain("ignored.log");
+    // An empty set is an authoritative "nothing is ignored", not a hidden tree.
+    expect(shown(new Set())).toBe(everything);
+  });
+
+  it("offers the show-ignored escape hatch only when something is actually hidden", async () => {
+    const listings = new Map([["/r", listing]]);
+    const shown = async (ignoredPaths?: ReadonlySet<string>) => {
+      let renderer!: ReturnType<typeof create>;
+      await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={listings} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined} ignoredPaths={ignoredPaths}
+        onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+      // The Explorer header is the surface the toggle lives on.
+      const header = renderer.root.findAllByProps({ className: "explorer-root" })[0];
+      await act(async () => { header.props.onContextMenu({ preventDefault: vi.fn(), clientX: 1, clientY: 1 }); });
+      return renderer;
+    };
+
+    const degraded = await shown(undefined);
+    expect(JSON.stringify(degraded.toJSON())).not.toContain("ignored files");
+    await act(async () => { degraded.unmount(); });
+
+    const filtering = await shown(new Set(["/r/ignored.log"]));
+    expect(JSON.stringify(filtering.toJSON())).not.toContain("ignored.log");
+    expect(JSON.stringify(filtering.toJSON())).toContain("Show ignored files");
+    const toggle = filtering.root.findByProps({ "data-menu-item": "ignored" });
+    await act(async () => { toggle.props.onClick(); });
+    expect(JSON.stringify(filtering.toJSON())).toContain("ignored.log");
+    await act(async () => { filtering.unmount(); });
+  });
+
   it("never changes the tree's height to say a directory is being re-read", () => {
     // The reported flicker: the "Loading…" row lives inside the scrolling box,
     // so showing it while rows are already up grew the content by a row and
