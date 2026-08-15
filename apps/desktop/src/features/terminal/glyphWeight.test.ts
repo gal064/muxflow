@@ -122,6 +122,15 @@ describe("the glyph atlas canvas", () => {
     expect(addonBundle, "the willReadFrequently-alone idiom this predicate excludes is gone")
       .toMatch(/getContext\(\s*["']2d["']\s*,\s*\{\s*willReadFrequently\s*:\s*!?(0|1|true)\s*\}/);
   });
+
+  it("is still taken back out of the document by the addon that owns it", () => {
+    // The hook roots a canvas that was reachable only from the addon, so its
+    // lifetime becomes the addon's `remove()` call rather than the collector's.
+    // Nothing here sweeps the holder on that basis; an addon that stops
+    // removing would accumulate one canvas per atlas rebuild, invisibly.
+    expect(addonBundle, "the atlas no longer removes its canvas when disposed")
+      .toMatch(/dispose\(\)\s*\{\s*this\._tmpCanvas\.remove\(\)/);
+  });
 });
 
 describe("the weights the terminal is allowed to draw", () => {
