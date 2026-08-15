@@ -27,7 +27,9 @@ const PERMISSION_STATUSES: readonly NotificationPermissionStatus[] =
  */
 export async function notificationPermissionStatus(): Promise<NotificationPermissionStatus> {
   const status = await invoke<string>("notification_permission_status");
-  return PERMISSION_STATUSES.find((known) => known === status) ?? "unsupported";
+  return PERMISSION_STATUSES.includes(status as NotificationPermissionStatus)
+    ? status as NotificationPermissionStatus
+    : "unsupported";
 }
 
 /**

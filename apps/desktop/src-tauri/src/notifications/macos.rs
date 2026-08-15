@@ -95,22 +95,23 @@ impl PendingRoutes {
 /// same `userInfo` the activation path already reads, which means there is no
 /// side table to keep, bound, evict, or clean up on the error path.
 ///
-/// The `test-` prefix short-circuits it. That notification's entire job is to
-/// answer "does a banner appear at all", so it must not be able to answer "no"
-/// because a payload field went missing.
+/// The sound half is read off the content rather than decided again here, so
+/// the banner and the sound cannot disagree with what was actually posted:
+/// agent notifications carry no sound because the app plays its own cue for
+/// the same transition, and the test notification carries one.
 fn foreground_presentation(
-    identifier: &str,
+    sound: bool,
     user_info: &NSDictionary,
 ) -> UNNotificationPresentationOptions {
-    if identifier.starts_with(TEST_IDENTIFIER_PREFIX) {
-        return UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::Sound;
-    }
     if notification_string(user_info, FOREGROUND_KEY).as_deref() == Some(FOREGROUND_SUPPRESS) {
         return UNNotificationPresentationOptions::empty();
     }
-    // Banner without Sound: the app plays its own agent cue for the same event,
-    // and two sounds for one transition is worse than none.
-    UNNotificationPresentationOptions::Banner
+    let banner = UNNotificationPresentationOptions::Banner;
+    if sound {
+        banner | UNNotificationPresentationOptions::Sound
+    } else {
+        banner
+    }
 }
 
 define_class!(
@@ -131,9 +132,8 @@ define_class!(
             // Only the pane the user is actually looking at represents its own
             // attention in-app. Everything else is as invisible as it would be
             // with the app in the background, so it is presented.
-            let request = notification.request();
-            let identifier = request.identifier().to_string();
-            let options = foreground_presentation(&identifier, &request.content().userInfo());
+            let content = notification.request().content();
+            let options = foreground_presentation(content.sound().is_some(), &content.userInfo());
             completion.call((options,));
         }
 
@@ -182,8 +182,8 @@ pub struct NativeNotifications {
     route_directory: Option<Arc<File>>,
 }
 
-/// One notification's parameters, named. Three of these are booleans and two
-/// of them are adjacent, which is the shape that silently swaps positionally.
+/// One notification's parameters, named. Two of these are adjacent booleans,
+/// which is the shape that silently swaps when passed positionally.
 struct Posting<'a> {
     title: &'a str,
     body: &'a str,
@@ -286,29 +286,18 @@ impl NativeNotifications {
         if sound {
             content.setSound(Some(&UNNotificationSound::defaultSound()));
         }
-        let mut keys: Vec<Retained<NSString>> = Vec::new();
-        let mut values: Vec<Retained<NSString>> = Vec::new();
+        let mut entries: Vec<(&str, &str)> = Vec::new();
         if request_action {
-            keys.push(NSString::from_str("adeRouteSchema"));
-            values.push(NSString::from_str(ROUTE_SCHEMA));
-            keys.push(NSString::from_str("adeRouteToken"));
-            values.push(NSString::from_str(&identifier));
+            entries.push(("adeRouteSchema", ROUTE_SCHEMA));
+            entries.push(("adeRouteToken", &identifier));
         }
         if !present_in_foreground {
-            keys.push(NSString::from_str(FOREGROUND_KEY));
-            values.push(NSString::from_str(FOREGROUND_SUPPRESS));
+            entries.push((FOREGROUND_KEY, FOREGROUND_SUPPRESS));
         }
-        if !keys.is_empty() {
-            let key_refs: Vec<&NSString> = keys.iter().map(|key| &**key).collect();
-            let value_refs: Vec<&NSString> = values.iter().map(|value| &**value).collect();
-            let typed_user_info = NSDictionary::from_slices(&key_refs, &value_refs);
-            // SAFETY: NSDictionary's generic parameters are Rust-side type
-            // information only; Objective-C exposes userInfo as untyped.
-            let user_info: Retained<NSDictionary> =
-                unsafe { Retained::cast_unchecked(typed_user_info) };
+        if !entries.is_empty() {
             // SAFETY: this dictionary contains only NSString keys and values,
             // which are property-list types accepted by UserNotifications.
-            unsafe { content.setUserInfo(&user_info) };
+            unsafe { content.setUserInfo(&string_dictionary(&entries)) };
         }
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSString::from_str(&identifier),
@@ -338,6 +327,24 @@ impl NativeNotifications {
             actionable: request_action,
         })
     }
+}
+
+/// An all-`NSString` `userInfo` dictionary, built from pairs so keys and
+/// values cannot drift out of correspondence.
+fn string_dictionary(entries: &[(&str, &str)]) -> Retained<NSDictionary> {
+    let keys: Vec<Retained<NSString>> = entries
+        .iter()
+        .map(|(key, _)| NSString::from_str(key))
+        .collect();
+    let values: Vec<Retained<NSString>> = entries
+        .iter()
+        .map(|(_, value)| NSString::from_str(value))
+        .collect();
+    let key_refs: Vec<&NSString> = keys.iter().map(|key| &**key).collect();
+    let value_refs: Vec<&NSString> = values.iter().map(|value| &**value).collect();
+    // SAFETY: NSDictionary's generic parameters are Rust-side type information
+    // only; Objective-C exposes userInfo as untyped.
+    unsafe { Retained::cast_unchecked(NSDictionary::from_slices(&key_refs, &value_refs)) }
 }
 
 fn route_filename(id: &str) -> Option<CString> {
@@ -632,47 +639,36 @@ mod tests {
         );
     }
 
-    fn user_info(pairs: &[(&str, &str)]) -> Retained<NSDictionary> {
-        let keys: Vec<Retained<NSString>> =
-            pairs.iter().map(|(key, _)| NSString::from_str(key)).collect();
-        let values: Vec<Retained<NSString>> = pairs
-            .iter()
-            .map(|(_, value)| NSString::from_str(value))
-            .collect();
-        let key_refs: Vec<&NSString> = keys.iter().map(|key| &**key).collect();
-        let value_refs: Vec<&NSString> = values.iter().map(|value| &**value).collect();
-        unsafe { Retained::cast_unchecked(NSDictionary::from_slices(&key_refs, &value_refs)) }
-    }
-
     #[test]
     fn foreground_presentation_shows_everything_except_what_the_frontend_suppressed() {
-        let id = Uuid::new_v4().to_string();
         // The frontend said the user is looking at this pane, so the app is
         // already representing the attention itself.
         assert_eq!(
-            foreground_presentation(&id, &user_info(&[(FOREGROUND_KEY, FOREGROUND_SUPPRESS)])),
+            foreground_presentation(
+                false,
+                &string_dictionary(&[(FOREGROUND_KEY, FOREGROUND_SUPPRESS)])
+            ),
             UNNotificationPresentationOptions::empty()
         );
         // Anything else is presented — including a payload that says nothing,
         // because total suppression is the defect this reverses and a missing
         // field must not quietly reinstate it.
         assert_eq!(
-            foreground_presentation(&id, &user_info(&[])),
+            foreground_presentation(false, &string_dictionary(&[])),
             UNNotificationPresentationOptions::Banner
         );
         assert_eq!(
-            foreground_presentation(&id, &user_info(&[(FOREGROUND_KEY, "present")])),
+            foreground_presentation(false, &string_dictionary(&[(FOREGROUND_KEY, "present")])),
             UNNotificationPresentationOptions::Banner
         );
     }
 
     #[test]
-    fn the_test_notification_presents_whatever_its_payload_says() {
-        // Its entire job is to answer "does a banner appear at all". It must
-        // not be able to answer "no" because a field went missing.
-        let id = format!("{TEST_IDENTIFIER_PREFIX}{}", Uuid::new_v4());
-        let options =
-            foreground_presentation(&id, &user_info(&[(FOREGROUND_KEY, FOREGROUND_SUPPRESS)]));
+    fn a_notification_that_carries_a_sound_is_presented_with_one() {
+        // Read off the content, so the banner and the sound cannot disagree
+        // with what was actually posted. The test notification is the only
+        // thing that carries one.
+        let options = foreground_presentation(true, &string_dictionary(&[]));
         assert!(options.contains(UNNotificationPresentationOptions::Banner));
         assert!(options.contains(UNNotificationPresentationOptions::Sound));
     }

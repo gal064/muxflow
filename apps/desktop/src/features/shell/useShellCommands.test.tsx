@@ -87,7 +87,10 @@ describe("shell commands", () => {
       result: { windowId: "@9", topologyGeneration: 9 },
     });
     expect(performAction).toHaveBeenCalledWith({ kind: "createWindow", sessionId: "$1" });
-    expect(selectCreatedWindow).toHaveBeenCalledWith("$1", "@9");
+    // The generation the *create* returned, not the one in scope: the create
+    // moved the topology, and a selection sent against the older number is
+    // rejected as stale and only lands on a retry.
+    expect(selectCreatedWindow).toHaveBeenCalledWith("$1", "@9", 9);
   });
 
   it("does not steal focus into a window created on a host the user has left", async () => {

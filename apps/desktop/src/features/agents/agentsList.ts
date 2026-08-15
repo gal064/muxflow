@@ -63,10 +63,10 @@ export function buildAgentRows(
     location: locate(agent),
     routable: routable(agent),
   }));
-  return rows.sort(mode === "status" ? byPriority : byWorkspace);
+  return rows.sort(mode === "status" ? byStatus : byWorkspace);
 }
 
-function byPriority(left: AgentListRow, right: AgentListRow): number {
+function byStatus(left: AgentListRow, right: AgentListRow): number {
   // compareAgents is already blocked > done-unread > working > unknown > idle,
   // then most-recently-updated. Reusing it keeps one definition of "loudest".
   return compareAgents(left.agent, right.agent);
@@ -81,12 +81,12 @@ function byWorkspace(left: AgentListRow, right: AgentListRow): number {
 }
 
 /**
- * The row ⌘⇧U goes to: the top of the priority order, restricted to rows that
+ * The row ⌘⇧U goes to: the top of the status order, restricted to rows that
  * actually want attention and can actually be reached. Jumping to an idle agent
  * because it happened to sort first would make the shortcut useless.
  */
 export function jumpTarget(rows: readonly AgentListRow[]): AgentListRow | undefined {
-  return [...rows].sort(byPriority).find((row) => row.routable && needsAttention(row.state));
+  return [...rows].sort(byStatus).find((row) => row.routable && needsAttention(row.state));
 }
 
 /** How many rows are waiting on a human — the number on the titlebar's bell. */

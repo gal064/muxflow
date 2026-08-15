@@ -46,8 +46,13 @@ interface ShellCommandOptions {
    * Land on the terminal tab ⌘T just made. The host creates it detached, so
    * tmux's active window does not move and the app — which mirrors that flag
    * on every snapshot — would put the selection straight back.
+   *
+   * `generation` is the one the creation returned, not the one in scope: the
+   * create bumped the topology and the app's own scope does not catch up until
+   * the next snapshot, so a selection sent against the older number is
+   * rejected as stale and only lands on a retry.
    */
-  selectCreatedWindow(sessionId: string, windowId: string): void;
+  selectCreatedWindow(sessionId: string, windowId: string, generation: number): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
   setConfirmation: Dispatch<SetStateAction<PendingTmuxConfirmation | undefined>>;
@@ -67,6 +72,38 @@ interface ShellCommandOptions {
   /** ⌘⇧U. */
   jumpToUnreadAgent(): void;
   stepFocusHistory(direction: "back" | "forward"): void;
+}
+
+/**
+ * What a destructive command closes, and whether it asks first.
+ *
+ * `confirmLabel` present means a dialog names that target; absent means the
+ * close happens on the spot. A terminal tab and a pane are the surface the
+ * user is looking at and their disappearance is the confirmation — the same
+ * call this user's own terminal makes with `confirm-close-surface = false`. A
+ * workspace takes every window in it, which is a different blast radius.
+ *
+ * Either way the action reaches the host identically: `confirmed: true` plus
+ * the precondition captured when the command ran. Only the gate differs.
+ */
+function closeTarget(
+  commandId: CommandId,
+  targets: { targetSession?: Session; targetWindow?: TmuxWindow; targetPane?: Pane },
+): { action: TmuxAction; confirmLabel?: string } | undefined {
+  const { targetSession, targetWindow, targetPane } = targets;
+  if (commandId === "session.close" && targetSession) {
+    return {
+      action: { kind: "closeSession", sessionId: targetSession.id },
+      confirmLabel: `workspace “${targetSession.name}” and all of its windows`,
+    };
+  }
+  if (commandId === "window.close" && targetWindow) {
+    return { action: { kind: "closeWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id } };
+  }
+  if (commandId === "pane.close" && targetPane) {
+    return { action: { kind: "closePane", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id } };
+  }
+  return undefined;
 }
 
 export function useShellCommands(options: ShellCommandOptions): {
@@ -113,38 +150,21 @@ export function useShellCommands(options: ShellCommandOptions): {
       options.setAppState((current) => closeAppTab(current, options.currentHostProfileId, targetAppTab.id));
       return;
     }
-    if (commandId === "session.close" && targetSession) {
-      if (!options.serverIdentity) return;
-      options.setConfirmation(createTmuxConfirmation(
-        commandId,
-        definition.title,
-        `workspace “${targetSession.name}” and all of its windows`,
-        { kind: "closeSession", sessionId: targetSession.id },
-        { serverIdentity: options.serverIdentity, generation: options.generation },
-      ));
-      return;
-    }
     if (definition.destructive) {
       if (!options.serverIdentity) return;
-      const action: TmuxAction | undefined = commandId === "window.close" && targetWindow
-        ? { kind: "closeWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id }
-        : commandId === "pane.close" && targetPane
-          ? { kind: "closePane", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id }
-          : undefined;
-      if (!action) return;
-      // Closing a terminal tab or a pane does not ask. It is the surface the
-      // user is looking at, the result is visible the instant it happens, and
-      // a terminal that asks before closing is a preference this user has
-      // already turned off in their own terminal. Closing a whole workspace
-      // still asks — that is the branch above, and a different blast radius.
-      //
-      // The host contract is unchanged: `confirmed` is still what the dialog's
-      // accept path would have stamped, and the authoritative precondition is
-      // still captured at the moment the command ran.
-      await options.performAction(
-        { ...action, confirmed: true },
-        { serverIdentity: options.serverIdentity, generation: options.generation },
-      );
+      const close = closeTarget(commandId, { targetSession, targetWindow, targetPane });
+      if (!close) return;
+      // One dispatch, so `confirmed: true` and the authoritative precondition
+      // are stamped in exactly one place whether or not a dialog is involved.
+      // Whether a close *asks* is data — `confirmLabel` — not a second branch
+      // of control flow above this one.
+      const action: TmuxAction = { ...close.action, confirmed: true };
+      const precondition = { serverIdentity: options.serverIdentity, generation: options.generation };
+      if (close.confirmLabel) {
+        options.setConfirmation(createTmuxConfirmation(commandId, definition.title, close.confirmLabel, action, precondition));
+      } else {
+        await options.performAction(action, precondition);
+      }
       return;
     }
     const workspaceIndex = selectionIndex(commandId, "workspace.select");
@@ -215,7 +235,9 @@ export function useShellCommands(options: ShellCommandOptions): {
         const scope = options.hostScope;
         const sessionId = targetSession.id;
         void options.performAction({ kind: "createWindow", sessionId }).then((result) => {
-          if (result?.windowId && options.isHostScopeCurrent(scope)) options.selectCreatedWindow(sessionId, result.windowId);
+          if (result?.windowId && options.isHostScopeCurrent(scope)) {
+            options.selectCreatedWindow(sessionId, result.windowId, result.topologyGeneration);
+          }
         });
         return;
       }

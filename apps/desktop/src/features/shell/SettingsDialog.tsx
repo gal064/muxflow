@@ -33,8 +33,8 @@ interface SettingsDialogProps {
   onSounds(preferences: AgentSoundPreferences): void;
   /** What the OS says about this app's notification permission, read on demand. */
   onNotificationStatus(): Promise<NotificationPermissionStatus>;
-  /** Posts a test notification; resolves to the failure text, or nothing on success. */
-  onTestNotification(): Promise<string | undefined>;
+  /** Posts a test notification. Rejects with whatever the OS refused with. */
+  onTestNotification(): Promise<unknown>;
   /**
    * Where a "not now" is taken back. The one-time prompt is deliberately
    * one-time, so declining it has to leave a way back that is not "reinstall
@@ -217,11 +217,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
  */
 function NotificationSettings(props: {
   onStatus(): Promise<NotificationPermissionStatus>;
-  onTest(): Promise<string | undefined>;
+  onTest(): Promise<unknown>;
 }) {
   const [status, setStatus] = useState<NotificationPermissionStatus | "unreadable">();
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string>();
+  const [failure, setFailure] = useState<unknown>();
   const [sent, setSent] = useState(false);
 
   const { onStatus } = props;
@@ -242,10 +242,10 @@ function NotificationSettings(props: {
       disabled={sending}
       onClick={() => {
         setSending(true);
-        setError(undefined);
+        setFailure(undefined);
         setSent(false);
         void props.onTest()
-          .then((failure) => { setError(failure); setSent(!failure); })
+          .then(() => setSent(true), setFailure)
           // The permission may have just been granted or refused by the prompt
           // this button raises, so the line above it is re-read either way.
           .finally(() => {
@@ -256,7 +256,10 @@ function NotificationSettings(props: {
       type="button"
     >{sending ? "Sending…" : "Send test notification"}</button>
     <span className="settings-hint">{notificationStatusHint(status)}</span>
-    {error && <span className="settings-error" role="alert">{error}</span>}
+    {/* The same shape every other rejection in this app takes, rather than a
+        bare red string: a Tauri error is the kind of text that needs a summary
+        with the detail behind disclosure. */}
+    {failure !== undefined && <SurfaceError detail={String(failure)} summary="The test notification could not be sent." />}
     {sent && <span className="settings-hint" role="status">
       Sent. If nothing appeared, check System Settings → Notifications → tmux Agent IDE.
     </span>}
@@ -271,8 +274,10 @@ function notificationStatusHint(status: NotificationPermissionStatus | "unreadab
     case "provisional": return "Notifications are delivered quietly. Allow them in System Settings → Notifications → tmux Agent IDE to get banners.";
     case "denied": return "Notifications are turned off for this app. Enable them in System Settings → Notifications → tmux Agent IDE.";
     case "notDetermined": return "Not requested yet — sending a test notification is what asks for permission.";
-    // Reachable on Linux, where it means no notification daemon is running.
-    case "unsupported": return "This system has nothing to deliver notifications through.";
+    // On Linux, no notification daemon is answering. On macOS it is the
+    // catch-all for a permission state this build has never heard of — hence
+    // the wording that fits both without prescribing the wrong fix.
+    case "unsupported": return "This system did not report a notification permission this app understands.";
     // The likely macOS answer for a build the system will not register: a
     // `tauri dev` binary, or a bundle whose signature seal is broken. The
     // framework has no status for "you are not a real app" — the query simply
