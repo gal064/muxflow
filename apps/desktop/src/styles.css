@@ -918,7 +918,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   background-image:
     linear-gradient(45deg, transparent 50%, var(--chrome-dim) 50%),
     linear-gradient(135deg, var(--chrome-dim) 50%, transparent 50%);
-  background-position: right 13px center, right 9px center;
+  /* Offset by exactly one box width, so the two halves meet at the apex
+     instead of overlapping into a blunt tip. */
+  background-position: right 14px center, right 9px center;
   background-size: 5px 5px, 5px 5px;
   background-repeat: no-repeat;
 }

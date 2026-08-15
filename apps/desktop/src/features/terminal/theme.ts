@@ -73,14 +73,28 @@ const TOKEN_BY_THEME_KEY: Record<keyof typeof GHOSTTY_DEFAULT_DARK, string> = {
 const SLIDER_ALPHAS = { idle: "40", hover: "66", active: "99" } as const;
 
 /**
- * The chrome tokens this module falls back to with no stylesheet, and the
- * tokens they stand in for. Same contract as `GHOSTTY_DEFAULT_DARK`: these are
- * not a second source of truth, and `theme.test.ts` fails if they ever stop
- * matching `tokens.css`.
+ * Every chrome token something outside the stylesheet has to name, and what it
+ * is worth when there is no stylesheet to read.
+ *
+ * Same contract as `GHOSTTY_DEFAULT_DARK`: not a second source of truth, and
+ * `theme.test.ts` fails if any entry stops matching `tokens.css`. That test is
+ * the reason this object is shared rather than copied — the editor theme
+ * (`../files/monaco`) needs the same fallbacks, and a private copy there would
+ * be ten literals nothing checks. The list is what is actually used, not every
+ * token that exists: an entry nobody reads is an entry nobody notices going
+ * stale.
  */
 export const CHROME_FALLBACKS = {
   "--accent": "#7aa6da",
-  "--chrome-dim": "#8a919c",
+  "--accent-wash": "#7aa6da1f",
+  "--chrome-bg": "#282c34",
+  "--chrome-raised": "#2c313a",
+  "--chrome-hairline": "#313640",
+  "--chrome-border": "#3e4451",
+  "--chrome-hover": "#2f343e",
+  "--chrome-ink": "#c4c8c6",
+  "--chrome-dim": "#8f96a1",
+  "--chrome-faint": "#636b78",
   "--font-mono": '"JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace',
   "--term-font-size": "13px",
   "--term-line-height": "1.42",

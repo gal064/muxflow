@@ -69,10 +69,14 @@
   /* ── Chrome ink ──────────────────────────────────────────────────────── */
   --chrome-ink: #c4c8c6;
   --chrome-ink-strong: #ffffff;
-  /* Dim and faint are lifted a step from the near-black ramp's values: the same
-     greys that read as "quiet" on #101114 read as "illegible" on #282c34. */
-  --chrome-dim: #8a919c;
-  --chrome-faint: #565e6a;
+  /* Dim and faint are lifted, because a lighter ground makes a grey quieter and
+     these two greys were already the quietest text in the app. Kept honest by
+     contrast rather than by eye: --chrome-dim carries 11.5px labels and clears
+     4.5:1 on the new ground (4.70:1, against 5.00:1 on the old one), and
+     --chrome-faint carries the 9.5-10.5px metadata that no ramp gets to AA and
+     is at least no worse than it was (2.60:1, against 2.49:1 before). */
+  --chrome-dim: #8f96a1;
+  --chrome-faint: #636b78;
 
   /* ── The one accent, and the one destructive treatment ───────────────── */
   /* Ghostty's bright blue and red (--term-12 / --term-1), so a selected row and

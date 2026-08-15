@@ -78,6 +78,11 @@ describe("the glyph atlas canvas", () => {
       // The addon's atlas *pages*: they only ever receive blits.
       ["2d", { alpha: true }],
       ["2d", undefined],
+      // An ordinary offscreen measuring canvas — the same `willReadFrequently`
+      // idiom without the addon's `alpha`. Nothing ever removes a canvas from
+      // the holder, so claiming a stranger's would pin it in the document for
+      // the life of the app.
+      ["2d", { willReadFrequently: true }],
       ["webgl2", { antialias: false }],
     ];
     for (const [contextId, options] of cases) {
