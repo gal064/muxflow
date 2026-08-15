@@ -75,9 +75,10 @@ async fn deliver(
 /// `--settings-path` relocates one adapter's, which is what keeps QA off a real
 /// `~/.claude` while still testing the real merge.
 pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
-    let home = flag(&arguments, "--home").map(std::path::PathBuf::from);
-    let settings_path = flag(&arguments, "--settings-path").map(std::path::PathBuf::from);
-    let adapter_id = flag(&arguments, "--adapter");
+    let options = Options::parse(&arguments);
+    let home = options.home.clone().map(std::path::PathBuf::from);
+    let settings_path = options.settings_path.clone().map(std::path::PathBuf::from);
+    let adapter_id = options.adapter.clone();
     let selected = adapter_id
         .as_deref()
         .map(|id| crate::service::agents::adapters::by_id(id).context("unsupported hook adapter"))
@@ -111,15 +112,15 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
     // run would. So the paths are compared against the ones this operator's own
     // environment resolves, which is also what leaves every fixture lane — all
     // of which redirect somewhere else — needing no answer.
-    if action.is_some() && !confirmed(&arguments) {
+    if action.is_some() && !options.confirmed {
+        // `?`, never a default. A gate that permits when it cannot work out
+        // what it is protecting is not a gate.
         let mine = crate::service::agents::HookManager::with_overrides(None, None)
-            .map(|mine| {
-                mine.wiring()
-                    .into_iter()
-                    .map(|(_, entry)| entry.config_path)
-                    .collect::<std::collections::HashSet<_>>()
-            })
-            .unwrap_or_default();
+            .context("resolve your own agent configuration to confirm this would not change it")?
+            .wiring()
+            .into_iter()
+            .map(|(_, entry)| entry.config_path)
+            .collect::<std::collections::HashSet<_>>();
         if let Some((_, entry)) = manager
             .wiring()
             .into_iter()
@@ -248,32 +249,43 @@ fn apply_one(
     }))
 }
 
-/// Whether `--yes` was passed as a switch of its own.
+/// Everything this command reads from its arguments, parsed once.
 ///
-/// Not a plain search: every other flag here takes a value, and a value that
-/// happened to be the string `--yes` would otherwise read as consent.
-fn confirmed(arguments: &[String]) -> bool {
-    let mut index = 0;
-    while index < arguments.len() {
-        if arguments[index] == "--yes" {
-            return true;
-        }
-        index += if VALUE_FLAGS.contains(&arguments[index].as_str()) {
-            2
-        } else {
-            1
-        };
-    }
-    false
+/// One traversal, because there were two and they disagreed. A `windows(2)`
+/// search matches a flag anywhere, including where it is another flag's value;
+/// a positional walk does not. With both models present, `--adapter --home /x`
+/// meant different things to the code that decides *where* to write and the
+/// code that decides *whether* it may — on the one command that writes the
+/// user's configuration files.
+#[derive(Default)]
+struct Options {
+    adapter: Option<String>,
+    home: Option<String>,
+    settings_path: Option<String>,
+    confirmed: bool,
 }
 
-const VALUE_FLAGS: [&str; 3] = ["--home", "--settings-path", "--adapter"];
-
-fn flag(arguments: &[String], name: &str) -> Option<String> {
-    arguments
-        .windows(2)
-        .find(|pair| pair[0] == name)
-        .map(|pair| pair[1].clone())
+impl Options {
+    fn parse(arguments: &[String]) -> Self {
+        let mut options = Self::default();
+        let mut rest = arguments.iter();
+        while let Some(argument) = rest.next() {
+            let field = match argument.as_str() {
+                "--adapter" => &mut options.adapter,
+                "--home" => &mut options.home,
+                "--settings-path" => &mut options.settings_path,
+                "--yes" => {
+                    options.confirmed = true;
+                    continue;
+                }
+                _ => continue,
+            };
+            // A flag whose value is missing stays unset rather than swallowing
+            // the next flag, and the value is never re-read as one.
+            *field = rest.next().cloned();
+        }
+        options
+    }
 }
 
 fn build_event(
@@ -484,8 +496,9 @@ fn prune_fallbacks(runtime: &Path, prefix: &str) {
 }
 
 fn parse_adapter(arguments: &[String]) -> anyhow::Result<v1::AgentAdapterKind> {
-    let value =
-        flag(arguments, "--adapter").context("hook ingest requires --adapter codex|claude-code")?;
+    let value = Options::parse(arguments)
+        .adapter
+        .context("hook ingest requires --adapter codex|claude-code")?;
     crate::service::agents::adapters::by_id(&value)
         .map(|adapter| adapter.legacy_kind())
         .ok_or_else(|| anyhow::anyhow!("unsupported hook adapter"))

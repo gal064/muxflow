@@ -98,18 +98,7 @@ fn publish_runtime_dir(
     environment: impl Fn(&str) -> Option<OsString> + Copy,
     uid: libc::uid_t,
 ) -> anyhow::Result<()> {
-    // Only the directory this environment resolves on its own, and only when
-    // nothing pinned it — by `ADE_HOST_RUNTIME_DIR` or by an explicit
-    // `--socket` somewhere else. Every test fixture on this machine pins its
-    // directory one of those two ways while inheriting the developer's real
-    // `HOME`, so a fixture that published would point the *user's* hooks at a
-    // throwaway directory; `fallback_runtime_dir` prefers a directory that has
-    // held a daemon, so their undelivered events would follow it there too.
-    // Symmetric with `candidate_runtime_dirs`, which collapses to exactly one
-    // directory under the same condition.
-    if environment("ADE_HOST_RUNTIME_DIR").is_some()
-        || runtime != resolved_runtime_dir(environment, uid)
-    {
+    if !placed_by_environment(runtime, environment, uid) {
         return Ok(());
     }
     let Some(pointer) = runtime_pointer_path(environment) else {
@@ -138,12 +127,13 @@ fn publish_runtime_dir(
 
 /// Where a daemon on this machine could be, best first — normally two entries.
 ///
-/// The recorded pointer is the authority, and finding one *ends* the list:
-/// a daemon that published where it is has answered the question, and reaching
-/// past it into directories nobody claimed is how a process starts deleting
-/// files it does not own. The guesses below it are for one case only — no
-/// daemon on this machine has published yet — which after this change means a
-/// helper old enough to predate the pointer.
+/// This process's own directory leads, because a daemon sitting in it is
+/// unambiguously the one this process belongs to. The recorded pointer comes
+/// next and *ends* the list: a daemon that published where it is has answered
+/// the question, and reaching past that answer into directories nobody claimed
+/// is how a process starts touching files it does not own. The guesses below
+/// are for one case only — no daemon on this machine has published yet — which
+/// after this change means a helper old enough to predate the pointer.
 ///
 /// An explicit `ADE_HOST_RUNTIME_DIR` is answered exactly and alone: it is how
 /// every test fixture isolates itself, and a fixture that fell back to a
@@ -188,9 +178,32 @@ fn candidate_runtime_dirs(
     candidates
 }
 
-/// The directory a daemon last published, if any.
+/// Whether `runtime` is where this process's own environment places a daemon,
+/// rather than somewhere it was pinned — by `ADE_HOST_RUNTIME_DIR` or by an
+/// explicit `--socket`.
+///
+/// The one predicate that decides whether a process owns the shared pointer
+/// under `HOME`. Every test fixture on this machine pins its directory one of
+/// those two ways while inheriting the developer's real `HOME`: a pinned
+/// process that *wrote* the pointer would send the user's hooks to a directory
+/// that is deleted when the lane ends, and one that *read* it would sweep — and
+/// `consume` deletes — the user's own pending events. Stated once, because it
+/// was stated twice and omitted on the read.
+fn placed_by_environment(
+    runtime: &Path,
+    environment: impl Fn(&str) -> Option<OsString> + Copy,
+    uid: libc::uid_t,
+) -> bool {
+    environment("ADE_HOST_RUNTIME_DIR").is_none()
+        && runtime == resolved_runtime_dir(environment, uid)
+}
+
+/// The directory a daemon last published, for a process entitled to read it.
 pub fn published_runtime_dir() -> Option<PathBuf> {
-    recorded_runtime_dir(environment)
+    let uid = unsafe { libc::geteuid() };
+    placed_by_environment(&runtime_dir(), environment, uid)
+        .then(|| recorded_runtime_dir(environment))
+        .flatten()
 }
 
 /// Read back as the bytes it was written as. A path is not text: decoding it
@@ -392,6 +405,16 @@ mod tests {
         assert!(
             !pointer.exists(),
             "a daemon published a directory its environment does not name"
+        );
+
+        // And a pinned process must not *read* it either: the sweep that
+        // follows the pointer deletes what it finds, so a fixture that read the
+        // developer's pointer would drain their pending events. This is the
+        // same predicate, and it was once stated only on the write.
+        adopt_runtime_dir(&fixture);
+        assert!(
+            !placed_by_environment(&fixture, pinned, 11),
+            "a pinned fixture claimed the pointer it must not read"
         );
 
         publish_runtime_dir(&home.join("tmux-agent-ide"), unpinned, 11).unwrap();
