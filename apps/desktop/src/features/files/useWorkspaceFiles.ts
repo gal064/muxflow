@@ -63,7 +63,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
 
-  const loadDirectory = useCallback(async (path: string, force = false, append = false) => {
+  const loadDirectory = useCallback(async (path: string, force = false, append = false, announce = true) => {
     const activeScope = scopeRef.current;
     if (!activeScope || keyForScope(activeScope) !== scopeKey) return;
     const root = stateRef.current.root;
@@ -73,18 +73,21 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const epoch = scopeEpoch.current;
     const serial = (directorySerial.current.get(path) ?? 0) + 1;
     directorySerial.current.set(path, serial);
-    // A wait is announced only when there is nothing to wait in front of.
+    // A wait is announced when there is nothing to wait in front of, or when a
+    // person asked for this read and is owed an acknowledgement.
     //
-    // Marking every re-read as loading put a "Loading…" row at the end of the
+    // Marking *every* re-read as loading put a "Loading…" row at the end of the
     // tree each time — inside the scrolling box, so the content grew by a row
     // and shrank again on every filesystem event. On a link where the re-read
     // takes a visible moment that is the flicker the user reported twice over:
     // the row itself on a short listing, and, on a long one, macOS revealing
     // and re-hiding the overlay scrollbars as the content height oscillated. It
     // also announced "Loading…" to a screen reader once per event, because that
-    // row is a live region. Rows already on screen stay on screen and are
-    // replaced when the answer lands, which is what a refresh should look like.
-    const announcesWait = append || !previous;
+    // row is a live region. Rows already on screen now stay on screen and are
+    // replaced when the answer lands, which is what a refresh should look like
+    // — but a refresh nobody asked for is the only kind that goes quiet, so
+    // pressing Refresh still says something on a link slow enough to need it.
+    const announcesWait = announce || append || !previous;
     if (announcesWait) setState((current) => ({ ...current, loading: new Set(current.loading).add(path), error: undefined }));
     else setState((current) => (current.error === undefined ? current : { ...current, error: undefined }));
     const finishSpan = startPerfSpan(append ? "files.listDirectory.page" : "files.listDirectory");
@@ -130,7 +133,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     if (timers.has(path)) return;
     timers.set(path, setTimeout(() => {
       timers.delete(path);
-      void loadDirectory(path, true);
+      void loadDirectory(path, true, false, false);
     }, DIRECTORY_REFRESH_COALESCE_MS));
   }, [loadDirectory]);
 

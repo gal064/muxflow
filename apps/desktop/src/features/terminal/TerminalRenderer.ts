@@ -926,6 +926,13 @@ export class XtermRenderer implements TerminalRenderer {
   #discardFallbackAtlas(): void {
     const fonts = globalThis.document?.fonts;
     if (typeof fonts?.load !== "function") return;
+    // Nothing declared is still outstanding, so no glyph rasterised from here on
+    // can disagree with one rasterised a moment ago, and there is nothing to
+    // throw away. This is the case on every pane after the first, and skipping
+    // it matters: xterm keys its atlas by font and colours, not by terminal, so
+    // panes with the same appearance share one — and clearing it on each new
+    // pane would drop every other pane's glyphs to re-rasterise them.
+    if ([...fonts].every((face) => face.status === "loaded")) return;
     void fonts.load(this.#fontShorthand).then((faces) => {
       // An empty match means the stack resolved to a system face that was never
       // going to load; there is no later rasterisation to be inconsistent with.

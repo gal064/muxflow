@@ -45,7 +45,15 @@ describe("useWorkspaceFiles", () => {
   it("refreshes the affected parent for precise native create/change/delete events", async () => {
     const root = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
     let listener: ((event: WorkspaceEvent) => void) | undefined;
-    const listDirectory = vi.fn(async (_scope, active: ActiveRoot, directory: string) => ({ rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true }));
+    // Held open on demand, so the in-flight state is observable rather than
+    // already over by the time the assertion runs.
+    let hold: { promise: Promise<unknown>; resolve: (value: unknown) => void } | undefined;
+    const listing = (active: ActiveRoot, directory: string) =>
+      ({ rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true });
+    const listDirectory = vi.fn(async (_scope, active: ActiveRoot, directory: string) => {
+      if (hold) await hold.promise;
+      return listing(active, directory);
+    });
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn(async () => root), listDirectory,
       acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true }, release: () => undefined })), openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
@@ -78,6 +86,17 @@ describe("useWorkspaceFiles", () => {
     // refreshes rather than being starved by the events behind it.
     await act(async () => { listener?.({ kind: "fileChanged", rootToken: "root", path: "/repo/later.txt", generation: "3" }); await settle(); });
     expect(reads()).toBe(before + 2);
+    // A refresh a person asked for is the one that still says something: going
+    // quiet for it would make the button look broken on a link slow enough to
+    // need it. It is also immediate — a burst is what needs gathering up, and
+    // one deliberate press is not a burst.
+    hold = deferred<unknown>();
+    await act(async () => { current?.refresh(); await Promise.resolve(); });
+    expect(reads()).toBe(before + 3);
+    expect(current?.loading.has("/repo"), "an explicit Refresh gave no sign it had started").toBe(true);
+    await act(async () => { hold!.resolve(undefined); await hold!.promise; await Promise.resolve(); });
+    expect(current?.loading.has("/repo")).toBe(false);
+    hold = undefined;
     await act(async () => { renderer.unmount(); });
   });
 
