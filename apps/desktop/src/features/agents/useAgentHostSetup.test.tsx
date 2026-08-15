@@ -31,6 +31,7 @@ function harness(overrides: Partial<AgentHostSetupOptions> = {}) {
     connected: true,
     hostProfileId: "ssh-omarchy",
     hostIdentity: "ssh-omarchy client-1 1",
+    decisionsArePersistable: true,
     hostLabel: "omarchy",
     decision: undefined,
     ...calls,
@@ -304,6 +305,39 @@ describe("the one-time set-up prompt", () => {
     // And no consent is recorded at all — not for the host that moved away,
     // and above all not for the host that was never asked.
     expect(setup.calls.recordDecision).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
+  it("writes nothing when the answer could not be kept", async () => {
+    // The app state is write-frozen after a file it could not parse. Installing
+    // in that mode leaves configured hooks and, at the next launch, no record
+    // of ever having agreed to them — which is half of the shape the field
+    // machine was found in.
+    const setup = harness({ decisionsArePersistable: false });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    const accept = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => String(node.children[0]).startsWith("Set up this host"))!;
+    await act(async () => accept.props.onClick());
+    expect(setup.calls.reviewHooks).not.toHaveBeenCalled();
+    expect(setup.calls.applyHooks).not.toHaveBeenCalled();
+    expect(setup.calls.recordDecision).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
+  it("answers about the host the dialog named, not the one connected when the button is clicked", async () => {
+    // The question names one machine and its configuration paths. An answer to
+    // it is an answer about that machine, so the binding is taken when the
+    // dialog opens rather than re-derived when it is answered.
+    const setup = harness();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    await act(async () => renderer.update(<setup.Harness hostIdentity="local client-2 1" hostProfileId="local" />));
+    const decline = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => node.children[0] === "Not now")!;
+    await act(async () => decline.props.onClick());
+    expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-omarchy", "declined");
+    expect(setup.calls.recordDecision).not.toHaveBeenCalledWith("local", "declined");
     await act(async () => renderer.unmount());
   });
 

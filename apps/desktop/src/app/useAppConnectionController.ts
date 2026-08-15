@@ -30,6 +30,20 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   const [activeSessionId, setActiveSessionId] = useState<string>();
   const [activeWindowId, setActiveWindowId] = useState<string>();
   const [clientId, setClientId] = useState<string>();
+  /**
+   * Which host profile `clientId` was established for.
+   *
+   * `currentHostProfileId` is derived from the *pending* connection spec, and
+   * the bridge is torn down by an effect, so a render that changes the
+   * connection commits with the new profile id and the previous connection's
+   * live client. Anything that acts on "the current host" in that window acts
+   * on two different machines at once — M13-E004 is what that costs when the
+   * act is writing an agent's configuration file. Recorded here, at the one
+   * moment both facts are known together, so the mismatch is detectable
+   * instead of depending on every caller remembering to reset host state
+   * first.
+   */
+  const [clientHostProfileId, setClientHostProfileId] = useState<string>();
   const clientIdRef = useRef<string | undefined>(undefined);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [terminalEpoch, setTerminalEpoch] = useState(0);
@@ -194,6 +208,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
       else {
         clientIdRef.current = id;
         setClientId(id);
+        setClientHostProfileId(hostProfileId(connection));
       }
     }).catch((error) => { if (!disposed) setStatus(String(error)); });
 
@@ -202,6 +217,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
       if (clientIdRef.current === startedClient) clientIdRef.current = undefined;
       dispatchHost({ type: "connection", phase: "disconnected" });
       setClientId(undefined);
+      setClientHostProfileId(undefined);
       terminalEpochRef.current = 0;
       setTerminalEpoch(0);
       if (startedClient) void stopTerminal(startedClient);
@@ -209,7 +225,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   }, [bridgeKey, profilesHydrated]);
 
   return {
-    activeSessionId, activeWindowId, appFocused, clientId, clientIdRef, connection,
+    activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
     profiles, profilesHydrated, selectedProfileId, setActiveSessionId, setActiveWindowId,

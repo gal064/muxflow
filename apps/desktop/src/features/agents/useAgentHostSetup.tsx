@@ -15,6 +15,8 @@ export interface AgentHostSetupOptions {
    * for the whole install; see `agentHostIdentity`.
    */
   hostIdentity?: string;
+  /** False while the app state cannot be written back, so no answer would keep. */
+  decisionsArePersistable: boolean;
   hostLabel: string;
   /** What the user last answered for this host, if anything. */
   decision?: HostSetupDecision;
@@ -26,7 +28,7 @@ export interface AgentHostSetupOptions {
    * because it lives in the tmux server's memory rather than a config file,
    * so it has to be re-asserted rather than installed once.
    */
-  applyHostNaming(): Promise<AgentHostNamingOutcome>;
+  applyHostNaming(expectedHost: string): Promise<AgentHostNamingOutcome>;
   /** Re-asks the host what its wiring is now, after a change to it. */
   refreshWiring(): void;
   onStatus(message: string): void;
@@ -47,7 +49,14 @@ function consentedHost(options: AgentHostSetupOptions): ConsentedHost | undefine
   // `connected` and a host identity are the same fact from two sources; both
   // are required, because the write happens down the connection and the
   // decision is remembered under the profile.
+  //
+  // `decisionsArePersistable` is the third. The app state is write-frozen after
+  // a file it could not parse, and in that mode `recordDecision` reaches memory
+  // and nothing else: the install would happen, the answer would be lost on
+  // quit, and the next launch would find configured hooks and no record of
+  // agreeing to them. Consent that cannot be recorded is not consent.
   return options.connected && options.hostIdentity && options.hostProfileId
+    && options.decisionsArePersistable
     ? { profileId: options.hostProfileId, identity: options.hostIdentity }
     : undefined;
 }
@@ -98,8 +107,20 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   const offerable = options.connected && wiring.setupTargets.length > 0;
   const promptable = options.connected && shouldPromptForSetup(wiring);
 
+  /**
+   * Opens the prompt, and records which host it is about.
+   *
+   * The host is captured here rather than read again when a button is clicked,
+   * because this is the moment the question is *posed*: the dialog names one
+   * machine and one set of configuration paths, and an answer to it is an
+   * answer about that machine. Resolving the host at click time instead only
+   * ever covers a switch that happens during the install, never one between
+   * reading the dialog and answering it.
+   */
+  const [asked, setAsked] = useState<ConsentedHost>();
   const offer = useCallback(() => {
     setError(undefined);
+    setAsked(consentedHost(optionsRef.current));
     setOpen(true);
   }, []);
 
@@ -122,11 +143,11 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // per snapshot put subprocess spawns on the path this phase budgets at under
   // a second end to end.
   const asserted = useRef(false);
-  const assertNaming = useCallback(() => {
+  const assertNaming = useCallback((host: ConsentedHost) => {
     if (asserted.current) return;
     asserted.current = true;
     const current = optionsRef.current;
-    void current.applyHostNaming().then((outcome) => {
+    void current.applyHostNaming(host.identity).then((outcome) => {
       // A change to the user's running tmux server is worth one line; finding
       // that their own config already does it is not.
       if (outcome === "applied") current.onStatus("Recommended tmux window naming applied to this host's tmux server.");
@@ -167,7 +188,7 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       setOpen(false);
       // Part of the same "set up this host" answer, and deliberately after it:
       // a tmux server that refuses the naming must not lose the hooks.
-      assertNaming();
+      assertNaming(host);
       return true;
     }).catch((cause) => {
       setError(String(cause));
@@ -211,7 +232,7 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     if (outdated.length === 0 || reassert.current.running || reassert.current.attempted) {
       // `install` asserts the naming itself when it succeeds; this is the
       // nothing-to-install path, which still has a tmux server to talk to.
-      if (!reassert.current.running) assertNaming();
+      if (!reassert.current.running) assertNaming(host);
       return;
     }
     reassert.current.running = true;
@@ -234,9 +255,8 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
    * showed it rather than re-derived here: those config paths are the whole
    * content of the question the user answered.
    */
-  const accept = useCallback((targets: readonly AgentAdapterDescriptor[]) => {
+  const accept = useCallback((targets: readonly AgentAdapterDescriptor[], host?: ConsentedHost) => {
     const current = optionsRef.current;
-    const host = consentedHost(current);
     if (!host) {
       setError("This host is no longer connected; nothing was changed.");
       return;
@@ -246,12 +266,12 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     });
   }, [install]);
 
-  const decline = useCallback(() => {
+  const decline = useCallback((host?: ConsentedHost) => {
     // Unconditionally, including over an earlier "accepted": this prompt is
     // reachable from Settings, and someone who opens it there to say no is
-    // changing their mind, not restating it.
-    const current = optionsRef.current;
-    current.recordDecision(current.hostProfileId, "declined");
+    // changing their mind, not restating it. Against the host that was asked
+    // about, so a "no" never lands on a host whose hooks are installed.
+    if (host) optionsRef.current.recordDecision(host.profileId, "declined");
     setOpen(false);
   }, []);
 
@@ -261,8 +281,8 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       applying={applying}
       error={error}
       hostLabel={options.hostLabel}
-      onAccept={() => accept(wiring.setupTargets)}
-      onDecline={decline}
+      onAccept={() => accept(wiring.setupTargets, asked)}
+      onDecline={() => decline(asked)}
       onReview={() => {
         const first = wiring.setupTargets[0];
         if (!first) return;

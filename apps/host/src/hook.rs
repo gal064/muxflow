@@ -89,6 +89,7 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
         }
         (None, _) => None,
     };
+    let redirected = home.is_some() || config_override.is_some();
     let manager = crate::service::agents::HookManager::with_overrides(home, config_override)?;
     let action = match verb {
         "status" => None,
@@ -96,6 +97,21 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
         "uninstall" => Some(v1::HookManagementAction::Uninstall),
         _ => bail!("usage: tmux-ide-host hook <ingest|status|install|uninstall>"),
     };
+    // Consent, for the one caller that has no user interface to ask through.
+    //
+    // The desktop will not write a host's agent configuration without a
+    // recorded answer for that host; this command had no notion of consent at
+    // all, so anything that could run it — a script, an agent, a paste from a
+    // README — rewrote the operator's real `~/.claude` and `~/.codex` silently.
+    // `--yes` is what makes the answer explicit and, in a shell history, a
+    // record. A run redirected at a fixture home changes nothing of theirs and
+    // needs no such answer, which is what keeps every test lane unchanged.
+    if action.is_some() && !redirected && !arguments.iter().any(|argument| argument == "--yes") {
+        bail!(
+            "hook {verb} would change the agent configuration in your own home directory. \
+             Re-run with --yes to confirm, or with --home/--settings-path to act on a copy."
+        );
+    }
     let mut report = Vec::new();
     let mut failed = false;
     if let Some(action) = action {

@@ -155,7 +155,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     if (!optionsRef.current.scope) return Promise.reject(new Error("Agent resume requires a live authoritative host."));
     return optionsRef.current.client.resume(optionsRef.current.scope, agent.id, agent.nativeSessionId, request);
   }, []);
-  const reviewHooks = useCallback((adapter: AgentAdapterId, action: "install" | "uninstall" = "install", expectedHost?: string): Promise<AgentHookReview> => {
+  const reviewHooks = useCallback((adapter: AgentAdapterId, action: "install" | "uninstall", expectedHost: string): Promise<AgentHookReview> => {
     const scope = consentedScope(optionsRef.current.scope, expectedHost, "Hook review");
     if (scope instanceof Error) return Promise.reject(scope);
     return optionsRef.current.client.reviewHooks(scope, adapter, action).then((review) => ({
@@ -163,18 +163,23 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
       adapterDisplayName: stateRef.current.adapters.find((descriptor) => descriptor.id === adapter)?.displayName ?? adapter,
     }));
   }, []);
-  const applyHooks = useCallback((review: AgentHookReview, expectedHost?: string): Promise<void> => {
+  const applyHooks = useCallback((review: AgentHookReview, expectedHost: string): Promise<void> => {
     const scope = consentedScope(optionsRef.current.scope, expectedHost, "Hook installation");
     if (scope instanceof Error) return Promise.reject(scope);
     return optionsRef.current.client.applyHooks(scope, review);
   }, []);
-  const applyHostNaming = useCallback((): Promise<AgentHostNamingOutcome> => {
-    if (!optionsRef.current.scope) return Promise.reject(new Error("Host naming requires a live authoritative host."));
-    return optionsRef.current.client.applyHostNaming(optionsRef.current.scope);
+  // The naming changes the tmux server's memory rather than a configuration
+  // file, so it is outside the consent invariant — but it is part of the same
+  // one-time answer, and an answer about one host must not reach another.
+  const applyHostNaming = useCallback((expectedHost: string): Promise<AgentHostNamingOutcome> => {
+    const scope = consentedScope(optionsRef.current.scope, expectedHost, "Host naming");
+    if (scope instanceof Error) return Promise.reject(scope);
+    return optionsRef.current.client.applyHostNaming(scope);
   }, []);
-  const removeHostNaming = useCallback((): Promise<AgentHostNamingOutcome> => {
-    if (!optionsRef.current.scope) return Promise.reject(new Error("Host naming requires a live authoritative host."));
-    return optionsRef.current.client.applyHostNaming(optionsRef.current.scope, "uninstall");
+  const removeHostNaming = useCallback((expectedHost: string): Promise<AgentHostNamingOutcome> => {
+    const scope = consentedScope(optionsRef.current.scope, expectedHost, "Host naming");
+    if (scope instanceof Error) return Promise.reject(scope);
+    return optionsRef.current.client.applyHostNaming(scope, "uninstall");
   }, []);
 
   return { state, agents, adapters: state.adapters, rollups, accept, launch, resume, rename, reviewHooks, applyHooks, applyHostNaming, removeHostNaming, refreshSnapshot };
@@ -191,15 +196,18 @@ export type AgentRuntime = ReturnType<typeof useAgentRuntime>;
  * on another host by the time it runs. M13-E004: the decision, the reviewed
  * diff and the write each resolved "the current host" independently, so a host
  * switch between them wrote a machine the user had never been asked about.
- * Callers with no such answer to honour pass nothing and get the live host.
+ *
+ * `expectedHost` is required rather than optional: an optional guard is one a
+ * future caller can opt out of by saying nothing, which is exactly the
+ * behaviour this replaced.
  */
 function consentedScope(
   scope: AgentRequestScope | undefined,
-  expectedHost: string | undefined,
+  expectedHost: string,
   action: string,
 ): AgentRequestScope | Error {
   if (!scope) return new Error(`${action} requires a live authoritative host.`);
-  if (expectedHost !== undefined && agentHostIdentity(scope) !== expectedHost) {
+  if (agentHostIdentity(scope) !== expectedHost) {
     return new Error(`${action} was answered for a different host than this app is connected to now; nothing was changed.`);
   }
   return scope;
