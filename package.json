@@ -27,6 +27,7 @@
     "phase8:release-matrix": "bash tests/phase8/run-release-matrix.sh",
     "phase8:regressions": "bash tests/phase8/run-regressions.sh",
     "phase9:acceptance": "bash tests/phase9/run-acceptance.sh",
+    "phase12:pause": "bash tests/phase12/run-pause-probe.sh",
     "phase12:perf": "bash tests/phase12/run-perf.sh",
     "phase12:stall": "bash tests/phase12/run-stall.sh",
     "release:linux": "bash release/linux/build-package.sh",

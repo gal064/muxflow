@@ -142,6 +142,13 @@ const COLLAPSED_DIRECTORIES: &[&str] = &["node_modules"];
 /// descend guard would otherwise each be deciding it separately. An entry that
 /// no listing reports but that a directly requested path can still be listed
 /// from is not hidden — it is merely absent from one view.
+///
+/// Deliberately *not* used by the emptiness checks that gate destructive
+/// confirmations (`mutations.rs`): a directory holding nothing but a `.git` is
+/// a directory holding a repository, and deleting it without asking because the
+/// tree happens not to draw its contents is a different and much worse defect
+/// than a confirmation prompt about something the user cannot see. Hidden means
+/// "not shown", never "not there".
 pub(super) fn is_always_hidden(name: &OsStr) -> bool {
     ALWAYS_HIDDEN
         .iter()
@@ -505,11 +512,21 @@ mod tests {
         fs::create_dir(root.join(".git")).unwrap();
         let mut token = String::new();
         let mut names = Vec::new();
+        let mut pages = 0;
         loop {
             let page = service
                 .list_directory_page(root.to_str().unwrap(), "", "page", &token, 2)
                 .unwrap();
-            assert!(page.entries.len() <= 2);
+            pages += 1;
+            // The load-bearing assertion, and the reason it is not merely
+            // `len() <= 2`: filtering *after* the page window would fill the
+            // window with hidden entries and hand back a short page that still
+            // claims more to come. Every page but the last is full.
+            assert!(
+                page.complete || page.entries.len() == 2,
+                "a non-final page must be full, got {} entries",
+                page.entries.len()
+            );
             names.extend(page.entries.into_iter().map(|entry| entry.name));
             if page.complete {
                 break;
@@ -517,6 +534,7 @@ mod tests {
             token = page.next_page_token;
         }
         assert_eq!(names, vec!["a", "b", "c", "d"]);
+        assert_eq!(pages, 2, "four visible entries at two per page");
         fs::remove_dir_all(root).unwrap();
     }
 

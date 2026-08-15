@@ -324,15 +324,9 @@ export function resizeClient(clientId: string, columns: number, rows: number): P
 }
 
 /**
- * Tells the host which workspace is on screen, so tmux sizes from that one.
- *
- * The host keeps one tmux control client per session and takes exactly one of
- * them out of `ignore-size`; that client's windows are the ones
- * `resizeClient` moves. Which workspace is on screen is decided here, and
- * nothing on the wire used to carry it: the only message that moved the host's
- * answer was the connect-time attach, aimed at whichever session the snapshot
- * listed first. Sent on every session change *and* every new bridge, because a
- * reconnect re-runs that guess.
+ * Tells the host which workspace is on screen, so tmux sizes from that one's
+ * control client. `useVisibleTerminalSession.ts` is the only caller and owns
+ * why this exists and when it is sent.
  */
 export function selectTerminalSession(clientId: string, sessionId: string): Promise<void> {
   return measurePerf("invoke.select_terminal_session", () =>

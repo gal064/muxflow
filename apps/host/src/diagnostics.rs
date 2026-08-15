@@ -298,12 +298,23 @@ fn write_rejected_client_resize_log(columns: u32, rows: u32) {
 /// tmux session identifiers (`$3`) are the server's own ordinals: not names,
 /// not paths, not hostnames, and not terminal content. This stays inside the
 /// privacy declaration above.
+///
+/// `error` is the one free-form field, so it is bounded rather than trusted.
+/// Every producer today is a message this crate wrote or an `io::Error` from a
+/// pipe, none of which name a path or a host — but "none of them do today" is
+/// not a property a log line should rest on, and an unbounded string in a log
+/// is also how one bad error becomes a megabyte of stderr.
 pub fn write_terminal_sizing_handoff_log(
     previous_session: Option<&str>,
     session_id: &str,
     size: Option<(u32, u32)>,
     error: Option<&str>,
 ) {
+    const MAX_ERROR_CHARS: usize = 200;
+    let error = error.map(|error| match error.char_indices().nth(MAX_ERROR_CHARS) {
+        Some((index, _)) => format!("{}…", &error[..index]),
+        None => error.to_owned(),
+    });
     let line = serde_json::json!({
         "subsystem": "host_daemon",
         "event": "terminalSizingHandoff",
@@ -315,6 +326,36 @@ pub fn write_terminal_sizing_handoff_log(
         "size": size.map(|(columns, rows)| format!("{columns}x{rows}")),
         "ok": error.is_none(),
         "error": error,
+    });
+    eprintln!("{line}");
+}
+
+/// Names every flow-control resume tmux refused, and what was done about it.
+///
+/// A retried rejection is deliberately not an event: the host is still handling
+/// it and the desktop has nothing to do. That makes the log the only place it
+/// exists, which is the point — a pane that recovered on the second attempt
+/// recovered from something, and "it worked in the end" is not a diagnosis. It
+/// is also what the pause lane's injected-fault run reads to prove the fault
+/// fired at all.
+///
+/// A tmux pane identifier (`%3`) is the server's own ordinal, and `reason` is
+/// tmux's own refusal text — a parse error about a command this crate composed,
+/// never pane content, which the reader never puts in an error detail for
+/// exactly that reason. Bounded anyway, for the same reasons as the sizing
+/// handoff above.
+pub fn write_flow_resume_rejected_log(pane_id: &str, disposition: &str, reason: &str) {
+    const MAX_REASON_CHARS: usize = 200;
+    let reason = match reason.char_indices().nth(MAX_REASON_CHARS) {
+        Some((index, _)) => format!("{}…", &reason[..index]),
+        None => reason.to_owned(),
+    };
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "flowResumeRejected",
+        "paneId": pane_id,
+        "disposition": disposition,
+        "reason": reason,
     });
     eprintln!("{line}");
 }

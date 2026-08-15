@@ -230,23 +230,28 @@ export function useClientResize({
    * programs resizing a real person's windows at each other indefinitely.
    */
   useEffect(() => {
-    if (!appFocused || !clientId || !canMutate || !actualSize) return;
+    // `surface` because a request needs one: with an app tab showing there is
+    // no tiled surface to measure, `send` returns immediately, and spending a
+    // reassertion on a request that cannot be built would leave the budget
+    // gone when the terminal comes back.
+    if (!appFocused || !clientId || !canMutate || !actualSize || !surface) return;
     const requested = lastRequested.current;
     if (!requested || requested.clientId !== clientId) return;
     if (requested.columns === actualSize.columns && requested.rows === actualSize.rows) return;
     if (reasserted.current >= CLIENT_RESIZE_REASSERTS) return;
-    reasserted.current += 1;
     const timer = window.setTimeout(() => {
-      // Forgetting the request is what lets the identical computation through
-      // the dedupe; `send` recomputes from the live surface either way. Done
-      // here rather than above so that an effect re-run cancelling this timer
-      // leaves nothing half-applied: the record it would have cleared is the
-      // one the next run needs to recognise the mismatch at all.
+      // Both of these happen here rather than above so that an effect re-run
+      // cancelling this timer leaves nothing half-applied: the budget is spent
+      // only on an attempt actually made, and the record `lastRequested` holds
+      // is the one the next run needs to recognise the mismatch at all.
+      // Forgetting it is what lets the identical computation through the
+      // dedupe; `send` recomputes from the live surface either way.
+      reasserted.current += 1;
       lastRequested.current = undefined;
       send();
     }, CLIENT_RESIZE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [actualSize?.columns, actualSize?.rows, appFocused, canMutate, clientId, send]);
+  }, [actualSize?.columns, actualSize?.rows, appFocused, canMutate, clientId, send, surface]);
 
   // The retry timer is the one thing that outlives an effect; only unmounting
   // ends it.

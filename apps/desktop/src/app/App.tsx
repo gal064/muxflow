@@ -634,7 +634,13 @@ export function App() {
   // Which workspace tmux sizes from is decided here and nowhere else, so it is
   // stated to the host as a fact rather than left to whichever event happened
   // to change it.
-  useVisibleTerminalSession({ activeSessionId, canMutate: hostState.canMutate, clientId, onStatus: setStatus });
+  useVisibleTerminalSession({
+    activeSessionId,
+    canMutate: hostState.canMutate,
+    clientId,
+    onStatus: setStatus,
+    topologyGeneration: hostState.generation,
+  });
 
   // The client size is computed from the tiled surface and from what a live
   // terminal turns pixels into. Both arrive here; neither is a pane's geometry.

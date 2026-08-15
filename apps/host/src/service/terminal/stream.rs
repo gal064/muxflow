@@ -19,6 +19,7 @@ use super::super::{SequencerControl, emit_event};
 use super::correlation::{
     MarkerBlock, classify_marker_block, error_reason, marker_pane, wants_error_line,
 };
+use super::flow_control::RejectedResume;
 use super::{build_seed_with_metadata, capture_metadata, validate_tmux_id};
 
 /// Asks the control-writer thread to write a capture for `pane_id`.
@@ -53,7 +54,7 @@ pub(super) struct ControlStreamReader {
     pub(super) terminal_generation: Arc<AtomicU64>,
     pub(super) stopped: Arc<AtomicBool>,
     pub(super) controls: std_mpsc::Receiver<StreamControl>,
-    pub(super) paused: Arc<super::PausedPanes>,
+    pub(super) flow: Arc<super::FlowControl>,
 }
 
 pub(super) enum StreamControl {
@@ -74,11 +75,11 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         terminal_generation,
         stopped,
         controls,
-        paused,
+        flow,
     } = context;
     let mut reader = BufReader::new(stdout);
     let mut parser = ControlParser::default();
-    let mut state = StreamState::new(&pane_ids, paused);
+    let mut state = StreamState::new(&pane_ids, flow);
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         match reader.read(&mut buffer) {
@@ -191,7 +192,7 @@ pub(super) struct StreamState {
     /// Shared with the service thread, which is what writes a seed when the
     /// desktop reveals a pane: a seed for a pane tmux has paused has to carry
     /// the resume or it re-photographs a screen that then stops moving again.
-    paused: Arc<super::PausedPanes>,
+    flow: Arc<super::FlowControl>,
 }
 
 pub(super) struct PendingCaptureMetadata {
@@ -211,9 +212,9 @@ struct StreamRuntime<'a> {
 }
 
 impl StreamState {
-    pub(super) fn new(pane_ids: &[String], paused: Arc<super::PausedPanes>) -> Self {
+    pub(super) fn new(pane_ids: &[String], flow: Arc<super::FlowControl>) -> Self {
         Self {
-            paused,
+            flow,
             pane_states: pane_ids
                 .iter()
                 .map(|id| {
@@ -365,20 +366,22 @@ impl StreamState {
                 // quoting four rows of it into an event that reaches the
                 // desktop and the logs would leak the pane, not explain the
                 // failure.
-                let rejected_resume = match &self.command_block {
-                    CommandBlock::Resume { pane_id, .. } => Some(pane_id.clone()),
-                    _ => None,
-                };
-                let detail = match &self.command_block {
-                    CommandBlock::Input { pane_id, lines, .. } => format!(
-                        "terminal input for {pane_id} was rejected by tmux: {}",
-                        error_reason(&arguments, lines)
+                let (detail, rejected_resume) = match &self.command_block {
+                    CommandBlock::Input { pane_id, lines, .. } => (
+                        format!(
+                            "terminal input for {pane_id} was rejected by tmux: {}",
+                            error_reason(&arguments, lines)
+                        ),
+                        None,
                     ),
-                    CommandBlock::Resume { pane_id, lines, .. } => format!(
-                        "tmux rejected the flow-control resume for {pane_id}: {}",
-                        error_reason(&arguments, lines)
+                    CommandBlock::Resume { pane_id, lines, .. } => (
+                        format!(
+                            "tmux rejected the flow-control resume for {pane_id}: {}",
+                            error_reason(&arguments, lines)
+                        ),
+                        Some(pane_id.clone()),
                     ),
-                    _ => arguments,
+                    _ => (arguments, None),
                 };
                 // An error abandons whatever multi-block sequence was running,
                 // so every correlation slot has to be released too — otherwise
@@ -390,41 +393,54 @@ impl StreamState {
                 self.expected_resume = None;
                 self.pending_alternate = None;
                 self.pending_metadata = None;
-                // The resnapshot stays for every rejection, including the ones
-                // retried below: a command tmux refused is a command the desktop
-                // has to be told about, whatever this thread goes on to do about
-                // it. What it is *not* is a recovery on its own. The reseed it
-                // asks for used to be written without a resume, so it
-                // re-photographed a paused pane and left it paused — the
-                // switch-tabs-and-back workaround, working exactly as far as the
-                // user described and no further. `request_seed` now carries the
-                // resume, so this event recovers the pane as well as reporting
+                // Exactly one event per rejection, and for a rejected resume
+                // which one it is depends on what this thread is about to do.
+                //
+                // Both a resnapshot and a stall make the desktop ask for a
+                // seed, so emitting both would ask twice — and each of those
+                // seeds carries a resume for a pane still believed paused,
+                // which the same broken command rejects, which emits both
+                // events again. Two seeds per rejection is 2ⁿ tmux writes.
+                // While the host is still retrying, the desktop has nothing to
+                // do and is told nothing; when the host gives up, the stall is
+                // both the report and the request for the seed that replaces
                 // it.
-                emit_resnapshot(sender, overflowed, &scope, detail.clone());
-                if let Some(pane_id) = rejected_resume {
-                    if self.paused.spend_resume_attempt(&pane_id) {
-                        // Re-issued rather than abandoned. The pane is
-                        // definitely still paused — tmux said so and has not
-                        // said otherwise — and a resume is the only thing that
-                        // changes that. Unlike a bare capture re-issued against
-                        // a vanished pane, this one carries its own targeted
-                        // marker, so a second failure is attributed here again
-                        // instead of to the whole connection.
-                        request_capture(writer, &pane_id, true);
-                    } else {
-                        // Out of attempts. Nothing further will happen to this
-                        // pane on its own, and until now that fact existed only
-                        // as a line in a daemon log nobody reads.
-                        emit_event(
-                            sender,
-                            overflowed,
-                            v1::HostEvent {
-                                kind: v1::EventKind::TerminalFlowStalled.into(),
-                                scope: pane_id,
-                                detail,
-                                ..Default::default()
-                            },
-                        );
+                let decision =
+                    rejected_resume.map(|pane_id| (self.flow.reject_resume(&pane_id), pane_id));
+                if let Some((disposition, pane_id)) = &decision {
+                    crate::diagnostics::write_flow_resume_rejected_log(
+                        pane_id,
+                        disposition.label(),
+                        &detail,
+                    );
+                }
+                match decision {
+                    // Re-issued rather than abandoned: the pane is still paused,
+                    // and a resume is the only thing that changes that. Unlike a
+                    // bare capture re-issued against a vanished pane, this one
+                    // carries its own targeted marker, so a second failure is
+                    // attributed here again instead of to the connection.
+                    Some((RejectedResume::Retry, pane_id)) => {
+                        request_capture(writer, &pane_id, true)
+                    }
+                    // Out of attempts. `reject_resume` has already stopped this
+                    // pane's captures carrying a resume, so the seed asked for
+                    // here is a plain capture and the recovery terminates.
+                    Some((RejectedResume::Stall, pane_id)) => emit_event(
+                        sender,
+                        overflowed,
+                        v1::HostEvent {
+                            kind: v1::EventKind::TerminalFlowStalled.into(),
+                            scope: pane_id,
+                            detail,
+                            ..Default::default()
+                        },
+                    ),
+                    // Every other rejection, including a resume for a pane
+                    // nothing paused, is a command the desktop has to be told
+                    // about and has always been told about this way.
+                    Some((RejectedResume::Ignore, _)) | None => {
+                        emit_resnapshot(sender, overflowed, &scope, detail)
                     }
                 }
             }
@@ -461,7 +477,7 @@ impl StreamState {
             }
             ControlRecord::Notification { name, arguments } if name == "pause" => {
                 if let Some(pane_id) = notification_pane(&arguments) {
-                    self.paused.paused(&pane_id);
+                    self.flow.paused(&pane_id);
                     emit_event(
                         sender,
                         overflowed,
@@ -478,10 +494,10 @@ impl StreamState {
             // tmux says `%continue` only for a pane that really was paused, so
             // this is the acknowledgement the resume itself is not. Until it
             // arrives every capture for the pane carries a resume, which is the
-            // safe direction to be wrong in — see `PausedPanes`.
+            // safe direction to be wrong in — see `FlowControl`.
             ControlRecord::Notification { name, arguments } if name == "continue" => {
                 if let Some(pane_id) = notification_pane(&arguments) {
-                    self.paused.cleared(&pane_id);
+                    self.flow.cleared(&pane_id);
                 }
             }
             ControlRecord::Notification { name, .. } if is_topology_notification(&name) => {
@@ -693,7 +709,7 @@ impl StreamState {
                     // limiter — a discard needs another few megabytes of output
                     // before it can happen again — so even a permanent flood
                     // costs a couple of in-band commands per megabyte.
-                    request_capture(writer, &pane_id, self.paused.is_paused(&pane_id));
+                    request_capture(writer, &pane_id, self.flow.resume_before_capture(&pane_id));
                 }
             }
             CommandBlock::None => {}
@@ -799,7 +815,7 @@ impl StreamState {
                     // A pane this client no longer owns is not one it can
                     // resume, and leaving it here would make the *next* pane to
                     // take its id inherit a pause that was never its own.
-                    self.paused.cleared(&pane_id);
+                    self.flow.cleared(&pane_id);
                     if self
                         .pending_alternate
                         .as_ref()
@@ -872,7 +888,7 @@ impl StreamState {
             // once, and a paused one among them still needs its resume: the
             // whole point of this pass is that afterwards every pane is
             // delivering again.
-            request_capture(writer, pane_id, self.paused.is_paused(pane_id));
+            request_capture(writer, pane_id, self.flow.resume_before_capture(pane_id));
         }
     }
 }
@@ -955,12 +971,12 @@ fn is_topology_notification(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::terminal::PausedPanes;
+    use crate::service::terminal::FlowControl;
 
     /// Everything `handle` writes to, so a test can read back both what the
     /// desktop was told and what tmux was asked for.
     struct Harness {
-        paused: Arc<PausedPanes>,
+        flow: Arc<FlowControl>,
         writes: std_mpsc::Receiver<super::super::ControlWrite>,
         writer: std_mpsc::Sender<super::super::ControlWrite>,
         events: mpsc::Receiver<SequencerControl>,
@@ -973,14 +989,14 @@ mod tests {
 
     impl Harness {
         fn new(pane_ids: &[String]) -> (StreamState, Self) {
-            let paused = Arc::new(PausedPanes::default());
+            let flow = Arc::new(FlowControl::default());
             let (writer, writes) = std_mpsc::channel();
             let (sender, events) = mpsc::channel(64);
-            let state = StreamState::new(pane_ids, Arc::clone(&paused));
+            let state = StreamState::new(pane_ids, Arc::clone(&flow));
             (
                 state,
                 Self {
-                    paused,
+                    flow,
                     writes,
                     writer,
                     events,
@@ -1084,8 +1100,8 @@ mod tests {
             },
             harness.runtime(),
         );
-        assert!(harness.paused.is_paused("%1"));
-        assert!(!harness.paused.is_paused("%2"));
+        assert!(harness.flow.resume_before_capture("%1"));
+        assert!(!harness.flow.resume_before_capture("%2"));
         assert_eq!(harness.writes(), vec![("%1".to_owned(), true)]);
         assert_eq!(
             kinds(&harness.events()),
@@ -1094,7 +1110,7 @@ mod tests {
 
         // The half the service thread owns: a reveal or a recovery seed asks
         // this same question before it writes.
-        assert!(harness.paused.is_paused("%1"));
+        assert!(harness.flow.resume_before_capture("%1"));
 
         // tmux acknowledges the resume the only way it ever does.
         state.handle(
@@ -1104,13 +1120,12 @@ mod tests {
             },
             harness.runtime(),
         );
-        assert!(!harness.paused.is_paused("%1"));
+        assert!(!harness.flow.resume_before_capture("%1"));
     }
 
     /// A rejected resume used to be reported and then abandoned, and the reseed
     /// its event asked for could not resume the pane. It is retried once, and
-    /// the pane's own budget is what stops the retry becoming a loop against a
-    /// deterministic rejection.
+    /// then reported stalled rather than retried at forever.
     #[test]
     fn a_rejected_resume_is_retried_once_and_then_reported_stalled() {
         let (mut state, mut harness) = Harness::new(&["%5".into()]);
@@ -1130,16 +1145,10 @@ mod tests {
             vec![("%5".to_owned(), true)],
             "the retry must carry the resume, not merely re-photograph the pane"
         );
-        let events = harness.events();
         assert_eq!(
-            kinds(&events),
-            vec![(v1::EventKind::TerminalResnapshotRequired, "%5".to_owned())],
-            "a retried rejection is still reported, but is not yet a stall"
-        );
-        assert!(
-            events[0].detail.contains("parse error: syntax error"),
-            "the reason tmux printed is the whole value of the report: {}",
-            events[0].detail
+            harness.events(),
+            Vec::new(),
+            "the host is still handling it; the desktop has nothing to do and is told nothing"
         );
 
         reject_one_resume(&mut state, &harness, "%5");
@@ -1148,12 +1157,22 @@ mod tests {
             Vec::new(),
             "the budget is spent; a deterministic rejection must not loop"
         );
+        let events = harness.events();
         assert_eq!(
-            kinds(&harness.events()),
-            vec![
-                (v1::EventKind::TerminalResnapshotRequired, "%5".to_owned()),
-                (v1::EventKind::TerminalFlowStalled, "%5".to_owned()),
-            ],
+            kinds(&events),
+            vec![(v1::EventKind::TerminalFlowStalled, "%5".to_owned())],
+            "exactly one event, because both this and a resnapshot make the desktop \
+             ask for a seed and two seeds per rejection is exponential"
+        );
+        assert!(
+            events[0].detail.contains("parse error: syntax error"),
+            "the reason tmux printed is the whole value of the report: {}",
+            events[0].detail
+        );
+        assert!(
+            !harness.flow.resume_before_capture("%5"),
+            "the seed this stall asks for must be a plain capture, or its own rejection \
+             produces the next stall, which asks for the next seed, forever"
         );
 
         // A fresh flow-control episode is a fresh budget: this pane must not be
@@ -1172,18 +1191,16 @@ mod tests {
     }
 
     /// A `%error` on a resume for a pane nothing paused is a correlation
-    /// failure, not a flow-control one, and retrying it would say nothing new.
+    /// failure, not a flow-control one: it is reported the way every other
+    /// rejected command is, and nothing about flow control is claimed.
     #[test]
-    fn a_resume_rejection_for_a_pane_that_is_not_paused_is_not_retried() {
+    fn a_resume_rejection_for_a_pane_that_is_not_paused_is_not_flow_control() {
         let (mut state, mut harness) = Harness::new(&["%5".into()]);
         reject_one_resume(&mut state, &harness, "%5");
         assert_eq!(harness.writes(), Vec::new());
         assert_eq!(
             kinds(&harness.events()),
-            vec![
-                (v1::EventKind::TerminalResnapshotRequired, "%5".to_owned()),
-                (v1::EventKind::TerminalFlowStalled, "%5".to_owned()),
-            ],
+            vec![(v1::EventKind::TerminalResnapshotRequired, "%5".to_owned())],
         );
     }
 
@@ -1200,12 +1217,12 @@ mod tests {
             },
             harness.runtime(),
         );
-        assert!(harness.paused.is_paused("%1"));
+        assert!(harness.flow.resume_before_capture("%1"));
         state.apply_control(StreamControl::Membership {
             added: Vec::new(),
             removed: vec!["%1".into()],
         });
-        assert!(!harness.paused.is_paused("%1"));
+        assert!(!harness.flow.resume_before_capture("%1"));
     }
 
     /// A malformed `%pause` must not enter a pane id nothing can ever clear.
@@ -1229,7 +1246,7 @@ mod tests {
     fn pane_close_prunes_capture_state_without_disturbing_sibling() {
         let mut state = StreamState::new(
             &["%1".into(), "%2".into()],
-            Arc::new(crate::service::terminal::PausedPanes::default()),
+            Arc::new(crate::service::terminal::FlowControl::default()),
         );
         state.command_block = CommandBlock::CapturePrimary {
             tag: CommandTag {
@@ -1257,7 +1274,7 @@ mod tests {
         // so an error inside that block recovers only the pane typed into.
         let mut state = StreamState::new(
             &["%1".into(), "%2".into()],
-            Arc::new(crate::service::terminal::PausedPanes::default()),
+            Arc::new(crate::service::terminal::FlowControl::default()),
         );
         state.expected_input = Some("%2".into());
         let block = state.start_block(CommandTag {
@@ -1286,7 +1303,7 @@ mod tests {
         }
         let mut state = StreamState::new(
             &["%2".into()],
-            Arc::new(crate::service::terminal::PausedPanes::default()),
+            Arc::new(crate::service::terminal::FlowControl::default()),
         );
         state.command_block = block;
         assert_eq!(state.active_scope(), "%2");
@@ -1305,7 +1322,7 @@ mod tests {
         };
         let mut state = StreamState::new(
             &["%1".into(), "%5".into()],
-            Arc::new(crate::service::terminal::PausedPanes::default()),
+            Arc::new(crate::service::terminal::FlowControl::default()),
         );
         state.expected_resume = Some("%5".into());
         state.command_block = state.start_block(tag);
@@ -1338,7 +1355,7 @@ mod tests {
         };
         let mut state = StreamState::new(
             &["%5".into()],
-            Arc::new(crate::service::terminal::PausedPanes::default()),
+            Arc::new(crate::service::terminal::FlowControl::default()),
         );
         state.expected_resume = Some("%5".into());
         state.command_block = state.start_block(tag);
