@@ -530,18 +530,9 @@ fn decode_terminal_input_frame(body: &[u8]) -> Result<(&str, &str, &[u8]), Strin
     Ok((client_id, pane_id, &body[offset..]))
 }
 
-/// Tells the host which session the desktop is showing.
-///
-/// The host attaches one tmux control client per session and takes exactly one
-/// of them out of `ignore-size`; that client is the one whose windows tmux
-/// resizes. Which session the *desktop* displays is decided here, and until
-/// this existed the two only agreed by accident. `AttachTerminal` — the only
-/// message that ever moved the host's answer — is sent once, at connect, for
-/// whichever session the fresh snapshot happens to list first, and the
-/// workspace-switch path sends `SetTerminalVisibility`, which is per pane and
-/// touches no sizing. So every reconnect, and every session change the
-/// `SelectSession` tmux action did not drive, left tmux sizing the user's
-/// windows from a workspace they were not looking at.
+/// Tells the host which session the desktop is showing, so tmux sizes from
+/// that one's control client. `useVisibleTerminalSession.ts` owns why this
+/// exists and when it is sent.
 ///
 /// Async and spawn_blocking for the same reason `set_terminal_visibility` is:
 /// this runs on a workspace switch, and holding the WebView's main thread for

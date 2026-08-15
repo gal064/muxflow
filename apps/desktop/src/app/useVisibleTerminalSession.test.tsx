@@ -17,6 +17,7 @@ interface HarnessProps {
   canMutate?: boolean;
   clientId?: string;
   onStatus?: (message: string) => void;
+  topologyGeneration?: number;
 }
 
 function Harness(props: HarnessProps) {
@@ -25,6 +26,7 @@ function Harness(props: HarnessProps) {
     canMutate: props.canMutate ?? true,
     clientId: props.clientId,
     onStatus: props.onStatus ?? (() => undefined),
+    topologyGeneration: props.topologyGeneration ?? 1,
   });
   return null;
 }
@@ -117,6 +119,41 @@ describe("useVisibleTerminalSession", () => {
     await update({ activeSessionId: "$2", clientId: "client-1" });
     selectMock.mockClear();
     await exhaustRetries();
+    // Both halves: the retries kept going for the workspace that is *now*
+    // shown, and none of them was for the one the user left. Asserting only
+    // the second half would also pass if the retry loop were deleted.
+    expect(selectMock.mock.calls.length).toBe(VISIBLE_SESSION_RETRIES);
     expect(selectMock.mock.calls.every(([, sessionId]) => sessionId === "$2")).toBe(true);
+  });
+
+  /**
+   * The timed budget is not the only clock. What actually ends the host's
+   * refusal is a reconciliation attaching the session's control client, and on
+   * a slow link with several sessions that can land after the budget is gone —
+   * leaving the workspace at tmux's 80x24 default with nothing left to try.
+   */
+  it("tries again on a topology change after the timed budget is gone", async () => {
+    selectMock.mockImplementation(async () => { throw new Error("session has no control client"); });
+    const { update } = await render({ activeSessionId: "$1", clientId: "client-1", topologyGeneration: 1 });
+    await exhaustRetries();
+    expect(selectMock).toHaveBeenCalledTimes(VISIBLE_SESSION_RETRIES + 1);
+
+    selectMock.mockClear();
+    selectMock.mockImplementation(async () => undefined);
+    await update({ activeSessionId: "$1", clientId: "client-1", topologyGeneration: 2 });
+    expect(selectMock.mock.calls).toEqual([["client-1", "$1"]]);
+  });
+
+  /**
+   * …but a topology change is not a reason to re-send something the host has
+   * already accepted. Every window rename produces one, and each re-send is a
+   * `refresh-client -C` the desktop's own dedupe exists to avoid.
+   */
+  it("does not re-send a selection the host already took", async () => {
+    const { update } = await render({ activeSessionId: "$1", clientId: "client-1", topologyGeneration: 1 });
+    expect(selectMock).toHaveBeenCalledTimes(1);
+    await update({ activeSessionId: "$1", clientId: "client-1", topologyGeneration: 2 });
+    await update({ activeSessionId: "$1", clientId: "client-1", topologyGeneration: 3 });
+    expect(selectMock).toHaveBeenCalledTimes(1);
   });
 });
