@@ -124,6 +124,44 @@ impl Drop for FileService {
     }
 }
 
+/// Entries no listing ever reports, whatever asks for it.
+///
+/// VS Code's `files.exclude` defaults, adopted verbatim because the explorer is
+/// the surface the user compares this one against. `node_modules` is
+/// deliberately *not* here — VS Code shows it too, and this host has always
+/// shown it collapsed; hiding a directory people open on purpose is a different
+/// decision from hiding repository plumbing and scratch files nobody edits.
+const ALWAYS_HIDDEN: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
+
+/// Directories the tree shows but never enumerates the inside of.
+const COLLAPSED_DIRECTORIES: &[&str] = &["node_modules"];
+
+/// Whether an entry of this name is omitted from every directory listing.
+///
+/// One predicate, because the pagination token, the watch registry and the
+/// descend guard would otherwise each be deciding it separately. An entry that
+/// no listing reports but that a directly requested path can still be listed
+/// from is not hidden — it is merely absent from one view.
+pub(super) fn is_always_hidden(name: &OsStr) -> bool {
+    ALWAYS_HIDDEN
+        .iter()
+        .any(|hidden| name == OsStr::new(hidden))
+}
+
+/// Whether this service ever enumerates the contents of a directory so named.
+///
+/// The two reasons it does not are different — hidden from every listing, or
+/// shown but not expandable — and every caller that asks has to treat them the
+/// same: `expandable: false` and an unenterable path. A *symlinked* directory is
+/// a third reason, decided per entry rather than by name, so it stays the
+/// caller's own condition.
+pub(super) fn is_never_enumerated(name: &OsStr) -> bool {
+    is_always_hidden(name)
+        || COLLAPSED_DIRECTORIES
+            .iter()
+            .any(|collapsed| name == OsStr::new(collapsed))
+}
+
 pub(super) fn root_token(root: &str) -> anyhow::Result<String> {
     Ok(RootCapability::capture(root)?.token().to_owned())
 }
@@ -172,7 +210,7 @@ fn metadata_for_in_root(root: &Path, path: &Path) -> anyhow::Result<v1::FileMeta
             }
         });
     let mime = image_mime(path).unwrap_or_default().to_owned();
-    let collapsed = name == ".git" || name == "node_modules" || symlink;
+    let collapsed = is_never_enumerated(OsStr::new(&name)) || symlink;
     Ok(v1::FileMetadata {
         path: path.to_string_lossy().into_owned(),
         name,
@@ -237,7 +275,7 @@ fn metadata_for_directory_entry(
         .unwrap_or(logical.as_os_str())
         .to_string_lossy()
         .into_owned();
-    let collapsed = name == ".git" || name == "node_modules" || symlink;
+    let collapsed = is_never_enumerated(OsStr::new(&name)) || symlink;
     let mime = image_mime(logical).unwrap_or_default().to_owned();
     Ok(v1::FileMetadata {
         path: logical.to_string_lossy().into_owned(),
@@ -404,33 +442,81 @@ mod tests {
         (root, FileService::new())
     }
 
+    /// Three populations, and the difference between them is the whole rule.
+    ///
+    /// Repository plumbing and platform scratch files are *hidden*: VS Code's
+    /// `files.exclude` defaults, which is the explorer this one is compared
+    /// against. `node_modules` is *shown and collapsed*, because VS Code shows
+    /// it too and people open it on purpose. Every other dotfile — `.env`,
+    /// `.gitignore` — is an ordinary file the user edits, and hiding those
+    /// would be a different product.
     #[test]
-    fn listing_keeps_dotfiles_and_collapses_heavy_and_symlink_directories() {
+    fn listing_hides_repository_plumbing_keeps_dotfiles_and_collapses_heavy_directories() {
         let (root, service) = fixture();
         fs::write(root.join(".env"), "ok").unwrap();
-        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".DS_Store"), "noise").unwrap();
+        fs::write(root.join("Thumbs.db"), "noise").unwrap();
+        for hidden in [".git", ".svn", ".hg", "CVS"] {
+            fs::create_dir(root.join(hidden)).unwrap();
+        }
         fs::create_dir(root.join("node_modules")).unwrap();
         fs::create_dir(root.join("real")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
         let snapshot = service
             .list_directory(root.to_str().unwrap(), "", "watch")
             .unwrap();
-        assert!(snapshot.entries.iter().any(|item| item.name == ".env"));
-        for name in [".git", "node_modules", "linked"] {
+        let named = |name: &str| snapshot.entries.iter().find(|item| item.name == name);
+
+        assert!(named(".env").is_some(), "ordinary dotfiles stay visible");
+        for hidden in [".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"] {
+            assert!(named(hidden).is_none(), "{hidden} must not be listed");
+        }
+        for name in ["node_modules", "linked"] {
             assert!(
-                !snapshot
-                    .entries
-                    .iter()
-                    .find(|item| item.name == name)
-                    .unwrap()
-                    .expandable
+                !named(name).expect("shown, just not expandable").expandable,
+                "{name} stays visible and collapsed"
             );
         }
-        assert!(
-            service
-                .list_directory(root.to_str().unwrap(), ".git", "watch")
-                .is_err()
-        );
+        // Hidden is not the same as merely absent from one view: the path is
+        // refused too, so nothing lists or watches it by asking directly.
+        for hidden in [".git", ".svn", ".hg", "CVS", "node_modules"] {
+            assert!(
+                service
+                    .list_directory(root.to_str().unwrap(), hidden, "watch")
+                    .is_err(),
+                "{hidden} must not be enterable by path"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A hidden entry that consumed a page slot would make a page shorter than
+    /// it claims, and one that became the page token would make the next page
+    /// resume from a name no client was ever told about.
+    #[test]
+    fn hidden_entries_do_not_consume_page_slots_or_become_page_tokens() {
+        let (root, service) = fixture();
+        for name in ["a", "b", "c", "d"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+        for hidden in [".DS_Store", "Thumbs.db"] {
+            fs::write(root.join(hidden), "noise").unwrap();
+        }
+        fs::create_dir(root.join(".git")).unwrap();
+        let mut token = String::new();
+        let mut names = Vec::new();
+        loop {
+            let page = service
+                .list_directory_page(root.to_str().unwrap(), "", "page", &token, 2)
+                .unwrap();
+            assert!(page.entries.len() <= 2);
+            names.extend(page.entries.into_iter().map(|entry| entry.name));
+            if page.complete {
+                break;
+            }
+            token = page.next_page_token;
+        }
+        assert_eq!(names, vec!["a", "b", "c", "d"]);
         fs::remove_dir_all(root).unwrap();
     }
 
