@@ -102,6 +102,12 @@ enum Operation {
   // prompt as hook installation, and re-asserted on every connect because it
   // lives in the tmux server's memory rather than in a config file.
   OPERATION_AGENT_HOST_NAMING = 42;
+  // Names the session the desktop is *showing*, which is the one tmux must
+  // size from. Distinct from ATTACH_TERMINAL, which also sets the control
+  // client's pane membership and reseeds it: a workspace switch changes which
+  // client participates in sizing and nothing else, and paying an attach for
+  // that reseeds every pane of the session on every switch.
+  OPERATION_SELECT_TERMINAL_SESSION = 43;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;

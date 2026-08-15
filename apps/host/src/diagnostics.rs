@@ -286,6 +286,39 @@ fn write_rejected_client_resize_log(columns: u32, rows: u32) {
     eprintln!("{line}");
 }
 
+/// Names every handoff of the one control client tmux sizes from.
+///
+/// The flag and the size are two `refresh-client` writes to a pipe, and a pipe
+/// write that tmux ignores succeeds. When that happened the only symptom was a
+/// user's windows sitting at 80x24 with nothing anywhere saying which client
+/// had been asked for what — the whole of M13-E005 was reconstructed from a
+/// live `list-clients`. Recording the handoff is what makes the next one
+/// readable from a log.
+///
+/// tmux session identifiers (`$3`) are the server's own ordinals: not names,
+/// not paths, not hostnames, and not terminal content. This stays inside the
+/// privacy declaration above.
+pub fn write_terminal_sizing_handoff_log(
+    previous_session: Option<&str>,
+    session_id: &str,
+    size: Option<(u32, u32)>,
+    error: Option<&str>,
+) {
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "terminalSizingHandoff",
+        "previousSession": previous_session,
+        "sessionId": session_id,
+        // Null means the desktop has not asked for a size yet on this
+        // connection, which is why a newly visible client can be correct and
+        // still be at tmux's default.
+        "size": size.map(|(columns, rows)| format!("{columns}x{rows}")),
+        "ok": error.is_none(),
+        "error": error,
+    });
+    eprintln!("{line}");
+}
+
 pub fn write_safe_log(class: SafeErrorClass) {
     let line = serde_json::json!({
         "subsystem": "host_daemon",

@@ -530,6 +530,41 @@ fn decode_terminal_input_frame(body: &[u8]) -> Result<(&str, &str, &[u8]), Strin
     Ok((client_id, pane_id, &body[offset..]))
 }
 
+/// Tells the host which session the desktop is showing.
+///
+/// The host attaches one tmux control client per session and takes exactly one
+/// of them out of `ignore-size`; that client is the one whose windows tmux
+/// resizes. Which session the *desktop* displays is decided here, and until
+/// this existed the two only agreed by accident. `AttachTerminal` — the only
+/// message that ever moved the host's answer — is sent once, at connect, for
+/// whichever session the fresh snapshot happens to list first, and the
+/// workspace-switch path sends `SetTerminalVisibility`, which is per pane and
+/// touches no sizing. So every reconnect, and every session change the
+/// `SelectSession` tmux action did not drive, left tmux sizing the user's
+/// windows from a workspace they were not looking at.
+///
+/// Async and spawn_blocking for the same reason `set_terminal_visibility` is:
+/// this runs on a workspace switch, and holding the WebView's main thread for
+/// an SSH round trip is a visibly frozen switch.
+#[tauri::command]
+pub async fn select_terminal_session(
+    client_id: String,
+    session_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    validate_tmux_id(&session_id, '$')?;
+    let client = get_client(&clients, &client_id)?;
+    let request = v1::Request {
+        operation: v1::Operation::SelectTerminalSession.into(),
+        session_id,
+        ..Default::default()
+    };
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal session selection task failed: {error}"))??;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn resize_terminal_client(
     client_id: String,

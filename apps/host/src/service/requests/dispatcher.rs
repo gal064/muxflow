@@ -65,6 +65,7 @@ pub(crate) async fn handle_request(
     let is_mutation = matches!(
         operation,
         v1::Operation::AttachTerminal
+            | v1::Operation::SelectTerminalSession
             | v1::Operation::TerminalInput
             | v1::Operation::ResizeTerminal
             | v1::Operation::TmuxAction
@@ -273,6 +274,22 @@ pub(crate) async fn handle_request(
                 request_id,
                 result.map_or_else(
                     |error| response_error("terminal_attach_failed", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
+        v1::Operation::SelectTerminalSession => {
+            // No reconciliation follow-up: this changes which control client
+            // tmux sizes from, which is not a topology change. The size it
+            // carries across can change the *windows*, and the `%layout-change`
+            // that produces already drives the ordinary dirty path.
+            let result = terminal.lock().unwrap().select_session(&request.session_id);
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_selection_failed", &error.to_string()),
                     |_| response_ok(),
                 ),
             )
