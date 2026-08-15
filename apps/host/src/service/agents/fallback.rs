@@ -6,15 +6,37 @@ use tmux_agent_protocol::v1;
 
 use super::{AgentRuntime, MAX_HOOK_BYTES, publish};
 
+/// Replay everything a stopped daemon was told about, from every directory a
+/// hook could have left it in.
+///
+/// One directory was not enough: a hook whose environment resolved a different
+/// runtime directory from this daemon's wrote a perfectly good mailbox that
+/// nothing swept (M13-E003). The candidate list is the same one the hook uses,
+/// so the two ends agree by construction, and an explicit
+/// `ADE_HOST_RUNTIME_DIR` still collapses it to exactly one directory — a
+/// fixture daemon never reaches into a neighbouring one.
 pub(crate) fn ingest() -> anyhow::Result<usize> {
-    consume(&crate::paths::default_runtime_dir(), |event| {
-        if let Ok(agent_event) = AgentRuntime::global().ingest_hook(&event) {
-            publish(agent_event);
-            true
-        } else {
-            false
+    let mut ingested = 0;
+    let mut failure = None;
+    for runtime in crate::paths::runtime_dir_candidates() {
+        match consume(&runtime, |event| {
+            if let Ok(agent_event) = AgentRuntime::global().ingest_hook(&event) {
+                publish(agent_event);
+                true
+            } else {
+                false
+            }
+        }) {
+            Ok(count) => ingested += count,
+            // A directory this daemon cannot read is not a reason to drop the
+            // events it already replayed from the ones it could.
+            Err(error) => failure = failure.or(Some(error)),
         }
-    })
+    }
+    match failure {
+        Some(error) if ingested == 0 => Err(error),
+        _ => Ok(ingested),
+    }
 }
 
 pub(super) fn consume(

@@ -1,29 +1,153 @@
 use std::{
-    fs,
-    os::unix::fs::{FileTypeExt, PermissionsExt},
+    ffi::OsString,
+    fs::{self, OpenOptions},
+    io::Write,
+    os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
 
+fn environment(name: &str) -> Option<OsString> {
+    std::env::var_os(name)
+}
+
 pub fn default_runtime_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("ADE_HOST_RUNTIME_DIR") {
+    resolved_runtime_dir(environment, unsafe { libc::geteuid() })
+}
+
+fn resolved_runtime_dir(
+    environment: impl Fn(&str) -> Option<OsString>,
+    uid: libc::uid_t,
+) -> PathBuf {
+    if let Some(path) = environment("ADE_HOST_RUNTIME_DIR") {
         return PathBuf::from(path);
     }
-    if let Some(path) = std::env::var_os("XDG_RUNTIME_DIR") {
+    if let Some(path) = environment("XDG_RUNTIME_DIR") {
         return PathBuf::from(path).join("tmux-agent-ide");
     }
     #[cfg(target_os = "macos")]
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = environment("HOME") {
         return PathBuf::from(home).join("Library/Caches/dev.dev.tmux-agent-ide/runtime");
     }
-    PathBuf::from(format!("/tmp/tmux-agent-ide-{}", unsafe {
-        libc::geteuid()
-    }))
+    PathBuf::from(format!("/tmp/tmux-agent-ide-{uid}"))
 }
 
 pub fn default_socket_path() -> PathBuf {
     default_runtime_dir().join("host.sock")
+}
+
+/// Where the daemon records the runtime directory it actually chose.
+///
+/// M13-E003: a hook and the daemon resolved the runtime directory from
+/// `XDG_RUNTIME_DIR`, which is *not* the same in the two contexts that matter.
+/// The desktop starts the daemon over a non-interactive `ssh` command, where
+/// systemd's user environment is not applied and the variable is unset, so the
+/// daemon lived in `/tmp/tmux-agent-ide-<uid>`. The hooks run inside the user's
+/// tmux server, whose global environment carries `XDG_RUNTIME_DIR`, so
+/// `hook ingest` looked in `/run/user/<uid>/tmux-agent-ide`, found no socket,
+/// and wrote its events to a fallback mailbox in that other directory that no
+/// daemon has ever read. Every lifecycle event on the field machine was
+/// delivered correctly and filed somewhere nobody was listening.
+///
+/// `HOME` is the one variable that *is* the same in both contexts — an ssh
+/// command, a login shell and a tmux pane all agree on it — so the daemon
+/// leaves a pointer under it and the hook reads it. Deliberately not removed on
+/// shutdown: a stopped daemon's last directory is also the right place to leave
+/// a fallback event for it to find when it comes back.
+fn runtime_pointer_path(environment: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let home = PathBuf::from(environment("HOME")?);
+    if cfg!(target_os = "macos") {
+        Some(home.join("Library/Caches/dev.dev.tmux-agent-ide/daemon-runtime-dir"))
+    } else {
+        Some(home.join(".local/state/tmux-agent-ide/daemon-runtime-dir"))
+    }
+}
+
+pub fn record_runtime_dir(runtime: &Path) -> anyhow::Result<()> {
+    let Some(pointer) = runtime_pointer_path(environment) else {
+        return Ok(());
+    };
+    let parent = pointer.parent().context("runtime pointer has no parent")?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".daemon-runtime-dir-{}", std::process::id()));
+    let result = (|| -> anyhow::Result<()> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(runtime.as_os_str().as_encoded_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, &pointer)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Every directory a daemon on this machine could be using, best first.
+///
+/// An explicit `ADE_HOST_RUNTIME_DIR` is answered exactly and alone: it is how
+/// every test fixture isolates itself, and a fixture that fell back to a
+/// neighbouring directory would talk to the developer's real daemon.
+pub fn runtime_dir_candidates() -> Vec<PathBuf> {
+    candidate_runtime_dirs(environment, unsafe { libc::geteuid() })
+}
+
+fn candidate_runtime_dirs(
+    environment: impl Fn(&str) -> Option<OsString> + Copy,
+    uid: libc::uid_t,
+) -> Vec<PathBuf> {
+    let mut candidates = vec![resolved_runtime_dir(environment, uid)];
+    if environment("ADE_HOST_RUNTIME_DIR").is_some() {
+        return candidates;
+    }
+    if let Some(pointer) = runtime_pointer_path(environment)
+        && let Ok(recorded) = fs::read(&pointer)
+    {
+        let recorded = String::from_utf8_lossy(&recorded).trim().to_owned();
+        if !recorded.is_empty() {
+            add_unique(&mut candidates, PathBuf::from(recorded));
+        }
+    }
+    if let Some(path) = environment("XDG_RUNTIME_DIR") {
+        add_unique(&mut candidates, PathBuf::from(path).join("tmux-agent-ide"));
+    }
+    if cfg!(target_os = "linux") {
+        add_unique(
+            &mut candidates,
+            PathBuf::from(format!("/run/user/{uid}/tmux-agent-ide")),
+        );
+    }
+    add_unique(
+        &mut candidates,
+        PathBuf::from(format!("/tmp/tmux-agent-ide-{uid}")),
+    );
+    candidates
+}
+
+fn add_unique(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.contains(&path) {
+        candidates.push(path);
+    }
+}
+
+/// Where an event goes when no daemon answered anywhere.
+///
+/// A directory that has held a daemon is worth more than the one this process
+/// would have picked: the daemon that comes back is the one that reads it.
+pub fn fallback_runtime_dir(candidates: &[PathBuf]) -> PathBuf {
+    candidates
+        .iter()
+        .find(|candidate| candidate.join("daemon.json").exists())
+        .or_else(|| candidates.iter().find(|candidate| candidate.is_dir()))
+        .or_else(|| candidates.first())
+        .cloned()
+        .unwrap_or_else(default_runtime_dir)
 }
 
 /// A Unix socket bind must fit `sockaddr_un::sun_path` including its
@@ -115,6 +239,81 @@ mod tests {
             0o700
         );
         fs::remove_dir(root).unwrap();
+    }
+
+    /// The exact split that lost every hook event on the field machine: the
+    /// daemon was started over `ssh` with no `XDG_RUNTIME_DIR`, the hooks ran
+    /// inside a tmux server that had one, and the two never named the same
+    /// directory. The candidate list has to close the gap from *either* side.
+    #[test]
+    fn a_hook_with_xdg_set_still_reaches_a_daemon_started_without_it() {
+        let home = std::env::temp_dir().join(format!("ade-pointer-{}", uuid::Uuid::new_v4()));
+        let daemon_runtime = home.join("daemon-runtime");
+        fs::create_dir_all(&daemon_runtime).unwrap();
+        let daemon_environment = |name: &str| match name {
+            "HOME" => Some(OsString::from(home.as_os_str())),
+            _ => None,
+        };
+        // The daemon's own choice, whatever produced it, is what it publishes.
+        let pointer = runtime_pointer_path(daemon_environment).unwrap();
+        fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+        fs::write(&pointer, daemon_runtime.as_os_str().as_encoded_bytes()).unwrap();
+
+        let hook_environment = |name: &str| match name {
+            "HOME" => Some(OsString::from(home.as_os_str())),
+            "XDG_RUNTIME_DIR" => Some(OsString::from("/run/user/4242")),
+            _ => None,
+        };
+        let candidates = candidate_runtime_dirs(hook_environment, 4242);
+        assert!(
+            candidates.contains(&daemon_runtime),
+            "the daemon's recorded directory must be reachable from the hook: {candidates:?}"
+        );
+        // And the reverse split, where the daemon had no XDG and the hook does.
+        assert!(candidates.contains(&PathBuf::from("/tmp/tmux-agent-ide-4242")));
+        assert_eq!(
+            candidates.first(),
+            Some(&PathBuf::from("/run/user/4242/tmux-agent-ide")),
+            "this process's own resolution still comes first"
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// A fixture that names its directory must never be widened into a scan:
+    /// the neighbouring candidate on a developer's machine is their real daemon.
+    #[test]
+    fn an_explicit_runtime_directory_is_the_only_candidate() {
+        let environment = |name: &str| match name {
+            "ADE_HOST_RUNTIME_DIR" => Some(OsString::from("/fixture/runtime")),
+            "XDG_RUNTIME_DIR" => Some(OsString::from("/run/user/7")),
+            "HOME" => Some(OsString::from("/home/someone")),
+            _ => None,
+        };
+        assert_eq!(
+            candidate_runtime_dirs(environment, 7),
+            vec![PathBuf::from("/fixture/runtime")]
+        );
+    }
+
+    #[test]
+    fn an_undeliverable_event_waits_where_a_daemon_has_lived() {
+        let root = std::env::temp_dir().join(format!("ade-fallback-{}", uuid::Uuid::new_v4()));
+        let empty = root.join("empty");
+        let used = root.join("used");
+        fs::create_dir_all(&empty).unwrap();
+        fs::create_dir_all(&used).unwrap();
+        fs::write(used.join("daemon.json"), b"{}").unwrap();
+        assert_eq!(
+            fallback_runtime_dir(&[root.join("missing"), empty.clone(), used.clone()]),
+            used
+        );
+        // Nothing has ever run: the first directory that exists still beats a
+        // path this process would have to create.
+        assert_eq!(
+            fallback_runtime_dir(&[root.join("missing"), empty.clone()]),
+            empty
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "macos")]
