@@ -8,7 +8,7 @@ import { needsAttention, nextSortMode, type AgentListRow, type AgentSortMode } f
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPlacement, AgentRecord } from "../agents/types";
 import type { ConnectionPhase } from "../../state/connectionReducer";
 import { AGENTS_SECTION_MAX_RATIO, AGENTS_SECTION_MIN_RATIO, SIDEBAR_MIN_WIDTH } from "../shell/types";
-import type { WorkspaceRowModel } from "./workspaceRows";
+import { activityWord, type WorkspaceRowModel } from "./workspaceRows";
 
 export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close">;
 
@@ -140,12 +140,10 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               aria-current={row.active ? "true" : undefined}
               // The badge beside this row is a decorative span, so the count
               // has to be part of the row's own name to be announced at all.
-              aria-label={[
-                row.session.name,
-                row.activity,
-                row.unread > 0 ? `${row.unread} agent${row.unread === 1 ? "" : "s"} waiting` : undefined,
-                row.metadata,
-              ].filter(Boolean).join(", ")}
+              // The row lists up to three agents; the label names the loudest
+              // and counts the rest. Reading every line back would make a busy
+              // workspace four announcements long for one list item.
+              aria-label={rowLabel(row)}
               className={row.active ? "workspace-button active" : "workspace-button"}
               data-workspace-index={index}
               onClick={() => props.onSelectWorkspace(row.session.id)}
@@ -168,8 +166,22 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                 {row.working && <span aria-hidden="true" className="spinner" />}
                 <span className="workspace-name">{row.session.name}</span>
               </span>
-              {row.activity && <span className="workspace-activity">{row.activity}</span>}
-              {row.metadata && <span className="workspace-meta">{row.metadata}</span>}
+              {row.agents.length > 0 && <span className="workspace-activity">
+                {row.agents.map((agent) => <span className="workspace-activity-line" key={agent.id}>
+                  {/* Decorative: the button's own accessible name already
+                      carries the loudest agent and the total. */}
+                  <StateDot glyphs={props.stateGlyphs} state={agent.state} />
+                  <span className="workspace-activity-text">{agentLine(agent)}</span>
+                </span>)}
+                {row.agentOverflow > 0 && <span className="workspace-activity-line workspace-activity-more">
+                  <span className="workspace-activity-text">…{row.agentOverflow} more</span>
+                </span>}
+              </span>}
+              {/* The working directory used to be fused onto this line. It is
+                  gone from the sidebar and lives on in ⌘P's match key, where a
+                  path is something you search rather than something you read
+                  once per row. */}
+              {row.branch && <span className="workspace-meta">{row.branch}</span>}
             </button>
             {row.unread > 0 && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
           </div>)}
@@ -375,6 +387,29 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       onClose={() => setAgentMenu(undefined)}
     />}
   </nav>;
+}
+
+/** One agent's line, written the same way for the eye and for the label. */
+function agentLine(agent: WorkspaceRowModel["agents"][number]): string {
+  return `${agent.name} · ${activityWord(agent.state)}`;
+}
+
+/**
+ * The row's whole accessible name.
+ *
+ * It names the loudest agent and counts the rest rather than reading all four
+ * lines: a busy workspace is one list item, and four announcements for one
+ * item is how a list stops being navigable.
+ */
+function rowLabel(row: WorkspaceRowModel): string {
+  const total = row.agents.length + row.agentOverflow;
+  return [
+    row.session.name,
+    row.agents[0] && agentLine(row.agents[0]),
+    total > 1 ? `${total} agents` : undefined,
+    row.unread > 0 ? `${row.unread} agent${row.unread === 1 ? "" : "s"} waiting` : undefined,
+    row.branch,
+  ].filter(Boolean).join(", ");
 }
 
 function resumePlacements(adapters: readonly AgentAdapterDescriptor[], agent: AgentRecord): AgentPlacement[] {

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import contract from "./persistedAppState.contract.json";
-import { defaultAppState, defaultShellState, type AppOwnedTab, type PersistedAppState, type WorkspaceUiRecord } from "./types";
+import {
+  defaultAppState, defaultShellState, normalizePersistedAppState,
+  type AppOwnedTab, type PersistedAppState, type WorkspaceUiRecord,
+} from "./types";
 
 /**
  * The TypeScript end of the `save_app_state` contract.
@@ -53,9 +56,48 @@ describe("persisted app state contract", () => {
       ...(contract as unknown as PersistedAppState),
       schemaVersion: 1,
     };
-    expect(typed.shell.agentSort).toBe("priority");
+    expect(typed.shell.agentSort).toBe("status");
     expect(typed.shell.sidebarWidth).toBe(260);
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
+  });
+});
+
+describe("reading state the previous build wrote", () => {
+  const saved = (shell: Record<string, unknown>) => normalizePersistedAppState({
+    schemaVersion: 1, appTabs: [], workspaceUi: [], shell,
+  });
+
+  it("migrates the renamed agent orderings instead of resetting them", () => {
+    // The orderings were renamed, not changed. Falling back to the default —
+    // which is what an unrecognised value does everywhere else in this
+    // function — would have silently moved every user who had picked the other
+    // order back onto this one, for a change that was only ever about wording.
+    expect(saved({ agentSort: "priority" }).shell.agentSort).toBe("status");
+    expect(saved({ agentSort: "grouped" }).shell.agentSort).toBe("workspace");
+    expect(saved({ agentSort: "status" }).shell.agentSort).toBe("status");
+    expect(saved({ agentSort: "workspace" }).shell.agentSort).toBe("workspace");
+    // Anything else is still a value this build refuses to trust.
+    expect(saved({ agentSort: "inbox" }).shell.agentSort).toBe(defaultShellState.agentSort);
+    expect(saved({}).shell.agentSort).toBe(defaultShellState.agentSort);
+  });
+
+  it("leaves the rest of a legacy save alone while migrating the ordering", () => {
+    // The migration is one field. A save that carries open tabs and a picked
+    // workspace must come back with both, not with a fresh default state.
+    const tab = { ...contract.appTabs[0] };
+    const restored = normalizePersistedAppState({
+      schemaVersion: 1,
+      appTabs: [tab],
+      workspaceUi: [contract.workspaceUi[0]],
+      shell: { agentSort: "priority", sidebarWidth: 320, panelOpen: true },
+      commands: { shortcutOverrides: { "window.new": "Ctrl+T" } },
+    });
+    expect(restored.shell.agentSort).toBe("status");
+    expect(restored.appTabs).toEqual([tab]);
+    expect(restored.workspaceUi).toHaveLength(1);
+    expect(restored.shell.sidebarWidth).toBe(320);
+    expect(restored.shell.panelOpen).toBe(true);
+    expect(restored.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
   });
 });

@@ -27,9 +27,12 @@ use objc2_foundation::{NSDictionary, NSError, NSObject, NSObjectProtocol, NSStri
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
     UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-    UNNotificationSettings, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+    UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
+    UNUserNotificationCenterDelegate,
 };
 use phase0_core::NotificationRoute;
+
+use super::{TEST_BODY, TEST_TITLE};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
@@ -41,6 +44,13 @@ const NATIVE_CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
 const AUTHORIZATION_PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PENDING_ROUTES: usize = 512;
 const ROUTE_SCHEMA: &str = "ade-notification-route-v1";
+/// The identifier prefix that marks the notification the user asked for.
+const TEST_IDENTIFIER_PREFIX: &str = "test-";
+/// `userInfo` key carrying the frontend's foreground-presentation answer.
+const FOREGROUND_KEY: &str = "adeForeground";
+/// The only value that suppresses. Anything else — including a payload that
+/// never set the key — presents, because invisibility is this feature's bug.
+const FOREGROUND_SUPPRESS: &str = "suppress";
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static ROUTES: OnceLock<Mutex<PendingRoutes>> = OnceLock::new();
@@ -75,6 +85,35 @@ impl PendingRoutes {
     }
 }
 
+/// What the delegate shows for one notification while the app is frontmost.
+///
+/// Foreground suppression used to be total — `will_present` completed with no
+/// options at all — so while the app was frontmost the system showed nothing,
+/// for every notification, including the ones the frontend had already decided
+/// were not on any pane the user can see. Focus is the frontend's fact, not
+/// this process's, so its answer travels *on* the notification: this reads the
+/// same `userInfo` the activation path already reads, which means there is no
+/// side table to keep, bound, evict, or clean up on the error path.
+///
+/// The sound half is read off the content rather than decided again here, so
+/// the banner and the sound cannot disagree with what was actually posted:
+/// agent notifications carry no sound because the app plays its own cue for
+/// the same transition, and the test notification carries one.
+fn foreground_presentation(
+    sound: bool,
+    user_info: &NSDictionary,
+) -> UNNotificationPresentationOptions {
+    if notification_string(user_info, FOREGROUND_KEY).as_deref() == Some(FOREGROUND_SUPPRESS) {
+        return UNNotificationPresentationOptions::empty();
+    }
+    let banner = UNNotificationPresentationOptions::Banner;
+    if sound {
+        banner | UNNotificationPresentationOptions::Sound
+    } else {
+        banner
+    }
+}
+
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = AnyThread]
@@ -87,12 +126,15 @@ define_class!(
         fn will_present(
             &self,
             _center: &UNUserNotificationCenter,
-            _notification: &UNNotification,
+            notification: &UNNotification,
             completion: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            // Foreground attention is already represented in-app. Suppress
-            // the duplicate system banner and sound while the app is active.
-            completion.call((UNNotificationPresentationOptions::empty(),));
+            // Only the pane the user is actually looking at represents its own
+            // attention in-app. Everything else is as invisible as it would be
+            // with the app in the background, so it is presented.
+            let content = notification.request().content();
+            let options = foreground_presentation(content.sound().is_some(), &content.userInfo());
+            completion.call((options,));
         }
 
         #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
@@ -140,6 +182,18 @@ pub struct NativeNotifications {
     route_directory: Option<Arc<File>>,
 }
 
+/// One notification's parameters, named. Two of these are adjacent booleans,
+/// which is the shape that silently swaps when passed positionally.
+struct Posting<'a> {
+    title: &'a str,
+    body: &'a str,
+    identifier: String,
+    /// `Some` makes the notification actionable and requires route storage.
+    route: Option<NotificationRoute>,
+    present_in_foreground: bool,
+    sound: bool,
+}
+
 impl NativeNotifications {
     pub fn new(app: AppHandle) -> Self {
         let route_directory = app
@@ -170,12 +224,55 @@ impl NativeNotifications {
         body: &str,
         route: NotificationRoute,
         request_action: bool,
+        present_in_foreground: bool,
     ) -> Result<NotificationReceipt, String> {
+        self.post(Posting {
+            title,
+            body,
+            identifier: Uuid::new_v4().to_string(),
+            route: request_action.then_some(route),
+            present_in_foreground,
+            sound: false,
+        })
+    }
+
+    /// The one notification a person can ask for directly.
+    ///
+    /// It carries no route — an actionable notification needs route storage
+    /// that may not exist, and "did a banner appear" is the whole question —
+    /// and it is the call that first raises the OS permission prompt on a
+    /// machine where no agent event has ever fired.
+    pub fn send_test_notification(&self) -> Result<NotificationReceipt, String> {
+        self.post(Posting {
+            title: TEST_TITLE,
+            body: TEST_BODY,
+            identifier: format!("{TEST_IDENTIFIER_PREFIX}{}", Uuid::new_v4()),
+            route: None,
+            present_in_foreground: true,
+            sound: true,
+        })
+    }
+
+    /// What macOS says about this app, in the five words the UI knows.
+    pub fn authorization_status(&self) -> Result<String, String> {
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        Ok(authorization_status_name(notification_status(&center)?).to_owned())
+    }
+
+    fn post(&self, posting: Posting<'_>) -> Result<NotificationReceipt, String> {
+        let Posting {
+            title,
+            body,
+            identifier,
+            route,
+            present_in_foreground,
+            sound,
+        } = posting;
         let center = UNUserNotificationCenter::currentNotificationCenter();
         ensure_authorized(&center)?;
 
-        let identifier = Uuid::new_v4().to_string();
-        if request_action {
+        let request_action = route.is_some();
+        if let Some(route) = route {
             let directory = self
                 .route_directory
                 .as_ref()
@@ -186,20 +283,21 @@ impl NativeNotifications {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(title));
         content.setBody(&NSString::from_str(body));
+        if sound {
+            content.setSound(Some(&UNNotificationSound::defaultSound()));
+        }
+        let mut entries: Vec<(&str, &str)> = Vec::new();
         if request_action {
-            let schema_key = NSString::from_str("adeRouteSchema");
-            let schema = NSString::from_str(ROUTE_SCHEMA);
-            let token_key = NSString::from_str("adeRouteToken");
-            let token = NSString::from_str(&identifier);
-            let typed_user_info =
-                NSDictionary::from_slices(&[&*schema_key, &*token_key], &[&*schema, &*token]);
-            // SAFETY: NSDictionary's generic parameters are Rust-side type
-            // information only; Objective-C exposes userInfo as untyped.
-            let user_info: Retained<NSDictionary> =
-                unsafe { Retained::cast_unchecked(typed_user_info) };
+            entries.push(("adeRouteSchema", ROUTE_SCHEMA));
+            entries.push(("adeRouteToken", &identifier));
+        }
+        if !present_in_foreground {
+            entries.push((FOREGROUND_KEY, FOREGROUND_SUPPRESS));
+        }
+        if !entries.is_empty() {
             // SAFETY: this dictionary contains only NSString keys and values,
             // which are property-list types accepted by UserNotifications.
-            unsafe { content.setUserInfo(&user_info) };
+            unsafe { content.setUserInfo(&string_dictionary(&entries)) };
         }
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSString::from_str(&identifier),
@@ -229,6 +327,24 @@ impl NativeNotifications {
             actionable: request_action,
         })
     }
+}
+
+/// An all-`NSString` `userInfo` dictionary, built from pairs so keys and
+/// values cannot drift out of correspondence.
+fn string_dictionary(entries: &[(&str, &str)]) -> Retained<NSDictionary> {
+    let keys: Vec<Retained<NSString>> = entries
+        .iter()
+        .map(|(key, _)| NSString::from_str(key))
+        .collect();
+    let values: Vec<Retained<NSString>> = entries
+        .iter()
+        .map(|(_, value)| NSString::from_str(value))
+        .collect();
+    let key_refs: Vec<&NSString> = keys.iter().map(|key| &**key).collect();
+    let value_refs: Vec<&NSString> = values.iter().map(|value| &**value).collect();
+    // SAFETY: NSDictionary's generic parameters are Rust-side type information
+    // only; Objective-C exposes userInfo as untyped.
+    unsafe { Retained::cast_unchecked(NSDictionary::from_slices(&key_refs, &value_refs)) }
 }
 
 fn route_filename(id: &str) -> Option<CString> {
@@ -387,8 +503,11 @@ fn ensure_authorized(center: &UNUserNotificationCenter) -> Result<(), String> {
         let callback = RcBlock::new(move |granted: objc2::runtime::Bool, error: *mut NSError| {
             let _ = sender.send((granted.as_bool(), error.is_null()));
         });
+        // Sound as well as Alert. Asking for Alert alone means a granted
+        // notification is silent forever, and there is no second prompt: the
+        // options are fixed at the first request for the life of the install.
         center.requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert,
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
             &callback,
         );
         let (granted, no_error) = receiver
@@ -408,6 +527,19 @@ fn ensure_authorized(center: &UNUserNotificationCenter) -> Result<(), String> {
         Ok(())
     } else {
         Err("macOS notification permission is denied; enable it in System Settings".into())
+    }
+}
+
+/// The framework's status, in the vocabulary the Settings panel renders.
+fn authorization_status_name(status: UNAuthorizationStatus) -> &'static str {
+    match status {
+        UNAuthorizationStatus::NotDetermined => "notDetermined",
+        UNAuthorizationStatus::Denied => "denied",
+        UNAuthorizationStatus::Authorized => "authorized",
+        // Provisional and Ephemeral both mean "delivered quietly, nobody said
+        // yes"; the difference does not change what the user would do next.
+        UNAuthorizationStatus::Provisional | UNAuthorizationStatus::Ephemeral => "provisional",
+        _ => "unsupported",
     }
 }
 
@@ -474,6 +606,86 @@ mod tests {
         assert!(pending.take("0").is_none());
         assert_eq!(pending.take("1").unwrap().agent_id, "1");
         assert!(pending.take("1").is_none());
+    }
+
+    #[test]
+    fn authorization_status_reads_as_one_of_the_five_words_the_ui_knows() {
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::NotDetermined),
+            "notDetermined"
+        );
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::Denied),
+            "denied"
+        );
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::Authorized),
+            "authorized"
+        );
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::Provisional),
+            "provisional"
+        );
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::Ephemeral),
+            "provisional"
+        );
+        // A status this build has never heard of is reported as such rather
+        // than being rounded down to "denied", which would tell the user to go
+        // fix a setting that is not the problem.
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus(99)),
+            "unsupported"
+        );
+        // And every one of them is a word the frontend has a sentence for.
+        for status in [
+            UNAuthorizationStatus::NotDetermined,
+            UNAuthorizationStatus::Denied,
+            UNAuthorizationStatus::Authorized,
+            UNAuthorizationStatus::Provisional,
+            UNAuthorizationStatus::Ephemeral,
+            UNAuthorizationStatus(99),
+        ] {
+            let name = authorization_status_name(status);
+            assert!(
+                crate::notifications::PERMISSION_STATUSES.contains(&name),
+                "{name} is not in the shared permission vocabulary"
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_presentation_shows_everything_except_what_the_frontend_suppressed() {
+        // The frontend said the user is looking at this pane, so the app is
+        // already representing the attention itself.
+        assert_eq!(
+            foreground_presentation(
+                false,
+                &string_dictionary(&[(FOREGROUND_KEY, FOREGROUND_SUPPRESS)])
+            ),
+            UNNotificationPresentationOptions::empty()
+        );
+        // Anything else is presented — including a payload that says nothing,
+        // because total suppression is the defect this reverses and a missing
+        // field must not quietly reinstate it.
+        assert_eq!(
+            foreground_presentation(false, &string_dictionary(&[])),
+            UNNotificationPresentationOptions::Banner
+        );
+        assert_eq!(
+            foreground_presentation(false, &string_dictionary(&[(FOREGROUND_KEY, "present")])),
+            UNNotificationPresentationOptions::Banner
+        );
+    }
+
+    #[test]
+    fn a_notification_that_carries_a_sound_is_presented_with_one() {
+        // Read off the content, so the banner and the sound cannot disagree
+        // with what was actually posted. The test notification is the only
+        // thing that carries one.
+        let options = foreground_presentation(true, &string_dictionary(&[]));
+        assert!(options.contains(UNNotificationPresentationOptions::Banner));
+        assert!(options.contains(UNNotificationPresentationOptions::Sound));
     }
 
     #[test]

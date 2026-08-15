@@ -26,6 +26,41 @@ denial is reported by the app and can be changed for `tmux Agent IDE` in System
 Settings. Accessibility and Screen Recording are required only by the QA
 driver, not by normal app operation.
 
+## Notifications never appear on macOS
+
+Settings → Sounds has a **Send test notification** button and a line saying what
+macOS currently permits. Read that line first; it separates the three reasons a
+notification does not arrive.
+
+- *"Not requested yet"* — nothing has ever asked. Permission is requested lazily
+  on the first agent event, so on a machine where no agent has blocked or
+  finished, the app never appears in System Settings at all. Pressing the button
+  is what raises the prompt.
+- *"Notifications are turned off for this app"* — grant them in System Settings →
+  Notifications → tmux Agent IDE.
+- *"macOS did not answer"* — the running binary is not a bundle the system will
+  register, so the permission query never comes back. There is no framework
+  status for this; the silence *is* the symptom. `pnpm tauri dev` runs an
+  unbundled binary, and a plain `tauri build` bundle can also be rejected when
+  its signature seal is broken (M10-E016). **Only the output of
+  `release/macos/build-package.sh` is expected to deliver notifications**; that
+  script is what removes `LSRequiresCarbon` and re-signs the bundle. Verify a
+  bundle with `release/macos/verify-package.sh`.
+- *"…did not report a notification permission this app understands"* — on Linux,
+  no notification daemon is answering on the session bus. On macOS, a permission
+  state newer than this build.
+
+A notification for the pane you are currently looking at is suppressed on
+purpose — the app is already showing that agent's state. Every other pane's
+notification is shown, including while the app is frontmost.
+
+**Notifications arrive but the test one is silent.** macOS fixes an app's
+notification options at the first authorization request and never asks again.
+Builds before this one asked for alerts only, so an install that granted
+permission then has no sound permission now and cannot be re-prompted from
+inside the app. Turn sound on in System Settings → Notifications → tmux Agent
+IDE, or revoke and re-grant.
+
 The local helper uses a private runtime under
 `~/Library/Caches/dev.dev.tmux-agent-ide/runtime` unless
 `ADE_HOST_RUNTIME_DIR` is explicitly set. Remote Linux helpers are ELF files in

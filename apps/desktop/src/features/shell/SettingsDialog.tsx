@@ -1,7 +1,8 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { HostProfile } from "../../app/types";
+import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
 import type { ShellState } from "./types";
@@ -30,6 +31,10 @@ interface SettingsDialogProps {
   onRequestHelperInstall(): void;
   onShell(update: Partial<ShellState>): void;
   onSounds(preferences: AgentSoundPreferences): void;
+  /** What the OS says about this app's notification permission, read on demand. */
+  onNotificationStatus(): Promise<NotificationPermissionStatus>;
+  /** Posts a test notification. Rejects with whatever the OS refused with. */
+  onTestNotification(): Promise<unknown>;
   /**
    * Where a "not now" is taken back. The one-time prompt is deliberately
    * one-time, so declining it has to leave a way back that is not "reinstall
@@ -172,6 +177,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           <label className="settings-check"><input checked={props.sounds.blocked !== "none"} disabled={!props.sounds.enabled} onChange={(event) => props.onSounds({ ...props.sounds, blocked: event.target.checked ? "subtle" : "none" })} type="checkbox" /> Cue when an agent is blocked</label>
           <label className="settings-check"><input checked={props.sounds.completed !== "none"} disabled={!props.sounds.enabled} onChange={(event) => props.onSounds({ ...props.sounds, completed: event.target.checked ? "subtle" : "none" })} type="checkbox" /> Cue when an agent finishes</label>
           <label>Volume<input aria-label="Agent sound volume" max="1" min="0" onChange={(event) => props.onSounds({ ...props.sounds, volume: Number(event.target.value) })} step="0.05" type="range" value={props.sounds.volume} /></label>
+          <NotificationSettings onStatus={props.onNotificationStatus} onTest={props.onTestNotification} />
         </>}
 
         {tab === "accessibility" && <>
@@ -193,6 +199,91 @@ export function SettingsDialog(props: SettingsDialogProps) {
       <footer><button className="primary" onClick={tab === "connection" ? props.onConnect : props.onClose} type="button">{tab === "connection" ? "Connect" : "Done"}</button></footer>
     </section>
   </div>;
+}
+
+/**
+ * Whether system notifications can arrive at all, and one button that finds out.
+ *
+ * Both halves exist because neither was answerable before. Permission is
+ * requested lazily on the first agent event, so on a machine where nothing has
+ * blocked or finished the app never appeared in System Settings and there was
+ * nothing to grant — this button is what asks. And when a notification does not
+ * appear there are three different reasons (never requested, denied, or the app
+ * is not a properly packaged bundle), which the status line separates instead of
+ * leaving the user to guess.
+ *
+ * Mounted with the tab rather than with the dialog: the query is a real
+ * round trip to the OS and this is the only place its answer is shown.
+ */
+function NotificationSettings(props: {
+  onStatus(): Promise<NotificationPermissionStatus>;
+  onTest(): Promise<unknown>;
+}) {
+  const [status, setStatus] = useState<NotificationPermissionStatus | "unreadable">();
+  const [sending, setSending] = useState(false);
+  const [failure, setFailure] = useState<unknown>();
+  const [sent, setSent] = useState(false);
+
+  const { onStatus } = props;
+  useEffect(() => {
+    let live = true;
+    void onStatus().then(
+      (value) => { if (live) setStatus(value); },
+      () => { if (live) setStatus("unreadable"); },
+    );
+    return () => { live = false; };
+  }, [onStatus]);
+
+  // Named, because "Sounds" does not imply system notification permission and
+  // an unlabelled button under a volume slider reads as part of the mixer.
+  return <div className="settings-host-actions">
+    <h3 className="settings-heading">System notifications</h3>
+    <button
+      disabled={sending}
+      onClick={() => {
+        setSending(true);
+        setFailure(undefined);
+        setSent(false);
+        void props.onTest()
+          .then(() => setSent(true), setFailure)
+          // The permission may have just been granted or refused by the prompt
+          // this button raises, so the line above it is re-read either way.
+          .finally(() => {
+            setSending(false);
+            void props.onStatus().then(setStatus, () => setStatus("unreadable"));
+          });
+      }}
+      type="button"
+    >{sending ? "Sending…" : "Send test notification"}</button>
+    <span className="settings-hint">{notificationStatusHint(status)}</span>
+    {/* The same shape every other rejection in this app takes, rather than a
+        bare red string: a Tauri error is the kind of text that needs a summary
+        with the detail behind disclosure. */}
+    {failure !== undefined && <SurfaceError detail={String(failure)} summary="The test notification could not be sent." />}
+    {sent && <span className="settings-hint" role="status">
+      Sent. If nothing appeared, check System Settings → Notifications → tmux Agent IDE.
+    </span>}
+  </div>;
+}
+
+/** The permission state, in the words of what the user would do about it. */
+function notificationStatusHint(status: NotificationPermissionStatus | "unreadable" | undefined): string {
+  switch (status) {
+    case undefined: return "Checking whether this system will deliver notifications…";
+    case "authorized": return "Notifications are allowed for this app.";
+    case "provisional": return "Notifications are delivered quietly. Allow them in System Settings → Notifications → tmux Agent IDE to get banners.";
+    case "denied": return "Notifications are turned off for this app. Enable them in System Settings → Notifications → tmux Agent IDE.";
+    case "notDetermined": return "Not requested yet — sending a test notification is what asks for permission.";
+    // On Linux, no notification daemon is answering. On macOS it is the
+    // catch-all for a permission state this build has never heard of — hence
+    // the wording that fits both without prescribing the wrong fix.
+    case "unsupported": return "This system did not report a notification permission this app understands.";
+    // The likely macOS answer for a build the system will not register: a
+    // `tauri dev` binary, or a bundle whose signature seal is broken. The
+    // framework has no status for "you are not a real app" — the query simply
+    // does not come back — so this is where that guidance has to live.
+    case "unreadable": return "macOS did not answer. This usually means the running build is not a packaged app; only the output of release/macos/build-package.sh can deliver notifications.";
+  }
 }
 
 /** What the host's agent configuration is, in the words of what it is. */

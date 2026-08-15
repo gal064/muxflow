@@ -233,6 +233,11 @@ export interface AgentNativeNotification {
   route: AgentNotificationRoute;
   /** False for an unmapped record that must remain in-app-only attention. */
   requestAction: boolean;
+  /**
+   * Whether the OS should show this while the app is frontmost. Only this side
+   * knows which pane the user is looking at, so only this side can answer it.
+   */
+  presentInForeground: boolean;
 }
 
 export interface AgentNotificationInstrumentation {

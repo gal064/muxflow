@@ -104,7 +104,7 @@ export const defaultShellState: ShellState = {
   sidebarCollapsed: false,
   sidebarWidth: SIDEBAR_MIN_WIDTH,
   panelOpen: false,
-  agentSort: "grouped",
+  agentSort: "workspace",
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
   terminalScreenReader: false,
@@ -145,7 +145,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       sidebarCollapsed: Boolean(shell?.sidebarCollapsed),
       sidebarWidth: clampedSidebarWidth(shell?.sidebarWidth),
       panelOpen: Boolean(shell?.panelOpen),
-      agentSort: isAgentSortMode(shell?.agentSort) ? shell.agentSort : defaultShellState.agentSort,
+      agentSort: migratedAgentSort(shell?.agentSort),
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
@@ -155,6 +155,21 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
     commands: { shortcutOverrides: normalizeShortcutRecord(candidate.commands?.shortcutOverrides) },
     hostSetup: normalizeHostSetup(candidate.hostSetup),
   };
+}
+
+/**
+ * The agent ordering, under whichever name the file was written with.
+ *
+ * `priority` and `grouped` are the previous names of the two orderings that
+ * are now `status` and `workspace`; the sorts themselves did not change. A
+ * saved value is therefore migrated rather than dropped — falling back to the
+ * default here would silently put every user who had picked the other order
+ * back on this one, for a change that was only ever about wording.
+ */
+function migratedAgentSort(value: unknown): AgentSortMode {
+  if (value === "priority") return "status";
+  if (value === "grouped") return "workspace";
+  return isAgentSortMode(value) ? value : defaultShellState.agentSort;
 }
 
 /**

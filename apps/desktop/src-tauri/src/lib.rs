@@ -69,7 +69,21 @@ struct AgentNotificationContent {
     title: String,
     body: String,
     request_action: bool,
+    /// Whether macOS should show this while the app itself is frontmost. The
+    /// frontend is the only side that knows which pane the user is looking at.
+    ///
+    /// Defaulted to *presenting*, not to suppressing. A missing field is a bug
+    /// either way, but its two failure modes are not equal: showing a banner
+    /// for a pane already on screen is a duplicate, while suppressing one is
+    /// silence — which is the exact defect this flag exists to end, and the
+    /// kind nobody reports because nothing happens.
+    #[serde(default = "present_by_default")]
+    present_in_foreground: bool,
     route: AgentNotificationRouteContent,
+}
+
+fn present_by_default() -> bool {
+    true
 }
 
 #[tauri::command]
@@ -91,10 +105,49 @@ async fn emit_agent_notification(
             &notification.body,
             route,
             notification.request_action,
+            notification.present_in_foreground,
         )
     })
     .await
     .map_err(|error| format!("native notification worker failed: {error}"))?
+}
+
+/// What the OS says about this app's permission, so Settings can say it too.
+///
+/// Read-only and never prompts: a status line that raised a modal system
+/// prompt just for being looked at would be a worse surface than none.
+#[tauri::command]
+async fn notification_permission_status(
+    notifications: tauri::State<'_, notifications::NativeNotifications>,
+) -> Result<String, String> {
+    let notifications = notifications.inner().clone();
+    let status = tauri::async_runtime::spawn_blocking(move || notifications.authorization_status())
+        .await
+        .map_err(|error| format!("notification status worker failed: {error}"))??;
+    // Three backends write this vocabulary independently and the UI renders one
+    // sentence per word, so a sixth word would render as an empty status line.
+    // The frontend re-checks it too; this is where a new backend finds out.
+    debug_assert!(
+        notifications::PERMISSION_STATUSES.contains(&status.as_str()),
+        "{status} is not a notification permission the UI can render"
+    );
+    Ok(status)
+}
+
+/// The notification the user asks for from Settings.
+///
+/// This is also the only thing in the app that reliably *raises* the OS
+/// permission prompt: authorization is requested lazily on the first
+/// notification, so on a machine where no agent has ever blocked or finished,
+/// the app never appeared in System Settings and there was nothing to grant.
+#[tauri::command]
+async fn emit_test_notification(
+    notifications: tauri::State<'_, notifications::NativeNotifications>,
+) -> Result<notifications::NotificationReceipt, String> {
+    let notifications = notifications.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || notifications.send_test_notification())
+        .await
+        .map_err(|error| format!("native notification worker failed: {error}"))?
 }
 
 fn valid_notification_content(title: &str, body: &str) -> bool {
@@ -160,6 +213,8 @@ pub fn run() {
             connection::helper::install_remote_helper,
             resolve_notification_route,
             emit_agent_notification,
+            emit_test_notification,
+            notification_permission_status,
             connection::start_terminal,
             connection::stop_terminal,
             connection::send_terminal_input,

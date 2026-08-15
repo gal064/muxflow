@@ -3,7 +3,7 @@ import { keyboardEventIsComposing } from "../../commands/registry";
 import { fuzzyRank } from "../../commands/fuzzy";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { StateDot } from "../../ui/StateDot";
-import type { WorkspaceRowModel } from "./workspaceRows";
+import { workspaceMetaLine, type WorkspaceRowModel } from "./workspaceRows";
 
 interface WorkspaceSwitcherProps {
   rows: readonly WorkspaceRowModel[];
@@ -27,8 +27,11 @@ export function WorkspaceSwitcher(props: WorkspaceSwitcherProps) {
   const titleId = useId();
   const dialog = useModalDialog<HTMLElement>(props.onClose);
   const listRef = useRef<HTMLDivElement>(null);
+  // Branch *and* path. The sidebar stopped printing the working directory, but
+  // typing a path fragment is one of the two ways anyone finds a workspace
+  // here, so it stays a match key — and the row shows what it matched on.
   const rows = useMemo(
-    () => fuzzyRank(props.rows, query, (row) => `${row.session.name} ${row.metadata ?? ""}`),
+    () => fuzzyRank(props.rows, query, (row) => `${row.session.name} ${workspaceMetaLine(row)}`),
     [props.rows, query],
   );
   useEffect(() => setActiveIndex(0), [query]);
@@ -83,7 +86,7 @@ export function WorkspaceSwitcher(props: WorkspaceSwitcherProps) {
         >
           <span className="palette-title">{row.session.name}</span>
           {row.attention !== "none" && <StateDot glyphs={props.stateGlyphs} label={`Agent ${row.attention}`} state={row.attention} />}
-          {row.metadata && <span className="palette-meta">{row.metadata}</span>}
+          {workspaceMetaLine(row) && <span className="palette-meta">{workspaceMetaLine(row)}</span>}
         </button>)}
       </div>
     </section>
