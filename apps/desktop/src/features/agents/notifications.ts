@@ -12,12 +12,30 @@ import { generationAtLeast, generationIsAfter, type AgentGeneration } from "./ge
 
 export interface NativeNotificationReceipt { id: number; actionable: boolean }
 
+/** What macOS says about this app; `unsupported` where there is nothing to grant. */
+export type NotificationPermissionStatus =
+  | "authorized" | "denied" | "notDetermined" | "provisional" | "unsupported";
+
+export function notificationPermissionStatus(): Promise<NotificationPermissionStatus> {
+  return invoke("notification_permission_status");
+}
+
+/**
+ * The notification the user asks for from Settings — and, on a machine where
+ * no agent has ever blocked or finished, the only thing that raises the OS
+ * permission prompt at all.
+ */
+export function emitTestNotification(): Promise<NativeNotificationReceipt> {
+  return invoke("emit_test_notification");
+}
+
 export function emitNativeAgentNotification(notification: AgentNativeNotification): Promise<NativeNotificationReceipt> {
   return invoke("emit_agent_notification", {
     notification: {
       title: notification.title,
       body: notification.body,
       requestAction: notification.requestAction,
+      presentInForeground: notification.presentInForeground,
       route: {
         hostProfile: notification.route.hostProfileId,
         serverIdentity: notification.route.serverIdentity,
@@ -99,6 +117,13 @@ export function decideAgentNotification(
         ? `Unmapped · ${event === "blocked" ? "Blocked" : "Done"} · Review in Agents`
         : `${workspace} · ${terminal} · ${event === "blocked" ? "Blocked" : "Done"}`,
       requestAction: Boolean(next.paneId),
+      // Anything that survives the focus rule above is, by construction, about
+      // a pane the user cannot see — so it is worth showing even with the app
+      // in front. macOS used to make that call itself, and made it "never":
+      // its delegate suppressed every foreground notification, so a blocked
+      // agent in another workspace succeeded invisibly while the user sat in
+      // this one. The rule lives on this side; the answer travels with it.
+      presentInForeground: true,
       route: {
         hostProfileId: next.hostProfileId,
         serverIdentity: next.serverIdentity,

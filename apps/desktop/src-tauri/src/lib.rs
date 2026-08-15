@@ -69,6 +69,13 @@ struct AgentNotificationContent {
     title: String,
     body: String,
     request_action: bool,
+    /// Whether macOS should show this while the app itself is frontmost. The
+    /// frontend is the only side that knows which pane the user is looking at.
+    /// Defaulted rather than required, and defaulted to the conservative
+    /// answer: a payload without it suppresses, exactly as every build before
+    /// the flag existed did.
+    #[serde(default)]
+    present_in_foreground: bool,
     route: AgentNotificationRouteContent,
 }
 
@@ -91,10 +98,41 @@ async fn emit_agent_notification(
             &notification.body,
             route,
             notification.request_action,
+            notification.present_in_foreground,
         )
     })
     .await
     .map_err(|error| format!("native notification worker failed: {error}"))?
+}
+
+/// What the OS says about this app's permission, so Settings can say it too.
+///
+/// Read-only and never prompts: a status line that raised a modal system
+/// prompt just for being looked at would be a worse surface than none.
+#[tauri::command]
+async fn notification_permission_status(
+    notifications: tauri::State<'_, notifications::NativeNotifications>,
+) -> Result<String, String> {
+    let notifications = notifications.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || notifications.authorization_status())
+        .await
+        .map_err(|error| format!("notification status worker failed: {error}"))?
+}
+
+/// The notification the user asks for from Settings.
+///
+/// This is also the only thing in the app that reliably *raises* the OS
+/// permission prompt: authorization is requested lazily on the first
+/// notification, so on a machine where no agent has ever blocked or finished,
+/// the app never appeared in System Settings and there was nothing to grant.
+#[tauri::command]
+async fn emit_test_notification(
+    notifications: tauri::State<'_, notifications::NativeNotifications>,
+) -> Result<notifications::NotificationReceipt, String> {
+    let notifications = notifications.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || notifications.send_test_notification())
+        .await
+        .map_err(|error| format!("native notification worker failed: {error}"))?
 }
 
 fn valid_notification_content(title: &str, body: &str) -> bool {
@@ -160,6 +198,8 @@ pub fn run() {
             connection::helper::install_remote_helper,
             resolve_notification_route,
             emit_agent_notification,
+            emit_test_notification,
+            notification_permission_status,
             connection::start_terminal,
             connection::stop_terminal,
             connection::send_terminal_input,
