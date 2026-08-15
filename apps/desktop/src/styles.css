@@ -438,7 +438,13 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* The frame's edge is drawn, not laid out: an inset shadow costs no pixels,
    while a border costs each pane the same width however small the pane is, and
    the tmux client size can only give that allowance back in proportion. */
-.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); box-shadow: inset -1px -1px 0 var(--chrome-bg); }
+/* The edge was `--chrome-bg` while chrome was a near-black: a dark line drawn
+   against the pane's own background. `--chrome-bg` is the terminal background
+   now, so that line would be invisible and two panes either side of a split
+   would read as one — this is the one place the chrome/terminal merge takes
+   something away rather than giving it. `--chrome-border` restores a drawn edge
+   from the same ramp every other divider in the app comes from. */
+.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); box-shadow: inset -1px -1px 0 var(--chrome-border); }
 .pane-frame.active { box-shadow: inset 0 0 0 var(--focus-ring) var(--accent); }
 .pane-frame.attention::after {
   content: ""; position: absolute; inset: var(--attention-inset);
@@ -889,9 +895,34 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .segment.active { background: var(--chrome-hover); color: var(--chrome-ink-strong); }
 .settings-body { display: grid; align-content: start; gap: 12px; padding: 16px; overflow-y: auto; }
 .settings-body label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11.5px; }
+/* The controls take the row type size explicitly rather than inheriting the
+   caption size their `label` sets — `font: inherit` in the reset means a field
+   otherwise renders at 11.5px, which is a size for the words *above* a control,
+   not the words *in* one. `min-height` states the field height once instead of
+   letting each control derive its own from its padding and its type size; the
+   rule below is what actually recovers the picker's, and this is what keeps
+   every field on the same one afterwards. */
 .settings-body input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), .settings-body select {
-  width: 100%; padding: 6px; border: 1px solid var(--chrome-border); border-radius: 4px;
-  background: var(--chrome-bg); color: var(--chrome-ink);
+  width: 100%; min-height: 30px; padding: 6px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-row);
+}
+/* Drawn rather than native. WKWebView renders `appearance: menulist` at the
+   platform control's intrinsic height and discards most of the padding around
+   it, so the saved-host picker sat visibly shorter than the text inputs beside
+   it however it was styled. Taking the appearance off makes it an ordinary box
+   that honours the rule above; the cost is the disclosure caret, drawn back
+   here from two gradients so it stays a token colour — this file holds no
+   colour literals, and a caret baked into an SVG data URI would be one. */
+.settings-body select {
+  appearance: none; -webkit-appearance: none; padding-right: 28px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--chrome-dim) 50%),
+    linear-gradient(135deg, var(--chrome-dim) 50%, transparent 50%);
+  /* Offset by exactly one box width, so the two halves meet at the apex
+     instead of overlapping into a blunt tip. */
+  background-position: right 14px center, right 9px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
 }
 .settings-check { display: flex !important; align-items: center; gap: 8px; color: var(--chrome-ink) !important; }
 .settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-faint); font-size: var(--type-secondary); line-height: 1.5; }

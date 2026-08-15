@@ -56,8 +56,11 @@ describe("terminal theme derivation", () => {
   it("falls back cleanly with no stylesheet, and derives the scrollbar from chrome ink", () => {
     const theme = terminalTheme(undefined);
     expect(theme.background).toBe(GHOSTTY_DEFAULT_DARK.background);
-    expect(theme.scrollbarSliderBackground).toBe("#7d848e40");
-    expect(theme.scrollbarSliderHoverBackground).toBe("#7d848e66");
+    // Written through the fallback rather than as a fourth copy of the hex: the
+    // alpha suffix is what this assertion is about, and the colour itself is
+    // already pinned to tokens.css by the chrome-fallback test below.
+    expect(theme.scrollbarSliderBackground).toBe(`${CHROME_FALLBACKS["--chrome-dim"]}40`);
+    expect(theme.scrollbarSliderHoverBackground).toBe(`${CHROME_FALLBACKS["--chrome-dim"]}66`);
   });
 
   it("takes the terminal font and metrics from tokens, not from a literal", () => {
