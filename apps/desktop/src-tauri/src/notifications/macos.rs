@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::CString,
     fs::{self, File},
     io::{Read, Write},
@@ -27,7 +27,8 @@ use objc2_foundation::{NSDictionary, NSError, NSObject, NSObjectProtocol, NSStri
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
     UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-    UNNotificationSettings, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+    UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
+    UNUserNotificationCenterDelegate,
 };
 use phase0_core::NotificationRoute;
 use serde::Serialize;
@@ -41,9 +42,14 @@ const NATIVE_CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
 const AUTHORIZATION_PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PENDING_ROUTES: usize = 512;
 const ROUTE_SCHEMA: &str = "ade-notification-route-v1";
+/// The identifier prefix that marks the notification the user asked for.
+pub(super) const TEST_IDENTIFIER_PREFIX: &str = "test-";
+const TEST_TITLE: &str = "tmux Agent IDE";
+const TEST_BODY: &str = "Test notification — delivery works.";
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static ROUTES: OnceLock<Mutex<PendingRoutes>> = OnceLock::new();
+static FOREGROUND: OnceLock<Mutex<ForegroundPresentation>> = OnceLock::new();
 static ROUTE_DIRECTORY: OnceLock<File> = OnceLock::new();
 static NEXT_RECEIPT: AtomicU32 = AtomicU32::new(1);
 
@@ -75,6 +81,65 @@ impl PendingRoutes {
     }
 }
 
+/// The notifications the delegate should show even though the app is in front.
+///
+/// Foreground suppression used to be total — `will_present` completed with no
+/// options at all — so while the app was frontmost the system showed nothing,
+/// for every notification, including the ones the frontend had already decided
+/// were not on any pane the user can see. Focus is the frontend's fact, not
+/// this process's, so the frontend sends its answer with each notification and
+/// this keeps it, keyed by identifier, until the delegate is asked.
+///
+/// Bounded the same way pending routes are, and for the same reason: an app
+/// that spends a long time in the background accumulates one entry per
+/// notification whose `will_present` will never fire.
+#[derive(Default)]
+struct ForegroundPresentation {
+    ids: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl ForegroundPresentation {
+    fn insert(&mut self, id: String) {
+        while self.ids.len() >= MAX_PENDING_ROUTES {
+            match self.order.pop_front() {
+                Some(oldest) => {
+                    self.ids.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+        self.order.push_back(id.clone());
+        self.ids.insert(id);
+    }
+
+    fn take(&mut self, id: &str) -> bool {
+        let present = self.ids.remove(id);
+        if present {
+            self.order.retain(|entry| entry != id);
+        }
+        present
+    }
+}
+
+/// What the delegate shows for one notification while the app is frontmost.
+///
+/// The `test-` prefix is checked unconditionally rather than through the
+/// registry: the test notification exists to answer "does delivery work at
+/// all", and an answer that depends on in-memory state which the bound above
+/// can evict would be the one answer this button must never give.
+fn foreground_presentation(identifier: &str) -> UNNotificationPresentationOptions {
+    if identifier.starts_with(TEST_IDENTIFIER_PREFIX) {
+        return UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::Sound;
+    }
+    if foreground().lock().unwrap().take(identifier) {
+        // Banner without Sound: the app plays its own agent cue for the same
+        // event, and two sounds for one transition is worse than none.
+        return UNNotificationPresentationOptions::Banner;
+    }
+    UNNotificationPresentationOptions::empty()
+}
+
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = AnyThread]
@@ -87,12 +152,14 @@ define_class!(
         fn will_present(
             &self,
             _center: &UNUserNotificationCenter,
-            _notification: &UNNotification,
+            notification: &UNNotification,
             completion: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            // Foreground attention is already represented in-app. Suppress
-            // the duplicate system banner and sound while the app is active.
-            completion.call((UNNotificationPresentationOptions::empty(),));
+            // Only the pane the user is actually looking at represents its own
+            // attention in-app. Everything else is as invisible as it would be
+            // with the app in the background, so it is presented.
+            let identifier = notification.request().identifier().to_string();
+            completion.call((foreground_presentation(&identifier),));
         }
 
         #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
@@ -126,6 +193,10 @@ define_class!(
 
 fn routes() -> &'static Mutex<PendingRoutes> {
     ROUTES.get_or_init(|| Mutex::new(PendingRoutes::default()))
+}
+
+fn foreground() -> &'static Mutex<ForegroundPresentation> {
+    FOREGROUND.get_or_init(|| Mutex::new(ForegroundPresentation::default()))
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -170,12 +241,55 @@ impl NativeNotifications {
         body: &str,
         route: NotificationRoute,
         request_action: bool,
+        present_in_foreground: bool,
+    ) -> Result<NotificationReceipt, String> {
+        self.post(
+            title,
+            body,
+            Uuid::new_v4().to_string(),
+            request_action.then_some(route),
+            present_in_foreground,
+            false,
+        )
+    }
+
+    /// The one notification a person can ask for directly.
+    ///
+    /// It carries no route — an actionable notification needs route storage
+    /// that may not exist, and "did a banner appear" is the whole question —
+    /// and it is the call that first raises the OS permission prompt on a
+    /// machine where no agent event has ever fired.
+    pub fn send_test_notification(&self) -> Result<NotificationReceipt, String> {
+        self.post(
+            TEST_TITLE,
+            TEST_BODY,
+            format!("{TEST_IDENTIFIER_PREFIX}{}", Uuid::new_v4()),
+            None,
+            true,
+            true,
+        )
+    }
+
+    /// What macOS says about this app, in the five words the UI knows.
+    pub fn authorization_status(&self) -> Result<String, String> {
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        Ok(authorization_status_name(notification_status(&center)?).to_owned())
+    }
+
+    fn post(
+        &self,
+        title: &str,
+        body: &str,
+        identifier: String,
+        route: Option<NotificationRoute>,
+        present_in_foreground: bool,
+        sound: bool,
     ) -> Result<NotificationReceipt, String> {
         let center = UNUserNotificationCenter::currentNotificationCenter();
         ensure_authorized(&center)?;
 
-        let identifier = Uuid::new_v4().to_string();
-        if request_action {
+        let request_action = route.is_some();
+        if let Some(route) = route {
             let directory = self
                 .route_directory
                 .as_ref()
@@ -183,9 +297,15 @@ impl NativeNotifications {
             persist_route(directory, &identifier, &route)?;
             routes().lock().unwrap().insert(identifier.clone(), route);
         }
+        if present_in_foreground {
+            foreground().lock().unwrap().insert(identifier.clone());
+        }
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(title));
         content.setBody(&NSString::from_str(body));
+        if sound {
+            content.setSound(Some(&UNNotificationSound::defaultSound()));
+        }
         if request_action {
             let schema_key = NSString::from_str("adeRouteSchema");
             let schema = NSString::from_str(ROUTE_SCHEMA);
@@ -221,6 +341,7 @@ impl NativeNotifications {
             .map_err(|_| "macOS notification delivery timed out".to_owned())?
         {
             routes().lock().unwrap().take(&identifier);
+            foreground().lock().unwrap().take(&identifier);
             remove_persisted_route(&identifier);
             return Err(error);
         }
@@ -387,8 +508,11 @@ fn ensure_authorized(center: &UNUserNotificationCenter) -> Result<(), String> {
         let callback = RcBlock::new(move |granted: objc2::runtime::Bool, error: *mut NSError| {
             let _ = sender.send((granted.as_bool(), error.is_null()));
         });
+        // Sound as well as Alert. Asking for Alert alone means a granted
+        // notification is silent forever, and there is no second prompt: the
+        // options are fixed at the first request for the life of the install.
         center.requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert,
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
             &callback,
         );
         let (granted, no_error) = receiver
@@ -408,6 +532,19 @@ fn ensure_authorized(center: &UNUserNotificationCenter) -> Result<(), String> {
         Ok(())
     } else {
         Err("macOS notification permission is denied; enable it in System Settings".into())
+    }
+}
+
+/// The framework's status, in the vocabulary the Settings panel renders.
+fn authorization_status_name(status: UNAuthorizationStatus) -> &'static str {
+    match status {
+        UNAuthorizationStatus::NotDetermined => "notDetermined",
+        UNAuthorizationStatus::Denied => "denied",
+        UNAuthorizationStatus::Authorized => "authorized",
+        // Provisional and Ephemeral both mean "delivered quietly, nobody said
+        // yes"; the difference does not change what the user would do next.
+        UNAuthorizationStatus::Provisional | UNAuthorizationStatus::Ephemeral => "provisional",
+        _ => "unsupported",
     }
 }
 
@@ -474,6 +611,81 @@ mod tests {
         assert!(pending.take("0").is_none());
         assert_eq!(pending.take("1").unwrap().agent_id, "1");
         assert!(pending.take("1").is_none());
+    }
+
+    #[test]
+    fn authorization_status_reads_as_one_of_the_five_words_the_ui_knows() {
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::NotDetermined),
+            "notDetermined"
+        );
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::Denied),
+            "denied"
+        );
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::Authorized),
+            "authorized"
+        );
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::Provisional),
+            "provisional"
+        );
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus::Ephemeral),
+            "provisional"
+        );
+        // A status this build has never heard of is reported as such rather
+        // than being rounded down to "denied", which would tell the user to go
+        // fix a setting that is not the problem.
+        assert_eq!(
+            authorization_status_name(UNAuthorizationStatus(99)),
+            "unsupported"
+        );
+    }
+
+    #[test]
+    fn the_test_notification_presents_in_the_foreground_without_any_registry_entry() {
+        // The registry is in-memory and bounded. The one notification whose
+        // entire job is to answer "does a banner appear" must not be able to
+        // answer "no" because its entry was evicted.
+        let options = foreground_presentation(&format!("{TEST_IDENTIFIER_PREFIX}{}", Uuid::new_v4()));
+        assert!(options.contains(UNNotificationPresentationOptions::Banner));
+        assert!(options.contains(UNNotificationPresentationOptions::Sound));
+    }
+
+    #[test]
+    fn an_agent_notification_presents_once_when_the_frontend_said_the_pane_is_not_visible() {
+        let id = Uuid::new_v4().to_string();
+        // Nothing registered: the frontend said this pane is the focused one,
+        // so the app is already showing the attention itself.
+        assert_eq!(
+            foreground_presentation(&id),
+            UNNotificationPresentationOptions::empty()
+        );
+        foreground().lock().unwrap().insert(id.clone());
+        assert_eq!(
+            foreground_presentation(&id),
+            UNNotificationPresentationOptions::Banner
+        );
+        // Consumed: `will_present` fires once per request, and a leftover entry
+        // would be a second notification's answer.
+        assert_eq!(
+            foreground_presentation(&id),
+            UNNotificationPresentationOptions::empty()
+        );
+    }
+
+    #[test]
+    fn foreground_entries_are_bounded_and_consumed_exactly_once() {
+        let mut pending = ForegroundPresentation::default();
+        for index in 0..=MAX_PENDING_ROUTES {
+            pending.insert(index.to_string());
+        }
+        assert_eq!(pending.ids.len(), MAX_PENDING_ROUTES);
+        assert!(!pending.take("0"));
+        assert!(pending.take("1"));
+        assert!(!pending.take("1"));
     }
 
     #[test]

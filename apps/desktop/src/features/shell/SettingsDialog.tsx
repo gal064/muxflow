@@ -1,7 +1,8 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { HostProfile } from "../../app/types";
+import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
 import type { ShellState } from "./types";
@@ -30,6 +31,10 @@ interface SettingsDialogProps {
   onRequestHelperInstall(): void;
   onShell(update: Partial<ShellState>): void;
   onSounds(preferences: AgentSoundPreferences): void;
+  /** What the OS says about this app's notification permission, read on demand. */
+  onNotificationStatus(): Promise<NotificationPermissionStatus>;
+  /** Posts a test notification; resolves to the failure text, or nothing on success. */
+  onTestNotification(): Promise<string | undefined>;
   /**
    * Where a "not now" is taken back. The one-time prompt is deliberately
    * one-time, so declining it has to leave a way back that is not "reinstall
@@ -172,6 +177,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           <label className="settings-check"><input checked={props.sounds.blocked !== "none"} disabled={!props.sounds.enabled} onChange={(event) => props.onSounds({ ...props.sounds, blocked: event.target.checked ? "subtle" : "none" })} type="checkbox" /> Cue when an agent is blocked</label>
           <label className="settings-check"><input checked={props.sounds.completed !== "none"} disabled={!props.sounds.enabled} onChange={(event) => props.onSounds({ ...props.sounds, completed: event.target.checked ? "subtle" : "none" })} type="checkbox" /> Cue when an agent finishes</label>
           <label>Volume<input aria-label="Agent sound volume" max="1" min="0" onChange={(event) => props.onSounds({ ...props.sounds, volume: Number(event.target.value) })} step="0.05" type="range" value={props.sounds.volume} /></label>
+          <NotificationSettings onStatus={props.onNotificationStatus} onTest={props.onTestNotification} />
         </>}
 
         {tab === "accessibility" && <>
@@ -193,6 +199,81 @@ export function SettingsDialog(props: SettingsDialogProps) {
       <footer><button className="primary" onClick={tab === "connection" ? props.onConnect : props.onClose} type="button">{tab === "connection" ? "Connect" : "Done"}</button></footer>
     </section>
   </div>;
+}
+
+/**
+ * Whether system notifications can arrive at all, and one button that finds out.
+ *
+ * Both halves exist because neither was answerable before. Permission is
+ * requested lazily on the first agent event, so on a machine where nothing has
+ * blocked or finished the app never appeared in System Settings and there was
+ * nothing to grant — this button is what asks. And when a notification does not
+ * appear there are three different reasons (never requested, denied, or the app
+ * is not a properly packaged bundle), which the status line separates instead of
+ * leaving the user to guess.
+ *
+ * Mounted with the tab rather than with the dialog: the query is a real
+ * round trip to the OS and this is the only place its answer is shown.
+ */
+function NotificationSettings(props: {
+  onStatus(): Promise<NotificationPermissionStatus>;
+  onTest(): Promise<string | undefined>;
+}) {
+  const [status, setStatus] = useState<NotificationPermissionStatus | "unreadable">();
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string>();
+  const [sent, setSent] = useState(false);
+
+  const { onStatus } = props;
+  useEffect(() => {
+    let live = true;
+    void onStatus().then(
+      (value) => { if (live) setStatus(value); },
+      () => { if (live) setStatus("unreadable"); },
+    );
+    return () => { live = false; };
+  }, [onStatus]);
+
+  return <div className="settings-host-actions">
+    <button
+      disabled={sending}
+      onClick={() => {
+        setSending(true);
+        setError(undefined);
+        setSent(false);
+        void props.onTest()
+          .then((failure) => { setError(failure); setSent(!failure); })
+          // The permission may have just been granted or refused by the prompt
+          // this button raises, so the line above it is re-read either way.
+          .finally(() => {
+            setSending(false);
+            void props.onStatus().then(setStatus, () => setStatus("unreadable"));
+          });
+      }}
+      type="button"
+    >{sending ? "Sending…" : "Send test notification"}</button>
+    <span className="settings-hint">{notificationStatusHint(status)}</span>
+    {error && <span className="settings-error" role="alert">{error}</span>}
+    {sent && <span className="settings-hint" role="status">
+      Sent. If nothing appeared, check System Settings → Notifications → tmux Agent IDE.
+    </span>}
+  </div>;
+}
+
+/** The permission state, in the words of what the user would do about it. */
+function notificationStatusHint(status: NotificationPermissionStatus | "unreadable" | undefined): string {
+  switch (status) {
+    case undefined: return "Checking whether this system will deliver notifications…";
+    case "authorized": return "Notifications are allowed for this app.";
+    case "provisional": return "Notifications are delivered quietly. Allow them in System Settings → Notifications → tmux Agent IDE to get banners.";
+    case "denied": return "Notifications are turned off for this app. Enable them in System Settings → Notifications → tmux Agent IDE.";
+    case "notDetermined": return "Not requested yet — sending a test notification is what asks for permission.";
+    // Not a failure worth an alert: on Linux it means no notification daemon is
+    // running, and on macOS it means this build is not a bundle the system will
+    // register (a `tauri dev` binary, or one whose signature seal is broken).
+    case "unsupported": return "This system has nothing to deliver notifications through. On macOS, only a packaged build can.";
+    case "unreadable": return "The notification permission could not be read on this system.";
+  }
 }
 
 /** What the host's agent configuration is, in the words of what it is. */
