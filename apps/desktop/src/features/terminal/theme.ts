@@ -129,6 +129,25 @@ export function searchDecorations(root: Element | undefined = globalThis.documen
 }
 
 /**
+ * How heavy the terminal's text is allowed to get, as Ghostty answers it.
+ *
+ * These are xterm option values rather than colours, so they cannot live in
+ * `tokens.css`, but they are the same kind of fact as the palette above and
+ * they are wrong in the same way when they drift: `bold-is-bright` is off in
+ * Ghostty and xterm's `drawBoldTextInBrightColors` defaults to on, so a bold run
+ * in the app was being emphasised twice — bold face *and* the bright half of
+ * the palette — against a terminal that emphasises it once. The two weights are
+ * xterm's own defaults, stated because they are the two the bundled faces
+ * actually provide: anything else is synthesised, and a synthesised weight is
+ * the other way this terminal has been heavier than its font.
+ */
+export const GHOSTTY_TEXT_OPTIONS = {
+  drawBoldTextInBrightColors: false,
+  fontWeight: "normal",
+  fontWeightBold: "bold",
+} as const;
+
+/**
  * The terminal's font, from the same tokens the rest of the app uses.
  *
  * `rowPitch` is the token's ratio *applied to the font size* — CSS's meaning of

@@ -4,7 +4,8 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { terminalScreenReaderMode } from "./accessibilityPreference";
-import { searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
+import { installAtlasFontSmoothing } from "./atlasFontSmoothing";
+import { GHOSTTY_TEXT_OPTIONS, searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
 import {
   terminalMeasurements,
   xtermLineHeight,
@@ -362,6 +363,7 @@ export class XtermRenderer implements TerminalRenderer {
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "block",
+      ...GHOSTTY_TEXT_OPTIONS,
       fontFamily: font.fontFamily,
       fontSize: font.fontSize,
       // Corrected to the token's row pitch in `open`, once xterm has measured
@@ -800,6 +802,10 @@ export class XtermRenderer implements TerminalRenderer {
 
   #mountWebgl(): void {
     try {
+      // Before the addon exists, because activating it is what builds the first
+      // glyph atlas, and an atlas built before the hook is in place keeps the
+      // heavier glyphs for as long as it lives.
+      installAtlasFontSmoothing();
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
         webgl.dispose();
