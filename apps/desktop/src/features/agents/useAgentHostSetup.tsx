@@ -9,12 +9,18 @@ export interface AgentHostSetupOptions {
   /** Live, mutable, authoritative — nothing is offered without all three. */
   connected: boolean;
   hostProfileId: string;
+  /**
+   * The connected host this render's adapters describe, or `undefined` when
+   * there is none. Consent is answered about one host and stays bound to it
+   * for the whole install; see `agentHostIdentity`.
+   */
+  hostIdentity?: string;
   hostLabel: string;
   /** What the user last answered for this host, if anything. */
   decision?: HostSetupDecision;
   recordDecision(hostProfileId: string, decision: HostSetupDecision): void;
-  reviewHooks(adapter: string, action: "install" | "uninstall"): Promise<AgentHookReview>;
-  applyHooks(review: AgentHookReview): Promise<void>;
+  reviewHooks(adapter: string, action: "install" | "uninstall", expectedHost: string): Promise<AgentHookReview>;
+  applyHooks(review: AgentHookReview, expectedHost: string): Promise<void>;
   /**
    * Applies the recommended tmux window naming. Separate from the hooks
    * because it lives in the tmux server's memory rather than a config file,
@@ -26,6 +32,24 @@ export interface AgentHostSetupOptions {
   onStatus(message: string): void;
   /** Opens the existing exact-diff review for one adapter. */
   openReview(adapter: string): void;
+}
+
+/**
+ * One host, named two ways: the durable key a decision is remembered under,
+ * and the connection identity every write in this flow is checked against.
+ */
+interface ConsentedHost {
+  profileId: string;
+  identity: string;
+}
+
+function consentedHost(options: AgentHostSetupOptions): ConsentedHost | undefined {
+  // `connected` and a host identity are the same fact from two sources; both
+  // are required, because the write happens down the connection and the
+  // decision is remembered under the profile.
+  return options.connected && options.hostIdentity && options.hostProfileId
+    ? { profileId: options.hostProfileId, identity: options.hostIdentity }
+    : undefined;
 }
 
 export interface AgentHostSetup {
@@ -68,10 +92,6 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // which changes on every hook event — and the effect below, which installs,
   // depended on this.
   const wiring = useMemo(() => hostHookWiring(options.adapters), [options.adapters]);
-  // Read by callbacks that must act on what the dialog was rendered from,
-  // rather than deriving it a second time and risking a different answer.
-  const wiringRef = useRef(wiring);
-  wiringRef.current = wiring;
   // Two different questions. `offerable` is "is there anything left to set up",
   // which is what Settings and the sidebar's line ask about. Raising the modal
   // unasked needs the stronger one: this host reports nothing at all.
@@ -117,18 +137,33 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     });
   }, []);
 
-  const install = useCallback((targets: readonly AgentAdapterDescriptor[]) => {
+  /**
+   * Installs exactly `targets` on exactly the host the caller answered about.
+   *
+   * Both halves of that sentence were the defect (M13-E004). The host was
+   * re-resolved at every `await`, so a switch mid-install redirected the write
+   * and then recorded "accepted" against whichever host the app had reached —
+   * a host the dialog never named and the user never saw a prompt for. The
+   * adapter list was re-read from a ref at click time rather than taken from
+   * what the dialog listed, so a snapshot arriving while the dialog was open
+   * could widen the consent the user actually gave. Both are now arguments,
+   * bound once, and checked again before every write.
+   */
+  const install = useCallback((targets: readonly AgentAdapterDescriptor[], host: ConsentedHost) => {
     const current = optionsRef.current;
     setApplying(true);
     setError(undefined);
     return (async () => {
       for (const adapter of targets) {
-        const review = await current.reviewHooks(adapter.id, "install");
+        const review = await current.reviewHooks(adapter.id, "install", host.identity);
         // The host's own idempotence answer, so a re-run writes nothing.
-        if (!review.alreadyInstalled) await current.applyHooks(review);
+        if (!review.alreadyInstalled) await current.applyHooks(review, host.identity);
       }
     })().then(() => {
-      current.recordDecision(current.hostProfileId, "accepted");
+      // Against the host that was written, not the one that happens to be
+      // connected now — and only after the writes themselves were accepted for
+      // it, so a refusal above leaves no consent behind.
+      current.recordDecision(host.profileId, "accepted");
       setOpen(false);
       // Part of the same "set up this host" answer, and deliberately after it:
       // a tmux server that refuses the naming must not lose the hooks.
@@ -162,7 +197,11 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       asserted.current = false;
       return;
     }
-    if (options.decision !== "accepted") return;
+    // Real, recorded consent for *this* host, and a host identity to bind the
+    // writes to. A migration is still a write to the user's configuration
+    // files, so it gets no weaker a gate than the first install did.
+    const host = consentedHost(optionsRef.current);
+    if (!host || options.decision !== "accepted") return;
     // Only adapters this app already owns entries in. `partial` means the
     // managed event set grew under a host the user already approved, which is
     // what this exists for. A `notWired` adapter that appeared *later* is one
@@ -177,7 +216,7 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     }
     reassert.current.running = true;
     const named = outdated.map((adapter) => adapter.displayName).join(" and ");
-    void install(outdated).then((ok) => {
+    void install(outdated, host).then((ok) => {
       // Once per connection, whatever happened. `install` finishes by
       // refreshing the wiring, which produces a new snapshot and re-runs this
       // effect; without this an install that cannot reach `wired` — a racing
@@ -188,12 +227,21 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
         ? `Updated the agent status hooks for ${named} on this host.`
         : `Could not update the agent status hooks for ${named} on this host.`);
     });
-  }, [assertNaming, install, options.connected, options.decision, wiring.setupTargets]);
+  }, [assertNaming, install, options.connected, options.decision, options.hostIdentity, options.hostProfileId, wiring.setupTargets]);
 
-
-  const accept = useCallback(() => {
+  /**
+   * `targets` is what the dialog listed, passed down from the render that
+   * showed it rather than re-derived here: those config paths are the whole
+   * content of the question the user answered.
+   */
+  const accept = useCallback((targets: readonly AgentAdapterDescriptor[]) => {
     const current = optionsRef.current;
-    void install(wiringRef.current.setupTargets).then((ok) => {
+    const host = consentedHost(current);
+    if (!host) {
+      setError("This host is no longer connected; nothing was changed.");
+      return;
+    }
+    void install(targets, host).then((ok) => {
       if (ok) current.onStatus(`Agent status hooks installed on ${current.hostLabel}.`);
     });
   }, [install]);
@@ -213,7 +261,7 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       applying={applying}
       error={error}
       hostLabel={options.hostLabel}
-      onAccept={accept}
+      onAccept={() => accept(wiring.setupTargets)}
       onDecline={decline}
       onReview={() => {
         const first = wiring.setupTargets[0];

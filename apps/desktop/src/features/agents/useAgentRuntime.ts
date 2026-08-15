@@ -6,6 +6,7 @@ import { agentsForScope, agentsMatchingFocusedPane, deriveAgentRollups } from ".
 import { agentReducer, initialAgentState } from "./state";
 import { playAgentSound, type SoundInstrumentation } from "./sound";
 import { AgentRuntimeMemory } from "./runtimeMemory";
+import { agentHostIdentity } from "./types";
 import type {
   AgentAdapterId,
   AgentFocus,
@@ -154,16 +155,18 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     if (!optionsRef.current.scope) return Promise.reject(new Error("Agent resume requires a live authoritative host."));
     return optionsRef.current.client.resume(optionsRef.current.scope, agent.id, agent.nativeSessionId, request);
   }, []);
-  const reviewHooks = useCallback((adapter: AgentAdapterId, action: "install" | "uninstall" = "install"): Promise<AgentHookReview> => {
-    if (!optionsRef.current.scope) return Promise.reject(new Error("Hook review requires a live authoritative host."));
-    return optionsRef.current.client.reviewHooks(optionsRef.current.scope, adapter, action).then((review) => ({
+  const reviewHooks = useCallback((adapter: AgentAdapterId, action: "install" | "uninstall" = "install", expectedHost?: string): Promise<AgentHookReview> => {
+    const scope = consentedScope(optionsRef.current.scope, expectedHost, "Hook review");
+    if (scope instanceof Error) return Promise.reject(scope);
+    return optionsRef.current.client.reviewHooks(scope, adapter, action).then((review) => ({
       ...review,
       adapterDisplayName: stateRef.current.adapters.find((descriptor) => descriptor.id === adapter)?.displayName ?? adapter,
     }));
   }, []);
-  const applyHooks = useCallback((review: AgentHookReview): Promise<void> => {
-    if (!optionsRef.current.scope) return Promise.reject(new Error("Hook installation requires a live authoritative host."));
-    return optionsRef.current.client.applyHooks(optionsRef.current.scope, review);
+  const applyHooks = useCallback((review: AgentHookReview, expectedHost?: string): Promise<void> => {
+    const scope = consentedScope(optionsRef.current.scope, expectedHost, "Hook installation");
+    if (scope instanceof Error) return Promise.reject(scope);
+    return optionsRef.current.client.applyHooks(scope, review);
   }, []);
   const applyHostNaming = useCallback((): Promise<AgentHostNamingOutcome> => {
     if (!optionsRef.current.scope) return Promise.reject(new Error("Host naming requires a live authoritative host."));
@@ -178,6 +181,29 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
 }
 
 export type AgentRuntime = ReturnType<typeof useAgentRuntime>;
+
+/**
+ * The scope a hook request may use, or why it may not have one.
+ *
+ * Every path that writes an agent's configuration file is acting on an answer
+ * the user gave about a *named* host, so it passes the identity it was
+ * answering for and the request is refused — never redirected — if this app is
+ * on another host by the time it runs. M13-E004: the decision, the reviewed
+ * diff and the write each resolved "the current host" independently, so a host
+ * switch between them wrote a machine the user had never been asked about.
+ * Callers with no such answer to honour pass nothing and get the live host.
+ */
+function consentedScope(
+  scope: AgentRequestScope | undefined,
+  expectedHost: string | undefined,
+  action: string,
+): AgentRequestScope | Error {
+  if (!scope) return new Error(`${action} requires a live authoritative host.`);
+  if (expectedHost !== undefined && agentHostIdentity(scope) !== expectedHost) {
+    return new Error(`${action} was answered for a different host than this app is connected to now; nothing was changed.`);
+  }
+  return scope;
+}
 
 function scopeKey(hostProfileId: string, serverIdentity: string): string {
   return `${hostProfileId}\0${serverIdentity}`;

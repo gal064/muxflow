@@ -30,6 +30,7 @@ function harness(overrides: Partial<AgentHostSetupOptions> = {}) {
     adapters: [adapter("claude-code", "notWired")],
     connected: true,
     hostProfileId: "ssh-omarchy",
+    hostIdentity: "ssh-omarchy client-1 1",
     hostLabel: "omarchy",
     decision: undefined,
     ...calls,
@@ -250,6 +251,71 @@ describe("the one-time set-up prompt", () => {
     expect(setup.calls.reviewHooks).not.toHaveBeenCalled();
     expect(setup.calls.applyHooks).not.toHaveBeenCalled();
     expect(setup.current.notice).toBeUndefined();
+    await act(async () => renderer.unmount());
+  });
+
+  /**
+   * M13-E004. The invariant: no agent configuration file is written on a host
+   * without an explicit, recorded consent for *that* host, migrations included.
+   *
+   * What broke it was not a missing check but three independent ones. The
+   * decision was read for the host selected when the effect ran, the diff was
+   * computed against the host connected when the request went out, and the
+   * write went down whichever connection was live when it landed. On a machine
+   * that switches hosts — eight app tabs and two profiles, on the field one —
+   * those are not the same host, and the field evidence is the shape it
+   * leaves: exactly one `hostSetup` entry, "accepted", for the host the user
+   * was never prompted about, and none for the host they answered on.
+   */
+  it("refuses every write and records nothing when the host changes mid-install", async () => {
+    // Two adapters, so the switch lands between the first write and the second
+    // — the window that is impossible to see and trivial to hit.
+    // The runtime stands in for the real one: it refuses a request bound to a
+    // host it is no longer connected to, and lets an unbound one through — so
+    // dropping the binding fails the assertions below rather than the stub.
+    let liveHost = "ssh-omarchy client-1 1";
+    const refuseIfMoved = (expectedHost: string | undefined) => {
+      if (expectedHost !== undefined && expectedHost !== liveHost) {
+        throw new Error("answered for a different host than this app is connected to now");
+      }
+    };
+    const reviewHooks = vi.fn(async (id: string, _action: string, expectedHost?: string) => {
+      refuseIfMoved(expectedHost);
+      return review(id);
+    });
+    const applyHooks = vi.fn(async (_review: AgentHookReview, expectedHost?: string) => {
+      refuseIfMoved(expectedHost);
+      // The switch the user makes while the first adapter is still being written.
+      liveHost = "local client-2 1";
+    });
+    const setup = harness({
+      adapters: [adapter("claude-code", "notWired"), adapter("codex", "notWired")],
+      reviewHooks,
+      applyHooks,
+    });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    const accept = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => String(node.children[0]).startsWith("Set up this host"))!;
+    await act(async () => accept.props.onClick());
+    // The first adapter was written to the host the dialog named; the second
+    // was refused rather than redirected to the host now connected.
+    expect(applyHooks).toHaveBeenCalledTimes(1);
+    // And no consent is recorded at all — not for the host that moved away,
+    // and above all not for the host that was never asked.
+    expect(setup.calls.recordDecision).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
+  it("writes nothing on a disconnected host, whatever it last answered", async () => {
+    // A migration is still a write. `hostIdentity` absent means there is no
+    // connection to bind consent to, so there is nothing to migrate against.
+    const setup = harness({ decision: "accepted", hostIdentity: undefined, adapters: [adapter("claude-code", "partial")] });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    expect(setup.calls.reviewHooks).not.toHaveBeenCalled();
+    expect(setup.calls.applyHooks).not.toHaveBeenCalled();
+    expect(setup.calls.recordDecision).not.toHaveBeenCalled();
     await act(async () => renderer.unmount());
   });
 

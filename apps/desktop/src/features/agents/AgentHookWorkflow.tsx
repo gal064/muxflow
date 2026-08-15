@@ -14,6 +14,14 @@ export interface AgentLaunchContext {
 interface AgentWorkflowOptions {
   runtime: AgentRuntime;
   launchContext?: AgentLaunchContext;
+  /**
+   * The connected host a review is opened against, or `undefined` when there
+   * is none. Captured when the diff is computed and re-checked when it is
+   * applied: the diff the user read describes one host's file, and a host
+   * switch while the dialog is open must refuse the write rather than apply
+   * that diff somewhere else (M13-E004).
+   */
+  host?: { profileId: string; identity: string };
   onStatus(message: string): void;
   onModalChange(open: boolean): void;
   /**
@@ -29,8 +37,11 @@ interface AgentWorkflowOptions {
    * withdrawing their consent to keep this host set up. Without that, the
    * per-host "accepted" would put the hooks straight back on the next connect,
    * and the uninstall the user just confirmed would silently not stick.
+   *
+   * `hostProfileId` is the host the review was opened against, not whichever
+   * one is connected when it lands.
    */
-  onHooksChanged(action: "install" | "uninstall"): void;
+  onHooksChanged(action: "install" | "uninstall", hostProfileId: string): void;
 }
 
 export interface AgentWorkflow {
@@ -53,8 +64,14 @@ export interface AgentWorkflow {
  * about to write and cannot be a fire-and-forget menu item.
  */
 export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
-  const { runtime, launchContext, onStatus, onModalChange, onHooksChanged } = options;
-  const [review, setReviewState] = useState<Awaited<ReturnType<AgentRuntime["reviewHooks"]>>>();
+  const { runtime, launchContext, host, onStatus, onModalChange, onHooksChanged } = options;
+  // The host is stored *with* the diff: the two are one answer about one
+  // machine, and separating them is what let the second be applied to a
+  // different first.
+  const [review, setReviewState] = useState<{
+    diff: Awaited<ReturnType<AgentRuntime["reviewHooks"]>>;
+    host: NonNullable<AgentWorkflowOptions["host"]>;
+  }>();
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -91,23 +108,24 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
   }, [onStatus, runtime]);
 
   const reviewHooks = useCallback((adapter: AgentAdapterId, action: "install" | "uninstall") => {
-    void runtime.reviewHooks(adapter, action).then((next) => {
+    if (!host) return onStatus("Reviewing hook changes requires a live authoritative host.");
+    void runtime.reviewHooks(adapter, action, host.identity).then((diff) => {
       setError(undefined);
-      setReview(next);
+      setReview({ diff, host });
     }).catch((cause) => onStatus(String(cause)));
-  }, [onStatus, runtime, setReview]);
+  }, [host, onStatus, runtime, setReview]);
 
   const dialog = review ? <HookReviewDialog
     applying={applying}
     error={error}
-    review={review}
+    review={review.diff}
     onCancel={() => { if (!applying) setReview(undefined); }}
     onConfirm={() => {
       setApplying(true);
       setError(undefined);
-      void runtime.applyHooks(review).then(() => {
-        onStatus(`${adapterName(review.adapterId)} reviewed hooks ${review.action === "install" ? "installed" : "removed"}.`);
-        onHooksChanged(review.action);
+      void runtime.applyHooks(review.diff, review.host.identity).then(() => {
+        onStatus(`${adapterName(review.diff.adapterId)} reviewed hooks ${review.diff.action === "install" ? "installed" : "removed"}.`);
+        onHooksChanged(review.diff.action, review.host.profileId);
         setReview(undefined);
       }).catch((cause) => setError(String(cause))).finally(() => setApplying(false));
     }}
