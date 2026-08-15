@@ -59,6 +59,9 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
             return Err(error).context("initialize private runtime diagnostics");
         }
     };
+    // Before anything reads it: this process's state belongs beside its
+    // socket, not beside whatever its environment would have resolved.
+    paths::adopt_runtime_dir(runtime);
     diagnostics.install_process_recorder();
     // Published before the first connection is accepted, so a hook that fires
     // the instant an agent starts can already find this directory rather than

@@ -59,11 +59,10 @@ fn cli_persists_an_exact_unsequenced_hook_envelope() {
 /// M13-E003, end to end: the hook and the daemon disagreed about which runtime
 /// directory this machine has, and every event was filed where nobody read it.
 ///
-/// The split is reproduced as the field machine had it: the daemon and the hook
-/// each resolve their directory from their own environment, and the two
-/// environments disagree — which on the field machine was an `ssh` command with
-/// no `XDG_RUNTIME_DIR` against a tmux server that had one. Only `HOME` is
-/// common to both, which is the whole basis of the fix.
+/// The split is reproduced as the field machine had it: the daemon is in a
+/// directory the hook's own environment would never name — on the field machine
+/// an `ssh` command with no `XDG_RUNTIME_DIR` against a tmux server that had
+/// one. Only `HOME` is common to both, which is the whole basis of the fix.
 #[test]
 fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     // Short, because the daemon's socket has to fit `sockaddr_un::sun_path`.
@@ -74,16 +73,25 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     }
     .join(format!("ade-split-{}", uuid::Uuid::new_v4().simple()));
     let home = root.join("home");
-    // Both ends resolve their directory the way the product does, from the
-    // environment — nothing here pins one with `ADE_HOST_RUNTIME_DIR`, because
-    // a daemon that was told exactly where to live publishes nothing and the
-    // split this reproduces would not arise.
-    let daemon_xdg = root.join("dx");
     let hook_xdg = root.join("hx");
-    let daemon_runtime = daemon_xdg.join("tmux-agent-ide");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir_all(&daemon_xdg).unwrap();
+    let daemon_runtime = root.join("dr");
     fs::create_dir_all(&hook_xdg).unwrap();
+    fs::create_dir_all(&daemon_runtime).unwrap();
+    // The daemon is pinned, and the pointer it would have published is written
+    // here instead. Both halves are deliberate. Pinning is what keeps this
+    // fixture off every real directory on the machine running it — an unpinned
+    // daemon consults, and its fallback sweep *deletes from*, the directories a
+    // real one could be in. And publishing is not what this test is about: that
+    // a daemon publishes only its own unpinned directory is asserted in
+    // `paths.rs`, so writing the pointer by hand states the one fact this test
+    // depends on without borrowing the machine to produce it.
+    let pointer = if cfg!(target_os = "macos") {
+        home.join("Library/Caches/dev.dev.tmux-agent-ide/daemon-runtime-dir")
+    } else {
+        home.join(".local/state/tmux-agent-ide/daemon-runtime-dir")
+    };
+    fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+    fs::write(&pointer, daemon_runtime.as_os_str().as_encoded_bytes()).unwrap();
     let socket = daemon_runtime.join("host.sock");
 
     // Detached from the harness's pipes and killed on any exit path: a daemon
@@ -93,8 +101,8 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
         Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
             .args(["daemon"])
             .env("HOME", &home)
-            .env("XDG_RUNTIME_DIR", &daemon_xdg)
-            .env_remove("ADE_HOST_RUNTIME_DIR")
+            .env("ADE_HOST_RUNTIME_DIR", &daemon_runtime)
+            .env_remove("XDG_RUNTIME_DIR")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -146,24 +154,24 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
         .arg("--socket")
         .arg(&socket)
         .env("HOME", &home)
-        .env("XDG_RUNTIME_DIR", &daemon_xdg)
-        .env_remove("ADE_HOST_RUNTIME_DIR")
+        .env("ADE_HOST_RUNTIME_DIR", &daemon_runtime)
+        .env_remove("XDG_RUNTIME_DIR")
         .status()
         .unwrap();
     assert!(stopped.success());
     daemon.reap();
     ingest(true);
 
-    // And it is read when that daemon comes back. This is the half the field
-    // machine needs: 45 events are waiting there, written by hooks that could
-    // never find it, and the first start after the upgrade is what replays
-    // them.
+    // And it is read when that daemon comes back. Delivering new events
+    // correctly is only half of it: an event written while the daemon was down
+    // is worth nothing if the daemon that returns does not look where the hook
+    // was told to leave it.
     let mut restarted = DaemonGuard(Some(
         Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
             .args(["daemon"])
             .env("HOME", &home)
-            .env("XDG_RUNTIME_DIR", &daemon_xdg)
-            .env_remove("ADE_HOST_RUNTIME_DIR")
+            .env("ADE_HOST_RUNTIME_DIR", &daemon_runtime)
+            .env_remove("XDG_RUNTIME_DIR")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -184,7 +192,7 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
             .contains("\"source_event_ids\":[\""),
         "the replayed event was not recorded as hook-sourced"
     );
-    restarted.reap_after_stop(&socket, &home, &daemon_xdg);
+    restarted.reap_after_stop(&socket, &home, &daemon_runtime);
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -198,14 +206,14 @@ impl DaemonGuard {
         }
     }
 
-    fn reap_after_stop(&mut self, socket: &std::path::Path, home: &PathBuf, xdg: &PathBuf) {
+    fn reap_after_stop(&mut self, socket: &std::path::Path, home: &PathBuf, runtime: &PathBuf) {
         let _ = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
             .args(["daemon-stop"])
             .arg("--socket")
             .arg(socket)
             .env("HOME", home)
-            .env("XDG_RUNTIME_DIR", xdg)
-            .env_remove("ADE_HOST_RUNTIME_DIR")
+            .env("ADE_HOST_RUNTIME_DIR", runtime)
+            .env_remove("XDG_RUNTIME_DIR")
             .status();
         self.reap();
     }
@@ -324,7 +332,21 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     assert!(!unconfirmed.status.success());
     let refusal = String::from_utf8_lossy(&unconfirmed.stderr).into_owned();
     assert!(refusal.contains("--yes"), "{refusal}");
-    assert!(refusal.contains("your own home directory"), "{refusal}");
+    assert!(
+        refusal.contains("your own agent configuration"),
+        "{refusal}"
+    );
+    // The gate asks where the write lands, not how the command was spelled: a
+    // redirection that resolves back to the operator's own files is not one.
+    let laundered = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        .args(["hook", "install", "--home"])
+        .arg(std::env::var("HOME").unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        !laundered.status.success(),
+        "--home $HOME wrote the operator's real configuration unconfirmed"
+    );
     // And `status` still answers freely: it reads, it does not write.
     assert!(
         Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))

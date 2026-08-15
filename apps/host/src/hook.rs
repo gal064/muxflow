@@ -89,7 +89,6 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
         }
         (None, _) => None,
     };
-    let redirected = home.is_some() || config_override.is_some();
     let manager = crate::service::agents::HookManager::with_overrides(home, config_override)?;
     let action = match verb {
         "status" => None,
@@ -104,13 +103,34 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
     // all, so anything that could run it — a script, an agent, a paste from a
     // README — rewrote the operator's real `~/.claude` and `~/.codex` silently.
     // `--yes` is what makes the answer explicit and, in a shell history, a
-    // record. A run redirected at a fixture home changes nothing of theirs and
-    // needs no such answer, which is what keeps every test lane unchanged.
-    if action.is_some() && !redirected && !arguments.iter().any(|argument| argument == "--yes") {
-        bail!(
-            "hook {verb} would change the agent configuration in your own home directory. \
-             Re-run with --yes to confirm, or with --home/--settings-path to act on a copy."
-        );
+    // record.
+    //
+    // The question is which files this run would write, never which flags it
+    // carries: `--home "$HOME"` and `--settings-path ~/.claude/settings.json`
+    // are both redirections and both land on exactly the files an unredirected
+    // run would. So the paths are compared against the ones this operator's own
+    // environment resolves, which is also what leaves every fixture lane — all
+    // of which redirect somewhere else — needing no answer.
+    if action.is_some() && !confirmed(&arguments) {
+        let mine = crate::service::agents::HookManager::with_overrides(None, None)
+            .map(|mine| {
+                mine.wiring()
+                    .into_iter()
+                    .map(|(_, entry)| entry.config_path)
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        if let Some((_, entry)) = manager
+            .wiring()
+            .into_iter()
+            .find(|(_, entry)| mine.contains(&entry.config_path))
+        {
+            bail!(
+                "hook {verb} would change your own agent configuration at {}. \
+                 Re-run with --yes to confirm, or point --home/--settings-path at a copy.",
+                entry.config_path.display()
+            );
+        }
     }
     let mut report = Vec::new();
     let mut failed = false;
@@ -227,6 +247,27 @@ fn apply_one(
         "changed": changed,
     }))
 }
+
+/// Whether `--yes` was passed as a switch of its own.
+///
+/// Not a plain search: every other flag here takes a value, and a value that
+/// happened to be the string `--yes` would otherwise read as consent.
+fn confirmed(arguments: &[String]) -> bool {
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] == "--yes" {
+            return true;
+        }
+        index += if VALUE_FLAGS.contains(&arguments[index].as_str()) {
+            2
+        } else {
+            1
+        };
+    }
+    false
+}
+
+const VALUE_FLAGS: [&str; 3] = ["--home", "--settings-path", "--adapter"];
 
 fn flag(arguments: &[String], name: &str) -> Option<String> {
     arguments

@@ -6,19 +6,24 @@ use tmux_agent_protocol::v1;
 
 use super::{AgentRuntime, MAX_HOOK_BYTES, publish};
 
-/// Replay everything a stopped daemon was told about, from every directory a
-/// hook could have left it in.
+/// Replay everything a stopped daemon was told about.
 ///
-/// One directory was not enough: a hook whose environment resolved a different
-/// runtime directory from this daemon's wrote a perfectly good mailbox that
-/// nothing swept (M13-E003). The candidate list is the same one the hook uses,
-/// so the two ends agree by construction, and an explicit
-/// `ADE_HOST_RUNTIME_DIR` still collapses it to exactly one directory — a
-/// fixture daemon never reaches into a neighbouring one.
+/// This daemon's own directory first, and then the one it last published —
+/// which is where a hook leaves an event it could not deliver, so that the
+/// daemon coming back finds it. Nothing beyond those two: sweeping consumes
+/// and deletes, and a directory no daemon on this machine has claimed is not
+/// this one's to empty (M13-E003 was fixed once by a scan that did exactly
+/// that, and drained a developer's real mailbox from a test).
 pub(crate) fn ingest() -> anyhow::Result<usize> {
     let mut ingested = 0;
     let mut failure = None;
-    for runtime in crate::paths::runtime_dir_candidates() {
+    let mut swept = vec![crate::paths::runtime_dir()];
+    if let Some(published) = crate::paths::published_runtime_dir()
+        && !swept.contains(&published)
+    {
+        swept.push(published);
+    }
+    for runtime in swept {
         match consume(&runtime, |event| {
             if let Ok(agent_event) = AgentRuntime::global().ingest_hook(&event) {
                 publish(agent_event);

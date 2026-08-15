@@ -394,6 +394,14 @@ impl TerminalClients {
     /// One function because they are one act. The flag is what makes tmux
     /// listen and the size is what it then hears; a caller that could do the
     /// first without the second is how M13-E005 happened.
+    ///
+    /// `visible_session` moves the instant the flag is set, before the size is
+    /// sent, so a failed resize leaves a state that is merely wrong by one
+    /// message rather than incoherent: the client that participates in sizing
+    /// and the one this type believes is visible are the same client, and the
+    /// next `resize` reaches it. Recording it only after the size would leave
+    /// every later resize addressed to a client tmux is ignoring, and reported
+    /// as success.
     fn size_visible_client(&mut self, session_id: &str) -> anyhow::Result<()> {
         let last_size = self.last_size;
         let client = self
@@ -401,10 +409,14 @@ impl TerminalClients {
             .get_mut(session_id)
             .context("selected session control client is detached")?;
         client.set_sizing(true)?;
-        if let Some((columns, rows)) = last_size {
-            client.resize(columns, rows)?;
-        }
-        Ok(())
+        self.visible_session = Some(session_id.to_owned());
+        let Some((columns, rows)) = last_size else {
+            return Ok(());
+        };
+        self.clients
+            .get_mut(session_id)
+            .context("selected session control client is detached")?
+            .resize(columns, rows)
     }
 
     pub(super) fn send_input(&mut self, pane_id: &str, data: &[u8]) -> anyhow::Result<()> {
@@ -450,9 +462,7 @@ impl TerminalClients {
         {
             client.set_sizing(false)?;
         }
-        self.size_visible_client(session_id)?;
-        self.visible_session = Some(session_id.to_owned());
-        Ok(())
+        self.size_visible_client(session_id)
     }
 
     pub(super) fn request_seed(&mut self, pane_id: &str) -> anyhow::Result<()> {

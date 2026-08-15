@@ -90,7 +90,6 @@ export interface AgentHostSetup {
  * read: that is reported, not overwritten.
  */
 export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetup {
-  const [open, setOpen] = useState(false);
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string>();
   const optionsRef = useRef(options);
@@ -108,20 +107,27 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   const promptable = options.connected && shouldPromptForSetup(wiring);
 
   /**
-   * Opens the prompt, and records which host it is about.
+   * The question, as posed — one value, so no part of it can drift.
    *
-   * The host is captured here rather than read again when a button is clicked,
-   * because this is the moment the question is *posed*: the dialog names one
-   * machine and one set of configuration paths, and an answer to it is an
-   * answer about that machine. Resolving the host at click time instead only
-   * ever covers a switch that happens during the install, never one between
-   * reading the dialog and answering it.
+   * The host, the label the dialog shows and the configuration paths it lists
+   * are captured together at the moment the prompt opens, and the dialog is
+   * rendered from them. An answer is an answer to what was on the screen: a
+   * snapshot or a host switch arriving while the modal is open must not leave
+   * the user reading one machine's paths and answering for another's.
    */
-  const [asked, setAsked] = useState<ConsentedHost>();
+  const [asked, setAsked] = useState<{
+    host?: ConsentedHost;
+    label: string;
+    targets: readonly AgentAdapterDescriptor[];
+  }>();
   const offer = useCallback(() => {
+    const current = optionsRef.current;
     setError(undefined);
-    setAsked(consentedHost(optionsRef.current));
-    setOpen(true);
+    setAsked({
+      host: consentedHost(current),
+      label: current.hostLabel,
+      targets: hostHookWiring(current.adapters).setupTargets,
+    });
   }, []);
 
   // Asked once, when the host has actually answered. `decision` being undefined
@@ -134,7 +140,7 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // A host that goes away takes its question with it, rather than leaving a
   // modal over a disconnected app that would act on the next host to connect.
   useEffect(() => {
-    if (!options.connected) setOpen(false);
+    if (!options.connected) setAsked(undefined);
   }, [options.connected]);
 
   // Once per connection. The host's answer is idempotent, but reaching it is
@@ -174,23 +180,39 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     const current = optionsRef.current;
     setApplying(true);
     setError(undefined);
+    // The record follows the write, always in that order and never without it.
+    // Recording only after *every* adapter succeeded left a part-way failure
+    // holding the worst of both: a configuration file changed on the host, and
+    // no record anywhere that the user ever agreed to it — which is half the
+    // shape the field machine was found in. Recording before the loop instead
+    // would answer for a host that may end up with nothing installed, and the
+    // migration path cannot repair that, because it only touches adapters this
+    // app already owns entries in.
+    let wrote = false;
     return (async () => {
       for (const adapter of targets) {
         const review = await current.reviewHooks(adapter.id, "install", host.identity);
         // The host's own idempotence answer, so a re-run writes nothing.
-        if (!review.alreadyInstalled) await current.applyHooks(review, host.identity);
+        if (review.alreadyInstalled) continue;
+        await current.applyHooks(review, host.identity);
+        if (!wrote) {
+          wrote = true;
+          current.recordDecision(host.profileId, "accepted");
+        }
       }
     })().then(() => {
       // Against the host that was written, not the one that happens to be
-      // connected now — and only after the writes themselves were accepted for
-      // it, so a refusal above leaves no consent behind.
+      // connected now. Also for the nothing-to-do case: a host already current
+      // has been agreed to, and asking again every launch is not "once".
       current.recordDecision(host.profileId, "accepted");
-      setOpen(false);
+      setAsked(undefined);
       // Part of the same "set up this host" answer, and deliberately after it:
       // a tmux server that refuses the naming must not lose the hooks.
       assertNaming(host);
       return true;
     }).catch((cause) => {
+      // `false` even when an adapter was written: the answer is recorded, but
+      // the thing the user asked for did not finish, and the dialog says so.
       setError(String(cause));
       return false;
     }).finally(() => {
@@ -255,14 +277,19 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
    * showed it rather than re-derived here: those config paths are the whole
    * content of the question the user answered.
    */
-  const accept = useCallback((targets: readonly AgentAdapterDescriptor[], host?: ConsentedHost) => {
+  const accept = useCallback((question: NonNullable<typeof asked>) => {
     const current = optionsRef.current;
-    if (!host) {
-      setError("This host is no longer connected; nothing was changed.");
+    if (!question.host) {
+      // Two different refusals, and the difference matters to the person
+      // reading it: one is a host that went away, the other is settings this
+      // app could not read and therefore could not record an answer in.
+      setError(current.decisionsArePersistable
+        ? "This host is no longer connected; nothing was changed."
+        : "Your saved settings could not be read, so this answer could not be recorded; nothing was changed.");
       return;
     }
-    void install(targets, host).then((ok) => {
-      if (ok) current.onStatus(`Agent status hooks installed on ${current.hostLabel}.`);
+    void install(question.targets, question.host).then((ok) => {
+      if (ok) current.onStatus(`Agent status hooks installed on ${question.label}.`);
     });
   }, [install]);
 
@@ -272,29 +299,29 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     // changing their mind, not restating it. Against the host that was asked
     // about, so a "no" never lands on a host whose hooks are installed.
     if (host) optionsRef.current.recordDecision(host.profileId, "declined");
-    setOpen(false);
+    setAsked(undefined);
   }, []);
 
-  const dialog = open
+  const dialog = asked
     ? <AgentHostSetupDialog
-      adapters={wiring.setupTargets}
+      adapters={asked.targets}
       applying={applying}
       error={error}
-      hostLabel={options.hostLabel}
-      onAccept={() => accept(wiring.setupTargets, asked)}
-      onDecline={() => decline(asked)}
+      hostLabel={asked.label}
+      onAccept={() => accept(asked)}
+      onDecline={() => decline(asked.host)}
       onReview={() => {
-        const first = wiring.setupTargets[0];
+        const first = asked.targets[0];
         if (!first) return;
-        setOpen(false);
-        options.openReview(first.id);
+        setAsked(undefined);
+        optionsRef.current.openReview(first.id);
       }}
     />
     : null;
 
   return {
     dialog,
-    open,
+    open: asked !== undefined,
     notice: hookWiringNotice(wiring),
     reports: wiring.reports,
     offerable,

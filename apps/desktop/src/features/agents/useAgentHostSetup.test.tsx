@@ -268,7 +268,7 @@ describe("the one-time set-up prompt", () => {
    * leaves: exactly one `hostSetup` entry, "accepted", for the host the user
    * was never prompted about, and none for the host they answered on.
    */
-  it("refuses every write and records nothing when the host changes mid-install", async () => {
+  it("refuses the write on a host that changed mid-install, and answers only for the one it wrote", async () => {
     // Two adapters, so the switch lands between the first write and the second
     // — the window that is impossible to see and trivial to hit.
     // The runtime stands in for the real one: it refuses a request bound to a
@@ -302,9 +302,10 @@ describe("the one-time set-up prompt", () => {
     // The first adapter was written to the host the dialog named; the second
     // was refused rather than redirected to the host now connected.
     expect(applyHooks).toHaveBeenCalledTimes(1);
-    // And no consent is recorded at all — not for the host that moved away,
-    // and above all not for the host that was never asked.
-    expect(setup.calls.recordDecision).not.toHaveBeenCalled();
+    // The record follows the write and names the host that took it. Above all
+    // it never names the host that was never asked — which is the state the
+    // field machine was found in.
+    expect(setup.calls.recordDecision.mock.calls).toEqual([["ssh-omarchy", "accepted"]]);
     await act(async () => renderer.unmount());
   });
 

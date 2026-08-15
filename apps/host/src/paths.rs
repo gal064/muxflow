@@ -40,6 +40,28 @@ pub fn default_socket_path() -> PathBuf {
     default_runtime_dir().join("host.sock")
 }
 
+/// The directory this process is actually using.
+///
+/// The daemon's is decided by its socket's parent, which `--socket` can put
+/// somewhere the environment would never resolve — and its state did not follow
+/// it there: `agents.json`, the session order and the fallback mailbox all
+/// asked the environment again, independently. That is the same class of split
+/// as M13-E003, one process wide instead of two processes wide. The daemon
+/// adopts its directory once, at startup, and everything below it agrees by
+/// construction.
+static ADOPTED_RUNTIME_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn adopt_runtime_dir(runtime: &Path) {
+    let _ = ADOPTED_RUNTIME_DIR.set(runtime.to_path_buf());
+}
+
+pub fn runtime_dir() -> PathBuf {
+    ADOPTED_RUNTIME_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(default_runtime_dir)
+}
+
 /// Where the daemon records the runtime directory it actually chose.
 ///
 /// M13-E003: a hook and the daemon resolved the runtime directory from
@@ -114,7 +136,14 @@ fn publish_runtime_dir(
     result
 }
 
-/// Every directory a daemon on this machine could be using, best first.
+/// Where a daemon on this machine could be, best first — normally two entries.
+///
+/// The recorded pointer is the authority, and finding one *ends* the list:
+/// a daemon that published where it is has answered the question, and reaching
+/// past it into directories nobody claimed is how a process starts deleting
+/// files it does not own. The guesses below it are for one case only — no
+/// daemon on this machine has published yet — which after this change means a
+/// helper old enough to predate the pointer.
 ///
 /// An explicit `ADE_HOST_RUNTIME_DIR` is answered exactly and alone: it is how
 /// every test fixture isolates itself, and a fixture that fell back to a
@@ -131,32 +160,45 @@ fn candidate_runtime_dirs(
     if environment("ADE_HOST_RUNTIME_DIR").is_some() {
         return candidates;
     }
-    // Read back as the bytes it was written as. A path is not text: decoding it
-    // lossily produces a path that exists nowhere, and trimming it corrupts the
-    // legal ones that end in a space.
-    if let Some(pointer) = runtime_pointer_path(environment)
-        && let Ok(recorded) = fs::read(&pointer)
-        && !recorded.is_empty()
-    {
-        add_unique(
-            &mut candidates,
-            PathBuf::from(std::ffi::OsStr::from_bytes(&recorded).to_owned()),
-        );
+    if let Some(recorded) = recorded_runtime_dir(environment) {
+        add_unique(&mut candidates, recorded);
+        return candidates;
     }
     if let Some(path) = environment("XDG_RUNTIME_DIR") {
         add_unique(&mut candidates, PathBuf::from(path).join("tmux-agent-ide"));
     }
-    if cfg!(target_os = "linux") {
+    // Both platform defaults, not only this platform's: `XDG_RUNTIME_DIR` set
+    // on a Mac takes the resolution above away from the cache directory, and a
+    // daemon that had it unset is then unreachable with nothing to fall back
+    // on — the asymmetry Linux does not have.
+    if let Some(home) = environment("HOME") {
         add_unique(
             &mut candidates,
-            PathBuf::from(format!("/run/user/{uid}/tmux-agent-ide")),
+            PathBuf::from(home).join("Library/Caches/dev.dev.tmux-agent-ide/runtime"),
         );
     }
+    add_unique(
+        &mut candidates,
+        PathBuf::from(format!("/run/user/{uid}/tmux-agent-ide")),
+    );
     add_unique(
         &mut candidates,
         PathBuf::from(format!("/tmp/tmux-agent-ide-{uid}")),
     );
     candidates
+}
+
+/// The directory a daemon last published, if any.
+pub fn published_runtime_dir() -> Option<PathBuf> {
+    recorded_runtime_dir(environment)
+}
+
+/// Read back as the bytes it was written as. A path is not text: decoding it
+/// lossily produces a path that exists nowhere, and trimming it corrupts the
+/// legal ones that end in a space.
+fn recorded_runtime_dir(environment: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let recorded = fs::read(runtime_pointer_path(environment)?).ok()?;
+    (!recorded.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&recorded).to_owned()))
 }
 
 fn add_unique(candidates: &mut Vec<PathBuf>, path: PathBuf) {
@@ -279,31 +321,39 @@ mod tests {
         let home = std::env::temp_dir().join(format!("ade-pointer-{}", uuid::Uuid::new_v4()));
         let daemon_runtime = home.join("daemon-runtime");
         fs::create_dir_all(&daemon_runtime).unwrap();
-        let daemon_environment = |name: &str| match name {
-            "HOME" => Some(OsString::from(home.as_os_str())),
-            _ => None,
-        };
-        // The daemon's own choice, whatever produced it, is what it publishes.
-        let pointer = runtime_pointer_path(daemon_environment).unwrap();
-        fs::create_dir_all(pointer.parent().unwrap()).unwrap();
-        fs::write(&pointer, daemon_runtime.as_os_str().as_encoded_bytes()).unwrap();
-
         let hook_environment = |name: &str| match name {
             "HOME" => Some(OsString::from(home.as_os_str())),
             "XDG_RUNTIME_DIR" => Some(OsString::from("/run/user/4242")),
             _ => None,
         };
-        let candidates = candidate_runtime_dirs(hook_environment, 4242);
-        assert!(
-            candidates.contains(&daemon_runtime),
-            "the daemon's recorded directory must be reachable from the hook: {candidates:?}"
-        );
-        // And the reverse split, where the daemon had no XDG and the hook does.
-        assert!(candidates.contains(&PathBuf::from("/tmp/tmux-agent-ide-4242")));
+
+        // Before any daemon has published: the directories one could have
+        // chosen, on either platform, because a hook cannot know which of them
+        // a helper too old to publish picked.
+        let guesses = candidate_runtime_dirs(hook_environment, 4242);
         assert_eq!(
-            candidates.first(),
+            guesses.first(),
             Some(&PathBuf::from("/run/user/4242/tmux-agent-ide")),
             "this process's own resolution still comes first"
+        );
+        for guess in ["/tmp/tmux-agent-ide-4242", "/run/user/4242/tmux-agent-ide"] {
+            assert!(guesses.contains(&PathBuf::from(guess)), "{guesses:?}");
+        }
+        assert!(guesses.contains(&home.join("Library/Caches/dev.dev.tmux-agent-ide/runtime")));
+
+        // And once a daemon has: its answer, and nothing else. The guesses stop
+        // — a directory nobody claimed is one this process must not connect to,
+        // file events in, or (as the daemon) delete from.
+        let pointer = runtime_pointer_path(hook_environment).unwrap();
+        fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+        fs::write(&pointer, daemon_runtime.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(
+            candidate_runtime_dirs(hook_environment, 4242),
+            vec![
+                PathBuf::from("/run/user/4242/tmux-agent-ide"),
+                daemon_runtime
+            ],
+            "the recorded directory must end the list"
         );
         fs::remove_dir_all(home).unwrap();
     }

@@ -385,10 +385,18 @@ export function App() {
 
   // The host every consent-bearing hook request is bound to: the profile the
   // decision is remembered under, and the connection it is checked against.
+  //
+  // `appStateRecovery` is part of it. A state file the app could not read is
+  // write-frozen until the user resets it, so an answer given in that mode
+  // reaches memory and nothing else — and a host whose answer cannot be kept is
+  // not a host anything here may write. Both doors out of the setup prompt run
+  // through this value, including the "Review exact changes…" one.
   const agentHost = useMemo(() => {
     const identity = agentHostIdentity(agentScope);
-    return agentScope && identity ? { profileId: agentScope.hostProfileId, identity } : undefined;
-  }, [agentScope]);
+    return agentScope && identity && appStateRecovery === undefined
+      ? { profileId: agentScope.hostProfileId, identity }
+      : undefined;
+  }, [agentScope, appStateRecovery]);
   const recordHostSetupDecision = useCallback((hostProfileId: string, decision: HostSetupDecision) => {
     setAppState((current) => ({
       ...current,
@@ -424,9 +432,6 @@ export function App() {
     applyHostNaming: agentRuntime.applyHostNaming,
     connected: Boolean(agentScope),
     decision: appState.hostSetup[currentHostProfileId],
-    // A state file the app could not read is write-frozen until the user
-    // resets it, and an answer that only reaches memory is not one this app
-    // may act on.
     decisionsArePersistable: appStateRecovery === undefined,
     hostIdentity: agentHost?.identity,
     hostLabel,
