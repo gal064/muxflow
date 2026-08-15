@@ -154,7 +154,7 @@ pub fn start_download(
         published: Arc::clone(&transfers.published),
     };
     emit_download_state(&job, TransferState::Queued, json!({}));
-    transfers.enqueue(job)?;
+    enqueue(job)?;
     Ok(transfer_id)
 }
 
@@ -188,33 +188,28 @@ pub fn suggest_download_destination(
 }
 
 #[tauri::command]
-pub fn cancel_download(
-    transfer_id: String,
-    transfers: State<'_, DownloadManager>,
-) -> Result<(), String> {
-    transfers.cancel(&transfer_id)
+pub fn cancel_download(transfer_id: String) -> Result<(), String> {
+    cancel_transfer(&transfer_id).map(|_| ())
 }
 
-impl DownloadManager {
-    fn enqueue(&self, job: DownloadJob) -> Result<(), String> {
-        let id = job.transfer_id.clone();
-        let binding = job.binding.clone();
-        let cancellation = Arc::clone(&job.cancellation);
-        let started_job = job.clone();
-        let work_job = job.clone();
-        enqueue_transfer(
-            id,
-            binding,
-            cancellation,
-            move || emit_download_state(&started_job, TransferState::Running, json!({})),
-            move || run_download(&work_job),
-            move |result, _reason| finish_download_job(&job, result),
-        )
-    }
-
-    fn cancel(&self, transfer_id: &str) -> Result<(), String> {
-        cancel_transfer(transfer_id).map(|_| ())
-    }
+/// A free function, not a method: the job already carries everything the work
+/// needs, including its own handle on the published-downloads registry. As a
+/// `&self` method that ignored `self` it invited the next reader to reach for
+/// the manager's state from a call site that has a throwaway one.
+fn enqueue(job: DownloadJob) -> Result<(), String> {
+    let id = job.transfer_id.clone();
+    let binding = job.binding.clone();
+    let cancellation = Arc::clone(&job.cancellation);
+    let started_job = job.clone();
+    let work_job = job.clone();
+    enqueue_transfer(
+        id,
+        binding,
+        cancellation,
+        move || emit_download_state(&started_job, TransferState::Running, json!({})),
+        move || run_download(&work_job),
+        move |result, _reason| finish_download_job(&job, result),
+    )
 }
 
 #[cfg(test)]
@@ -246,7 +241,7 @@ pub(super) fn enqueue_acceptance_download(
         published: Arc::default(),
     };
     emit_download_state(&job, TransferState::Queued, json!({}));
-    DownloadManager::default().enqueue(job)?;
+    enqueue(job)?;
     Ok(transfer_id)
 }
 

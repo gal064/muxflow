@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { openDownload, revealDownload, revealDownloadLabel } from "./downloadFlow";
+import { DownloadActions } from "./downloadFlow";
 import type { TransferStatus } from "./types";
 import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
 
@@ -22,10 +22,6 @@ export function DownloadTransfers({ transfers, onCancelTransfer }: {
 }) {
   const [openError, setOpenError] = useState<{ id: string; message: string }>();
   if (transfers.length === 0) return null;
-  const act = (transfer: TransferStatus, run: (destination: string) => Promise<void>) => {
-    setOpenError(undefined);
-    void run(transfer.destination!).catch((error) => setOpenError({ id: transfer.id, message: String(error) }));
-  };
   return <section aria-label="Downloads" className="transfers">
     <h3>Downloads</h3>
     {transfers.map((transfer) => <div aria-label={`Download ${transfer.path}: ${transferStateLabel(transfer.state)}`} className={`transfer ${transfer.state}`} key={transfer.id}>
@@ -36,8 +32,7 @@ export function DownloadTransfers({ transfers, onCancelTransfer }: {
       {/* The same two actions the completion toast offers, on the row that
           outlives it. Only a published download has a local file to act on. */}
       {transfer.state === "completed" && transfer.destination && <div className="transfer-actions">
-        <button aria-label={`Open ${transfer.destination}`} onClick={() => act(transfer, openDownload)} type="button">Open</button>
-        <button aria-label={`${revealDownloadLabel()}: ${transfer.destination}`} onClick={() => act(transfer, revealDownload)} type="button">{revealDownloadLabel()}</button>
+        <DownloadActions destination={transfer.destination} onError={(message) => setOpenError({ id: transfer.id, message })} />
       </div>}
       {openError?.id === transfer.id && <em role="alert">{openError.message}</em>}
       {transfer.state === "verifying" && <small className="transfer-detail transfer-finalizing" role="status">The verified bytes are being committed; awaiting the authoritative backend outcome.</small>}
