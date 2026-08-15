@@ -299,22 +299,15 @@ fn write_rejected_client_resize_log(columns: u32, rows: u32) {
 /// not paths, not hostnames, and not terminal content. This stays inside the
 /// privacy declaration above.
 ///
-/// `error` is the one free-form field, so it is bounded rather than trusted.
-/// Every producer today is a message this crate wrote or an `io::Error` from a
-/// pipe, none of which name a path or a host — but "none of them do today" is
-/// not a property a log line should rest on, and an unbounded string in a log
-/// is also how one bad error becomes a megabyte of stderr.
+/// `error` is the one free-form field, and it is bounded rather than trusted;
+/// see `bounded_log_text`.
 pub fn write_terminal_sizing_handoff_log(
     previous_session: Option<&str>,
     session_id: &str,
     size: Option<(u32, u32)>,
     error: Option<&str>,
 ) {
-    const MAX_ERROR_CHARS: usize = 200;
-    let error = error.map(|error| match error.char_indices().nth(MAX_ERROR_CHARS) {
-        Some((index, _)) => format!("{}…", &error[..index]),
-        None => error.to_owned(),
-    });
+    let error = error.map(bounded_log_text);
     let line = serde_json::json!({
         "subsystem": "host_daemon",
         "event": "terminalSizingHandoff",
@@ -342,14 +335,9 @@ pub fn write_terminal_sizing_handoff_log(
 /// A tmux pane identifier (`%3`) is the server's own ordinal, and `reason` is
 /// tmux's own refusal text — a parse error about a command this crate composed,
 /// never pane content, which the reader never puts in an error detail for
-/// exactly that reason. Bounded anyway, for the same reasons as the sizing
-/// handoff above.
+/// exactly that reason. Bounded anyway; see `bounded_log_text`.
 pub fn write_flow_resume_rejected_log(pane_id: &str, disposition: &str, reason: &str) {
-    const MAX_REASON_CHARS: usize = 200;
-    let reason = match reason.char_indices().nth(MAX_REASON_CHARS) {
-        Some((index, _)) => format!("{}…", &reason[..index]),
-        None => reason.to_owned(),
-    };
+    let reason = bounded_log_text(reason);
     let line = serde_json::json!({
         "subsystem": "host_daemon",
         "event": "flowResumeRejected",
@@ -358,6 +346,21 @@ pub fn write_flow_resume_rejected_log(pane_id: &str, disposition: &str, reason: 
         "reason": reason,
     });
     eprintln!("{line}");
+}
+
+/// Bounds the one free-form field either of the two loggers above carries.
+///
+/// Both take text this crate composed from tmux's own refusal messages, which
+/// name no path and no host — but "none of them do today" is not a property a
+/// log line should rest on, and an unbounded string in a log is also how one
+/// bad error becomes a megabyte of stderr. Cut on a character boundary, because
+/// tmux's messages are not guaranteed ASCII.
+fn bounded_log_text(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    match text.char_indices().nth(MAX_CHARS) {
+        Some((index, _)) => format!("{}…", &text[..index]),
+        None => text.to_owned(),
+    }
 }
 
 pub fn write_safe_log(class: SafeErrorClass) {

@@ -160,14 +160,15 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
         } else if (event.kind === "topologyDirty") {
           setStatus("Topology changed; reconciling…");
         } else if (event.kind === "flowStalled") {
-          // The host has already asked for the recovery seed, and that seed
-          // carries the resume that takes the pane out of tmux's flow control.
-          // What it cannot do is say so: this is the one flow-control state the
-          // host could not clear on its own, and it is worth a line because the
-          // pane was silently frozen until the user found the tab-switch
-          // workaround.
+          // The host has already asked for the recovery seed, and that seed no
+          // longer carries a resume — the host has established it cannot resume
+          // this pane, which is what stops the recovery re-triggering itself.
+          // So the seed is the repaint and this is the notice, worth saying
+          // because the alternative is what the user actually experienced: a
+          // pane silently frozen until they found the tab-switch workaround.
+          // The pane id stays out of it; `%7` names nothing the user can see.
           terminalStateCache.delete(event.paneId);
-          setStatus(`Terminal output for ${event.paneId} stalled; recovering.`);
+          setStatus("A terminal stopped receiving output; recovering it.");
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
           setConnectionDetail(detail);

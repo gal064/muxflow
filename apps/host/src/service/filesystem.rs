@@ -191,11 +191,12 @@ fn metadata_for_in_root(root: &Path, path: &Path) -> anyhow::Result<v1::FileMeta
     } else {
         v1::FileKind::Other
     };
-    let name = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned();
+    let entry_name = path.file_name().unwrap_or(path.as_os_str());
+    // The raw `OsStr`, not the lossy string: the hidden/collapsed predicate has
+    // to see the bytes the filesystem gave, or a name that does not survive
+    // UTF-8 replacement is asked about under a different identity than the one
+    // `listing.rs` filters on.
+    let name = entry_name.to_string_lossy().into_owned();
     let followed = if symlink {
         fs::canonicalize(path)
             .ok()
@@ -217,7 +218,7 @@ fn metadata_for_in_root(root: &Path, path: &Path) -> anyhow::Result<v1::FileMeta
             }
         });
     let mime = image_mime(path).unwrap_or_default().to_owned();
-    let collapsed = is_never_enumerated(OsStr::new(&name)) || symlink;
+    let collapsed = is_never_enumerated(entry_name) || symlink;
     Ok(v1::FileMetadata {
         path: path.to_string_lossy().into_owned(),
         name,
@@ -277,12 +278,9 @@ fn metadata_for_directory_entry(
     } else {
         v1::FileKind::Other
     };
-    let name = logical
-        .file_name()
-        .unwrap_or(logical.as_os_str())
-        .to_string_lossy()
-        .into_owned();
-    let collapsed = is_never_enumerated(OsStr::new(&name)) || symlink;
+    let entry_name = logical.file_name().unwrap_or(logical.as_os_str());
+    let name = entry_name.to_string_lossy().into_owned();
+    let collapsed = is_never_enumerated(entry_name) || symlink;
     let mime = image_mime(logical).unwrap_or_default().to_owned();
     Ok(v1::FileMetadata {
         path: logical.to_string_lossy().into_owned(),

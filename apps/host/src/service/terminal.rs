@@ -24,7 +24,7 @@ use super::snapshot::tmux_command;
 use super::{SequencerControl, TERMINAL_INPUT_QUEUE, emit_event};
 
 mod flow_control;
-use flow_control::{FlowControl, resume_command};
+use flow_control::{FlowControl, resume_command, take_injected_rejection};
 mod input;
 use input::{InputDispatch, run_input_dispatch};
 mod seed;
@@ -236,16 +236,17 @@ impl TerminalAttachment {
     /// cheaper than a repair. The rejected size is named in the error the caller
     /// surfaces and in the daemon log, because "resize failed" without a number
     /// cannot be diagnosed after the fact.
+    /// Always writes. The desktop asking for a size it has asked for before is
+    /// not a repetition to suppress — it is the *only* signal the desktop has
+    /// when something else moved the windows out from under it. Its surface has
+    /// not changed, so the size it re-asserts is by construction the size the
+    /// host last recorded, and a dedupe here would swallow exactly the request
+    /// that exists to un-letterbox the pane. [`Self::ensure_size`] is the one
+    /// caller that may skip a write, and it is not this one.
     pub(super) fn resize(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {
         if let Err(error) = check_client_size(columns, rows) {
             crate::diagnostics::record_rejected_client_resize(columns, rows);
             return Err(error);
-        }
-        // A size this client has already been told is a size it still has; see
-        // `last_size`. Checked after the bound, so a refused size is still
-        // refused loudly rather than deduplicated into silence.
-        if self.last_size == Some((columns, rows)) {
-            return Ok(());
         }
         {
             let mut stdin = self.stdin.lock().unwrap();
@@ -256,6 +257,26 @@ impl TerminalAttachment {
         // rather than remembered as delivered.
         self.last_size = Some((columns, rows));
         Ok(())
+    }
+
+    /// Gives a client a size it has never been given, and otherwise does
+    /// nothing.
+    ///
+    /// The visibility handoff's half of sizing: a client taken out of
+    /// `ignore-size` having never been sent a `refresh-client -C` sizes its
+    /// windows from tmux's 80x24 default (M13-E005), so whoever clears the flag
+    /// owes it a size. A client that has already been told one still has it —
+    /// `ignore-size` decides whether tmux *acts* on a client's size, not
+    /// whether it remembers one — so a workspace switched away from and back
+    /// costs nothing. That matters because the desktop re-states the visible
+    /// session on every switch and every reconnect, and the omarchy lane
+    /// measured identical `refresh-client -C` requests at 15 topology-dirty
+    /// events each on a real link.
+    fn ensure_size(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {
+        if self.last_size == Some((columns, rows)) {
+            return Ok(());
+        }
+        self.resize(columns, rows)
     }
 
     pub(super) fn contains_pane(&self, pane_id: &str) -> bool {
@@ -459,7 +480,7 @@ impl TerminalClients {
             self.clients
                 .get_mut(session_id)
                 .context("selected session control client is detached")?
-                .resize(columns, rows)
+                .ensure_size(columns, rows)
         })();
         // Both writes go to a pipe, and a pipe write tmux ignores still
         // succeeds, so this is the only record that the handoff happened at all.
@@ -763,7 +784,11 @@ fn write_capture_request_resuming<W: Write>(
         // The marker names the pane this resume belongs to, so a rejected
         // resume resnapshots one pane instead of the whole connection.
         writeln!(writer, "{}", queue_marker("__ADE_RESUME__", pane_id))?;
-        writeln!(writer, "{}", resume_command(pane_id))?;
+        writeln!(
+            writer,
+            "{}",
+            resume_command(pane_id, take_injected_rejection())
+        )?;
     }
     queue_capture(&mut *writer, pane_id)?;
     writer.flush()?;

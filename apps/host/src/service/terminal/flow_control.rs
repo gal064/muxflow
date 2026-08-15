@@ -121,8 +121,14 @@ impl FlowControl {
 /// pane stays paused (P12-U001).
 /// `resume_command_quotes_the_pause_argument_tmux_lexer_rejects` pins the
 /// byte-exact form.
-pub(super) fn resume_command(pane_id: &str) -> String {
-    if take_injected_rejection() {
+///
+/// Pure, and deliberately so: `rejected` is passed in rather than read here,
+/// because a formatter that consumed a global counter would return different
+/// bytes on identical calls, and the first refactor that logged the command
+/// before writing it would silently spend the injection on the log.
+/// [`take_injected_rejection`] is called once, at the write.
+pub(super) fn resume_command(pane_id: &str, rejected: bool) -> String {
+    if rejected {
         return format!("refresh-client -A {pane_id}:continue");
     }
     format!("refresh-client -A '{pane_id}:continue'")
@@ -139,7 +145,7 @@ pub(super) fn resume_command(pane_id: &str) -> String {
 ///
 /// Gated on `ADE_PHASE1_TESTING` like every other fault injection in this crate,
 /// and read once — a daemon does not change its mind about being a test daemon.
-fn take_injected_rejection() -> bool {
+pub(super) fn take_injected_rejection() -> bool {
     static REMAINING: std::sync::OnceLock<AtomicU64> = std::sync::OnceLock::new();
     REMAINING
         .get_or_init(|| {
@@ -222,10 +228,14 @@ mod tests {
         assert_eq!(flow.reject_resume("%1"), RejectedResume::Ignore);
     }
 
-    /// Without `ADE_PHASE1_TESTING` in the environment the injection cannot be
-    /// reached at all, so this is also the only form a user's daemon writes.
+    /// The quoted form is the only one a daemon writes unless a test asks
+    /// otherwise, and the unquoted one is the exact P12-U001 shape.
     #[test]
     fn the_resume_command_quotes_what_tmux_would_otherwise_read_as_a_directive() {
-        assert_eq!(resume_command("%5"), "refresh-client -A '%5:continue'");
+        assert_eq!(
+            resume_command("%5", false),
+            "refresh-client -A '%5:continue'"
+        );
+        assert_eq!(resume_command("%5", true), "refresh-client -A %5:continue");
     }
 }
