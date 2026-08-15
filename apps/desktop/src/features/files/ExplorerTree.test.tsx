@@ -5,7 +5,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import { rowCommandRegistry } from "../../commands/rowCommands";
-import { revealDownloadLabel } from "./downloadFlow";
 import { ExplorerTree } from "./ExplorerTree";
 import type { ActiveRoot, DirectoryListing } from "./types";
 
@@ -26,7 +25,7 @@ const listing: DirectoryListing = {
 describe("ExplorerTree", () => {
   it("shows dotfiles/ignored entries while protected and symlink directories stay collapsed", () => {
     const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}
-      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
     expect(html).toContain(".env");
     expect(html).toContain("ignored.log");
     expect(html).toContain(".git");
@@ -62,7 +61,7 @@ describe("ExplorerTree", () => {
     const listings = new Map([["/r", withTarget], ["/r/target", targetListing]]);
     const expanded = new Set(["/r", "/r/target"]);
     const shown = (ignoredPaths?: ReadonlySet<string>) => renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={listings} expanded={expanded} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined} ignoredPaths={ignoredPaths}
-      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
 
     const filtered = shown(new Set(["/r/target", "/r/ignored.log"]));
     expect(filtered).not.toContain(">target<");
@@ -88,7 +87,7 @@ describe("ExplorerTree", () => {
     const shown = async (ignoredPaths?: ReadonlySet<string>) => {
       let renderer!: ReturnType<typeof create>;
       await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={listings} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined} ignoredPaths={ignoredPaths}
-        onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+        onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
       // The Explorer header is the surface the toggle lives on.
       const header = renderer.root.findAllByProps({ className: "explorer-root" })[0];
       await act(async () => { header.props.onContextMenu({ preventDefault: vi.fn(), clientX: 1, clientY: 1 }); });
@@ -117,7 +116,7 @@ describe("ExplorerTree", () => {
     };
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", withDirectory]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}
-      onToggle={onToggle} onOpen={onOpen} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+      onToggle={onToggle} onOpen={onOpen} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
     const row = renderer.root.findAllByProps({ className: "file-main" })[0];
 
     await act(async () => { row.props.onClick(); });
@@ -152,7 +151,7 @@ describe("ExplorerTree", () => {
     // long one. Whatever else a refresh does, it must not move that content.
     const shown = (props: { loading: Set<string>; requestedReads: number; listings: Map<string, DirectoryListing> }) =>
       renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" expanded={new Set(["/r"])} transfers={[]} disabled={false} error={undefined}
-        onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} {...props} />);
+        onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} {...props} />);
     const listings = new Map([["/r", listing]]);
     const resting = shown({ loading: new Set(), requestedReads: 0, listings });
     const refreshing = shown({ loading: new Set(["/r"]), requestedReads: 0, listings });
@@ -185,7 +184,7 @@ describe("ExplorerTree", () => {
         { id: "running", scopeKey: "scope", path: "/r/running", kind: "file", state: "running", completedBytes: "2", totalBytes: "10", filesCompleted: "0" },
         { id: "cancelled", scopeKey: "scope", path: "/r/cancelled", kind: "file", state: "cancelled", outcome: "notPublished", completedBytes: "2", filesCompleted: "0", cleanupStatus: "removed" },
       ]}
-      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
     expect(html).toContain("Downloads");
     expect(html).toContain("Download /r/queued: Queued");
     expect(html).toContain("Download /r/running: Transferring");
@@ -200,7 +199,7 @@ describe("ExplorerTree", () => {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} requestedReads={0} disabled={false}
       transfers={[{ id: "running-id", scopeKey: "scope", path: "/r/running", kind: "file", state: "running", completedBytes: "2", totalBytes: "10", filesCompleted: "0" }]}
-      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={cancel} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={cancel} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
     await act(async () => { renderer.root.findByProps({ "aria-label": "Cancel download /r/running" }).props.onClick(); });
     expect(cancel).toHaveBeenCalledWith("running-id");
     await act(async () => { renderer.unmount(); });
@@ -214,7 +213,7 @@ describe("ExplorerTree", () => {
     const onRefresh = vi.fn();
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}
-      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={onDownload} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={onRefresh} onLoadMore={vi.fn()} />); });
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={onDownload} onCancelTransfer={vi.fn()} onRefresh={onRefresh} onLoadMore={vi.fn()} />); });
 
     expect(rowCommandRegistry.available()).toEqual([
       "files.open", "files.download", "files.rename", "files.move", "files.duplicate", "files.delete",
@@ -248,43 +247,15 @@ describe("ExplorerTree", () => {
   it("withholds the mutating row actions while the host is read-only", async () => {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled error={undefined}
-      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
     expect(rowCommandRegistry.available()).toEqual(["files.open", "files.download", "files.refresh"]);
-    await act(async () => { renderer.unmount(); });
-  });
-
-  it("offers Open and reveal only on a download that actually published a local file", async () => {
-    const onOpenDownload = vi.fn();
-    const onRevealDownload = vi.fn();
-    let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} requestedReads={0} disabled={false}
-      transfers={[
-        { id: "done", scopeKey: "scope", path: "/r/report.pdf", destination: "/Users/test/Downloads/report (1).pdf", kind: "file", state: "completed", outcome: "published", completedBytes: "9", totalBytes: "9", filesCompleted: "1" },
-        { id: "running", scopeKey: "scope", path: "/r/running", kind: "file", state: "running", completedBytes: "2", totalBytes: "10", filesCompleted: "0" },
-        // Terminal, but nothing landed locally: there is no file to point at.
-        { id: "failed", scopeKey: "scope", path: "/r/failed", kind: "file", state: "failed", outcome: "notPublished", completedBytes: "2", filesCompleted: "0" },
-      ]}
-      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={onOpenDownload} onRevealDownload={onRevealDownload} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
-
-    const markup = JSON.stringify(renderer.toJSON());
-    expect(markup).toContain("Open /Users/test/Downloads/report (1).pdf");
-    expect(markup).toContain(revealDownloadLabel());
-    expect(markup).not.toContain("/r/running: Open");
-    expect(markup).not.toContain("Open /r/failed");
-
-    // The buttons name the *published* path, not the remote source: a renamed
-    // destination is the file the user actually has.
-    await act(async () => { renderer.root.findByProps({ "aria-label": "Open /Users/test/Downloads/report (1).pdf" }).props.onClick(); });
-    expect(onOpenDownload).toHaveBeenCalledWith("/Users/test/Downloads/report (1).pdf");
-    await act(async () => { renderer.root.findByProps({ "aria-label": `${revealDownloadLabel()}: /Users/test/Downloads/report (1).pdf` }).props.onClick(); });
-    expect(onRevealDownload).toHaveBeenCalledWith("/Users/test/Downloads/report (1).pdf");
     await act(async () => { renderer.unmount(); });
   });
 
   it("summarizes a host rejection and keeps the diagnostic behind a disclosure", () => {
     const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
       error="file_mutation_rejected: File name too long (os error 63)"
-      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
     expect(html).toContain("That name is longer than this filesystem allows.");
     expect(html).toContain("<details");
     expect(html).toContain("os error 63");
@@ -298,7 +269,7 @@ describe("ExplorerTree", () => {
         { id: "timeout", scopeKey: "scope", path: "/r/timeout", kind: "file", state: "failed", outcome: "unknown", failureKind: "timeout", completedBytes: "12", filesCompleted: "0" },
         { id: "stale", scopeKey: "scope", path: "/r/stale", kind: "file", state: "failed", outcome: "unknown", failureKind: "staleScope", completedBytes: "12", filesCompleted: "0" },
       ]}
-      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onOpenDownload={vi.fn()} onRevealDownload={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
     expect(html).toContain("Verifying and committing");
     expect(html).toContain("awaiting the authoritative backend outcome");
     expect(html).toContain("outcome is unknown");

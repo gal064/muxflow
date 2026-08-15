@@ -33,6 +33,7 @@ import { keyForScope, keyForTransferConnection, TauriFileWorkspaceClient } from 
 import { ExplorerTree } from "../features/files/ExplorerTree";
 import { reconcileDownloadStatus, type ActiveDownloadStatus, type DownloadCompletion } from "../features/files/downloadStatus";
 import { chooseDownloadDestination, openDownload, revealDownload, revealDownloadLabel, type DownloadIntent } from "../features/files/downloadFlow";
+import { ignoredPathsFromStatus } from "../features/files/ignoredPaths";
 import type { ActiveRoot, DownloadRequest, FileEntry, FileMutation } from "../features/files/types";
 import { TauriGitWorkspaceClient } from "../features/git/api";
 import { GitSidebar } from "../features/git/GitSidebar";
@@ -242,27 +243,8 @@ export function App() {
     currentHostProfileId, fileClient, generation: hostState.generation, gitClient,
     serverIdentity: hostState.serverIdentity, snapshot, terminalEpoch, windows,
   });
-  /**
-   * What the Explorer hides, computed where the files controller and the git
-   * controller meet.
-   *
-   * Only an authoritative, non-oversized status may hide anything: a status
-   * that gave up returns zero entries, and treating that as "nothing is
-   * ignored" would be right by accident while treating it as truth would hide
-   * the tree at the first repository too large to walk. Anything short of a
-   * real answer is `undefined`, which the tree reads as "show everything".
-   *
-   * Paths are rebuilt from `displayPath` (repo-relative, canonical) against the
-   * worktree root. The `path` field is an opaque identity and is never decoded.
-   */
-  const ignoredPaths = useMemo(() => {
-    const status = workspaceGit.status;
-    if (!status?.authoritative || status.oversized) return undefined;
-    const worktreeRoot = status.repository.worktreeRoot.replace(/\/+$/u, "");
-    const paths = new Set<string>();
-    for (const entry of status.entries) if (entry.ignored) paths.add(`${worktreeRoot}/${entry.displayPath}`);
-    return paths;
-  }, [workspaceGit.status]);
+  /** Where the files controller and the git controller meet; the rule itself is `ignoredPathsFromStatus`. */
+  const ignoredPaths = useMemo(() => ignoredPathsFromStatus(workspaceGit.status), [workspaceGit.status]);
 
   useEffect(() => {
     if (!activeDownloadStatus) return;
@@ -1008,8 +990,6 @@ export function App() {
           requestedReads={workspaceFiles.requestedReads}
           onCancelTransfer={async (id) => { if (fileScope) await fileClient.cancelTransfer(fileScope, id); }}
           onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
-          onOpenDownload={(destination) => void openDownload(destination).catch((error) => setStatus(String(error)))}
-          onRevealDownload={(destination) => void revealDownload(destination).catch((error) => setStatus(String(error)))}
           onLoadMore={workspaceFiles.loadMore}
           onMutate={mutateFile}
           onOpen={openExplorerEntry}
@@ -1065,7 +1045,7 @@ export function App() {
           they can never end up offering a file the toast is not about. */}
       {completedDownload?.message === notice.message && <>
         <button onClick={() => void openDownload(completedDownload.destination).catch((error) => setStatus(String(error)))} type="button">Open</button>
-        <button onClick={() => void revealDownload(completedDownload.destination).catch((error) => setStatus(String(error)))} type="button">{revealDownloadLabel(platform)}</button>
+        <button onClick={() => void revealDownload(completedDownload.destination).catch((error) => setStatus(String(error)))} type="button">{revealDownloadLabel()}</button>
       </>}
       <button aria-label="Dismiss" onClick={() => setNotice(undefined)} type="button">Dismiss</button>
     </div>}

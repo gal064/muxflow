@@ -5,10 +5,10 @@ import { useModalDialog } from "../../commands/useModalDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { Icon } from "../../ui/Icon";
 import { SurfaceError } from "../../ui/SurfaceError";
-import { revealDownloadLabel, type DownloadIntent } from "./downloadFlow";
+import type { DownloadIntent } from "./downloadFlow";
+import { DownloadTransfers } from "./DownloadTransfers";
 import { fileIcon } from "./fileIcons";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
-import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
 
 interface Props {
   root?: ActiveRoot;
@@ -45,8 +45,6 @@ interface Props {
    */
   onDownload(intent: DownloadIntent): Promise<void>;
   onCancelTransfer(id: string): Promise<void>;
-  onOpenDownload(destination: string): void;
-  onRevealDownload(destination: string): void;
   onRefresh(path?: string): void;
   onLoadMore(path: string): void;
 }
@@ -76,7 +74,10 @@ export function ExplorerTree(props: Props) {
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
   useEffect(() => setFocusIndex((current) => Math.min(current, Math.max(0, rows.length - 1))), [rows.length]);
-  useEffect(() => setPending(undefined), [props.root?.token, props.scopeIdentity]);
+  // A new root is a new repository, and the toggle is not offered when that
+  // repository has nothing ignored — so a `true` carried across would leave
+  // ignored files showing with no visible reason and no way to put them back.
+  useEffect(() => { setPending(undefined); setShowIgnored(false); }, [props.root?.token, props.scopeIdentity]);
 
   const focusRow = (index: number) => {
     const next = Math.max(0, Math.min(rows.length - 1, index));
@@ -265,7 +266,16 @@ export function ExplorerTree(props: Props) {
           live region re-announcing "Loading…" once per event. */}
       {props.root && !props.listings.has(props.root.path) && props.loading.has(props.root.path) && <p className="quiet-empty" role="status">Loading…</p>}
       {!props.root && <p className="quiet-empty">Select a live terminal pane.</p>}
-      {props.root && props.listings.has(props.root.path) && rows.length === 0 && <p className="quiet-empty">This directory is empty.</p>}
+      {/* "Empty" is now a claim about the *filtered* rows, so it has to
+          distinguish the two ways of having none: the directory really has
+          nothing in it, or everything in it is ignored and the tree is the
+          reason it looks bare. Saying "empty" for the second is a lie that
+          sends people looking for a filesystem problem. */}
+      {props.root && props.listings.has(props.root.path) && rows.length === 0 && <p className="quiet-empty">
+        {hidden && (props.listings.get(props.root.path)?.entries.length ?? 0) > 0
+          ? "Everything here is ignored by git. Right-click the Explorer header to show ignored files."
+          : "This directory is empty."}
+      </p>}
     </div>
     {menu && <ContextMenu
       anchor={menu.anchor}
@@ -297,28 +307,7 @@ export function ExplorerTree(props: Props) {
       label={menu.entry ? `Actions for ${menu.entry.name}` : "Explorer actions"}
       onClose={() => setMenu(undefined)}
     />}
-    {props.transfers.length > 0 && <section aria-label="Downloads" className="transfers">
-      <h3>Downloads</h3>
-      {props.transfers.map((transfer) => <div aria-label={`Download ${transfer.path}: ${transferStateLabel(transfer.state)}`} className={`transfer ${transfer.state}`} key={transfer.id}>
-        <span>{transfer.path.split("/").at(-1)}</span><small>{transferStateLabel(transfer.state)}</small>
-        {transfer.totalBytes ? <progress aria-label={`Download progress for ${transfer.path}`} aria-valuetext={formatTransfer(transfer)} data-completed-bytes={transfer.completedBytes} data-total-bytes={transfer.totalBytes} max={1000} value={transferPermille(transfer.completedBytes, transfer.totalBytes)} /> : <progress aria-label={`Download progress for ${transfer.path}`} data-completed-bytes={transfer.completedBytes} />}
-        <small className="transfer-detail">{formatTransfer(transfer)}</small>
-        {canCancelTransfer(transfer.state) && <button aria-label={`Cancel download ${transfer.path}`} onClick={() => void props.onCancelTransfer(transfer.id)} type="button">Cancel</button>}
-        {/* The same two actions the completion toast offers, on the row that
-            outlives it. Only a published download has a local file to act on. */}
-        {transfer.state === "completed" && transfer.destination && <div className="transfer-actions">
-          <button aria-label={`Open ${transfer.destination}`} onClick={() => props.onOpenDownload(transfer.destination!)} type="button">Open</button>
-          <button aria-label={`${revealDownloadLabel()}: ${transfer.destination}`} onClick={() => props.onRevealDownload(transfer.destination!)} type="button">{revealDownloadLabel()}</button>
-        </div>}
-        {transfer.state === "verifying" && <small className="transfer-detail transfer-finalizing" role="status">The verified bytes are being committed; awaiting the authoritative backend outcome.</small>}
-        {transfer.failureKind === "staleScope" && <em role="alert">Download stopped because the connection scope changed.</em>}
-        {transfer.failureKind === "timeout" && <em role="alert">Download timed out before an authoritative result arrived.</em>}
-        {transfer.outcome === "unknown" && <em role="alert">The download outcome is unknown. Inspect the destination before retrying.</em>}
-        {transfer.error && <em role="alert">{transfer.error}</em>}
-        {transfer.cleanupError && <em role="alert">Partial cleanup failed: {transfer.cleanupError}</em>}
-        {transfer.cleanupStatus && ["failed", "cancelled"].includes(transfer.state) && <small className="transfer-detail">Cleanup: {transfer.cleanupStatus}</small>}
-      </div>)}
-    </section>}
+    <DownloadTransfers onCancelTransfer={props.onCancelTransfer} transfers={props.transfers} />
     {pending && <div className="modal-backdrop" role="presentation"><form aria-labelledby={dialogTitleId} aria-modal="true" className="file-dialog confirmation" onSubmit={(event) => { event.preventDefault(); if (!composing.current) void submit(); }} ref={dialogRef} role="dialog">
       <h2 id={dialogTitleId}>{labelForAction(pending.action)}</h2>
       {pending.action === "delete" ? <p>Delete <code>{pending.entry?.path}</code>? {pending.entry?.kind === "directory" && "Non-empty directories require this confirmation."}</p> : <label>
@@ -378,33 +367,4 @@ function entryTooltip(entry: FileEntry): string {
   if (Number.isFinite(modified) && modified > 0) lines.push(`Modified ${new Date(modified).toLocaleString()}`);
   if (entry.symlinkTarget) lines.push(`Symlink → ${entry.symlinkTarget}`);
   return lines.join("\n");
-}
-
-function formatTransfer(transfer: TransferStatus): string {
-  const progress = transfer.totalBytes
-    ? `${formatTransferBytes(transfer.completedBytes)} / ${formatTransferBytes(transfer.totalBytes)}`
-    : `${formatTransferBytes(transfer.completedBytes)} transferred`;
-  const speed = transfer.bytesPerSecond ? ` · ${formatTransferBytes(transfer.bytesPerSecond)}/s` : "";
-  const eta = transfer.etaSeconds !== undefined && transfer.etaSeconds > 0 ? ` · ${Math.ceil(transfer.etaSeconds)}s remaining` : "";
-  return `${progress}${speed}${eta}`;
-}
-
-function formatTransferBytes(value: string): string {
-  if (!/^(0|[1-9]\d*)$/.test(value)) return `${value} B`;
-  const bytes = BigInt(value);
-  const units = [[1024n ** 4n, "TiB"], [1024n ** 3n, "GiB"], [1024n ** 2n, "MiB"], [1024n, "KiB"]] as const;
-  for (const [size, label] of units) {
-    if (bytes >= size) {
-      const tenths = bytes * 10n / size;
-      return `${tenths / 10n}.${tenths % 10n} ${label}`;
-    }
-  }
-  return `${bytes} B`;
-}
-
-function transferPermille(completed: string, total: string): number {
-  const numerator = BigInt(completed);
-  const denominator = BigInt(total);
-  if (denominator <= 0n) return 0;
-  return Number((numerator > denominator ? denominator : numerator) * 1000n / denominator);
 }
