@@ -241,6 +241,28 @@ export function App() {
     currentHostProfileId, fileClient, generation: hostState.generation, gitClient,
     serverIdentity: hostState.serverIdentity, snapshot, terminalEpoch, windows,
   });
+  /**
+   * What the Explorer hides, computed where the files controller and the git
+   * controller meet.
+   *
+   * Only an authoritative, non-oversized status may hide anything: a status
+   * that gave up returns zero entries, and treating that as "nothing is
+   * ignored" would be right by accident while treating it as truth would hide
+   * the tree at the first repository too large to walk. Anything short of a
+   * real answer is `undefined`, which the tree reads as "show everything".
+   *
+   * Paths are rebuilt from `displayPath` (repo-relative, canonical) against the
+   * worktree root. The `path` field is an opaque identity and is never decoded.
+   */
+  const ignoredPaths = useMemo(() => {
+    const status = workspaceGit.status;
+    if (!status?.authoritative || status.oversized) return undefined;
+    const worktreeRoot = status.repository.worktreeRoot.replace(/\/+$/u, "");
+    const paths = new Set<string>();
+    for (const entry of status.entries) if (entry.ignored) paths.add(`${worktreeRoot}/${entry.displayPath}`);
+    return paths;
+  }, [workspaceGit.status]);
+
   useEffect(() => {
     if (!activeDownloadStatus) return;
     const reconciled = reconcileDownloadStatus(status, activeDownloadStatus, workspaceFiles.transfers);
@@ -953,6 +975,7 @@ export function App() {
           disabled={!hostState.canMutate}
           error={workspaceFiles.error}
           expanded={workspaceFiles.expanded}
+          ignoredPaths={ignoredPaths}
           listings={workspaceFiles.listings}
           loading={workspaceFiles.loading}
           requestedReads={workspaceFiles.requestedReads}

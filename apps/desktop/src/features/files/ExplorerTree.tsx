@@ -17,6 +17,16 @@ interface Props {
   transfers: readonly TransferStatus[];
   /** Reads the user asked for and is waiting on. See `useWorkspaceFiles.refresh`. */
   requestedReads: number;
+  /**
+   * Absolute paths git reports as ignored, or `undefined` when there is no
+   * authoritative answer — no worktree, an oversized status, a repository that
+   * failed to report. Undefined means "show everything": the tree never hides
+   * a file on a guess.
+   *
+   * Git collapses an ignored directory to one record, so a path in here hides
+   * the entry itself *and* everything beneath it.
+   */
+  ignoredPaths?: ReadonlySet<string>;
   scopeIdentity: string;
   disabled: boolean;
   error?: string;
@@ -42,13 +52,17 @@ export function ExplorerTree(props: Props) {
   const [nonEmptyOverwrite, setNonEmptyOverwrite] = useState(false);
   const [dialogError, setDialogError] = useState<string>();
   const [focusIndex, setFocusIndex] = useState(0);
+  // VS Code's escape hatch, and the reason hiding them is safe: the rule is
+  // reversible from the tree itself, without a settings trip.
+  const [showIgnored, setShowIgnored] = useState(false);
   const treeRef = useRef<HTMLDivElement>(null);
   const composing = useRef(false);
   const dialogTitleId = useId();
   const closeDialog = () => setPending(undefined);
   const dialogRef = useModalDialog<HTMLFormElement>(closeDialog, Boolean(pending));
   const rootName = props.root?.path.split("/").filter(Boolean).at(-1) ?? props.root?.path ?? "No active root";
-  const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded) : [], [props.expanded, props.listings, props.root]);
+  const hidden = showIgnored ? undefined : props.ignoredPaths;
+  const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
   useEffect(() => setFocusIndex((current) => Math.min(current, Math.max(0, rows.length - 1))), [rows.length]);
   useEffect(() => setPending(undefined), [props.root?.token, props.scopeIdentity]);
 
@@ -175,7 +189,10 @@ export function ExplorerTree(props: Props) {
   };
 
   return <div className="explorer-tree">
-    <header className="explorer-root">
+    <header className="explorer-root" onContextMenu={(event) => {
+      event.preventDefault();
+      setMenu({ anchor: { x: event.clientX, y: event.clientY } });
+    }}>
       <span title={props.root?.path}>{rootName}</span>
       {props.root && <small>{props.root.gitWorktree ? "git worktree" : "pane cwd"}</small>}
       {/* The one wait that is shown for a listing already on screen, and it is
@@ -252,6 +269,12 @@ export function ExplorerTree(props: Props) {
           { id: "newFile", label: "New file…", disabled: props.disabled || !props.root, run: () => begin("newFile") },
           { id: "newDirectory", label: "New folder…", disabled: props.disabled || !props.root, run: () => begin("newDirectory") },
           "separator" as const,
+          // Offered only when git has actually told us something to hide.
+          // Without an authoritative status the tree is already showing
+          // everything, and a toggle that changes nothing is worse than none.
+          ...(props.ignoredPaths?.size
+            ? [{ id: "ignored", label: showIgnored ? "Hide ignored files" : "Show ignored files", run: () => setShowIgnored((current) => !current) }]
+            : []),
           { id: "refresh", label: "Refresh", run: () => props.onRefresh() },
         ]}
       label={menu.entry ? `Actions for ${menu.entry.name}` : "Explorer actions"}
@@ -287,11 +310,17 @@ export function ExplorerTree(props: Props) {
   </div>;
 }
 
-function flattenTree(root: string, listings: ReadonlyMap<string, DirectoryListing>, expanded: ReadonlySet<string>) {
+function flattenTree(
+  root: string,
+  listings: ReadonlyMap<string, DirectoryListing>,
+  expanded: ReadonlySet<string>,
+  ignored?: ReadonlySet<string>,
+) {
   const rows: ({ kind: "entry"; entry: FileEntry; depth: number } | { kind: "more"; directory: string; depth: number })[] = [];
   const visit = (directory: string, depth: number) => {
     const listing = listings.get(directory);
     for (const entry of listing?.entries ?? []) {
+      if (ignored && isIgnoredPath(entry.path, ignored)) continue;
       rows.push({ kind: "entry", entry, depth });
       if (entry.expandable && expanded.has(entry.path)) visit(entry.path, depth + 1);
     }
@@ -299,6 +328,21 @@ function flattenTree(root: string, listings: ReadonlyMap<string, DirectoryListin
   };
   visit(root, 0);
   return rows;
+}
+
+/**
+ * Git reports `target/` once, never its ten thousand contents, so membership
+ * alone is not the question: an entry is ignored when it is in the set or when
+ * any of its ancestors is. Walking the ancestors costs the path's depth and
+ * needs no precomputed prefix list, which would have to be rebuilt on every
+ * status generation.
+ */
+function isIgnoredPath(path: string, ignored: ReadonlySet<string>): boolean {
+  if (ignored.has(path)) return true;
+  for (let cut = path.lastIndexOf("/"); cut > 0; cut = path.lastIndexOf("/", cut - 1)) {
+    if (ignored.has(path.slice(0, cut))) return true;
+  }
+  return false;
 }
 
 function labelForAction(action: PendingAction["action"]): string {
