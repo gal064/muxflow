@@ -42,6 +42,12 @@ interface ShellCommandOptions {
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
   selectCreatedSession(sessionId: string): void;
+  /**
+   * Land on the terminal tab ⌘T just made. The host creates it detached, so
+   * tmux's active window does not move and the app — which mirrors that flag
+   * on every snapshot — would put the selection straight back.
+   */
+  selectCreatedWindow(sessionId: string, windowId: string): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
   setConfirmation: Dispatch<SetStateAction<PendingTmuxConfirmation | undefined>>;
@@ -101,8 +107,10 @@ export function useShellCommands(options: ShellCommandOptions): {
         options.setStatus(`Could not close ${targetAppTab.title} because its editor did not save: ${String(error)}`);
         return;
       }
+      // No toast: the tab is gone from the strip, which is the whole message.
+      // Status is for what the user cannot see or must act on — the failure
+      // branch above is exactly that, and stays.
       options.setAppState((current) => closeAppTab(current, options.currentHostProfileId, targetAppTab.id));
-      options.setStatus(`Closed ${targetAppTab.title}`);
       return;
     }
     if (commandId === "session.close" && targetSession) {
@@ -130,10 +138,19 @@ export function useShellCommands(options: ShellCommandOptions): {
               }
             : undefined;
       if (!captured) return;
-      options.setConfirmation(createTmuxConfirmation(
-        commandId, definition.title, captured.label, captured.action,
+      // Closing a terminal tab or a pane does not ask. It is the surface the
+      // user is looking at, the result is visible the instant it happens, and
+      // a terminal that asks before closing is a preference this user has
+      // already turned off in their own terminal. Closing a whole workspace
+      // still asks — that is the branch above, and a different blast radius.
+      //
+      // The host contract is unchanged: `confirmed` is still what the dialog's
+      // accept path would have stamped, and the authoritative precondition is
+      // still captured at the moment the command ran.
+      await options.performAction(
+        { ...captured.action, confirmed: true },
         { serverIdentity: options.serverIdentity, generation: options.generation },
-      ));
+      );
       return;
     }
     const workspaceIndex = selectionIndex(commandId, "workspace.select");
@@ -197,7 +214,17 @@ export function useShellCommands(options: ShellCommandOptions): {
         if (current >= 0 && index >= 0 && index < ordered.length) await options.performAction({ kind: "reorderSession", sessionId: targetSession.id, index });
         return;
       }
-      case "window.new": if (targetSession) await options.performAction({ kind: "createWindow", sessionId: targetSession.id }); return;
+      case "window.new": {
+        if (!targetSession) return;
+        // Same shape as `session.new`: create, then select what came back, and
+        // only if the app is still pointed at the host that created it.
+        const scope = options.hostScope;
+        const sessionId = targetSession.id;
+        void options.performAction({ kind: "createWindow", sessionId }).then((result) => {
+          if (result?.windowId && options.isHostScopeCurrent(scope)) options.selectCreatedWindow(sessionId, result.windowId);
+        });
+        return;
+      }
       case "window.rename": {
         const scope = options.hostScope;
         if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: targetWindow.name, submit: (name) => {
