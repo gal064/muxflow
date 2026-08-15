@@ -404,19 +404,31 @@ impl TerminalClients {
     /// as success.
     fn size_visible_client(&mut self, session_id: &str) -> anyhow::Result<()> {
         let last_size = self.last_size;
-        let client = self
-            .clients
-            .get_mut(session_id)
-            .context("selected session control client is detached")?;
-        client.set_sizing(true)?;
-        self.visible_session = Some(session_id.to_owned());
-        let Some((columns, rows)) = last_size else {
-            return Ok(());
-        };
-        self.clients
-            .get_mut(session_id)
-            .context("selected session control client is detached")?
-            .resize(columns, rows)
+        let previous = self.visible_session.clone();
+        let outcome = (|| -> anyhow::Result<()> {
+            let client = self
+                .clients
+                .get_mut(session_id)
+                .context("selected session control client is detached")?;
+            client.set_sizing(true)?;
+            self.visible_session = Some(session_id.to_owned());
+            let Some((columns, rows)) = last_size else {
+                return Ok(());
+            };
+            self.clients
+                .get_mut(session_id)
+                .context("selected session control client is detached")?
+                .resize(columns, rows)
+        })();
+        // Both writes go to a pipe, and a pipe write tmux ignores still
+        // succeeds, so this is the only record that the handoff happened at all.
+        crate::diagnostics::write_terminal_sizing_handoff_log(
+            previous.as_deref(),
+            session_id,
+            last_size,
+            outcome.as_ref().err().map(ToString::to_string).as_deref(),
+        );
+        outcome
     }
 
     pub(super) fn send_input(&mut self, pane_id: &str, data: &[u8]) -> anyhow::Result<()> {
@@ -450,9 +462,30 @@ impl TerminalClients {
         Ok(())
     }
 
+    /// Names the session the desktop is showing.
+    ///
+    /// Called on every workspace switch *and* on every (re)connect, because the
+    /// two ways this went wrong are the same fact from either end. The desktop
+    /// decides which workspace it displays; the host decides which control
+    /// client tmux sizes from; nothing on the wire tied them together, so any
+    /// path that moved one without the other left tmux sizing the user's
+    /// windows from a client they are not looking at. A workspace switch is the
+    /// obvious one. A reconnect is the quiet one: the bridge re-attaches to
+    /// whichever session the fresh snapshot lists first, which after the first
+    /// connect has nothing to do with what is on screen.
+    ///
+    /// Idempotent by construction: selecting the session that is already
+    /// selected re-asserts the flag and re-sends the size, which is what a
+    /// caller that cannot know whether the client survived actually wants.
     pub(super) fn select_session(&mut self, session_id: &str) -> anyhow::Result<()> {
         validate_tmux_id(session_id, '$')?;
         if !self.clients.contains_key(session_id) {
+            crate::diagnostics::write_terminal_sizing_handoff_log(
+                self.visible_session.as_deref(),
+                session_id,
+                self.last_size,
+                Some("session has no control client"),
+            );
             bail!("session has no control client");
         }
         let previous_id = self.visible_session.clone();
@@ -460,7 +493,19 @@ impl TerminalClients {
             && previous != session_id
             && let Some(client) = self.clients.get_mut(previous)
         {
-            client.set_sizing(false)?;
+            // Yielding first, and failing here if it cannot: two clients out of
+            // `ignore-size` at once means tmux sizes the windows from whichever
+            // spoke last, which is the state this whole mechanism exists to
+            // never be in.
+            if let Err(error) = client.set_sizing(false) {
+                crate::diagnostics::write_terminal_sizing_handoff_log(
+                    previous_id.as_deref(),
+                    session_id,
+                    self.last_size,
+                    Some(&format!("previous client would not yield sizing: {error}")),
+                );
+                return Err(error);
+            }
         }
         self.size_visible_client(session_id)
     }

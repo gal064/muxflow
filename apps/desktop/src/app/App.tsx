@@ -77,6 +77,8 @@ import { resolveTerminalDestination } from "./paneRouting";
 import { requestActiveWindow } from "./windowSelection";
 import { useAppConnectionController } from "./useAppConnectionController";
 import { useClientResize } from "./useClientResize";
+import { useVisibleTerminalSession } from "./useVisibleTerminalSession";
+import { windowCellSize } from "../features/terminal/clientSize";
 import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
 import { AppDialogLayer } from "./AppDialogLayer";
 import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
@@ -629,10 +631,23 @@ export function App() {
     void request.catch((error) => { if (clientIdRef.current === clientId) setStatus(String(error)); });
   }, [clientId, hostState.canMutate]);
 
+  // Which workspace tmux sizes from is decided here and nowhere else, so it is
+  // stated to the host as a fact rather than left to whichever event happened
+  // to change it.
+  useVisibleTerminalSession({ activeSessionId, canMutate: hostState.canMutate, clientId, onStatus: setStatus });
+
   // The client size is computed from the tiled surface and from what a live
   // terminal turns pixels into. Both arrive here; neither is a pane's geometry.
+  // `actualSize` is the other direction — what tmux settled on — and is the
+  // only way the app can tell that another terminal took the size away from it.
+  const actualWindowSize = useMemo(
+    () => windowCellSize(snapshot.panes, activeWindowId),
+    [activeWindowId, snapshot.panes],
+  );
   const { onMeasurements, surfaceRef } = useClientResize({
     activeWindowId,
+    actualSize: actualWindowSize,
+    appFocused,
     canMutate: hostState.canMutate,
     clientId,
     onStatus: setStatus,

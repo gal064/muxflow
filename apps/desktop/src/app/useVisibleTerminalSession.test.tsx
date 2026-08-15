@@ -1,0 +1,122 @@
+// @vitest-environment jsdom
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  useVisibleTerminalSession,
+  VISIBLE_SESSION_RETRIES,
+  VISIBLE_SESSION_RETRY_MS,
+} from "./useVisibleTerminalSession";
+
+const selectMock = vi.hoisted(() => vi.fn(async (_clientId: string, _sessionId: string) => undefined));
+vi.mock("../features/terminal/api", () => ({ selectTerminalSession: selectMock }));
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+interface HarnessProps {
+  activeSessionId?: string;
+  canMutate?: boolean;
+  clientId?: string;
+  onStatus?: (message: string) => void;
+}
+
+function Harness(props: HarnessProps) {
+  useVisibleTerminalSession({
+    activeSessionId: props.activeSessionId,
+    canMutate: props.canMutate ?? true,
+    clientId: props.clientId,
+    onStatus: props.onStatus ?? (() => undefined),
+  });
+  return null;
+}
+
+async function render(props: HarnessProps) {
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(<Harness {...props} />); });
+  return {
+    update: async (next: HarnessProps) => {
+      await act(async () => { renderer.update(<Harness {...next} />); });
+    },
+  };
+}
+
+/** Long enough for every retry the hook is allowed. */
+async function exhaustRetries() {
+  await act(async () => { await vi.advanceTimersByTimeAsync(VISIBLE_SESSION_RETRY_MS * (VISIBLE_SESSION_RETRIES + 1)); });
+}
+
+describe("useVisibleTerminalSession", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    selectMock.mockClear();
+    selectMock.mockImplementation(async () => undefined);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("tells the host which workspace is on screen as soon as there is a bridge", async () => {
+    await render({ activeSessionId: "$1", clientId: "client-1" });
+    expect(selectMock.mock.calls).toEqual([["client-1", "$1"]]);
+  });
+
+  it("says nothing without a bridge, a workspace, or the right to mutate", async () => {
+    await render({ activeSessionId: "$1", clientId: undefined });
+    await render({ activeSessionId: undefined, clientId: "client-1" });
+    await render({ activeSessionId: "$1", clientId: "client-1", canMutate: false });
+    expect(selectMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The reconnect is the case this exists for. The bridge re-attaches to
+   * whichever session the fresh snapshot lists first, which after the first
+   * connect has nothing to do with what is on screen — so a new client id has
+   * to re-state the fact even though the workspace never changed.
+   */
+  it("re-states the workspace on a workspace switch and on a new bridge", async () => {
+    const { update } = await render({ activeSessionId: "$1", clientId: "client-1" });
+    await update({ activeSessionId: "$2", clientId: "client-1" });
+    await update({ activeSessionId: "$2", clientId: "client-2" });
+    expect(selectMock.mock.calls).toEqual([
+      ["client-1", "$1"],
+      ["client-1", "$2"],
+      ["client-2", "$2"],
+    ]);
+  });
+
+  /**
+   * The host refuses a session whose control client it has not attached yet,
+   * and on a fresh bridge its reconciler is still doing that. Transient, so it
+   * is retried; permanent, so it is eventually said out loud — a host that will
+   * not take the selection is about to size the user's windows from a workspace
+   * they cannot see.
+   */
+  it("retries a refused selection, then reports it once", async () => {
+    selectMock.mockImplementation(async () => { throw new Error("session has no control client"); });
+    const statuses: string[] = [];
+    await render({ activeSessionId: "$1", clientId: "client-1", onStatus: (message) => statuses.push(message) });
+    expect(selectMock).toHaveBeenCalledTimes(1);
+    expect(statuses).toEqual([]);
+    await exhaustRetries();
+    expect(selectMock).toHaveBeenCalledTimes(VISIBLE_SESSION_RETRIES + 1);
+    expect(statuses).toEqual([
+      "This workspace may render at the wrong size: Error: session has no control client",
+    ]);
+  });
+
+  it("stops retrying as soon as one lands", async () => {
+    selectMock.mockImplementationOnce(async () => { throw new Error("not attached yet"); });
+    const statuses: string[] = [];
+    await render({ activeSessionId: "$1", clientId: "client-1", onStatus: (message) => statuses.push(message) });
+    await exhaustRetries();
+    expect(selectMock).toHaveBeenCalledTimes(2);
+    expect(statuses).toEqual([]);
+  });
+
+  /** A retry for a workspace the user has already left must not land. */
+  it("abandons the retries when the workspace changes under them", async () => {
+    selectMock.mockImplementation(async () => { throw new Error("not attached yet"); });
+    const { update } = await render({ activeSessionId: "$1", clientId: "client-1" });
+    await update({ activeSessionId: "$2", clientId: "client-1" });
+    selectMock.mockClear();
+    await exhaustRetries();
+    expect(selectMock.mock.calls.every(([, sessionId]) => sessionId === "$2")).toBe(true);
+  });
+});
