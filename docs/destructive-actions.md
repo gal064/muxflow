@@ -1,10 +1,16 @@
 # Destructive actions and recovery limits
 
-The desktop requires confirmation before killing a tmux session/window/pane,
-deleting a non-empty directory, overwriting a file, discarding Git changes, or
-pasting an upload larger than 500 MiB. The confirmation identifies the exact
-target and is revalidated against the current server/root generation before the
-mutation is sent.
+The desktop requires confirmation before killing a tmux session, deleting a
+non-empty directory, overwriting a file, discarding Git changes, or pasting an
+upload larger than 500 MiB. The confirmation identifies the exact target and is
+revalidated against the current server/root generation before the mutation is
+sent.
+
+Closing a single terminal tab or pane is deliberately not one of them: it is the
+surface the user is looking at and the result is visible the instant it happens.
+The wire contract is unchanged — those actions still carry `confirmed` and the
+authoritative precondition, captured when the command ran. Only the dialog is
+gone, and only for those two.
 
 After reconnect, stale mutations are rejected rather than replayed. File and
 Git requests are scoped to an authoritative root identity. Path traversal,

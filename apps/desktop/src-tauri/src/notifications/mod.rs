@@ -1,3 +1,7 @@
+/// The one notification a person can ask for, worded once for every backend.
+pub(crate) const TEST_TITLE: &str = "tmux Agent IDE";
+pub(crate) const TEST_BODY: &str = "Test notification — delivery works.";
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

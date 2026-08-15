@@ -576,7 +576,10 @@ export function App() {
     selectCreatedWindow: (sessionId, windowId) => {
       void performAction({ kind: "selectWindow", sessionId, windowId }).then((accepted) => {
         if (!accepted) return;
-        const session = snapshot.sessions.find((item) => item.id === sessionId);
+        // `snapshotRef`, not the render's `snapshot`: this resolves after a
+        // host round trip, and the workspace may have been renamed or closed
+        // in between. Same reason `surfacePaneDestination` reads the ref.
+        const session = snapshotRef.current.sessions.find((item) => item.id === sessionId);
         if (session && hostState.serverIdentity) {
           setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, session, undefined));
         }

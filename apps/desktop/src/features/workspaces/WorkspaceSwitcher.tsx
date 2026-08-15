@@ -72,7 +72,7 @@ export function WorkspaceSwitcher(props: WorkspaceSwitcherProps) {
       </div>
       <div className="palette-list" id="workspace-results" ref={listRef} role="listbox">
         {rows.length === 0 && <p className="quiet-empty">No matching workspace.</p>}
-        {rows.map((row, index) => <button
+        {rows.map((row, index) => { const meta = switcherMeta(row); return <button
           aria-selected={index === activeIndex}
           className={index === activeIndex ? "palette-row selected" : "palette-row"}
           id={`workspace-option-${row.session.id}`}
@@ -86,8 +86,8 @@ export function WorkspaceSwitcher(props: WorkspaceSwitcherProps) {
         >
           <span className="palette-title">{row.session.name}</span>
           {row.attention !== "none" && <StateDot glyphs={props.stateGlyphs} label={`Agent ${row.attention}`} state={row.attention} />}
-          {switcherMeta(row) && <span className="palette-meta">{switcherMeta(row)}</span>}
-        </button>)}
+          {meta && <span className="palette-meta">{meta}</span>}
+        </button>; })}
       </div>
     </section>
   </div>;

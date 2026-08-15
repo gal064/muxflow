@@ -2,10 +2,10 @@
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
-import type { PendingTmuxConfirmation } from "../../commands/destructiveConfirmation";
 import type { CommandId, CommandTarget } from "../../commands/registry";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
-import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
+import type { TmuxActionResult } from "../tmux/actions";
+import type { HostScopeToken } from "./hostScope";
 import { defaultAppState, type PersistedAppState } from "./types";
 import { useShellCommands } from "./useShellCommands";
 
@@ -16,11 +16,17 @@ const pane: Pane = {
   width: 80, height: 24, left: 0, top: 0, currentPath: "/home/user", currentCommand: "zsh",
 };
 const snapshot: TmuxSnapshot = { sessions: [session], windows: [window], panes: [pane] };
+const hostScope: HostScopeToken = {
+  hostProfileId: "local", connectionKey: "local", connectionEpoch: 1,
+  serverIdentity: "server-a", generation: 8,
+};
 
 const appTab: PersistedAppState["appTabs"][number] = {
   id: "tab-1", hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1",
   sessionName: "muxflow", kind: "file", resource: "/home/user/notes.md", title: "notes.md", order: 0,
 };
+
+type Options = Parameters<typeof useShellCommands>[0];
 
 /**
  * Drives `runCommand` for one command, and reports everything the hook did.
@@ -29,14 +35,19 @@ const appTab: PersistedAppState["appTabs"][number] = {
  * the only honest way to call it; `create` is what the rest of this suite uses
  * for the same reason.
  */
-async function run(commandId: CommandId, overrides: Partial<Parameters<typeof useShellCommands>[0]> = {}, target?: CommandTarget) {
-  const performAction = overrides.performAction
-    ?? vi.fn<(action: TmuxAction, precondition?: { serverIdentity: string; generation: number }) => Promise<TmuxActionResult | undefined>>(
-      async () => ({ topologyGeneration: 8 }),
-    );
-  const setConfirmation = vi.fn<(value: PendingTmuxConfirmation | undefined) => void>();
-  const setStatus = vi.fn();
-  const selectCreatedWindow = vi.fn();
+async function run(
+  commandId: CommandId,
+  overrides: Partial<Options> & { result?: TmuxActionResult } = {},
+  target?: CommandTarget,
+) {
+  // Typed against the real option, so a rename on `TmuxActionResult` breaks the
+  // ⌘T test rather than leaving it green over a broken feature.
+  const performAction = vi.fn<Options["performAction"]>(
+    async () => overrides.result ?? { topologyGeneration: 8 },
+  );
+  const setConfirmation = vi.fn<Options["setConfirmation"]>();
+  const setStatus = vi.fn<Options["setStatus"]>();
+  const selectCreatedWindow = vi.fn<Options["selectCreatedWindow"]>();
   const setAppState = vi.fn();
   let call: ((commandId: CommandId, target?: CommandTarget) => Promise<void>) | undefined;
 
@@ -46,13 +57,12 @@ async function run(commandId: CommandId, overrides: Partial<Parameters<typeof us
       appState: { ...defaultAppState, appTabs: [appTab] },
       canMutate: true, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
       currentHostProfileId: "local", focusDirection: vi.fn(), generation: 8,
-      hostScope: { hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1 } as never,
-      isHostScopeCurrent: () => true, jumpToUnreadAgent: vi.fn(),
+      hostScope, isHostScopeCurrent: () => true, jumpToUnreadAgent: vi.fn(),
       requestHostProfileDelete: vi.fn(), rowCommands: [], selectCreatedSession: vi.fn(),
       selectCreatedWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
       selectWorkspaceByIndex: vi.fn(), serverIdentity: "server-a", setAppState,
-      setConfirmation: setConfirmation as never, setPaletteOpen: vi.fn(), setSettingsOpen: vi.fn(),
-      setShortcutEditorOpen: vi.fn(), setStatus: setStatus as never, setTextPrompt: vi.fn(),
+      setConfirmation, setPaletteOpen: vi.fn(), setSettingsOpen: vi.fn(),
+      setShortcutEditorOpen: vi.fn(), setStatus, setTextPrompt: vi.fn(),
       setWorkspaceSwitcherOpen: vi.fn(), snapshot, stepFocusHistory: vi.fn(), windows: [window],
       ...overrides,
       performAction,
@@ -74,7 +84,7 @@ describe("shell commands", () => {
     // move; the app mirrors that flag on every snapshot, so without an explicit
     // selection the new tab appears and the focus stays behind.
     const { performAction, selectCreatedWindow } = await run("window.new", {
-      performAction: vi.fn(async () => ({ windowId: "@9", topologyGeneration: 9 })) as never,
+      result: { windowId: "@9", topologyGeneration: 9 },
     });
     expect(performAction).toHaveBeenCalledWith({ kind: "createWindow", sessionId: "$1" });
     expect(selectCreatedWindow).toHaveBeenCalledWith("$1", "@9");
@@ -83,7 +93,7 @@ describe("shell commands", () => {
   it("does not steal focus into a window created on a host the user has left", async () => {
     const { selectCreatedWindow } = await run("window.new", {
       isHostScopeCurrent: () => false,
-      performAction: vi.fn(async () => ({ windowId: "@9", topologyGeneration: 9 })) as never,
+      result: { windowId: "@9", topologyGeneration: 9 },
     });
     expect(selectCreatedWindow).not.toHaveBeenCalled();
   });

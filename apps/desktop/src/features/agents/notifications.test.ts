@@ -87,6 +87,11 @@ describe("agent native notification policy", () => {
     invokeMock.mockResolvedValueOnce({ id: 1, actionable: false });
     await expect(emitTestNotification()).resolves.toEqual({ id: 1, actionable: false });
     expect(invokeMock).toHaveBeenLastCalledWith("emit_test_notification");
+    // Three platform backends write that vocabulary independently. A word this
+    // side has no sentence for would render an empty status line, so it is
+    // checked on the way in rather than asserted.
+    invokeMock.mockResolvedValueOnce("ephemeral");
+    await expect(notificationPermissionStatus()).resolves.toBe("unsupported");
   });
 
   it("acknowledges only the clicked agent and stale generation, not a newer pane peer", async () => {

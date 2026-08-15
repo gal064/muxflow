@@ -126,18 +126,12 @@ export function useShellCommands(options: ShellCommandOptions): {
     }
     if (definition.destructive) {
       if (!options.serverIdentity) return;
-      const captured = commandId === "window.close" && targetWindow
-        ? {
-            label: `terminal tab “${targetWindow.name}” and all of its panes`,
-            action: { kind: "closeWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id } as TmuxAction,
-          }
+      const action: TmuxAction | undefined = commandId === "window.close" && targetWindow
+        ? { kind: "closeWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id }
         : commandId === "pane.close" && targetPane
-            ? {
-                label: `pane ${targetPane.id}`,
-                action: { kind: "closePane", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id } as TmuxAction,
-              }
-            : undefined;
-      if (!captured) return;
+          ? { kind: "closePane", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id }
+          : undefined;
+      if (!action) return;
       // Closing a terminal tab or a pane does not ask. It is the surface the
       // user is looking at, the result is visible the instant it happens, and
       // a terminal that asks before closing is a preference this user has
@@ -148,7 +142,7 @@ export function useShellCommands(options: ShellCommandOptions): {
       // accept path would have stamped, and the authoritative precondition is
       // still captured at the moment the command ran.
       await options.performAction(
-        { ...captured.action, confirmed: true },
+        { ...action, confirmed: true },
         { serverIdentity: options.serverIdentity, generation: options.generation },
       );
       return;

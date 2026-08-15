@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     ffi::CString,
     fs::{self, File},
     io::{Read, Write},
@@ -31,6 +31,8 @@ use objc2_user_notifications::{
     UNUserNotificationCenterDelegate,
 };
 use phase0_core::NotificationRoute;
+
+use super::{TEST_BODY, TEST_TITLE};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
@@ -43,13 +45,15 @@ const AUTHORIZATION_PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PENDING_ROUTES: usize = 512;
 const ROUTE_SCHEMA: &str = "ade-notification-route-v1";
 /// The identifier prefix that marks the notification the user asked for.
-pub(super) const TEST_IDENTIFIER_PREFIX: &str = "test-";
-const TEST_TITLE: &str = "tmux Agent IDE";
-const TEST_BODY: &str = "Test notification — delivery works.";
+const TEST_IDENTIFIER_PREFIX: &str = "test-";
+/// `userInfo` key carrying the frontend's foreground-presentation answer.
+const FOREGROUND_KEY: &str = "adeForeground";
+/// The only value that suppresses. Anything else — including a payload that
+/// never set the key — presents, because invisibility is this feature's bug.
+const FOREGROUND_SUPPRESS: &str = "suppress";
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static ROUTES: OnceLock<Mutex<PendingRoutes>> = OnceLock::new();
-static FOREGROUND: OnceLock<Mutex<ForegroundPresentation>> = OnceLock::new();
 static ROUTE_DIRECTORY: OnceLock<File> = OnceLock::new();
 static NEXT_RECEIPT: AtomicU32 = AtomicU32::new(1);
 
@@ -81,63 +85,32 @@ impl PendingRoutes {
     }
 }
 
-/// The notifications the delegate should show even though the app is in front.
+/// What the delegate shows for one notification while the app is frontmost.
 ///
 /// Foreground suppression used to be total — `will_present` completed with no
 /// options at all — so while the app was frontmost the system showed nothing,
 /// for every notification, including the ones the frontend had already decided
 /// were not on any pane the user can see. Focus is the frontend's fact, not
-/// this process's, so the frontend sends its answer with each notification and
-/// this keeps it, keyed by identifier, until the delegate is asked.
+/// this process's, so its answer travels *on* the notification: this reads the
+/// same `userInfo` the activation path already reads, which means there is no
+/// side table to keep, bound, evict, or clean up on the error path.
 ///
-/// Bounded the same way pending routes are, and for the same reason: an app
-/// that spends a long time in the background accumulates one entry per
-/// notification whose `will_present` will never fire.
-#[derive(Default)]
-struct ForegroundPresentation {
-    ids: HashSet<String>,
-    order: VecDeque<String>,
-}
-
-impl ForegroundPresentation {
-    fn insert(&mut self, id: String) {
-        while self.ids.len() >= MAX_PENDING_ROUTES {
-            match self.order.pop_front() {
-                Some(oldest) => {
-                    self.ids.remove(&oldest);
-                }
-                None => break,
-            }
-        }
-        self.order.push_back(id.clone());
-        self.ids.insert(id);
-    }
-
-    fn take(&mut self, id: &str) -> bool {
-        let present = self.ids.remove(id);
-        if present {
-            self.order.retain(|entry| entry != id);
-        }
-        present
-    }
-}
-
-/// What the delegate shows for one notification while the app is frontmost.
-///
-/// The `test-` prefix is checked unconditionally rather than through the
-/// registry: the test notification exists to answer "does delivery work at
-/// all", and an answer that depends on in-memory state which the bound above
-/// can evict would be the one answer this button must never give.
-fn foreground_presentation(identifier: &str) -> UNNotificationPresentationOptions {
+/// The `test-` prefix short-circuits it. That notification's entire job is to
+/// answer "does a banner appear at all", so it must not be able to answer "no"
+/// because a payload field went missing.
+fn foreground_presentation(
+    identifier: &str,
+    user_info: &NSDictionary,
+) -> UNNotificationPresentationOptions {
     if identifier.starts_with(TEST_IDENTIFIER_PREFIX) {
         return UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::Sound;
     }
-    if foreground().lock().unwrap().take(identifier) {
-        // Banner without Sound: the app plays its own agent cue for the same
-        // event, and two sounds for one transition is worse than none.
-        return UNNotificationPresentationOptions::Banner;
+    if notification_string(user_info, FOREGROUND_KEY).as_deref() == Some(FOREGROUND_SUPPRESS) {
+        return UNNotificationPresentationOptions::empty();
     }
-    UNNotificationPresentationOptions::empty()
+    // Banner without Sound: the app plays its own agent cue for the same event,
+    // and two sounds for one transition is worse than none.
+    UNNotificationPresentationOptions::Banner
 }
 
 define_class!(
@@ -158,8 +131,10 @@ define_class!(
             // Only the pane the user is actually looking at represents its own
             // attention in-app. Everything else is as invisible as it would be
             // with the app in the background, so it is presented.
-            let identifier = notification.request().identifier().to_string();
-            completion.call((foreground_presentation(&identifier),));
+            let request = notification.request();
+            let identifier = request.identifier().to_string();
+            let options = foreground_presentation(&identifier, &request.content().userInfo());
+            completion.call((options,));
         }
 
         #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
@@ -195,10 +170,6 @@ fn routes() -> &'static Mutex<PendingRoutes> {
     ROUTES.get_or_init(|| Mutex::new(PendingRoutes::default()))
 }
 
-fn foreground() -> &'static Mutex<ForegroundPresentation> {
-    FOREGROUND.get_or_init(|| Mutex::new(ForegroundPresentation::default()))
-}
-
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationReceipt {
@@ -209,6 +180,18 @@ pub struct NotificationReceipt {
 #[derive(Clone)]
 pub struct NativeNotifications {
     route_directory: Option<Arc<File>>,
+}
+
+/// One notification's parameters, named. Three of these are booleans and two
+/// of them are adjacent, which is the shape that silently swaps positionally.
+struct Posting<'a> {
+    title: &'a str,
+    body: &'a str,
+    identifier: String,
+    /// `Some` makes the notification actionable and requires route storage.
+    route: Option<NotificationRoute>,
+    present_in_foreground: bool,
+    sound: bool,
 }
 
 impl NativeNotifications {
@@ -243,14 +226,14 @@ impl NativeNotifications {
         request_action: bool,
         present_in_foreground: bool,
     ) -> Result<NotificationReceipt, String> {
-        self.post(
+        self.post(Posting {
             title,
             body,
-            Uuid::new_v4().to_string(),
-            request_action.then_some(route),
+            identifier: Uuid::new_v4().to_string(),
+            route: request_action.then_some(route),
             present_in_foreground,
-            false,
-        )
+            sound: false,
+        })
     }
 
     /// The one notification a person can ask for directly.
@@ -260,14 +243,14 @@ impl NativeNotifications {
     /// and it is the call that first raises the OS permission prompt on a
     /// machine where no agent event has ever fired.
     pub fn send_test_notification(&self) -> Result<NotificationReceipt, String> {
-        self.post(
-            TEST_TITLE,
-            TEST_BODY,
-            format!("{TEST_IDENTIFIER_PREFIX}{}", Uuid::new_v4()),
-            None,
-            true,
-            true,
-        )
+        self.post(Posting {
+            title: TEST_TITLE,
+            body: TEST_BODY,
+            identifier: format!("{TEST_IDENTIFIER_PREFIX}{}", Uuid::new_v4()),
+            route: None,
+            present_in_foreground: true,
+            sound: true,
+        })
     }
 
     /// What macOS says about this app, in the five words the UI knows.
@@ -276,15 +259,15 @@ impl NativeNotifications {
         Ok(authorization_status_name(notification_status(&center)?).to_owned())
     }
 
-    fn post(
-        &self,
-        title: &str,
-        body: &str,
-        identifier: String,
-        route: Option<NotificationRoute>,
-        present_in_foreground: bool,
-        sound: bool,
-    ) -> Result<NotificationReceipt, String> {
+    fn post(&self, posting: Posting<'_>) -> Result<NotificationReceipt, String> {
+        let Posting {
+            title,
+            body,
+            identifier,
+            route,
+            present_in_foreground,
+            sound,
+        } = posting;
         let center = UNUserNotificationCenter::currentNotificationCenter();
         ensure_authorized(&center)?;
 
@@ -297,22 +280,28 @@ impl NativeNotifications {
             persist_route(directory, &identifier, &route)?;
             routes().lock().unwrap().insert(identifier.clone(), route);
         }
-        if present_in_foreground {
-            foreground().lock().unwrap().insert(identifier.clone());
-        }
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(title));
         content.setBody(&NSString::from_str(body));
         if sound {
             content.setSound(Some(&UNNotificationSound::defaultSound()));
         }
+        let mut keys: Vec<Retained<NSString>> = Vec::new();
+        let mut values: Vec<Retained<NSString>> = Vec::new();
         if request_action {
-            let schema_key = NSString::from_str("adeRouteSchema");
-            let schema = NSString::from_str(ROUTE_SCHEMA);
-            let token_key = NSString::from_str("adeRouteToken");
-            let token = NSString::from_str(&identifier);
-            let typed_user_info =
-                NSDictionary::from_slices(&[&*schema_key, &*token_key], &[&*schema, &*token]);
+            keys.push(NSString::from_str("adeRouteSchema"));
+            values.push(NSString::from_str(ROUTE_SCHEMA));
+            keys.push(NSString::from_str("adeRouteToken"));
+            values.push(NSString::from_str(&identifier));
+        }
+        if !present_in_foreground {
+            keys.push(NSString::from_str(FOREGROUND_KEY));
+            values.push(NSString::from_str(FOREGROUND_SUPPRESS));
+        }
+        if !keys.is_empty() {
+            let key_refs: Vec<&NSString> = keys.iter().map(|key| &**key).collect();
+            let value_refs: Vec<&NSString> = values.iter().map(|value| &**value).collect();
+            let typed_user_info = NSDictionary::from_slices(&key_refs, &value_refs);
             // SAFETY: NSDictionary's generic parameters are Rust-side type
             // information only; Objective-C exposes userInfo as untyped.
             let user_info: Retained<NSDictionary> =
@@ -341,7 +330,6 @@ impl NativeNotifications {
             .map_err(|_| "macOS notification delivery timed out".to_owned())?
         {
             routes().lock().unwrap().take(&identifier);
-            foreground().lock().unwrap().take(&identifier);
             remove_persisted_route(&identifier);
             return Err(error);
         }
@@ -644,48 +632,49 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_test_notification_presents_in_the_foreground_without_any_registry_entry() {
-        // The registry is in-memory and bounded. The one notification whose
-        // entire job is to answer "does a banner appear" must not be able to
-        // answer "no" because its entry was evicted.
-        let options = foreground_presentation(&format!("{TEST_IDENTIFIER_PREFIX}{}", Uuid::new_v4()));
-        assert!(options.contains(UNNotificationPresentationOptions::Banner));
-        assert!(options.contains(UNNotificationPresentationOptions::Sound));
+    fn user_info(pairs: &[(&str, &str)]) -> Retained<NSDictionary> {
+        let keys: Vec<Retained<NSString>> =
+            pairs.iter().map(|(key, _)| NSString::from_str(key)).collect();
+        let values: Vec<Retained<NSString>> = pairs
+            .iter()
+            .map(|(_, value)| NSString::from_str(value))
+            .collect();
+        let key_refs: Vec<&NSString> = keys.iter().map(|key| &**key).collect();
+        let value_refs: Vec<&NSString> = values.iter().map(|value| &**value).collect();
+        unsafe { Retained::cast_unchecked(NSDictionary::from_slices(&key_refs, &value_refs)) }
     }
 
     #[test]
-    fn an_agent_notification_presents_once_when_the_frontend_said_the_pane_is_not_visible() {
+    fn foreground_presentation_shows_everything_except_what_the_frontend_suppressed() {
         let id = Uuid::new_v4().to_string();
-        // Nothing registered: the frontend said this pane is the focused one,
-        // so the app is already showing the attention itself.
+        // The frontend said the user is looking at this pane, so the app is
+        // already representing the attention itself.
         assert_eq!(
-            foreground_presentation(&id),
+            foreground_presentation(&id, &user_info(&[(FOREGROUND_KEY, FOREGROUND_SUPPRESS)])),
             UNNotificationPresentationOptions::empty()
         );
-        foreground().lock().unwrap().insert(id.clone());
+        // Anything else is presented — including a payload that says nothing,
+        // because total suppression is the defect this reverses and a missing
+        // field must not quietly reinstate it.
         assert_eq!(
-            foreground_presentation(&id),
+            foreground_presentation(&id, &user_info(&[])),
             UNNotificationPresentationOptions::Banner
         );
-        // Consumed: `will_present` fires once per request, and a leftover entry
-        // would be a second notification's answer.
         assert_eq!(
-            foreground_presentation(&id),
-            UNNotificationPresentationOptions::empty()
+            foreground_presentation(&id, &user_info(&[(FOREGROUND_KEY, "present")])),
+            UNNotificationPresentationOptions::Banner
         );
     }
 
     #[test]
-    fn foreground_entries_are_bounded_and_consumed_exactly_once() {
-        let mut pending = ForegroundPresentation::default();
-        for index in 0..=MAX_PENDING_ROUTES {
-            pending.insert(index.to_string());
-        }
-        assert_eq!(pending.ids.len(), MAX_PENDING_ROUTES);
-        assert!(!pending.take("0"));
-        assert!(pending.take("1"));
-        assert!(!pending.take("1"));
+    fn the_test_notification_presents_whatever_its_payload_says() {
+        // Its entire job is to answer "does a banner appear at all". It must
+        // not be able to answer "no" because a field went missing.
+        let id = format!("{TEST_IDENTIFIER_PREFIX}{}", Uuid::new_v4());
+        let options =
+            foreground_presentation(&id, &user_info(&[(FOREGROUND_KEY, FOREGROUND_SUPPRESS)]));
+        assert!(options.contains(UNNotificationPresentationOptions::Banner));
+        assert!(options.contains(UNNotificationPresentationOptions::Sound));
     }
 
     #[test]

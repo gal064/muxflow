@@ -234,7 +234,10 @@ function NotificationSettings(props: {
     return () => { live = false; };
   }, [onStatus]);
 
+  // Named, because "Sounds" does not imply system notification permission and
+  // an unlabelled button under a volume slider reads as part of the mixer.
   return <div className="settings-host-actions">
+    <h3 className="settings-heading">System notifications</h3>
     <button
       disabled={sending}
       onClick={() => {
@@ -268,11 +271,13 @@ function notificationStatusHint(status: NotificationPermissionStatus | "unreadab
     case "provisional": return "Notifications are delivered quietly. Allow them in System Settings → Notifications → tmux Agent IDE to get banners.";
     case "denied": return "Notifications are turned off for this app. Enable them in System Settings → Notifications → tmux Agent IDE.";
     case "notDetermined": return "Not requested yet — sending a test notification is what asks for permission.";
-    // Not a failure worth an alert: on Linux it means no notification daemon is
-    // running, and on macOS it means this build is not a bundle the system will
-    // register (a `tauri dev` binary, or one whose signature seal is broken).
-    case "unsupported": return "This system has nothing to deliver notifications through. On macOS, only a packaged build can.";
-    case "unreadable": return "The notification permission could not be read on this system.";
+    // Reachable on Linux, where it means no notification daemon is running.
+    case "unsupported": return "This system has nothing to deliver notifications through.";
+    // The likely macOS answer for a build the system will not register: a
+    // `tauri dev` binary, or a bundle whose signature seal is broken. The
+    // framework has no status for "you are not a real app" — the query simply
+    // does not come back — so this is where that guidance has to live.
+    case "unreadable": return "macOS did not answer. This usually means the running build is not a packaged app; only the output of release/macos/build-package.sh can deliver notifications.";
   }
 }
 
