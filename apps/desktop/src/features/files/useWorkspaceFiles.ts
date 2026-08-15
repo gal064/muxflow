@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { keyForScope, keyForTransferConnection, sameRoot } from "./api";
+import { startPerfSpan } from "../../perf/probe";
 import { isTerminalTransferState, mergeCanonicalTransfer } from "../transfers/transferState";
 import type {
   ActiveRoot,
@@ -30,6 +31,18 @@ const EMPTY = new Map<string, DirectoryListing>();
  */
 const ACTIVE_ROOT_POLL_MS = 2_000;
 
+/**
+ * How long one directory's filesystem events are gathered before it is re-read.
+ *
+ * Every event used to re-read immediately, so a directory an agent is writing
+ * into was re-listed once per write — over SSH that is a round trip per write,
+ * all of them asking the same question. The window is a throttle rather than a
+ * debounce (it starts at the first event of a burst and is not pushed back by
+ * later ones), because a directory under continuous change must still refresh
+ * on a bounded schedule rather than only once the writing stops.
+ */
+const DIRECTORY_REFRESH_COALESCE_MS = 150;
+
 export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorkspaceScope | undefined) {
   const [state, setState] = useState<WorkspaceFilesState>({
     scopeKey: "",
@@ -44,6 +57,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const scopeEpoch = useRef(0);
   const rootProbeSerial = useRef(0);
   const directorySerial = useRef(new Map<string, number>());
+  const refreshTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const scopeKey = scope ? keyForScope(scope) : "";
   const transferConnectionKey = scope ? keyForTransferConnection(scope) : "";
   const scopeRef = useRef(scope);
@@ -59,7 +73,21 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const epoch = scopeEpoch.current;
     const serial = (directorySerial.current.get(path) ?? 0) + 1;
     directorySerial.current.set(path, serial);
-    setState((current) => ({ ...current, loading: new Set(current.loading).add(path), error: undefined }));
+    // A wait is announced only when there is nothing to wait in front of.
+    //
+    // Marking every re-read as loading put a "Loading…" row at the end of the
+    // tree each time — inside the scrolling box, so the content grew by a row
+    // and shrank again on every filesystem event. On a link where the re-read
+    // takes a visible moment that is the flicker the user reported twice over:
+    // the row itself on a short listing, and, on a long one, macOS revealing
+    // and re-hiding the overlay scrollbars as the content height oscillated. It
+    // also announced "Loading…" to a screen reader once per event, because that
+    // row is a live region. Rows already on screen stay on screen and are
+    // replaced when the answer lands, which is what a refresh should look like.
+    const announcesWait = append || !previous;
+    if (announcesWait) setState((current) => ({ ...current, loading: new Set(current.loading).add(path), error: undefined }));
+    else setState((current) => (current.error === undefined ? current : { ...current, error: undefined }));
+    const finishSpan = startPerfSpan(append ? "files.listDirectory.page" : "files.listDirectory");
     try {
       const listing = await client.listDirectory(activeScope, root, path, append ? previous?.nextPageToken : undefined);
       if (epoch !== scopeEpoch.current || directorySerial.current.get(path) !== serial || keyForScope(activeScope) !== scopeKey) return;
@@ -81,8 +109,30 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
         loading.delete(path);
         return sameRoot(current.root, root) ? { ...current, loading, error: String(error) } : current;
       });
+    } finally {
+      // What a directory read costs on this link, when `ADE_PERF_LOG` is set and
+      // nothing otherwise. The flicker this hook was reported for is only ever
+      // visible when this number is large, and until now nothing measured it.
+      finishSpan();
     }
   }, [client, scopeKey]);
+
+  /**
+   * Re-reads a directory that filesystem events say has changed, at most once
+   * per `DIRECTORY_REFRESH_COALESCE_MS`.
+   *
+   * The timer is started by the first event of a burst and deliberately not
+   * pushed back by the ones behind it: a directory an agent is writing into
+   * continuously would otherwise never be re-read at all.
+   */
+  const coalesceRefresh = useCallback((path: string) => {
+    const timers = refreshTimers.current;
+    if (timers.has(path)) return;
+    timers.set(path, setTimeout(() => {
+      timers.delete(path);
+      void loadDirectory(path, true);
+    }, DIRECTORY_REFRESH_COALESCE_MS));
+  }, [loadDirectory]);
 
   const applyEvent = useCallback((event: WorkspaceEvent) => {
     const current = stateRef.current;
@@ -100,9 +150,9 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       return;
     }
     if (!current.root || event.rootToken !== current.root.token) return;
-    if (event.kind === "directoryChanged") void loadDirectory(event.directory, true);
-    else if (event.kind === "fileChanged" || event.kind === "fileDeleted") void loadDirectory(parentPath(event.path), true);
-  }, [loadDirectory]);
+    if (event.kind === "directoryChanged") coalesceRefresh(event.directory);
+    else if (event.kind === "fileChanged" || event.kind === "fileDeleted") coalesceRefresh(parentPath(event.path));
+  }, [coalesceRefresh]);
 
   useEffect(() => {
     scopeEpoch.current += 1;
@@ -167,6 +217,11 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       disposed = true;
       scopeEpoch.current += 1;
       window.clearInterval(poll);
+      // A refresh still waiting out its window belongs to the scope that is
+      // going away; letting it fire would read a directory for a pane the user
+      // has already left.
+      for (const timer of refreshTimers.current.values()) clearTimeout(timer);
+      refreshTimers.current.clear();
       unsubscribe?.();
     };
   }, [applyEvent, client, scopeKey]);
