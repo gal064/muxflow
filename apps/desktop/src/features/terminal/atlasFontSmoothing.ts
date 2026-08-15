@@ -41,14 +41,28 @@
  */
 
 /**
- * Recognises the atlas canvas, and nothing that matters.
+ * Recognises the atlas canvas, and deliberately little else.
  *
- * `willReadFrequently` on a 2d context is the addon's signature for the one
- * canvas it rasterises glyphs on (`TextureAtlas._tmpCanvas`); its atlas *pages*
- * only ever receive `drawImage` blits of that canvas, so they neither need the
- * hook nor match it. Requiring the canvas to be detached keeps the hook off
- * every canvas the app itself puts on screen, and makes it idempotent: a canvas
- * this hook has already moved does not match a second time.
+ * The addon asks for its glyph canvas as `{ alpha, willReadFrequently: true }`
+ * (`TextureAtlas._tmpCanvas`), and that pair is the whole predicate. Both
+ * halves are load-bearing in the *narrowing* direction, because this hook is a
+ * global patch and everything it claims it also keeps: `willReadFrequently`
+ * alone is the ordinary idiom for an offscreen measuring canvas — xterm's own
+ * colour parser uses it — and those must be left where they are, since nothing
+ * here would ever take them back out of the document. Requiring `alpha` to have
+ * been named is what separates the addon's call from that idiom.
+ *
+ * The atlas *pages* pass neither `willReadFrequently` nor text: they only
+ * receive `drawImage` blits of this canvas, so they need no hook and match
+ * none. Requiring the canvas to be detached keeps the hook off everything the
+ * app itself puts on screen, and makes it idempotent — a canvas already moved
+ * here is connected, and does not match a second time.
+ *
+ * If a future xterm stops passing `alpha`, this stops matching and the glyphs
+ * go back to being heavy. That is the failure this trades for, and it is the
+ * visible one: the QA probe drives the real bundled addon and measures the
+ * result, where the alternative failure — a stranger's canvas pinned into the
+ * document forever — is silent.
  */
 function wantsDocumentFontSmoothing(
   canvas: HTMLCanvasElement,
@@ -57,7 +71,8 @@ function wantsDocumentFontSmoothing(
 ): boolean {
   if (contextId !== "2d" || canvas.isConnected) return false;
   if (typeof options !== "object" || options === null) return false;
-  return (options as CanvasRenderingContext2DSettings).willReadFrequently === true;
+  return (options as CanvasRenderingContext2DSettings).willReadFrequently === true
+    && "alpha" in options;
 }
 
 const HOLDER_ID = "ade-atlas-font-smoothing";
