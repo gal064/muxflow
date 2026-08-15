@@ -34,7 +34,7 @@ export function DownloadTransfers({ transfers, onCancelTransfer }: {
           published reports `failed` with `outcome: "published"`, and that is
           exactly when the user most needs to find the file. */}
       {transfer.outcome === "published" && transfer.destination && <div className="transfer-actions">
-        <DownloadActions destination={transfer.destination} onError={(message) => setOpenError({ id: transfer.id, message })} />
+        <DownloadActions destination={transfer.destination} onResult={(error) => setOpenError(error ? { id: transfer.id, message: error } : undefined)} />
       </div>}
       {openError?.id === transfer.id && <em role="alert">{openError.message}</em>}
       {transfer.state === "verifying" && <small className="transfer-detail transfer-finalizing" role="status">The verified bytes are being committed; awaiting the authoritative backend outcome.</small>}

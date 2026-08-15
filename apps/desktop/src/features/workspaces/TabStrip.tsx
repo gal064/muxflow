@@ -31,7 +31,8 @@ interface TabStripProps {
 function TabGlyph({ tab }: { tab: Extract<CombinedTab, { kind: "app" }> }) {
   const { icon, color } = tab.appKind === "gitDiff"
     ? { icon: "diff" as const, color: "var(--state-working)" }
-    : fileIcon({ name: tab.resource.split("/").filter(Boolean).at(-1) ?? tab.resource, kind: "file" });
+    // The strip already shows the basename; `openFileTab` put it there.
+    : fileIcon({ name: tab.title, kind: "file" });
   return <span className={`tab-glyph ${tab.appKind}`} style={{ color }}><Icon name={icon} size={12} /></span>;
 }
 

@@ -57,6 +57,20 @@ describe("DownloadTransfers", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it("clears a refusal once the same row opens successfully", async () => {
+    // A row that has recovered must not keep showing the error it recovered
+    // from — the previous shape only ever set the message, never unset it.
+    invoke.mockImplementation(() => Promise.reject(new Error("refused")));
+    const renderer = await render();
+    await act(async () => { renderer.root.findByProps({ "aria-label": `Open ${published}` }).props.onClick(); });
+    expect(JSON.stringify(renderer.toJSON())).toContain("refused");
+
+    invoke.mockImplementation(() => Promise.resolve());
+    await act(async () => { renderer.root.findByProps({ "aria-label": `Open ${published}` }).props.onClick(); });
+    expect(JSON.stringify(renderer.toJSON())).not.toContain("refused");
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("draws nothing at all when there are no transfers", async () => {
     const renderer = await render([]);
     expect(renderer.toJSON()).toBeNull();
