@@ -4,6 +4,7 @@ import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
 import { SurfaceError } from "../../ui/SurfaceError";
+import { attachEditorLayout } from "../files/editorLayout";
 import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot, GitWorkspaceClient, GitWorkspaceEvent } from "./types";
 import { ADE_MONACO_THEME } from "../files/monaco";
 
@@ -20,6 +21,8 @@ interface Props {
 type PendingDiscard = { kind: "discardFile" | "discardHunk"; hunkIndex?: number; diff: GitDiff; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
 
 export function GitDiffSurface(props: Props) {
+  const detachLayout = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => () => { detachLayout.current?.(); detachLayout.current = undefined; }, []);
   const [diff, setDiff] = useState<GitDiff>();
   const [status, setStatus] = useState<GitStatusSnapshot>();
   const [loading, setLoading] = useState(true);
@@ -216,6 +219,7 @@ export function GitDiffSurface(props: Props) {
             language={languageForPath(diff.displayPath)}
             modified={text.modified}
             modifiedModelPath={modelUri(props.tab, "modified")}
+            onMount={(editor) => { detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor); }}
             options={{ automaticLayout: true, enableSplitViewResizing: true, minimap: { enabled: false }, originalEditable: false, readOnly: true, renderSideBySide: true, scrollBeyondLastLine: false }}
             original={text.original}
             originalModelPath={modelUri(props.tab, "original")}

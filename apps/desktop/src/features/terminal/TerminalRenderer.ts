@@ -4,18 +4,18 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { terminalScreenReaderMode } from "./accessibilityPreference";
-import { searchDecorations, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
+import { searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
+import {
+  terminalMeasurements,
+  xtermLineHeight,
+  type MeasurableTerminal,
+  type TerminalMeasurements,
+  type TerminalSize,
+} from "./cellMetrics";
 
-export interface TerminalSize {
-  columns: number;
-  rows: number;
-}
-
-/** A CSS-pixel box. The outer box of an element, borders and padding included. */
-export interface PixelBox {
-  width: number;
-  height: number;
-}
+// Re-exported so the renderer stays the one import site for a pane's metrics.
+export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
+export { cellsForBox, terminalMeasurements, xtermLineHeight } from "./cellMetrics";
 
 export type TerminalInput =
   | { kind: "text"; data: string }
@@ -127,211 +127,6 @@ export function restoreDecision(
     };
   }
   return { kind: "apply" };
-}
-
-/** Chrome a terminal spends out of the box it is given, in CSS pixels. */
-export interface TerminalBoxChrome {
-  horizontal: number;
-  vertical: number;
-  scrollbar: number;
-}
-
-/**
- * A terminal, plus the internal xterm does not expose: its render service's CSS
- * cell size. The dependency is in the signature rather than inside a cast so
- * that "this reads xterm internals" is visible to the next reader and to the
- * next upgrade.
- */
-export type MeasurableTerminal = Pick<Terminal, "options"> & {
-  _core?: {
-    _renderService?: { dimensions?: { css?: { cell?: Partial<PixelBox> } } };
-    /** What xterm measured one character to be, in CSS pixels. See `xtermLineHeight`. */
-    _charSizeService?: {
-      height?: number;
-      onCharSizeChange?: (listener: () => void) => IDisposable;
-    };
-  };
-};
-
-/**
- * The `lineHeight` option that makes xterm render rows at `rowPitch` CSS pixels.
- *
- * xterm's `lineHeight` is **not** CSS's. It multiplies the *measured character
- * height* — `device.cell.height = floor(device.char.height * lineHeight)` in
- * `RenderService._updateDimensions` — and a monospace face measures taller than
- * its font size (JetBrains Mono at 13 px measures ~17 px). Handing xterm the
- * token's 1.42 therefore asked for 17 × 1.42 ≈ 24 px rows: a real pitch of
- * ~1.86 font sizes, a terminal that looks stretched, and a tmux grid a third
- * shorter than the window can hold — 30 rows where 41 belong.
- *
- * So the token stays the design value (row pitch = font size × 1.42) and this
- * expresses it in xterm's units. Only the cell metric changes; every derivation
- * downstream — `FitAddon`, `terminalMeasurements`, `clientSizeForSurface` —
- * reads the resulting `css.cell`, so all of them stay in agreement by
- * construction.
- *
- * A row is a whole number of *device* pixels, and xterm floors into them, so the
- * multiplier aims at the middle of the device row it wants rather than at its
- * edge, via `wholeDeviceRowHeight`.
- *
- * Returns undefined when there is nothing to derive from, which leaves xterm at
- * its unit multiplier: rows one measured character tall, slightly tighter than
- * the design, never a grid the surface cannot show.
- */
-export function xtermLineHeight(
-  rowPitch: number,
-  measuredCharHeight: number | undefined,
-  devicePixelRatio = 1,
-): number | undefined {
-  if (!(rowPitch > 0) || !(measuredCharHeight !== undefined && measuredCharHeight > 0)) return undefined;
-  const ratio = devicePixelRatio > 0 ? devicePixelRatio : 1;
-  // The same rounding xterm performs on the measured character.
-  const deviceCharHeight = Math.ceil(measuredCharHeight * ratio);
-  // Never below the face: xterm refuses a multiplier under 1, and the row that
-  // clamp produces is `deviceCharHeight` — a number nothing chose, and as likely
-  // to be the odd one this whole function exists to avoid.
-  return (unresampledRowHeight(rowPitch, ratio, deviceCharHeight) + 0.5) / deviceCharHeight;
-}
-
-/**
- * How much of the designed pitch a row may give up to avoid being resampled.
- *
- * At a ratio of 1.25 the smallest row that is whole in both spaces is a multiple
- * of 4 CSS px, which would drag a 18.46 px pitch to 20 — 8% of the design, and a
- * worse trade than the resampling. So the snap is only taken when it is cheap,
- * and the budget is stated here rather than falling out of an integer check.
- */
-const MAX_PITCH_SACRIFICE_PX = 1;
-
-/**
- * The device row height to aim at: as close to the token's pitch as a row can be
- * while `rows × row` still divides by the device pixel ratio exactly.
- *
- * That constraint is not cosmetic. xterm sizes the WebGL canvas's backing store
- * from `rows × device.cell.height` but its CSS box from
- * `Math.round(that / devicePixelRatio)`, and a `DevicePixelObserver` then resizes
- * the backing store to whatever that rounded box actually measures. So whenever
- * the product does not divide exactly, the two disagree by up to one device
- * pixel, the glyph quads are placed in a clip space one pixel shorter than the
- * viewport they are drawn into, and the whole grid is stretched by that pixel:
- * every row lands on a different subpixel offset, the GPU's linear filter smears
- * each one differently, and text that is crisp at the top of the pane is visibly
- * soft and displaced by the bottom.
- *
- * Measured on the packaged app at 13 px / 1.42 on a 2× display: a 37-device-pixel
- * row (18.5 CSS px) drifted each row's glyph centroid by 0.0257 device px, 1.0 px
- * across the 39-row pane, against a within-row spread of 0.003 px.
- *
- * The rule is one predicate rather than a special case per ratio: a row of `h`
- * CSS pixels survives every grid size when `h` and `h × ratio` are both whole, so
- * `h` must be a multiple of the smallest `step` with `step × ratio` whole — 1 at
- * an integer ratio, 2 at 1.5, 4 at 1.25. 13 × 1.42 = 18.46 CSS px, so a 2×
- * display gets 18.0 (1.385 font sizes rather than the token's 1.42) and a 1.5×
- * display gets the same 18.0, which is 27 device pixels and exact.
- *
- * A ratio with no such step inside `MAX_SNAP_STEP`, or one whose step costs more
- * pitch than the budget allows, keeps the nearest device row and accepts the
- * stretch — stated, rather than silently produced by a rounding.
- */
-function unresampledRowHeight(rowPitch: number, ratio: number, deviceCharHeight: number): number {
-  const nearest = Math.max(deviceCharHeight, Math.round(rowPitch * ratio));
-  const step = cssRowStep(ratio);
-  if (step === undefined) return nearest;
-  let cssRow = Math.max(step, Math.round(rowPitch / step) * step);
-  // A row shorter than the face would clamp; step up until it is not.
-  while (cssRow * ratio < deviceCharHeight) cssRow += step;
-  return Math.abs(cssRow - rowPitch) <= MAX_PITCH_SACRIFICE_PX ? cssRow * ratio : nearest;
-}
-
-/** How far a whole-CSS-pixel row has to be from the next one at this ratio. */
-const MAX_SNAP_STEP = 4;
-
-function cssRowStep(ratio: number): number | undefined {
-  for (let step = 1; step <= MAX_SNAP_STEP; step += 1) {
-    if (Number.isInteger(step * ratio)) return step;
-  }
-  return undefined;
-}
-
-/** Everything needed to turn a pixel box into a terminal grid. */
-export interface TerminalMeasurements {
-  cell: PixelBox;
-  chrome: TerminalBoxChrome;
-}
-
-/**
- * Reads a terminal's cell size and chrome from the DOM and from xterm's own
- * render service — the same places `FitAddon.proposeDimensions` reads them.
- *
- * Exported and parameterised so the reading, not a reimplementation of it, is
- * what the tests exercise: `measureBox.test.ts` runs this against a real
- * `Terminal` and asserts it agrees with `FitAddon`. Everything is
- * optional-chained: if a future xterm moves the render service, this reports
- * nothing and the app asks tmux for nothing, which is the safe outcome.
- */
-export function terminalMeasurements(
-  terminal: MeasurableTerminal,
-  host: Element,
-  element: Element,
-): TerminalMeasurements | undefined {
-  const cell = terminal._core?._renderService?.dimensions?.css?.cell;
-  if (!cell?.width || !cell.height) return undefined;
-  const hostStyle = window.getComputedStyle(host);
-  const terminalStyle = window.getComputedStyle(element);
-  return {
-    cell: { width: cell.width, height: cell.height },
-    chrome: {
-      horizontal: edges(hostStyle, "left", "right") + edges(terminalStyle, "left", "right"),
-      vertical: edges(hostStyle, "top", "bottom") + edges(terminalStyle, "top", "bottom"),
-      // xterm reserves this on the right whenever there is scrollback, and
-      // FitAddon subtracts it before dividing; a terminal sized without it
-      // renders its last columns under the scrollbar.
-      scrollbar: terminal.options.scrollback === 0 ? 0 : terminal.options.overviewRuler?.width || 14,
-    },
-  };
-}
-
-/**
- * Cells that fit a pixel box, given one cell's size and the terminal's own
- * chrome. Extracted from `measureBox` so the arithmetic that decides how big a
- * tmux client to ask for is testable without a DOM: it is the arithmetic
- * `FitAddon.proposeDimensions` performs, with an explicit box.
- *
- * Floors, never rounds. Half a cell of terminal is not a cell of terminal, and
- * rounding up asks tmux for a grid the surface cannot show — which is how a
- * pane ends up with its bottom row cut off.
- */
-export function cellsForBox(
-  box: PixelBox,
-  cell: PixelBox,
-  chrome: TerminalBoxChrome,
-): TerminalSize | undefined {
-  if (!(cell.width > 0) || !(cell.height > 0)) return undefined;
-  const width = box.width - chrome.horizontal - chrome.scrollbar;
-  const height = box.height - chrome.vertical;
-  if (!(width > 0) || !(height > 0)) return undefined;
-  return { columns: Math.floor(width / cell.width), rows: Math.floor(height / cell.height) };
-}
-
-/**
- * Padding plus border an element spends on the named sides, in CSS pixels.
- *
- * A border with no style spends nothing. Browsers already compute its width to
- * `0px`, so this guard changes nothing in the app; jsdom reports the initial
- * `medium` (16 px) instead, and without it `measureBox.test.ts` would be
- * asserting against 64 px of border that does not exist anywhere.
- */
-function edges(style: CSSStyleDeclaration, ...sides: Array<"top" | "bottom" | "left" | "right">): number {
-  return sides.reduce((total, side) => {
-    const padding = pixels(style.getPropertyValue(`padding-${side}`));
-    const invisible = ["none", "hidden", ""].includes(style.getPropertyValue(`border-${side}-style`));
-    return total + padding + (invisible ? 0 : pixels(style.getPropertyValue(`border-${side}-width`)));
-  }, 0);
-}
-
-function pixels(value: string): number {
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
@@ -637,13 +432,46 @@ export class XtermRenderer implements TerminalRenderer {
     // multiplier derived from a measurement that no longer holds, and the only
     // symptom is a grid that does not fit its surface — nobody would trace that
     // back to here. xterm fires this only when the *measured* value moves, and
-    // the measurement is in CSS pixels, so a display change is deliberately not
-    // covered by it; see `#applyRowPitch`.
+    // that measurement is in CSS pixels, so it says nothing about the ratio.
     const charSize = (this.#terminal as MeasurableTerminal)._core?._charSizeService;
     const subscribe = charSize?.onCharSizeChange;
     if (subscribe) this.#disposables.push(subscribe.call(charSize, () => this.#applyRowPitch()));
+    this.#watchDevicePixelRatio();
     this.#mountWebgl();
     this.#discardFallbackAtlas();
+  }
+
+  /**
+   * Re-derives the row pitch when the window moves to a display of a different
+   * pixel ratio.
+   *
+   * This used to be deliberately uncovered, and the note that said so was right
+   * at the time: the multiplier was derived from a CSS measurement, so a ratio
+   * change cost a fraction of a pixel of pitch and nothing else. It is not right
+   * any more. The multiplier now encodes a *ratio-specific* choice — the row
+   * that keeps `rows × cell` divisible — so carrying one derived at 2× onto a
+   * 1.25× display gives `floor(22 × 1.0735) = 23` device px, 18.4 CSS px, and
+   * exactly the stretched grid the whole rule exists to prevent.
+   *
+   * `matchMedia` on the current ratio is the only event for this: `resize` does
+   * not fire for a same-size move between displays. The query is rebuilt each
+   * time because it can only ever match one ratio.
+   */
+  #watchDevicePixelRatio(): void {
+    if (typeof window.matchMedia !== "function") return;
+    let query: MediaQueryList | undefined;
+    const arm = () => {
+      query?.removeEventListener("change", onChange);
+      query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      query.addEventListener("change", onChange);
+    };
+    const onChange = () => {
+      if (this.#disposed) return;
+      this.#applyRowPitch();
+      arm();
+    };
+    arm();
+    this.#disposables.push({ dispose: () => query?.removeEventListener("change", onChange) });
   }
 
   seed(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
@@ -907,7 +735,8 @@ export class XtermRenderer implements TerminalRenderer {
    * tmux sized from the previous cell until the next resize. Recorded in
    * `tests/phase12/evidence/phase12-11/review-round-3-deferred.md` rather than
    * fixed here: the fix belongs in the observer, which is the protected resize
-   * path.
+   * path. (A display change now re-applies this; see
+   * `#watchDevicePixelRatio`.)
    *
    * A missing measurement is reported rather than guessed at: it means xterm
    * moved the service, which is what `measureBox.test.ts` fails on.
@@ -949,25 +778,23 @@ export class XtermRenderer implements TerminalRenderer {
    * lands this late still leaves the tmux grid derived from the fallback cell.
    * Forcing that re-measure means writing an option we do not own to a value we
    * do not want and back, which is a worse trade than the bounded wait.
+   *
+   * Every live pane clears when the faces land, and the atlas is shared between
+   * panes that look alike, so the last clear is the one that counts and the ones
+   * before it are redundant. They all run in the same microtask drain, before
+   * anything is rasterised against them, so the cost is the calls themselves.
    */
   #discardFallbackAtlas(): void {
-    const fonts = globalThis.document?.fonts;
-    if (typeof fonts?.load !== "function") return;
-    // Nothing declared is still outstanding, so no glyph rasterised from here on
-    // can disagree with one rasterised a moment ago, and there is nothing to
-    // throw away. This is the case on every pane after the first, and skipping
-    // it matters: xterm keys its atlas by font and colours, not by terminal, so
-    // panes with the same appearance share one — and clearing it on each new
-    // pane would drop every other pane's glyphs to re-rasterise them.
-    if ([...fonts].every((face) => face.status === "loaded")) return;
-    void terminalFacesReady().then((faces) => {
-      // An empty match means the stack resolved to a system face that was never
-      // going to load; there is no later rasterisation to be inconsistent with.
-      if (this.#disposed || faces.length === 0) return;
+    // Nothing can arrive after this moment, so no glyph rasterised from here on
+    // can disagree with one rasterised a moment ago. That is the case on every
+    // pane once the faces have settled, which is nearly always.
+    if (!terminalFacesPending()) return;
+    void terminalFacesReady().then(() => {
+      if (this.#disposed) return;
       this.#terminal.clearTextureAtlas();
     }).catch(() => {
-      // A face that cannot load is the fallback case above, not an error the
-      // user can act on. The glyphs on screen stay as they are.
+      // A face that cannot load leaves the fallback glyphs in place, which is
+      // the best available outcome and not something the user can act on.
     });
   }
 

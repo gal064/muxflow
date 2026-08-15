@@ -18,6 +18,8 @@ interface WorkspaceFilesState {
   listings: ReadonlyMap<string, DirectoryListing>;
   expanded: ReadonlySet<string>;
   loading: ReadonlySet<string>;
+  /** Reads a person asked for and has not yet been answered. See `refresh`. */
+  requestedReads: number;
   transfers: readonly TransferStatus[];
   error?: string;
 }
@@ -29,7 +31,7 @@ const EMPTY = new Map<string, DirectoryListing>();
  * event that *can* be pushed already re-resolves it immediately; this only
  * covers `cd` inside the current pane, which tmux does not announce.
  */
-const ACTIVE_ROOT_POLL_MS = 2_000;
+export const ACTIVE_ROOT_POLL_MS = 2_000;
 
 /**
  * How long one directory's filesystem events are gathered before it is re-read.
@@ -41,7 +43,7 @@ const ACTIVE_ROOT_POLL_MS = 2_000;
  * later ones), because a directory under continuous change must still refresh
  * on a bounded schedule rather than only once the writing stops.
  */
-const DIRECTORY_REFRESH_COALESCE_MS = 150;
+export const DIRECTORY_REFRESH_COALESCE_MS = 150;
 
 export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorkspaceScope | undefined) {
   const [state, setState] = useState<WorkspaceFilesState>({
@@ -50,6 +52,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     listings: EMPTY,
     expanded: new Set(),
     loading: new Set(),
+    requestedReads: 0,
     transfers: [],
   });
   const stateRef = useRef(state);
@@ -63,12 +66,24 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
 
-  const loadDirectory = useCallback(async (path: string, force = false, append = false) => {
+  /**
+   * Reads one directory, against the root the caller was authorised for.
+   *
+   * `root` is a parameter rather than something read from `stateRef` here,
+   * because a caller can be *deferred* — the coalescing window below holds one
+   * for 150 ms — and the root can move underneath it. Reading it ambiently made
+   * "the root that authorised this read" and "the root at the moment it went
+   * out" the same variable, so a delayed caller silently listed an old root's
+   * path against the new one, and none of the completion guards could see it:
+   * they compare against the root the request carried, which was the new one.
+   * One guard here covers every caller, including the next deferred one.
+   */
+  const loadDirectory = useCallback(async (root: ActiveRoot, path: string, force = false, append = false) => {
     const activeScope = scopeRef.current;
     if (!activeScope || keyForScope(activeScope) !== scopeKey) return;
-    const root = stateRef.current.root;
+    if (!sameRoot(stateRef.current.root, root)) return;
     const previous = stateRef.current.listings.get(path);
-    if (!root || (!force && !append && previous)) return;
+    if (!force && !append && previous) return;
     if (append && (!previous?.nextPageToken || previous.complete)) return;
     const epoch = scopeEpoch.current;
     const serial = (directorySerial.current.get(path) ?? 0) + 1;
@@ -121,14 +136,13 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
    * completion guards cannot catch that, because they compare against the root
    * the request was issued with, which is the new one.
    */
-  const coalesceRefresh = useCallback((rootToken: string, path: string) => {
+  const coalesceRefresh = useCallback((root: ActiveRoot, path: string) => {
     const timers = refreshTimers.current;
-    const key = `${rootToken}\0${path}`;
+    const key = `${root.token}\0${path}`;
     if (timers.has(key)) return;
     timers.set(key, setTimeout(() => {
       timers.delete(key);
-      if (stateRef.current.root?.token !== rootToken) return;
-      void loadDirectory(path, true);
+      void loadDirectory(root, path, true);
     }, DIRECTORY_REFRESH_COALESCE_MS));
   }, [loadDirectory]);
 
@@ -148,8 +162,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       return;
     }
     if (!current.root || event.rootToken !== current.root.token) return;
-    if (event.kind === "directoryChanged") coalesceRefresh(event.rootToken, event.directory);
-    else if (event.kind === "fileChanged" || event.kind === "fileDeleted") coalesceRefresh(event.rootToken, parentPath(event.path));
+    if (event.kind === "directoryChanged") coalesceRefresh(current.root, event.directory);
+    else if (event.kind === "fileChanged" || event.kind === "fileDeleted") coalesceRefresh(current.root, parentPath(event.path));
   }, [coalesceRefresh]);
 
   useEffect(() => {
@@ -157,6 +171,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     if (!scope) {
       setState((current) => ({
         scopeKey: "", transferConnectionKey: "", listings: new Map(), expanded: new Set(), loading: new Set(),
+        requestedReads: 0,
         transfers: current.transfers.map(staleTransferOnScopeReplacement),
       }));
       return;
@@ -167,6 +182,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       listings: new Map(),
       expanded: new Set(),
       loading: new Set(),
+      requestedReads: 0,
       transfers: !current.transferConnectionKey || current.transferConnectionKey === transferConnectionKey
         ? current.transfers
         : current.transfers.map(staleTransferOnScopeReplacement),
@@ -225,7 +241,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   }, [applyEvent, client, scopeKey]);
 
   useEffect(() => {
-    if (state.root && !state.listings.has(state.root.path)) void loadDirectory(state.root.path);
+    if (state.root && !state.listings.has(state.root.path)) void loadDirectory(state.root, state.root.path);
   }, [loadDirectory, state.listings, state.root]);
 
   useEffect(() => {
@@ -258,12 +274,28 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       else expanded.add(path);
       return { ...current, expanded };
     });
-    if (!stateRef.current.listings.has(path)) void loadDirectory(path);
+    const root = stateRef.current.root;
+    if (root && !stateRef.current.listings.has(path)) void loadDirectory(root, path);
   }, [loadDirectory]);
 
+  /**
+   * A read a person asked for, which is the one kind that owes them an answer.
+   *
+   * Tracked apart from `loading` because the view has to tell the two cases
+   * apart: a refresh nobody asked for must show nothing that moves — that was
+   * the flicker — while pressing Refresh and seeing nothing at all is a button
+   * that looks broken on exactly the slow link that makes a refresh worth
+   * pressing. A count, not a flag, so two overlapping presses do not have the
+   * first one's completion clear the second one's signal.
+   */
   const refresh = useCallback((directory?: string) => {
-    const target = directory ?? stateRef.current.root?.path;
-    if (target) void loadDirectory(target, true);
+    const root = stateRef.current.root;
+    const target = directory ?? root?.path;
+    if (!root || !target) return;
+    setState((current) => ({ ...current, requestedReads: current.requestedReads + 1 }));
+    void loadDirectory(root, target, true).finally(() => {
+      setState((current) => ({ ...current, requestedReads: Math.max(0, current.requestedReads - 1) }));
+    });
   }, [loadDirectory]);
 
   const recordTransfer = useCallback((transfer: TransferStatus) => {
@@ -271,7 +303,10 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     setState((current) => ({ ...current, transfers: upsertTransfer(current.transfers, transfer) }));
   }, [transferConnectionKey]);
 
-  const loadMore = useCallback((directory: string) => { void loadDirectory(directory, false, true); }, [loadDirectory]);
+  const loadMore = useCallback((directory: string) => {
+    const root = stateRef.current.root;
+    if (root) void loadDirectory(root, directory, false, true);
+  }, [loadDirectory]);
 
   // Effects run after paint. Mask the prior pane synchronously on the render
   // where scopeKey changes so Explorer never flashes or acts on the old root.
@@ -281,6 +316,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     listings: EMPTY,
     expanded: new Set<string>(),
     loading: new Set<string>(),
+    requestedReads: 0,
     transfers: state.transferConnectionKey === transferConnectionKey
       ? state.transfers
       : state.transfers.map(staleTransferOnScopeReplacement),

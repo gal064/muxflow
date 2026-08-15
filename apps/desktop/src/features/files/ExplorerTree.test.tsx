@@ -24,7 +24,7 @@ const listing: DirectoryListing = {
 
 describe("ExplorerTree", () => {
   it("shows dotfiles/ignored entries while protected and symlink directories stay collapsed", () => {
-    const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} transfers={[]} disabled={false} error={undefined}
+    const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}
       onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
     expect(html).toContain(".env");
     expect(html).toContain("ignored.log");
@@ -43,8 +43,42 @@ describe("ExplorerTree", () => {
     expect(html).not.toContain("•••");
   });
 
+  it("never changes the tree's height to say a directory is being re-read", () => {
+    // The reported flicker: the "Loading…" row lives inside the scrolling box,
+    // so showing it while rows are already up grew the content by a row and
+    // shrank it again on every filesystem event — the row blinking on a short
+    // listing, and macOS revealing and re-hiding the overlay scrollbars on a
+    // long one. Whatever else a refresh does, it must not move that content.
+    const shown = (props: { loading: Set<string>; requestedReads: number; listings: Map<string, DirectoryListing> }) =>
+      renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" expanded={new Set(["/r"])} transfers={[]} disabled={false} error={undefined}
+        onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} {...props} />);
+    const listings = new Map([["/r", listing]]);
+    const resting = shown({ loading: new Set(), requestedReads: 0, listings });
+    const refreshing = shown({ loading: new Set(["/r"]), requestedReads: 0, listings });
+    expect(resting).not.toContain("Loading…");
+    expect(refreshing, "a re-read put a row back inside the scrolling tree").not.toContain("Loading…");
+    // The tree's own markup is untouched by the refresh; only the busy flag moves.
+    expect(refreshing.replace(' aria-busy="true"', "")).toBe(resting);
+    expect(refreshing).toContain('aria-busy="true"');
+
+    // A directory that has never answered is the one case that still says so,
+    // because then there is nothing for the wait to be in front of.
+    const first = shown({ loading: new Set(["/r"]), requestedReads: 0, listings: new Map() });
+    expect(first).toContain("Loading…");
+    // And an empty directory does not swap between two lines on every re-read.
+    const empty = new Map([["/r", { ...listing, entries: [] }]]);
+    expect(shown({ loading: new Set(["/r"]), requestedReads: 0, listings: empty })).toContain("This directory is empty.");
+    expect(shown({ loading: new Set(), requestedReads: 0, listings: empty })).toContain("This directory is empty.");
+
+    // A refresh the user asked for is the one wait that is visible, and it is
+    // drawn in the header — outside the scrolling box, so it cannot flicker it.
+    const requested = shown({ loading: new Set(["/r"]), requestedReads: 1, listings });
+    expect(requested).toContain("Refreshing…");
+    expect(requested.slice(0, requested.indexOf('role="tree"'))).toContain("Refreshing…");
+  });
+
   it("exposes accessible cancellation for queued/running downloads but never terminal cancellation", () => {
-    const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} disabled={false}
+    const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} requestedReads={0} disabled={false}
       transfers={[
         { id: "queued", scopeKey: "scope", path: "/r/queued", kind: "file", state: "queued", completedBytes: "0", totalBytes: "5368709120", filesCompleted: "0" },
         { id: "running", scopeKey: "scope", path: "/r/running", kind: "file", state: "running", completedBytes: "2", totalBytes: "10", filesCompleted: "0" },
@@ -63,7 +97,7 @@ describe("ExplorerTree", () => {
   it("routes the accessible running-download button to its exact transfer id", async () => {
     const cancel = vi.fn(async () => undefined);
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} disabled={false}
+    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} requestedReads={0} disabled={false}
       transfers={[{ id: "running-id", scopeKey: "scope", path: "/r/running", kind: "file", state: "running", completedBytes: "2", totalBytes: "10", filesCompleted: "0" }]}
       onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={cancel} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
     await act(async () => { renderer.root.findByProps({ "aria-label": "Cancel download /r/running" }).props.onClick(); });
@@ -78,7 +112,7 @@ describe("ExplorerTree", () => {
     const onDownload = vi.fn(async () => undefined);
     const onRefresh = vi.fn();
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} transfers={[]} disabled={false} error={undefined}
+    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}
       onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={onDownload} onCancelTransfer={vi.fn()} onRefresh={onRefresh} onLoadMore={vi.fn()} />); });
 
     expect(rowCommandRegistry.available()).toEqual([
@@ -112,14 +146,14 @@ describe("ExplorerTree", () => {
 
   it("withholds the mutating row actions while the host is read-only", async () => {
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} transfers={[]} disabled error={undefined}
+    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled error={undefined}
       onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
     expect(rowCommandRegistry.available()).toEqual(["files.open", "files.download", "files.refresh"]);
     await act(async () => { renderer.unmount(); });
   });
 
   it("summarizes a host rejection and keeps the diagnostic behind a disclosure", () => {
-    const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} transfers={[]} disabled={false}
+    const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
       error="file_mutation_rejected: File name too long (os error 63)"
       onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
     expect(html).toContain("That name is longer than this filesystem allows.");
@@ -128,7 +162,7 @@ describe("ExplorerTree", () => {
   });
 
   it("makes commit authoritative and renders unknown/cleanup outcomes as terminal alerts", () => {
-    const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} disabled={false}
+    const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map()} expanded={new Set()} loading={new Set()} requestedReads={0} disabled={false}
       transfers={[
         { id: "verifying", scopeKey: "scope", path: "/r/commit", kind: "file", state: "verifying", completedBytes: "12", totalBytes: "12", filesCompleted: "0" },
         { id: "unknown", scopeKey: "scope", path: "/r/unknown", kind: "file", state: "failed", outcome: "unknown", failureKind: "outcomeUnknown", completedBytes: "12", filesCompleted: "0", cleanupStatus: "failed", cleanupError: "permission denied" },
