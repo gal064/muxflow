@@ -531,6 +531,14 @@ export function TerminalPane({
     setSearchMiss(!found);
   };
 
+  // Deliberately no `title`. This element is the whole terminal surface, so a
+  // native tooltip on it is not an affordance attached to a control — it is a
+  // grey box that appears over the user's output wherever the pointer happens
+  // to rest, on a surface the pointer rests on constantly, and it hides the
+  // very text the pointer is there to read (the user's own capture caught it
+  // covering a line of agent output). The Shift-to-force-local-selection
+  // behaviour it used to advertise still works and is still recorded on
+  // `data-local-selection-modifier` for anything that needs to name it.
   const terminal = <div
       className="terminal-pane"
       ref={container}
@@ -544,7 +552,6 @@ export function TerminalPane({
       onMouseUpCapture={(event) => { delete event.currentTarget.dataset.localSelectionActive; }}
       onFocusCapture={() => focusRef.current(pane.id)}
       role="region"
-      title="Hold Shift while dragging to force local selection in mouse-aware terminal apps"
     />;
 
   return <>
