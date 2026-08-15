@@ -172,10 +172,7 @@ export type MeasurableTerminal = Pick<Terminal, "options"> & {
  *
  * A row is a whole number of *device* pixels, and xterm floors into them, so the
  * multiplier aims at the middle of the device row it wants rather than at its
- * edge. 13 × 1.42 = 18.46 CSS px is 36.92 device pixels on a Retina display;
- * a multiplier that lands exactly there floors to 36 and renders an 18.0 px row
- * — measurably short of the token. Aiming at 37.5 floors to 37, i.e. 18.5 px,
- * which is the closest a whole device pixel gets to the design value.
+ * edge, via `wholeDeviceRowHeight`.
  *
  * Returns undefined when there is nothing to derive from, which leaves xterm at
  * its unit multiplier: rows one measured character tall, slightly tighter than
@@ -190,10 +187,42 @@ export function xtermLineHeight(
 ): number | undefined {
   if (!(rowPitch > 0) || !(measuredCharHeight !== undefined && measuredCharHeight > 0)) return undefined;
   const ratio = devicePixelRatio > 0 ? devicePixelRatio : 1;
-  // The same two roundings xterm performs, in the same order.
+  // The same rounding xterm performs on the measured character.
   const deviceCharHeight = Math.ceil(measuredCharHeight * ratio);
-  const deviceRowHeight = Math.round(rowPitch * ratio);
-  return Math.max(1, (deviceRowHeight + 0.5) / deviceCharHeight);
+  return Math.max(1, (wholeDeviceRowHeight(rowPitch, ratio) + 0.5) / deviceCharHeight);
+}
+
+/**
+ * The device row height to aim at: as close to the token's pitch as a row can
+ * be *while staying a whole number of CSS pixels*.
+ *
+ * The CSS-pixel constraint is not cosmetic. xterm sizes the WebGL canvas's
+ * backing store from `rows × device.cell.height` but its CSS box from
+ * `Math.round(that / devicePixelRatio)`, and a `DevicePixelObserver` then
+ * resizes the backing store to whatever that rounded box actually measures. So
+ * whenever `rows × device.cell.height` is not a whole multiple of the ratio, the
+ * two disagree by up to one device pixel, the glyph quads are placed in a clip
+ * space one pixel shorter than the viewport they are drawn into, and the whole
+ * grid is stretched by that pixel: every row lands on a different subpixel
+ * offset, the GPU's linear filter smears each one differently, and text that is
+ * crisp at the top of the pane is visibly soft and displaced by the bottom.
+ *
+ * Measured on the packaged app at 13 px / 1.42 on a 2× display: a 37-device-pixel
+ * row (18.5 CSS px) drifted each row's glyph centroid by 0.0257 device px, 1.0 px
+ * across the 39-row pane, against a within-row spread of 0.003 px. A row that is
+ * a whole multiple of the ratio makes `Math.round` exact at every grid size, so
+ * the stretch cannot arise at any window height.
+ *
+ * 13 × 1.42 = 18.46 CSS px, so the nearest whole CSS row is 18 — 1.385 font
+ * sizes rather than the token's 1.42, the price of a grid that is not resampled.
+ *
+ * A fractional ratio (1.25, 1.5 on some Linux and Windows displays) has no whole
+ * CSS row that is also a whole device row, so there is nothing to snap to and
+ * this returns the nearest device row, which is what it did before.
+ */
+export function wholeDeviceRowHeight(rowPitch: number, devicePixelRatio: number): number {
+  if (!Number.isInteger(devicePixelRatio)) return Math.max(1, Math.round(rowPitch * devicePixelRatio));
+  return Math.max(devicePixelRatio, Math.round(rowPitch) * devicePixelRatio);
 }
 
 /** Everything needed to turn a pixel box into a terminal grid. */
@@ -485,6 +514,8 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #options: TerminalRendererOptions;
   /** CSS pixels the token asks one row to occupy. See `xtermLineHeight`. */
   readonly #rowPitch: number;
+  /** A CSS font shorthand for the terminal face. See `#discardFallbackAtlas`. */
+  readonly #fontShorthand: string;
   #webgl?: WebglAddon;
   #newOutput = false;
   #lastViewport?: TerminalViewportState;
@@ -504,6 +535,7 @@ export class XtermRenderer implements TerminalRenderer {
     // of literals that drifted from the chrome.
     const font = terminalFont();
     this.#rowPitch = font.rowPitch;
+    this.#fontShorthand = `${font.fontSize}px ${font.fontFamily}`;
     this.#terminal = new Terminal({
       allowProposedApi: false,
       altClickMovesCursor: false,
@@ -586,6 +618,7 @@ export class XtermRenderer implements TerminalRenderer {
     const subscribe = charSize?.onCharSizeChange;
     if (subscribe) this.#disposables.push(subscribe.call(charSize, () => this.#applyRowPitch()));
     this.#mountWebgl();
+    this.#discardFallbackAtlas();
   }
 
   seed(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
@@ -862,6 +895,46 @@ export class XtermRenderer implements TerminalRenderer {
       return;
     }
     this.#terminal.options.lineHeight = lineHeight;
+  }
+
+  /**
+   * Throws away any glyphs this terminal rasterised before the bundled face
+   * arrived.
+   *
+   * xterm rasterises each glyph **once**, into a texture atlas it never
+   * revisits, and it positions that glyph from the ink it finds relative to a
+   * baseline it drew at. A glyph drawn in the fallback face therefore keeps the
+   * fallback's baseline for as long as the atlas lives — and the atlas outlives
+   * the font load, because nothing in xterm re-rasterises on `loadingdone`. The
+   * result is a single row of text in two typefaces at two baselines: measured
+   * on the user's 2× capture, `d e n o p` sat 3.4 device pixels — 1.7 CSS px —
+   * below `a c g m r s`, which is exactly "some letters a pixel-plus lower than
+   * their neighbours".
+   *
+   * `main.tsx` now loads the face before the app mounts, so in practice this
+   * finds it already there and does nothing. It stays because that wait is
+   * bounded: a face that resolves after the bound would otherwise leave a
+   * two-typeface atlas on screen until the pane is closed, and nothing about
+   * that failure is recoverable by the user.
+   *
+   * Only the glyphs are recovered here, not the metrics: xterm re-measures the
+   * cell on a `fontFamily`/`fontSize` change and on nothing else, so a face that
+   * lands this late still leaves the tmux grid derived from the fallback cell.
+   * Forcing that re-measure means writing an option we do not own to a value we
+   * do not want and back, which is a worse trade than the bounded wait.
+   */
+  #discardFallbackAtlas(): void {
+    const fonts = globalThis.document?.fonts;
+    if (typeof fonts?.load !== "function") return;
+    void fonts.load(this.#fontShorthand).then((faces) => {
+      // An empty match means the stack resolved to a system face that was never
+      // going to load; there is no later rasterisation to be inconsistent with.
+      if (this.#disposed || faces.length === 0) return;
+      this.#terminal.clearTextureAtlas();
+    }).catch(() => {
+      // A face that cannot load is the fallback case above, not an error the
+      // user can act on. The glyphs on screen stay as they are.
+    });
   }
 
   #mountWebgl(): void {
