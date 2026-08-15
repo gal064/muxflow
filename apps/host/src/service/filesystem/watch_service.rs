@@ -456,9 +456,12 @@ pub(super) fn scan_fallback_shard_with_limits(
                 };
                 let entry = entry?;
                 match fs::symlink_metadata(entry.path()) {
-                    Ok(metadata) => {
-                        return Ok(Some(watch_entry_fingerprint(&entry.file_name(), &metadata)));
-                    }
+                    // `None` is a hidden entry, not the end of the directory:
+                    // keep walking rather than reporting the shard complete.
+                    Ok(metadata) => match watch_entry_fingerprint(&entry.file_name(), &metadata) {
+                        Some(value) => return Ok(Some(value)),
+                        None => continue,
+                    },
                     Err(error) if error.kind() == ErrorKind::NotFound => continue,
                     Err(error) => return Err(error.into()),
                 }

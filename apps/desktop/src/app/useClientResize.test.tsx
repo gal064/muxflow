@@ -280,4 +280,39 @@ describe("useClientResize", () => {
     await update({ ...props, actualSize: undefined });
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
   });
+
+  /**
+   * With an app tab showing there is no tiled surface to measure, so nothing
+   * may be sent — and the app must still be able to take its size back when
+   * the terminal comes back.
+   *
+   * Scope, honestly: this covers the behaviour, not the `!surface` guard that
+   * implements half of it. Removing that guard leaves this green, because the
+   * ordinary path re-sends on remount anyway and the budget it wasted only
+   * shows up in a longer sequence than a unit harness can hold steady. The
+   * guard is argued at its definition instead.
+   */
+  it("sends nothing while no terminal surface is mounted, and recovers after", async () => {
+    const props = { appFocused: true, clientId: "client-1" };
+    const { update } = await render({ ...props, actualSize: { columns: 121, rows: 46 } });
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+
+    // The user opens a file: the surface unmounts, and tmux is meanwhile taken
+    // to someone else's size, twice — the whole budget, if it were spendable.
+    await update({ ...props, surfaceMounted: false, actualSize: { columns: 80, rows: 24 } });
+    await update({ ...props, surfaceMounted: false, actualSize: { columns: 80, rows: 25 } });
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+
+    // Back to the terminal. The remounted surface needs its box again — jsdom
+    // lays nothing out, and a surface with no measurable box produces no
+    // request whatever the budget says.
+    await update({ ...props, actualSize: { columns: 80, rows: 25 } });
+    await act(async () => { setSurfaceBox({ width: 1000, height: 800 }); });
+    await settle();
+    expect(resizeClientMock).toHaveBeenCalledTimes(2);
+
+    // And the budget is still there to answer the next one.
+    await update({ ...props, actualSize: { columns: 80, rows: 26 } });
+    expect(resizeClientMock).toHaveBeenCalledTimes(3);
+  });
 });

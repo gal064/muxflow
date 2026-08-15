@@ -33,9 +33,25 @@ fn request_capture(
     pane_id: &str,
     resume_first: bool,
 ) {
+    send_capture(writer, pane_id, resume_first, None);
+}
+
+/// How long a retried resume waits, so the second attempt is a second chance
+/// rather than the same attempt written twice. Short enough that a pane the
+/// user is watching is not visibly held, long enough for whatever was in
+/// flight when the first was refused to have finished.
+const RESUME_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
+fn send_capture(
+    writer: &std_mpsc::Sender<super::ControlWrite>,
+    pane_id: &str,
+    resume_first: bool,
+    delay: Option<std::time::Duration>,
+) {
     let _ = writer.send(super::ControlWrite {
         pane_id: pane_id.to_owned(),
         resume_first,
+        delay,
     });
 }
 
@@ -421,7 +437,7 @@ impl StreamState {
                     // carries its own targeted marker, so a second failure is
                     // attributed here again instead of to the connection.
                     Some((RejectedResume::Retry, pane_id)) => {
-                        request_capture(writer, &pane_id, true)
+                        send_capture(writer, &pane_id, true, Some(RESUME_RETRY_DELAY))
                     }
                     // Out of attempts. `reject_resume` has already stopped this
                     // pane's captures carrying a resume, so the seed asked for
@@ -476,7 +492,18 @@ impl StreamState {
                 }
             }
             ControlRecord::Notification { name, arguments } if name == "pause" => {
-                if let Some(pane_id) = notification_pane(&arguments) {
+                // Only for a pane this client actually carries. The control
+                // client is attached to the whole session, but membership is
+                // the mounted subset, and a capture for a pane outside it is
+                // correlated to nothing: `start_block` filters the marker away
+                // (see `expected_capture`), so the capture-pane reply lands in
+                // an `Unknown` block that accumulates the pane's screen and is
+                // then scanned for marker prefixes. An unmounted pane's output
+                // is not delivered anyway, so there is nothing to resume it
+                // for.
+                if let Some(pane_id) =
+                    notification_pane(&arguments).filter(|id| self.pane_states.contains_key(id))
+                {
                     self.flow.paused(&pane_id);
                     emit_event(
                         sender,

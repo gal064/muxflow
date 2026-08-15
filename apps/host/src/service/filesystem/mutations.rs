@@ -422,11 +422,8 @@ pub(super) fn mutation_metadata(
     } else {
         v1::FileKind::Other
     };
-    let name = logical
-        .file_name()
-        .unwrap_or(logical.as_os_str())
-        .to_string_lossy()
-        .into_owned();
+    let entry_name = logical.file_name().unwrap_or(logical.as_os_str());
+    let name = entry_name.to_string_lossy().into_owned();
     let mime = image_mime(logical).unwrap_or_default().to_owned();
     Ok(v1::FileMetadata {
         path: logical.to_string_lossy().into_owned(),
@@ -441,7 +438,7 @@ pub(super) fn mutation_metadata(
             .flatten()
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_default(),
-        expandable: metadata.is_dir() && name != ".git" && name != "node_modules",
+        expandable: metadata.is_dir() && !is_never_enumerated(entry_name),
         generation: metadata.generation(),
         mime: mime.clone(),
         image_preview_eligible: metadata.is_file()

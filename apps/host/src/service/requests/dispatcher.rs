@@ -280,11 +280,32 @@ pub(crate) async fn handle_request(
             .await;
         }
         v1::Operation::SelectTerminalSession => {
-            // No reconciliation follow-up: this changes which control client
-            // tmux sizes from, which is not a topology change. The size it
-            // carries across can change the *windows*, and the `%layout-change`
-            // that produces already drives the ordinary dirty path.
-            let result = terminal.lock().unwrap().select_session(&request.session_id);
+            // Handled exactly like `ResizeTerminal` below, because on the path
+            // that matters it *is* one: a client becoming visible for the first
+            // time is given a size, and that is the same `refresh-client -C`
+            // write. So it takes the same input barrier — a resize is ordered
+            // behind every queued keystroke, or the panes reflow underneath
+            // bytes the user typed before the switch — and the same
+            // reconciliation, or the topology baseline still describes the
+            // geometry from before the reflow and the next tmux action is
+            // refused as stale.
+            let mut result = {
+                let mut terminal = terminal.lock().unwrap();
+                terminal
+                    .flush_input()
+                    .and_then(|()| terminal.select_session(&request.session_id))
+            };
+            if result.is_ok() {
+                result = reconcile_internal_tmux_change(
+                    topology_lock,
+                    topology_baseline,
+                    generation,
+                    terminal,
+                    event_tx,
+                    overflowed,
+                )
+                .await;
+            }
             send_response(
                 control_tx,
                 request_id,
