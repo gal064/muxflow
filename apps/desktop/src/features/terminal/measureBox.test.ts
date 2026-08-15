@@ -54,14 +54,28 @@ describe("xterm cell metrics", () => {
     // the answer is judged by what xterm would then render, not by the ratio.
     const rendered = (pitch: number, charHeight: number, ratio: number) =>
       Math.floor(Math.ceil(charHeight * ratio) * xtermLineHeight(pitch, charHeight, ratio)!) / ratio;
-    // 13px JetBrains Mono measures ~17px, so a 1.42 CSS line-height is a ~1.10
+    // 13px JetBrains Mono measures ~17px, so a 1.42 CSS line-height is a ~1.07
     // xterm one — and handing xterm 1.42 rendered ~24px rows instead.
-    expect(xtermLineHeight(13 * 1.42, 17, 2)).toBeCloseTo(1.1029, 3);
-    // 18.46 CSS px is 36.92 device px: unreachable, and aiming straight at it
-    // floors to 36 and renders an 18.0px row. 18.5 is the closest whole device
-    // row there is.
-    expect(rendered(13 * 1.42, 17, 2)).toBe(18.5);
+    expect(xtermLineHeight(13 * 1.42, 17, 2)).toBeCloseTo(1.0735, 3);
+    // 18.46 CSS px is 36.92 device px. The nearest device row, 37, is odd, and
+    // an odd device row makes the WebGL canvas's backing store and its CSS box
+    // disagree by a pixel at every odd row count — which stretches the whole
+    // grid. A whole CSS pixel is the constraint, so 18.0 it is, at any ratio.
+    expect(rendered(13 * 1.42, 17, 2)).toBe(18);
     expect(rendered(13 * 1.42, 17, 1)).toBe(18);
+    // The property that matters, over the ratios and faces a display can hand
+    // us: the rendered row is a whole number of CSS pixels, so `rows × cell`
+    // divides by the ratio exactly however many rows the window ends up with.
+    for (const ratio of [1, 2, 3]) {
+      for (const charHeight of [15, 16.4, 17, 17.6, 18]) {
+        const row = rendered(13 * 1.42, charHeight, ratio);
+        expect(Number.isInteger(row), `ratio ${ratio}, char ${charHeight} rendered a ${row}px row`).toBe(true);
+      }
+    }
+    // A fractional ratio has no row that is whole in both spaces; it keeps the
+    // nearest device row rather than pretending otherwise. 18.46 × 1.5 = 27.69,
+    // so 28 device px — 18.667 CSS px.
+    expect(rendered(13 * 1.42, 17, 1.5)).toBeCloseTo(28 / 1.5, 6);
     // xterm throws below 1, so a face taller than the requested pitch clamps.
     expect(xtermLineHeight(18.46, 20, 1)).toBe(1);
     // Nothing measured, nothing derived: the caller leaves xterm alone.
