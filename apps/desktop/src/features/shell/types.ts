@@ -26,6 +26,15 @@ export interface AppOwnedTab {
   order: number;
   rootPath?: string;
   rootToken?: string;
+  /**
+   * VS Code's preview tab: opened by a single click, italic in the strip, and
+   * the one slot the next single click reuses instead of adding a tab. Cleared
+   * — "pinned" — by a double-click, by Enter, or by the first edit.
+   *
+   * Absent rather than `false` when pinned: this crosses the `save_app_state`
+   * boundary, and an absent optional is what every other optional here does.
+   */
+  preview?: boolean;
   viewMode?: "source" | "preview" | "split";
   /** Git diff tabs retain opaque host path and repository identity. */
   gitRepositoryId?: string;

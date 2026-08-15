@@ -396,9 +396,13 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
   font-variant-numeric: tabular-nums;
 }
-.tab-glyph { display: inline-flex; color: var(--chrome-faint); }
-.tab-glyph.gitDiff { color: var(--state-working); }
+/* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
+   inline color, so there is no rule here per document kind. */
+.tab-glyph { display: inline-flex; }
 .tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A preview tab is the one the next single click will replace. Italic is how
+   VS Code says so, and the strip is on the sans stack, so it just works. */
+.tab-title-preview { font-style: italic; }
 .tab-zoom { display: inline-flex; color: var(--chrome-faint); }
 .tab-dot {
   display: inline-flex; align-items: center; justify-content: center;
@@ -562,7 +566,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .explorer-refreshing { margin-left: auto; color: var(--state-working); }
 .explorer-root > span {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--chrome-ink); font-size: 11px; font-weight: 600;
+  color: var(--chrome-ink); font-family: var(--font-sans); font-size: var(--type-row); font-weight: 600;
 }
 .explorer-root > small { color: var(--chrome-faint); font-size: var(--type-label); }
 .file-tree { min-height: 0; padding: 4px 0 12px; overflow: auto; outline: 0; }
@@ -572,17 +576,21 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .file-row:hover, .file-row:focus-within { background: var(--chrome-hover); }
 .file-row[aria-selected="true"] { background: var(--chrome-selected); }
+/* The tree is UI text, not code: it was 11px monospace, which is the one place
+   in the app where a proportional stack reads better — VS Code's explorer is
+   the UI font at the row size, on the same 22px rows. Nothing depends on
+   monospace alignment any more; the letter glyphs that did are icons now. */
 .file-main {
-  display: grid; grid-template-columns: 12px 12px minmax(90px, 1fr);
+  display: grid; grid-template-columns: 12px 16px minmax(90px, 1fr);
   align-items: center; gap: 4px; flex: 1; min-width: 0; height: 100%;
   padding: 0; border: 0; background: transparent;
-  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px; text-align: left;
+  color: var(--chrome-ink); font-family: var(--font-sans); font-size: var(--type-row); text-align: left;
 }
 .file-main span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-twisty { display: inline-flex; color: var(--chrome-faint); }
-.file-state { color: var(--chrome-faint); }
-.file-state.directory { color: var(--term-4); }
-.file-state.symlink { color: var(--term-6); }
+/* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
+   inline color, so there is no rule here per language. */
+.file-icon { display: inline-flex; align-items: center; justify-content: center; }
 .load-more-files {
   display: block; margin: 3px 0; padding: 3px 8px;
   border: 1px solid var(--chrome-border); border-radius: 4px;
@@ -599,6 +607,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .transfer small { color: var(--chrome-dim); }
 .transfer progress { grid-column: 1 / -1; width: 100%; height: 4px; }
 .transfer button { justify-self: end; }
+.transfer-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 6px; }
+.transfer-actions button { justify-self: auto; }
 .transfer em { grid-column: 1 / -1; color: var(--danger-ink); font-style: normal; }
 .transfer .transfer-detail { grid-column: 1 / -1; }
 .transfer .transfer-finalizing { color: var(--state-working); }
@@ -846,7 +856,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .confirmation h2 { margin: 0 0 10px; font-size: 16px; }
 .confirmation p { color: var(--chrome-dim); line-height: 1.5; }
 .text-input-dialog form, .text-input-dialog label { display: grid; gap: 8px; }
-.text-input-dialog input, .file-dialog input:not([type="checkbox"]), .download-dialog input, .download-dialog select {
+.text-input-dialog input, .file-dialog input:not([type="checkbox"]) {
   width: 100%; padding: 7px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
   background: var(--chrome-bg); color: var(--chrome-ink);
 }
@@ -857,8 +867,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    dim text that did not read as a control in either state — and would have
    done the same to the next button added to any dialog. Opt out with
    `.bar-button` / `.inline-action`, which bring their own chrome. */
-:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment),
-.download-destination button {
+:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment) {
   padding: 6px 12px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
   background: var(--chrome-bg); color: var(--chrome-ink);
 }
@@ -873,11 +882,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .primary:disabled { opacity: .5; }
 .danger { border-color: var(--danger) !important; background: var(--danger) !important; color: var(--accent-ink) !important; }
 .dialog-error { color: var(--danger-ink) !important; }
-.file-dialog, .download-dialog { display: grid; gap: 11px; padding: 20px; }
-.file-dialog label, .download-dialog label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11px; }
+.file-dialog { display: grid; gap: 11px; padding: 20px; }
+.file-dialog label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11px; }
 .file-dialog .overwrite { grid-template-columns: auto 1fr; align-items: center; }
-.download-destination { display: flex; gap: 7px; }
-.download-destination input { min-width: 0; flex: 1; }
+/* Named for the download dialog it was written for; that dialog is gone and
+   the terminal upload confirmation is the surviving user. */
 .download-warning {
   padding: 8px; border: 1px solid var(--state-working); border-radius: 4px;
   color: var(--state-working); background: var(--chrome-bg); font-size: var(--type-meta);

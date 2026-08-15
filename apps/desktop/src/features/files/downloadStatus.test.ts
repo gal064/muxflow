@@ -16,8 +16,25 @@ const completed: TransferStatus = {
 };
 
 describe("reconcileDownloadStatus", () => {
-  it("replaces an active banner when the same download reaches a terminal state", () => {
+  it("announces a completed download by the local file the user now has", () => {
+    // Not the remote source: that is the one path they cannot open, and it was
+    // also wrong whenever the backend published under a different name.
     expect(reconcileDownloadStatus("Download running: /repo/image.png", { id: "download-1", path: "/repo/image.png", banner: "Download running: /repo/image.png" }, [completed]))
+      .toEqual({
+        status: "Download complete: /tmp/image.png",
+        completion: { destination: "/tmp/image.png", message: "Download complete: /tmp/image.png" },
+      });
+  });
+
+  it("keeps the source path and offers nothing to open when the download did not publish", () => {
+    const active = { id: "download-1", path: "/repo/image.png", banner: "Download running: /repo/image.png" };
+    for (const state of ["failed", "cancelled"] as const) {
+      expect(reconcileDownloadStatus(active.banner, active, [{ ...completed, state, outcome: "notPublished" }]))
+        .toEqual({ status: `Download ${state}: /repo/image.png` });
+    }
+    // A completion the backend never gave a destination for has nothing to act
+    // on, so it must not offer an Open button pointed at nothing.
+    expect(reconcileDownloadStatus(active.banner, active, [{ ...completed, destination: undefined }]))
       .toEqual({ status: "Download completed: /repo/image.png" });
   });
 

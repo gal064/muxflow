@@ -18,6 +18,12 @@ interface Props {
   client: FileWorkspaceClient;
   canWrite: boolean;
   onDownload(path: string, kind: "file" | "folder", root: ActiveRoot): void;
+  /**
+   * The buffer became dirty. A preview tab stops being disposable here: the
+   * one thing that must never happen is the next single click in the Explorer
+   * replacing a tab the user has typed into.
+   */
+  onDirty(): void;
   onStatus(message: string): void;
   onViewMode(mode: "source" | "preview" | "split"): void;
 }
@@ -111,6 +117,12 @@ export function AppTabSurface(props: Props) {
   useEffect(() => editorFlushRegistry.register(props.tab.id, async () => {
     await controller.current?.flush();
   }), [props.tab.id]);
+
+  // "The buffer is dirty" is a state this surface already tracks, so the tab
+  // hears about it once per clean→dirty transition rather than once per
+  // keystroke. `onDirty` is deliberately not a dependency: it closes over
+  // render-fresh state and would re-run this on every render.
+  useEffect(() => { if (view?.state === "dirty") props.onDirty(); }, [view?.state]);
 
   useEffect(() => {
     if (!props.scope || !root) return;

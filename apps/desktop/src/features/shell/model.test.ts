@@ -9,6 +9,7 @@ import {
   openFileTab,
   openGitDiffTab,
   orderedSessions,
+  pinAppTab,
   relocateFileTabs,
   reconcileWorkspaceIdentity,
   recoverableAppTabCount,
@@ -107,6 +108,67 @@ describe("application shell model", () => {
     expect(deduplicated.appTabs).toHaveLength(1);
     const preview = setMarkdownViewMode(deduplicated, "local", deduplicated.appTabs[0].id, "preview");
     expect(preview.appTabs[0].viewMode).toBe("preview");
+  });
+
+  it("keeps at most one preview tab per workspace and reuses its slot in place", () => {
+    const open = (state: PersistedAppState, resource: string, preview: boolean, kind: "file" | "markdown" = "file") =>
+      openFileTab(state, "local", "server-a", sessions[1], resource, kind, { path: "/repo", token: "root", revision: "1" }, { preview });
+
+    const first = open(defaultAppState, "/repo/a.ts", true);
+    expect(first.appTabs).toHaveLength(1);
+    expect(first.appTabs[0].preview).toBe(true);
+
+    // A second single click reuses the slot: same id, same order, new file.
+    const second = open(first, "/repo/b.ts", true);
+    expect(second.appTabs).toHaveLength(1);
+    expect(second.appTabs[0]).toMatchObject({ id: first.appTabs[0].id, order: 0, resource: "/repo/b.ts", title: "b.ts", preview: true });
+    expect(second.workspaceUi[0].selectedAppTabId).toBe(first.appTabs[0].id);
+
+    // Reuse replaces the record, not merges into it: the previous file's
+    // markdown view mode must not survive onto a .ts file.
+    const markdownPreview = open(second, "/repo/README.md", true, "markdown");
+    expect(markdownPreview.appTabs[0].viewMode).toBe("split");
+    expect(open(markdownPreview, "/repo/c.ts", true).appTabs[0].viewMode).toBeUndefined();
+
+    // A double-click on the same file pins the tab it already created, and the
+    // pinned field goes away rather than becoming `false`.
+    const pinned = open(open(second, "/repo/b.ts", true), "/repo/b.ts", false);
+    expect(pinned.appTabs).toHaveLength(1);
+    expect(pinned.appTabs[0].id).toBe(first.appTabs[0].id);
+    expect("preview" in pinned.appTabs[0]).toBe(false);
+
+    // With nothing disposable left, the next single click adds a tab.
+    const third = open(pinned, "/repo/c.ts", true);
+    expect(third.appTabs).toHaveLength(2);
+    expect(third.appTabs.filter((tab) => tab.preview)).toHaveLength(1);
+    expect(third.appTabs[1].order).toBe(1);
+
+    // Reopening a pinned file as a preview must never demote it back to
+    // disposable, and must not touch the workspace's actual preview tab.
+    const reopened = open(third, "/repo/b.ts", true);
+    expect(reopened.appTabs.find((tab) => tab.resource === "/repo/b.ts")?.preview).toBeUndefined();
+    expect(reopened.appTabs.filter((tab) => tab.preview).map((tab) => tab.resource)).toEqual(["/repo/c.ts"]);
+
+    // A preview tab belongs to its own workspace: another session's click gets
+    // its own slot rather than stealing this one.
+    const otherSession = openFileTab(third, "local", "server-a", sessions[0], "/repo/d.ts", "file", { path: "/repo", token: "root", revision: "1" }, { preview: true });
+    expect(otherSession.appTabs).toHaveLength(3);
+    expect(otherSession.appTabs.filter((tab) => tab.preview)).toHaveLength(2);
+
+    // The strip reads it, and `pinAppTab` is idempotent because the editor
+    // calls it on every keystroke.
+    expect(combineWorkspaceTabs([], appTabsForWorkspace(third, "local", "server-a", sessions[1]))
+      .map((tab) => tab.kind === "app" && tab.preview)).toEqual([false, true]);
+    const editPinned = pinAppTab(third, "local", third.appTabs[1].id);
+    expect(editPinned.appTabs[1].preview).toBeUndefined();
+    expect(pinAppTab(editPinned, "local", editPinned.appTabs[1].id)).toBe(editPinned);
+    expect(pinAppTab(third, "local", "no-such-tab")).toBe(third);
+    expect(pinAppTab(third, "other-host", third.appTabs[1].id)).toBe(third);
+  });
+
+  it("opens a permanent tab by default, so no caller gets a disposable one by omission", () => {
+    const opened = openFileTab(defaultAppState, "local", "server-a", sessions[1], "/repo/a.ts", "file", { path: "/repo", token: "root", revision: "1" });
+    expect(opened.appTabs[0].preview).toBeUndefined();
   });
 
   it("relocates open file tabs after an app-owned file or directory move", () => {

@@ -31,6 +31,7 @@
       "order": 0,
       "rootPath": "/work",
       "rootToken": "root-token",
+      "preview": true,
       "viewMode": "split",
       "gitRepositoryId": "repo-1",
       "gitPath": "L3dvcmsvUkVBRE1FLm1k",

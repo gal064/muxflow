@@ -29,6 +29,11 @@ pub struct AppTabRecord {
     pub root_path: Option<String>,
     #[serde(default)]
     pub root_token: Option<String>,
+    /// VS Code's preview tab. `serde(default)` because every file written
+    /// before preview tabs existed lacks it, and a required field here is
+    /// exactly the mismatch that once made every save fail.
+    #[serde(default)]
+    pub preview: Option<bool>,
     #[serde(default)]
     pub view_mode: Option<AppTabViewMode>,
     #[serde(default)]
@@ -486,6 +491,7 @@ mod tests {
                 resource: "/work/README.md".into(),
                 root_path: Some("/work".into()),
                 root_token: Some("root-token".into()),
+                preview: Some(true),
                 view_mode: Some(AppTabViewMode::Split),
                 git_repository_id: None,
                 git_path: None,
@@ -562,6 +568,7 @@ mod tests {
             resource: "staged:new name".into(),
             root_path: Some("/work".into()),
             root_token: Some("root-token".into()),
+            preview: None,
             view_mode: None,
             git_repository_id: Some("repo-identity".into()),
             git_path: Some("bmV3IG5hbWU=".into()),
@@ -649,7 +656,7 @@ mod tests {
 
         // Nothing may be stored that the frontend does not send, and nothing the
         // frontend sends may be silently dropped. Checked for every struct that
-        // crosses, not just the one that broke: `appTabs` carries eighteen
+        // crosses, not just the one that broke: `appTabs` carries nineteen
         // fields and `workspaceUi` five, and either could lose one the same way.
         let expected: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
         let stored = serde_json::to_value(&value).unwrap();

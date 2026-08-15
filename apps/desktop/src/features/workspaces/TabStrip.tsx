@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Icon, type IconName } from "../../ui/Icon";
+import { Icon } from "../../ui/Icon";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { StateDot } from "../../ui/StateDot";
+import { fileIcon } from "../files/fileIcons";
 import type { CombinedTab } from "../shell/model";
 
 interface TabStripProps {
@@ -15,15 +16,25 @@ interface TabStripProps {
   onClose(tab: CombinedTab): void;
   onMove(tab: CombinedTab, direction: "left" | "right"): void;
   onRenameTerminal(tab: Extract<CombinedTab, { kind: "terminal" }>): void;
+  /** Double-clicking a preview tab makes it permanent, as VS Code's does. */
+  onPin(tab: Extract<CombinedTab, { kind: "app" }>): void;
   onNewTerminal(): void;
   onSplit(): void;
 }
 
-const DOCUMENT_ICON: Record<string, IconName> = {
-  gitDiff: "diff",
-  markdown: "markdown",
-  file: "file",
-};
+/**
+ * A document tab shows the same icon its Explorer row does — one mapping, two
+ * surfaces, so a `.rs` tab and its row cannot disagree about what the file is.
+ * A diff is not a file type: it keeps the diff mark and the tint the strip's
+ * own rule gives it.
+ */
+function TabGlyph({ tab }: { tab: Extract<CombinedTab, { kind: "app" }> }) {
+  const { icon, color } = tab.appKind === "gitDiff"
+    ? { icon: "diff" as const, color: "var(--state-working)" }
+    // The strip already shows the basename; `openFileTab` put it there.
+    : fileIcon({ name: tab.title, kind: "file" });
+  return <span className={`tab-glyph ${tab.appKind}`} style={{ color }}><Icon name={icon} size={12} /></span>;
+}
 
 /**
  * One strip, two kinds of tab: tmux windows and app-owned documents.
@@ -102,7 +113,10 @@ export function TabStrip(props: TabStripProps) {
               event.preventDefault();
               setMenu({ tab, anchor: { x: event.clientX, y: event.clientY } });
             }}
-            onDoubleClick={() => { if (tab.kind === "terminal" && props.canMutate) props.onRenameTerminal(tab); }}
+            onDoubleClick={() => {
+              if (tab.kind === "app") props.onPin(tab);
+              else if (props.canMutate) props.onRenameTerminal(tab);
+            }}
             onKeyDown={(event) => onTabKeyDown(event, tab, index)}
             role="tab"
             // With nothing selected — a window closed by another client, briefly —
@@ -113,8 +127,8 @@ export function TabStrip(props: TabStripProps) {
           >
             {tab.kind === "terminal"
               ? <span className="tab-index">{tab.index}</span>
-              : <span className={`tab-glyph ${tab.appKind}`}><Icon name={DOCUMENT_ICON[tab.appKind] ?? "file"} size={12} /></span>}
-            <span className="tab-title">{tab.title}</span>
+              : <TabGlyph tab={tab} />}
+            <span className={tab.kind === "app" && tab.preview ? "tab-title tab-title-preview" : "tab-title"}>{tab.title}</span>
             {tab.kind === "terminal" && tab.zoomed && <span aria-label="Pane zoomed" className="tab-zoom"><Icon name="zoom" size={11} /></span>}
             {tab.kind === "terminal" && tab.attention !== "none" && <StateDot
               className="tab-dot"

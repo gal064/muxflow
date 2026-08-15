@@ -151,10 +151,10 @@ describe("application shell accessibility contracts", () => {
   it("renders combined terminal/app tabs as one selected tablist", () => {
     const html = renderToStaticMarkup(<TabStrip
       activeKey="app:file" canMutate canSplit stateGlyphs={false} onClose={noop} onMove={noop}
-      onNewTerminal={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
+      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
       tabs={[
         { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked" },
-        { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, canMoveLeft: false, canMoveRight: false },
+        { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: true, canMoveLeft: false, canMoveRight: false },
       ]}
     />);
     expect(html).toContain('role="tablist"');
@@ -167,6 +167,8 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain("Close README.md");
     expect(html).not.toContain("Close shell");
     expect(html).toContain('aria-label="Agent blocked"');
+    // A preview tab says so in the strip, the way VS Code does.
+    expect(html).toContain('class="tab-title tab-title-preview"');
   });
 
   it("keeps Files and Git mutually exclusive in the one right panel", () => {
