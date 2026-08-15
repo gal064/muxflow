@@ -7,6 +7,9 @@ import { useWorkspaceFiles } from "./useWorkspaceFiles";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+/** Waits out the hook's directory-refresh coalescing window, and a little more. */
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 220));
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -49,11 +52,32 @@ describe("useWorkspaceFiles", () => {
       subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
     };
     const scope: FileWorkspaceScope = { clientId: "c", hostProfileId: "local", serverIdentity: "s", generation: 1, terminalEpoch: 41, sessionId: "$1", paneId: "%1" };
-    function Harness() { useWorkspaceFiles(client, scope); return null; }
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, scope); return null; }
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
-    await act(async () => { listener?.({ kind: "fileChanged", rootToken: "root", path: "/repo/new.txt", generation: "2" }); await Promise.resolve(); });
-    expect(listDirectory.mock.calls.filter((call) => call[2] === "/repo").length).toBeGreaterThanOrEqual(2);
+    const reads = () => listDirectory.mock.calls.filter((call) => call[2] === "/repo").length;
+    const before = reads();
+    // A burst, as an agent writing into the workspace root produces. They are
+    // one directory's worth of news and must cost one re-read, not five: over
+    // SSH each one is a round trip, and each one used to replace the whole list.
+    await act(async () => {
+      for (let index = 0; index < 5; index += 1) {
+        listener?.({ kind: "fileChanged", rootToken: "root", path: `/repo/new-${index}.txt`, generation: "2" });
+      }
+      await Promise.resolve();
+    });
+    // Nothing is announced as loading: the rows are already on screen, and the
+    // "Loading…" row that would appear is inside the scrolling box, so putting
+    // it back on every event is what made the list and its scrollbars flicker.
+    expect(current?.loading.has("/repo")).toBe(false);
+    expect(reads(), "a burst re-read the directory before its window closed").toBe(before);
+    await act(async () => { await settle(); });
+    expect(reads()).toBe(before + 1);
+    // And the window reopens, so a directory under continuous change still
+    // refreshes rather than being starved by the events behind it.
+    await act(async () => { listener?.({ kind: "fileChanged", rootToken: "root", path: "/repo/later.txt", generation: "3" }); await settle(); });
+    expect(reads()).toBe(before + 2);
     await act(async () => { renderer.unmount(); });
   });
 
