@@ -137,7 +137,7 @@ pub fn run() {
                 config_dir.join("app-state.json"),
             ));
             app.manage(connection::TerminalClients::default());
-            app.manage(connection::files::DownloadManager);
+            app.manage(connection::files::DownloadManager::default());
             app.manage(connection::files::FileIoManager);
             app.manage(connection::files::UploadManager);
             app.manage(notifications::NativeNotifications::new(
@@ -175,6 +175,9 @@ pub fn run() {
             connection::git::cancel_git_request,
             connection::files::download_manager::start_download,
             connection::files::download_manager::cancel_download,
+            connection::files::download_manager::suggest_download_destination,
+            connection::files::download_opener::open_download,
+            connection::files::download_opener::reveal_download,
             connection::files::editor_manager::start_file_read,
             connection::files::editor_manager::start_file_write,
             connection::files::editor_manager::cancel_file_io,
