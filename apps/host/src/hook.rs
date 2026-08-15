@@ -31,8 +31,9 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
     if !value.is_object() {
         bail!("hook payload must be a JSON object");
     }
-    let pane_id = std::env::var("TMUX_PANE").context("TMUX_PANE is unavailable")?;
-    validate_pane_id(&pane_id)?;
+    let Some(pane_id) = pane_for_hook(std::env::var_os("TMUX_PANE"))? else {
+        return Ok(());
+    };
     let origin_server_identity =
         crate::service::snapshot::inherited_server_identity().unwrap_or_default();
     let now = now_millis();
@@ -504,6 +505,32 @@ fn parse_adapter(arguments: &[String]) -> anyhow::Result<v1::AgentAdapterKind> {
         .ok_or_else(|| anyhow::anyhow!("unsupported hook adapter"))
 }
 
+/// Which pane this hook belongs to, or `None` when it belongs to no pane.
+///
+/// The managed hook line is installed once, into the agent's own configuration,
+/// and that configuration follows the user everywhere the agent runs — including
+/// a plain terminal with no tmux server in sight. There is legitimately nothing
+/// to ingest there, and treating it as an error surfaced
+/// `UserPromptSubmit hook error … TMUX_PANE is unavailable` on *every* prompt of
+/// every such session.
+///
+/// Absent is the no-tmux case and is silent. Present-but-malformed is not: a
+/// value that exists and is not a pane id means something in the environment
+/// claims to be tmux and is wrong, which the operator has to be told about. That
+/// includes a value that is not UTF-8 at all, which is why the caller passes
+/// `var_os` — `var` reports it as absent and would have swallowed exactly the
+/// misconfiguration this distinction exists to catch.
+fn pane_for_hook(value: Option<std::ffi::OsString>) -> anyhow::Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let pane_id = value
+        .to_str()
+        .context("TMUX_PANE is not valid UTF-8 and cannot be a tmux pane ID")?;
+    validate_pane_id(pane_id)?;
+    Ok(Some(pane_id.to_owned()))
+}
+
 fn validate_pane_id(value: &str) -> anyhow::Result<()> {
     if value.strip_prefix('%').is_some_and(|digits| {
         !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
@@ -561,6 +588,26 @@ mod tests {
         assert!(parse_adapter(&["--adapter".into(), "other".into()]).is_err());
         assert!(validate_pane_id("%12").is_ok());
         assert!(validate_pane_id("%12;bad").is_err());
+    }
+
+    /// Running the agent outside tmux is not a misconfiguration and must not
+    /// look like one; running it with a broken `TMUX_PANE` still must.
+    #[test]
+    fn a_session_outside_tmux_has_no_pane_and_is_not_an_error() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        assert_eq!(pane_for_hook(None).unwrap(), None);
+        assert_eq!(
+            pane_for_hook(Some("%12".into())).unwrap(),
+            Some("%12".to_owned())
+        );
+        for malformed in ["", "%", "12", "%12;bad", "%1 2"] {
+            assert!(
+                pane_for_hook(Some(malformed.into())).is_err(),
+                "a present but malformed TMUX_PANE ({malformed:?}) must still fail loudly"
+            );
+        }
+        assert!(pane_for_hook(Some(OsString::from_vec(vec![0xff, 0xfe]))).is_err());
     }
 
     #[test]
