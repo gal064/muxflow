@@ -324,16 +324,30 @@ fn watch_fingerprint(path: &Path) -> anyhow::Result<u64> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
-        value = value.wrapping_add(watch_entry_fingerprint(&entry.file_name(), &metadata));
+        if let Some(entry_value) = watch_entry_fingerprint(&entry.file_name(), &metadata) {
+            value = value.wrapping_add(entry_value);
+        }
     }
     Ok(value)
 }
 
-fn watch_entry_fingerprint(name: &std::ffi::OsStr, metadata: &Metadata) -> u64 {
+/// One entry's contribution to a directory's change fingerprint, or `None` for
+/// an entry no listing reports.
+///
+/// A hidden entry that moved the fingerprint would make the fallback poller a
+/// second source of the churn the native watcher was just taught to filter: on
+/// macOS every folder Finder has opened gains a `.DS_Store` that is rewritten
+/// behind the user's back, and each rewrite would publish an authoritative
+/// snapshot that the desktop answers with a full re-list — of a directory whose
+/// listing does not contain the entry that changed.
+fn watch_entry_fingerprint(name: &OsStr, metadata: &Metadata) -> Option<u64> {
+    if is_always_hidden(name) {
+        return None;
+    }
     let name = blake3::hash(name.as_bytes());
     let mut name_bytes = [0_u8; 8];
     name_bytes.copy_from_slice(&name.as_bytes()[..8]);
-    u64::from_le_bytes(name_bytes) ^ metadata_generation(metadata).rotate_left(29)
+    Some(u64::from_le_bytes(name_bytes) ^ metadata_generation(metadata).rotate_left(29))
 }
 
 fn apply_effective_metadata(item: &mut v1::FileMetadata, metadata: &Metadata) {
@@ -492,6 +506,45 @@ mod tests {
                 "{hidden} must not be enterable by path"
             );
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Hidden means "not shown", never "not there".
+    ///
+    /// The destructive-confirmation gates count what is really in a directory,
+    /// and must keep doing so: a directory holding nothing but a `.git` is a
+    /// directory holding a repository, and deleting it without asking because
+    /// the tree does not draw its contents would be a far worse defect than a
+    /// prompt about something invisible. This is the test that fails if the
+    /// hiding predicate is ever wired into `mutations.rs` for tidiness.
+    #[test]
+    fn a_directory_that_looks_empty_is_still_not_empty_to_a_delete() {
+        let (root, service) = fixture();
+        let repository = root.join("repo");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(repository.join(".git")).unwrap();
+        fs::write(repository.join(".git/config"), "kept").unwrap();
+
+        let listed = service
+            .list_directory(root.to_str().unwrap(), "repo", "watch")
+            .unwrap();
+        assert!(listed.entries.is_empty(), "the tree draws nothing in it");
+
+        let error = service
+            .mutate(&v1::FileServiceRequest {
+                operation_id: "delete-repo".into(),
+                root: root.to_string_lossy().into_owned(),
+                mutation: v1::FileMutationKind::Delete.into(),
+                path: repository.to_string_lossy().into_owned(),
+                non_empty_confirmed: false,
+                ..Default::default()
+            })
+            .expect_err("a repository must not be deleted without confirmation");
+        assert!(
+            error.to_string().contains("confirmation_required"),
+            "got {error}"
+        );
+        assert!(repository.join(".git/config").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

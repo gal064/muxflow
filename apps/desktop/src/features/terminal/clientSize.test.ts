@@ -168,12 +168,24 @@ describe("windowCellSize", () => {
    * geometry at all.
    */
   it("reads the window's grid off its bottom-right pane", () => {
+    // The bottom-right pane is listed *first* on purpose. Snapshot pane order
+    // is not a guaranteed property, so a fixture that happened to end on the
+    // widest and tallest pane would pass on an implementation that simply took
+    // the last one — and a wrong answer here is a permanent `actualSize`
+    // mismatch, which spends the reassertion budget resizing real windows on
+    // every focus gain.
     const panes = [
+      pane("%3", { left: 95, top: 25, width: 93, height: 25 }),
       pane("%1", { left: 0, top: 0, width: 94, height: 50 }),
       pane("%2", { left: 95, top: 0, width: 93, height: 24 }),
-      pane("%3", { left: 95, top: 25, width: 93, height: 25 }),
     ];
     expect(windowCellSize(panes, "@1")).toEqual({ columns: 188, rows: 50 });
+    // Widest and tallest come from different panes, so neither axis can be
+    // satisfied by picking one pane and reading both numbers off it.
+    expect(windowCellSize([
+      pane("%1", { left: 0, top: 0, width: 200, height: 10 }),
+      pane("%2", { left: 0, top: 11, width: 20, height: 40 }),
+    ], "@1")).toEqual({ columns: 200, rows: 51 });
   });
 
   it("ignores panes belonging to other windows", () => {

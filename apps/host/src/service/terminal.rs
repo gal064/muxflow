@@ -458,16 +458,28 @@ impl TerminalClients {
     /// first without the second is how M13-E005 happened.
     ///
     /// `visible_session` moves the instant the flag is set, before the size is
-    /// sent, so a failed resize leaves a state that is merely wrong by one
+    /// sent, so a failed *resize* leaves a state that is merely wrong by one
     /// message rather than incoherent: the client that participates in sizing
     /// and the one this type believes is visible are the same client, and the
     /// next `resize` reaches it. Recording it only after the size would leave
     /// every later resize addressed to a client tmux is ignoring, and reported
     /// as success.
+    ///
+    /// A failed *flag*, though, is the opposite case and gets the opposite
+    /// treatment: the caller has already taken the previous client out of
+    /// sizing, so nobody participates, and naming a client that is in
+    /// `ignore-size` would make every later `resize` a write tmux discards and
+    /// this type reports as delivered. `visible_session` is cleared instead, so
+    /// `resize` says "no visible session control client" until a selection
+    /// lands — which the desktop re-attempts on every topology generation.
     fn size_visible_client(&mut self, session_id: &str) -> anyhow::Result<()> {
         let last_size = self.last_size;
         let previous = self.visible_session.clone();
         let outcome = (|| -> anyhow::Result<()> {
+            // Nobody participates until the flag lands. Cleared first rather
+            // than on each failure path, so every way out of the two lines
+            // below leaves the same coherent state.
+            self.visible_session = None;
             let client = self
                 .clients
                 .get_mut(session_id)
@@ -740,6 +752,20 @@ pub(super) struct ControlWrite {
     pub(super) pane_id: String,
     /// Whether tmux paused this pane and is waiting to be told to continue.
     pub(super) resume_first: bool,
+    /// How long to wait before writing.
+    ///
+    /// Only a retried resume sets this, and it is the difference between a
+    /// second attempt and the same attempt twice: an immediate identical
+    /// rewrite can only clear a rejection that was already over, which is a
+    /// narrower class than "transient". A rejection worth one retry is one
+    /// where something in flight has to finish first.
+    ///
+    /// Delaying here rather than on the reader is the whole reason this lane
+    /// exists — the reader must never block, because it is the only thing
+    /// draining tmux's output and tmux stops reading its stdin while blocked
+    /// writing to us. This thread may block; the cost is that a capture queued
+    /// behind a retry waits for it, which is bounded and rare.
+    pub(super) delay: Option<Duration>,
 }
 
 /// Serialises reader-requested writes onto a thread that is allowed to block.
@@ -761,6 +787,9 @@ pub(super) fn spawn_control_writer(
         .name(format!("host-tmux-writer-{session_id}"))
         .spawn(move || {
             while let Ok(write) = receiver.recv() {
+                if let Some(delay) = write.delay {
+                    std::thread::sleep(delay);
+                }
                 let _ = write_capture_request_resuming(&stdin, &write.pane_id, write.resume_first);
             }
         })?;
