@@ -124,7 +124,12 @@ export const commandRegistry: readonly CommandDefinition[] = [
   // as `files.delete` and `git.discard` do.
   { id: "host.delete", title: "Delete the selected saved host…", group: "Application", requires: "hostProfile" },
   { id: "view.toggleSidebar", title: "Toggle sidebar", group: "View", defaults: { mac: "Meta+B", linux: "Ctrl+B" } },
-  { id: "view.togglePanel", title: "Toggle right panel", group: "View", defaults: { mac: "Meta+Alt+B", linux: "Ctrl+Alt+B" } },
+  // ⌘L, not ⌥⌘B. The Option-modified letter below is exactly the class of
+  // binding that macOS rewrites into a different glyph, and the panel is a
+  // twice-a-minute toggle that had a binding nobody could press. While a
+  // terminal pane is focused this now takes ⌘L before the shell sees it —
+  // the same trade ⌘B already makes for the sidebar.
+  { id: "view.togglePanel", title: "Toggle right panel", group: "View", defaults: { mac: "Meta+L", linux: "Ctrl+L" } },
   { id: "view.showFiles", title: "Show Files", group: "View", defaults: { mac: "Meta+Shift+E", linux: "Ctrl+Shift+E" } },
   { id: "view.showGit", title: "Show Source Control", group: "View", defaults: { mac: "Meta+Shift+G", linux: "Ctrl+Shift+G" } },
   { id: "focus.workspaces", title: "Focus workspace list", group: "View" },
@@ -135,7 +140,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "focus.back", title: "Back to the previous terminal", group: "View", defaults: { mac: "Meta+[", linux: "Ctrl+[" } },
   { id: "focus.forward", title: "Forward again", group: "View", defaults: { mac: "Meta+]", linux: "Ctrl+]" } },
   { id: "agents.jumpUnread", title: "Jump to the agent that needs you", group: "Agents", defaults: { mac: "Meta+Shift+U", linux: "Ctrl+Shift+U" } },
-  { id: "agents.toggleSort", title: "Toggle agent ordering (grouped ⇄ priority)", group: "Agents" },
+  { id: "agents.toggleSort", title: "Toggle agent ordering (workspace ⇄ status)", group: "Agents" },
   // Kept adjacent to the rest of the Agents group: the palette prints a group
   // heading whenever the group changes down the list, so a group split across
   // two places in this array would print its heading twice.
