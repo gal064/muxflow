@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 // The token file itself, as text: this test's whole purpose is to compare the
 // renderer's fallback against what tokens.css actually declares.
 import tokensCss from "../../tokens.css?raw";
-import { CHROME_FALLBACKS, GHOSTTY_DEFAULT_DARK, searchDecorations, terminalFont, terminalTheme } from "./theme";
+import { CHROME_FALLBACKS, GHOSTTY_DEFAULT_DARK, searchDecorations, terminalFacesReady, terminalFont, terminalFontFaces, terminalTheme } from "./theme";
 
 function token(name: string): string | undefined {
   return new RegExp(`^\\s*${name}:\\s*([^;]+);`, "mu").exec(tokensCss)?.[1].trim();
@@ -71,6 +71,25 @@ describe("terminal theme derivation", () => {
     // `lineHeight` is a ratio of something else entirely (`xtermLineHeight`).
     expect(font.rowPitch).toBeCloseTo(13 * 1.42, 10);
     expect(font.fontFamily).toContain("JetBrains Mono");
+  });
+
+  it("names every style the atlas can hold, and settles even where fonts cannot be asked", async () => {
+    // All four, because bold and italic runs are rasterised into the same
+    // texture atlas as the regular text and a face that lands late splits that
+    // atlas between two typefaces. Every declared `@font-face` weight/style in
+    // tokens.css must be represented, or the one this list forgets is the one
+    // that comes back looking like a different font.
+    const faces = terminalFontFaces(undefined);
+    const declared = [...tokensCss.matchAll(/@font-face\s*\{[^}]*?font-family:\s*"JetBrains Mono"[^}]*?\}/gsu)];
+    expect(faces).toHaveLength(declared.length);
+    expect(new Set(faces).size, "two styles resolved to the same shorthand").toBe(faces.length);
+    for (const face of faces) {
+      expect(face).toContain(CHROME_FALLBACKS["--font-mono"]);
+      expect(face).toContain(CHROME_FALLBACKS["--term-font-size"]);
+    }
+    // The app renders nothing until this settles, so it must settle even with
+    // no font API at all — a hang here is a permanently blank window.
+    await expect(terminalFacesReady()).resolves.toEqual([]);
   });
 
   it("guards the chrome fallbacks too, not just the terminal palette", () => {
