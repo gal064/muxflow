@@ -37,15 +37,34 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
         crate::service::snapshot::inherited_server_identity().unwrap_or_default();
     let now = now_millis();
     let event = build_event(adapter, payload, &pane_id, &origin_server_identity, now)?;
-    let socket = crate::paths::default_socket_path();
-    match send(&socket, &event).await {
-        Ok(()) => Ok(()),
-        Err(error) if is_connection_error(&error) => {
-            persist_latest_fallback(&event)?;
-            Ok(())
+    deliver(&crate::paths::runtime_dir_candidates(), &event).await
+}
+
+/// Hand the event to whichever daemon is actually running.
+///
+/// The candidate list exists because "the runtime directory" is not a property
+/// of the machine but of the environment a process happened to inherit, and a
+/// hook inherits a different one from the daemon (see `paths::record_runtime_dir`).
+/// Only a connection error moves on to the next candidate: a daemon that
+/// answered and then rejected the event is the daemon, and retrying the same
+/// event against another directory would either duplicate it or hide the
+/// rejection.
+async fn deliver(
+    candidates: &[std::path::PathBuf],
+    event: &v1::AgentHookEvent,
+) -> anyhow::Result<()> {
+    for runtime in candidates {
+        let socket = runtime.join("host.sock");
+        if !socket.exists() {
+            continue;
         }
-        Err(error) => Err(error),
+        match send(&socket, event).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_connection_error(&error) => continue,
+            Err(error) => return Err(error),
+        }
     }
+    persist_latest_fallback(&crate::paths::fallback_runtime_dir(candidates), event)
 }
 
 /// `hook status|install|uninstall` — the same merge-only installer the desktop
@@ -339,9 +358,8 @@ async fn send(socket: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<()> {
 /// describes where the agent ended up.
 const MAX_FALLBACK_PER_PANE: usize = 32;
 
-fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
-    let runtime = crate::paths::default_runtime_dir();
-    crate::paths::prepare_runtime_dir(&runtime)?;
+fn persist_latest_fallback(runtime: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<()> {
+    crate::paths::prepare_runtime_dir(runtime)?;
     let pane = event.pane_id.trim_start_matches('%');
     let adapter = crate::service::agents::adapters::adapter(
         v1::AgentAdapterKind::try_from(event.adapter).unwrap_or_default(),
@@ -349,7 +367,7 @@ fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
     .context("unsupported hook adapter")?
     .id();
     let prefix = format!("hook-fallback-{adapter}-{pane}-");
-    prune_fallbacks(&runtime, &prefix);
+    prune_fallbacks(runtime, &prefix);
     // Fixed-width nanoseconds first, so the file name sorts chronologically and
     // the daemon can replay the sequence without opening anything; the random
     // suffix separates two hooks that fired in the same nanosecond, which are
@@ -372,7 +390,7 @@ fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
         file.write_all(&event.encode_to_vec())?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        fs::File::open(&runtime)?.sync_all()?;
+        fs::File::open(runtime)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {

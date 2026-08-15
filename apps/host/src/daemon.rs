@@ -60,6 +60,14 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
         }
     };
     diagnostics.install_process_recorder();
+    // Published before the first connection is accepted, so a hook that fires
+    // the instant an agent starts can already find this directory rather than
+    // the one its own environment would have derived (M13-E003). Non-fatal: a
+    // daemon that cannot write the pointer still serves every client that
+    // resolves the same directory it did, which is the common case.
+    if let Err(error) = paths::record_runtime_dir(runtime) {
+        eprintln!("could not record the runtime directory for hooks: {error}");
+    }
     let metadata_path = runtime.join("daemon.json");
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let process_start_time = process_start_time(std::process::id())?;
