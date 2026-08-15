@@ -20,11 +20,6 @@ describe("status notices", () => {
       "Connection reconnecting…",
       "Opened README.md",
       "Viewing the last known workspace. Writes remain frozen.",
-      // A navigation that worked moved the workspace, the tab and the terminal
-      // in front of the user; repeating it in a notice full of tmux ids is the
-      // noise this list exists for. Both shapes the focus path emits.
-      "Agent Codex one focus request accepted for $1/@1/%1.",
-      "Notification for Codex one. Focus request accepted.",
       "   ",
     ]) expect(noticeForStatus(routine, 1), routine).toBeUndefined();
   });

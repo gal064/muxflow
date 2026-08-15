@@ -114,6 +114,18 @@ function topAgentsBySession(
   return loudest;
 }
 
+/**
+ * Branch and path recomposed, for ⌘P — the one surface that still wants both.
+ *
+ * The two are stored apart because the sidebar shows only the branch, but the
+ * switcher matches on the pair and shows what it matched. Composing that here
+ * keeps the separator in the module that owns the fields, rather than in a
+ * component that would rebuild it on every keystroke.
+ */
+export function workspaceMetaLine(row: Pick<WorkspaceRowModel, "branch" | "path">): string {
+  return [row.branch, row.path].filter(Boolean).join(" · ");
+}
+
 /** The verb a row prints beside an agent's name. */
 export function activityWord(state: AgentDisplayState): string {
   return state === "done" ? "done, unread" : state;

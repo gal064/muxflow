@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { agent } from "../agents/testFixtures";
 import { compareAgents, deriveAgentRollups } from "../agents/selectors";
 import type { TmuxSnapshot } from "../../app/types";
-import { WORKSPACE_ROW_AGENT_LIMIT, abbreviateHome, inferHome, sessionPath, workspaceRows } from "./workspaceRows";
+import {
+  WORKSPACE_ROW_AGENT_LIMIT, abbreviateHome, inferHome, sessionPath, workspaceMetaLine, workspaceRows,
+} from "./workspaceRows";
 
 const snapshot: TmuxSnapshot = {
   sessions: [
@@ -110,6 +112,11 @@ describe("workspace sidebar rows", () => {
     // carry a path and claim no branch rather than guessing one.
     expect(sampleco.branch).toBeUndefined();
     expect(sampleco.path).toBe("~/dev/checksum");
+    // ⌘P wants them back together, and the separator lives here rather than in
+    // the component that would otherwise rebuild it on every keystroke.
+    expect(workspaceMetaLine(galAde)).toBe("main* · ~/dev/muxflow");
+    expect(workspaceMetaLine(checksum)).toBe("~/dev/checksum");
+    expect(workspaceMetaLine({})).toBe("");
   });
 
   it("says nothing about activity for a workspace with no agents", () => {

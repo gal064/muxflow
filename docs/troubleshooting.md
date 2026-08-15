@@ -54,6 +54,13 @@ A notification for the pane you are currently looking at is suppressed on
 purpose — the app is already showing that agent's state. Every other pane's
 notification is shown, including while the app is frontmost.
 
+**Notifications arrive but the test one is silent.** macOS fixes an app's
+notification options at the first authorization request and never asks again.
+Builds before this one asked for alerts only, so an install that granted
+permission then has no sound permission now and cannot be re-prompted from
+inside the app. Turn sound on in System Settings → Notifications → tmux Agent
+IDE, or revoke and re-grant.
+
 The local helper uses a private runtime under
 `~/Library/Caches/dev.dev.tmux-agent-ide/runtime` unless
 `ADE_HOST_RUNTIME_DIR` is explicitly set. Remote Linux helpers are ELF files in

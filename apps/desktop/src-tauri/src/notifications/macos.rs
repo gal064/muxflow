@@ -637,6 +637,21 @@ mod tests {
             authorization_status_name(UNAuthorizationStatus(99)),
             "unsupported"
         );
+        // And every one of them is a word the frontend has a sentence for.
+        for status in [
+            UNAuthorizationStatus::NotDetermined,
+            UNAuthorizationStatus::Denied,
+            UNAuthorizationStatus::Authorized,
+            UNAuthorizationStatus::Provisional,
+            UNAuthorizationStatus::Ephemeral,
+            UNAuthorizationStatus(99),
+        ] {
+            let name = authorization_status_name(status);
+            assert!(
+                crate::notifications::PERMISSION_STATUSES.contains(&name),
+                "{name} is not in the shared permission vocabulary"
+            );
+        }
     }
 
     #[test]
