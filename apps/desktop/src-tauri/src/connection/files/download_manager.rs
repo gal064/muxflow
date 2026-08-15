@@ -51,6 +51,7 @@ struct DownloadJob {
     cancellation: Arc<CancelState>,
     channel: Channel<Value>,
     published: Arc<PathRegistry>,
+    reserved: Arc<PathRegistry>,
 }
 
 /// A bounded, FIFO set of absolute paths. Two of these carry the download
@@ -78,6 +79,12 @@ impl PathRegistry {
         paths.push_back(path);
     }
 
+    pub(super) fn release(&self, path: &Path) {
+        if let Ok(mut paths) = self.paths.lock() {
+            paths.retain(|candidate| candidate != path);
+        }
+    }
+
     pub(super) fn contains(&self, path: &Path) -> bool {
         self.paths
             .lock()
@@ -97,14 +104,21 @@ pub struct DownloadManager {
     /// I write this?" instead — so the renderer's reach into the OS opener is
     /// exactly the set of downloads the app just published, and nothing else.
     published: Arc<PathRegistry>,
-    /// Names already handed to a save panel this session.
+    /// Destinations with a transfer currently in flight.
     ///
-    /// A download in flight occupies only its `.partial`; the final name stays
+    /// A running download occupies only its `.partial`; the final name stays
     /// free on disk until `publish()`. Without this, starting a second copy of
-    /// a large file while the first is still transferring gets offered the
-    /// *same* suggested name, the panel has nothing to warn about, and the
-    /// second publish silently replaces the first — the exact "three
-    /// downloads, three files" the flow exists to guarantee.
+    /// a large file while the first is still transferring would be offered the
+    /// *same* suggested name, the save panel would have nothing to warn about,
+    /// and the second publish would silently replace the first — the exact
+    /// "three downloads, three files" the flow exists to guarantee.
+    ///
+    /// What is reserved is the destination the user actually confirmed, held
+    /// from the moment the job is queued until it finishes, either way. Two
+    /// things follow that reserving the *suggestion* would get wrong:
+    /// cancelling the save panel reserves nothing, and typing the same name
+    /// into two panels is caught, because the reservation is made where the
+    /// name is committed rather than where it is proposed.
     reserved: Arc<PathRegistry>,
 }
 
@@ -112,6 +126,18 @@ impl DownloadManager {
     pub(super) fn published(&self) -> &PathRegistry {
         &self.published
     }
+}
+
+/// The path a download will actually be written to.
+///
+/// A folder download is a tar archive, and the suffix is applied here — at the
+/// one boundary that names the destination — so the reservation, the job, and
+/// the file on disk cannot disagree about what is being written.
+fn archive_destination(destination: PathBuf, folder: bool) -> PathBuf {
+    if folder && destination.extension().and_then(|value| value.to_str()) != Some("tar") {
+        return PathBuf::from(format!("{}.tar", destination.to_string_lossy()));
+    }
+    destination
 }
 
 #[tauri::command]
@@ -149,14 +175,18 @@ pub fn start_download(
         root,
         root_token,
         source,
-        destination: PathBuf::from(destination),
+        destination: archive_destination(PathBuf::from(destination), folder),
         folder,
         collision,
         binding,
         cancellation: Arc::clone(&cancellation),
         channel: on_event,
         published: Arc::clone(&transfers.published),
+        reserved: Arc::clone(&transfers.reserved),
     };
+    // Held until this job finishes, so a second download of the same file is
+    // offered a different name while this one is still only a `.partial`.
+    transfers.reserved.record(job.destination.clone());
     emit_download_state(&job, TransferState::Queued, json!({}));
     enqueue(job)?;
     Ok(transfer_id)
@@ -181,16 +211,17 @@ pub fn suggest_download_destination(
         .path()
         .download_dir()
         .map_err(|error| format!("could not resolve the Downloads directory: {error}"))?;
-    // A name is taken when it is on disk *or* already promised to a panel this
-    // session — see `DownloadManager::reserved`.
+    // A name is taken when it is on disk *or* has a transfer in flight against
+    // it — see `DownloadManager::reserved`. Nothing is reserved here: this is a
+    // proposal, and a user who cancels the panel must not leave a name burned
+    // for the rest of the session.
     let name = super::download_naming::suggest_non_colliding_name(
         &directory,
         OsStr::new(file_name.as_str()),
         |candidate| transfers.reserved.contains(candidate),
     )?;
-    let suggested = directory.join(name);
-    transfers.reserved.record(suggested.clone());
-    suggested
+    directory
+        .join(name)
         .into_os_string()
         .into_string()
         .map_err(|_| "the Downloads directory path is not valid UTF-8".to_owned())
@@ -245,9 +276,11 @@ pub(super) fn enqueue_acceptance_download(
         binding,
         cancellation: Arc::new(CancelState::new()),
         channel,
-        // Its own registry, dropped with this call: an acceptance download is
-        // never handed to the UI, so nothing will ever ask to open it.
+        // Its own registries, dropped with this call: an acceptance download is
+        // never handed to the UI, so nothing will ever ask to open it and
+        // nothing is competing for its name.
         published: Arc::default(),
+        reserved: Arc::default(),
     };
     emit_download_state(&job, TransferState::Queued, json!({}));
     enqueue(job)?;
@@ -255,6 +288,10 @@ pub(super) fn enqueue_acceptance_download(
 }
 
 fn finish_download_job(job: &DownloadJob, result: TransferResult) {
+    // Every path out of a download passes here, so this is where the name goes
+    // back into circulation — a reservation that outlived its transfer would
+    // push every later download of the same file onto a "(1)" it did not need.
+    job.reserved.release(&job.destination);
     let Err(failure) = result else { return };
     let state = if job.cancellation.reason() == super::scheduler::CancelReason::User
         && failure.outcome == TransferOutcome::NotPublished
@@ -284,17 +321,10 @@ fn emit_download_state(job: &DownloadJob, state: TransferState, extra: Value) {
 
 fn run_download(job: &DownloadJob) -> TransferResult {
     job.binding.validate()?;
-    let requested_destination = if job.folder
-        && job.destination.extension().and_then(|value| value.to_str()) != Some("tar")
-    {
-        PathBuf::from(format!("{}.tar", job.destination.to_string_lossy()))
-    } else {
-        job.destination.clone()
-    };
     // Resolve and retain the destination directory before the host allocates a
     // transfer. All later create, cleanup and publication operations use this
     // descriptor, so a parent rename/symlink swap cannot redirect them.
-    let destination = PreparedDestination::open(&requested_destination, job.collision)?;
+    let destination = PreparedDestination::open(&job.destination, job.collision)?;
     let _deadline = job.cancellation.arm_inactivity_deadline();
     let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
@@ -509,13 +539,25 @@ fn stream_download(
     job.cancellation.prepare_finalize()?;
     emit_download_state(job, TransferState::Verifying, json!({}));
     drop(output);
-    let publication = destination
-        .publish()
-        .map_err(download_publication_failure)?;
-    // Recorded the moment the local file exists under its final name, and from
+    // Recorded whenever the local file exists under its final name, and from
     // the *final* path rather than the requested one — a `Rename` policy may
-    // have moved it. This is what later authorizes Open / Show in Finder.
-    job.published.record(destination.final_path().to_path_buf());
+    // have moved it. This is what later authorizes Open / Show in Finder, so
+    // it has to follow the backend's own verdict: a publication that reports
+    // `Published` and *then* fails still left a file behind, and the UI offers
+    // to open exactly that case.
+    let publication = match destination.publish() {
+        Ok(publication) => {
+            job.published.record(destination.final_path().to_path_buf());
+            publication
+        }
+        Err(error) => {
+            let failure = download_publication_failure(error);
+            if failure.outcome == TransferOutcome::Published {
+                job.published.record(destination.final_path().to_path_buf());
+            }
+            return Err(failure);
+        }
+    };
     let cleanup_status = if publication.cleanup_error.is_some() {
         CleanupStatus::Retained
     } else {
@@ -598,5 +640,61 @@ mod tests {
         failure.merge_cleanup(CleanupStatus::Removed, None);
         assert_eq!(failure.cleanup_status, CleanupStatus::Retained);
         assert_eq!(failure.cleanup_error.as_deref(), Some(original.as_str()));
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn a_reservation_lasts_exactly_as_long_as_its_transfer() {
+        let registry = PathRegistry::default();
+        let destination = PathBuf::from("/Users/test/Downloads/report.pdf");
+
+        // While a transfer holds the name, the suggestion walk must step past
+        // it even though nothing is on disk under it yet.
+        assert!(!registry.contains(&destination));
+        registry.record(destination.clone());
+        assert!(registry.contains(&destination));
+
+        // And it must come back afterwards, or every later download of the
+        // same file is pushed onto a "(1)" it never needed.
+        registry.release(&destination);
+        assert!(!registry.contains(&destination));
+        // Releasing something that was never held is not an error.
+        registry.release(&destination);
+
+        // Recording twice holds one entry, so one release is enough.
+        registry.record(destination.clone());
+        registry.record(destination.clone());
+        registry.release(&destination);
+        assert!(!registry.contains(&destination));
+    }
+
+    #[test]
+    fn the_registry_is_bounded_and_evicts_oldest_first() {
+        let registry = PathRegistry::default();
+        for index in 0..MAX_REGISTRY_PATHS + 10 {
+            registry.record(PathBuf::from(format!("/downloads/file-{index}")));
+        }
+        assert!(!registry.contains(Path::new("/downloads/file-0")));
+        assert!(registry.contains(Path::new("/downloads/file-265")));
+    }
+
+    #[test]
+    fn a_folder_download_is_named_as_the_tar_it_actually_writes() {
+        // One rule, applied where the destination is named — so the
+        // reservation, the job and the file on disk cannot disagree.
+        let named = |path: &str, folder: bool| {
+            archive_destination(PathBuf::from(path), folder)
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(named("/d/archive", true), "/d/archive.tar");
+        assert_eq!(named("/d/archive.tar", true), "/d/archive.tar");
+        assert_eq!(named("/d/report.pdf", false), "/d/report.pdf");
+        // A file download is never renamed, even without an extension.
+        assert_eq!(named("/d/report", false), "/d/report");
     }
 }

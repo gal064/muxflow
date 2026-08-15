@@ -154,7 +154,8 @@ export function App() {
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
   const [appRecoveryDiscardConfirmation, setAppRecoveryDiscardConfirmation] = useState(false);
   const [pendingAppRecovery, setPendingAppRecovery] = useState<{ hostProfileId: string; previousServerIdentity: string; currentServerIdentity: string; count: number; scope: HostScopeToken }>();
-  const [completedDownload, setCompletedDownload] = useState<DownloadCompletion>();
+  const [completedDownload, setCompletedDownload] = useState<DownloadCompletion & { noticeId?: number }>();
+  const downloadPickerOpen = useRef(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
@@ -188,10 +189,15 @@ export function App() {
     const next = noticeForStatus(status, (noticeSequence.current += 1));
     setNotice(next);
     // The completion's Open/reveal buttons belong to the notice announcing it
-    // and to no other. Dropping the record as soon as the channel moves on is
-    // what stops a finished download's destination being held for the rest of
-    // the session, waiting for some later message to read the same.
-    setCompletedDownload((current) => current && current.message.trim() === next?.message ? current : undefined);
+    // and to no other. The message is matched once, here, at the moment the
+    // notice is minted — after which the two are joined by the notice's id, so
+    // nothing downstream re-derives the association from user-facing prose.
+    // (`noticeForStatus` trims, hence the trim.) Anything else drops the
+    // record rather than holding a finished download's destination for the
+    // rest of the session.
+    setCompletedDownload((current) => current && next && current.message.trim() === next.message
+      ? { ...current, noticeId: next.id }
+      : undefined);
     if (!next) return;
     const delay = noticeDismissDelay(next);
     if (delay === undefined) return;
@@ -742,8 +748,14 @@ export function App() {
    * no in-app step, so cancelling the panel ends it with nothing said.
    */
   const startDownloadFlow = async (intent: DownloadIntent, downloadRoot: ActiveRoot) => {
+    // Three call sites invoke this fire-and-forget, and the in-app modal that
+    // used to serialize them is gone — without this, two quick downloads open
+    // two save panels.
+    if (downloadPickerOpen.current) return;
+    downloadPickerOpen.current = true;
     const chosen = await chooseDownloadDestination(intent)
-      .catch((error) => { setStatus(`Could not open the save panel: ${String(error)}`); return undefined; });
+      .catch((error) => { setStatus(`Could not open the save panel: ${String(error)}`); return undefined; })
+      .finally(() => { downloadPickerOpen.current = false; });
     if (!chosen) return;
     // `overwrite`, not `rename`: the default name the panel opened with was
     // already unique, so reaching an existing file means the user aimed at one
@@ -1051,8 +1063,8 @@ export function App() {
       {/* Only on the notice this exact download raised: matching the message
           means a later status replaces the buttons along with the text, so
           they can never end up offering a file the toast is not about. */}
-      {completedDownload?.message.trim() === notice.message && <DownloadActions destination={completedDownload.destination} onError={setStatus} />}
-      <button aria-label="Dismiss" onClick={() => setNotice(undefined)} type="button">Dismiss</button>
+      {completedDownload?.noticeId === notice.id && <DownloadActions destination={completedDownload.destination} onResult={(error) => { if (error) setStatus(error); }} />}
+      <button aria-label="Dismiss" onClick={() => { setNotice(undefined); setCompletedDownload(undefined); }} type="button">Dismiss</button>
     </div>}
     {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}
     {appStateRecovery && <div className="toast" role="alert"><strong>Saved shell state is write-frozen</strong><span>{appStateRecovery}</span><button onClick={() => setAppStateResetConfirmation(true)} type="button">Reset saved shell state…</button></div>}
