@@ -29,13 +29,13 @@ describe("persisted app state contract", () => {
   });
 
   it("names every field of the two record types that also cross the boundary", () => {
-    // `appTabs` carries eighteen fields and `workspaceUi` five. Pinning only
+    // `appTabs` carries nineteen fields and `workspaceUi` five. Pinning only
     // the shell object would have left the same silent-drop failure open on the
     // two largest structs.
     const tab: Required<AppOwnedTab> = {
       id: "", hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "",
       kind: "file", resource: "", title: "", order: 0, rootPath: "", rootToken: "",
-      viewMode: "source", gitRepositoryId: "", gitPath: "", gitOriginalPath: "",
+      preview: false, viewMode: "source", gitRepositoryId: "", gitPath: "", gitOriginalPath: "",
       gitTarget: "staged", gitStatusGeneration: "", gitSourceGeneration: "",
     };
     const workspace: Required<WorkspaceUiRecord> = {

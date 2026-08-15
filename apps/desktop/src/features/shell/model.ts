@@ -6,7 +6,7 @@ import type { AgentAttentionRollup } from "../agents/types";
 
 export type CombinedTab =
   | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"] }
-  | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; canMoveLeft: boolean; canMoveRight: boolean };
+  | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean };
 
 export interface AgentShellItem {
   id: string;
@@ -70,6 +70,7 @@ export function combineWorkspaceTabs(
       appKind: tab.kind,
       resource: tab.resource,
       order: tab.order,
+      preview: Boolean(tab.preview),
       canMoveLeft: index > 0,
       canMoveRight: index < ordered.length - 1,
     }));
@@ -206,6 +207,21 @@ export function selectAppTab(
   return { ...state, workspaceUi };
 }
 
+function fileTabTitle(resource: string): string {
+  return resource.split("/").filter(Boolean).at(-1) ?? resource;
+}
+
+/**
+ * VS Code's open rule, and the invariant behind it: a workspace has **at most
+ * one** preview tab.
+ *
+ * A single click asks for a preview. If a preview tab is already open it is
+ * reused in place — same id, same position in the strip — so browsing a
+ * directory leaves one tab behind instead of one per file. A double-click,
+ * Enter, an explicit Open, or the first edit asks for a pinned tab, and a tab
+ * that is already open is only ever promoted by that, never demoted: reopening
+ * a pinned file as a preview must not make it disposable again.
+ */
 export function openFileTab(
   state: PersistedAppState,
   currentHostProfileId: string,
@@ -214,28 +230,66 @@ export function openFileTab(
   resource: string,
   kind: "file" | "markdown",
   root: { path: string; token: string; revision: string },
+  options: { preview: boolean } = { preview: false },
 ): PersistedAppState {
-  const existing = state.appTabs.find((tab) => tab.hostProfileId === currentHostProfileId
+  const inWorkspace = (tab: AppOwnedTab) => tab.hostProfileId === currentHostProfileId
     && tab.serverIdentity === currentServerIdentity
-    && tab.sessionId === session.id
-    && tab.resource === resource);
-  const tab = existing ?? {
+    && tab.sessionId === session.id;
+  const existing = state.appTabs.find((tab) => inWorkspace(tab) && tab.resource === resource);
+  if (existing) {
+    const pinned = !options.preview && existing.preview
+      ? state.appTabs.map((tab) => tab.id === existing.id ? withoutPreview(tab) : tab)
+      : state.appTabs;
+    return selectAppTab({ ...state, appTabs: pinned }, currentHostProfileId, currentServerIdentity, session, existing.id);
+  }
+
+  const details = {
+    kind,
+    resource,
+    title: fileTabTitle(resource),
+    rootPath: root.path,
+    rootToken: root.token,
+    ...(kind === "markdown" ? { viewMode: "split" as const } : {}),
+  };
+  // The slot is reused, not the record: everything that described the previous
+  // file — its markdown view mode, its root snapshot — is replaced, and only
+  // the tab's identity and position survive.
+  const reusable = options.preview ? state.appTabs.find((tab) => inWorkspace(tab) && tab.preview) : undefined;
+  if (reusable) {
+    const appTabs = state.appTabs.map((tab) => tab.id === reusable.id
+      ? { id: tab.id, hostProfileId: tab.hostProfileId, serverIdentity: tab.serverIdentity, sessionId: tab.sessionId, sessionName: tab.sessionName, order: tab.order, preview: true, ...details }
+      : tab);
+    return selectAppTab({ ...state, appTabs }, currentHostProfileId, currentServerIdentity, session, reusable.id);
+  }
+
+  const tab: AppOwnedTab = {
     id: crypto.randomUUID(),
     hostProfileId: currentHostProfileId,
     serverIdentity: currentServerIdentity,
     sessionId: session.id,
     sessionName: session.name,
-    kind,
-    resource,
-    title: resource.split("/").filter(Boolean).at(-1) ?? resource,
-    order: state.appTabs.filter((candidate) => candidate.hostProfileId === currentHostProfileId
-      && candidate.serverIdentity === currentServerIdentity && candidate.sessionId === session.id).length,
-    rootPath: root.path,
-    rootToken: root.token,
-    ...(kind === "markdown" ? { viewMode: "split" as const } : {}),
+    order: state.appTabs.filter(inWorkspace).length,
+    ...(options.preview ? { preview: true } : {}),
+    ...details,
   };
-  const appTabs = existing ? state.appTabs : [...state.appTabs, tab];
-  return selectAppTab({ ...state, appTabs }, currentHostProfileId, currentServerIdentity, session, tab.id);
+  return selectAppTab({ ...state, appTabs: [...state.appTabs, tab] }, currentHostProfileId, currentServerIdentity, session, tab.id);
+}
+
+/**
+ * Promote a preview tab to a permanent one. Idempotent, because the callers
+ * are "the user double-clicked" and "the buffer became dirty", and the second
+ * fires on every keystroke.
+ */
+export function pinAppTab(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {
+  const target = state.appTabs.find((tab) => tab.hostProfileId === currentHostProfileId && tab.id === tabId);
+  if (!target?.preview) return state;
+  return { ...state, appTabs: state.appTabs.map((tab) => tab.id === target.id ? withoutPreview(tab) : tab) };
+}
+
+/** Absent, not `false` — the shape the persistence contract expects. */
+function withoutPreview(tab: AppOwnedTab): AppOwnedTab {
+  const { preview: _preview, ...rest } = tab;
+  return rest;
 }
 
 export function relocateFileTabs(
@@ -259,11 +313,7 @@ export function relocateFileTabs(
     const suffix = tab.resource === source ? "" : tab.resource.slice(sourcePrefix.length);
     const resource = suffix ? `${resolvedDestination.replace(/\/+$/u, "")}/${suffix}` : resolvedDestination;
     changed = true;
-    return {
-      ...tab,
-      resource,
-      title: resource.split("/").filter(Boolean).at(-1) ?? resource,
-    };
+    return { ...tab, resource, title: fileTabTitle(resource) };
   });
   return changed ? { ...state, appTabs } : state;
 }

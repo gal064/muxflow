@@ -16,6 +16,8 @@ interface TabStripProps {
   onClose(tab: CombinedTab): void;
   onMove(tab: CombinedTab, direction: "left" | "right"): void;
   onRenameTerminal(tab: Extract<CombinedTab, { kind: "terminal" }>): void;
+  /** Double-clicking a preview tab makes it permanent, as VS Code's does. */
+  onPin(tab: Extract<CombinedTab, { kind: "app" }>): void;
   onNewTerminal(): void;
   onSplit(): void;
 }
@@ -109,7 +111,10 @@ export function TabStrip(props: TabStripProps) {
               event.preventDefault();
               setMenu({ tab, anchor: { x: event.clientX, y: event.clientY } });
             }}
-            onDoubleClick={() => { if (tab.kind === "terminal" && props.canMutate) props.onRenameTerminal(tab); }}
+            onDoubleClick={() => {
+              if (tab.kind === "app") props.onPin(tab);
+              else if (props.canMutate) props.onRenameTerminal(tab);
+            }}
             onKeyDown={(event) => onTabKeyDown(event, tab, index)}
             role="tab"
             // With nothing selected — a window closed by another client, briefly —
@@ -121,7 +126,7 @@ export function TabStrip(props: TabStripProps) {
             {tab.kind === "terminal"
               ? <span className="tab-index">{tab.index}</span>
               : <span className={`tab-glyph ${tab.appKind}`} style={glyph ? { color: glyph.color } : undefined}><Icon name={glyph?.icon ?? "diff"} size={12} /></span>}
-            <span className="tab-title">{tab.title}</span>
+            <span className={tab.kind === "app" && tab.preview ? "tab-title tab-title-preview" : "tab-title"}>{tab.title}</span>
             {tab.kind === "terminal" && tab.zoomed && <span aria-label="Pane zoomed" className="tab-zoom"><Icon name="zoom" size={11} /></span>}
             {tab.kind === "terminal" && tab.attention !== "none" && <StateDot
               className="tab-dot"

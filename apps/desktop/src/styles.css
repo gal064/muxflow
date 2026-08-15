@@ -399,6 +399,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .tab-glyph { display: inline-flex; color: var(--chrome-faint); }
 .tab-glyph.gitDiff { color: var(--state-working); }
 .tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A preview tab is the one the next single click will replace. Italic is how
+   VS Code says so, and the strip is on the sans stack, so it just works. */
+.tab-title-preview { font-style: italic; }
 .tab-zoom { display: inline-flex; color: var(--chrome-faint); }
 .tab-dot {
   display: inline-flex; align-items: center; justify-content: center;
