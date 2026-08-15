@@ -59,7 +59,7 @@ function Sidebar({ client: agentClient, connected, connectionEpoch }: { client: 
     onStatus: vi.fn(),
     effects: { emitNotification: vi.fn(async () => ({ id: 1, actionable: true })), playSound: vi.fn(async () => undefined) },
   });
-  const rows = buildAgentRows(runtime.agents, () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "priority");
+  const rows = buildAgentRows(runtime.agents, () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "status");
   return <output
     data-jump={jumpTarget(rows)?.agent.id ?? ""}
     data-unread={unreadCount(rows)}

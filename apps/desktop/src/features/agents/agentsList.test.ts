@@ -17,7 +17,7 @@ const idle = agent({ id: "idle", displayName: "claude three", lifecycle: "idle",
 
 describe("agents section ordering", () => {
   it("ranks the inbox blocked > done-unread > working > idle", () => {
-    const rows = buildAgentRows([idle, working, done, blocked], locate, () => true, "priority");
+    const rows = buildAgentRows([idle, working, done, blocked], locate, () => true, "status");
     expect(rows.map((row) => row.agent.id)).toEqual(["blocked", "done", "working", "idle"]);
     // The point of the ranking: a finished agent outranks a running one,
     // because the finished one is the one waiting on a human.
@@ -25,8 +25,8 @@ describe("agents section ordering", () => {
       .toBeLessThan(rows.findIndex((row) => row.agent.id === "working"));
   });
 
-  it("follows the workspace list, then tab order, in grouped mode", () => {
-    const rows = buildAgentRows([done, idle, blocked, working], locate, () => true, "grouped");
+  it("follows the workspace list, then tab order, in workspace mode", () => {
+    const rows = buildAgentRows([done, idle, blocked, working], locate, () => true, "workspace");
     expect(rows.map((row) => row.location.workspaceName)).toEqual(["muxflow", "muxflow", "sampleco-e2e", "sampleco-e2e"]);
     // Within a workspace, ties fall back to the agent's own name so the list
     // does not reshuffle on every update.
@@ -34,19 +34,19 @@ describe("agents section ordering", () => {
   });
 
   it("sends ⌘⇧U to the loudest reachable agent that actually wants something", () => {
-    const rows = buildAgentRows([idle, working, done, blocked], locate, () => true, "grouped");
+    const rows = buildAgentRows([idle, working, done, blocked], locate, () => true, "workspace");
     expect(jumpTarget(rows)?.agent.id).toBe("blocked");
     // Ordering mode must not change where the jump lands.
-    expect(jumpTarget(buildAgentRows([idle, working, done, blocked], locate, () => true, "priority"))?.agent.id).toBe("blocked");
+    expect(jumpTarget(buildAgentRows([idle, working, done, blocked], locate, () => true, "status"))?.agent.id).toBe("blocked");
     // An unroutable row is not a destination; the next one down is.
     expect(jumpTarget(rows.map((row) => row.agent.id === "blocked" ? { ...row, routable: false } : row))?.agent.id).toBe("done");
     // Nothing waiting means nothing to jump to, rather than "jump to whatever
     // sorted first".
-    expect(jumpTarget(buildAgentRows([idle, working], locate, () => true, "priority"))).toBeUndefined();
+    expect(jumpTarget(buildAgentRows([idle, working], locate, () => true, "status"))).toBeUndefined();
   });
 
   it("counts only the rows waiting on a human as unread", () => {
-    const rows = buildAgentRows([idle, working, done, blocked], locate, () => true, "priority");
+    const rows = buildAgentRows([idle, working, done, blocked], locate, () => true, "status");
     expect(unreadCount(rows)).toBe(2);
     expect(needsAttention("working")).toBe(false);
     expect(needsAttention("done")).toBe(true);
@@ -54,13 +54,13 @@ describe("agents section ordering", () => {
   });
 
   it("toggles between exactly two orderings", () => {
-    expect(nextSortMode("grouped")).toBe("priority");
-    expect(nextSortMode("priority")).toBe("grouped");
+    expect(nextSortMode("workspace")).toBe("status");
+    expect(nextSortMode("status")).toBe("workspace");
   });
 
   it("keeps agents whose workspace is not in the list last instead of dropping them", () => {
     const orphan = agent({ id: "orphan", sessionId: "$9", sessionName: "gone", displayName: "zed" });
-    const rows = buildAgentRows([orphan, working], locate, () => false, "grouped");
+    const rows = buildAgentRows([orphan, working], locate, () => false, "workspace");
     expect(rows.map((row) => row.agent.id)).toEqual(["working", "orphan"]);
     expect(rows.every((row) => row.routable)).toBe(false);
   });
