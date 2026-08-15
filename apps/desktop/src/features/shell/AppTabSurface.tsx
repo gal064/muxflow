@@ -122,7 +122,6 @@ export function AppTabSurface(props: Props) {
   // hears about it once per clean→dirty transition rather than once per
   // keystroke. `onDirty` is deliberately not a dependency: it closes over
   // render-fresh state and would re-run this on every render.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (view?.state === "dirty") props.onDirty(); }, [view?.state]);
 
   useEffect(() => {

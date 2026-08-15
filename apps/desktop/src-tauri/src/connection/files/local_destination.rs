@@ -720,7 +720,7 @@ fn choose_name(
     requested: &OsStr,
     collision: DownloadCollisionPolicy,
 ) -> Result<(CString, Option<FileIdentity>), String> {
-    let name_max = naming::directory_name_max(directory)?;
+    let name_max = super::download_naming::directory_name_max(directory)?;
     if requested.as_bytes().len() > name_max {
         return Err("destination basename exceeds filesystem NAME_MAX".into());
     }
@@ -741,8 +741,11 @@ fn choose_name(
                     .map_err(|_| "candidate contains a NUL byte")?;
                 Ok(metadata_at(directory, &candidate)?.is_some())
             };
-            let chosen =
-                naming::first_free_name(OsStr::from_bytes(requested.as_bytes()), name_max, taken)?;
+            let chosen = super::download_naming::first_free_name(
+                OsStr::from_bytes(requested.as_bytes()),
+                name_max,
+                taken,
+            )?;
             let chosen = CString::new(chosen.into_vec())
                 .map_err(|_| "destination basename contains a NUL byte")?;
             Ok((chosen, None))
@@ -910,11 +913,6 @@ fn exchange_at(_directory: &File, _left: &CString, _right: &CString) -> Result<(
 fn c_string(value: &OsStr, label: &str) -> Result<CString, String> {
     CString::new(value.as_bytes()).map_err(|_| format!("{label} contains a NUL byte"))
 }
-
-#[path = "local_destination/naming.rs"]
-mod naming;
-
-pub(super) use naming::suggest_non_colliding_name;
 
 #[cfg(test)]
 #[path = "local_destination/tests.rs"]

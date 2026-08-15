@@ -15,6 +15,9 @@ const transfers: TransferStatus[] = [
   { id: "running", scopeKey: "scope", path: "/r/running", kind: "file", state: "running", completedBytes: "2", totalBytes: "10", filesCompleted: "0" },
   // Terminal, but nothing landed locally: there is no file to point at.
   { id: "failed", scopeKey: "scope", path: "/r/failed", kind: "file", state: "failed", outcome: "notPublished", completedBytes: "2", filesCompleted: "0" },
+  // Published, then its scope went stale. The file exists and this is exactly
+  // when the user most needs to find it, so the actions must be offered.
+  { id: "stale", scopeKey: "scope", path: "/r/stale.bin", destination: "/Users/test/Downloads/stale.bin", kind: "file", state: "failed", outcome: "published", failureKind: "staleScope", completedBytes: "9", filesCompleted: "1" },
 ];
 
 const render = async (rows: readonly TransferStatus[] = transfers) => {
@@ -33,6 +36,8 @@ describe("DownloadTransfers", () => {
     expect(markup).toContain(revealDownloadLabel());
     expect(markup).not.toContain("Open /r/running");
     expect(markup).not.toContain("Open /r/failed");
+    expect(markup, "a published file with a stale scope had nothing to open")
+      .toContain("Open /Users/test/Downloads/stale.bin");
 
     // The buttons name the *published* path, not the remote source: a renamed
     // destination is the file the user actually has, and it is also the only

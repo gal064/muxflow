@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { DownloadActions } from "./downloadFlow";
+import { DownloadActions } from "./DownloadActions";
 import type { TransferStatus } from "./types";
 import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
 
@@ -29,9 +29,11 @@ export function DownloadTransfers({ transfers, onCancelTransfer }: {
       {transfer.totalBytes ? <progress aria-label={`Download progress for ${transfer.path}`} aria-valuetext={formatTransfer(transfer)} data-completed-bytes={transfer.completedBytes} data-total-bytes={transfer.totalBytes} max={1000} value={transferPermille(transfer.completedBytes, transfer.totalBytes)} /> : <progress aria-label={`Download progress for ${transfer.path}`} data-completed-bytes={transfer.completedBytes} />}
       <small className="transfer-detail">{formatTransfer(transfer)}</small>
       {canCancelTransfer(transfer.state) && <button aria-label={`Cancel download ${transfer.path}`} onClick={() => void onCancelTransfer(transfer.id)} type="button">Cancel</button>}
-      {/* The same two actions the completion toast offers, on the row that
-          outlives it. Only a published download has a local file to act on. */}
-      {transfer.state === "completed" && transfer.destination && <div className="transfer-actions">
+      {/* A published local file is the thing that can be opened — not a
+          "completed" state. A transfer whose scope went stale after it
+          published reports `failed` with `outcome: "published"`, and that is
+          exactly when the user most needs to find the file. */}
+      {transfer.outcome === "published" && transfer.destination && <div className="transfer-actions">
         <DownloadActions destination={transfer.destination} onError={(message) => setOpenError({ id: transfer.id, message })} />
       </div>}
       {openError?.id === transfer.id && <em role="alert">{openError.message}</em>}

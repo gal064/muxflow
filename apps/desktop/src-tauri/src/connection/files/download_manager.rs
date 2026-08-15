@@ -50,37 +50,29 @@ struct DownloadJob {
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
     channel: Channel<Value>,
-    published: Arc<PublishedDownloads>,
+    published: Arc<PathRegistry>,
 }
 
-/// The local files this session has actually written, and the whole authority
-/// behind `open_download`/`reveal_download`.
-///
-/// Handing the renderer a command that opens an arbitrary path with the user's
-/// default application would make any string the webview can produce an
-/// execution request. The commands take a path and answer "did I write this?"
-/// instead — so the renderer's reach into the OS opener is exactly the set of
-/// downloads the app just published, and nothing else.
-///
-/// Bounded and FIFO: a long session downloading thousands of files must not
-/// grow this without limit, and the oldest entry is the one whose toast and
-/// transfer row are furthest gone.
+/// A bounded, FIFO set of absolute paths. Two of these carry the download
+/// manager's whole memory of this session; neither may grow without limit
+/// under a user who downloads all day, and in both the oldest entry is the one
+/// whose toast and transfer row are furthest gone.
 #[derive(Default)]
-pub struct PublishedDownloads {
+pub struct PathRegistry {
     paths: Mutex<VecDeque<PathBuf>>,
 }
 
-const MAX_PUBLISHED_DOWNLOADS: usize = 256;
+const MAX_REGISTRY_PATHS: usize = 256;
 
-impl PublishedDownloads {
-    fn record(&self, path: PathBuf) {
+impl PathRegistry {
+    pub(super) fn record(&self, path: PathBuf) {
         let Ok(mut paths) = self.paths.lock() else {
             return;
         };
         if paths.iter().any(|candidate| candidate == &path) {
             return;
         }
-        while paths.len() >= MAX_PUBLISHED_DOWNLOADS {
+        while paths.len() >= MAX_REGISTRY_PATHS {
             paths.pop_front();
         }
         paths.push_back(path);
@@ -92,20 +84,32 @@ impl PublishedDownloads {
             .map(|paths| paths.iter().any(|candidate| candidate == path))
             .unwrap_or(false)
     }
-
-    #[cfg(test)]
-    pub(super) fn record_for_test(&self, path: PathBuf) {
-        self.record(path);
-    }
 }
 
 #[derive(Clone, Default)]
 pub struct DownloadManager {
-    published: Arc<PublishedDownloads>,
+    /// The local files this session has actually written, and the whole
+    /// authority behind `open_download`/`reveal_download`.
+    ///
+    /// Handing the renderer a command that opens an arbitrary path with the
+    /// user's default application would make any string the webview can
+    /// produce an execution request. The commands take a path and answer "did
+    /// I write this?" instead — so the renderer's reach into the OS opener is
+    /// exactly the set of downloads the app just published, and nothing else.
+    published: Arc<PathRegistry>,
+    /// Names already handed to a save panel this session.
+    ///
+    /// A download in flight occupies only its `.partial`; the final name stays
+    /// free on disk until `publish()`. Without this, starting a second copy of
+    /// a large file while the first is still transferring gets offered the
+    /// *same* suggested name, the panel has nothing to warn about, and the
+    /// second publish silently replaces the first — the exact "three
+    /// downloads, three files" the flow exists to guarantee.
+    reserved: Arc<PathRegistry>,
 }
 
 impl DownloadManager {
-    pub(super) fn published(&self) -> &PublishedDownloads {
+    pub(super) fn published(&self) -> &PathRegistry {
         &self.published
     }
 }
@@ -169,6 +173,7 @@ pub fn start_download(
 pub fn suggest_download_destination(
     file_name: String,
     app: tauri::AppHandle,
+    transfers: State<'_, DownloadManager>,
 ) -> Result<String, String> {
     use tauri::Manager;
 
@@ -176,12 +181,16 @@ pub fn suggest_download_destination(
         .path()
         .download_dir()
         .map_err(|error| format!("could not resolve the Downloads directory: {error}"))?;
-    let name = super::local_destination::suggest_non_colliding_name(
+    // A name is taken when it is on disk *or* already promised to a panel this
+    // session — see `DownloadManager::reserved`.
+    let name = super::download_naming::suggest_non_colliding_name(
         &directory,
         OsStr::new(file_name.as_str()),
+        |candidate| transfers.reserved.contains(candidate),
     )?;
-    directory
-        .join(name)
+    let suggested = directory.join(name);
+    transfers.reserved.record(suggested.clone());
+    suggested
         .into_os_string()
         .into_string()
         .map_err(|_| "the Downloads directory path is not valid UTF-8".to_owned())

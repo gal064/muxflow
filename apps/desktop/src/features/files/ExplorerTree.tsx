@@ -203,6 +203,18 @@ export function ExplorerTree(props: Props) {
     }
   };
 
+  // Offered only when git has actually told us something to hide: without an
+  // authoritative status the tree already shows everything, and a toggle that
+  // changes nothing is worse than none.
+  //
+  // It is on *both* menus deliberately. The header is not a focusable element,
+  // so a header-only item would make the single escape hatch out of a feature
+  // that hides content by default reachable by mouse alone; Shift+F10 on any
+  // row reaches the entry menu.
+  const ignoredToggle = props.ignoredPaths?.size
+    ? [{ id: "ignored", label: showIgnored ? "Hide ignored files" : "Show ignored files", run: () => setShowIgnored((current) => !current) }]
+    : [];
+
   return <div className="explorer-tree">
     <header className="explorer-root" onContextMenu={(event) => {
       event.preventDefault();
@@ -296,17 +308,13 @@ export function ExplorerTree(props: Props) {
           { id: "newDirectory", label: "New folder…", disabled: props.disabled || !props.root, run: () => begin("newDirectory", menu.entry) },
           "separator" as const,
           { id: "delete", label: "Delete…", destructive: true, disabled: props.disabled, run: () => begin("delete", menu.entry) },
+          ...(ignoredToggle.length > 0 ? ["separator" as const, ...ignoredToggle] : []),
         ]
         : [
           { id: "newFile", label: "New file…", disabled: props.disabled || !props.root, run: () => begin("newFile") },
           { id: "newDirectory", label: "New folder…", disabled: props.disabled || !props.root, run: () => begin("newDirectory") },
           "separator" as const,
-          // Offered only when git has actually told us something to hide.
-          // Without an authoritative status the tree is already showing
-          // everything, and a toggle that changes nothing is worse than none.
-          ...(props.ignoredPaths?.size
-            ? [{ id: "ignored", label: showIgnored ? "Hide ignored files" : "Show ignored files", run: () => setShowIgnored((current) => !current) }]
-            : []),
+          ...ignoredToggle,
           { id: "refresh", label: "Refresh", run: () => props.onRefresh() },
         ]}
       label={menu.entry ? `Actions for ${menu.entry.name}` : "Explorer actions"}

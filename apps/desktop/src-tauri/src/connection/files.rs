@@ -12,6 +12,7 @@ mod bulk_protocol;
 mod cleanup;
 mod clipboard_staging;
 pub(crate) mod download_manager;
+mod download_naming;
 pub(crate) mod download_opener;
 mod local_destination;
 mod local_staging;
