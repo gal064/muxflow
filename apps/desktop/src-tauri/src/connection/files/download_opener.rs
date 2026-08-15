@@ -109,7 +109,7 @@ mod tests {
 
         transfers
             .published()
-            .record_for_test(PathBuf::from("/tmp/report.pdf"));
+            .record(PathBuf::from("/tmp/report.pdf"));
         assert_eq!(
             authorized_download("/tmp/report.pdf", &transfers).unwrap(),
             PathBuf::from("/tmp/report.pdf")
