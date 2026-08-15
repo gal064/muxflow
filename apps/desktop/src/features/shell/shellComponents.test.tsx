@@ -11,7 +11,8 @@ import { buildAgentRows } from "../agents/agentsList";
 import { HookReviewDialog } from "../agents/HookReviewDialog";
 import { WorkspaceSidebar } from "../workspaces/WorkspaceSidebar";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../workspaces/TabStrip";
-import type { WorkspaceRowModel } from "../workspaces/workspaceRows";
+import { workspaceRows, type WorkspaceRowModel } from "../workspaces/workspaceRows";
+import { deriveAgentRollups } from "../agents/selectors";
 import { DisconnectedStrip } from "./DisconnectedStrip";
 import { RightPanel } from "./RightPanel";
 import type { ShellState } from "./types";
@@ -25,6 +26,24 @@ const rows: WorkspaceRowModel[] = [{
   agents: [{ id: "a1", name: "codex", state: "blocked" }], agentOverflow: 0,
   branch: "main*", path: "~/dev/muxflow",
 }];
+
+/** One workspace holding five agents, through the real row builder. */
+function fiveAgentRows(): WorkspaceRowModel[] {
+  const agents = [
+    agent({ id: "a1", sessionId: "$1", displayName: "codex", lifecycle: "blocked", updatedAt: 5 }),
+    agent({ id: "a2", sessionId: "$1", displayName: "claude", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 4, seenGeneration: 1, updatedAt: 4 }),
+    agent({ id: "a3", sessionId: "$1", displayName: "aider", lifecycle: "working", updatedAt: 3 }),
+    agent({ id: "a4", sessionId: "$1", displayName: "quiet one", lifecycle: "idle", updatedAt: 2 }),
+    agent({ id: "a5", sessionId: "$1", displayName: "quiet two", lifecycle: "idle", updatedAt: 1 }),
+  ];
+  return workspaceRows({
+    snapshot: { sessions: [session], windows: [], panes: [] },
+    activeSessionId: session.id,
+    agents,
+    attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
+    activeBranch: "main*",
+  });
+}
 
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
   adapters={[]}
@@ -86,17 +105,10 @@ describe("application shell accessibility contracts", () => {
   });
 
   it("lists three agents on a workspace row and counts the rest", () => {
-    const busy = sidebar({
-      rows: [{
-        ...rows[0],
-        agents: [
-          { id: "a1", name: "codex", state: "blocked" },
-          { id: "a2", name: "claude", state: "done" },
-          { id: "a3", name: "aider", state: "working" },
-        ],
-        agentOverflow: 2,
-      }],
-    });
+    // Built through `workspaceRows` from five real agents rather than from a
+    // hand-written row, so the row model and the component cannot disagree
+    // about which three get a line.
+    const busy = sidebar({ rows: fiveAgentRows() });
     expect(busy.match(/class="workspace-activity-line/g)).toHaveLength(4);
     expect(busy).toContain("codex · blocked");
     expect(busy).toContain("claude · done, unread");
