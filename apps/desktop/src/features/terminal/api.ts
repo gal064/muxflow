@@ -14,6 +14,7 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "seed"; paneId: string; generation: number; data: Uint8Array }
   | { kind: "output"; paneId: string; generation: number; data: Uint8Array }
   | { kind: "seedDiagnostic"; paneId: string; message: string }
+  | { kind: "flowStalled"; paneId: string; message: string }
   | { kind: "topologyDirty"; name: string }
   | { kind: "error"; message: string }
   | { kind: "exit"; reason: string }
@@ -171,6 +172,14 @@ export function decodeTerminalEvent(buffer: ArrayBuffer): TerminalEvent {
         throw new Error("agent-service payload is not valid UTF-8 JSON");
       }
     }
+    case 15:
+      requireHostSequence(sequence, "terminal flow stall");
+      requirePaneId(label, "terminal flow stall");
+      try {
+        return { kind: "flowStalled", paneId: label, message: decoder.decode(data), sequence };
+      } catch {
+        throw new Error("terminal flow stall payload is not valid UTF-8");
+      }
     default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
   }
 }

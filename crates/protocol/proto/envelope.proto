@@ -179,6 +179,12 @@ enum EventKind {
   EVENT_KIND_TRANSFER_PROGRESS = 14;
   EVENT_KIND_GIT_STATUS = 15;
   EVENT_KIND_AGENT_STATE = 16;
+  // A pane tmux paused that the host could not get resumed. Distinct from
+  // TERMINAL_FLOW_PAUSED, which is the ordinary start of a flow-control
+  // episode the host recovers from by itself: this one says the recovery ran
+  // out of attempts and the pane is delivering nothing until something reseeds
+  // it.
+  EVENT_KIND_TERMINAL_FLOW_STALLED = 17;
 }
 
 message HostEvent {
