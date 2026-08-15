@@ -60,9 +60,10 @@
  *
  * If a future xterm stops passing `alpha`, this stops matching and the glyphs
  * go back to being heavy. That is the failure this trades for, and it is the
- * visible one: the QA probe drives the real bundled addon and measures the
- * result, where the alternative failure — a stranger's canvas pinned into the
- * document forever — is silent.
+ * one that can be made loud: `glyphWeight.test.ts` reads the bundled addon and
+ * fails if the signature this keys on is no longer in it. The failure it trades
+ * away — a stranger's canvas pinned into the document forever — has no such
+ * tripwire, because nothing would look wrong.
  */
 function wantsDocumentFontSmoothing(
   canvas: HTMLCanvasElement,
@@ -93,9 +94,14 @@ let holder: HTMLElement | undefined;
  * Off-screen by position, deliberately not by `display: none` or
  * `visibility: hidden`: an element in either of those states is still in the
  * document, but this is the configuration the measurement above was taken in
- * and the difference is not worth re-deriving to save nothing. Nothing removes
- * the canvases from here — the addon does that itself, calling `remove()` on
- * every atlas canvas it owns when it is disposed.
+ * and the difference is not worth re-deriving to save nothing.
+ *
+ * The lifetime note, because this hook changes one: an atlas canvas arrives
+ * here reachable only from the addon and leaves rooted in the document, so it
+ * is no longer the garbage collector that ends it. `TextureAtlas.dispose()`
+ * calls `remove()` on the canvas it owns, which unroots it again — a fact about
+ * a dependency that this module now depends on, and the reason nothing here
+ * sweeps the holder.
  */
 function fontSmoothingHolder(): HTMLElement | undefined {
   if (holder?.isConnected) return holder;
@@ -119,6 +125,12 @@ let installed = false;
  * Installs the hook. Idempotent, and safe to call from anywhere that is about
  * to build a terminal; there is no matching uninstall because the hook has no
  * effect on a canvas that does not look like a glyph atlas.
+ *
+ * A call rather than an import side effect, even though the module has exactly
+ * one global effect and importing it for that effect would be shorter. The
+ * ordering is the whole point — the hook has to be in place before an atlas is
+ * built, and a bare `import "./atlasFontSmoothing"` states that ordering in the
+ * one place a bundler is free to rearrange and a linter is free to drop.
  */
 export function installAtlasFontSmoothing(): void {
   if (installed) return;

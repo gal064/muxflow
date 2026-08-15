@@ -74,16 +74,24 @@
      contrast rather than by eye: --chrome-dim carries 11.5px labels and clears
      4.5:1 on the new ground (4.70:1, against 5.00:1 on the old one), and
      --chrome-faint carries the 9.5-10.5px metadata that no ramp gets to AA and
-     is at least no worse than it was (2.60:1, against 2.49:1 before). */
+     is at least no worse than it was (2.60:1, against 2.47:1 before). */
   --chrome-dim: #8f96a1;
   --chrome-faint: #636b78;
 
   /* ── The one accent, and the one destructive treatment ───────────────── */
   /* Ghostty's bright blue and red (--term-12 / --term-1), so a selected row and
-     a terminal's own bright text are the same two colours. `--accent-ink` is the
-     knockout on top of both fills, and it is the terminal background for the
-     same reason Ghostty's own selection foreground is: these fills are light,
-     and white on them is not readable. */
+     a terminal's own bright text are the same two colours.
+
+     `--accent-ink` is misnamed and worth reading carefully: it is the knockout
+     for every *filled* control, the destructive ones included (the danger
+     buttons, the destructive context-menu row, `.primary`), not only the accent
+     ones. It goes dark because the accent went light — white on #7aa6da is
+     2.53:1 and not text anyone reads, where the terminal background on it is
+     5.53:1, which is what Ghostty does with its own selection. The danger fills
+     come along: white on #cc6566 was 3.75:1 and dark on it is 3.74:1, so those
+     buttons change visibly and legibility does not. Splitting the two inks is
+     the honest fix and is a rename across a dozen rules in styles.css; it is
+     named here instead so the coupling is at least deliberate. */
   --accent: #7aa6da;
   --accent-ink: #282c34;
   --accent-wash: #7aa6da1f;

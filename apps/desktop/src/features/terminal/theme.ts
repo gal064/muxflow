@@ -73,16 +73,14 @@ const TOKEN_BY_THEME_KEY: Record<keyof typeof GHOSTTY_DEFAULT_DARK, string> = {
 const SLIDER_ALPHAS = { idle: "40", hover: "66", active: "99" } as const;
 
 /**
- * Every chrome token something outside the stylesheet has to name, and what it
- * is worth when there is no stylesheet to read.
+ * Every non-palette token something outside the stylesheet has to name, and
+ * what it is worth when there is no stylesheet to read.
  *
  * Same contract as `GHOSTTY_DEFAULT_DARK`: not a second source of truth, and
- * `theme.test.ts` fails if any entry stops matching `tokens.css`. That test is
- * the reason this object is shared rather than copied — the editor theme
- * (`../files/monaco`) needs the same fallbacks, and a private copy there would
- * be ten literals nothing checks. The list is what is actually used, not every
- * token that exists: an entry nobody reads is an entry nobody notices going
- * stale.
+ * `theme.test.ts` fails if any entry stops matching `tokens.css`. The list is
+ * what is actually read, not every token that exists — an entry nobody reads is
+ * an entry nobody notices going stale. Exported for that test alone; everything
+ * else goes through `tokenWithFallback`.
  */
 export const CHROME_FALLBACKS = {
   "--accent": "#7aa6da",
@@ -100,13 +98,33 @@ export const CHROME_FALLBACKS = {
   "--term-line-height": "1.42",
 } as const;
 
+/** A token `CHROME_FALLBACKS` — and therefore `theme.test.ts` — covers. */
+export type FallbackToken = keyof typeof CHROME_FALLBACKS;
+
+/**
+ * Reads one of those tokens off a root, or hands back the checked fallback.
+ *
+ * The reader is what is shared, not the map. Every caller wants the same
+ * sentence — "this token, or the value the test pins it to" — and the app had
+ * accumulated a copy of it per call site, which is how the editor theme
+ * (`../files/monaco`) ended up with twenty-two literals of its own instead. One
+ * function means a token can only be read one way, and the `FallbackToken` type
+ * means a caller cannot name a token the test does not cover.
+ */
+export function tokenWithFallback(
+  root: Element | undefined = globalThis.document?.documentElement,
+): (name: FallbackToken) => string {
+  const read = tokenReader(root);
+  return (name) => read(name) ?? CHROME_FALLBACKS[name];
+}
+
 export function terminalTheme(root: Element | undefined = globalThis.document?.documentElement): ITheme {
   const read = tokenReader(root);
   const theme: Record<string, string> = {};
   for (const [key, token] of Object.entries(TOKEN_BY_THEME_KEY)) {
     theme[key] = read(token) ?? GHOSTTY_DEFAULT_DARK[key as keyof typeof GHOSTTY_DEFAULT_DARK];
   }
-  const slider = read("--chrome-dim") ?? CHROME_FALLBACKS["--chrome-dim"];
+  const slider = tokenWithFallback(root)("--chrome-dim");
   return {
     ...theme,
     scrollbarSliderBackground: `${slider}${SLIDER_ALPHAS.idle}`,
@@ -129,9 +147,9 @@ export function searchDecorations(root: Element | undefined = globalThis.documen
   activeMatchBackground: string;
   activeMatchColorOverviewRuler: string;
 } {
-  const read = tokenReader(root);
-  const accent = read("--accent") ?? CHROME_FALLBACKS["--accent"];
-  const muted = read("--chrome-dim") ?? CHROME_FALLBACKS["--chrome-dim"];
+  const token = tokenWithFallback(root);
+  const accent = token("--accent");
+  const muted = token("--chrome-dim");
   return {
     // Semi-transparent so the glyph underneath stays legible; the overview
     // ruler is a solid 1px mark and cannot be.
@@ -176,15 +194,18 @@ export function terminalFont(root: Element | undefined = globalThis.document?.do
   fontSize: number;
   rowPitch: number;
 } {
-  const read = tokenReader(root);
-  const size = Number.parseFloat(read("--term-font-size") ?? CHROME_FALLBACKS["--term-font-size"]);
-  const ratio = Number.parseFloat(read("--term-line-height") ?? CHROME_FALLBACKS["--term-line-height"]);
+  const token = tokenWithFallback(root);
+  // A token that is present but not a number is a case the fallback above
+  // cannot catch, so these two are re-checked against the literal after
+  // parsing: `--term-font-size: inherit` would otherwise size the grid `NaN`.
+  const size = Number.parseFloat(token("--term-font-size"));
+  const ratio = Number.parseFloat(token("--term-line-height"));
   const fontSize = Number.isFinite(size) && size > 0 ? size : Number.parseFloat(CHROME_FALLBACKS["--term-font-size"]);
   const lineHeight = Number.isFinite(ratio) && ratio > 0
     ? ratio
     : Number.parseFloat(CHROME_FALLBACKS["--term-line-height"]);
   return {
-    fontFamily: read("--font-mono") ?? CHROME_FALLBACKS["--font-mono"],
+    fontFamily: token("--font-mono"),
     fontSize,
     rowPitch: fontSize * lineHeight,
   };

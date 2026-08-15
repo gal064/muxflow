@@ -1,5 +1,5 @@
 import { loader } from "@monaco-editor/react";
-import { CHROME_FALLBACKS, terminalTheme, tokenReader } from "../terminal/theme";
+import { terminalTheme, tokenWithFallback } from "../terminal/theme";
 import * as monaco from "monaco-editor";
 import CssWorker from "monaco-editor/language/css/css.worker?worker";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -40,27 +40,40 @@ loader.config({ monaco });
  * names are coarse, and a full TextMate table would be a much larger claim than
  * "an editor and a terminal showing the same file should agree about what a
  * string looks like".
+ *
+ * Small also means each row has to earn its place, so two were checked against
+ * the bundled Monarch grammars rather than assumed:
+ *
+ *  - `function` and `variable` are absent, because nothing emits them where it
+ *    would show. TypeScript and Rust emit `identifier`, never `function`, and
+ *    `variable` appears only in Markdown's link definitions. A rule that colours
+ *    nothing is a rule nobody notices going wrong.
+ *  - `comment` is the one row that is deliberately *not* an ANSI colour.
+ *    `--term-8` is Ghostty's dim grey — dim against a terminal's brighter
+ *    neighbours, and only 2.44:1 on this ground, which is worse than the
+ *    `vs-dark` green it would replace (3.53:1) on the highest-volume quiet token
+ *    in an editor. It takes `--chrome-dim`, the app's own quiet ink, picked for
+ *    legibility on exactly this background (4.70:1) by exactly this argument.
  */
 export const ADE_MONACO_THEME = "ade-dark";
 
 export function defineAdeMonacoTheme(root: Element | undefined = globalThis.document?.documentElement): void {
-  const read = tokenReader(root);
-  // No literals here, and no second list of them: the fallbacks are the ones
-  // `theme.test.ts` already pins to `tokens.css`, so this file cannot be the
-  // place the palette drifts.
-  const token = (name: keyof typeof CHROME_FALLBACKS) => read(name) ?? CHROME_FALLBACKS[name];
+  // Neither map below holds a colour of its own. The chrome half reads through
+  // the fallback reader, whose values `theme.test.ts` pins to `tokens.css`; the
+  // syntax half reads the resolved terminal palette, which the same test pins.
+  // The only literals left are the two diff washes at the bottom, which are
+  // blend colours rather than theme colours and are called out there.
+  const token = tokenWithFallback(root);
   const ansi = terminalTheme(root);
   monaco.editor.defineTheme(ADE_MONACO_THEME, {
     base: "vs-dark",
     inherit: true,
     rules: [
-      { token: "comment", foreground: syntaxColor(ansi.brightBlack), fontStyle: "italic" },
-      { token: "keyword", foreground: syntaxColor(ansi.magenta) },
-      { token: "string", foreground: syntaxColor(ansi.green) },
-      { token: "number", foreground: syntaxColor(ansi.yellow) },
-      { token: "type", foreground: syntaxColor(ansi.cyan) },
-      { token: "function", foreground: syntaxColor(ansi.blue) },
-      { token: "variable", foreground: syntaxColor(ansi.white) },
+      { token: "comment", foreground: token("--chrome-dim"), fontStyle: "italic" },
+      { token: "keyword", foreground: ansi.magenta },
+      { token: "string", foreground: ansi.green },
+      { token: "number", foreground: ansi.yellow },
+      { token: "type", foreground: ansi.cyan },
     ],
     colors: {
       "editor.background": token("--chrome-bg"),
@@ -78,29 +91,15 @@ export function defineAdeMonacoTheme(root: Element | undefined = globalThis.docu
       "scrollbarSlider.background": token("--chrome-border"),
       "scrollbarSlider.hoverBackground": token("--chrome-hover"),
       "scrollbarSlider.activeBackground": token("--chrome-dim"),
+      // Translucent additions over whatever line the diff lands on, so they are
+      // eight digits and not a token: the added-line green has no counterpart in
+      // the palette at all, and the removed-line red is `--danger` at an alpha
+      // `--danger-wash` does not carry. A `colors` entry takes any CSS colour,
+      // unlike a `rules` entry, which is why these can live here.
       "diffEditor.insertedTextBackground": "#2ea04326",
       "diffEditor.removedTextBackground": "#cc656626",
     },
   });
-}
-
-/**
- * A syntax rule's colour, or nothing if the value cannot be one.
- *
- * The `colors` map above accepts any CSS colour; a `rules` entry does not.
- * Monaco matches a rule's `foreground` against
- * `/^#?[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/` and **throws** on anything else —
- * from `defineTheme`, which this module calls at import time, so one
- * unparseable value would take the whole editor bundle down rather than
- * mis-colour a keyword. Omitting the foreground instead leaves that rule
- * inheriting `vs-dark`'s, which is the state this table replaced and a safe
- * place to land.
- *
- * The alpha form Monaco tolerates is refused here on purpose: it discards the
- * alpha pair anyway, so a translucent token would silently paint opaque.
- */
-function syntaxColor(value: string | undefined): string | undefined {
-  return value !== undefined && /^#?[0-9a-fA-F]{6}$/.test(value) ? value : undefined;
 }
 
 defineAdeMonacoTheme();
