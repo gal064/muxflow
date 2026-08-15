@@ -43,6 +43,7 @@ function setSurfaceBox(box: PixelBox) {
 
 interface HarnessProps {
   activeWindowId?: string;
+  activeSessionId?: string;
   canMutate?: boolean;
   clientId?: string;
   measurements?: TerminalMeasurements;
@@ -53,6 +54,7 @@ interface HarnessProps {
 function Harness(props: HarnessProps) {
   const { onMeasurements, surfaceRef } = useClientResize({
     activeWindowId: props.activeWindowId,
+    activeSessionId: props.activeSessionId,
     canMutate: props.canMutate ?? true,
     clientId: props.clientId,
     onStatus: props.onStatus ?? (() => undefined),
@@ -168,6 +170,27 @@ describe("useClientResize", () => {
     // A new bridge has a new tmux client, which has never been sized.
     await update({ clientId: "client-2" });
     expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-2", 121, 46]]);
+  });
+
+  // M13-E005: the user selected a workspace on another tmux session and its
+  // windows collapsed to 80x24. The host attaches one control client per
+  // session and only the visible one participates in sizing, so selecting a
+  // session hands sizing to a client that has never been given a size — while
+  // the bridge's `clientId` and the app's surface both stayed exactly as they
+  // were, so the dedupe answered "already sent" for a client that had never
+  // been sent anything.
+  it("sizes the newly selected session's client, which has never been sized", async () => {
+    const { update } = await render({ clientId: "client-1", activeSessionId: "$1", activeWindowId: "@1" });
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+    await update({ activeSessionId: "$2" });
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-1", 121, 46]]);
+    // Still once per client, though: selecting the same session again is not a
+    // new client, and a repeated `refresh-client -C` is the churn this dedupes.
+    await update({ activeSessionId: "$2" });
+    expect(resizeClientMock).toHaveBeenCalledTimes(2);
+    // And a new session created and selected on the same bridge is another one.
+    await update({ activeSessionId: "$3" });
+    expect(resizeClientMock).toHaveBeenCalledTimes(3);
   });
 
   it("retries a request the bridge refused, then reports it", async () => {
