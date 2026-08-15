@@ -617,6 +617,7 @@ export function App() {
   // terminal turns pixels into. Both arrive here; neither is a pane's geometry.
   const { onMeasurements, surfaceRef } = useClientResize({
     activeWindowId,
+    activeSessionId,
     canMutate: hostState.canMutate,
     clientId,
     onStatus: setStatus,
