@@ -173,19 +173,39 @@ export function terminalFontFaces(root: Element | undefined = globalThis.documen
 }
 
 let facesReady: Promise<FontFace[]> | undefined;
+let facesSettled = false;
 
 /**
  * Resolves once every terminal face is usable, or immediately where the document
  * cannot say. Memoised: each pane asks, and they are all asking about the same
  * four files.
+ *
+ * `allSettled`, not `all`: a build missing one of the four — a stripped bundle, a
+ * corrupt woff2 — would otherwise reject the whole wait, and the app would fall
+ * through to its timeout and mount on the fallback stack. That is the very
+ * defect this wait exists to prevent, arrived at from the opposite direction.
  */
 export function terminalFacesReady(): Promise<FontFace[]> {
   facesReady ??= (async () => {
     const fonts = globalThis.document?.fonts;
     if (typeof fonts?.load !== "function") return [];
-    return (await Promise.all(terminalFontFaces().map((face) => fonts.load(face)))).flat();
-  })();
+    const settled = await Promise.allSettled(terminalFontFaces().map((face) => fonts.load(face)));
+    return settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  })().finally(() => { facesSettled = true; });
   return facesReady;
+}
+
+/**
+ * Whether a terminal face could still arrive after this moment.
+ *
+ * The renderer needs this to decide whether the glyphs it is about to rasterise
+ * can end up disagreeing with the ones it rasterises later. It is a fact about
+ * the four faces this module owns, which is why it lives here: asking
+ * `document.fonts` directly means scanning every face the document declares and
+ * silently assuming the terminal's are the only ones.
+ */
+export function terminalFacesPending(): boolean {
+  return !facesSettled;
 }
 
 export function tokenReader(root: Element | undefined): (token: string) => string | undefined {

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { AutosaveController, type AutosaveView } from "../files/autosave";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
+import { attachEditorLayout } from "../files/editorLayout";
 import { renderSafeMarkdown, renderSafeSvg } from "../files/markdown";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
 import { SurfaceError } from "../../ui/SurfaceError";
@@ -29,6 +30,7 @@ export function AppTabSurface(props: Props) {
   const controller = useRef<AutosaveController | undefined>(undefined);
   const loadSerial = useRef(0);
   const loadAbort = useRef<AbortController | undefined>(undefined);
+  const detachLayout = useRef<(() => void) | undefined>(undefined);
   const root = useMemo<ActiveRoot | undefined>(() => {
     if (props.tab.rootPath && props.tab.rootToken) return {
       token: props.tab.rootToken,
@@ -94,6 +96,8 @@ export function AppTabSurface(props: Props) {
     return () => {
       loadSerial.current += 1;
       loadAbort.current?.abort();
+      detachLayout.current?.();
+      detachLayout.current = undefined;
       if (controller.current) {
         const pending = controller.current.flush();
         editorFlushRegistry.track(pending);
@@ -184,6 +188,7 @@ export function AppTabSurface(props: Props) {
       <Editor
         language={languageForPath(props.tab.resource)}
         onChange={(content) => { if (props.canWrite && typeof content === "string") controller.current?.edit(content, opened.file.lineEnding); }}
+        onMount={(editor) => { detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor); }}
         options={{ automaticLayout: true, minimap: { enabled: false }, readOnly: !props.canWrite, scrollBeyondLastLine: false, wordWrap: props.tab.kind === "markdown" ? "on" : "off" }}
         path={modelPath(props.tab)}
         saveViewState

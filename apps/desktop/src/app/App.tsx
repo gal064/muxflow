@@ -928,6 +928,7 @@ export function App() {
           expanded={workspaceFiles.expanded}
           listings={workspaceFiles.listings}
           loading={workspaceFiles.loading}
+          requestedReads={workspaceFiles.requestedReads}
           onCancelTransfer={async (id) => { if (fileScope) await fileClient.cancelTransfer(fileScope, id); }}
           onDownload={async (request) => { if (workspaceFiles.root) setPendingDownload({ root: workspaceFiles.root, path: request.path, kind: request.kind }); }}
           onLoadMore={workspaceFiles.loadMore}

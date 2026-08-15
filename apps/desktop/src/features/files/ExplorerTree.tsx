@@ -14,6 +14,8 @@ interface Props {
   expanded: ReadonlySet<string>;
   loading: ReadonlySet<string>;
   transfers: readonly TransferStatus[];
+  /** Reads the user asked for and is waiting on. See `useWorkspaceFiles.refresh`. */
+  requestedReads: number;
   scopeIdentity: string;
   disabled: boolean;
   error?: string;
@@ -175,10 +177,16 @@ export function ExplorerTree(props: Props) {
     <header className="explorer-root">
       <span title={props.root?.path}>{rootName}</span>
       {props.root && <small>{props.root.gitWorktree ? "git worktree" : "pane cwd"}</small>}
+      {/* The one wait that is shown for a listing already on screen, and it is
+          drawn here rather than in the tree because the header is outside the
+          scrolling box: nothing it does can change the tree's content height,
+          which is what made the row-shaped version flicker. Only reads the user
+          asked for reach this — a refresh nobody requested stays silent. */}
+      {props.requestedReads > 0 && <small className="explorer-refreshing" role="status">Refreshing…</small>}
     </header>
     {props.error && <SurfaceError detail={props.error} />}
     <div
-      aria-busy={props.root && props.loading.has(props.root.path) ? true : undefined}
+      aria-busy={props.loading.size > 0 ? true : undefined}
       aria-label="Files"
       className="file-tree"
       onContextMenu={(event) => {

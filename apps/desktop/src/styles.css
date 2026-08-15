@@ -551,6 +551,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   display: flex; align-items: baseline; gap: 7px;
   padding: 7px 12px; border-bottom: 1px solid var(--chrome-hairline);
 }
+/* Sits in the header, never in the scrolling tree: an indicator inside the tree
+   changes its content height, which is what made the Explorer flicker. */
+.explorer-refreshing { margin-left: auto; color: var(--state-working); }
 .explorer-root > span {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--chrome-ink); font-size: 11px; font-weight: 600;
