@@ -241,6 +241,8 @@ pub(super) fn enqueue_acceptance_download(
         binding,
         cancellation: Arc::new(CancelState::new()),
         channel,
+        // Its own registry, dropped with this call: an acceptance download is
+        // never handed to the UI, so nothing will ever ask to open it.
         published: Arc::default(),
     };
     emit_download_state(&job, TransferState::Queued, json!({}));

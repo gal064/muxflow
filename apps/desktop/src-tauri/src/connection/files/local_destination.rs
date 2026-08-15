@@ -736,29 +736,55 @@ fn choose_name(
             Err("overwrite destination must be a regular file".into())
         }
         (DownloadCollisionPolicy::Rename, Some(_)) => {
-            let requested = OsStr::from_bytes(requested.as_bytes());
-            for index in 1..=10_000 {
-                let candidate = renamed_name_bytes(requested, index, name_max)?;
-                let candidate = CString::new(candidate)
-                    .map_err(|_| "destination basename contains a NUL byte")?;
-                if metadata_at(directory, &candidate)?.is_none() {
-                    return Ok((candidate, None));
-                }
-            }
-            Err("could not choose a non-colliding destination name".into())
+            let taken = |candidate: &OsStr| {
+                let candidate = CString::new(candidate.as_bytes())
+                    .map_err(|_| "candidate contains a NUL byte")?;
+                Ok(metadata_at(directory, &candidate)?.is_some())
+            };
+            let chosen = first_free_name(OsStr::from_bytes(requested.as_bytes()), name_max, taken)?;
+            let chosen = CString::new(chosen.into_vec())
+                .map_err(|_| "destination basename contains a NUL byte")?;
+            Ok((chosen, None))
         }
     }
+}
+
+/// The one collision walk: `name`, `name (1)`, `name (2)`, … until something is
+/// free, bounded the same way for every caller.
+///
+/// The two callers differ only in how they ask whether a name is taken — one
+/// holds a directory descriptor and one has only a path — so that is the single
+/// parameter. Writing the walk twice is how the panel's suggested name and the
+/// backend's `Rename` policy would eventually disagree about the bound, the
+/// starting index, or which entries count as occupied.
+fn first_free_name(
+    requested: &OsStr,
+    name_max: usize,
+    mut taken: impl FnMut(&OsStr) -> Result<bool, String>,
+) -> Result<std::ffi::OsString, String> {
+    if !taken(requested)? {
+        return Ok(requested.to_os_string());
+    }
+    for index in 1..=10_000 {
+        let candidate =
+            std::ffi::OsString::from_vec(renamed_name_bytes(requested, index, name_max)?);
+        if !taken(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    Err("could not choose a non-colliding destination name".into())
 }
 
 /// The name the save panel should open with: the spelling the `Rename`
 /// collision policy would eventually produce, applied *before* the panel opens
 /// instead of after the transfer.
 ///
-/// Shares `renamed_name_bytes` with `choose_name` so the two can never disagree
-/// about what "a non-colliding name" looks like. It deliberately does not open
-/// a directory descriptor: this is a suggested default that the user is about
-/// to confirm or overrule in the panel, and the authoritative check against a
-/// swapped-out parent still happens in `PreparedDestination::open`.
+/// Runs the same `first_free_name` walk `choose_name`'s `Rename` policy runs,
+/// so the panel's suggestion and the backend's eventual answer cannot drift.
+/// It deliberately does not open a directory descriptor: this is a default the
+/// user is about to confirm or overrule in the panel, and the authoritative
+/// check against a swapped-out parent still happens in
+/// `PreparedDestination::open`.
 pub(super) fn suggest_non_colliding_name(
     directory: &Path,
     requested: &OsStr,
@@ -776,23 +802,11 @@ pub(super) fn suggest_non_colliding_name(
     if bytes.len() > name_max {
         return Err("destination basename exceeds filesystem NAME_MAX".into());
     }
-    if !exists(&directory.join(requested)) {
-        return Ok(requested.to_os_string());
-    }
-    for index in 1..=10_000 {
-        let candidate =
-            std::ffi::OsString::from_vec(renamed_name_bytes(requested, index, name_max)?);
-        if !exists(&directory.join(&candidate)) {
-            return Ok(candidate);
-        }
-    }
-    Err("could not choose a non-colliding destination name".into())
-}
-
-/// Any entry at all, symlinks included: the panel should step around a dangling
-/// symlink the same way it steps around a file.
-fn exists(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok()
+    // Any entry at all, symlinks included: the panel should step around a
+    // dangling symlink the same way it steps around a file.
+    first_free_name(requested, name_max, |candidate| {
+        Ok(std::fs::symlink_metadata(directory.join(candidate)).is_ok())
+    })
 }
 
 /// `NAME_MAX` for a directory named by path rather than by descriptor. Falls

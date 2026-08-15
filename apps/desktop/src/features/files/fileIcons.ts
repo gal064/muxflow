@@ -85,7 +85,7 @@ function shapeForName(name: string): FileIconChoice {
   // read as "the eslint config", not "some JavaScript". `*.config.*` is the
   // same claim spelled the other way round, and VS Code marks both.
   if (lower.startsWith(".") || /\.config\.[^.]+$/u.test(lower)) return CONFIG;
-  const extension = lower.slice(lower.lastIndexOf(".") + 1);
-  if (!lower.includes(".")) return FALLBACK;
-  return EXTENSION_ICONS[extension] ?? FALLBACK;
+  const dot = lower.lastIndexOf(".");
+  if (dot < 0) return FALLBACK;
+  return EXTENSION_ICONS[lower.slice(dot + 1)] ?? FALLBACK;
 }
