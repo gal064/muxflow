@@ -1,0 +1,130 @@
+/**
+ * Why the terminal's glyphs are heavier than the same font everywhere else, and
+ * the one line of DOM that fixes it.
+ *
+ * The app and Ghostty render JetBrains Mono Regular at 13px from the same file,
+ * and the app's looked semi-bold beside it. The font is not the cause: all four
+ * faces are bundled and the app refuses to mount until they load
+ * (`main.tsx`), so a fallback stack is not reachable. The cause is where the
+ * glyphs are rasterised. xterm's WebGL addon builds a glyph atlas by calling
+ * `fillText` on a canvas it creates with `document.createElement` and never
+ * attaches, and WebKit resolves `-webkit-font-smoothing` for canvas text from
+ * the canvas **element's computed style** — which a detached element does not
+ * have. So `:root { -webkit-font-smoothing: antialiased }` in `styles.css`
+ * reaches every glyph in the app except the ones in the terminal, and those get
+ * CoreGraphics' default subpixel smoothing with stem darkening baked in.
+ *
+ * Measured in Playwright WebKit against the addon's exact atlas path
+ * (`getContext("2d", { alpha, willReadFrequently: true })`, background fill,
+ * `fillText`), as ink mass — summed luminance above the background — over the
+ * text band, with a DOM line of the same text at `-webkit-font-smoothing:
+ * antialiased` as the reference:
+ *
+ * | case                                                  | ink mass | vs reference |
+ * | ----------------------------------------------------- | -------- | ------------ |
+ * | DOM text, antialiased (the rest of the app)            |   504.8k | reference    |
+ * | detached canvas (the addon today)                      |   665.5k | +32%         |
+ * | detached canvas, `alpha: true`                         |   665.5k | +32%         |
+ * | detached canvas + inline `-webkit-font-smoothing`      |   665.5k | +32%         |
+ * | canvas attached to the document, smoothing inherited   |   504.8k | exact        |
+ *
+ * Two things that row 2 and row 3 rule out, so they are not tried again:
+ * xterm's `allowTransparency` (which is what feeds `alpha` here) changes
+ * nothing, and neither does styling the canvas while it is detached. Only being
+ * in the document does.
+ *
+ * Hence this module: a hook on `getContext` that puts the atlas canvas into a
+ * hidden corner of the document before the addon draws into it. It has to be a
+ * standing hook rather than a step in terminal setup, because the addon builds
+ * new atlas canvases long after activation — whenever the font, the theme or
+ * the device pixel ratio changes, and on every `clearTextureAtlas`.
+ */
+
+/**
+ * Recognises the atlas canvas, and nothing that matters.
+ *
+ * `willReadFrequently` on a 2d context is the addon's signature for the one
+ * canvas it rasterises glyphs on (`TextureAtlas._tmpCanvas`); its atlas *pages*
+ * only ever receive `drawImage` blits of that canvas, so they neither need the
+ * hook nor match it. Requiring the canvas to be detached keeps the hook off
+ * every canvas the app itself puts on screen, and makes it idempotent: a canvas
+ * this hook has already moved does not match a second time.
+ */
+function wantsDocumentFontSmoothing(
+  canvas: HTMLCanvasElement,
+  contextId: string,
+  options: unknown,
+): boolean {
+  if (contextId !== "2d" || canvas.isConnected) return false;
+  if (typeof options !== "object" || options === null) return false;
+  return (options as CanvasRenderingContext2DSettings).willReadFrequently === true;
+}
+
+const HOLDER_ID = "ade-atlas-font-smoothing";
+
+/**
+ * Written as one declaration string rather than through `style.setProperty`,
+ * because `-webkit-font-smoothing` — the only declaration here that does any
+ * work — is a prefixed property that engines outside WebKit, the test runner's
+ * included, drop on the way in.
+ */
+const HOLDER_STYLE = "position: absolute; left: -9999px; top: 0; -webkit-font-smoothing: antialiased";
+
+let holder: HTMLElement | undefined;
+
+/**
+ * The off-screen element the atlas canvases live under.
+ *
+ * Off-screen by position, deliberately not by `display: none` or
+ * `visibility: hidden`: an element in either of those states is still in the
+ * document, but this is the configuration the measurement above was taken in
+ * and the difference is not worth re-deriving to save nothing. Nothing removes
+ * the canvases from here — the addon does that itself, calling `remove()` on
+ * every atlas canvas it owns when it is disposed.
+ */
+function fontSmoothingHolder(): HTMLElement | undefined {
+  if (holder?.isConnected) return holder;
+  const parent = globalThis.document?.body ?? globalThis.document?.documentElement;
+  if (!parent) return undefined;
+  const element = globalThis.document.createElement("div");
+  element.id = HOLDER_ID;
+  element.setAttribute("aria-hidden", "true");
+  // Inherited by everything under it, which is the whole mechanism.
+  element.setAttribute("style", HOLDER_STYLE);
+  parent.appendChild(element);
+  holder = element;
+  return element;
+}
+
+type GetContext = HTMLCanvasElement["getContext"];
+
+let installed = false;
+
+/**
+ * Installs the hook. Idempotent, and safe to call from anywhere that is about
+ * to build a terminal; there is no matching uninstall because the hook has no
+ * effect on a canvas that does not look like a glyph atlas.
+ */
+export function installAtlasFontSmoothing(): void {
+  if (installed) return;
+  const prototype = globalThis.HTMLCanvasElement?.prototype;
+  if (!prototype) return;
+  installed = true;
+  const original = prototype.getContext as (
+    this: HTMLCanvasElement,
+    contextId: string,
+    options?: unknown,
+  ) => RenderingContext | null;
+  prototype.getContext = function patched(
+    this: HTMLCanvasElement,
+    contextId: string,
+    options?: unknown,
+  ): RenderingContext | null {
+    if (wantsDocumentFontSmoothing(this, contextId, options)) {
+      // Before the context exists, so the first glyph is rasterised under the
+      // same computed style as the ten thousandth.
+      fontSmoothingHolder()?.appendChild(this);
+    }
+    return original.call(this, contextId, options);
+  } as GetContext;
+}
