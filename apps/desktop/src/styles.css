@@ -895,9 +895,32 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .segment.active { background: var(--chrome-hover); color: var(--chrome-ink-strong); }
 .settings-body { display: grid; align-content: start; gap: 12px; padding: 16px; overflow-y: auto; }
 .settings-body label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11.5px; }
+/* The controls take the row type size explicitly rather than inheriting the
+   caption size their `label` sets — `font: inherit` in the reset means a field
+   otherwise renders at 11.5px, which is a size for the words *above* a control,
+   not the words *in* one. `min-height` is what makes a field a field: without
+   it each control is as tall as whatever it happens to contain, and the picker
+   below (which contains nothing until a host is saved) is shorter than its
+   neighbours. */
 .settings-body input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), .settings-body select {
-  width: 100%; padding: 6px; border: 1px solid var(--chrome-border); border-radius: 4px;
-  background: var(--chrome-bg); color: var(--chrome-ink);
+  width: 100%; min-height: 30px; padding: 6px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-row);
+}
+/* Drawn rather than native. WKWebView renders `appearance: menulist` at the
+   platform control's intrinsic height and discards most of the padding around
+   it, so the saved-host picker sat visibly shorter than the text inputs beside
+   it however it was styled. Taking the appearance off makes it an ordinary box
+   that honours the rule above; the cost is the disclosure caret, drawn back
+   here from two gradients so it stays a token colour — this file holds no
+   colour literals, and a caret baked into an SVG data URI would be one. */
+.settings-body select {
+  appearance: none; -webkit-appearance: none; padding-right: 28px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--chrome-dim) 50%),
+    linear-gradient(135deg, var(--chrome-dim) 50%, transparent 50%);
+  background-position: right 13px center, right 9px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
 }
 .settings-check { display: flex !important; align-items: center; gap: 8px; color: var(--chrome-ink) !important; }
 .settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-faint); font-size: var(--type-secondary); line-height: 1.5; }
