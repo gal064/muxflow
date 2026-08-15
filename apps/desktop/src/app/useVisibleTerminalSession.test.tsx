@@ -156,4 +156,58 @@ describe("useVisibleTerminalSession", () => {
     await update({ activeSessionId: "$1", clientId: "client-1", topologyGeneration: 3 });
     expect(selectMock).toHaveBeenCalledTimes(1);
   });
+
+  /**
+   * A host that refuses permanently — an older helper that does not know the
+   * operation — must not cost a toast and a fresh budget of round trips on
+   * every window rename. It keeps one cheap attempt per topology change, so a
+   * refusal that turns out to have been transient is still recovered from, and
+   * says nothing more.
+   */
+  it("says a permanent refusal once, and keeps trying cheaply", async () => {
+    selectMock.mockImplementation(async () => { throw new Error("unsupported operation"); });
+    const statuses: string[] = [];
+    const props = { activeSessionId: "$1", clientId: "client-1", onStatus: (message: string) => statuses.push(message) };
+    const { update } = await render({ ...props, topologyGeneration: 1 });
+    await exhaustRetries();
+    expect(selectMock).toHaveBeenCalledTimes(VISIBLE_SESSION_RETRIES + 1);
+    expect(statuses).toHaveLength(1);
+
+    selectMock.mockClear();
+    for (const generation of [2, 3, 4]) {
+      await update({ ...props, topologyGeneration: generation });
+      await exhaustRetries();
+    }
+    expect(selectMock).toHaveBeenCalledTimes(3);
+    expect(statuses).toHaveLength(1);
+  });
+
+  /**
+   * Two selections outstanding at once race for the transport on the other
+   * side of the IPC boundary, and an earlier one landing last leaves the host
+   * sizing from the workspace the user has left. Chained, so the host is never
+   * asked two things at once — and a superseded answer never records itself as
+   * the current fact, which is what would stop the correct one being re-sent.
+   */
+  it("never has two selections outstanding, and ignores a superseded answer", async () => {
+    const settle: Array<() => void> = [];
+    selectMock.mockImplementation(() => new Promise<undefined>((resolve) => {
+      settle.push(() => resolve(undefined));
+    }));
+    const { update } = await render({ activeSessionId: "$1", clientId: "client-1" });
+    await update({ activeSessionId: "$2", clientId: "client-1" });
+    expect(selectMock.mock.calls).toEqual([["client-1", "$1"]]);
+
+    // The first lands; only now may the second be asked.
+    await act(async () => { settle[0](); });
+    expect(selectMock.mock.calls).toEqual([["client-1", "$1"], ["client-1", "$2"]]);
+    await act(async () => { settle[1](); });
+
+    // And the superseded first answer did not record `$1` as the fact: a
+    // return to it is still sent.
+    selectMock.mockClear();
+    selectMock.mockImplementation(async () => undefined);
+    await update({ activeSessionId: "$1", clientId: "client-1" });
+    expect(selectMock.mock.calls).toEqual([["client-1", "$1"]]);
+  });
 });

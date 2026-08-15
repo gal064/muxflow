@@ -60,35 +60,65 @@ export function useVisibleTerminalSession({
 }: VisibleTerminalSessionOptions): void {
   /** The fact this hook has already got the host to agree to. */
   const asserted = useRef<string | undefined>(undefined);
+  /** The fact this hook has already reported it could not get agreement on. */
+  const reported = useRef<string | undefined>(undefined);
+  /**
+   * Which selection is the current one, and the one before it.
+   *
+   * Two selections can be outstanding at once — a rapid workspace switch, or a
+   * topology generation arriving mid-request — and each is dispatched onto its
+   * own blocking task on the other side of the IPC boundary, where they race
+   * for the transport. If the earlier one lands last, the host ends up sizing
+   * from the workspace the user has just left, and because the later one
+   * *resolved* nothing would ever re-send it. So they are chained: the next
+   * selection is not issued until the previous has settled, which is what makes
+   * "the last one the host saw" and "the last one this asked for" the same
+   * message. The counter is the other half — a settled answer from a
+   * superseded issue is discarded rather than recorded as the current fact.
+   */
+  const issue = useRef(0);
+  const settled = useRef<Promise<unknown>>(Promise.resolve());
   useEffect(() => {
     if (!clientId || !activeSessionId || !canMutate) return;
     const fact = `${clientId}:${activeSessionId}`;
     // A topology change is a reason to try again, never a reason to re-send
-    // something the host already accepted — every window rename produces one.
+    // something the host already accepted.
     if (asserted.current === fact) return;
-    let cancelled = false;
+    const current = (issue.current += 1);
+    const stale = () => issue.current !== current;
+    // A fact already reported gets one attempt per topology change rather than
+    // a fresh budget of five, and says nothing further. What this retries for
+    // is transient by construction — a control client the reconciler has not
+    // attached yet — so a refusal that outlives its budget is most likely
+    // permanent, and an old helper that does not know the operation would
+    // otherwise cost five round trips and a toast on every window rename.
+    const budget = reported.current === fact ? 0 : VISIBLE_SESSION_RETRIES;
     let attempt = 0;
     let timer = 0;
     const assert = () => {
-      void selectTerminalSession(clientId, activeSessionId).then(() => {
-        if (!cancelled) asserted.current = fact;
+      const request = settled.current
+        .catch(() => undefined)
+        .then(() => (stale() ? undefined : selectTerminalSession(clientId, activeSessionId)));
+      settled.current = request.catch(() => undefined);
+      void request.then(() => {
+        if (!stale()) asserted.current = fact;
       }).catch((error) => {
-        if (cancelled) return;
-        if (attempt < VISIBLE_SESSION_RETRIES) {
+        if (stale()) return;
+        if (attempt < budget) {
           attempt += 1;
           timer = window.setTimeout(assert, VISIBLE_SESSION_RETRY_MS);
           return;
         }
-        // Left unasserted on purpose: the next topology generation is another
-        // chance, and this is precisely the case where taking it matters.
+        if (reported.current === fact) return;
+        reported.current = fact;
         onStatus(`This workspace may render at the wrong size: ${String(error)}`);
       });
     };
     assert();
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
+    // Only the timer is cancelled here. The issue counter is bumped by the
+    // *next* run, so that an unmount with nothing following it does not make
+    // an in-flight answer look superseded.
+    return () => window.clearTimeout(timer);
     // `onStatus` is deliberately not a dependency: it is re-created on most
     // renders, and re-running this would re-send the selection for nothing.
   }, [activeSessionId, canMutate, clientId, topologyGeneration]);
