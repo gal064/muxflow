@@ -898,10 +898,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* The controls take the row type size explicitly rather than inheriting the
    caption size their `label` sets — `font: inherit` in the reset means a field
    otherwise renders at 11.5px, which is a size for the words *above* a control,
-   not the words *in* one. `min-height` is what makes a field a field: without
-   it each control is as tall as whatever it happens to contain, and the picker
-   below (which contains nothing until a host is saved) is shorter than its
-   neighbours. */
+   not the words *in* one. `min-height` states the field height once instead of
+   letting each control derive its own from its padding and its type size; the
+   rule below is what actually recovers the picker's, and this is what keeps
+   every field on the same one afterwards. */
 .settings-body input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), .settings-body select {
   width: 100%; min-height: 30px; padding: 6px; border: 1px solid var(--chrome-border); border-radius: 4px;
   background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-row);

@@ -63,6 +63,14 @@ export function defineAdeMonacoTheme(root: Element | undefined = globalThis.docu
   // syntax half reads the resolved terminal palette, which the same test pins.
   // The only literals left are the two diff washes at the bottom, which are
   // blend colours rather than theme colours and are called out there.
+  //
+  // One asymmetry worth knowing before editing a token these read: `colors`
+  // takes any CSS colour, `rules` does not. A rule foreground must be six or
+  // eight hex digits — Monaco *throws* on anything else, at first editor mount
+  // rather than here — so a `--term-*` or `--chrome-dim` written as `rgb(…)` or
+  // as a `var()` reference would take the editor surface down rather than
+  // degrade. `theme.test.ts` pins every one of them to exact hex today, which
+  // is what makes that safe.
   const token = tokenWithFallback(root);
   const ansi = terminalTheme(root);
   monaco.editor.defineTheme(ADE_MONACO_THEME, {
