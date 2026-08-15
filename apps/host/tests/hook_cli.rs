@@ -56,6 +56,71 @@ fn cli_persists_an_exact_unsequenced_hook_envelope() {
     fs::remove_dir_all(runtime).unwrap();
 }
 
+/// The agent's configuration follows the user out of tmux; the hook must not
+/// complain when it gets there.
+///
+/// One managed hook line runs on every prompt of every session that agent ever
+/// starts, including a plain terminal with no tmux server in sight, where there
+/// is legitimately no pane to file the event against. Exit zero, print nothing,
+/// and write nothing — a mailbox entry here would be an event no daemon can
+/// ever attribute to a pane. A malformed `TMUX_PANE` is the opposite case and
+/// stays loud.
+#[test]
+fn a_hook_outside_tmux_is_silent_and_files_nothing() {
+    let runtime_root = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::current_dir().unwrap().join("tmp")
+    };
+    let runtime = runtime_root.join(format!("hook-no-tmux-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&runtime).unwrap();
+
+    let ingest = |pane: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"));
+        command
+            .args(["hook", "ingest", "--adapter", "claude-code"])
+            .env("ADE_HOST_RUNTIME_DIR", &runtime)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(pane) = pane {
+            command.env("TMUX_PANE", pane);
+        }
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"hook_event_name":"UserPromptSubmit","session_id":"s"}"#)
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    let outside = ingest(None);
+    assert!(
+        outside.status.success(),
+        "a session outside tmux must not report a hook error: {}",
+        String::from_utf8_lossy(&outside.stderr)
+    );
+    assert!(outside.stdout.is_empty(), "the hook must print nothing");
+    assert!(outside.stderr.is_empty(), "the hook must print nothing");
+    assert_eq!(
+        fs::read_dir(&runtime).unwrap().count(),
+        0,
+        "an event with no pane must not be filed for a pane"
+    );
+
+    let malformed = ingest(Some("pane-7"));
+    assert!(
+        !malformed.status.success(),
+        "a present but malformed TMUX_PANE is a real misconfiguration and must still fail"
+    );
+    assert_eq!(fs::read_dir(&runtime).unwrap().count(), 0);
+    fs::remove_dir_all(runtime).unwrap();
+}
+
 /// M13-E003, end to end: the hook and the daemon disagreed about which runtime
 /// directory this machine has, and every event was filed where nobody read it.
 ///

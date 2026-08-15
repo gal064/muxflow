@@ -286,6 +286,83 @@ fn write_rejected_client_resize_log(columns: u32, rows: u32) {
     eprintln!("{line}");
 }
 
+/// Names every handoff of the one control client tmux sizes from.
+///
+/// The flag and the size are two `refresh-client` writes to a pipe, and a pipe
+/// write that tmux ignores succeeds. When that happened the only symptom was a
+/// user's windows sitting at 80x24 with nothing anywhere saying which client
+/// had been asked for what — the whole of M13-E005 was reconstructed from a
+/// live `list-clients`. Recording the handoff is what makes the next one
+/// readable from a log.
+///
+/// tmux session identifiers (`$3`) are the server's own ordinals: not names,
+/// not paths, not hostnames, and not terminal content. This stays inside the
+/// privacy declaration above.
+///
+/// `error` is the one free-form field, and it is bounded rather than trusted;
+/// see `bounded_log_text`.
+pub fn write_terminal_sizing_handoff_log(
+    previous_session: Option<&str>,
+    session_id: &str,
+    size: Option<(u32, u32)>,
+    error: Option<&str>,
+) {
+    let error = error.map(bounded_log_text);
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "terminalSizingHandoff",
+        "previousSession": previous_session,
+        "sessionId": session_id,
+        // Null means the desktop has not asked for a size yet on this
+        // connection, which is why a newly visible client can be correct and
+        // still be at tmux's default.
+        "size": size.map(|(columns, rows)| format!("{columns}x{rows}")),
+        "ok": error.is_none(),
+        "error": error,
+    });
+    eprintln!("{line}");
+}
+
+/// Names every flow-control resume tmux refused, and what was done about it.
+///
+/// A retried rejection is deliberately not an event: the host is still handling
+/// it and the desktop has nothing to do. That makes the log the only place it
+/// exists, which is the point — a pane that recovered on the second attempt
+/// recovered from something, and "it worked in the end" is not a diagnosis. It
+/// is also what the pause lane's injected-fault run reads to prove the fault
+/// fired at all.
+///
+/// A tmux pane identifier (`%3`) is the server's own ordinal, and `reason` is
+/// tmux's own refusal text — a parse error about a command this crate composed,
+/// never pane content, which the reader never puts in an error detail for
+/// exactly that reason. Bounded anyway; see `bounded_log_text`.
+pub fn write_flow_resume_rejected_log(pane_id: &str, disposition: &str, reason: &str) {
+    let reason = bounded_log_text(reason);
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "flowResumeRejected",
+        "paneId": pane_id,
+        "disposition": disposition,
+        "reason": reason,
+    });
+    eprintln!("{line}");
+}
+
+/// Bounds the one free-form field either of the two loggers above carries.
+///
+/// Both take text this crate composed from tmux's own refusal messages, which
+/// name no path and no host — but "none of them do today" is not a property a
+/// log line should rest on, and an unbounded string in a log is also how one
+/// bad error becomes a megabyte of stderr. Cut on a character boundary, because
+/// tmux's messages are not guaranteed ASCII.
+fn bounded_log_text(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    match text.char_indices().nth(MAX_CHARS) {
+        Some((index, _)) => format!("{}…", &text[..index]),
+        None => text.to_owned(),
+    }
+}
+
 pub fn write_safe_log(class: SafeErrorClass) {
     let line = serde_json::json!({
         "subsystem": "host_daemon",

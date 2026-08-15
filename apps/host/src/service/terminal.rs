@@ -23,6 +23,8 @@ use tokio::sync::mpsc;
 use super::snapshot::tmux_command;
 use super::{SequencerControl, TERMINAL_INPUT_QUEUE, emit_event};
 
+mod flow_control;
+use flow_control::{FlowControl, resume_command, take_injected_rejection};
 mod input;
 use input::{InputDispatch, run_input_dispatch};
 mod seed;
@@ -43,6 +45,18 @@ pub(super) struct TerminalAttachment {
     stopped: Arc<AtomicBool>,
     input_tx: std_mpsc::SyncSender<InputDispatch>,
     stream_tx: std_mpsc::Sender<StreamControl>,
+    flow: Arc<FlowControl>,
+    /// The last size tmux was told for *this* client, so it is not told again.
+    ///
+    /// `refresh-client -C` is not free — the omarchy lane measured 3 identical
+    /// requests costing 15 topology-dirty events on a real link — and the
+    /// desktop's own dedupe cannot cover this one, because what re-sends it is
+    /// the host carrying a size across to a client that became visible
+    /// (M13-E005). A client that has already been told the size still has it:
+    /// `ignore-size` decides whether tmux acts on a client's size, not whether
+    /// it remembers one. So the carry-across is needed exactly once per client
+    /// per size, and a workspace switched away from and back costs nothing.
+    last_size: Option<(u32, u32)>,
 }
 
 pub(super) struct VisibilityChange {
@@ -132,6 +146,8 @@ impl TerminalAttachment {
         let reader_stopped = Arc::clone(&stopped);
         let reader_stop_signal = Arc::clone(&stopped);
         let reader_panes = pane_ids.to_vec();
+        let flow = Arc::new(FlowControl::default());
+        let reader_flow = Arc::clone(&flow);
         let reader_writer = spawn_control_writer(session_id, Arc::clone(&stdin))?;
         std::thread::Builder::new()
             .name(format!("host-tmux-control-{session_id}"))
@@ -146,6 +162,7 @@ impl TerminalAttachment {
                     terminal_generation,
                     stopped: reader_stop_signal,
                     controls: stream_rx,
+                    flow: reader_flow,
                 });
                 reader_stopped.store(true, Ordering::Release);
             })?;
@@ -156,6 +173,8 @@ impl TerminalAttachment {
             stopped,
             input_tx,
             stream_tx,
+            flow,
+            last_size: None,
         })
     }
 
@@ -217,15 +236,47 @@ impl TerminalAttachment {
     /// cheaper than a repair. The rejected size is named in the error the caller
     /// surfaces and in the daemon log, because "resize failed" without a number
     /// cannot be diagnosed after the fact.
+    /// Always writes. The desktop asking for a size it has asked for before is
+    /// not a repetition to suppress — it is the *only* signal the desktop has
+    /// when something else moved the windows out from under it. Its surface has
+    /// not changed, so the size it re-asserts is by construction the size the
+    /// host last recorded, and a dedupe here would swallow exactly the request
+    /// that exists to un-letterbox the pane. [`Self::ensure_size`] is the one
+    /// caller that may skip a write, and it is not this one.
     pub(super) fn resize(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {
         if let Err(error) = check_client_size(columns, rows) {
             crate::diagnostics::record_rejected_client_resize(columns, rows);
             return Err(error);
         }
-        let mut stdin = self.stdin.lock().unwrap();
-        writeln!(stdin, "refresh-client -C {columns},{rows}")?;
-        stdin.flush()?;
+        {
+            let mut stdin = self.stdin.lock().unwrap();
+            writeln!(stdin, "refresh-client -C {columns},{rows}")?;
+            stdin.flush()?;
+        }
+        // Recorded only once the write landed, so a failed one is retried
+        // rather than remembered as delivered.
+        self.last_size = Some((columns, rows));
         Ok(())
+    }
+
+    /// Gives a client a size it has never been given, and otherwise does
+    /// nothing.
+    ///
+    /// The visibility handoff's half of sizing: a client taken out of
+    /// `ignore-size` having never been sent a `refresh-client -C` sizes its
+    /// windows from tmux's 80x24 default (M13-E005), so whoever clears the flag
+    /// owes it a size. A client that has already been told one still has it —
+    /// `ignore-size` decides whether tmux *acts* on a client's size, not
+    /// whether it remembers one — so a workspace switched away from and back
+    /// costs nothing. That matters because the desktop re-states the visible
+    /// session on every switch and every reconnect, and the omarchy lane
+    /// measured identical `refresh-client -C` requests at 15 topology-dirty
+    /// events each on a real link.
+    fn ensure_size(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {
+        if self.last_size == Some((columns, rows)) {
+            return Ok(());
+        }
+        self.resize(columns, rows)
     }
 
     pub(super) fn contains_pane(&self, pane_id: &str) -> bool {
@@ -263,12 +314,23 @@ impl TerminalAttachment {
         Ok(())
     }
 
+    /// Re-photographs a pane, resuming it first if tmux has it paused.
+    ///
+    /// The resume is the half that was missing. A seed for a paused pane
+    /// restores its screen and then delivers nothing further, because tmux
+    /// drops a paused pane's output rather than replaying it — which is exactly
+    /// what the user reported: switching to another tab and back refreshes the
+    /// pane once, and it freezes again.
     pub(super) fn request_seed(&mut self, pane_id: &str) -> anyhow::Result<()> {
         validate_tmux_id(pane_id, '%')?;
         if !self.contains_pane(pane_id) {
             bail!("pane is not owned by this session control client");
         }
-        write_capture_request(&self.stdin, pane_id)
+        write_capture_request_resuming(
+            &self.stdin,
+            pane_id,
+            self.flow.resume_before_capture(pane_id),
+        )
     }
 
     fn set_sizing(&mut self, participates: bool) -> anyhow::Result<()> {
@@ -396,27 +458,51 @@ impl TerminalClients {
     /// first without the second is how M13-E005 happened.
     ///
     /// `visible_session` moves the instant the flag is set, before the size is
-    /// sent, so a failed resize leaves a state that is merely wrong by one
+    /// sent, so a failed *resize* leaves a state that is merely wrong by one
     /// message rather than incoherent: the client that participates in sizing
     /// and the one this type believes is visible are the same client, and the
     /// next `resize` reaches it. Recording it only after the size would leave
     /// every later resize addressed to a client tmux is ignoring, and reported
     /// as success.
+    ///
+    /// A failed *flag*, though, is the opposite case and gets the opposite
+    /// treatment: the caller has already taken the previous client out of
+    /// sizing, so nobody participates, and naming a client that is in
+    /// `ignore-size` would make every later `resize` a write tmux discards and
+    /// this type reports as delivered. `visible_session` is cleared instead, so
+    /// `resize` says "no visible session control client" until a selection
+    /// lands — which the desktop re-attempts on every topology generation.
     fn size_visible_client(&mut self, session_id: &str) -> anyhow::Result<()> {
         let last_size = self.last_size;
-        let client = self
-            .clients
-            .get_mut(session_id)
-            .context("selected session control client is detached")?;
-        client.set_sizing(true)?;
-        self.visible_session = Some(session_id.to_owned());
-        let Some((columns, rows)) = last_size else {
-            return Ok(());
-        };
-        self.clients
-            .get_mut(session_id)
-            .context("selected session control client is detached")?
-            .resize(columns, rows)
+        let previous = self.visible_session.clone();
+        let outcome = (|| -> anyhow::Result<()> {
+            // Nobody participates until the flag lands. Cleared first rather
+            // than on each failure path, so every way out of the two lines
+            // below leaves the same coherent state.
+            self.visible_session = None;
+            let client = self
+                .clients
+                .get_mut(session_id)
+                .context("selected session control client is detached")?;
+            client.set_sizing(true)?;
+            self.visible_session = Some(session_id.to_owned());
+            let Some((columns, rows)) = last_size else {
+                return Ok(());
+            };
+            self.clients
+                .get_mut(session_id)
+                .context("selected session control client is detached")?
+                .ensure_size(columns, rows)
+        })();
+        // Both writes go to a pipe, and a pipe write tmux ignores still
+        // succeeds, so this is the only record that the handoff happened at all.
+        crate::diagnostics::write_terminal_sizing_handoff_log(
+            previous.as_deref(),
+            session_id,
+            last_size,
+            outcome.as_ref().err().map(ToString::to_string).as_deref(),
+        );
+        outcome
     }
 
     pub(super) fn send_input(&mut self, pane_id: &str, data: &[u8]) -> anyhow::Result<()> {
@@ -450,9 +536,23 @@ impl TerminalClients {
         Ok(())
     }
 
+    /// Names the session the desktop is showing.
+    ///
+    /// Called on every workspace switch *and* on every (re)connect; the desktop
+    /// side owns why, in `useVisibleTerminalSession.ts`. Idempotent by
+    /// construction — selecting the session that is already selected re-asserts
+    /// the flag, which is what a caller that cannot know whether the client
+    /// survived actually wants, and `TerminalAttachment::last_size` is what
+    /// keeps that from costing a redundant `refresh-client -C`.
     pub(super) fn select_session(&mut self, session_id: &str) -> anyhow::Result<()> {
         validate_tmux_id(session_id, '$')?;
         if !self.clients.contains_key(session_id) {
+            crate::diagnostics::write_terminal_sizing_handoff_log(
+                self.visible_session.as_deref(),
+                session_id,
+                self.last_size,
+                Some("session has no control client"),
+            );
             bail!("session has no control client");
         }
         let previous_id = self.visible_session.clone();
@@ -460,7 +560,25 @@ impl TerminalClients {
             && previous != session_id
             && let Some(client) = self.clients.get_mut(previous)
         {
-            client.set_sizing(false)?;
+            // Yielding first, because two clients out of `ignore-size` at once
+            // means tmux sizes the windows from whichever spoke last, which is
+            // the state this whole mechanism exists to never be in.
+            //
+            // A client that cannot be written to has already stopped
+            // participating in anything — its tmux process is gone — so the
+            // switch proceeds. Failing it instead would leave `visible_session`
+            // naming that dead client, which is where every later resize would
+            // then be addressed: a workspace switch blocked by the workspace
+            // being switched *away* from. Logged, because a yield that did not
+            // happen is exactly the kind of thing the handoff log exists for.
+            if let Err(error) = client.set_sizing(false) {
+                crate::diagnostics::write_terminal_sizing_handoff_log(
+                    previous_id.as_deref(),
+                    session_id,
+                    self.last_size,
+                    Some(&format!("previous client could not yield sizing: {error}")),
+                );
+            }
         }
         self.size_visible_client(session_id)
     }
@@ -604,8 +722,9 @@ fn register_mounted_panes(
 /// block", so an interleaved write — an in-band keystroke shares this same
 /// stdin — would attribute the capture to the wrong pane and corrupt the seed.
 /// Every caller therefore writes both lines under a single lock hold; use
-/// [`write_capture_request`] rather than taking the lock yourself when only one
-/// pane is being captured. `input.rs` upholds the same rule for its own marker,
+/// [`write_capture_request_resuming`] rather than taking the lock yourself when
+/// only one pane is being captured. `input.rs` upholds the same rule for its
+/// own marker,
 /// and `capture_marker_and_capture_command_are_never_split_by_concurrent_input`
 /// proves it under concurrency.
 ///
@@ -623,12 +742,6 @@ fn queue_capture(stdin: &mut impl Write, pane_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes one pane's capture marker and capture command under a single lock
-/// hold, upholding [`queue_capture`]'s adjacency invariant.
-fn write_capture_request<W: Write>(stdin: &Arc<Mutex<W>>, pane_id: &str) -> anyhow::Result<()> {
-    write_capture_request_resuming(stdin, pane_id, false)
-}
-
 /// One write the control-stream reader needs performed on its behalf.
 ///
 /// The reader must never write to tmux's stdin itself: tmux stops reading its
@@ -639,6 +752,20 @@ pub(super) struct ControlWrite {
     pub(super) pane_id: String,
     /// Whether tmux paused this pane and is waiting to be told to continue.
     pub(super) resume_first: bool,
+    /// How long to wait before writing.
+    ///
+    /// Only a retried resume sets this, and it is the difference between a
+    /// second attempt and the same attempt twice: an immediate identical
+    /// rewrite can only clear a rejection that was already over, which is a
+    /// narrower class than "transient". A rejection worth one retry is one
+    /// where something in flight has to finish first.
+    ///
+    /// Delaying here rather than on the reader is the whole reason this lane
+    /// exists — the reader must never block, because it is the only thing
+    /// draining tmux's output and tmux stops reading its stdin while blocked
+    /// writing to us. This thread may block; the cost is that a capture queued
+    /// behind a retry waits for it, which is bounded and rare.
+    pub(super) delay: Option<Duration>,
 }
 
 /// Serialises reader-requested writes onto a thread that is allowed to block.
@@ -660,15 +787,19 @@ pub(super) fn spawn_control_writer(
         .name(format!("host-tmux-writer-{session_id}"))
         .spawn(move || {
             while let Ok(write) = receiver.recv() {
+                if let Some(delay) = write.delay {
+                    std::thread::sleep(delay);
+                }
                 let _ = write_capture_request_resuming(&stdin, &write.pane_id, write.resume_first);
             }
         })?;
     Ok(sender)
 }
 
-/// As [`write_capture_request`], optionally resuming a pane tmux paused first.
-/// The resume and the capture share the lock hold so no other writer can land
-/// between them.
+/// Writes one pane's capture marker and capture command under a single lock
+/// hold, upholding [`queue_capture`]'s adjacency invariant, and resuming a pane
+/// tmux paused first. The resume and the capture share the lock hold so no
+/// other writer can land between them.
 fn write_capture_request_resuming<W: Write>(
     stdin: &Arc<Mutex<W>>,
     pane_id: &str,
@@ -682,14 +813,11 @@ fn write_capture_request_resuming<W: Write>(
         // The marker names the pane this resume belongs to, so a rejected
         // resume resnapshots one pane instead of the whole connection.
         writeln!(writer, "{}", queue_marker("__ADE_RESUME__", pane_id))?;
-        // The quotes are load-bearing. tmux's command lexer (`cmd-parse.y`
-        // `yylex`) treats an unquoted word beginning with `%` as a `%if`-style
-        // conditional directive unless the rest of the word is digits or `%`;
-        // `%5:continue` contains `:`, so the unquoted form is a
-        // `parse error: syntax error` and the pane stays paused forever.
-        // `resume_command_quotes_the_pause_argument_tmux_lexer_rejects` pins the
-        // byte-exact form.
-        writeln!(writer, "refresh-client -A '{pane_id}:continue'")?;
+        writeln!(
+            writer,
+            "{}",
+            resume_command(pane_id, take_injected_rejection())
+        )?;
     }
     queue_capture(&mut *writer, pane_id)?;
     writer.flush()?;
@@ -906,7 +1034,7 @@ mod tests {
     #[test]
     fn reconnect_marks_every_pane_pending_for_a_fresh_seed() {
         let pane_ids: Vec<_> = (0..33).map(|index| format!("%{index}")).collect();
-        let state = StreamState::new(&pane_ids);
+        let state = StreamState::new(&pane_ids, Arc::new(FlowControl::default()));
         assert_eq!(state.pane_states.len(), 33);
         assert!(
             state
@@ -918,7 +1046,7 @@ mod tests {
 
     #[test]
     fn capture_and_metadata_are_correlated_across_distinct_tmux_command_blocks() {
-        let mut state = StreamState::new(&["%1".into()]);
+        let mut state = StreamState::new(&["%1".into()], Arc::new(FlowControl::default()));
         state.expected_capture = Some("%1".into());
         let tag = |number| CommandTag {
             timestamp: 1,

@@ -165,6 +165,7 @@ pub fn run() {
             connection::send_terminal_input,
             connection::send_terminal_input_bytes,
             connection::resize_terminal_client,
+            connection::select_terminal_session,
             connection::set_terminal_visibility,
             connection::request_terminal_seed,
             connection::tmux_action::tmux_action,

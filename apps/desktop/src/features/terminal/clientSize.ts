@@ -1,3 +1,4 @@
+import type { Pane } from "../../app/types";
 import { cellsForBox, type PixelBox, type TerminalMeasurements, type TerminalSize } from "./TerminalRenderer";
 
 /**
@@ -73,4 +74,39 @@ export function clientSizeForSurface(
   // said: the user can see how big their own window is.
   if (columns < MIN_CLIENT_CELLS || rows < MIN_CLIENT_CELLS) return { kind: "none" };
   return { kind: "size", size: { columns, rows } };
+}
+
+/**
+ * The cell grid tmux *actually* gave a window, read off the authoritative
+ * snapshot.
+ *
+ * The counterpart to `clientSizeForSurface`, and deliberately a different
+ * quantity: that one is what the desktop believes the window should be, this
+ * one is what tmux settled on. They come apart whenever another client wins —
+ * under tmux's `window-size latest`, any activity in a plain terminal attached
+ * to the same session resizes the shared windows to *its* size, and the desktop
+ * has nothing to notice that with, because its own surface never moved. So it
+ * letterboxes, and stays letterboxed.
+ *
+ * Derived from panes rather than a window field because the wire carries pane
+ * geometry and not window geometry. The bottom-right pane's offset plus its own
+ * size is the window's size exactly: tmux counts the separator rows and columns
+ * into the following pane's offset, so the sum lands on the edge whatever the
+ * split. Zoom is not a special case here — a zoomed pane covers the window, so
+ * its own box is the window's box.
+ */
+export function windowCellSize(panes: readonly Pane[], windowId: string | undefined): TerminalSize | undefined {
+  if (!windowId) return undefined;
+  let columns = 0;
+  let rows = 0;
+  for (const pane of panes) {
+    if (pane.windowId !== windowId) continue;
+    columns = Math.max(columns, pane.left + pane.width);
+    rows = Math.max(rows, pane.top + pane.height);
+  }
+  // A window with no panes in the snapshot is a window this cannot describe,
+  // which must read as "no answer" rather than as a zero-sized window: the
+  // caller compares this against a requested size and would see every request
+  // as unhonoured.
+  return columns > 0 && rows > 0 ? { columns, rows } : undefined;
 }

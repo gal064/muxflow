@@ -124,6 +124,51 @@ impl Drop for FileService {
     }
 }
 
+/// Entries no listing ever reports, whatever asks for it.
+///
+/// VS Code's `files.exclude` defaults, adopted verbatim because the explorer is
+/// the surface the user compares this one against. `node_modules` is
+/// deliberately *not* here — VS Code shows it too, and this host has always
+/// shown it collapsed; hiding a directory people open on purpose is a different
+/// decision from hiding repository plumbing and scratch files nobody edits.
+const ALWAYS_HIDDEN: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"];
+
+/// Directories the tree shows but never enumerates the inside of.
+const COLLAPSED_DIRECTORIES: &[&str] = &["node_modules"];
+
+/// Whether an entry of this name is omitted from every directory listing.
+///
+/// One predicate, because the pagination token, the watch registry and the
+/// descend guard would otherwise each be deciding it separately. An entry that
+/// no listing reports but that a directly requested path can still be listed
+/// from is not hidden — it is merely absent from one view.
+///
+/// Deliberately *not* used by the emptiness checks that gate destructive
+/// confirmations (`mutations.rs`): a directory holding nothing but a `.git` is
+/// a directory holding a repository, and deleting it without asking because the
+/// tree happens not to draw its contents is a different and much worse defect
+/// than a confirmation prompt about something the user cannot see. Hidden means
+/// "not shown", never "not there".
+pub(super) fn is_always_hidden(name: &OsStr) -> bool {
+    ALWAYS_HIDDEN
+        .iter()
+        .any(|hidden| name == OsStr::new(hidden))
+}
+
+/// Whether this service ever enumerates the contents of a directory so named.
+///
+/// The two reasons it does not are different — hidden from every listing, or
+/// shown but not expandable — and every caller that asks has to treat them the
+/// same: `expandable: false` and an unenterable path. A *symlinked* directory is
+/// a third reason, decided per entry rather than by name, so it stays the
+/// caller's own condition.
+pub(super) fn is_never_enumerated(name: &OsStr) -> bool {
+    is_always_hidden(name)
+        || COLLAPSED_DIRECTORIES
+            .iter()
+            .any(|collapsed| name == OsStr::new(collapsed))
+}
+
 pub(super) fn root_token(root: &str) -> anyhow::Result<String> {
     Ok(RootCapability::capture(root)?.token().to_owned())
 }
@@ -146,11 +191,12 @@ fn metadata_for_in_root(root: &Path, path: &Path) -> anyhow::Result<v1::FileMeta
     } else {
         v1::FileKind::Other
     };
-    let name = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned();
+    let entry_name = path.file_name().unwrap_or(path.as_os_str());
+    // The raw `OsStr`, not the lossy string: the hidden/collapsed predicate has
+    // to see the bytes the filesystem gave, or a name that does not survive
+    // UTF-8 replacement is asked about under a different identity than the one
+    // `listing.rs` filters on.
+    let name = entry_name.to_string_lossy().into_owned();
     let followed = if symlink {
         fs::canonicalize(path)
             .ok()
@@ -172,7 +218,7 @@ fn metadata_for_in_root(root: &Path, path: &Path) -> anyhow::Result<v1::FileMeta
             }
         });
     let mime = image_mime(path).unwrap_or_default().to_owned();
-    let collapsed = name == ".git" || name == "node_modules" || symlink;
+    let collapsed = is_never_enumerated(entry_name) || symlink;
     Ok(v1::FileMetadata {
         path: path.to_string_lossy().into_owned(),
         name,
@@ -232,12 +278,9 @@ fn metadata_for_directory_entry(
     } else {
         v1::FileKind::Other
     };
-    let name = logical
-        .file_name()
-        .unwrap_or(logical.as_os_str())
-        .to_string_lossy()
-        .into_owned();
-    let collapsed = name == ".git" || name == "node_modules" || symlink;
+    let entry_name = logical.file_name().unwrap_or(logical.as_os_str());
+    let name = entry_name.to_string_lossy().into_owned();
+    let collapsed = is_never_enumerated(entry_name) || symlink;
     let mime = image_mime(logical).unwrap_or_default().to_owned();
     Ok(v1::FileMetadata {
         path: logical.to_string_lossy().into_owned(),
@@ -281,16 +324,30 @@ fn watch_fingerprint(path: &Path) -> anyhow::Result<u64> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
-        value = value.wrapping_add(watch_entry_fingerprint(&entry.file_name(), &metadata));
+        if let Some(entry_value) = watch_entry_fingerprint(&entry.file_name(), &metadata) {
+            value = value.wrapping_add(entry_value);
+        }
     }
     Ok(value)
 }
 
-fn watch_entry_fingerprint(name: &std::ffi::OsStr, metadata: &Metadata) -> u64 {
+/// One entry's contribution to a directory's change fingerprint, or `None` for
+/// an entry no listing reports.
+///
+/// A hidden entry that moved the fingerprint would make the fallback poller a
+/// second source of the churn the native watcher was just taught to filter: on
+/// macOS every folder Finder has opened gains a `.DS_Store` that is rewritten
+/// behind the user's back, and each rewrite would publish an authoritative
+/// snapshot that the desktop answers with a full re-list — of a directory whose
+/// listing does not contain the entry that changed.
+fn watch_entry_fingerprint(name: &OsStr, metadata: &Metadata) -> Option<u64> {
+    if is_always_hidden(name) {
+        return None;
+    }
     let name = blake3::hash(name.as_bytes());
     let mut name_bytes = [0_u8; 8];
     name_bytes.copy_from_slice(&name.as_bytes()[..8]);
-    u64::from_le_bytes(name_bytes) ^ metadata_generation(metadata).rotate_left(29)
+    Some(u64::from_le_bytes(name_bytes) ^ metadata_generation(metadata).rotate_left(29))
 }
 
 fn apply_effective_metadata(item: &mut v1::FileMetadata, metadata: &Metadata) {
@@ -404,33 +461,131 @@ mod tests {
         (root, FileService::new())
     }
 
+    /// Three populations, and the difference between them is the whole rule.
+    ///
+    /// Repository plumbing and platform scratch files are *hidden*: VS Code's
+    /// `files.exclude` defaults, which is the explorer this one is compared
+    /// against. `node_modules` is *shown and collapsed*, because VS Code shows
+    /// it too and people open it on purpose. Every other dotfile — `.env`,
+    /// `.gitignore` — is an ordinary file the user edits, and hiding those
+    /// would be a different product.
     #[test]
-    fn listing_keeps_dotfiles_and_collapses_heavy_and_symlink_directories() {
+    fn listing_hides_repository_plumbing_keeps_dotfiles_and_collapses_heavy_directories() {
         let (root, service) = fixture();
         fs::write(root.join(".env"), "ok").unwrap();
-        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".DS_Store"), "noise").unwrap();
+        fs::write(root.join("Thumbs.db"), "noise").unwrap();
+        for hidden in [".git", ".svn", ".hg", "CVS"] {
+            fs::create_dir(root.join(hidden)).unwrap();
+        }
         fs::create_dir(root.join("node_modules")).unwrap();
         fs::create_dir(root.join("real")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
         let snapshot = service
             .list_directory(root.to_str().unwrap(), "", "watch")
             .unwrap();
-        assert!(snapshot.entries.iter().any(|item| item.name == ".env"));
-        for name in [".git", "node_modules", "linked"] {
+        let named = |name: &str| snapshot.entries.iter().find(|item| item.name == name);
+
+        assert!(named(".env").is_some(), "ordinary dotfiles stay visible");
+        for hidden in [".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"] {
+            assert!(named(hidden).is_none(), "{hidden} must not be listed");
+        }
+        for name in ["node_modules", "linked"] {
             assert!(
-                !snapshot
-                    .entries
-                    .iter()
-                    .find(|item| item.name == name)
-                    .unwrap()
-                    .expandable
+                !named(name).expect("shown, just not expandable").expandable,
+                "{name} stays visible and collapsed"
             );
         }
+        // Hidden is not the same as merely absent from one view: the path is
+        // refused too, so nothing lists or watches it by asking directly.
+        for hidden in [".git", ".svn", ".hg", "CVS", "node_modules"] {
+            assert!(
+                service
+                    .list_directory(root.to_str().unwrap(), hidden, "watch")
+                    .is_err(),
+                "{hidden} must not be enterable by path"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Hidden means "not shown", never "not there".
+    ///
+    /// The destructive-confirmation gates count what is really in a directory,
+    /// and must keep doing so: a directory holding nothing but a `.git` is a
+    /// directory holding a repository, and deleting it without asking because
+    /// the tree does not draw its contents would be a far worse defect than a
+    /// prompt about something invisible. This is the test that fails if the
+    /// hiding predicate is ever wired into `mutations.rs` for tidiness.
+    #[test]
+    fn a_directory_that_looks_empty_is_still_not_empty_to_a_delete() {
+        let (root, service) = fixture();
+        let repository = root.join("repo");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(repository.join(".git")).unwrap();
+        fs::write(repository.join(".git/config"), "kept").unwrap();
+
+        let listed = service
+            .list_directory(root.to_str().unwrap(), "repo", "watch")
+            .unwrap();
+        assert!(listed.entries.is_empty(), "the tree draws nothing in it");
+
+        let error = service
+            .mutate(&v1::FileServiceRequest {
+                operation_id: "delete-repo".into(),
+                root: root.to_string_lossy().into_owned(),
+                mutation: v1::FileMutationKind::Delete.into(),
+                path: repository.to_string_lossy().into_owned(),
+                non_empty_confirmed: false,
+                ..Default::default()
+            })
+            .expect_err("a repository must not be deleted without confirmation");
         assert!(
-            service
-                .list_directory(root.to_str().unwrap(), ".git", "watch")
-                .is_err()
+            error.to_string().contains("confirmation_required"),
+            "got {error}"
         );
+        assert!(repository.join(".git/config").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A hidden entry that consumed a page slot would make a page shorter than
+    /// it claims, and one that became the page token would make the next page
+    /// resume from a name no client was ever told about.
+    #[test]
+    fn hidden_entries_do_not_consume_page_slots_or_become_page_tokens() {
+        let (root, service) = fixture();
+        for name in ["a", "b", "c", "d"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+        for hidden in [".DS_Store", "Thumbs.db"] {
+            fs::write(root.join(hidden), "noise").unwrap();
+        }
+        fs::create_dir(root.join(".git")).unwrap();
+        let mut token = String::new();
+        let mut names = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = service
+                .list_directory_page(root.to_str().unwrap(), "", "page", &token, 2)
+                .unwrap();
+            pages += 1;
+            // The load-bearing assertion, and the reason it is not merely
+            // `len() <= 2`: filtering *after* the page window would fill the
+            // window with hidden entries and hand back a short page that still
+            // claims more to come. Every page but the last is full.
+            assert!(
+                page.complete || page.entries.len() == 2,
+                "a non-final page must be full, got {} entries",
+                page.entries.len()
+            );
+            names.extend(page.entries.into_iter().map(|entry| entry.name));
+            if page.complete {
+                break;
+            }
+            token = page.next_page_token;
+        }
+        assert_eq!(names, vec!["a", "b", "c", "d"]);
+        assert_eq!(pages, 2, "four visible entries at two per page");
         fs::remove_dir_all(root).unwrap();
     }
 
