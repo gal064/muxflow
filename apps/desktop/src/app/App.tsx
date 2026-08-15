@@ -25,6 +25,7 @@ import { useAgentWorkflow } from "../features/agents/AgentHookWorkflow";
 import { TauriAgentClient } from "../features/agents/api";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
 import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
+import { emitTestNotification, notificationPermissionStatus } from "../features/agents/notifications";
 import { agentHostIdentity } from "../features/agents/types";
 import { useAgentHostSetup } from "../features/agents/useAgentHostSetup";
 import { useAgentNotificationActivation, type PaneSurfaceResult } from "../features/agents/useAgentNotificationActivation";
@@ -557,9 +558,12 @@ export function App() {
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     if (tab.kind === "terminal") selectWindow(tab.id);
+    // No status: the tab the user asked for is now the tab on screen. The
+    // message that used to be written here reached nobody either way — the
+    // notice is the channel's only reader and it has classified "Opened …" as
+    // routine since it was written.
     else if (activeSession && hostState.serverIdentity) {
       setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, tab.id));
-      setStatus(`Opened ${tab.title}`);
     }
   }, [activeSession, currentHostProfileId, hostState.serverIdentity, selectWindow, setAppState]);
 
@@ -587,6 +591,31 @@ export function App() {
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
     selectCreatedSession: (sessionId) => { setActiveSessionId(sessionId); setActiveWindowId(undefined); },
+    // Deliberately not `requestActiveWindow`: that one looks the window up in
+    // the current snapshot first, and a window one round trip old is not in it
+    // yet. A real `select-window` is also what makes the *next* snapshot agree
+    // — the app mirrors tmux's active flag, so anything only set locally here
+    // would be overwritten the moment the snapshot arrived. The generation is
+    // chained from the create for the same reason `surfacePaneDestination`
+    // chains its own: the create already moved the topology.
+    selectCreatedWindow: (sessionId, windowId, generation) => {
+      notificationActivation.clearNotificationFocusGuard();
+      const scope = hostScopeRef.current;
+      const identity = hostState.serverIdentity;
+      if (!identity) return;
+      void performAction({ kind: "selectWindow", sessionId, windowId }, { serverIdentity: identity, generation })
+        .then((accepted) => {
+          // Re-checked after the round trip, not only before it: the guard is
+          // there to catch the connection being replaced mid-flight, which is
+          // precisely what can happen while this is in the air.
+          if (!accepted || !sameHostConnection(scope, hostScopeRef.current)) return;
+          // `snapshotRef`, not the render's `snapshot`: the workspace may have
+          // been renamed or closed while this was outstanding.
+          const session = snapshotRef.current.sessions.find((item) => item.id === sessionId);
+          if (session) setAppState((current) => selectAppTab(current, currentHostProfileId, identity, session, undefined));
+          setActiveWindowId(windowId);
+        });
+    },
     selectRelativeTab: (direction) => {
       const index = combinedTabs.findIndex((tab) => tab.key === activeCombinedTabKey);
       const next = combinedTabs[(index < 0 ? 0 : index + direction + combinedTabs.length) % Math.max(1, combinedTabs.length)];
@@ -738,8 +767,9 @@ export function App() {
       const directory = "parent" in mutation
         ? mutation.parent
         : mutation.path.slice(0, mutation.path.lastIndexOf("/")) || mutationRoot.path;
+      // No toast: the tree redraws with the rename, the new file, or the row
+      // gone. The failure below is the part nothing else on screen would say.
       workspaceFiles.refresh(directory);
-      setStatus(`File ${mutation.kind} completed.`);
     } catch (error) {
       setStatus(String(error));
       throw error;
@@ -1112,6 +1142,10 @@ export function App() {
       onConnect={() => { connect(); setSettingsOpen(false); }}
       onConnectionMode={(mode) => { setSelectedProfileId(""); setConnectionMode(mode); }}
       onDeleteProfile={() => void runCommand("host.delete")}
+      onNotificationStatus={notificationPermissionStatus}
+      // Not routed through `setStatus`: this is a diagnostic the user pressed a
+      // button to get, and it belongs beside the button that produced it.
+      onTestNotification={emitTestNotification}
       onProbeHelper={() => void probeHelper()}
       onProfile={selectProfile}
       onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}

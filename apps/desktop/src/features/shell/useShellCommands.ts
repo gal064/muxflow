@@ -42,6 +42,17 @@ interface ShellCommandOptions {
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
   selectCreatedSession(sessionId: string): void;
+  /**
+   * Land on the terminal tab ⌘T just made. The host creates it detached, so
+   * tmux's active window does not move and the app — which mirrors that flag
+   * on every snapshot — would put the selection straight back.
+   *
+   * `generation` is the one the creation returned, not the one in scope: the
+   * create bumped the topology and the app's own scope does not catch up until
+   * the next snapshot, so a selection sent against the older number is
+   * rejected as stale and only lands on a retry.
+   */
+  selectCreatedWindow(sessionId: string, windowId: string, generation: number): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
   setConfirmation: Dispatch<SetStateAction<PendingTmuxConfirmation | undefined>>;
@@ -61,6 +72,38 @@ interface ShellCommandOptions {
   /** ⌘⇧U. */
   jumpToUnreadAgent(): void;
   stepFocusHistory(direction: "back" | "forward"): void;
+}
+
+/**
+ * What a destructive command closes, and whether it asks first.
+ *
+ * `confirmLabel` present means a dialog names that target; absent means the
+ * close happens on the spot. A terminal tab and a pane are the surface the
+ * user is looking at and their disappearance is the confirmation — the same
+ * call this user's own terminal makes with `confirm-close-surface = false`. A
+ * workspace takes every window in it, which is a different blast radius.
+ *
+ * Either way the action reaches the host identically: `confirmed: true` plus
+ * the precondition captured when the command ran. Only the gate differs.
+ */
+function closeTarget(
+  commandId: CommandId,
+  targets: { targetSession?: Session; targetWindow?: TmuxWindow; targetPane?: Pane },
+): { action: TmuxAction; confirmLabel?: string } | undefined {
+  const { targetSession, targetWindow, targetPane } = targets;
+  if (commandId === "session.close" && targetSession) {
+    return {
+      action: { kind: "closeSession", sessionId: targetSession.id },
+      confirmLabel: `workspace “${targetSession.name}” and all of its windows`,
+    };
+  }
+  if (commandId === "window.close" && targetWindow) {
+    return { action: { kind: "closeWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id } };
+  }
+  if (commandId === "pane.close" && targetPane) {
+    return { action: { kind: "closePane", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id } };
+  }
+  return undefined;
 }
 
 export function useShellCommands(options: ShellCommandOptions): {
@@ -101,39 +144,27 @@ export function useShellCommands(options: ShellCommandOptions): {
         options.setStatus(`Could not close ${targetAppTab.title} because its editor did not save: ${String(error)}`);
         return;
       }
+      // No toast: the tab is gone from the strip, which is the whole message.
+      // Status is for what the user cannot see or must act on — the failure
+      // branch above is exactly that, and stays.
       options.setAppState((current) => closeAppTab(current, options.currentHostProfileId, targetAppTab.id));
-      options.setStatus(`Closed ${targetAppTab.title}`);
-      return;
-    }
-    if (commandId === "session.close" && targetSession) {
-      if (!options.serverIdentity) return;
-      options.setConfirmation(createTmuxConfirmation(
-        commandId,
-        definition.title,
-        `workspace “${targetSession.name}” and all of its windows`,
-        { kind: "closeSession", sessionId: targetSession.id },
-        { serverIdentity: options.serverIdentity, generation: options.generation },
-      ));
       return;
     }
     if (definition.destructive) {
       if (!options.serverIdentity) return;
-      const captured = commandId === "window.close" && targetWindow
-        ? {
-            label: `terminal tab “${targetWindow.name}” and all of its panes`,
-            action: { kind: "closeWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id } as TmuxAction,
-          }
-        : commandId === "pane.close" && targetPane
-            ? {
-                label: `pane ${targetPane.id}`,
-                action: { kind: "closePane", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id } as TmuxAction,
-              }
-            : undefined;
-      if (!captured) return;
-      options.setConfirmation(createTmuxConfirmation(
-        commandId, definition.title, captured.label, captured.action,
-        { serverIdentity: options.serverIdentity, generation: options.generation },
-      ));
+      const close = closeTarget(commandId, { targetSession, targetWindow, targetPane });
+      if (!close) return;
+      // One dispatch, so `confirmed: true` and the authoritative precondition
+      // are stamped in exactly one place whether or not a dialog is involved.
+      // Whether a close *asks* is data — `confirmLabel` — not a second branch
+      // of control flow above this one.
+      const action: TmuxAction = { ...close.action, confirmed: true };
+      const precondition = { serverIdentity: options.serverIdentity, generation: options.generation };
+      if (close.confirmLabel) {
+        options.setConfirmation(createTmuxConfirmation(commandId, definition.title, close.confirmLabel, action, precondition));
+      } else {
+        await options.performAction(action, precondition);
+      }
       return;
     }
     const workspaceIndex = selectionIndex(commandId, "workspace.select");
@@ -197,7 +228,19 @@ export function useShellCommands(options: ShellCommandOptions): {
         if (current >= 0 && index >= 0 && index < ordered.length) await options.performAction({ kind: "reorderSession", sessionId: targetSession.id, index });
         return;
       }
-      case "window.new": if (targetSession) await options.performAction({ kind: "createWindow", sessionId: targetSession.id }); return;
+      case "window.new": {
+        if (!targetSession) return;
+        // Same shape as `session.new`: create, then select what came back, and
+        // only if the app is still pointed at the host that created it.
+        const scope = options.hostScope;
+        const sessionId = targetSession.id;
+        void options.performAction({ kind: "createWindow", sessionId }).then((result) => {
+          if (result?.windowId && options.isHostScopeCurrent(scope)) {
+            options.selectCreatedWindow(sessionId, result.windowId, result.topologyGeneration);
+          }
+        });
+        return;
+      }
       case "window.rename": {
         const scope = options.hostScope;
         if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: targetWindow.name, submit: (name) => {

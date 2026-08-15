@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { agent } from "../agents/testFixtures";
-import { deriveAgentRollups } from "../agents/selectors";
+import { compareAgents, deriveAgentRollups } from "../agents/selectors";
 import type { TmuxSnapshot } from "../../app/types";
-import { abbreviateHome, inferHome, metadataLine, sessionPath, workspaceRows } from "./workspaceRows";
+import {
+  WORKSPACE_ROW_AGENT_LIMIT, abbreviateHome, inferHome, sessionPath, workspaceMetaLine, workspaceRows,
+} from "./workspaceRows";
 
 const snapshot: TmuxSnapshot = {
   sessions: [
@@ -41,13 +43,55 @@ describe("workspace sidebar rows", () => {
     expect(rows().map((row) => row.session.name)).toEqual(["muxflow", "sampleco-e2e"]);
   });
 
-  it("inherits the loudest agent's state and names what it is doing", () => {
+  it("inherits the loudest agent's state and lists its agents loudest first", () => {
     const [galAde, checksum] = rows();
     // blocked outranks working, so the workspace reads blocked even though a
-    // working agent updated more recently.
+    // working agent updated more recently — and leads the row's own list.
     expect(galAde.attention).toBe("blocked");
-    expect(galAde.activity).toBe("codex · blocked");
-    expect(sampleco.activity).toBe("claude two · done, unread");
+    expect(galAde.agents).toEqual([
+      { id: "b", name: "codex", state: "blocked" },
+      { id: "a", name: "claude", state: "working" },
+    ]);
+    expect(galAde.agentOverflow).toBe(0);
+    expect(sampleco.agents).toEqual([{ id: "c", name: "claude two", state: "done" }]);
+  });
+
+  it("lists three agents and counts the rest", () => {
+    const many = [
+      agent({ id: "n1", sessionId: "$1", displayName: "one", lifecycle: "idle", updatedAt: 1 }),
+      agent({ id: "n2", sessionId: "$1", displayName: "two", lifecycle: "working", updatedAt: 2 }),
+      agent({ id: "n3", sessionId: "$1", displayName: "three", lifecycle: "blocked", updatedAt: 3 }),
+      agent({ id: "n4", sessionId: "$1", displayName: "four", lifecycle: "working", updatedAt: 9 }),
+      agent({ id: "n5", sessionId: "$1", displayName: "five", lifecycle: "idle", updatedAt: 4 }),
+    ];
+    const [galAde, checksum] = workspaceRows({
+      snapshot, agents: many, attentionByWorkspace: deriveAgentRollups(many).byWorkspace,
+    });
+    expect(galAde.agents.map((row) => row.name)).toEqual(["three", "four", "two"]);
+    expect(galAde.agents).toHaveLength(WORKSPACE_ROW_AGENT_LIMIT);
+    expect(galAde.agentOverflow).toBe(2);
+    // A workspace with no agents counts nothing and lists nothing; the row must
+    // not claim an overflow it does not have.
+    expect(sampleco.agents).toEqual([]);
+    expect(sampleco.agentOverflow).toBe(0);
+  });
+
+  it("ranks a row's agents exactly the way the agents list below it does", () => {
+    // Two copies of "loudest" would put the same two agents in one order on
+    // the workspace row and another in the list directly beneath it.
+    const tied = [
+      agent({ id: "z", sessionId: "$1", displayName: "zed", lifecycle: "working", updatedAt: 7 }),
+      agent({ id: "a", sessionId: "$1", displayName: "ada", lifecycle: "working", updatedAt: 7 }),
+      agent({ id: "m", sessionId: "$1", displayName: "mia", lifecycle: "working", updatedAt: 8 }),
+    ];
+    const rowOrder = (agents: typeof tied) => workspaceRows({
+      snapshot, agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
+    })[0].agents.map((row) => row.id);
+    expect(rowOrder(tied)).toEqual([...tied].sort(compareAgents).map((item) => item.id));
+    // Recency, then name: "ada" before "zed" at the same update time.
+    expect(rowOrder(tied)).toEqual(["m", "a", "z"]);
+    // And the input's own order never leaks into the answer.
+    expect(rowOrder([...tied].reverse())).toEqual(rowOrder(tied));
   });
 
   it("counts only agents waiting on a human as that workspace's unread badge", () => {
@@ -60,17 +104,25 @@ describe("workspace sidebar rows", () => {
     expect(workspaceRows({ snapshot, agents: working, attentionByWorkspace: deriveAgentRollups(working).byWorkspace })[0].working).toBe(true);
   });
 
-  it("writes `branch · cwd` for the workspace whose branch is actually known", () => {
+  it("keeps branch and path apart, so the sidebar can show one and ⌘P can match both", () => {
     const [galAde, checksum] = rows();
-    expect(galAde.metadata).toBe("main* · ~/dev/muxflow");
+    expect(galAde.branch).toBe("main*");
+    expect(galAde.path).toBe("~/dev/muxflow");
     // Git only ever has a snapshot for the active workspace, so the others
-    // show their path and claim no branch rather than guessing one.
-    expect(sampleco.metadata).toBe("~/dev/checksum");
+    // carry a path and claim no branch rather than guessing one.
+    expect(sampleco.branch).toBeUndefined();
+    expect(sampleco.path).toBe("~/dev/checksum");
+    // ⌘P wants them back together, and the separator lives here rather than in
+    // the component that would otherwise rebuild it on every keystroke.
+    expect(workspaceMetaLine(galAde)).toBe("main* · ~/dev/muxflow");
+    expect(workspaceMetaLine(checksum)).toBe("~/dev/checksum");
+    expect(workspaceMetaLine({})).toBe("");
   });
 
   it("says nothing about activity for a workspace with no agents", () => {
     const [galAde] = workspaceRows({ snapshot, agents: [], attentionByWorkspace: new Map() });
-    expect(galAde.activity).toBeUndefined();
+    expect(galAde.agents).toEqual([]);
+    expect(galAde.agentOverflow).toBe(0);
     expect(galAde.attention).toBe("none");
   });
 
@@ -86,8 +138,6 @@ describe("workspace sidebar rows", () => {
     expect(abbreviateHome("/home/useraxy/x", "/home/user")).toBe("/home/useraxy/x");
     expect(abbreviateHome("/srv/app", "/home/user")).toBe("/srv/app");
     expect(abbreviateHome(undefined, "/home/user")).toBeUndefined();
-    expect(metadataLine(undefined, "main", undefined)).toBe("main");
-    expect(metadataLine(undefined, undefined, undefined)).toBeUndefined();
   });
 
   it("infers the tmux user's home from where the panes are, or says nothing", () => {

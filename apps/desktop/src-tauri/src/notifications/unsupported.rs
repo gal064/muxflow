@@ -23,7 +23,20 @@ impl NativeNotifications {
         _body: &str,
         _route: NotificationRoute,
         _request_action: bool,
+        _present_in_foreground: bool,
     ) -> Result<NotificationReceipt, String> {
-        Err("native notification activation is not implemented on this platform yet".into())
+        Err(UNIMPLEMENTED.into())
+    }
+
+    pub fn send_test_notification(&self) -> Result<NotificationReceipt, String> {
+        Err(UNIMPLEMENTED.into())
+    }
+
+    /// The same word the other two backends use for "there is nothing here to
+    /// grant" — the UI has one branch for it rather than a platform check.
+    pub fn authorization_status(&self) -> Result<String, String> {
+        Ok("unsupported".into())
     }
 }
+
+const UNIMPLEMENTED: &str = "native notification activation is not implemented on this platform yet";

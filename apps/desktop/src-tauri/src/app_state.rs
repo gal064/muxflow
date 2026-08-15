@@ -154,12 +154,21 @@ pub enum PanelSurface {
 }
 
 /// The agents section's ordering: workspace order, or attention order.
+///
+/// The two orderings were named `grouped` and `priority` before they were
+/// named after what they sort by. An unknown variant is a hard deserialization
+/// error, not a defaulted field, so both old names are still accepted here:
+/// without the aliases, a file written by the previous build would make every
+/// `load_app_state` fail — and, worse, `save_app_state` would have rejected the
+/// frontend's new names, silently freezing every saved tab and preference.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentSortMode {
+    #[serde(alias = "priority")]
+    Status,
     #[default]
-    Grouped,
-    Priority,
+    #[serde(alias = "grouped")]
+    Workspace,
 }
 
 // No `Eq`: the shell's sidebar width and agents-section ratio are fractions.
@@ -514,7 +523,7 @@ mod tests {
                 sidebar_collapsed: true,
                 sidebar_width: Some(260.0),
                 panel_open: true,
-                agent_sort: AgentSortMode::Priority,
+                agent_sort: AgentSortMode::Status,
                 agents_section_ratio: Some(0.42),
                 agent_state_glyphs: true,
                 terminal_screen_reader: false,
@@ -638,7 +647,7 @@ mod tests {
         let value: PersistedAppState =
             serde_json::from_str(CONTRACT).expect("the frontend's own payload must deserialize");
         assert_eq!(value.shell.panel_surface, PanelSurface::Git);
-        assert_eq!(value.shell.agent_sort, AgentSortMode::Priority);
+        assert_eq!(value.shell.agent_sort, AgentSortMode::Status);
         assert_eq!(value.shell.sidebar_width, Some(260.0));
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
         assert!(value.shell.sidebar_collapsed && value.shell.panel_open);
@@ -715,9 +724,37 @@ mod tests {
         });
         let value: PersistedAppState = serde_json::from_value(legacy).unwrap();
         assert_eq!(value.shell.panel_surface, PanelSurface::Files);
-        assert_eq!(value.shell.agent_sort, AgentSortMode::Grouped);
+        assert_eq!(value.shell.agent_sort, AgentSortMode::Workspace);
         assert!(!value.shell.sidebar_collapsed);
         assert_eq!(value.shell.window_geometry.unwrap().width, 900);
+    }
+
+    /// The agent ordering was renamed, not changed. A file naming an ordering
+    /// the way the previous build wrote it must still load — as the *same*
+    /// ordering, not as the default. An unknown enum variant is a hard error
+    /// in serde, so without the aliases this is a load failure that freezes
+    /// every saved tab and preference behind the recovery path.
+    #[test]
+    fn renamed_agent_orderings_still_load_under_their_previous_names() {
+        let load = |sort: &str| {
+            let value: PersistedAppState = serde_json::from_value(serde_json::json!({
+                "schemaVersion": 1,
+                "appTabs": [],
+                "workspaceUi": [],
+                "shell": { "agentSort": sort },
+            }))
+            .unwrap_or_else(|error| panic!("agentSort {sort} must load: {error}"));
+            value.shell.agent_sort
+        };
+        assert_eq!(load("priority"), AgentSortMode::Status);
+        assert_eq!(load("grouped"), AgentSortMode::Workspace);
+        assert_eq!(load("status"), AgentSortMode::Status);
+        assert_eq!(load("workspace"), AgentSortMode::Workspace);
+        // And what is written back is the current name, never the old one.
+        assert_eq!(
+            serde_json::to_value(AgentSortMode::Status).unwrap(),
+            serde_json::json!("status")
+        );
     }
 
     #[test]

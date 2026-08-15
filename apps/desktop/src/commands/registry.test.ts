@@ -88,7 +88,10 @@ describe("command registry", () => {
     expect(shortcut("workspaces.switch", "mac")).toBe("Meta+P");
     expect(shortcut("session.new", "mac")).toBe("Meta+N");
     expect(shortcut("view.toggleSidebar", "mac")).toBe("Meta+B");
-    expect(shortcut("view.togglePanel", "mac")).toBe("Meta+Alt+B");
+    // ⌘L, off Option entirely: ⌥⌘B was drawn in the palette and could never
+    // fire, because macOS types `∫` for ⌥B.
+    expect(shortcut("view.togglePanel", "mac")).toBe("Meta+L");
+    expect(shortcut("view.togglePanel", "linux")).toBe("Ctrl+L");
     expect(shortcut("pane.splitRight", "mac")).toBe("Meta+D");
     expect(shortcut("pane.splitDown", "mac")).toBe("Meta+Shift+D");
     expect(shortcut("pane.zoom", "mac")).toBe("Meta+Shift+Enter");
@@ -111,7 +114,10 @@ describe("command registry", () => {
       isComposing: false, keyCode: 0,
     } as KeyboardEvent;
     expect(shortcutFromEvent(event)).toBe("Alt+Meta+B");
-    expect(commandForKeyboardEvent(event, "mac", {})?.id).toBe("view.togglePanel");
+    // ⌥⌘B is no longer a default — the panel moved to ⌘L precisely because
+    // Option-modified letters are this fragile — but a user who binds one by
+    // hand must still have it resolve.
+    expect(commandForKeyboardEvent(event, "mac", { "view.togglePanel": "Meta+Alt+B" })?.id).toBe("view.togglePanel");
     // A layout `code` cannot describe still falls back to what was typed.
     expect(keyFromCode("KeyB")).toBe("B");
     expect(keyFromCode("Digit4")).toBe("4");
@@ -169,6 +175,9 @@ describe("command registry", () => {
   });
 
   it("has collision-free platform defaults and detects user override collisions", () => {
+    // A duplicate binding silently disables *both* commands — the resolver
+    // takes a match only when there is exactly one — so this has to stay empty
+    // as bindings move around.
     expect(shortcutCollisions("linux", {})).toEqual([]);
     expect(shortcutCollisions("mac", {})).toEqual([]);
     expect(shortcutCollisions("linux", { "session.new": "Ctrl+Shift+T" })).toEqual([{
