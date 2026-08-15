@@ -1,0 +1,124 @@
+// @vitest-environment jsdom
+import { act, create } from "react-test-renderer";
+import { describe, expect, it, vi } from "vitest";
+import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
+import type { PendingTmuxConfirmation } from "../../commands/destructiveConfirmation";
+import type { CommandId, CommandTarget } from "../../commands/registry";
+import type { TerminalPaneController } from "../terminal/TerminalPane";
+import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
+import { defaultAppState, type PersistedAppState } from "./types";
+import { useShellCommands } from "./useShellCommands";
+
+const session: Session = { id: "$1", name: "muxflow", windowCount: 1, attachedClients: 1, order: 0 };
+const window: TmuxWindow = { id: "@1", sessionId: "$1", index: 1, name: "zsh", active: true, layout: "" };
+const pane: Pane = {
+  id: "%1", sessionId: "$1", windowId: "@1", index: 0, active: true,
+  width: 80, height: 24, left: 0, top: 0, currentPath: "/home/user", currentCommand: "zsh",
+};
+const snapshot: TmuxSnapshot = { sessions: [session], windows: [window], panes: [pane] };
+
+const appTab: PersistedAppState["appTabs"][number] = {
+  id: "tab-1", hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1",
+  sessionName: "muxflow", kind: "file", resource: "/home/user/notes.md", title: "notes.md", order: 0,
+};
+
+/**
+ * Drives `runCommand` for one command, and reports everything the hook did.
+ *
+ * The hook is a `useCallback` over a wide options object, so a component is
+ * the only honest way to call it; `create` is what the rest of this suite uses
+ * for the same reason.
+ */
+async function run(commandId: CommandId, overrides: Partial<Parameters<typeof useShellCommands>[0]> = {}, target?: CommandTarget) {
+  const performAction = overrides.performAction
+    ?? vi.fn<(action: TmuxAction, precondition?: { serverIdentity: string; generation: number }) => Promise<TmuxActionResult | undefined>>(
+      async () => ({ topologyGeneration: 8 }),
+    );
+  const setConfirmation = vi.fn<(value: PendingTmuxConfirmation | undefined) => void>();
+  const setStatus = vi.fn();
+  const selectCreatedWindow = vi.fn();
+  const setAppState = vi.fn();
+  let call: ((commandId: CommandId, target?: CommandTarget) => Promise<void>) | undefined;
+
+  function Harness() {
+    const { runCommand } = useShellCommands({
+      activePane: pane, activeSession: session, activeWindow: window,
+      appState: { ...defaultAppState, appTabs: [appTab] },
+      canMutate: true, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
+      currentHostProfileId: "local", focusDirection: vi.fn(), generation: 8,
+      hostScope: { hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1 } as never,
+      isHostScopeCurrent: () => true, jumpToUnreadAgent: vi.fn(),
+      requestHostProfileDelete: vi.fn(), rowCommands: [], selectCreatedSession: vi.fn(),
+      selectCreatedWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
+      selectWorkspaceByIndex: vi.fn(), serverIdentity: "server-a", setAppState,
+      setConfirmation: setConfirmation as never, setPaletteOpen: vi.fn(), setSettingsOpen: vi.fn(),
+      setShortcutEditorOpen: vi.fn(), setStatus: setStatus as never, setTextPrompt: vi.fn(),
+      setWorkspaceSwitcherOpen: vi.fn(), snapshot, stepFocusHistory: vi.fn(), windows: [window],
+      ...overrides,
+      performAction,
+    });
+    call = runCommand;
+    return null;
+  }
+
+  let renderer!: ReturnType<typeof create>;
+  await act(async () => { renderer = create(<Harness />); });
+  await act(async () => { await call!(commandId, target); });
+  await act(async () => renderer.unmount());
+  return { performAction, setConfirmation, setStatus, selectCreatedWindow, setAppState };
+}
+
+describe("shell commands", () => {
+  it("selects the terminal tab ⌘T just created", async () => {
+    // The host creates the window detached, so tmux's active window does not
+    // move; the app mirrors that flag on every snapshot, so without an explicit
+    // selection the new tab appears and the focus stays behind.
+    const { performAction, selectCreatedWindow } = await run("window.new", {
+      performAction: vi.fn(async () => ({ windowId: "@9", topologyGeneration: 9 })) as never,
+    });
+    expect(performAction).toHaveBeenCalledWith({ kind: "createWindow", sessionId: "$1" });
+    expect(selectCreatedWindow).toHaveBeenCalledWith("$1", "@9");
+  });
+
+  it("does not steal focus into a window created on a host the user has left", async () => {
+    const { selectCreatedWindow } = await run("window.new", {
+      isHostScopeCurrent: () => false,
+      performAction: vi.fn(async () => ({ windowId: "@9", topologyGeneration: 9 })) as never,
+    });
+    expect(selectCreatedWindow).not.toHaveBeenCalled();
+  });
+
+  it("closes a terminal tab and a pane without a dialog, still telling the host it was confirmed", async () => {
+    const closeWindow = await run("window.close", {}, { kind: "terminalTab", id: "@1" });
+    expect(closeWindow.setConfirmation).not.toHaveBeenCalled();
+    expect(closeWindow.performAction).toHaveBeenCalledWith(
+      { kind: "closeWindow", sessionId: "$1", windowId: "@1", confirmed: true },
+      { serverIdentity: "server-a", generation: 8 },
+    );
+    const closePane = await run("pane.close", {}, { kind: "pane", id: "%1" });
+    expect(closePane.setConfirmation).not.toHaveBeenCalled();
+    expect(closePane.performAction).toHaveBeenCalledWith(
+      { kind: "closePane", sessionId: "$1", windowId: "@1", paneId: "%1", confirmed: true },
+      { serverIdentity: "server-a", generation: 8 },
+    );
+  });
+
+  it("still confirms closing a whole workspace", async () => {
+    // A workspace takes every window in it. Different blast radius, and the
+    // complaint that removed the other two dialogs was about tab close.
+    const { setConfirmation, performAction } = await run("session.close", {}, { kind: "session", id: "$1" });
+    expect(performAction).not.toHaveBeenCalled();
+    expect(setConfirmation).toHaveBeenCalledTimes(1);
+    expect(setConfirmation.mock.calls[0][0]).toMatchObject({
+      commandId: "session.close",
+      action: { kind: "closeSession", sessionId: "$1", confirmed: true },
+      precondition: { serverIdentity: "server-a", generation: 8 },
+    });
+  });
+
+  it("says nothing when closing a file tab, because the tab going is the message", async () => {
+    const { setAppState, setStatus } = await run("window.close", {}, { kind: "appTab", id: "tab-1" });
+    expect(setAppState).toHaveBeenCalledTimes(1);
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+});
