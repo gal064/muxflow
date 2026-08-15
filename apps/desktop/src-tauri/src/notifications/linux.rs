@@ -245,7 +245,12 @@ impl NativeNotifications {
         let reachable = FreedesktopNotificationsProxyBlocking::new(connection)
             .and_then(|proxy| proxy.get_capabilities())
             .is_ok();
-        Ok(if reachable { "authorized" } else { "unsupported" }.into())
+        Ok(if reachable {
+            "authorized"
+        } else {
+            "unsupported"
+        }
+        .into())
     }
 
     fn post(
@@ -286,7 +291,10 @@ impl NativeNotifications {
             .map_err(|error| error.to_string())?;
         let install = match route {
             Some(route) if actionable => {
-                self.routes.lock().unwrap().insert(id, route, Instant::now())
+                self.routes
+                    .lock()
+                    .unwrap()
+                    .insert(id, route, Instant::now())
             }
             _ => RouteInstall::Pending,
         };

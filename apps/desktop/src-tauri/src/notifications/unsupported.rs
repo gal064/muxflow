@@ -39,4 +39,5 @@ impl NativeNotifications {
     }
 }
 
-const UNIMPLEMENTED: &str = "native notification activation is not implemented on this platform yet";
+const UNIMPLEMENTED: &str =
+    "native notification activation is not implemented on this platform yet";
