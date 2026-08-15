@@ -60,11 +60,11 @@ static GLOBAL: OnceLock<Arc<AgentRuntime>> = OnceLock::new();
 
 impl AgentRuntime {
     pub(crate) fn global() -> Arc<Self> {
-        Arc::clone(GLOBAL.get_or_init(|| {
-            Arc::new(Self::load(
-                crate::paths::default_runtime_dir().join("agents.json"),
-            ))
-        }))
+        Arc::clone(
+            GLOBAL.get_or_init(|| {
+                Arc::new(Self::load(crate::paths::runtime_dir().join("agents.json")))
+            }),
+        )
     }
 
     fn load(state_path: PathBuf) -> Self {

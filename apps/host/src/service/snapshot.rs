@@ -133,7 +133,7 @@ pub(super) fn reorder_session(
     target_index: u32,
 ) -> anyhow::Result<()> {
     let _guard = SESSION_ORDER_LOCK.lock().unwrap();
-    let path = crate::paths::default_runtime_dir().join("session-order.json");
+    let path = crate::paths::runtime_dir().join("session-order.json");
     let mut state = load_session_order(&path)?;
     let mut order: Vec<_> = snapshot
         .sessions
@@ -155,7 +155,7 @@ fn overlay_session_order_unlocked(
     snapshot: &mut TmuxSnapshot,
     server_identity: &str,
 ) -> anyhow::Result<()> {
-    let path = crate::paths::default_runtime_dir().join("session-order.json");
+    let path = crate::paths::runtime_dir().join("session-order.json");
     let mut state = load_session_order(&path)?;
     let Some(saved) = state.servers.get_mut(server_identity) else {
         for (order, session) in snapshot.sessions.iter_mut().enumerate() {
