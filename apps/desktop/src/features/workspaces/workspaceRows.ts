@@ -5,12 +5,18 @@ import type { AgentAttentionRollup, AgentDisplayState, AgentRecord } from "../ag
 import { orderedSessions } from "../shell/model";
 
 /**
- * A workspace row in the sidebar: name, what its loudest agent is doing, and
- * where it is on disk.
+ * A workspace row in the sidebar: name, what its loudest few agents are doing,
+ * and which branch it is on.
  *
  * The row is derived, not stored. tmux owns the topology and the agent store
  * owns the states, so this module's whole job is to answer "what does one
  * sidebar row say" from those two, with no per-row state to fall out of sync.
+ *
+ * `branch` and `path` are two fields rather than one composed string because
+ * the two surfaces reading them want different things: the sidebar shows the
+ * branch alone (a working directory beside every row is noise once a host has
+ * more than a handful of workspaces), while ⌘P still matches on the path,
+ * where searching for `~/dev/thing` is the fastest way to a workspace.
  */
 export interface WorkspaceRowModel {
   session: Session;
@@ -20,11 +26,29 @@ export interface WorkspaceRowModel {
   /** Number of that workspace's agents waiting on a human. */
   unread: number;
   working: boolean;
-  /** Last thing an agent here was seen doing; empty when there are none. */
-  activity?: string;
-  /** `branch* · ~/dev/thing`, or just the path when the branch is unknown. */
-  metadata?: string;
+  /** The loudest agents here, at most {@link WORKSPACE_ROW_AGENT_LIMIT}. */
+  agents: WorkspaceRowAgent[];
+  /** How many agents this workspace has beyond the ones the row lists. */
+  agentOverflow: number;
+  /** Branch of the active workspace; nothing else has a git snapshot. */
+  branch?: string;
+  /** The shell's own cwd, abbreviated the way a prompt would write it. */
+  path?: string;
 }
+
+/** One agent line on a workspace row. */
+export interface WorkspaceRowAgent {
+  id: string;
+  name: string;
+  state: AgentDisplayState;
+}
+
+/**
+ * How many agent lines a row shows before it stops listing and starts
+ * counting. Three is what fits under a row title without the sidebar turning
+ * into the agents list that already sits below it.
+ */
+export const WORKSPACE_ROW_AGENT_LIMIT = 3;
 
 export interface WorkspaceRowInputs {
   snapshot: TmuxSnapshot;
@@ -38,7 +62,7 @@ export interface WorkspaceRowInputs {
 }
 
 export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
-  const loudest = loudestAgentBySession(inputs.agents);
+  const loudest = topAgentsBySession(inputs.agents, WORKSPACE_ROW_AGENT_LIMIT);
   const unreadBySession = new Map<string, number>();
   for (const agent of inputs.agents) {
     if (!needsAttention(displayState(agent))) continue;
@@ -46,7 +70,8 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
   }
   return orderedSessions(inputs.snapshot.sessions).map((session) => {
     const attention = inputs.attentionByWorkspace.get(session.id)?.state ?? "none";
-    const agent = loudest.get(session.id);
+    const here = loudest.get(session.id);
+    const shown = here?.top ?? [];
     const active = session.id === inputs.activeSessionId;
     return {
       session,
@@ -54,28 +79,46 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
       attention,
       unread: unreadBySession.get(session.id) ?? 0,
       working: attention === "working",
-      activity: agent ? `${agent.displayName} · ${activityWord(displayState(agent))}` : undefined,
-      metadata: metadataLine(sessionPath(inputs.snapshot, session.id), active ? inputs.activeBranch : undefined, inputs.home),
+      agents: shown.map((agent) => ({ id: agent.id, name: agent.displayName, state: displayState(agent) })),
+      agentOverflow: (here?.total ?? 0) - shown.length,
+      branch: active ? inputs.activeBranch : undefined,
+      path: abbreviateHome(sessionPath(inputs.snapshot, session.id), inputs.home),
     };
   });
 }
 
-/** The one agent whose state the workspace row inherits. */
-function loudestAgentBySession(agents: readonly AgentRecord[]): Map<string, AgentRecord> {
+/**
+ * The agents a workspace row inherits its state from, loudest first.
+ *
+ * One ranking, used for both the row's own state (`top[0]` is the agent the
+ * rollup agrees with) and for which few of a busy workspace's agents get a
+ * line. Ties break on recency and then on ID, so a row that is redrawn without
+ * anything changing draws the same three names in the same order.
+ */
+function topAgentsBySession(
+  agents: readonly AgentRecord[],
+  limit: number,
+): Map<string, { top: AgentRecord[]; total: number }> {
   const rank: Record<AgentDisplayState, number> = { blocked: 4, done: 3, working: 2, unknown: 1, idle: 0 };
-  const loudest = new Map<string, AgentRecord>();
+  const bySession = new Map<string, AgentRecord[]>();
   for (const agent of agents) {
-    const current = loudest.get(agent.sessionId);
-    if (!current
-      || rank[displayState(agent)] > rank[displayState(current)]
-      || (rank[displayState(agent)] === rank[displayState(current)] && agent.updatedAt > current.updatedAt)) {
-      loudest.set(agent.sessionId, agent);
-    }
+    const existing = bySession.get(agent.sessionId);
+    if (existing) existing.push(agent);
+    else bySession.set(agent.sessionId, [agent]);
+  }
+  const loudest = new Map<string, { top: AgentRecord[]; total: number }>();
+  for (const [sessionId, here] of bySession) {
+    const ordered = [...here].sort((left, right) =>
+      rank[displayState(right)] - rank[displayState(left)]
+      || right.updatedAt - left.updatedAt
+      || left.id.localeCompare(right.id));
+    loudest.set(sessionId, { top: ordered.slice(0, limit), total: ordered.length });
   }
   return loudest;
 }
 
-function activityWord(state: AgentDisplayState): string {
+/** The verb a row prints beside an agent's name. */
+export function activityWord(state: AgentDisplayState): string {
   return state === "done" ? "done, unread" : state;
 }
 
@@ -87,12 +130,6 @@ export function sessionPath(snapshot: TmuxSnapshot, sessionId: string): string |
   const panes = snapshot.panes.filter((pane: Pane) => pane.windowId === window.id);
   const pane = panes.find((item) => item.active) ?? panes.sort((left, right) => left.index - right.index)[0];
   return pane?.currentPath || undefined;
-}
-
-export function metadataLine(path: string | undefined, branch: string | undefined, home: string | undefined): string | undefined {
-  const shortened = abbreviateHome(path, home);
-  if (branch && shortened) return `${branch} · ${shortened}`;
-  return branch ?? shortened;
 }
 
 const HOME_SHAPE = /^(\/home\/[^/]+|\/Users\/[^/]+|\/root)(?=\/|$)/u;

@@ -22,13 +22,14 @@ const noop = vi.fn();
 const session: Session = { id: "$1", name: "A very long workspace name", windowCount: 3, attachedClients: 1, order: 0 };
 const rows: WorkspaceRowModel[] = [{
   session, active: true, attention: "blocked", unread: 2, working: true,
-  activity: "codex · blocked", metadata: "main* · ~/dev/muxflow",
+  agents: [{ id: "a1", name: "codex", state: "blocked" }], agentOverflow: 0,
+  branch: "main*", path: "~/dev/muxflow",
 }];
 
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
   adapters={[]}
-  agents={buildAgentRows([agent({ displayName: "Codex one", lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "grouped")}
-  agentSort="grouped"
+  agents={buildAgentRows([agent({ displayName: "Codex one", lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "workspace")}
+  agentSort="workspace"
   agentsRatio={0.4}
   canMutate
   hostLabel="omarchy"
@@ -60,9 +61,12 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('aria-current="true"');
     expect(html).toContain("A very long workspace name");
     expect(html).toContain("codex · blocked");
-    expect(html).toContain("main* · ~/dev/muxflow");
+    // The branch, and only the branch. The working directory used to be fused
+    // onto this line and is now ⌘P's business alone.
+    expect(html).toContain('class="workspace-meta">main*<');
+    expect(html).not.toContain("~/dev/muxflow");
     // The one control in the agents header names both its state and its effect.
-    expect(html).toContain("Agent ordering: grouped. Switch to priority.");
+    expect(html).toContain("Agent ordering: workspace. Switch to status.");
     // The only resting connection indicator, and it is the way into settings.
     expect(html).toContain("Host omarchy over ssh, connected. Open connection settings.");
     expect(html).toContain("41 ms");
@@ -71,14 +75,38 @@ describe("application shell accessibility contracts", () => {
   it("badges only the workspaces and agents that are waiting on a human", () => {
     // The badge itself is decorative, so the count has to be in the row's own
     // accessible name or a screen reader never hears it.
-    expect(sidebar()).toContain('aria-label="A very long workspace name, codex · blocked, 2 agents waiting, main* · ~/dev/muxflow"');
+    expect(sidebar()).toContain('aria-label="A very long workspace name, codex · blocked, 2 agents waiting, main*"');
     expect(sidebar()).toContain("Codex one, blocked, waiting, work, tab 1");
     const quiet = sidebar({
-      agents: buildAgentRows([agent({ displayName: "Claude", lifecycle: "working" })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "grouped"),
-      rows: [{ ...rows[0], unread: 0, attention: "working", working: true, activity: undefined }],
+      agents: buildAgentRows([agent({ displayName: "Claude", lifecycle: "working" })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "workspace"),
+      rows: [{ ...rows[0], unread: 0, attention: "working", working: true, agents: [], agentOverflow: 0 }],
     });
     expect(quiet).not.toContain("waiting");
     expect(quiet).not.toContain('class="badge badge-row"');
+  });
+
+  it("lists three agents on a workspace row and counts the rest", () => {
+    const busy = sidebar({
+      rows: [{
+        ...rows[0],
+        agents: [
+          { id: "a1", name: "codex", state: "blocked" },
+          { id: "a2", name: "claude", state: "done" },
+          { id: "a3", name: "aider", state: "working" },
+        ],
+        agentOverflow: 2,
+      }],
+    });
+    expect(busy.match(/class="workspace-activity-line/g)).toHaveLength(4);
+    expect(busy).toContain("codex · blocked");
+    expect(busy).toContain("claude · done, unread");
+    expect(busy).toContain("aider · working");
+    expect(busy).toContain("…2 more");
+    // Four lines, one announcement: the label names the loudest and counts the
+    // rest rather than reading every line of one list item.
+    expect(busy).toContain('aria-label="A very long workspace name, codex · blocked, 5 agents, 2 agents waiting, main*"');
+    // Nothing to count means nothing is said about counting.
+    expect(sidebar()).not.toContain("more");
   });
 
   it("reaches the agent row actions from the command registry, on the last agent focused", async () => {
@@ -87,7 +115,7 @@ describe("application shell accessibility contracts", () => {
     const onResumeAgent = vi.fn();
     const agents = buildAgentRows(
       [agent({ id: "a1", displayName: "Codex one", lifecycle: "blocked" })],
-      () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "grouped",
+      () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "workspace",
     );
     const adapters: AgentAdapterDescriptor[] = [{
       id: "codex", displayName: "Codex", supportsLaunch: true, supportsResume: true, supportsHooks: true,
@@ -96,7 +124,7 @@ describe("application shell accessibility contracts", () => {
     }];
     let renderer!: ReturnType<typeof create>;
     const element = (rows: typeof agents, canMutate = true) => <WorkspaceSidebar
-      adapters={adapters} agents={rows} agentSort="grouped" agentsRatio={0.4} canMutate={canMutate}
+      adapters={adapters} agents={rows} agentSort="workspace" agentsRatio={0.4} canMutate={canMutate}
       hostLabel="omarchy" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
       onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop}
@@ -130,7 +158,7 @@ describe("application shell accessibility contracts", () => {
     // which is exactly what shipped when this class stopped interpolating.
     for (const [lifecycle, expected] of [["working", "working"], ["blocked", "blocked"], ["idle", "idle"]] as const) {
       const html = sidebar({
-        agents: buildAgentRows([agent({ displayName: "A", lifecycle })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "grouped"),
+        agents: buildAgentRows([agent({ displayName: "A", lifecycle })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "workspace"),
       });
       expect(html, lifecycle).toContain(`class="state-dot ${expected}"`);
     }
@@ -274,9 +302,11 @@ describe("saved host picker", () => {
     onProbeHelper={noop}
     onProfile={noop}
     onRequestHelperInstall={noop}
+    onNotificationStatus={async () => "authorized"}
     onShell={noop}
     onSounds={noop}
     onSshConfigPath={noop}
+    onTestNotification={async () => undefined}
     onSshTarget={noop}
     profiles={profiles as unknown as HostProfile[]}
     remote={false}
@@ -287,6 +317,49 @@ describe("saved host picker", () => {
     sshTarget=""
     {...overrides}
   />;
+
+  it("reports the OS notification permission and what the user would do about it", async () => {
+    const soundsTab = (renderer: ReturnType<typeof create>) =>
+      renderer.root.findAllByType("button").find((node) => node.props.children === "Sounds")!;
+    const shown = async (status: string) => {
+      let renderer!: ReturnType<typeof create>;
+      await act(async () => { renderer = create(settings({ onNotificationStatus: async () => status as never })); });
+      await act(async () => { soundsTab(renderer).props.onClick(); });
+      const text = JSON.stringify(renderer.toJSON());
+      await act(async () => renderer.unmount());
+      return text;
+    };
+    // The three states are three different answers, and the difference is the
+    // whole reason the line exists: "denied" is a setting to change, "not
+    // requested" is a button to press, "unsupported" is the wrong build.
+    expect(await shown("denied")).toContain("Notifications are turned off for this app.");
+    expect(await shown("notDetermined")).toContain("sending a test notification is what asks for permission");
+    expect(await shown("unsupported")).toContain("nothing to deliver notifications through");
+    expect(await shown("authorized")).toContain("Notifications are allowed for this app.");
+  });
+
+  it("sends a test notification and shows the exact failure beside the button", async () => {
+    const onTestNotification = vi.fn(async () => "macOS notification permission is denied; enable it in System Settings");
+    const onNotificationStatus = vi.fn(async () => "notDetermined" as never);
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(settings({ onNotificationStatus, onTestNotification })); });
+    await act(async () => {
+      renderer.root.findAllByType("button").find((node) => node.props.children === "Sounds")!.props.onClick();
+    });
+    const button = () => renderer.root.findAllByType("button")
+      .find((node) => String(node.props.children).includes("Send test notification"))!;
+    await act(async () => { button().props.onClick(); });
+    expect(onTestNotification).toHaveBeenCalledTimes(1);
+    const text = JSON.stringify(renderer.toJSON());
+    // Inline and announced, not a toast: this is a diagnostic the user pressed
+    // a button to get, and it belongs beside the button that produced it.
+    expect(text).toContain("macOS notification permission is denied");
+    expect(text).toContain('"role":"alert"');
+    // The prompt this button raises can change the permission, so the line
+    // above it is re-read once the attempt settles.
+    expect(onNotificationStatus).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.unmount());
+  });
 
   it("shows the host the user picked, not the one the app is connected to", () => {
     // The defect: the control derived its value by matching each saved profile

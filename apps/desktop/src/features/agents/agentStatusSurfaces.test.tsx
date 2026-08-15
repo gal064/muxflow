@@ -20,11 +20,11 @@ const rowsFor = (agents: readonly AgentRecord[]) => buildAgentRows(
   agents,
   (record) => ({ workspaceOrder: 0, workspaceName: record.sessionName, tabIndex: 1 }),
   () => true,
-  "priority",
+  "status",
 );
 
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
-  adapters={[]} agents={[]} agentSort="priority" agentsRatio={0.4} canMutate hostLabel="omarchy"
+  adapters={[]} agents={[]} agentSort="status" agentsRatio={0.4} canMutate hostLabel="omarchy"
   latencyMs={41} maxWidth={426} onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop}
   onRenameAgent={noop} onResumeAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
   onSelectWorkspace={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop}
@@ -158,7 +158,7 @@ describe("one derivation, three surfaces", () => {
       />),
       renderToStaticMarkup(<WorkspaceSwitcher
         onClose={noop} onSelect={noop} stateGlyphs
-        rows={[{ session, active: true, attention: "blocked", unread: 1, working: false }]}
+        rows={[{ session, active: true, attention: "blocked", unread: 1, working: false, agents: [], agentOverflow: 0 }]}
       />),
     ];
     for (const html of surfaces) expect(html).toMatch(/class="(state|tab)-dot [a-z]+ glyphs"/);
