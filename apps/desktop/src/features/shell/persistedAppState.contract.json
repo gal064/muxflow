@@ -54,7 +54,7 @@
     "sidebarCollapsed": true,
     "sidebarWidth": 260,
     "panelOpen": true,
-    "agentSort": "priority",
+    "agentSort": "status",
     "agentsSectionRatio": 0.42,
     "agentStateGlyphs": true,
     "terminalScreenReader": true,

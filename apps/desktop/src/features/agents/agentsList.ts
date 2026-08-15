@@ -5,20 +5,26 @@ import type { AgentDisplayState, AgentRecord } from "./types";
  * The sidebar's agents section is a flat list across every workspace, with one
  * control: the order it is in.
  *
- * `grouped` follows the workspace list above it, so the two halves of the
- * sidebar read as one thing. `priority` is the inbox: blocked first, then
+ * `workspace` follows the workspace list above it, so the two halves of the
+ * sidebar read as one thing. `status` is the inbox: blocked first, then
  * done-but-unread, then working, then idle — Herdr's ranking, in which a
  * finished agent outranks a running one because a finished agent is the one
  * waiting on a human.
+ *
+ * The two modes were called `grouped` and `priority`, which named neither the
+ * thing sorted nor — in `grouped`'s case — what it does, since neither mode
+ * has ever drawn a group heading. The orders themselves did not change; the
+ * button now says what each one is. Persisted values from before the rename
+ * migrate in `features/shell/types.ts`.
  */
-export type AgentSortMode = "grouped" | "priority";
+export type AgentSortMode = "status" | "workspace";
 
 export function isAgentSortMode(value: unknown): value is AgentSortMode {
-  return value === "grouped" || value === "priority";
+  return value === "status" || value === "workspace";
 }
 
 export function nextSortMode(mode: AgentSortMode): AgentSortMode {
-  return mode === "grouped" ? "priority" : "grouped";
+  return mode === "workspace" ? "status" : "workspace";
 }
 
 /** Where a row sits in the workspace list and in its workspace's tab strip. */
@@ -57,7 +63,7 @@ export function buildAgentRows(
     location: locate(agent),
     routable: routable(agent),
   }));
-  return rows.sort(mode === "priority" ? byPriority : byWorkspace);
+  return rows.sort(mode === "status" ? byPriority : byWorkspace);
 }
 
 function byPriority(left: AgentListRow, right: AgentListRow): number {
