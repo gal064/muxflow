@@ -56,6 +56,7 @@ import {
   mountedTerminalPanes,
   openFileTab,
   openGitDiffTab,
+  pinAppTab,
   reconcileWorkspaceIdentity,
   recoverableAppTabCount,
   recoverAppTabsFromPreviousServer,
@@ -682,7 +683,7 @@ export function App() {
     void runCommand("window.close", { kind: tab.kind === "app" ? "appTab" : "terminalTab", id: tab.id });
   };
 
-  const openExplorerEntry = (entry: FileEntry) => {
+  const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {
     if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || entry.kind === "directory"
       || (entry.kind === "symlink" && entry.targetKind !== "file")) return;
     const kind = /\.md(?:own)?$/i.test(entry.name) ? "markdown" as const : "file" as const;
@@ -694,8 +695,12 @@ export function App() {
       entry.path,
       kind,
       workspaceFiles.root!,
+      options,
     ));
   };
+
+  /** A preview tab stops being disposable the moment the user commits to it. */
+  const pinOpenTab = (tabId: string) => setAppState((current) => pinAppTab(current, currentHostProfileId, tabId));
 
   const mutateFile = async (mutation: FileMutation) => {
     if (!fileScope || !workspaceFiles.root || !hostState.canMutate) throw new Error("File changes are unavailable while the host is read-only.");
@@ -914,6 +919,7 @@ export function App() {
           onClose={closeCombinedTab}
           onMove={moveCombinedTab}
           onNewTerminal={() => void runCommand("window.new")}
+          onPin={(tab) => pinOpenTab(tab.id)}
           onRenameTerminal={(tab) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id })}
           onSelect={selectCombinedTab}
       stateGlyphs={appState.shell.agentStateGlyphs}
@@ -942,6 +948,7 @@ export function App() {
             canWrite={hostState.canMutate}
             client={fileClient}
             onDownload={(path, kind, root) => setPendingDownload({ path, kind, root })}
+            onEdit={() => pinOpenTab(selectedAppTab.id)}
             onStatus={setStatus}
             onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, selectedAppTab.id, viewMode))}
             scope={fileScope}

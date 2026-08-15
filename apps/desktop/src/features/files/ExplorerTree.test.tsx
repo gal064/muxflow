@@ -107,6 +107,42 @@ describe("ExplorerTree", () => {
     await act(async () => { filtering.unmount(); });
   });
 
+  it("asks for a preview on a single click and a permanent tab on every deliberate open", async () => {
+    const onOpen = vi.fn();
+    const onToggle = vi.fn();
+    const withDirectory: DirectoryListing = {
+      ...listing,
+      entries: [...listing.entries, { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true }],
+    };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", withDirectory]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}
+      onToggle={onToggle} onOpen={onOpen} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+    const row = renderer.root.findAllByProps({ className: "file-main" })[0];
+
+    await act(async () => { row.props.onClick(); });
+    expect(onOpen).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/r/.env" }), { preview: true });
+    // The click of a double-click has already fired; the second click pins the
+    // tab that first one created.
+    await act(async () => { row.props.onDoubleClick(); });
+    expect(onOpen).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/r/.env" }), { preview: false });
+
+    const treeRow = renderer.root.findAllByProps({ "data-tree-index": 0 })[0];
+    await act(async () => { treeRow.props.onKeyDown({ key: "Enter", target: 1, currentTarget: 1, preventDefault: vi.fn() }); });
+    expect(onOpen).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/r/.env" }), { preview: false });
+
+    await act(async () => { treeRow.props.onPointerDown(); });
+    await act(async () => { rowCommandRegistry.run("files.open"); });
+    expect(onOpen).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/r/.env" }), { preview: false });
+
+    // An expandable directory toggles and never opens, single or double.
+    const directory = renderer.root.findAllByProps({ className: "file-main" }).at(-1)!;
+    onOpen.mockClear();
+    await act(async () => { directory.props.onClick(); directory.props.onDoubleClick(); });
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(onToggle).toHaveBeenCalledWith("/r/src");
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("never changes the tree's height to say a directory is being re-read", () => {
     // The reported flicker: the "Loading…" row lives inside the scrolling box,
     // so showing it while rows are already up grew the content by a row and

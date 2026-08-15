@@ -31,7 +31,12 @@ interface Props {
   disabled: boolean;
   error?: string;
   onToggle(path: string): void;
-  onOpen(entry: FileEntry): void;
+  /**
+   * `preview: true` is a single click — a disposable tab the next single click
+   * reuses. Every deliberate open (double-click, Enter, the Open item, the
+   * palette command) asks for a permanent one.
+   */
+  onOpen(entry: FileEntry, options: { preview: boolean }): void;
   onMutate(mutation: FileMutation): Promise<void>;
   onDownload(request: DownloadRequest): Promise<void>;
   onCancelTransfer(id: string): Promise<void>;
@@ -102,7 +107,9 @@ export function ExplorerTree(props: Props) {
     }
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      if (entry.expandable) props.onToggle(entry.path); else props.onOpen(entry);
+      // Enter pins, as VS Code's does: reaching a file with the keyboard and
+      // pressing Enter is as deliberate as a double-click.
+      if (entry.expandable) props.onToggle(entry.path); else props.onOpen(entry, { preview: false });
     }
   };
 
@@ -145,7 +152,7 @@ export function ExplorerTree(props: Props) {
   const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
   runRowCommand.current = (commandId) => {
     switch (commandId) {
-      case "files.open": if (focusedEntry) props.onOpen(focusedEntry); return;
+      case "files.open": if (focusedEntry) props.onOpen(focusedEntry, { preview: false }); return;
       case "files.rename": begin("rename", focusedEntry); return;
       case "files.move": begin("move", focusedEntry); return;
       case "files.duplicate": begin("duplicate", focusedEntry); return;
@@ -224,12 +231,15 @@ export function ExplorerTree(props: Props) {
         const { entry, depth } = row;
         const isOpen = props.expanded.has(entry.path);
         const icon = fileIcon(entry, isOpen);
-        return <div aria-expanded={entry.expandable ? isOpen : undefined} aria-level={depth + 1} aria-selected={index === focusIndex} className="file-row" data-tree-index={index} key={entry.path} onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry); }} onContextMenu={(event) => {
+        return <div aria-expanded={entry.expandable ? isOpen : undefined} aria-level={depth + 1} aria-selected={index === focusIndex} className="file-row" data-tree-index={index} key={entry.path} onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry, { preview: true }); }} onContextMenu={(event) => {
           event.preventDefault();
           focusRow(index);
           setMenu({ entry, anchor: { x: event.clientX, y: event.clientY } });
         }} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => navigateEntry(event, index, depth, entry)} onPointerDown={() => setFocusIndex(index)} role="treeitem" style={{ paddingLeft: `${8 + depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1}>
-          <button className="file-main" onClick={() => entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry)} tabIndex={-1} type="button">
+          {/* The click of a double-click fires first and opens the preview;
+              the second click then pins that same tab, which is exactly the
+              VS Code behaviour and needs no click-delay timer. */}
+          <button className="file-main" onClick={() => entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry, { preview: true })} onDoubleClick={() => { if (!entry.expandable) props.onOpen(entry, { preview: false }); }} tabIndex={-1} type="button">
             <span className="file-twisty">{entry.expandable ? <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={11} /> : null}</span>
             <span className={`file-icon ${entry.kind}`} style={{ color: icon.color }}><Icon name={icon.icon} size={14} /></span>
             <span title={entryTooltip(entry)}>{entry.name}</span>
@@ -254,7 +264,7 @@ export function ExplorerTree(props: Props) {
       anchor={menu.anchor}
       items={menu.entry
         ? [
-          ...(menu.entry.kind === "directory" ? [] : [{ id: "open", label: "Open", run: () => props.onOpen(menu.entry!) }]),
+          ...(menu.entry.kind === "directory" ? [] : [{ id: "open", label: "Open", run: () => props.onOpen(menu.entry!, { preview: false }) }]),
           { id: "rename", label: "Rename…", disabled: props.disabled, run: () => begin("rename", menu.entry) },
           { id: "move", label: "Move…", disabled: props.disabled, run: () => { setValue(""); begin("move", menu.entry); } },
           { id: "duplicate", label: "Duplicate…", disabled: props.disabled, run: () => begin("duplicate", menu.entry) },
