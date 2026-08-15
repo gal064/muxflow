@@ -377,10 +377,32 @@ impl TerminalClients {
         }
         if make_visible {
             self.select_session(session_id)?;
-        } else if self.visible_session.as_deref() == Some(session_id)
-            && let Some(client) = self.clients.get_mut(session_id)
-        {
-            client.set_sizing(true)?;
+        } else if self.visible_session.as_deref() == Some(session_id) {
+            // A fresh control client for the session that is already visible —
+            // a reconnect, or one whose tmux process died. It re-arms sizing,
+            // so it needs the size for the same reason a newly selected one
+            // does: it is a client tmux now listens to, and it has been told
+            // nothing.
+            self.size_visible_client(session_id)?;
+        }
+        Ok(())
+    }
+
+    /// Makes `session_id`'s client the one tmux sizes from, and tells it what
+    /// size that is.
+    ///
+    /// One function because they are one act. The flag is what makes tmux
+    /// listen and the size is what it then hears; a caller that could do the
+    /// first without the second is how M13-E005 happened.
+    fn size_visible_client(&mut self, session_id: &str) -> anyhow::Result<()> {
+        let last_size = self.last_size;
+        let client = self
+            .clients
+            .get_mut(session_id)
+            .context("selected session control client is detached")?;
+        client.set_sizing(true)?;
+        if let Some((columns, rows)) = last_size {
+            client.resize(columns, rows)?;
         }
         Ok(())
     }
@@ -428,18 +450,7 @@ impl TerminalClients {
         {
             client.set_sizing(false)?;
         }
-        let client = self
-            .clients
-            .get_mut(session_id)
-            .context("selected session control client is detached")?;
-        client.set_sizing(true)?;
-        // Immediately, and in this order: the flag is what makes tmux listen,
-        // and the size is what it then hears. A client that participates in
-        // sizing without having been given one leaves tmux holding the 80x24
-        // default for windows the user is looking at.
-        if let Some((columns, rows)) = self.last_size {
-            client.resize(columns, rows)?;
-        }
+        self.size_visible_client(session_id)?;
         self.visible_session = Some(session_id.to_owned());
         Ok(())
     }

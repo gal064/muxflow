@@ -38,9 +38,16 @@ against a copy of a real configuration:
 
 ```
 tmux-ide-host hook status    [--adapter codex|claude-code] [--home DIR] [--settings-path FILE]
-tmux-ide-host hook install   [--adapter …] [--home …] [--settings-path …]
-tmux-ide-host hook uninstall [--adapter …] [--home …] [--settings-path …]
+tmux-ide-host hook install   [--adapter …] [--home …] [--settings-path …] [--yes]
+tmux-ide-host hook uninstall [--adapter …] [--home …] [--settings-path …] [--yes]
 ```
+
+`install` and `uninstall` refuse to change the agent configuration in your own
+home directory unless you pass `--yes`. The desktop will not write a host's
+configuration without a recorded answer for that host, and this command is the
+same installer without an interface to ask through: `--yes` is where the answer
+goes. A run redirected by `--home` or `--settings-path` changes nothing of
+yours and needs no confirmation. `status` reads only, and is never gated.
 
 `--home` relocates every adapter's configuration; `--settings-path` relocates
 exactly the adapter named by `--adapter`, which it requires. Without

@@ -2,7 +2,10 @@ use std::{
     ffi::OsString,
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
 };
 
@@ -65,6 +68,18 @@ fn runtime_pointer_path(environment: impl Fn(&str) -> Option<OsString>) -> Optio
 }
 
 pub fn record_runtime_dir(runtime: &Path) -> anyhow::Result<()> {
+    // Only the directory this environment resolves on its own, and only when
+    // nothing pinned it — by `ADE_HOST_RUNTIME_DIR` or by an explicit
+    // `--socket` somewhere else. Every test fixture on this machine pins its
+    // directory one of those two ways while inheriting the developer's real
+    // `HOME`, so a fixture that published would point the *user's* hooks at a
+    // throwaway directory; `fallback_runtime_dir` prefers a directory that has
+    // held a daemon, so their undelivered events would follow it there too.
+    // Symmetric with `candidate_runtime_dirs`, which collapses to exactly one
+    // directory under the same condition.
+    if environment("ADE_HOST_RUNTIME_DIR").is_some() || runtime != default_runtime_dir() {
+        return Ok(());
+    }
     let Some(pointer) = runtime_pointer_path(environment) else {
         return Ok(());
     };
@@ -106,13 +121,17 @@ fn candidate_runtime_dirs(
     if environment("ADE_HOST_RUNTIME_DIR").is_some() {
         return candidates;
     }
+    // Read back as the bytes it was written as. A path is not text: decoding it
+    // lossily produces a path that exists nowhere, and trimming it corrupts the
+    // legal ones that end in a space.
     if let Some(pointer) = runtime_pointer_path(environment)
         && let Ok(recorded) = fs::read(&pointer)
+        && !recorded.is_empty()
     {
-        let recorded = String::from_utf8_lossy(&recorded).trim().to_owned();
-        if !recorded.is_empty() {
-            add_unique(&mut candidates, PathBuf::from(recorded));
-        }
+        add_unique(
+            &mut candidates,
+            PathBuf::from(std::ffi::OsStr::from_bytes(&recorded).to_owned()),
+        );
     }
     if let Some(path) = environment("XDG_RUNTIME_DIR") {
         add_unique(&mut candidates, PathBuf::from(path).join("tmux-agent-ide"));

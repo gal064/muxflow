@@ -108,7 +108,7 @@ export function App() {
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
   const connectionController = useAppConnectionController({ agentClient, fileClient, gitClient, setStatus });
   const {
-    activeSessionId, activeWindowId, appFocused, clientId, clientIdRef, connection,
+    activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
     profiles, selectedProfileId, setActiveSessionId, setActiveWindowId,
@@ -330,13 +330,20 @@ export function App() {
     return { ok: true };
   }, [clientId, currentHostProfileId, hostState.canMutate, hostState.generation, hostState.serverIdentity, setAppState]);
 
-  const agentScope = useMemo(() => clientId && hostState.serverIdentity && hostState.canMutate ? {
+  // `clientHostProfileId === currentHostProfileId` is not redundant: the profile
+  // id follows the connection spec immediately and the client follows it an
+  // effect later, so a render that changes hosts commits with one host's name
+  // and another's live client. There is no scope during that window rather
+  // than a scope naming two machines — which is what let a write land on the
+  // host the user had not answered about (M13-E004).
+  const agentScope = useMemo(() => clientId && clientHostProfileId === currentHostProfileId
+    && hostState.serverIdentity && hostState.canMutate ? {
     clientId,
     hostProfileId: currentHostProfileId,
     serverIdentity: hostState.serverIdentity,
     topologyGeneration: hostState.generation,
     connectionEpoch: terminalEpoch,
-  } : undefined, [clientId, currentHostProfileId, hostState.canMutate, hostState.generation, hostState.serverIdentity, terminalEpoch]);
+  } : undefined, [clientHostProfileId, clientId, currentHostProfileId, hostState.canMutate, hostState.generation, hostState.serverIdentity, terminalEpoch]);
   const notificationActivation = useAgentNotificationActivation({
     agentClient,
     agentScope,
@@ -393,7 +400,7 @@ export function App() {
       ? { sessionId: activeSession.id, windowId: activeWindow.id, paneId: activePane.id, root: workspaceFiles.root }
       : undefined,
     host: agentHost,
-    onHooksChanged: (action, hostProfileId) => {
+    onHooksChanged: (action, hostProfileId, hostIdentity) => {
       agentRuntime.refreshSnapshot();
       // Installing through the exact-diff review *is* consent for this host,
       // and removing is withdrawing it. Recording only one of the two left a
@@ -403,7 +410,7 @@ export function App() {
       // Against the host the review named, which is the host that was written.
       recordHostSetupDecision(hostProfileId, action === "install" ? "accepted" : "declined");
       if (action === "uninstall") {
-        void agentRuntime.removeHostNaming().catch((cause) => setStatus(String(cause)));
+        void agentRuntime.removeHostNaming(hostIdentity).catch((cause) => setStatus(String(cause)));
       }
     },
     onModalChange: setAgentModalOpen,
@@ -417,6 +424,10 @@ export function App() {
     applyHostNaming: agentRuntime.applyHostNaming,
     connected: Boolean(agentScope),
     decision: appState.hostSetup[currentHostProfileId],
+    // A state file the app could not read is write-frozen until the user
+    // resets it, and an answer that only reaches memory is not one this app
+    // may act on.
+    decisionsArePersistable: appStateRecovery === undefined,
     hostIdentity: agentHost?.identity,
     hostLabel,
     hostProfileId: currentHostProfileId,
@@ -617,7 +628,6 @@ export function App() {
   // terminal turns pixels into. Both arrive here; neither is a pane's geometry.
   const { onMeasurements, surfaceRef } = useClientResize({
     activeWindowId,
-    activeSessionId,
     canMutate: hostState.canMutate,
     clientId,
     onStatus: setStatus,
@@ -1085,6 +1095,13 @@ export function App() {
           const local: HostProfile = { id: "local", label: "Local", connection: { mode: "local" } };
           setProfiles([local]);
           setProfileRecovery(undefined);
+          // As `switchHostProfile` does. Changing the connection without
+          // dropping the host state leaves the previous host's live client
+          // under the new host's name for as long as the bridge takes to tear
+          // down.
+          dispatchHost({ type: "reset" });
+          setActiveSessionId(undefined);
+          setActiveWindowId(undefined);
           setConnection(local.connection);
           setConnectionMode("local");
           setConnectionEpoch((value) => value + 1);

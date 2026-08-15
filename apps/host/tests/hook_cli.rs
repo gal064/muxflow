@@ -59,11 +59,11 @@ fn cli_persists_an_exact_unsequenced_hook_envelope() {
 /// M13-E003, end to end: the hook and the daemon disagreed about which runtime
 /// directory this machine has, and every event was filed where nobody read it.
 ///
-/// The split is reproduced exactly as the field machine had it. The daemon is
-/// started the way the desktop starts it over `ssh` — no `XDG_RUNTIME_DIR` — and
-/// the hook is run the way an agent inside tmux runs it, with one set to a
-/// directory that has no daemon in it. Only `HOME` is common to both, which is
-/// the whole basis of the fix.
+/// The split is reproduced as the field machine had it: the daemon and the hook
+/// each resolve their directory from their own environment, and the two
+/// environments disagree — which on the field machine was an `ssh` command with
+/// no `XDG_RUNTIME_DIR` against a tmux server that had one. Only `HOME` is
+/// common to both, which is the whole basis of the fix.
 #[test]
 fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     // Short, because the daemon's socket has to fit `sockaddr_un::sun_path`.
@@ -74,10 +74,15 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     }
     .join(format!("ade-split-{}", uuid::Uuid::new_v4().simple()));
     let home = root.join("home");
-    let daemon_runtime = root.join("daemon-runtime");
-    let hook_xdg = root.join("hook-xdg");
+    // Both ends resolve their directory the way the product does, from the
+    // environment — nothing here pins one with `ADE_HOST_RUNTIME_DIR`, because
+    // a daemon that was told exactly where to live publishes nothing and the
+    // split this reproduces would not arise.
+    let daemon_xdg = root.join("dx");
+    let hook_xdg = root.join("hx");
+    let daemon_runtime = daemon_xdg.join("tmux-agent-ide");
     fs::create_dir_all(&home).unwrap();
-    fs::create_dir_all(&daemon_runtime).unwrap();
+    fs::create_dir_all(&daemon_xdg).unwrap();
     fs::create_dir_all(&hook_xdg).unwrap();
     let socket = daemon_runtime.join("host.sock");
 
@@ -88,8 +93,8 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
         Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
             .args(["daemon"])
             .env("HOME", &home)
-            .env("ADE_HOST_RUNTIME_DIR", &daemon_runtime)
-            .env_remove("XDG_RUNTIME_DIR")
+            .env("XDG_RUNTIME_DIR", &daemon_xdg)
+            .env_remove("ADE_HOST_RUNTIME_DIR")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -141,7 +146,8 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
         .arg("--socket")
         .arg(&socket)
         .env("HOME", &home)
-        .env("ADE_HOST_RUNTIME_DIR", &daemon_runtime)
+        .env("XDG_RUNTIME_DIR", &daemon_xdg)
+        .env_remove("ADE_HOST_RUNTIME_DIR")
         .status()
         .unwrap();
     assert!(stopped.success());
@@ -262,6 +268,27 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
         serde_json::from_slice::<serde_json::Value>(&fs::read(&settings).unwrap()).unwrap(),
         serde_json::from_slice::<serde_json::Value>(&original).unwrap(),
         "uninstall left the foreign configuration changed"
+    );
+
+    // Nothing writes the operator's own configuration without being told to.
+    // This command is the one installer with no interface to ask through, and
+    // it used to have no notion of consent at all.
+    let unconfirmed = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        .args(["hook", "install"])
+        .output()
+        .unwrap();
+    assert!(!unconfirmed.status.success());
+    let refusal = String::from_utf8_lossy(&unconfirmed.stderr).into_owned();
+    assert!(refusal.contains("--yes"), "{refusal}");
+    assert!(refusal.contains("your own home directory"), "{refusal}");
+    // And `status` still answers freely: it reads, it does not write.
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+            .args(["hook", "status"])
+            .output()
+            .unwrap()
+            .status
+            .success()
     );
 
     // The override names one adapter's file, so it cannot be used without one.

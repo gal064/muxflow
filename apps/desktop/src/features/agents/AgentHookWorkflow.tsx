@@ -41,7 +41,7 @@ interface AgentWorkflowOptions {
    * `hostProfileId` is the host the review was opened against, not whichever
    * one is connected when it lands.
    */
-  onHooksChanged(action: "install" | "uninstall", hostProfileId: string): void;
+  onHooksChanged(action: "install" | "uninstall", hostProfileId: string, hostIdentity: string): void;
 }
 
 export interface AgentWorkflow {
@@ -108,7 +108,10 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
   }, [onStatus, runtime]);
 
   const reviewHooks = useCallback((adapter: AgentAdapterId, action: "install" | "uninstall") => {
-    if (!host) return onStatus("Reviewing hook changes requires a live authoritative host.");
+    if (!host) {
+      onStatus("Reviewing hook changes requires a live authoritative host.");
+      return;
+    }
     void runtime.reviewHooks(adapter, action, host.identity).then((diff) => {
       setError(undefined);
       setReview({ diff, host });
@@ -125,7 +128,7 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
       setError(undefined);
       void runtime.applyHooks(review.diff, review.host.identity).then(() => {
         onStatus(`${adapterName(review.diff.adapterId)} reviewed hooks ${review.diff.action === "install" ? "installed" : "removed"}.`);
-        onHooksChanged(review.diff.action, review.host.profileId);
+        onHooksChanged(review.diff.action, review.host.profileId, review.host.identity);
         setReview(undefined);
       }).catch((cause) => setError(String(cause))).finally(() => setApplying(false));
     }}
