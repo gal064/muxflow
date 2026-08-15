@@ -154,6 +154,38 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     daemon.reap();
     ingest(true);
 
+    // And it is read when that daemon comes back. This is the half the field
+    // machine needs: 45 events are waiting there, written by hooks that could
+    // never find it, and the first start after the upgrade is what replays
+    // them.
+    let mut restarted = DaemonGuard(Some(
+        Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+            .args(["daemon"])
+            .env("HOME", &home)
+            .env("XDG_RUNTIME_DIR", &daemon_xdg)
+            .env_remove("ADE_HOST_RUNTIME_DIR")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    ));
+    let drained = (0..200).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        socket.exists() && mailbox_entries(&daemon_runtime).is_empty()
+    });
+    assert!(
+        drained,
+        "the restarted daemon left events waiting in its own directory: {:?}",
+        mailbox_entries(&daemon_runtime)
+    );
+    assert!(
+        fs::read_to_string(daemon_runtime.join("agents.json"))
+            .unwrap_or_default()
+            .contains("\"source_event_ids\":[\""),
+        "the replayed event was not recorded as hook-sourced"
+    );
+    restarted.reap_after_stop(&socket, &home, &daemon_xdg);
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -164,6 +196,18 @@ impl DaemonGuard {
         if let Some(mut child) = self.0.take() {
             let _ = child.wait();
         }
+    }
+
+    fn reap_after_stop(&mut self, socket: &std::path::Path, home: &PathBuf, xdg: &PathBuf) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+            .args(["daemon-stop"])
+            .arg("--socket")
+            .arg(socket)
+            .env("HOME", home)
+            .env("XDG_RUNTIME_DIR", xdg)
+            .env_remove("ADE_HOST_RUNTIME_DIR")
+            .status();
+        self.reap();
     }
 }
 
