@@ -5,6 +5,7 @@ import { useModalDialog } from "../../commands/useModalDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { Icon } from "../../ui/Icon";
 import { SurfaceError } from "../../ui/SurfaceError";
+import { fileIcon } from "./fileIcons";
 import type { ActiveRoot, DirectoryListing, DownloadRequest, FileEntry, FileMutation, TransferStatus } from "./types";
 import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
 
@@ -204,8 +205,8 @@ export function ExplorerTree(props: Props) {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
         }} role="treeitem" style={{ marginLeft: `${8 + row.depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1} type="button">Load more…</button>;
         const { entry, depth } = row;
-        const isDirectory = entry.kind === "directory";
         const isOpen = props.expanded.has(entry.path);
+        const icon = fileIcon(entry, isOpen);
         return <div aria-expanded={entry.expandable ? isOpen : undefined} aria-level={depth + 1} aria-selected={index === focusIndex} className="file-row" data-tree-index={index} key={entry.path} onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry); }} onContextMenu={(event) => {
           event.preventDefault();
           focusRow(index);
@@ -213,7 +214,7 @@ export function ExplorerTree(props: Props) {
         }} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => navigateEntry(event, index, depth, entry)} onPointerDown={() => setFocusIndex(index)} role="treeitem" style={{ paddingLeft: `${8 + depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1}>
           <button className="file-main" onClick={() => entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry)} tabIndex={-1} type="button">
             <span className="file-twisty">{entry.expandable ? <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={11} /> : null}</span>
-            <span className={`file-state ${entry.kind}`}>{entry.kind === "directory" ? "d" : entry.kind === "symlink" ? "l" : "·"}</span>
+            <span className={`file-icon ${entry.kind}`} style={{ color: icon.color }}><Icon name={icon.icon} size={14} /></span>
             <span title={entryTooltip(entry)}>{entry.name}</span>
           </button>
         </div>;
