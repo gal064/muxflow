@@ -7,7 +7,7 @@ describe("status notices", () => {
     // disappear, because a silently swallowed refusal is the defect this
     // module exists to prevent.
     expect(noticeForStatus("Something nobody thought about", 1)?.message).toBe("Something nobody thought about");
-    expect(noticeForStatus("File rename completed.", 1)?.severity).toBe("info");
+    expect(noticeForStatus("Helper installed. Version 0.2.0.", 1)?.severity).toBe("info");
   });
 
   it("stays quiet for the progress the rest of the shell already shows", () => {
@@ -20,6 +20,11 @@ describe("status notices", () => {
       "Connection reconnecting…",
       "Opened README.md",
       "Viewing the last known workspace. Writes remain frozen.",
+      // A navigation that worked moved the workspace, the tab and the terminal
+      // in front of the user; repeating it in a notice full of tmux ids is the
+      // noise this list exists for. Both shapes the focus path emits.
+      "Agent Codex one focus request accepted for $1/@1/%1.",
+      "Notification for Codex one. Focus request accepted.",
       "   ",
     ]) expect(noticeForStatus(routine, 1), routine).toBeUndefined();
   });
@@ -28,7 +33,7 @@ describe("status notices", () => {
     const refusal = noticeForStatus("This action is unavailable until the authoritative connection is live.", 1)!;
     expect(refusal.severity).toBe("problem");
     expect(noticeDismissDelay(refusal)).toBeUndefined();
-    const info = noticeForStatus("File rename completed.", 1)!;
+    const info = noticeForStatus("Helper installed. Version 0.2.0.", 1)!;
     expect(noticeDismissDelay(info)).toBe(NOTICE_DISMISS_MS);
   });
 

@@ -334,12 +334,16 @@ describe("saved host picker", () => {
     // requested" is a button to press, "unsupported" is the wrong build.
     expect(await shown("denied")).toContain("Notifications are turned off for this app.");
     expect(await shown("notDetermined")).toContain("sending a test notification is what asks for permission");
-    expect(await shown("unsupported")).toContain("nothing to deliver notifications through");
+    expect(await shown("unsupported")).toContain("did not report a notification permission this app understands");
     expect(await shown("authorized")).toContain("Notifications are allowed for this app.");
   });
 
   it("sends a test notification and shows the exact failure beside the button", async () => {
-    const onTestNotification = vi.fn(async () => "macOS notification permission is denied; enable it in System Settings");
+    // The command rejects; nothing in between converts that into a resolved
+    // string, so a rejection cannot arrive as a silent success.
+    const onTestNotification = vi.fn(async () => {
+      throw new Error("macOS notification permission is denied; enable it in System Settings");
+    });
     const onNotificationStatus = vi.fn(async () => "notDetermined" as never);
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(settings({ onNotificationStatus, onTestNotification })); });

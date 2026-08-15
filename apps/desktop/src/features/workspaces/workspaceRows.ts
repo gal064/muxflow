@@ -62,7 +62,7 @@ export interface WorkspaceRowInputs {
 }
 
 export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
-  const loudest = topAgentsBySession(inputs.agents, WORKSPACE_ROW_AGENT_LIMIT);
+  const loudest = topAgentsBySession(inputs.agents);
   const unreadBySession = new Map<string, number>();
   for (const agent of inputs.agents) {
     if (!needsAttention(displayState(agent))) continue;
@@ -98,7 +98,6 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
  */
 function topAgentsBySession(
   agents: readonly AgentRecord[],
-  limit: number,
 ): Map<string, { top: AgentRecord[]; total: number }> {
   const loudest = new Map<string, { top: AgentRecord[]; total: number }>();
   // Sorted once, then grouped: a stable partition of an ordered list leaves
@@ -110,7 +109,7 @@ function topAgentsBySession(
       continue;
     }
     here.total += 1;
-    if (here.top.length < limit) here.top.push(agent);
+    if (here.top.length < WORKSPACE_ROW_AGENT_LIMIT) here.top.push(agent);
   }
   return loudest;
 }

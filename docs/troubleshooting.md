@@ -46,8 +46,9 @@ notification does not arrive.
   `release/macos/build-package.sh` is expected to deliver notifications**; that
   script is what removes `LSRequiresCarbon` and re-signs the bundle. Verify a
   bundle with `release/macos/verify-package.sh`.
-- *"This system has nothing to deliver notifications through"* — Linux only: no
-  notification daemon is answering on the session bus.
+- *"…did not report a notification permission this app understands"* — on Linux,
+  no notification daemon is answering on the session bus. On macOS, a permission
+  state newer than this build.
 
 A notification for the pane you are currently looking at is suppressed on
 purpose — the app is already showing that agent's state. Every other pane's

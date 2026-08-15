@@ -538,9 +538,12 @@ export function App() {
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     if (tab.kind === "terminal") selectWindow(tab.id);
-    // No toast: the tab the user asked for is now the tab on screen.
     else if (activeSession && hostState.serverIdentity) {
       setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, tab.id));
+      // Not a toast — `statusNotice` has classified "Opened …" as routine since
+      // it was written. This is the live region, and it is the only way ⌃1–9
+      // and ⌘⇧[ tell a screen reader which tab they landed on.
+      setStatus(`Opened ${tab.title}`);
     }
   }, [activeSession, currentHostProfileId, hostState.serverIdentity, selectWindow, setAppState]);
 
@@ -572,19 +575,26 @@ export function App() {
     // the current snapshot first, and a window one round trip old is not in it
     // yet. A real `select-window` is also what makes the *next* snapshot agree
     // — the app mirrors tmux's active flag, so anything only set locally here
-    // would be overwritten the moment the snapshot arrived.
-    selectCreatedWindow: (sessionId, windowId) => {
-      void performAction({ kind: "selectWindow", sessionId, windowId }).then((accepted) => {
-        if (!accepted) return;
-        // `snapshotRef`, not the render's `snapshot`: this resolves after a
-        // host round trip, and the workspace may have been renamed or closed
-        // in between. Same reason `surfacePaneDestination` reads the ref.
-        const session = snapshotRef.current.sessions.find((item) => item.id === sessionId);
-        if (session && hostState.serverIdentity) {
-          setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, session, undefined));
-        }
-        setActiveWindowId(windowId);
-      });
+    // would be overwritten the moment the snapshot arrived. The generation is
+    // chained from the create for the same reason `surfacePaneDestination`
+    // chains its own: the create already moved the topology.
+    selectCreatedWindow: (sessionId, windowId, generation) => {
+      notificationActivation.clearNotificationFocusGuard();
+      const scope = hostScopeRef.current;
+      const identity = hostState.serverIdentity;
+      if (!identity) return;
+      void performAction({ kind: "selectWindow", sessionId, windowId }, { serverIdentity: identity, generation })
+        .then((accepted) => {
+          // Re-checked after the round trip, not only before it: the guard is
+          // there to catch the connection being replaced mid-flight, which is
+          // precisely what can happen while this is in the air.
+          if (!accepted || !sameHostConnection(scope, hostScopeRef.current)) return;
+          // `snapshotRef`, not the render's `snapshot`: the workspace may have
+          // been renamed or closed while this was outstanding.
+          const session = snapshotRef.current.sessions.find((item) => item.id === sessionId);
+          if (session) setAppState((current) => selectAppTab(current, currentHostProfileId, identity, session, undefined));
+          setActiveWindowId(windowId);
+        });
     },
     selectRelativeTab: (direction) => {
       const index = combinedTabs.findIndex((tab) => tab.key === activeCombinedTabKey);
@@ -1056,9 +1066,9 @@ export function App() {
       onConnectionMode={(mode) => { setSelectedProfileId(""); setConnectionMode(mode); }}
       onDeleteProfile={() => void runCommand("host.delete")}
       onNotificationStatus={notificationPermissionStatus}
-      // The exact failure, not a toast: this is a diagnostic the user pressed
-      // a button to get, and it belongs beside the button that produced it.
-      onTestNotification={() => emitTestNotification().then(() => undefined, (error) => String(error))}
+      // Not routed through `setStatus`: this is a diagnostic the user pressed a
+      // button to get, and it belongs beside the button that produced it.
+      onTestNotification={emitTestNotification}
       onProbeHelper={() => void probeHelper()}
       onProfile={selectProfile}
       onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
