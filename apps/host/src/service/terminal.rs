@@ -43,6 +43,71 @@ pub(super) struct TerminalAttachment {
     stopped: Arc<AtomicBool>,
     input_tx: std_mpsc::SyncSender<InputDispatch>,
     stream_tx: std_mpsc::Sender<StreamControl>,
+    paused: Arc<PausedPanes>,
+}
+
+/// How many `refresh-client -A <pane>:continue` writes one flow-control
+/// episode is worth: the one issued with the pause, and one retry.
+///
+/// A retry rather than a loop because the two ways a resume is rejected have
+/// opposite answers. A transient rejection — the pane's command block collided
+/// with something else in flight — clears on the next write. A deterministic
+/// one does not, and repeating it forever would be a command per rejection
+/// against a pane that is never coming back on its own. Two attempts separate
+/// the cases; after that the pane is reported stalled rather than retried at.
+const MAX_FLOW_RESUME_ATTEMPTS: u8 = 2;
+
+/// The panes tmux has paused, and how many resumes have been spent on each.
+///
+/// Shared, because the two halves of the recovery live on different threads and
+/// have to agree. The control-stream reader learns a pane was paused (`%pause`)
+/// and that it came back (`%continue`); the service thread is what writes a
+/// seed request when the desktop reveals a pane or asks for recovery. Until
+/// this existed those halves did not agree, and the disagreement is the bug:
+/// output produced while a pane is paused is dropped rather than replayed, so a
+/// seed written *without* a resume re-photographs the screen and leaves the
+/// pane paused. The code's own comment — "the pane stays paused until it is
+/// reseeded" — described a recovery that could not work, which is exactly the
+/// user's report: switching tabs refreshes the pane once and it freezes again.
+///
+/// A pane that tmux never says `%continue` for stays in here, and every later
+/// capture for it carries a redundant resume. That is the deliberate direction
+/// to be wrong in: a resume for a pane that is not paused is one extra
+/// `refresh-client` on a path that runs on reveals and recoveries, and a
+/// missing one silences the pane for the rest of the session.
+#[derive(Default)]
+pub(super) struct PausedPanes(Mutex<HashMap<String, u8>>);
+
+impl PausedPanes {
+    /// tmux paused this pane; a fresh episode gets a fresh budget.
+    fn paused(&self, pane_id: &str) {
+        self.0.lock().unwrap().insert(pane_id.to_owned(), 0);
+    }
+
+    /// tmux resumed it, or it is no longer ours to resume.
+    fn cleared(&self, pane_id: &str) {
+        self.0.lock().unwrap().remove(pane_id);
+    }
+
+    pub(super) fn is_paused(&self, pane_id: &str) -> bool {
+        self.0.lock().unwrap().contains_key(pane_id)
+    }
+
+    /// Takes one attempt from this pane's budget, or reports that it is spent.
+    fn spend_resume_attempt(&self, pane_id: &str) -> bool {
+        let mut paused = self.0.lock().unwrap();
+        let Some(spent) = paused.get_mut(pane_id) else {
+            // Not paused as far as this knows, so there is nothing to retry —
+            // a rejected resume for such a pane is a correlation problem, not a
+            // flow-control one, and retrying it would say nothing new.
+            return false;
+        };
+        if *spent + 1 >= MAX_FLOW_RESUME_ATTEMPTS {
+            return false;
+        }
+        *spent += 1;
+        true
+    }
 }
 
 pub(super) struct VisibilityChange {
@@ -132,6 +197,8 @@ impl TerminalAttachment {
         let reader_stopped = Arc::clone(&stopped);
         let reader_stop_signal = Arc::clone(&stopped);
         let reader_panes = pane_ids.to_vec();
+        let paused = Arc::new(PausedPanes::default());
+        let reader_paused = Arc::clone(&paused);
         let reader_writer = spawn_control_writer(session_id, Arc::clone(&stdin))?;
         std::thread::Builder::new()
             .name(format!("host-tmux-control-{session_id}"))
@@ -146,6 +213,7 @@ impl TerminalAttachment {
                     terminal_generation,
                     stopped: reader_stop_signal,
                     controls: stream_rx,
+                    paused: reader_paused,
                 });
                 reader_stopped.store(true, Ordering::Release);
             })?;
@@ -156,6 +224,7 @@ impl TerminalAttachment {
             stopped,
             input_tx,
             stream_tx,
+            paused,
         })
     }
 
@@ -263,12 +332,19 @@ impl TerminalAttachment {
         Ok(())
     }
 
+    /// Re-photographs a pane, resuming it first if tmux has it paused.
+    ///
+    /// The resume is the half that was missing. A seed for a paused pane
+    /// restores its screen and then delivers nothing further, because tmux
+    /// drops a paused pane's output rather than replaying it — which is exactly
+    /// what the user reported: switching to another tab and back refreshes the
+    /// pane once, and it freezes again.
     pub(super) fn request_seed(&mut self, pane_id: &str) -> anyhow::Result<()> {
         validate_tmux_id(pane_id, '%')?;
         if !self.contains_pane(pane_id) {
             bail!("pane is not owned by this session control client");
         }
-        write_capture_request(&self.stdin, pane_id)
+        write_capture_request_resuming(&self.stdin, pane_id, self.paused.is_paused(pane_id))
     }
 
     fn set_sizing(&mut self, participates: bool) -> anyhow::Result<()> {
@@ -649,8 +725,9 @@ fn register_mounted_panes(
 /// block", so an interleaved write — an in-band keystroke shares this same
 /// stdin — would attribute the capture to the wrong pane and corrupt the seed.
 /// Every caller therefore writes both lines under a single lock hold; use
-/// [`write_capture_request`] rather than taking the lock yourself when only one
-/// pane is being captured. `input.rs` upholds the same rule for its own marker,
+/// [`write_capture_request_resuming`] rather than taking the lock yourself when
+/// only one pane is being captured. `input.rs` upholds the same rule for its
+/// own marker,
 /// and `capture_marker_and_capture_command_are_never_split_by_concurrent_input`
 /// proves it under concurrency.
 ///
@@ -666,12 +743,6 @@ fn queue_capture(stdin: &mut impl Write, pane_id: &str) -> anyhow::Result<()> {
     writeln!(stdin, "{}", queue_marker("__ADE_CAPTURE__", pane_id))?;
     writeln!(stdin, "{}", capture_command(pane_id))?;
     Ok(())
-}
-
-/// Writes one pane's capture marker and capture command under a single lock
-/// hold, upholding [`queue_capture`]'s adjacency invariant.
-fn write_capture_request<W: Write>(stdin: &Arc<Mutex<W>>, pane_id: &str) -> anyhow::Result<()> {
-    write_capture_request_resuming(stdin, pane_id, false)
 }
 
 /// One write the control-stream reader needs performed on its behalf.
@@ -711,9 +782,10 @@ pub(super) fn spawn_control_writer(
     Ok(sender)
 }
 
-/// As [`write_capture_request`], optionally resuming a pane tmux paused first.
-/// The resume and the capture share the lock hold so no other writer can land
-/// between them.
+/// Writes one pane's capture marker and capture command under a single lock
+/// hold, upholding [`queue_capture`]'s adjacency invariant, and resuming a pane
+/// tmux paused first. The resume and the capture share the lock hold so no
+/// other writer can land between them.
 fn write_capture_request_resuming<W: Write>(
     stdin: &Arc<Mutex<W>>,
     pane_id: &str,
@@ -727,18 +799,64 @@ fn write_capture_request_resuming<W: Write>(
         // The marker names the pane this resume belongs to, so a rejected
         // resume resnapshots one pane instead of the whole connection.
         writeln!(writer, "{}", queue_marker("__ADE_RESUME__", pane_id))?;
-        // The quotes are load-bearing. tmux's command lexer (`cmd-parse.y`
-        // `yylex`) treats an unquoted word beginning with `%` as a `%if`-style
-        // conditional directive unless the rest of the word is digits or `%`;
-        // `%5:continue` contains `:`, so the unquoted form is a
-        // `parse error: syntax error` and the pane stays paused forever.
-        // `resume_command_quotes_the_pause_argument_tmux_lexer_rejects` pins the
-        // byte-exact form.
-        writeln!(writer, "refresh-client -A '{pane_id}:continue'")?;
+        writeln!(writer, "{}", resume_command(pane_id))?;
     }
     queue_capture(&mut *writer, pane_id)?;
     writer.flush()?;
     Ok(())
+}
+
+/// The one command that takes a pane out of tmux's flow-control pause.
+///
+/// The quotes are load-bearing. tmux's command lexer (`cmd-parse.y` `yylex`)
+/// treats an unquoted word beginning with `%` as a `%if`-style conditional
+/// directive unless the rest of the word is digits or `%`; `%5:continue`
+/// contains `:`, so the unquoted form is a `parse error: syntax error` and the
+/// pane stays paused forever (P12-U001).
+/// `resume_command_quotes_the_pause_argument_tmux_lexer_rejects` pins the
+/// byte-exact form.
+///
+/// `ADE_TEST_REJECT_FLOW_RESUME=<n>` writes the unquoted form back for the
+/// first `n` resumes this process sends, which is what gives the pause lane a
+/// reproducible rejected resume. Recovering from one is the half of this
+/// mechanism a healthy tmux never exercises, so without an injected fault it
+/// can only be argued about; with one it is a lane result.
+///
+/// A count rather than a switch, because a permanently broken resume is not a
+/// bug this code can recover from — nothing can resume a pane if the only
+/// command that resumes it never parses — and a lane that demanded recovery
+/// from it would be demanding the impossible. `n` rejections followed by a
+/// working command is the real shape: a resume was refused, and the pane came
+/// back anyway.
+fn resume_command(pane_id: &str) -> String {
+    if take_injected_resume_rejection() {
+        return format!("refresh-client -A {pane_id}:continue");
+    }
+    format!("refresh-client -A '{pane_id}:continue'")
+}
+
+/// Consumes one injected rejection, if any are configured and left.
+///
+/// Gated on `ADE_PHASE1_TESTING` like every other fault injection here, so it
+/// cannot be turned on by an environment a user's shell happens to carry, and
+/// read once: a daemon does not change its mind about being a test daemon.
+fn take_injected_resume_rejection() -> bool {
+    static REMAINING: std::sync::OnceLock<AtomicU64> = std::sync::OnceLock::new();
+    REMAINING
+        .get_or_init(|| {
+            AtomicU64::new(if std::env::var_os("ADE_PHASE1_TESTING").is_some() {
+                std::env::var("ADE_TEST_REJECT_FLOW_RESUME")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0)
+            } else {
+                0
+            })
+        })
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+            (left > 0).then(|| left - 1)
+        })
+        .is_ok()
 }
 
 /// The correlation marker written ahead of a command whose `%error` has to be
@@ -951,7 +1069,7 @@ mod tests {
     #[test]
     fn reconnect_marks_every_pane_pending_for_a_fresh_seed() {
         let pane_ids: Vec<_> = (0..33).map(|index| format!("%{index}")).collect();
-        let state = StreamState::new(&pane_ids);
+        let state = StreamState::new(&pane_ids, Arc::new(PausedPanes::default()));
         assert_eq!(state.pane_states.len(), 33);
         assert!(
             state
@@ -963,7 +1081,7 @@ mod tests {
 
     #[test]
     fn capture_and_metadata_are_correlated_across_distinct_tmux_command_blocks() {
-        let mut state = StreamState::new(&["%1".into()]);
+        let mut state = StreamState::new(&["%1".into()], Arc::new(PausedPanes::default()));
         state.expected_capture = Some("%1".into());
         let tag = |number| CommandTag {
             timestamp: 1,
