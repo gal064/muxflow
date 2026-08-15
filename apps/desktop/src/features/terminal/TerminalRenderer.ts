@@ -801,11 +801,13 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   #mountWebgl(): void {
+    // Before the addon exists, because activating it is what builds the first
+    // glyph atlas, and an atlas built before the hook is in place keeps the
+    // heavier glyphs for as long as it lives. Outside the `try`, because that
+    // `catch` speaks for WebGL: a failure in here reported as "WebGL
+    // unavailable" would name the wrong subsystem and skip the renderer too.
+    installAtlasFontSmoothing();
     try {
-      // Before the addon exists, because activating it is what builds the first
-      // glyph atlas, and an atlas built before the hook is in place keeps the
-      // heavier glyphs for as long as it lives.
-      installAtlasFontSmoothing();
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
         webgl.dispose();
