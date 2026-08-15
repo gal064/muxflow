@@ -1,9 +1,11 @@
 use std::{
+    collections::VecDeque,
+    ffi::OsStr,
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
-    sync::Arc,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -48,10 +50,65 @@ struct DownloadJob {
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
     channel: Channel<Value>,
+    published: Arc<PublishedDownloads>,
+}
+
+/// The local files this session has actually written, and the whole authority
+/// behind `open_download`/`reveal_download`.
+///
+/// Handing the renderer a command that opens an arbitrary path with the user's
+/// default application would make any string the webview can produce an
+/// execution request. The commands take a path and answer "did I write this?"
+/// instead — so the renderer's reach into the OS opener is exactly the set of
+/// downloads the app just published, and nothing else.
+///
+/// Bounded and FIFO: a long session downloading thousands of files must not
+/// grow this without limit, and the oldest entry is the one whose toast and
+/// transfer row are furthest gone.
+#[derive(Default)]
+pub struct PublishedDownloads {
+    paths: Mutex<VecDeque<PathBuf>>,
+}
+
+const MAX_PUBLISHED_DOWNLOADS: usize = 256;
+
+impl PublishedDownloads {
+    fn record(&self, path: PathBuf) {
+        let Ok(mut paths) = self.paths.lock() else {
+            return;
+        };
+        if paths.iter().any(|candidate| candidate == &path) {
+            return;
+        }
+        while paths.len() >= MAX_PUBLISHED_DOWNLOADS {
+            paths.pop_front();
+        }
+        paths.push_back(path);
+    }
+
+    pub(super) fn contains(&self, path: &Path) -> bool {
+        self.paths
+            .lock()
+            .map(|paths| paths.iter().any(|candidate| candidate == path))
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_for_test(&self, path: PathBuf) {
+        self.record(path);
+    }
 }
 
 #[derive(Clone, Default)]
-pub struct DownloadManager;
+pub struct DownloadManager {
+    published: Arc<PublishedDownloads>,
+}
+
+impl DownloadManager {
+    pub(super) fn published(&self) -> &PublishedDownloads {
+        &self.published
+    }
+}
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -94,10 +151,40 @@ pub fn start_download(
         binding,
         cancellation: Arc::clone(&cancellation),
         channel: on_event,
+        published: Arc::clone(&transfers.published),
     };
     emit_download_state(&job, TransferState::Queued, json!({}));
     transfers.enqueue(job)?;
     Ok(transfer_id)
+}
+
+/// The name the save panel opens with, chosen so the panel's own "…already
+/// exists. Replace?" prompt effectively never appears.
+///
+/// The user's ask was "download three times, get three files, answer nothing".
+/// Renaming *after* the panel would be wrong — clicking Replace is consent, and
+/// silently renaming past it would ignore the user — so the uniqueness is
+/// applied to the default name instead, before they ever see it.
+#[tauri::command]
+pub fn suggest_download_destination(
+    file_name: String,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    use tauri::Manager;
+
+    let directory = app
+        .path()
+        .download_dir()
+        .map_err(|error| format!("could not resolve the Downloads directory: {error}"))?;
+    let name = super::local_destination::suggest_non_colliding_name(
+        &directory,
+        OsStr::new(file_name.as_str()),
+    )?;
+    directory
+        .join(name)
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "the Downloads directory path is not valid UTF-8".to_owned())
 }
 
 #[tauri::command]
@@ -154,9 +241,10 @@ pub(super) fn enqueue_acceptance_download(
         binding,
         cancellation: Arc::new(CancelState::new()),
         channel,
+        published: Arc::default(),
     };
     emit_download_state(&job, TransferState::Queued, json!({}));
-    DownloadManager.enqueue(job)?;
+    DownloadManager::default().enqueue(job)?;
     Ok(transfer_id)
 }
 
@@ -418,6 +506,10 @@ fn stream_download(
     let publication = destination
         .publish()
         .map_err(download_publication_failure)?;
+    // Recorded the moment the local file exists under its final name, and from
+    // the *final* path rather than the requested one — a `Rename` policy may
+    // have moved it. This is what later authorizes Open / Show in Finder.
+    job.published.record(destination.final_path().to_path_buf());
     let cleanup_status = if publication.cleanup_error.is_some() {
         CleanupStatus::Retained
     } else {

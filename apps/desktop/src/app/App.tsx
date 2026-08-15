@@ -31,8 +31,8 @@ import { useAgentNotificationActivation, type PaneSurfaceResult } from "../featu
 import { useAgentRuntime } from "../features/agents/useAgentRuntime";
 import { keyForScope, keyForTransferConnection, TauriFileWorkspaceClient } from "../features/files/api";
 import { ExplorerTree } from "../features/files/ExplorerTree";
-import { reconcileDownloadStatus, type ActiveDownloadStatus } from "../features/files/downloadStatus";
-import type { PendingDownload } from "../features/files/DownloadDialog";
+import { reconcileDownloadStatus, type ActiveDownloadStatus, type DownloadCompletion } from "../features/files/downloadStatus";
+import { chooseDownloadDestination, openDownload, revealDownload, revealDownloadLabel, type DownloadIntent } from "../features/files/downloadFlow";
 import type { ActiveRoot, DownloadRequest, FileEntry, FileMutation } from "../features/files/types";
 import { TauriGitWorkspaceClient } from "../features/git/api";
 import { GitSidebar } from "../features/git/GitSidebar";
@@ -152,7 +152,7 @@ export function App() {
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
   const [appRecoveryDiscardConfirmation, setAppRecoveryDiscardConfirmation] = useState(false);
   const [pendingAppRecovery, setPendingAppRecovery] = useState<{ hostProfileId: string; previousServerIdentity: string; currentServerIdentity: string; count: number; scope: HostScopeToken }>();
-  const [pendingDownload, setPendingDownload] = useState<PendingDownload>();
+  const [completedDownload, setCompletedDownload] = useState<DownloadCompletion>();
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
@@ -269,6 +269,7 @@ export function App() {
     const reconciled = reconcileDownloadStatus(status, activeDownloadStatus, workspaceFiles.transfers);
     if (reconciled.status !== status) setStatus(reconciled.status);
     if (reconciled.active !== activeDownloadStatus) setActiveDownloadStatus(reconciled.active);
+    if (reconciled.completion) setCompletedDownload(reconciled.completion);
   }, [activeDownloadStatus, status, workspaceFiles.transfers]);
   const performAction = useCallback(async (
     action: TmuxAction,
@@ -630,7 +631,7 @@ export function App() {
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
     || Boolean(confirmation) || Boolean(textPrompt)
-    || agentModalOpen || agentHostSetup.open || Boolean(pendingDownload) || appStateResetConfirmation || appRecoveryDiscardConfirmation
+    || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecoveryDiscardConfirmation
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
   useEffect(() => {
@@ -746,6 +747,25 @@ export function App() {
       });
       setStatus(message);
     }
+  };
+
+  /**
+   * The whole download gesture: the OS save panel, then the transfer. There is
+   * no in-app step, so cancelling the panel ends it with nothing said.
+   */
+  const startDownloadFlow = async (intent: DownloadIntent, downloadRoot: ActiveRoot) => {
+    let destination: string | undefined;
+    try {
+      destination = await chooseDownloadDestination(intent);
+    } catch (error) {
+      setStatus(`Could not open the save panel: ${String(error)}`);
+      return;
+    }
+    if (!destination) return;
+    // `overwrite`, not `rename`: the default name the panel opened with was
+    // already unique, so reaching an existing file means the user aimed at one
+    // and answered the panel's own Replace prompt.
+    await startDownload({ path: intent.path, kind: intent.kind, destination, collision: "overwrite" }, downloadRoot);
   };
 
   const moveCombinedTab = (tab: CombinedTab, direction: "left" | "right") => {
@@ -947,7 +967,7 @@ export function App() {
             activeRoot={workspaceFiles.root}
             canWrite={hostState.canMutate}
             client={fileClient}
-            onDownload={(path, kind, root) => setPendingDownload({ path, kind, root })}
+            onDownload={(path, kind, root) => void startDownloadFlow({ path, kind }, root)}
             onEdit={() => pinOpenTab(selectedAppTab.id)}
             onStatus={setStatus}
             onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, selectedAppTab.id, viewMode))}
@@ -987,7 +1007,9 @@ export function App() {
           loading={workspaceFiles.loading}
           requestedReads={workspaceFiles.requestedReads}
           onCancelTransfer={async (id) => { if (fileScope) await fileClient.cancelTransfer(fileScope, id); }}
-          onDownload={async (request) => { if (workspaceFiles.root) setPendingDownload({ root: workspaceFiles.root, path: request.path, kind: request.kind }); }}
+          onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
+          onOpenDownload={(destination) => void openDownload(destination).catch((error) => setStatus(String(error)))}
+          onRevealDownload={(destination) => void revealDownload(destination).catch((error) => setStatus(String(error)))}
           onLoadMore={workspaceFiles.loadMore}
           onMutate={mutateFile}
           onOpen={openExplorerEntry}
@@ -1038,6 +1060,13 @@ export function App() {
       {notice.severity === "problem"
         ? <SurfaceError className="toast-body" detail={notice.message} role="none" />
         : <span>{notice.message}</span>}
+      {/* Only on the notice this exact download raised: matching the message
+          means a later status replaces the buttons along with the text, so
+          they can never end up offering a file the toast is not about. */}
+      {completedDownload?.message === notice.message && <>
+        <button onClick={() => void openDownload(completedDownload.destination).catch((error) => setStatus(String(error)))} type="button">Open</button>
+        <button onClick={() => void revealDownload(completedDownload.destination).catch((error) => setStatus(String(error)))} type="button">{revealDownloadLabel(platform)}</button>
+      </>}
       <button aria-label="Dismiss" onClick={() => setNotice(undefined)} type="button">Dismiss</button>
     </div>}
     {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}
@@ -1110,11 +1139,6 @@ export function App() {
         setConfirmation(undefined);
         void performAction(pending.action, pending.precondition);
       }}
-      onDownloadCancel={() => setPendingDownload(undefined)}
-      onDownloadConfirm={(request, root) => {
-        setPendingDownload(undefined);
-        void startDownload(request, root);
-      }}
       onHelperCancel={() => dispatchHelper({ type: "cancelUpgrade" })}
       onHelperConfirm={() => void confirmHelperInstall()}
       onHostDeleteCancel={() => setHostDeleteConfirmation(undefined)}
@@ -1148,7 +1172,6 @@ export function App() {
       onShortcutClose={() => setShortcutEditorOpen(false)}
       onTextPromptCancel={() => setTextPrompt(undefined)}
       paletteOpen={paletteOpen}
-      pendingDownload={pendingDownload}
       platform={platform}
       profileResetConfirmation={profileResetConfirmation}
       shortcuts={shortcuts}

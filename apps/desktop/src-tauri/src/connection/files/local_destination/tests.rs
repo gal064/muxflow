@@ -136,6 +136,50 @@ fn rename_suffix_respects_name_max_and_utf8_boundaries() {
 }
 
 #[test]
+fn suggested_name_walks_past_collisions_using_the_same_rename_spelling() {
+    let root = std::env::temp_dir().join(format!("ade-dl-suggest-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+
+    // A free name is returned unchanged: the panel must not gratuitously
+    // rename a file the user has never downloaded before.
+    assert_eq!(
+        suggest_non_colliding_name(&root, OsStr::new("report.pdf")).unwrap(),
+        OsStr::new("report.pdf")
+    );
+
+    // Three downloads of the same file, zero prompts.
+    fs::write(root.join("report.pdf"), b"one").unwrap();
+    assert_eq!(
+        suggest_non_colliding_name(&root, OsStr::new("report.pdf")).unwrap(),
+        OsStr::new("report (1).pdf")
+    );
+    fs::write(root.join("report (1).pdf"), b"two").unwrap();
+    assert_eq!(
+        suggest_non_colliding_name(&root, OsStr::new("report.pdf")).unwrap(),
+        OsStr::new("report (2).pdf")
+    );
+
+    // A dangling symlink occupies the name as surely as a file does.
+    std::os::unix::fs::symlink(root.join("missing"), root.join("dangling.txt")).unwrap();
+    assert_eq!(
+        suggest_non_colliding_name(&root, OsStr::new("dangling.txt")).unwrap(),
+        OsStr::new("dangling (1).txt")
+    );
+
+    // The suggestion is a basename in the Downloads directory, never a path:
+    // a name carrying a separator or a traversal is refused outright.
+    for rejected in ["", "a/b", "..", "."] {
+        assert!(
+            suggest_non_colliding_name(&root, OsStr::new(rejected)).is_err(),
+            "accepted {rejected:?}"
+        );
+    }
+    assert!(suggest_non_colliding_name(&root, OsStr::new(&"n".repeat(4096))).is_err());
+
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn parent_namespace_swap_fails_closed_and_cleans_original_directory() {
     let root = std::env::temp_dir().join(format!("ade-dl-parent-swap-{}", Uuid::new_v4()));
     let parent = root.join("destination");

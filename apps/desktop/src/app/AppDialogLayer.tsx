@@ -4,8 +4,6 @@ import { ShortcutEditorDialog } from "../commands/ShortcutEditorDialog";
 import { TextInputDialog, type PendingTextPrompt } from "../commands/TextInputDialog";
 import type { PendingTmuxConfirmation } from "../commands/destructiveConfirmation";
 import type { CommandContext, CommandId, Platform, ShortcutOverrides } from "../commands/registry";
-import { DownloadDialog, type PendingDownload } from "../features/files/DownloadDialog";
-import type { ActiveRoot, DownloadRequest } from "../features/files/types";
 import type { HelperUpgradeState } from "../features/shell/helperUpgrade";
 import type { HostProfile } from "./types";
 
@@ -17,7 +15,6 @@ type AppDialogLayerProps = {
   hostDelete?: HostProfile;
   helperState: HelperUpgradeState;
   paletteOpen: boolean;
-  pendingDownload?: PendingDownload;
   platform: Platform;
   profileResetConfirmation: boolean;
   shortcuts: ShortcutOverrides;
@@ -30,8 +27,6 @@ type AppDialogLayerProps = {
   onAppStateResetConfirm(): void;
   onConfirmationCancel(): void;
   onConfirmationConfirm(confirmation: PendingTmuxConfirmation): void;
-  onDownloadCancel(): void;
-  onDownloadConfirm(request: DownloadRequest, root: ActiveRoot): void;
   onHelperCancel(): void;
   onHelperConfirm(): void;
   onHostDeleteCancel(): void;
@@ -48,7 +43,7 @@ type AppDialogLayerProps = {
 export function AppDialogLayer(props: AppDialogLayerProps) {
   const {
     appRecoveryDiscard, appStateResetConfirmation, commandContext, confirmation,
-    helperState, hostDelete, paletteOpen, pendingDownload, platform, profileResetConfirmation,
+    helperState, hostDelete, paletteOpen, platform, profileResetConfirmation,
     shortcuts, shortcutEditorOpen, textPrompt,
   } = props;
   return <>
@@ -98,6 +93,5 @@ export function AppDialogLayer(props: AppDialogLayerProps) {
       onCancel={props.onHelperCancel}
       onConfirm={props.onHelperConfirm}
     />}
-    {pendingDownload && <DownloadDialog pending={pendingDownload} onCancel={props.onDownloadCancel} onConfirm={props.onDownloadConfirm} />}
   </>;
 }

@@ -600,6 +600,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .transfer small { color: var(--chrome-dim); }
 .transfer progress { grid-column: 1 / -1; width: 100%; height: 4px; }
 .transfer button { justify-self: end; }
+.transfer-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 6px; }
+.transfer-actions button { justify-self: auto; }
 .transfer em { grid-column: 1 / -1; color: var(--danger-ink); font-style: normal; }
 .transfer .transfer-detail { grid-column: 1 / -1; }
 .transfer .transfer-finalizing { color: var(--state-working); }
@@ -847,7 +849,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .confirmation h2 { margin: 0 0 10px; font-size: 16px; }
 .confirmation p { color: var(--chrome-dim); line-height: 1.5; }
 .text-input-dialog form, .text-input-dialog label { display: grid; gap: 8px; }
-.text-input-dialog input, .file-dialog input:not([type="checkbox"]), .download-dialog input, .download-dialog select {
+.text-input-dialog input, .file-dialog input:not([type="checkbox"]) {
   width: 100%; padding: 7px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
   background: var(--chrome-bg); color: var(--chrome-ink);
 }
@@ -858,8 +860,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    dim text that did not read as a control in either state — and would have
    done the same to the next button added to any dialog. Opt out with
    `.bar-button` / `.inline-action`, which bring their own chrome. */
-:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment),
-.download-destination button {
+:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment) {
   padding: 6px 12px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
   background: var(--chrome-bg); color: var(--chrome-ink);
 }
@@ -874,11 +875,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .primary:disabled { opacity: .5; }
 .danger { border-color: var(--danger) !important; background: var(--danger) !important; color: var(--accent-ink) !important; }
 .dialog-error { color: var(--danger-ink) !important; }
-.file-dialog, .download-dialog { display: grid; gap: 11px; padding: 20px; }
-.file-dialog label, .download-dialog label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11px; }
+.file-dialog { display: grid; gap: 11px; padding: 20px; }
+.file-dialog label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11px; }
 .file-dialog .overwrite { grid-template-columns: auto 1fr; align-items: center; }
-.download-destination { display: flex; gap: 7px; }
-.download-destination input { min-width: 0; flex: 1; }
+/* Named for the download dialog it was written for; that dialog is gone and
+   the terminal upload confirmation is the surviving user. */
 .download-warning {
   padding: 8px; border: 1px solid var(--state-working); border-radius: 4px;
   color: var(--state-working); background: var(--chrome-bg); font-size: var(--type-meta);

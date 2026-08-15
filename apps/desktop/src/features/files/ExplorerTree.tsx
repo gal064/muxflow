@@ -5,8 +5,9 @@ import { useModalDialog } from "../../commands/useModalDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { Icon } from "../../ui/Icon";
 import { SurfaceError } from "../../ui/SurfaceError";
+import { revealDownloadLabel, type DownloadIntent } from "./downloadFlow";
 import { fileIcon } from "./fileIcons";
-import type { ActiveRoot, DirectoryListing, DownloadRequest, FileEntry, FileMutation, TransferStatus } from "./types";
+import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
 import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
 
 interface Props {
@@ -38,8 +39,14 @@ interface Props {
    */
   onOpen(entry: FileEntry, options: { preview: boolean }): void;
   onMutate(mutation: FileMutation): Promise<void>;
-  onDownload(request: DownloadRequest): Promise<void>;
+  /**
+   * What to download, not how: the collision policy is the save panel's
+   * business now, and the tree has no business pre-deciding it.
+   */
+  onDownload(intent: DownloadIntent): Promise<void>;
   onCancelTransfer(id: string): Promise<void>;
+  onOpenDownload(destination: string): void;
+  onRevealDownload(destination: string): void;
   onRefresh(path?: string): void;
   onLoadMore(path: string): void;
 }
@@ -157,7 +164,7 @@ export function ExplorerTree(props: Props) {
       case "files.move": begin("move", focusedEntry); return;
       case "files.duplicate": begin("duplicate", focusedEntry); return;
       case "files.delete": begin("delete", focusedEntry); return;
-      case "files.download": if (focusedEntry) void props.onDownload({ path: focusedEntry.path, kind: focusedEntry.kind === "directory" ? "folder" : "file", collision: "fail" }); return;
+      case "files.download": if (focusedEntry) void props.onDownload({ path: focusedEntry.path, kind: focusedEntry.kind === "directory" ? "folder" : "file" }); return;
       case "files.newFile": begin("newFile", focusedEntry); return;
       case "files.newFolder": begin("newDirectory", focusedEntry); return;
       case "files.refresh": props.onRefresh(); return;
@@ -268,7 +275,7 @@ export function ExplorerTree(props: Props) {
           { id: "rename", label: "Rename…", disabled: props.disabled, run: () => begin("rename", menu.entry) },
           { id: "move", label: "Move…", disabled: props.disabled, run: () => { setValue(""); begin("move", menu.entry); } },
           { id: "duplicate", label: "Duplicate…", disabled: props.disabled, run: () => begin("duplicate", menu.entry) },
-          { id: "download", label: menu.entry.kind === "directory" ? "Download folder…" : "Download…", run: () => void props.onDownload({ path: menu.entry!.path, kind: menu.entry!.kind === "directory" ? "folder" : "file", collision: "fail" }) },
+          { id: "download", label: menu.entry.kind === "directory" ? "Download folder…" : "Download…", run: () => void props.onDownload({ path: menu.entry!.path, kind: menu.entry!.kind === "directory" ? "folder" : "file" }) },
           "separator" as const,
           { id: "newFile", label: "New file…", disabled: props.disabled || !props.root, run: () => begin("newFile", menu.entry) },
           { id: "newDirectory", label: "New folder…", disabled: props.disabled || !props.root, run: () => begin("newDirectory", menu.entry) },
@@ -297,6 +304,12 @@ export function ExplorerTree(props: Props) {
         {transfer.totalBytes ? <progress aria-label={`Download progress for ${transfer.path}`} aria-valuetext={formatTransfer(transfer)} data-completed-bytes={transfer.completedBytes} data-total-bytes={transfer.totalBytes} max={1000} value={transferPermille(transfer.completedBytes, transfer.totalBytes)} /> : <progress aria-label={`Download progress for ${transfer.path}`} data-completed-bytes={transfer.completedBytes} />}
         <small className="transfer-detail">{formatTransfer(transfer)}</small>
         {canCancelTransfer(transfer.state) && <button aria-label={`Cancel download ${transfer.path}`} onClick={() => void props.onCancelTransfer(transfer.id)} type="button">Cancel</button>}
+        {/* The same two actions the completion toast offers, on the row that
+            outlives it. Only a published download has a local file to act on. */}
+        {transfer.state === "completed" && transfer.destination && <div className="transfer-actions">
+          <button aria-label={`Open ${transfer.destination}`} onClick={() => props.onOpenDownload(transfer.destination!)} type="button">Open</button>
+          <button aria-label={`${revealDownloadLabel()}: ${transfer.destination}`} onClick={() => props.onRevealDownload(transfer.destination!)} type="button">{revealDownloadLabel()}</button>
+        </div>}
         {transfer.state === "verifying" && <small className="transfer-detail transfer-finalizing" role="status">The verified bytes are being committed; awaiting the authoritative backend outcome.</small>}
         {transfer.failureKind === "staleScope" && <em role="alert">Download stopped because the connection scope changed.</em>}
         {transfer.failureKind === "timeout" && <em role="alert">Download timed out before an authoritative result arrived.</em>}

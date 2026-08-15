@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     os::unix::{
-        ffi::OsStrExt,
+        ffi::{OsStrExt, OsStringExt},
         fs::MetadataExt,
         io::{AsRawFd, FromRawFd},
     },
@@ -748,6 +748,64 @@ fn choose_name(
             Err("could not choose a non-colliding destination name".into())
         }
     }
+}
+
+/// The name the save panel should open with: the spelling the `Rename`
+/// collision policy would eventually produce, applied *before* the panel opens
+/// instead of after the transfer.
+///
+/// Shares `renamed_name_bytes` with `choose_name` so the two can never disagree
+/// about what "a non-colliding name" looks like. It deliberately does not open
+/// a directory descriptor: this is a suggested default that the user is about
+/// to confirm or overrule in the panel, and the authoritative check against a
+/// swapped-out parent still happens in `PreparedDestination::open`.
+pub(super) fn suggest_non_colliding_name(
+    directory: &Path,
+    requested: &OsStr,
+) -> Result<std::ffi::OsString, String> {
+    let bytes = requested.as_bytes();
+    if bytes.is_empty()
+        || bytes.contains(&b'/')
+        || bytes.contains(&0)
+        || requested == OsStr::new(".")
+        || requested == OsStr::new("..")
+    {
+        return Err("download name must be a single path component".into());
+    }
+    let name_max = path_name_max(directory);
+    if bytes.len() > name_max {
+        return Err("destination basename exceeds filesystem NAME_MAX".into());
+    }
+    if !exists(&directory.join(requested)) {
+        return Ok(requested.to_os_string());
+    }
+    for index in 1..=10_000 {
+        let candidate =
+            std::ffi::OsString::from_vec(renamed_name_bytes(requested, index, name_max)?);
+        if !exists(&directory.join(&candidate)) {
+            return Ok(candidate);
+        }
+    }
+    Err("could not choose a non-colliding destination name".into())
+}
+
+/// Any entry at all, symlinks included: the panel should step around a dangling
+/// symlink the same way it steps around a file.
+fn exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// `NAME_MAX` for a directory named by path rather than by descriptor. Falls
+/// back to the POSIX floor when the filesystem will not say, which only ever
+/// makes the suggested name shorter than it had to be.
+fn path_name_max(directory: &Path) -> usize {
+    const FALLBACK_NAME_MAX: usize = 255;
+    let Ok(path) = CString::new(directory.as_os_str().as_bytes()) else {
+        return FALLBACK_NAME_MAX;
+    };
+    // SAFETY: `path` is a live NUL-terminated C string for the duration of the call.
+    let value = unsafe { libc::pathconf(path.as_ptr(), libc::_PC_NAME_MAX) };
+    usize::try_from(value).unwrap_or(FALLBACK_NAME_MAX).max(1)
 }
 
 fn directory_name_max(directory: &File) -> Result<usize, String> {
