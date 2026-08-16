@@ -120,6 +120,19 @@ describe("DirectoryListingCache", () => {
     expect(cache.get({ clientId: "c", rootToken: "next", directory: "/other" })).toBeDefined();
   });
 
+  it("drops a deleted directory and everything cached beneath it", () => {
+    const cache = new DirectoryListingCache();
+    for (const directory of ["/r", "/r/src", "/r/src/deep", "/r/srcfile"]) {
+      cache.set({ clientId: "c", rootToken: "root", directory }, listing("root", directory));
+    }
+    cache.invalidateSubtree("c", "root", "/r/src");
+    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r/src" })).toBeUndefined();
+    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r/src/deep" })).toBeUndefined();
+    // A sibling that merely shares a prefix is a different directory.
+    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r/srcfile" })).toBeDefined();
+    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r" })).toBeDefined();
+  });
+
   it("bounds itself by evicting the least recently used directory", () => {
     const cache = new DirectoryListingCache();
     for (let index = 0; index < 300; index += 1) {

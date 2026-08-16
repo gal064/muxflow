@@ -277,7 +277,11 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
         : "unmappable");
       return;
     }
-    // A deleted directory takes its whole cached subtree with it.
+    // A deleted directory takes its whole cached subtree with it, locally as
+    // well as on screen: a path recreated later is a different directory and
+    // must never paint from what the old one held.
+    const activeScope = scopeRef.current;
+    if (activeScope) cache.current.invalidateSubtree(activeScope.clientId, root.token, event.path);
     setState((value) => pruneSubtree(value, event.path));
     abortListing((path) => path === event.path || path.startsWith(`${event.path}/`));
     applyPrecise(root, directory, removeEntry(current.listings.get(directory), event.path));
