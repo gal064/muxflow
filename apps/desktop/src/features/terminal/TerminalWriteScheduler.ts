@@ -229,27 +229,35 @@ export class TerminalWriteScheduler {
       ? chunk.buffer.byteLength
       : partialRecord ? 0 : consumedBackingBytes;
     let completed = false;
-    const done = () => {
+    const settle = (succeeded: boolean) => {
       if (completed) return;
       completed = true;
       this.#pendingBytes -= this.#inFlightBytes;
       this.#inFlightBytes = 0;
       this.#inFlightBackingBytes = 0;
       this.onPendingBytes?.(this.#pendingBytes);
-      for (const onRendered of rendered) onRendered();
-      this.measurements?.add("terminal.scheduler.callbacksInvoked", rendered.length);
+      if (succeeded) {
+        for (const onRendered of rendered) onRendered();
+        this.measurements?.add("terminal.scheduler.callbacksInvoked", rendered.length);
+      }
       this.#resolveDrainWaiters();
-      this.#schedule();
+      if (succeeded) this.#schedule();
     };
+    const done = () => settle(true);
     try {
       this.measurements?.add("terminal.scheduler.xtermWrites");
       this.measurements?.add("terminal.scheduler.xtermWriteBytes", chunk.byteLength);
       this.writeChunk(chunk, done);
     } catch {
-      done();
+      // A synchronous completion means xterm accepted and finished the write;
+      // a later throw cannot retroactively turn it into lost output.
+      if (completed) return;
+      const failedPendingBytes = this.#pendingBytes;
+      settle(false);
       this.#dropQueued();
       this.#overflowed = true;
-      this.onOverflow?.(this.#pendingBytes);
+      this.onOverflow?.(failedPendingBytes);
+      this.#resolveDrainWaiters();
     }
   }
 

@@ -10,6 +10,7 @@ import { OperationCounters } from "../../perf/operations";
 import { TerminalEventHub } from "./TerminalEventHub";
 import { decodeTerminalEvent } from "./api";
 import { copyTerminalBytes } from "./TerminalBytes";
+import { TerminalGenerationWatermark } from "./TerminalGenerationWatermark";
 
 function wireOutputFrame(sequence: number, generation: number, data: Uint8Array): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(21 + data.byteLength);
@@ -313,6 +314,71 @@ describe("TerminalWriteScheduler", () => {
     expect(scheduler.retainedQueueByteLength).toBe(4);
     expect(scheduler.enqueue(Uint8Array.of(5))).toBe(false);
     expect(overflow).toEqual([5]);
+  });
+
+  it("does not advance rendered callbacks when xterm throws before accepting a write", async () => {
+    const overflow: number[] = [];
+    const rendered = vi.fn();
+    let lateCompletion: (() => void) | undefined;
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => { lateCompletion = done; throw new Error("parser unavailable"); },
+      () => 1,
+      () => undefined,
+      64,
+      1024,
+      undefined,
+      (bytes) => overflow.push(bytes),
+    );
+    expect(scheduler.enqueue(Uint8Array.of(1, 2, 3), rendered)).toBe(true);
+    expect(rendered).not.toHaveBeenCalled();
+    expect(overflow).toEqual([3]);
+    expect(scheduler.pendingBytes).toBe(0);
+    expect(scheduler.overflowed).toBe(true);
+    lateCompletion?.();
+    expect(rendered).not.toHaveBeenCalled();
+    await expect(scheduler.sealAndDrain()).resolves.toBeUndefined();
+  });
+
+  it("treats a synchronous callback as success even if writeChunk subsequently throws", () => {
+    const overflow = vi.fn();
+    const rendered = vi.fn();
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => { done(); throw new Error("after completion"); },
+      () => 1,
+      () => undefined,
+      64,
+      1024,
+      undefined,
+      overflow,
+    );
+    expect(scheduler.enqueue(Uint8Array.of(1), rendered)).toBe(true);
+    expect(rendered).toHaveBeenCalledOnce();
+    expect(overflow).not.toHaveBeenCalled();
+    expect(scheduler.pendingBytes).toBe(0);
+    expect(scheduler.overflowed).toBe(false);
+  });
+
+  it("keeps an old in-flight completion out of a new seed's hide watermark", async () => {
+    const frames: FrameRequestCallback[] = [];
+    const completions: Array<() => void> = [];
+    const generations = new TerminalGenerationWatermark();
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      64,
+      1024,
+    );
+    scheduler.enqueue(Uint8Array.of(99), generations.enqueued(99));
+    generations.resetAuthoritativeStream();
+    scheduler.replace(Uint8Array.of(1), true, generations.enqueued(1));
+
+    completions.shift()!();
+    expect(generations.appliedGeneration).toBe(0);
+    for (const frame of frames.splice(0, frames.length)) frame(16);
+    completions.shift()!();
+    await scheduler.sealAndDrain();
+    expect(generations.appliedGeneration).toBe(1);
   });
 });
 

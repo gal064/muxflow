@@ -316,4 +316,44 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.subscribePane("%20", (event) => received.push(event));
     expect(received).toEqual([seed(20, 1, "%20", new Uint8Array(8))]);
   });
+
+  it("preserves seed debt when a hidden backlog is evicted from the metadata LRU", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub(
+      (paneId) => requests.push(paneId),
+      { maxTrackedPanes: 1, maxBufferedPanes: 2 },
+    );
+    hub.publish(output(1, 1, "%1"));
+    hub.publish(output(2, 1, "%2"));
+    expect(requests).toEqual(["%1"]);
+
+    // Re-entry before the requested seed must not start a truncated backlog.
+    hub.publish(output(3, 2, "%1"));
+    const received: TerminalEvent[] = [];
+    hub.subscribePane("%1", (event) => received.push(event));
+    expect(received).toEqual([]);
+    expect(requests).toEqual(["%1", "%2"]);
+
+    hub.publish(seed(4, 3, "%1"));
+    hub.publish(output(5, 4, "%1"));
+    expect(received).toEqual([seed(4, 3, "%1"), output(5, 4, "%1")]);
+  });
+
+  it("requires a seed conservatively after the bounded debt tombstone ages out", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub(
+      (paneId) => requests.push(paneId),
+      { maxTrackedPanes: 1, maxBufferedPanes: 3 },
+    );
+    hub.publish(output(1, 1, "%1"));
+    hub.publish(output(2, 1, "%2"));
+    hub.publish(output(3, 1, "%3"));
+    // The one-entry tombstone can no longer name %1, but the bounded fallback
+    // still refuses incremental output when that pane eventually re-enters.
+    hub.publish(output(4, 2, "%1"));
+    const received: TerminalEvent[] = [];
+    hub.subscribePane("%1", (event) => received.push(event));
+    expect(received).toEqual([]);
+    expect(requests).toEqual(["%1", "%2", "%3", "%1"]);
+  });
 });
