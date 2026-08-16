@@ -80,6 +80,20 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(received).toEqual([seed(1, 1)]);
   });
 
+  it("delivers dedicated epoch subscriptions only for admitted epoch frames", () => {
+    const hub = new TerminalEventHub();
+    const epochs: number[] = [];
+    const unsubscribe = hub.subscribeEpoch((event) => epochs.push(event.epoch));
+    hub.publish(output(1, 1));
+    hub.publish({ kind: "generationEpoch", epoch: 41, sequence: 0 });
+    hub.publish(output(1, 1));
+    hub.publish({ kind: "connectionState", state: "connected", sequence: 0 });
+    expect(epochs).toEqual([41]);
+    unsubscribe();
+    hub.publish({ kind: "generationEpoch", epoch: 42, sequence: 0 });
+    expect(epochs).toEqual([41]);
+  });
+
   it("ignores duplicate terminal generations and waits for seed after recovery invalidation", () => {
     const hub = new TerminalEventHub();
     const received: TerminalEvent[] = [];
@@ -113,6 +127,20 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(received).toEqual([seed(4, 4, "%7", Uint8Array.of(4)), output(5, 5, "%7", Uint8Array.of(5))]);
   });
 
+  it("bounds zero-byte hidden records as well as retained bytes", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub(
+      (paneId) => requests.push(paneId),
+      { maxPaneEvents: 2 },
+    );
+    hub.publish(output(1, 1, "%7", new Uint8Array()));
+    hub.publish(output(2, 2, "%7", new Uint8Array()));
+    hub.publish(output(3, 3, "%7", new Uint8Array()));
+    expect(requests).toEqual(["%7"]);
+    expect(hub.retainedByteLength).toBe(0);
+    expect(hub.retainedPaneCount).toBe(0);
+  });
+
   it("replaces a consumed hidden recovery checkpoint instead of replaying its stale raw tail", () => {
     const hub = new TerminalEventHub();
     hub.publish(resource(1, 1));
@@ -120,6 +148,23 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     const received: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => received.push(event));
     expect(received).toEqual([resource(2, 2)]);
+  });
+
+  it("keeps exact byte accounting while replacing resource and diagnostic boundaries", () => {
+    const hub = new TerminalEventHub();
+    hub.publish(output(1, 1, "%1", Uint8Array.of(1, 2, 3)));
+    hub.publish({ kind: "seedDiagnostic", paneId: "%1", message: "old", sequence: 2 });
+    hub.publish(resource(3, 2, { serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array() }));
+    hub.publish({ kind: "seedDiagnostic", paneId: "%1", message: "λ", sequence: 4 });
+    expect(hub.retainedByteLength).toBe(5);
+    hub.publish(resource(5, 3, { serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }));
+    expect(hub.retainedByteLength).toBe(3);
+    const received: TerminalEvent[] = [];
+    hub.subscribePane("%1", (event) => received.push(event));
+    expect(received).toEqual([
+      resource(5, 3, { serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }),
+    ]);
+    expect(hub.retainedByteLength).toBe(0);
   });
 
   it("routes seed diagnostics only to their pane without requesting recovery", () => {

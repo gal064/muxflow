@@ -145,6 +145,7 @@ function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
 /** A byte-preserving queue bounded across both JS and xterm's async parser. */
 export class TerminalWriteScheduler {
   readonly #queue: Array<{ bytes: Uint8Array; onRendered?: () => void }> = [];
+  #queueHead = 0;
   #frame?: number;
   #disposed = false;
   #pendingBytes = 0;
@@ -179,18 +180,9 @@ export class TerminalWriteScheduler {
       this.onOverflow?.(attemptedBytes);
       return false;
     }
-    this.measurements?.add("terminal.scheduler.enqueueOperations");
-    this.measurements?.add("terminal.scheduler.inputBytes", bytes.byteLength);
     const owned = bytes.slice();
     this.measurements?.add("terminal.scheduler.copiedBytes", bytes.byteLength);
-    if (onRendered) this.measurements?.add("terminal.scheduler.callbacksQueued");
-    this.#queue.push({ bytes: owned, onRendered });
-    this.#pendingBytes += bytes.byteLength;
-    this.measurements?.highWater?.("terminal.scheduler.pendingBytes", this.#pendingBytes);
-    this.measurements?.highWater?.("terminal.scheduler.queueDepth", this.#queue.length);
-    this.onPendingBytes?.(this.#pendingBytes);
-    this.#schedule();
-    return true;
+    return this.#enqueueOwned(owned, onRendered);
   }
 
   replace(bytes: Uint8Array, recoverOverflow = true, onRendered?: () => void): void {
@@ -200,7 +192,9 @@ export class TerminalWriteScheduler {
     const resetAndBytes = new Uint8Array(bytes.byteLength + 2);
     resetAndBytes.set([0x1b, 0x63]);
     resetAndBytes.set(bytes, 2);
-    this.enqueue(resetAndBytes, onRendered);
+    if (this.#enqueueOwned(resetAndBytes, onRendered)) {
+      this.measurements?.add("terminal.scheduler.copiedBytes", bytes.byteLength);
+    }
   }
 
   clear(): void {
@@ -210,6 +204,7 @@ export class TerminalWriteScheduler {
 
   #dropQueued(): void {
     this.#queue.length = 0;
+    this.#queueHead = 0;
     this.#pendingBytes = this.#inFlightBytes;
     if (this.#frame !== undefined) this.cancelFrame(this.#frame);
     this.#frame = undefined;
@@ -246,14 +241,44 @@ export class TerminalWriteScheduler {
     return this.#overflowed;
   }
 
+  /** Queues a freshly allocated buffer whose ownership already belongs here. */
+  #enqueueOwned(bytes: Uint8Array, onRendered?: () => void): boolean {
+    if (this.#disposed || !this.#accepting || this.#overflowed) return false;
+    if (bytes.byteLength === 0) {
+      onRendered?.();
+      return true;
+    }
+    if (this.#pendingBytes + bytes.byteLength > this.maxPendingBytes) {
+      const attemptedBytes = this.#pendingBytes + bytes.byteLength;
+      this.#dropQueued();
+      this.#overflowed = true;
+      this.onOverflow?.(attemptedBytes);
+      return false;
+    }
+    this.measurements?.add("terminal.scheduler.enqueueOperations");
+    this.measurements?.add("terminal.scheduler.inputBytes", bytes.byteLength);
+    if (onRendered) this.measurements?.add("terminal.scheduler.callbacksQueued");
+    this.#queue.push({ bytes, onRendered });
+    this.#pendingBytes += bytes.byteLength;
+    this.measurements?.highWater?.("terminal.scheduler.pendingBytes", this.#pendingBytes);
+    this.measurements?.highWater?.("terminal.scheduler.queueDepth", this.#queueLength());
+    this.onPendingBytes?.(this.#pendingBytes);
+    this.#schedule();
+    return true;
+  }
+
+  #queueLength(): number {
+    return this.#queue.length - this.#queueHead;
+  }
+
   #schedule(): void {
-    if (this.#disposed || this.#inFlightBytes || this.#frame !== undefined || this.#queue.length === 0) return;
+    if (this.#disposed || this.#inFlightBytes || this.#frame !== undefined || this.#queueLength() === 0) return;
     // Idle fast path. An echoed keystroke is a few bytes arriving into an empty
     // queue, and waiting for the next animation frame quantises it by up to a
     // whole frame — on a 60 Hz display that is most of the local keystroke
     // budget spent doing nothing. At most one write per frame skips the wait,
     // so a flood still gets frame-paced exactly as before.
-    if (this.#queue.length === 1 && !this.#immediateWriteUsed) {
+    if (this.#queueLength() === 1 && !this.#immediateWriteUsed) {
       this.#immediateWriteUsed = true;
       this.#armImmediateWriteReset();
       this.#flush();
@@ -289,18 +314,18 @@ export class TerminalWriteScheduler {
    */
   #flush(): void {
     this.#frame = undefined;
-    if (this.#disposed || this.#inFlightBytes || this.#queue.length === 0) return;
+    if (this.#disposed || this.#inFlightBytes || this.#queueLength() === 0) return;
     this.measurements?.add("terminal.scheduler.framesFlushed");
     const pieces: Uint8Array[] = [];
     const rendered: Array<() => void> = [];
     let length = 0;
-    while (length < this.maxBytesPerFrame && this.#queue.length > 0) {
-      const first = this.#queue[0];
+    while (length < this.maxBytesPerFrame && this.#queueLength() > 0) {
+      const first = this.#queue[this.#queueHead];
       const take = Math.min(first.bytes.byteLength, this.maxBytesPerFrame - length);
       pieces.push(first.bytes.subarray(0, take));
       length += take;
       if (take === first.bytes.byteLength) {
-        this.#queue.shift();
+        this.#queueHead += 1;
         this.measurements?.add("terminal.scheduler.dequeueOperations");
         // A partially written event has not reached xterm yet, so its
         // completion belongs to the frame that finishes it.
@@ -309,6 +334,7 @@ export class TerminalWriteScheduler {
         first.bytes = first.bytes.subarray(take);
       }
     }
+    this.#compactQueue();
     const chunk = joinChunks(pieces, length);
     if (pieces.length > 1) this.measurements?.add("terminal.scheduler.copiedBytes", length);
     this.#inFlightBytes = length;
@@ -334,6 +360,22 @@ export class TerminalWriteScheduler {
       this.#overflowed = true;
       this.onOverflow?.(this.#pendingBytes);
     }
+  }
+
+  #compactQueue(): void {
+    if (this.#queueHead === 0) return;
+    if (this.#queueHead === this.#queue.length) {
+      this.#queue.length = 0;
+      this.#queueHead = 0;
+      return;
+    }
+    // Keep dequeue O(1), occasionally moving only live entry references once
+    // enough dead prefix has accumulated.
+    if (this.#queueHead < 64 || this.#queueHead * 2 < this.#queue.length) return;
+    this.#queue.copyWithin(0, this.#queueHead);
+    this.#queue.length -= this.#queueHead;
+    this.#queueHead = 0;
+    this.measurements?.add("terminal.scheduler.queueCompactions");
   }
 
 
