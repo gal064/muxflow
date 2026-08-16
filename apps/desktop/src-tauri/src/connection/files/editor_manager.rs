@@ -11,7 +11,9 @@ use uuid::Uuid;
 
 use super::bulk_pool::BulkLease;
 use super::bulk_protocol::RequestFailure;
-use super::scheduler::{BulkBinding, CancelReason, CancelState, cancel_transfer, enqueue_transfer};
+use super::scheduler::{
+    BulkBinding, CancelReason, CancelState, cancel_transfer, enqueue_transfer_with_queued,
+};
 use super::serialization::metadata_json;
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
@@ -49,7 +51,7 @@ struct FileWriteJob {
     path: String,
     operation_id: String,
     file_generation: u64,
-    content: Vec<u8>,
+    content: Arc<[u8]>,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
     channel: Channel<InvokeResponseBody>,
@@ -176,7 +178,7 @@ pub fn start_file_write(
         path,
         operation_id,
         file_generation: parse_optional_u64("fileGeneration", &file_generation)?,
-        content,
+        content: Arc::from(content),
         binding,
         cancellation,
         channel: on_event,
@@ -201,14 +203,15 @@ impl FileIoManager {
         let transfer_id = job.transfer_id().to_owned();
         let cancellation = Arc::clone(job.cancellation());
         let binding = job.binding().clone();
+        let admitted_job = job.clone();
         let started_job = job.clone();
         let work_job = job.clone();
         let finished_job = job.clone();
-        emit_file_job_state(&job, 1, TransferState::Queued);
-        enqueue_transfer(
+        enqueue_transfer_with_queued(
             transfer_id,
             binding,
             cancellation,
+            move || send_file_job_state(&admitted_job, 1, TransferState::Queued),
             move || emit_file_job_state(&started_job, 1, TransferState::Running),
             move || match &work_job {
                 FileIoJob::Read(job) => run_file_read(job).map_err(TransferFailure::not_published),
@@ -243,11 +246,15 @@ fn emit_file_failure(job: &FileIoJob, kind: u8, state: TransferState, failure: T
 }
 
 fn emit_file_job_state(job: &FileIoJob, kind: u8, state: TransferState) {
-    emit_file_json(
+    let _ = send_file_job_state(job, kind, state);
+}
+
+fn send_file_job_state(job: &FileIoJob, kind: u8, state: TransferState) -> Result<(), String> {
+    send_file_json(
         job.channel(),
         kind,
         TransferEvent::new(job.transfer_id(), job.binding(), state).value(),
-    );
+    )
 }
 
 fn run_file_read(job: &FileReadJob) -> Result<(), String> {
@@ -593,9 +600,22 @@ fn content_kind_name(kind: v1::FileContentKind) -> &'static str {
 }
 
 fn emit_file_json(channel: &Channel<InvokeResponseBody>, kind: u8, value: Value) {
+    let _ = send_file_json(channel, kind, value);
+}
+
+fn send_file_json(
+    channel: &Channel<InvokeResponseBody>,
+    kind: u8,
+    value: Value,
+) -> Result<(), String> {
     let mut frame = vec![kind];
-    frame.extend_from_slice(&serde_json::to_vec(&value).unwrap_or_default());
-    let _ = channel.send(InvokeResponseBody::Raw(frame));
+    frame.extend_from_slice(
+        &serde_json::to_vec(&value)
+            .map_err(|error| format!("could not serialize file transfer event: {error}"))?,
+    );
+    channel
+        .send(InvokeResponseBody::Raw(frame))
+        .map_err(|error| format!("could not publish queued file transfer event: {error}"))
 }
 
 fn emit_scoped_file_json(

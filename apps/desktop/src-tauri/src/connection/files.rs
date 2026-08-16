@@ -11,6 +11,7 @@ pub(crate) mod bulk_pool;
 mod bulk_protocol;
 mod cleanup;
 mod clipboard_staging;
+mod destination_lease;
 pub(crate) mod download_manager;
 mod download_naming;
 pub(crate) mod download_opener;

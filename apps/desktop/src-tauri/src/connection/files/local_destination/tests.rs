@@ -1,5 +1,10 @@
 use super::*;
-use std::{fs, io::Write, os::unix::fs::PermissionsExt};
+use std::{
+    fs,
+    io::Write,
+    os::unix::fs::PermissionsExt,
+    sync::{Arc, Barrier},
+};
 
 fn write_crafted_journal(
     root: &Path,
@@ -23,6 +28,155 @@ fn write_crafted_journal(
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
     path
+}
+
+#[test]
+fn concurrent_rename_leases_choose_distinct_exact_final_leaves() {
+    let root = std::env::temp_dir().join(format!("ade-dl-leases-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let reservations = Arc::new(DestinationReservations::default());
+    let barrier = Arc::new(Barrier::new(3));
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let root = root.clone();
+        let reservations = Arc::clone(&reservations);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            ReservedDestination::reserve(
+                &root.join("report.pdf"),
+                DownloadCollisionPolicy::Rename,
+                reservations,
+            )
+            .unwrap()
+        }));
+    }
+    barrier.wait();
+    let mut leases: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    let mut paths: Vec<_> = leases
+        .iter()
+        .map(|lease| lease.final_path().to_owned())
+        .collect();
+    paths.sort();
+
+    assert_eq!(
+        paths,
+        [root.join("report (1).pdf"), root.join("report.pdf")]
+    );
+    assert_eq!(reservations.len(), 2);
+    leases.clear();
+    assert_eq!(reservations.len(), 0);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reservation_uses_destination_filesystem_case_and_normalization_semantics() {
+    let root = std::env::temp_dir().join(format!("ade-dl-semantics-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+
+    for (first_name, alias_name) in [
+        ("case-probe.bin", "CASE-PROBE.BIN"),
+        ("r\u{e9}sum\u{e9}.bin", "re\u{301}sume\u{301}.bin"),
+    ] {
+        let probe = root.join(first_name);
+        fs::write(&probe, b"probe").unwrap();
+        let aliases = fs::metadata(root.join(alias_name)).is_ok();
+        fs::remove_file(&probe).unwrap();
+
+        let reservations = Arc::new(DestinationReservations::default());
+        let first = ReservedDestination::reserve(
+            &root.join(first_name),
+            DownloadCollisionPolicy::Fail,
+            Arc::clone(&reservations),
+        )
+        .unwrap();
+        let alias = ReservedDestination::reserve(
+            &root.join(alias_name),
+            DownloadCollisionPolicy::Fail,
+            Arc::clone(&reservations),
+        );
+        if aliases {
+            assert!(alias.is_err(), "filesystem-equivalent leaves must collide");
+        } else {
+            assert!(
+                alias.is_ok(),
+                "distinct filesystem leaves may both be leased"
+            );
+        }
+        drop(alias);
+        drop(first);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reservation_never_touches_a_foreign_private_coordination_namespace() {
+    let root = std::env::temp_dir().join(format!("ade-dl-foreign-{}", Uuid::new_v4()));
+    let foreign = root.join(".tmux-agent-destination-reservations");
+    fs::create_dir_all(&foreign).unwrap();
+    fs::set_permissions(&foreign, fs::Permissions::from_mode(0o700)).unwrap();
+    let marker = foreign.join("report.pdf");
+    fs::write(&marker, b"foreign bytes must survive").unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let reservations = Arc::new(DestinationReservations::default());
+    let lease = ReservedDestination::reserve(
+        &root.join("report.pdf"),
+        DownloadCollisionPolicy::Fail,
+        reservations,
+    )
+    .unwrap();
+    drop(lease);
+
+    assert_eq!(fs::read(&marker).unwrap(), b"foreign bytes must survive");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exact_destination_rejects_duplicates_and_only_owner_releases() {
+    let root = std::env::temp_dir().join(format!("ade-dl-owner-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let reservations = Arc::new(DestinationReservations::default());
+    let prepared = ReservedDestination::reserve(
+        &root.join("result.bin"),
+        DownloadCollisionPolicy::Fail,
+        Arc::clone(&reservations),
+    )
+    .unwrap();
+    let duplicate = ReservedDestination::reserve(
+        &root.join(".").join("result.bin"),
+        DownloadCollisionPolicy::Fail,
+        Arc::clone(&reservations),
+    )
+    .err()
+    .unwrap();
+    assert!(duplicate.contains("already reserved"));
+
+    prepared.release_as(Uuid::new_v4());
+    assert_eq!(reservations.len(), 1);
+    assert!(
+        ReservedDestination::reserve(
+            &root.join("result.bin"),
+            DownloadCollisionPolicy::Fail,
+            Arc::clone(&reservations),
+        )
+        .is_err()
+    );
+    drop(prepared);
+    assert_eq!(reservations.len(), 0);
+    ReservedDestination::reserve(
+        &root.join("result.bin"),
+        DownloadCollisionPolicy::Fail,
+        Arc::clone(&reservations),
+    )
+    .unwrap();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
