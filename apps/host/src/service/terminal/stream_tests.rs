@@ -53,6 +53,7 @@ struct Harness {
     generation: Arc<AtomicU64>,
     stopped: AtomicBool,
     output_credit: Arc<super::OutputCredit>,
+    emission_order: Arc<Mutex<()>>,
 }
 
 impl Harness {
@@ -76,6 +77,7 @@ impl Harness {
                 generation: Arc::new(AtomicU64::new(0)),
                 stopped: AtomicBool::new(false),
                 output_credit: Arc::new(super::OutputCredit::negotiated(false)),
+                emission_order: Arc::new(Mutex::new(())),
             },
         )
     }
@@ -89,6 +91,7 @@ impl Harness {
             terminal_generation: &self.generation,
             stopped: &self.stopped,
             output_credit: &self.output_credit,
+            emission_order: &self.emission_order,
         }
     }
 
@@ -417,6 +420,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
     let (writer, _writes) = std_mpsc::channel();
     let stopped = AtomicBool::new(false);
     let output_credit = super::OutputCredit::negotiated(false);
+    let emission_order = Arc::new(Mutex::new(()));
     state.finish_block(
         tag,
         StreamRuntime {
@@ -427,6 +431,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
             terminal_generation: &generation,
             stopped: &stopped,
             output_credit: &output_credit,
+            emission_order: &emission_order,
         },
     );
     assert!(matches!(state.command_block, CommandBlock::None));

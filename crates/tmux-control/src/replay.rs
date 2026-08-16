@@ -545,6 +545,23 @@ impl PaneResourceStore {
         self.refresh_accounting(pane_id, before);
     }
 
+    /// Invalidates a visibility handoff whose ordered event could not be
+    /// admitted. Output must not observe the speculative Visible/Hidden state
+    /// after its recovery boundary was lost; the next mount repairs from an
+    /// authoritative seed instead.
+    pub fn require_seed(&mut self, pane_id: &str, reason: &str) {
+        self.ensure(pane_id, false, 0);
+        let before = self.accounted_state(pane_id);
+        self.output_journals.remove(pane_id);
+        self.output_journal_bytes.remove(pane_id);
+        self.handoff_checkpoints.remove(pane_id);
+        release(
+            self.resources.get_mut(pane_id).expect("resource ensured"),
+            reason,
+        );
+        self.refresh_accounting(pane_id, before);
+    }
+
     fn pop_eviction_candidate(&mut self, over_bytes: bool) -> Option<String> {
         let pane_id = if over_bytes {
             self.byte_lru.pop_oldest()

@@ -29,6 +29,8 @@ mod event_frame;
 use event_frame::{TerminalEvent, encode_event};
 mod delivery_window;
 use delivery_window::{DeliveryWindow, HostCharge};
+pub(crate) mod delivery_ack;
+use delivery_ack::flush_delivery_ack;
 mod dispatch;
 use dispatch::{
     ClientInputDispatch, ClientInputQueue, INPUT_BYTE_BUDGET, INPUT_MESSAGE_BUDGET, ResizeQueue,
@@ -191,6 +193,7 @@ impl TerminalClient {
         if let Some(window) = self.delivery_window.lock().unwrap().take() {
             window.close();
         }
+        self.pending_delivery_ack.lock().unwrap().take();
         if let Some(writer) = self.writer.lock().unwrap().take() {
             writer.close();
         }
@@ -531,63 +534,6 @@ pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> 
         // connected to another host at the same time, and its warm bridges are
         // still reachable.
         files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub fn acknowledge_terminal_delivery(
-    client_id: String,
-    connection_epoch: u64,
-    cumulative_frame_count: u64,
-    cumulative_byte_length: u64,
-    clients: State<'_, TerminalClients>,
-) -> Result<(), String> {
-    let client = get_client(&clients, &client_id)?;
-    let _serialization = client.delivery_ack_serialization.lock().unwrap();
-    let window = client.delivery_window.lock().unwrap().clone();
-    let Some(window) = window else {
-        return Ok(());
-    };
-    let Some(host) = window.acknowledge(
-        connection_epoch,
-        cumulative_frame_count,
-        cumulative_byte_length,
-    )?
-    else {
-        return Ok(());
-    };
-    *client.pending_delivery_ack.lock().unwrap() = Some((connection_epoch, host));
-    flush_delivery_ack_serialized(&client).inspect_err(|_| client.reconnect_transport())
-}
-
-fn flush_delivery_ack(client: &TerminalClient) -> Result<(), String> {
-    let _serialization = client.delivery_ack_serialization.lock().unwrap();
-    flush_delivery_ack_serialized(client)
-}
-
-fn flush_delivery_ack_serialized(client: &TerminalClient) -> Result<(), String> {
-    let Some((epoch, host)) = *client.pending_delivery_ack.lock().unwrap() else {
-        return Ok(());
-    };
-    let Some(writer) = client.writer.lock().unwrap().clone() else {
-        return Ok(());
-    };
-    writer.write(
-        envelope(
-            0,
-            0,
-            Payload::TerminalOutputAck(v1::TerminalOutputAck {
-                connection_epoch: epoch,
-                cumulative_bytes: host.bytes,
-                cumulative_records: host.records,
-            }),
-        ),
-        Instant::now() + REQUEST_TIMEOUT,
-    )?;
-    let mut pending = client.pending_delivery_ack.lock().unwrap();
-    if *pending == Some((epoch, host)) {
-        *pending = None;
     }
     Ok(())
 }

@@ -132,7 +132,22 @@ fn run_control_writer<W>(
             .as_ref()
             .map_err(Clone::clone)
             .and_then(|_| write_until(&mut writer, fd, &command.bytes, command.deadline, &closed));
+        let poisoned = result.is_err();
         let _ = command.completion.send(result);
+        if poisoned {
+            // A length-prefixed protobuf frame is indivisible at this layer.
+            // After any physical write failure it may already have placed a
+            // prefix on the pipe, so appending another frame would corrupt the
+            // stream. Poison the lane and reject everything already queued;
+            // the connection supervisor must establish a fresh bridge.
+            closed.store(true, Ordering::Release);
+            while let Ok(pending) = receiver.try_recv() {
+                let _ = pending.completion.send(Err(
+                    "host bridge control writer is poisoned after a physical write failure".into(),
+                ));
+            }
+            break;
+        }
         if closed.load(Ordering::Acquire) {
             break;
         }
@@ -195,7 +210,7 @@ fn write_until(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::File, os::fd::FromRawFd};
+    use std::{fs::File, os::fd::FromRawFd, sync::Mutex};
     use tmux_agent_protocol::{envelope, v1::envelope::Payload};
 
     #[test]
@@ -223,6 +238,98 @@ mod tests {
         assert!(result.unwrap_err().contains("timed out"));
         assert!(started.elapsed() < Duration::from_millis(500));
         writer.close();
+        drop(read_end);
+    }
+
+    struct PrefixThenBlock {
+        fd: File,
+        captured: Arc<Mutex<Vec<u8>>>,
+        wrote_prefix: Option<mpsc::SyncSender<()>>,
+    }
+
+    impl AsRawFd for PrefixThenBlock {
+        fn as_raw_fd(&self) -> RawFd {
+            self.fd.as_raw_fd()
+        }
+    }
+
+    impl Write for PrefixThenBlock {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(wrote_prefix) = self.wrote_prefix.take() {
+                let length = bytes.len().min(8);
+                self.captured
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&bytes[..length]);
+                let _ = wrote_prefix.send(());
+                return Ok(length);
+            }
+            Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_partial_timed_out_frame_poisons_the_lane_and_rejects_queued_followers() {
+        let mut fds = [0; 2];
+        // SAFETY: pipe initializes both descriptors on success.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: each descriptor is newly owned by this test.
+        let read_end = unsafe { File::from_raw_fd(fds[0]) };
+        let write_end = unsafe { File::from_raw_fd(fds[1]) };
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (prefix_tx, prefix_rx) = mpsc::sync_channel(1);
+        let writer = ControlWriterHandle::start_with(
+            PrefixThenBlock {
+                fd: write_end,
+                captured: Arc::clone(&captured),
+                wrote_prefix: Some(prefix_tx),
+            },
+            "partial-frame-test",
+        )
+        .unwrap();
+        let first = writer.clone();
+        let first_result = std::thread::spawn(move || {
+            first.write(
+                envelope(
+                    1,
+                    0,
+                    Payload::Request(v1::Request {
+                        operation: v1::Operation::TerminalInput.into(),
+                        data: vec![7; 1024],
+                        ..Default::default()
+                    }),
+                ),
+                Instant::now() + Duration::from_millis(75),
+            )
+        });
+        prefix_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let queued = writer.write(
+            envelope(
+                2,
+                0,
+                Payload::Request(v1::Request {
+                    operation: v1::Operation::FullSnapshot.into(),
+                    ..Default::default()
+                }),
+            ),
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(first_result.join().unwrap().is_err());
+        assert!(queued.unwrap_err().contains("poisoned"));
+        assert!(
+            writer
+                .write(
+                    envelope(3, 0, Payload::Request(v1::Request::default())),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .unwrap_err()
+                .contains("closed")
+        );
+        assert_eq!(captured.lock().unwrap().len(), 8);
         drop(read_end);
     }
 }

@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use super::{
     correlation::{MarkerBlock, classify_marker_block, error_reason, wants_error_line},
     input::{InputDispatch, run_input_dispatch},
+    startup::{ProcessStartup, join_workers, stop_process},
     validate_tmux_id,
 };
 use crate::service::{SequencerControl, emit_event, snapshot::tmux_command};
@@ -51,6 +52,7 @@ pub(super) struct PersistentInputClient {
     input_tx: std_mpsc::SyncSender<InputDispatch>,
     failed: Arc<AtomicBool>,
     next_input_id: u64,
+    workers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl PersistentInputClient {
@@ -69,7 +71,7 @@ impl PersistentInputClient {
         mut command: Command,
     ) -> anyhow::Result<Self> {
         validate_tmux_id(session_id, '$')?;
-        let mut child = command
+        let child = command
             .args([
                 "-C",
                 "attach-session",
@@ -83,28 +85,36 @@ impl PersistentInputClient {
             .stderr(Stdio::null())
             .spawn()
             .context("start persistent tmux input client")?;
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut startup = ProcessStartup::new(child, Arc::clone(&failed));
+        let child = startup.child();
         let stdout = child
+            .lock()
+            .unwrap()
             .stdout
             .take()
             .context("persistent tmux input stdout unavailable")?;
         let stdin = child
+            .lock()
+            .unwrap()
             .stdin
             .take()
             .context("persistent tmux input stdin unavailable")?;
         let stdin = Arc::new(Mutex::new(stdin));
-        let child = Arc::new(Mutex::new(child));
-        let failed = Arc::new(AtomicBool::new(false));
         let (completion_tx, completion_rx) = std_mpsc::channel();
         let reader_failed = Arc::clone(&failed);
-        std::thread::Builder::new()
-            .name("host-tmux-input-reader".into())
-            .spawn(move || read_input_stream(stdout, completion_tx, reader_failed))?;
+        startup.spawn(
+            1,
+            std::thread::Builder::new().name("host-tmux-input-reader".into()),
+            move || read_input_stream(stdout, completion_tx, reader_failed),
+        )?;
 
         let (input_tx, input_rx) = std_mpsc::sync_channel(super::super::TERMINAL_INPUT_QUEUE);
         let dispatch_failed = Arc::clone(&failed);
-        std::thread::Builder::new()
-            .name("host-tmux-input-dispatch".into())
-            .spawn(move || {
+        startup.spawn(
+            2,
+            std::thread::Builder::new().name("host-tmux-input-dispatch".into()),
+            move || {
                 run_input_dispatch(
                     input_rx,
                     stdin,
@@ -125,13 +135,16 @@ impl PersistentInputClient {
                         );
                     },
                 )
-            })?;
+            },
+        )?;
 
+        let (child, workers) = startup.commit();
         Ok(Self {
             child,
             input_tx,
             failed,
             next_input_id: 0,
+            workers,
         })
     }
 
@@ -193,12 +206,8 @@ impl PersistentInputClient {
     }
 
     pub(super) fn stop(&mut self) {
-        self.failed.store(true, Ordering::Release);
         let _ = self.input_tx.try_send(InputDispatch::Stop);
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        stop_process(&self.failed, &self.child);
     }
 }
 
@@ -221,6 +230,7 @@ fn admit_fence(
 impl Drop for PersistentInputClient {
     fn drop(&mut self) {
         self.stop();
+        join_workers(&mut self.workers);
     }
 }
 
@@ -520,6 +530,41 @@ mod tests {
             number,
             flags: 0,
         }
+    }
+
+    fn long_lived_startup_command() -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 30", "persistent-input-startup-fixture"]);
+        command
+    }
+
+    #[test]
+    fn every_sidecar_worker_spawn_failure_reaps_the_child_and_allows_retry() {
+        use super::super::startup::{assert_last_startup_child_reaped, with_worker_spawn_failure};
+
+        for stage in [1, 2] {
+            let (events, _receiver) = mpsc::channel(8);
+            let result = with_worker_spawn_failure(stage, || {
+                PersistentInputClient::start_with_command(
+                    "$1",
+                    events,
+                    Arc::new(AtomicBool::new(false)),
+                    long_lived_startup_command(),
+                )
+            });
+            assert!(result.is_err(), "worker stage {stage} unexpectedly started");
+            assert_last_startup_child_reaped();
+        }
+
+        let (events, _receiver) = mpsc::channel(8);
+        let mut retry = PersistentInputClient::start_with_command(
+            "$1",
+            events,
+            Arc::new(AtomicBool::new(false)),
+            long_lived_startup_command(),
+        )
+        .unwrap();
+        retry.stop();
     }
 
     fn begin(

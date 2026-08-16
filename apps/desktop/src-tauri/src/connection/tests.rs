@@ -56,6 +56,25 @@ fn reconnect_backoff_stays_quick_for_a_blip_and_tops_out_at_a_minute() {
 }
 
 #[test]
+fn invalid_same_epoch_delivery_ack_fails_closed_instead_of_retrying_the_ledger() {
+    let client = TerminalClient::new();
+    client.ready.store(true, Ordering::Release);
+    let window = DeliveryWindow::new(17);
+    window
+        .reserve(100, HostCharge::terminal(80))
+        .unwrap()
+        .commit()
+        .unwrap();
+    *client.pending_delivery_ack.lock().unwrap() = Some((16, HostCharge::terminal(20)));
+    *client.delivery_window.lock().unwrap() = Some(Arc::clone(&window));
+    assert!(client.acknowledge_delivery(17, 1, 99).is_err());
+    assert!(!client.ready.load(Ordering::Acquire));
+    assert!(client.delivery_window.lock().unwrap().is_none());
+    assert!(client.pending_delivery_ack.lock().unwrap().is_none());
+    assert!(window.reserve(1, HostCharge::default()).is_err());
+}
+
+#[test]
 fn disconnected_input_is_rejected_and_reconnect_starts_a_fresh_epoch() {
     let client = Arc::new(TerminalClient::new());
     let (sender, receiver) = mpsc::sync_channel(1);

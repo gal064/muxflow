@@ -80,6 +80,42 @@ pub(super) fn emit_terminal(
     }
 }
 
+pub(in crate::service::terminal) struct OutputEmission<'a> {
+    pub(in crate::service::terminal) sender: &'a mpsc::Sender<SequencerControl>,
+    pub(in crate::service::terminal) overflowed: &'a AtomicBool,
+    pub(in crate::service::terminal) resources: &'a Arc<Mutex<PaneResourceStore>>,
+    pub(in crate::service::terminal) terminal_generation: &'a AtomicU64,
+    pub(in crate::service::terminal) stopped: &'a AtomicBool,
+    pub(in crate::service::terminal) output_credit: &'a OutputCredit,
+    pub(in crate::service::terminal) emission_order: &'a Mutex<()>,
+}
+
+impl OutputEmission<'_> {
+    pub(in crate::service::terminal) fn record(self, pane_id: String, data: Vec<u8>) {
+        let _emission = self.emission_order.lock().unwrap();
+        let generation = self.terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let visible = with_active_resources(self.resources, self.stopped, |resources| {
+            resources.record_output(&pane_id, &data, generation) == OutputDisposition::Visible
+        })
+        .unwrap_or(false);
+        // Resource ownership is released before either credit or channel
+        // backpressure. The emission fence stays held so a reveal transition
+        // and its recovery event cannot be overtaken by output that observes
+        // Visible.
+        if visible {
+            emit_terminal(
+                self.sender,
+                self.overflowed,
+                v1::EventKind::TerminalOutput,
+                pane_id,
+                data,
+                generation,
+                self.output_credit,
+            );
+        }
+    }
+}
+
 /// The pane a `%pause`/`%continue` names, if it names a valid one.
 pub(super) fn notification_pane(arguments: &str) -> Option<String> {
     let pane_id = arguments.split_whitespace().next()?;

@@ -116,6 +116,20 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(epochs).toEqual([41]);
   });
 
+  it("contains app and epoch observers after ownership transfer and admits the next frame", () => {
+    const failures: string[] = [];
+    const hub = new TerminalEventHub(undefined, {}, undefined, (message) => failures.push(message));
+    hub.subscribeEpoch(() => { throw new Error("epoch observer rejected delivery"); });
+    expect(() => hub.publish(
+      { kind: "generationEpoch", epoch: 41, sequence: 0 },
+      () => { throw new Error("app observer rejected delivery"); },
+    )).not.toThrow();
+    expect(hub.publish(output(1, 1))).toEqual({ kind: "accepted" });
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toContain("application delivery observer failed after terminal event ownership transfer");
+    expect(failures[1]).toContain("terminal epoch observer failed after terminal event ownership transfer");
+  });
+
   it("ignores duplicate terminal generations and waits for seed after recovery invalidation", () => {
     const hub = new TerminalEventHub();
     const received: TerminalEvent[] = [];
