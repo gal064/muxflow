@@ -25,7 +25,6 @@ interface PaneBacklog {
 interface PaneStreamState {
   backlog?: PaneBacklog;
   lastGeneration: number;
-  lastPaneResource?: PaneResourceIdentity;
   renderedGeneration: number;
   awaitingSeed: boolean;
   conflictReseedRequested: boolean;
@@ -38,18 +37,6 @@ function createPaneStreamState(): PaneStreamState {
     awaitingSeed: false,
     conflictReseedRequested: false,
   };
-}
-
-interface PaneResourceIdentity {
-  byteLength: number;
-  state: Extract<PaneEvent, { kind: "paneResource" }>["state"];
-  requiresSeed: boolean;
-  generation: number;
-  snapshotGeneration: number;
-  tailThroughGeneration: number;
-  recoveryReason: string;
-  serializedSnapshot: Uint8Array;
-  rawTail: Uint8Array;
 }
 
 const MAX_EXACT_RESOURCE_IDENTITY_BYTES = 256 * 1024;
@@ -85,7 +72,6 @@ export class TerminalEventHub {
   readonly #maxPaneEvents: number;
   #backlogBytes = 0;
   #backlogCount = 0;
-  #identityBytes = 0;
   #retainedPaneCount = 0;
   #generationEpoch?: number;
   #lastSequence = 0;
@@ -151,16 +137,14 @@ export class TerminalEventHub {
     if (event.kind !== "seedDiagnostic") {
       const lastGeneration = pane.lastGeneration;
       if (event.kind === "paneResource") {
-        const resourceIdentity = copyPaneResourceIdentity(event);
         if (event.generation <= lastGeneration) {
-          const previous = pane.lastPaneResource;
-          if (event.generation < lastGeneration || !previous || !resourceIdentity || !samePaneResource(previous, resourceIdentity)) {
+          const previous = latestBufferedPaneResource(pane.backlog);
+          if (event.generation < lastGeneration || !previous || !samePaneResource(previous, event)) {
             this.#requestConflictReseed(event.paneId, pane);
           }
           return admission;
         }
         pane.lastGeneration = event.generation;
-        this.#setPaneResourceIdentity(pane, resourceIdentity);
       } else if (event.generation <= lastGeneration) {
         // A seed is authoritative content, not an increment: dropping one
         // because its generation looks stale leaves the pane waiting for a
@@ -170,7 +154,6 @@ export class TerminalEventHub {
         return admission;
       } else {
         pane.lastGeneration = event.generation;
-        this.#setPaneResourceIdentity(pane, undefined);
       }
       if (event.kind === "paneResource" && event.requiresSeed) {
         pane.awaitingSeed = true;
@@ -202,12 +185,6 @@ export class TerminalEventHub {
         // prefix reached xterm, so incremental traffic must wait for a seed.
         this.#requireSeed(event.paneId, "terminal pane consumer rejected an admitted event");
         throw error;
-      } finally {
-        // The payload allocation has moved to its one renderer. Retaining an
-        // exact detached identity for every mounted pane would scale outside
-        // the hidden-buffer budget; a repeated same-generation resource is
-        // therefore conservatively reseeded after this ownership transfer.
-        if (event.kind === "paneResource") this.#setPaneResourceIdentity(pane, undefined);
       }
       return admission;
     }
@@ -239,7 +216,6 @@ export class TerminalEventHub {
     const backlog = pane?.backlog;
     if (backlog) {
       this.#deleteBacklog(pane);
-      this.#setPaneResourceIdentity(pane, undefined);
       try {
         for (const entry of backlog.entries) {
           this.measurements?.add("terminal.hub.fanoutDeliveries");
@@ -276,7 +252,6 @@ export class TerminalEventHub {
     const pane = this.#activePaneStates.get(paneId) ?? this.#dormantPaneStates.get(paneId);
     if (pane) {
       this.#deleteBacklog(pane);
-      this.#setPaneResourceIdentity(pane, undefined);
     }
     this.#dormantPaneStates.delete(paneId);
     if (this.#paneListeners.has(paneId)) {
@@ -326,7 +301,7 @@ export class TerminalEventHub {
   }
 
   get retainedByteLength(): number {
-    return this.#backlogBytes + this.#identityBytes;
+    return this.#backlogBytes;
   }
 
   get trackedPaneCount(): number {
@@ -341,7 +316,6 @@ export class TerminalEventHub {
     }
     this.#backlogBytes = 0;
     this.#backlogCount = 0;
-    this.#identityBytes = 0;
     this.#retainedPaneCount = 0;
     this.#evictedSeedDebt.clear();
     this.#unknownPanesRequireSeed = false;
@@ -370,12 +344,11 @@ export class TerminalEventHub {
       this.#appendBacklog(current, event, event.data.byteLength);
     }
 
-    if (current.byteLength + (pane.lastPaneResource?.byteLength ?? 0) > this.#maxPaneBytes
-      || current.entries.length > this.#maxPaneEvents) {
+    if (current.byteLength > this.#maxPaneBytes || current.entries.length > this.#maxPaneEvents) {
       const limit = this.#maxPaneBytes === DEFAULT_MAX_PANE_BYTES ? "8 MiB" : `${this.#maxPaneBytes} bytes`;
       this.#requireSeed(
         event.paneId,
-        current.byteLength + (pane.lastPaneResource?.byteLength ?? 0) > this.#maxPaneBytes
+        current.byteLength > this.#maxPaneBytes
           ? `frontend hidden recovery buffer exceeded ${limit}`
           : `frontend hidden recovery record capacity exceeded ${this.#maxPaneEvents} events`,
       );
@@ -439,20 +412,8 @@ export class TerminalEventHub {
     return backlog;
   }
 
-  #setPaneResourceIdentity(pane: PaneStreamState, identity: PaneResourceIdentity | undefined): void {
-    const wasRetained = this.#paneRetainsBytes(pane);
-    if (pane.lastPaneResource) this.#identityBytes -= pane.lastPaneResource.byteLength;
-    const withoutPrevious = this.#backlogBytes + this.#identityBytes;
-    const fitsPane = !identity
-      || identity.byteLength + (pane.backlog?.byteLength ?? 0) <= this.#maxPaneBytes;
-    const fitsTotal = !identity || withoutPrevious + identity.byteLength <= this.#maxTotalBytes;
-    pane.lastPaneResource = fitsPane && fitsTotal ? identity : undefined;
-    if (pane.lastPaneResource) this.#identityBytes += pane.lastPaneResource.byteLength;
-    this.#finishRetentionMutation(pane, wasRetained);
-  }
-
   #paneRetainsBytes(pane: PaneStreamState): boolean {
-    return pane.backlog !== undefined || pane.lastPaneResource !== undefined;
+    return pane.backlog !== undefined;
   }
 
   #finishRetentionMutation(pane: PaneStreamState, wasRetained: boolean): void {
@@ -460,17 +421,17 @@ export class TerminalEventHub {
     if (wasRetained !== isRetained) this.#retainedPaneCount += isRetained ? 1 : -1;
     this.measurements?.highWater?.(
       "terminal.hub.retainedBytes",
-      this.#backlogBytes + this.#identityBytes,
+      this.#backlogBytes,
     );
     this.measurements?.highWater?.("terminal.hub.retainedPanes", this.#retainedPaneCount);
   }
 
   #enforceBacklogLimits(): void {
     while (this.#backlogCount > this.#maxBufferedPanes
-      || this.#backlogBytes + this.#identityBytes > this.#maxTotalBytes) {
+      || this.#backlogBytes > this.#maxTotalBytes) {
       const oldest = this.#oldestBufferedPane();
       if (oldest === undefined) break;
-      this.#requireSeed(oldest, this.#backlogBytes + this.#identityBytes > this.#maxTotalBytes
+      this.#requireSeed(oldest, this.#backlogBytes > this.#maxTotalBytes
         ? "frontend aggregate hidden recovery budget was exceeded"
         : "frontend hidden-pane LRU capacity was exceeded");
     }
@@ -481,7 +442,6 @@ export class TerminalEventHub {
     const alreadyAwaiting = pane.awaitingSeed;
     pane.awaitingSeed = true;
     this.#deleteBacklog(pane);
-    this.#setPaneResourceIdentity(pane, undefined);
     if (!alreadyAwaiting) this.onSeedRequired?.(paneId, reason);
   }
 
@@ -510,7 +470,6 @@ export class TerminalEventHub {
       if (evicted) {
         const alreadyAwaiting = evicted.awaitingSeed;
         this.#deleteBacklog(evicted);
-        this.#setPaneResourceIdentity(evicted, undefined);
         this.#rememberEvictedSeedDebt(oldest);
         if (!alreadyAwaiting) this.onSeedRequired?.(oldest, "frontend pane metadata LRU capacity was exceeded");
       }
@@ -568,7 +527,21 @@ export class TerminalEventHub {
   }
 }
 
-function samePaneResource(left: PaneResourceIdentity, right: PaneResourceIdentity): boolean {
+function latestBufferedPaneResource(backlog: PaneBacklog | undefined): Extract<PaneEvent, { kind: "paneResource" }> | undefined {
+  for (let index = (backlog?.entries.length ?? 0) - 1; index >= 0; index -= 1) {
+    const event = backlog!.entries[index].event;
+    if (event.kind === "paneResource") return event;
+  }
+  return undefined;
+}
+
+function samePaneResource(
+  left: Extract<PaneEvent, { kind: "paneResource" }>,
+  right: Extract<PaneEvent, { kind: "paneResource" }>,
+): boolean {
+  const identityBytes = diagnosticEncoder.encode(right.recoveryReason).byteLength
+    + right.serializedSnapshot.byteLength + right.rawTail.byteLength;
+  if (identityBytes > MAX_EXACT_RESOURCE_IDENTITY_BYTES) return false;
   return left.state === right.state
     && left.requiresSeed === right.requiresSeed
     && left.generation === right.generation
@@ -577,28 +550,6 @@ function samePaneResource(left: PaneResourceIdentity, right: PaneResourceIdentit
     && left.recoveryReason === right.recoveryReason
     && sameBytes(left.serializedSnapshot, right.serializedSnapshot)
     && sameBytes(left.rawTail, right.rawTail);
-}
-
-function copyPaneResourceIdentity(event: Extract<PaneEvent, { kind: "paneResource" }>): PaneResourceIdentity | undefined {
-  const payloadBytes = event.serializedSnapshot.byteLength + event.rawTail.byteLength;
-  const identityBytes = diagnosticEncoder.encode(event.recoveryReason).byteLength + payloadBytes;
-  // Exact duplicate recognition is an optimization, not an authority check.
-  // Keep it bounded; oversized same-generation checkpoints conservatively
-  // request a new seed instead of relying on a collision-prone digest.
-  if (identityBytes > MAX_EXACT_RESOURCE_IDENTITY_BYTES) return undefined;
-  return {
-    // The immutable reason string is shared with the buffered event; only the
-    // byte arrays below are detached backing allocations owned by this copy.
-    byteLength: payloadBytes,
-    state: event.state,
-    requiresSeed: event.requiresSeed,
-    generation: event.generation,
-    snapshotGeneration: event.snapshotGeneration,
-    tailThroughGeneration: event.tailThroughGeneration,
-    recoveryReason: event.recoveryReason,
-    serializedSnapshot: event.serializedSnapshot.slice(),
-    rawTail: event.rawTail.slice(),
-  };
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {

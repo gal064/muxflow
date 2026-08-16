@@ -2,6 +2,10 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
+#[path = "replay_lru.rs"]
+mod replay_lru;
+use replay_lru::Lru;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BufferedOutput {
     pub sequence: u64,
@@ -156,65 +160,6 @@ macro_rules! record_pane_resource_measurement {
             }
         });
     };
-}
-
-#[derive(Debug, Clone, Default)]
-struct LruLinks {
-    older: Option<String>,
-    newer: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct Lru {
-    links: HashMap<String, LruLinks>,
-    oldest: Option<String>,
-    newest: Option<String>,
-}
-
-impl Lru {
-    fn touch(&mut self, pane_id: &str) {
-        self.detach(pane_id);
-        let older = self.newest.take();
-        if let Some(older_id) = older.as_ref() {
-            self.links
-                .get_mut(older_id)
-                .expect("LRU tail has links")
-                .newer = Some(pane_id.to_owned());
-        } else {
-            self.oldest = Some(pane_id.to_owned());
-        }
-        self.links
-            .insert(pane_id.to_owned(), LruLinks { older, newer: None });
-        self.newest = Some(pane_id.to_owned());
-    }
-
-    fn detach(&mut self, pane_id: &str) {
-        let Some(links) = self.links.remove(pane_id) else {
-            return;
-        };
-        if let Some(older) = links.older.as_ref() {
-            self.links
-                .get_mut(older)
-                .expect("LRU predecessor has links")
-                .newer = links.newer.clone();
-        } else {
-            self.oldest.clone_from(&links.newer);
-        }
-        if let Some(newer) = links.newer.as_ref() {
-            self.links
-                .get_mut(newer)
-                .expect("LRU successor has links")
-                .older = links.older.clone();
-        } else {
-            self.newest.clone_from(&links.older);
-        }
-    }
-
-    fn pop_oldest(&mut self) -> Option<String> {
-        let pane_id = self.oldest.clone()?;
-        self.detach(&pane_id);
-        Some(pane_id)
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

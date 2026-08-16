@@ -1,5 +1,44 @@
 use super::*;
 
+fn timed_pane_resource_round(pane_count: usize) -> u128 {
+    const CHUNKS_PER_PANE: usize = 8;
+    let chunk = [b'x'; 64];
+    let started = std::time::Instant::now();
+    let mut store =
+        PaneResourceStore::with_total_limit(pane_count + 1, 4 * 1024 * 1024, 128 * 1024 * 1024);
+    for pane in 0..pane_count {
+        let pane_id = format!("%{pane}");
+        store.set_visible(&pane_id, false, 1);
+        store.snapshot(&pane_id, format!("screen-{pane}").into_bytes(), 2);
+        for generation in 0..CHUNKS_PER_PANE {
+            store.append(&pane_id, &chunk, generation as u64 + 3);
+        }
+    }
+    std::hint::black_box(store.retained_bytes());
+    started.elapsed().as_nanos() / (pane_count * (CHUNKS_PER_PANE + 2)) as u128
+}
+
+#[test]
+#[ignore = "Phase 14 opt-in release timing fixture"]
+fn phase14_pane_resource_per_operation_time() {
+    for pane_count in [32_usize, 1_024] {
+        std::hint::black_box(timed_pane_resource_round(pane_count));
+        let mut samples = (0..9)
+            .map(|_| timed_pane_resource_round(pane_count))
+            .collect::<Vec<_>>();
+        samples.sort_unstable();
+        println!(
+            "PHASE14_METRIC {}",
+            serde_json::json!({
+                "lane": "paneResourceTime",
+                "paneCount": pane_count,
+                "samples": samples,
+                "medianNanosPerOperation": samples[samples.len() / 2],
+            })
+        );
+    }
+}
+
 fn assert_incremental_accounting_matches_model(store: &PaneResourceStore) {
     let resource_bytes = store.resources.values().fold(0_usize, |total, resource| {
         total + resource.serialized_snapshot.len() + resource.raw_tail.len()
@@ -46,19 +85,7 @@ fn assert_incremental_accounting_matches_model(store: &PaneResourceStore) {
 }
 
 fn assert_lru_matches(lru: &Lru, expected: &std::collections::HashSet<String>) {
-    let mut visited = std::collections::HashSet::new();
-    let mut current = lru.oldest.as_deref();
-    let mut previous = None;
-    while let Some(pane_id) = current {
-        assert!(visited.insert(pane_id.to_owned()), "LRU cycle at {pane_id}");
-        let links = lru.links.get(pane_id).expect("LRU pane has links");
-        assert_eq!(links.older.as_deref(), previous);
-        previous = Some(pane_id);
-        current = links.newer.as_deref();
-    }
-    assert_eq!(previous, lru.newest.as_deref());
-    assert_eq!(visited, *expected);
-    assert_eq!(visited.len(), lru.links.len());
+    lru.assert_matches(expected);
 }
 
 #[test]
@@ -179,6 +206,7 @@ fn phase14_pane_resource_scaling_and_reveal_parity() {
         let chunks_per_pane = 8_usize;
         let chunk = vec![b'x'; 64];
         begin_pane_resource_measurement();
+        let started = std::time::Instant::now();
         let mut store =
             PaneResourceStore::with_total_limit(pane_count + 1, 4 * 1024 * 1024, 128 * 1024 * 1024);
         for pane in 0..pane_count {
@@ -197,6 +225,8 @@ fn phase14_pane_resource_scaling_and_reveal_parity() {
         assert_eq!(retained_bytes, expected_bytes);
         assert_eq!(retained_panes, pane_count);
         let recovery = store.reveal(&format!("%{}", pane_count - 1), 99).unwrap();
+        let elapsed_nanos = started.elapsed().as_nanos();
+        let measured_operations = pane_count * (chunks_per_pane + 2) + 1;
         assert_eq!(
             recovery.serialized_snapshot,
             format!("screen-{}", pane_count - 1).as_bytes()
@@ -223,6 +253,9 @@ fn phase14_pane_resource_scaling_and_reveal_parity() {
                 "lruPops": measurements.lru_pops,
                 "appendOperations": measurements.append_operations,
                 "appendedBytes": measurements.appended_bytes,
+                "elapsedNanos": elapsed_nanos,
+                "measuredOperations": measured_operations,
+                "nanosPerOperation": elapsed_nanos / measured_operations as u128,
                 "evictions": measurements.evictions,
                 "revealParity": true,
             })

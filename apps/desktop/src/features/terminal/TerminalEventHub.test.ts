@@ -200,7 +200,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.publish({ kind: "seedDiagnostic", paneId: "%1", message: "λ", sequence: 4 });
     expect(hub.retainedByteLength).toBe(5);
     hub.publish(resource(5, 3, { recoveryReason: "λ", serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }));
-    expect(hub.retainedByteLength).toBe(8);
+    expect(hub.retainedByteLength).toBe(5);
     const received: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => received.push(event));
     expect(received).toEqual([
@@ -256,7 +256,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(received).toEqual([checkpoint]);
   });
 
-  it("retains only detached identity after delivering a resource to an active pane", () => {
+  it("uses conservative reseed after transferring a resource to an active pane", () => {
     const requests: string[] = [];
     const hub = new TerminalEventHub((paneId) => requests.push(paneId));
     hub.subscribePane("%1", () => undefined);
@@ -269,19 +269,19 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(requests).toEqual(["%1"]);
   });
 
-  it("charges dormant resource identity copies to the aggregate byte budget", () => {
+  it("retains one exclusively owned dormant resource payload", () => {
     const hub = new TerminalEventHub();
     hub.publish(resource(1, 2));
-    // Two payload bytes remain in the replay event and two in the exact
-    // detached identity used to reject conflicting same-generation handoffs.
-    expect(hub.retainedByteLength).toBe(4);
+    // The replay event is also the exact duplicate-comparison identity: no
+    // detached second allocation is retained beside it.
+    expect(hub.retainedByteLength).toBe(2);
     expect(hub.retainedPaneCount).toBe(1);
     hub.subscribePane("%1", () => undefined);
     expect(hub.retainedByteLength).toBe(0);
     expect(hub.retainedPaneCount).toBe(0);
   });
 
-  it("releases an active identity even when its renderer throws", () => {
+  it("does not retain a detached active resource when its renderer throws", () => {
     const hub = new TerminalEventHub();
     hub.subscribePane("%1", () => { throw new Error("injected renderer failure"); });
     expect(() => hub.publish(resource(1, 2))).toThrow("injected renderer failure");
@@ -334,7 +334,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(requests).toEqual(["%1"]);
   });
 
-  it("releases consumed resource allocations while retaining detached identity", () => {
+  it("releases consumed resource allocations and reseeds conservatively", () => {
     const requests: string[] = [];
     const hub = new TerminalEventHub((paneId) => requests.push(paneId));
     const checkpoint = resource(1, 2);

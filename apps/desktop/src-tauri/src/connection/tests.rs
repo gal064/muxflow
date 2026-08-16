@@ -444,6 +444,36 @@ fn input_flush_reports_the_first_failed_write() {
 }
 
 #[test]
+fn abandoned_input_barrier_cannot_consume_a_failed_write() {
+    let client = Arc::new(TerminalClient::new());
+    let (sender, receiver) = mpsc::sync_channel(8);
+    let worker_client = Arc::clone(&client);
+    let worker = thread::spawn(move || run_client_input_dispatch(worker_client, receiver));
+    sender
+        .send(ClientInputDispatch::Bytes {
+            pane_id: "%1".into(),
+            data: b"accepted".to_vec(),
+            epoch: 0,
+        })
+        .unwrap();
+    let (abandoned_tx, abandoned_rx) = mpsc::sync_channel(1);
+    drop(abandoned_rx);
+    sender
+        .send(ClientInputDispatch::Barrier(abandoned_tx))
+        .unwrap();
+    let (live_tx, live_rx) = mpsc::sync_channel(1);
+    sender.send(ClientInputDispatch::Barrier(live_tx)).unwrap();
+    let error = live_rx.recv().unwrap().unwrap_err();
+    assert!(error.contains("disconnected connection"), "{error}");
+
+    let (clean_tx, clean_rx) = mpsc::sync_channel(1);
+    sender.send(ClientInputDispatch::Barrier(clean_tx)).unwrap();
+    assert_eq!(clean_rx.recv().unwrap(), Ok(()));
+    sender.send(ClientInputDispatch::Stop).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
 fn input_flush_reports_bytes_accepted_by_a_replaced_connection() {
     let client = Arc::new(TerminalClient::new());
     let (sender, receiver) = mpsc::sync_channel(8);

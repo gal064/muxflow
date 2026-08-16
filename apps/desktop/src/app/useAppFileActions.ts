@@ -1,5 +1,5 @@
 import { useRef, type Dispatch, type SetStateAction } from "react";
-import { keyForTransferConnection } from "../features/files/api";
+import { keyForScope, keyForTransferConnection, sameRoot } from "../features/files/api";
 import { chooseDownloadDestination, type DownloadIntent } from "../features/files/downloadFlow";
 import type {
   ActiveRoot,
@@ -28,6 +28,17 @@ interface AppFileActionsOptions {
 /** Owns filesystem mutation, native save-panel serialization, and transfer publication. */
 export function useAppFileActions(options: AppFileActionsOptions) {
   const downloadPickerOpen = useRef(false);
+  const scopeRef = useRef(options.scope);
+  const rootRef = useRef(options.root);
+  scopeRef.current = options.scope;
+  rootRef.current = options.root;
+
+  const selectionIsCurrent = (scope: FileWorkspaceScope, root: ActiveRoot) => {
+    const currentScope = scopeRef.current;
+    return Boolean(currentScope
+      && keyForScope(currentScope) === keyForScope(scope)
+      && sameRoot(rootRef.current, root));
+  };
 
   const mutateFile = async (mutation: FileMutation) => {
     if (!options.scope || !options.root || !options.canMutate) {
@@ -57,19 +68,35 @@ export function useAppFileActions(options: AppFileActionsOptions) {
     }
   };
 
-  const startDownload = async (request: DownloadRequest, root: ActiveRoot) => {
-    if (!options.scope) throw new Error("Downloads require a live file host.");
+  const startDownload = async (
+    scope: FileWorkspaceScope,
+    request: DownloadRequest,
+    root: ActiveRoot,
+  ) => {
+    if (!selectionIsCurrent(scope, root)) {
+      options.setStatus("Download cancelled because the active host or workspace changed.");
+      return;
+    }
     try {
-      const transfer = await options.client.startDownload(options.scope, root, request);
+      const transfer = await options.client.startDownload(scope, root, request);
+      if (!selectionIsCurrent(scope, root)) {
+        await options.client.cancelTransfer(scope, transfer.id).catch(() => undefined);
+        options.setStatus("Download cancelled because the active host or workspace changed.");
+        return;
+      }
       options.recordTransfer(transfer);
       const banner = `Download ${transfer.state}: ${request.path}`;
       options.setActiveDownloadStatus({ id: transfer.id, path: request.path, banner });
       options.setStatus(banner);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (!selectionIsCurrent(scope, root)) {
+        options.setStatus("Download cancelled because the active host or workspace changed.");
+        return;
+      }
       options.recordTransfer({
         id: crypto.randomUUID(),
-        scopeKey: keyForTransferConnection(options.scope),
+        scopeKey: keyForTransferConnection(scope),
         path: request.path,
         destination: request.destination,
         kind: request.kind,
@@ -86,6 +113,11 @@ export function useAppFileActions(options: AppFileActionsOptions) {
 
   const startDownloadFlow = async (intent: DownloadIntent, root: ActiveRoot) => {
     if (downloadPickerOpen.current) return;
+    const scope = scopeRef.current;
+    if (!scope || !selectionIsCurrent(scope, root)) {
+      options.setStatus("Downloads require the active live file workspace.");
+      return;
+    }
     downloadPickerOpen.current = true;
     const chosen = await chooseDownloadDestination(intent)
       .catch((error) => {
@@ -94,7 +126,11 @@ export function useAppFileActions(options: AppFileActionsOptions) {
       })
       .finally(() => { downloadPickerOpen.current = false; });
     if (!chosen) return;
-    await startDownload({
+    if (!selectionIsCurrent(scope, root)) {
+      options.setStatus("Download cancelled because the active host or workspace changed.");
+      return;
+    }
+    await startDownload(scope, {
       path: intent.path,
       kind: intent.kind,
       destination: chosen.destination,

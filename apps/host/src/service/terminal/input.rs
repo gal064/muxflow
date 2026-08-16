@@ -2,6 +2,7 @@ use std::{
     io::Write,
     process::Stdio,
     sync::{Arc, Mutex, OnceLock, mpsc},
+    time::Duration,
 };
 
 use tmux_control::{HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
@@ -21,6 +22,7 @@ use super::{queue_input, stream::InputCompletion, validate_tmux_id};
 /// requests up to that size before choosing a path, so anything smaller would
 /// hand a fast typist's merged burst straight back to the fork path.
 pub(super) const INBAND_INPUT_MAX_BYTES: usize = HOST_INPUT_COALESCE_BYTES;
+const INPUT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 
 // The fork path must remain reachable, or a real paste would have nowhere to go.
 const _: () = assert!(MAX_INPUT_REQUEST_BYTES > INBAND_INPUT_MAX_BYTES);
@@ -44,22 +46,7 @@ pub(super) fn run_input_dispatch<W: Write>(
     run_input_dispatch_with(receiver, move |input_id, pane_id, data| {
         if data.len() <= INBAND_INPUT_MAX_BYTES {
             send_input_inband(&control_stdin, input_id, pane_id, data)?;
-            loop {
-                let (completed_id, result) = input_completion.recv().map_err(|_| {
-                    "terminal control stream closed before input completed".to_owned()
-                })?;
-                if completed_id == input_id {
-                    break result;
-                }
-                if completed_id > input_id {
-                    break Err(format!(
-                        "terminal input completion advanced from {input_id} to {completed_id}"
-                    ));
-                }
-                // A stale completion is never allowed to acknowledge this
-                // request. It can only originate before correlation became
-                // authoritative; discard it and keep waiting for the exact id.
-            }
+            wait_for_input_completion(&input_completion, input_id, INPUT_COMPLETION_TIMEOUT)
         } else {
             // Ordering against the in-band path is preserved because this
             // dispatch thread is the only writer of input: the previous
@@ -71,6 +58,38 @@ pub(super) fn run_input_dispatch<W: Write>(
         }
         .inspect_err(|error| report_failure(pane_id, error))
     })
+}
+
+fn wait_for_input_completion(
+    input_completion: &mpsc::Receiver<InputCompletion>,
+    input_id: u64,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let (completed_id, result) =
+            input_completion
+                .recv_timeout(remaining)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => {
+                        format!("timed out waiting for terminal input {input_id} completion")
+                    }
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        "terminal control stream closed before input completed".to_owned()
+                    }
+                })?;
+        if completed_id == input_id {
+            return result;
+        }
+        if completed_id > input_id {
+            return Err(format!(
+                "terminal input completion advanced from {input_id} to {completed_id}"
+            ));
+        }
+        // Late completions for timed-out/aborted older requests are stale by
+        // exact ID and cannot acknowledge the current input.
+    }
 }
 
 fn run_input_dispatch_with(
@@ -413,6 +432,21 @@ mod tests {
         assert_eq!(
             barrier_rx.recv().unwrap(),
             Err("the matching request failed".into())
+        );
+    }
+
+    #[test]
+    fn completion_timeout_releases_the_dispatcher_and_late_id_is_stale() {
+        let (completion_tx, completion_rx) = mpsc::channel();
+        let error =
+            wait_for_input_completion(&completion_rx, 1, Duration::from_millis(1)).unwrap_err();
+        assert!(error.contains("timed out"));
+
+        completion_tx.send((1, Ok(()))).unwrap();
+        completion_tx.send((2, Ok(()))).unwrap();
+        assert_eq!(
+            wait_for_input_completion(&completion_rx, 2, Duration::from_secs(1)),
+            Ok(())
         );
     }
 

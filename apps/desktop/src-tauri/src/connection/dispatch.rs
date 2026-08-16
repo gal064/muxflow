@@ -246,8 +246,10 @@ pub(super) fn run_client_input_dispatch(
                 }
             }
             ClientInputDispatch::Barrier(sender) => {
-                let result = pending_error.take().map_or(Ok(()), Err);
-                let _ = sender.send(result);
+                let result = pending_error.clone().map_or(Ok(()), Err);
+                if sender.send(result).is_ok() {
+                    pending_error = None;
+                }
             }
             ClientInputDispatch::Stop => break,
         }

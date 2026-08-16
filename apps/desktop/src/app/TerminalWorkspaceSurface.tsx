@@ -1,5 +1,5 @@
-import type { MutableRefObject, PointerEvent } from "react";
-import type { Pane, TmuxSnapshot, Window } from "./types";
+import { memo, type MutableRefObject, type PointerEvent } from "react";
+import type { Pane, Window } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { renderedPaneStyle, type WindowGrid } from "../features/terminal/layout";
 import { TerminalPane, type TerminalPaneController } from "../features/terminal/TerminalPane";
@@ -23,7 +23,6 @@ type TerminalWorkspaceSurfaceProps = {
   /** Per-pane agent state; a pane whose agent wants a human gets the ring. */
   paneAttention?: ReadonlyMap<string, AgentAttentionRollup>;
   panes: Pane[];
-  snapshot: TmuxSnapshot;
   /** Receives the tiled surface element the tmux client size is measured from. */
   surfaceRef: (element: HTMLElement | null) => void;
   terminalTransferClient: TauriTerminalTransferClient;
@@ -38,7 +37,8 @@ type TerminalWorkspaceSurfaceProps = {
   setStatus(message: string): void;
 };
 
-export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
+/** Memoized terminal-only boundary: unrelated root notices/dialogs never revisit live panes. */
+export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
   const { activePane, activeWindow, grid } = props;
   return <div className="terminal-window" ref={props.surfaceRef} aria-label={activeWindow ? `Terminal tab ${activeWindow.name}` : "Terminal"}>
     {props.mountedPanes.map((pane) => {
@@ -102,4 +102,4 @@ export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
     })}
     {props.panes.length === 0 && <p className="quiet-empty">No tmux panes in this terminal window.</p>}
   </div>;
-}
+});

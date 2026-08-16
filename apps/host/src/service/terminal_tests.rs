@@ -138,7 +138,8 @@ fn failed_membership_batch_remains_retryable() {
         &["%1".into()],
         Arc::new(crate::service::terminal::FlowControl::default()),
     );
-    stream.apply_control(stream_rx.recv().unwrap());
+    let (input_completion, _) = std_mpsc::channel();
+    stream.apply_control(stream_rx.recv().unwrap(), &input_completion);
     assert_eq!(
         stream.pane_states.keys().cloned().collect::<HashSet<_>>(),
         HashSet::from(["%2".into()])
@@ -146,16 +147,19 @@ fn failed_membership_batch_remains_retryable() {
     if let PaneSeedState::Pending { buffered, .. } = stream.pane_states.get_mut("%2").unwrap() {
         buffered.push((7, b"preserve-me".to_vec()));
     }
-    stream.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    stream.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &input_completion,
+    );
     assert!(matches!(
         stream.pane_states.get("%2"),
         Some(PaneSeedState::Pending { buffered, .. })
             if buffered == &[(7, b"preserve-me".to_vec())]
     ));
 
-    stream.apply_control(stream_rx.recv().unwrap());
+    stream.apply_control(stream_rx.recv().unwrap(), &input_completion);
     assert_eq!(
         stream.pane_states.keys().cloned().collect::<HashSet<_>>(),
         HashSet::from(["%1".into()]),
@@ -167,7 +171,7 @@ fn failed_membership_batch_remains_retryable() {
         vec!["%1".to_owned()]
     );
     assert_eq!(current, next_desired);
-    stream.apply_control(stream_rx.recv().unwrap());
+    stream.apply_control(stream_rx.recv().unwrap(), &input_completion);
     assert_eq!(
         stream.pane_states.keys().cloned().collect::<HashSet<_>>(),
         HashSet::from(["%3".into()]),

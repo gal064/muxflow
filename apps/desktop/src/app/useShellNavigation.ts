@@ -84,6 +84,11 @@ export function commitScopedAppTabClose(options: {
 
 export function useShellNavigation(options: ShellNavigationOptions) {
   const coordinator = useMemo(() => new RemoteNavigationCoordinator(), []);
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+  const {
+    connectionEpoch, connectionKey, hostProfileId, serverIdentity,
+  } = options.currentScope;
   const creationVersion = useRef(0);
   const scopeRef = useRef(options.currentScope);
   const activeSessionIdRef = useRef(options.activeSessionId);
@@ -98,19 +103,21 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     windowId?: string;
     lastObservation?: { generation: number; windowId?: string };
   } | undefined>(undefined);
-  scopeRef.current = options.currentScope;
-  activeSessionIdRef.current = options.activeSessionId;
-  activeWindowIdRef.current = options.activeWindowId;
-  sessionsRef.current = options.sessions;
-  windowsRef.current = options.windows;
+  scopeRef.current = optionsRef.current.currentScope;
+  activeSessionIdRef.current = optionsRef.current.activeSessionId;
+  activeWindowIdRef.current = optionsRef.current.activeWindowId;
+  sessionsRef.current = optionsRef.current.sessions;
+  windowsRef.current = optionsRef.current.windows;
 
   useEffect(() => {
     coordinator.invalidate();
     protectedAppTab.current = undefined;
-  }, [coordinator, options.currentScope.connectionEpoch, options.currentScope.connectionKey,
-    options.currentScope.hostProfileId, options.currentScope.serverIdentity]);
+  }, [connectionEpoch, connectionKey, coordinator, hostProfileId, serverIdentity]);
 
-  const scopeCurrent = (scope: HostScopeToken) => sameHostConnection(scope, scopeRef.current);
+  const scopeCurrent = useCallback(
+    (scope: HostScopeToken) => sameHostConnection(scope, scopeRef.current),
+    [],
+  );
   const requestLocation = useCallback(async (
     destination: ShellDestination,
     predecessor: NavigationOutcome | undefined,
@@ -151,7 +158,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     if (plan.selectSession) {
       let selected: TmuxActionResult | undefined;
       try {
-        selected = await options.performAction(
+        selected = await optionsRef.current.performAction(
           { kind: "selectSession", sessionId: target.sessionId },
           nextPrecondition,
           { kind: "navigation", feedback: measureWindowPaint ? "visible" : "silent", measurePanePaint: false },
@@ -163,7 +170,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope",
       };
       if (!scopeCurrent(scope)) return { kind: "unknown", reason: "scope" };
-      options.acknowledgeHostSessionSelection?.(target.sessionId);
+      optionsRef.current.acknowledgeHostSessionSelection?.(target.sessionId);
       generation = selected.topologyGeneration;
       generationSource = "action";
       appliedLocation = { sessionId: target.sessionId };
@@ -175,7 +182,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     if (plan.selectWindow && target.windowId) {
       let selected: TmuxActionResult | undefined;
       try {
-        selected = await options.performAction(
+        selected = await optionsRef.current.performAction(
           { kind: "selectWindow", sessionId: target.sessionId, windowId: target.windowId },
           nextPrecondition,
           {
@@ -200,14 +207,14 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       return { kind: "partial", location: appliedLocation, generation, generationSource };
     }
     return { kind: "reached", destination, generation, generationSource };
-  }, [options.acknowledgeHostSessionSelection, options.performAction]);
+  }, [scopeCurrent]);
 
   const beginTerminalIntent = useCallback(() => {
     protectedAppTab.current = undefined;
   }, []);
   const selectSession = useCallback((sessionId: string) => {
     beginTerminalIntent();
-    if (shellNavigationMode(options.canMutate) === "cached") {
+    if (shellNavigationMode(optionsRef.current.canMutate) === "cached") {
       coordinator.navigateLocal({
         destination: { kind: "session", sessionId },
         request: async () => ({
@@ -217,9 +224,9 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         commit: () => {
           activeSessionIdRef.current = sessionId;
           activeWindowIdRef.current = undefined;
-          options.setAppTab(sessionId, undefined);
-          options.setActiveSessionId(sessionId);
-          options.setStatus("Viewing the last known workspace. Writes remain frozen.");
+          optionsRef.current.setAppTab(sessionId, undefined);
+          optionsRef.current.setActiveSessionId(sessionId);
+          optionsRef.current.setStatus("Viewing the last known workspace. Writes remain frozen.");
         },
       });
       return;
@@ -234,13 +241,13 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         if (!scopeCurrent(scope)) return;
         activeSessionIdRef.current = sessionId;
         activeWindowIdRef.current = undefined;
-        options.setAppTab(sessionId, undefined);
-        options.setActiveSessionId(sessionId);
+        optionsRef.current.setAppTab(sessionId, undefined);
+        optionsRef.current.setActiveSessionId(sessionId);
       },
     }, sessionId === activeSessionIdRef.current
       ? { kind: "reached", destination: { kind: "session", sessionId }, generation: scope.generation, generationSource: "snapshot" }
       : undefined);
-  }, [beginTerminalIntent, coordinator, options, requestLocation]);
+  }, [beginTerminalIntent, coordinator, requestLocation, scopeCurrent]);
 
   const selectWindowDestination = useCallback((destination: Extract<ShellDestination, { kind: "window" }>) => {
     const scope = scopeRef.current;
@@ -253,20 +260,20 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         if (!scopeCurrent(scope)) return;
         activeSessionIdRef.current = destination.sessionId;
         activeWindowIdRef.current = destination.windowId;
-        options.setAppTab(destination.sessionId, undefined);
-        options.setActiveSessionId(destination.sessionId);
-        options.setActiveWindowId(destination.windowId);
+        optionsRef.current.setAppTab(destination.sessionId, undefined);
+        optionsRef.current.setActiveSessionId(destination.sessionId);
+        optionsRef.current.setActiveWindowId(destination.windowId);
       },
     }, destination.windowId === activeWindowIdRef.current && destination.sessionId === activeSessionIdRef.current
       ? { kind: "reached", destination, generation: scope.generation, generationSource: "snapshot" }
       : undefined);
-  }, [coordinator, options, requestLocation]);
+  }, [coordinator, requestLocation, scopeCurrent]);
 
   const selectWindow = useCallback((windowId: string) => {
     beginTerminalIntent();
     const target = windowsRef.current.find((window) => window.id === windowId);
     if (!target) return;
-    if (shellNavigationMode(options.canMutate) === "cached") {
+    if (shellNavigationMode(optionsRef.current.canMutate) === "cached") {
       coordinator.navigateLocal({
         destination: { kind: "window", sessionId: target.sessionId, windowId: target.id },
         request: async () => ({
@@ -278,16 +285,16 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         commit: () => {
           activeSessionIdRef.current = target.sessionId;
           activeWindowIdRef.current = target.id;
-          options.setAppTab(target.sessionId, undefined);
-          options.setActiveSessionId(target.sessionId);
-          options.setActiveWindowId(target.id);
-          options.setStatus("Viewing the last known terminal tab. Writes remain frozen.");
+          optionsRef.current.setAppTab(target.sessionId, undefined);
+          optionsRef.current.setActiveSessionId(target.sessionId);
+          optionsRef.current.setActiveWindowId(target.id);
+          optionsRef.current.setStatus("Viewing the last known terminal tab. Writes remain frozen.");
         },
       });
       return;
     }
     void selectWindowDestination({ kind: "window", sessionId: target.sessionId, windowId: target.id });
-  }, [beginTerminalIntent, coordinator, options, selectWindowDestination]);
+  }, [beginTerminalIntent, coordinator, selectWindowDestination]);
 
   const createWindow = useCallback((sessionId: string) => {
     beginTerminalIntent();
@@ -299,7 +306,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       destination: { kind: "operation", key },
       request: async () => {
         try {
-          created = await options.performAction({ kind: "createWindow", sessionId });
+          created = await optionsRef.current.performAction({ kind: "createWindow", sessionId });
         } catch (error) {
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope", error };
         }
@@ -307,7 +314,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope" };
         }
         createdSessionId = created.sessionId ?? sessionId;
-        options.acknowledgeHostSessionSelection?.(createdSessionId);
+        optionsRef.current.acknowledgeHostSessionSelection?.(createdSessionId);
         return {
           kind: "reached",
           destination: { kind: "window", sessionId: createdSessionId, windowId: created.windowId },
@@ -319,12 +326,12 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         if (!scopeCurrent(scope) || !created?.windowId) return;
         activeSessionIdRef.current = createdSessionId;
         activeWindowIdRef.current = created.windowId;
-        options.setAppTab(createdSessionId, undefined);
-        options.setActiveSessionId(createdSessionId);
-        options.setActiveWindowId(created.windowId);
+        optionsRef.current.setAppTab(createdSessionId, undefined);
+        optionsRef.current.setActiveSessionId(createdSessionId);
+        optionsRef.current.setActiveWindowId(created.windowId);
       },
     });
-  }, [beginTerminalIntent, coordinator, options]);
+  }, [beginTerminalIntent, coordinator, scopeCurrent]);
 
   const selectLocalAppTab = useCallback((
     sessionId: string,
@@ -357,11 +364,11 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       },
       commit: () => { if (scopeCurrent(scope)) commitLocal(); },
     });
-  }, [coordinator, options, requestLocation]);
+  }, [coordinator, requestLocation, scopeCurrent]);
 
   const selectAppTab = useCallback((sessionId: string, windowId: string | undefined, appTabId: string) => {
-    selectLocalAppTab(sessionId, windowId, appTabId, () => options.setAppTab(sessionId, appTabId));
-  }, [options, selectLocalAppTab]);
+    selectLocalAppTab(sessionId, windowId, appTabId, () => optionsRef.current.setAppTab(sessionId, appTabId));
+  }, [selectLocalAppTab]);
 
   const revealLocalTerminal = useCallback((
     sessionId: string,
@@ -387,7 +394,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     const source = feedback.kind === "announce" ? feedback.source : "Pane";
     if (!sessionsRef.current.some((session) => session.id === target.sessionId)) {
       const error = new Error(`${source} destination is no longer available.`);
-      if (feedback.kind === "announce") options.setStatus(error.message);
+      if (feedback.kind === "announce") optionsRef.current.setStatus(error.message);
       return { ok: false, error };
     }
     const scope = scopeRef.current;
@@ -409,7 +416,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         if (!isCurrent()) return location;
         let focused: TmuxActionResult | undefined;
         try {
-          focused = await options.performAction({
+          focused = await optionsRef.current.performAction({
             kind: "focusPane",
             sessionId: target.sessionId,
             windowId: target.windowId,
@@ -434,13 +441,13 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         if (!sessionsRef.current.some((session) => session.id === target.sessionId)) return;
         activeSessionIdRef.current = target.sessionId;
         activeWindowIdRef.current = target.windowId;
-        options.setAppTab(target.sessionId, undefined);
-        options.setActiveSessionId(target.sessionId);
-        options.setActiveWindowId(target.windowId);
-        if (feedback.kind === "announce") options.setStatus(feedback.successMessage
+        optionsRef.current.setAppTab(target.sessionId, undefined);
+        optionsRef.current.setActiveSessionId(target.sessionId);
+        optionsRef.current.setActiveWindowId(target.windowId);
+        if (feedback.kind === "announce") optionsRef.current.setStatus(feedback.successMessage
           ? `${feedback.successMessage} Focus request accepted.`
           : `${feedback.source} focus request accepted for ${target.sessionId}/${target.windowId}/${target.id}.`);
-        window.requestAnimationFrame(() => options.focusPaneController(target.id));
+        window.requestAnimationFrame(() => optionsRef.current.focusPaneController(target.id));
       },
     });
     if (accepted.kind === "reached") return { ok: true };
@@ -448,7 +455,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       return { ok: false, error: new ShellNavigationSupersededError() };
     }
     return { ok: false, error: accepted.error ?? new Error(`${source} focus request was not accepted.`) };
-  }, [beginTerminalIntent, coordinator, options, requestLocation]);
+  }, [beginTerminalIntent, coordinator, requestLocation, scopeCurrent]);
 
   const createSession = useCallback((name: string) => {
     beginTerminalIntent();
@@ -459,14 +466,14 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       destination: { kind: "operation", key },
       request: async () => {
         try {
-          created = await options.performAction({ kind: "createSession", name });
+          created = await optionsRef.current.performAction({ kind: "createSession", name });
         } catch (error) {
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope", error };
         }
         if (!created?.sessionId || !scopeCurrent(scope)) {
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope" };
         }
-        options.acknowledgeHostSessionSelection?.(created.sessionId);
+        optionsRef.current.acknowledgeHostSessionSelection?.(created.sessionId);
         return {
           kind: "reached",
           destination: { kind: "session", sessionId: created.sessionId },
@@ -478,12 +485,12 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         if (!scopeCurrent(scope) || !created?.sessionId) return;
         activeSessionIdRef.current = created.sessionId;
         activeWindowIdRef.current = undefined;
-        options.setAppTab(created.sessionId, undefined);
-        options.setActiveSessionId(created.sessionId);
-        options.setActiveWindowId(undefined);
+        optionsRef.current.setAppTab(created.sessionId, undefined);
+        optionsRef.current.setActiveSessionId(created.sessionId);
+        optionsRef.current.setActiveWindowId(undefined);
       },
     });
-  }, [beginTerminalIntent, coordinator, options]);
+  }, [beginTerminalIntent, coordinator, scopeCurrent]);
 
   const observeAuthoritativeWindow = useCallback((sessionId: string, windowId: string | undefined, generation: number) => {
     const protection = protectedAppTab.current;
@@ -498,8 +505,9 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     return true;
   }, []);
 
-  return {
+  return useMemo(() => ({
     createSession, createWindow, observeAuthoritativeWindow, selectAppTab, selectLocalAppTab,
     selectPane, selectSession, selectWindow, revealLocalTerminal,
-  };
+  }), [createSession, createWindow, observeAuthoritativeWindow, revealLocalTerminal, selectAppTab,
+    selectLocalAppTab, selectPane, selectSession, selectWindow]);
 }
