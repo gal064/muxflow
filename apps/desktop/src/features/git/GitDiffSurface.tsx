@@ -5,7 +5,7 @@ import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
 import { SurfaceError } from "../../ui/SurfaceError";
 import { attachEditorLayout } from "../files/editorLayout";
-import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot, GitWorkspaceClient } from "./types";
+import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot } from "./types";
 import type { GitRepositoryHandle, GitRepositoryStore } from "./repositoryStore";
 import { ADE_MONACO_THEME } from "../files/monaco";
 import { recordPerfMilestone } from "../../perf/probe";
@@ -15,11 +15,9 @@ interface Props {
   tab: AppOwnedTab;
   scope?: FileWorkspaceScope;
   activeRoot?: ActiveRoot;
-  client: GitWorkspaceClient;
   repositories: GitRepositoryStore;
   canWrite: boolean;
   onMessage(message: string): void;
-  onStatus(status: GitStatusSnapshot): void;
 }
 
 type PendingDiscard = { kind: "discardFile" | "discardHunk"; hunkIndex?: number; diff: GitDiff; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
@@ -53,6 +51,11 @@ export function GitDiffSurface(props: Props) {
   const committedLoadSerial = useRef(0);
   const loadedGeneration = useRef<string | undefined>(undefined);
   const requestedGeneration = useRef<string | undefined>(undefined);
+  const abort = useRef<AbortController | undefined>(undefined);
+  // A command owns its own reload. While one is running the shared observation
+  // will publish the command's authoritative status, and reacting to that would
+  // start the same reload a second time.
+  const commanding = useRef(false);
   const pendingDiffPaint = useRef<PaintTicket | undefined>(undefined);
   const repository = useRef<GitRepositoryHandle | undefined>(undefined);
   const root = useMemo<ActiveRoot | undefined>(() => props.tab.rootPath && props.tab.rootToken ? {
@@ -63,10 +66,8 @@ export function GitDiffSurface(props: Props) {
   const pathIdentity = props.tab.gitPath;
   const originalPathIdentity = props.tab.gitOriginalPath;
   const target = props.tab.gitTarget;
-  // Held in refs so acquiring the shared observation does not re-run whenever
+  // Held in a ref so acquiring the shared observation does not re-run whenever
   // an unrelated prop identity changes.
-  const publishStatus = useRef(props.onStatus);
-  publishStatus.current = props.onStatus;
   const boundScope = useRef<{ scope: FileWorkspaceScope; root: ActiveRoot } | undefined>(undefined);
   boundScope.current = props.scope && root ? { scope: props.scope, root } : undefined;
   const scopeIdentity = props.scope && root
@@ -91,6 +92,11 @@ export function GitDiffSurface(props: Props) {
     // Claimed before awaiting so a watch event describing the same status
     // cannot start a second read of the same thing.
     requestedGeneration.current = handle.state().status?.generation;
+    // A superseded load stops its own request, including the bulk body stream
+    // it may already have started. Peers waiting on the same diff do not.
+    abort.current?.abort();
+    const controller = new AbortController();
+    abort.current = controller;
     setLoading(true);
     pendingDiffPaint.current?.abandon();
     pendingDiffPaint.current = undefined;
@@ -117,7 +123,6 @@ export function GitDiffSurface(props: Props) {
         setStatus(shared);
         setDiff(undefined);
         setError(undefined);
-        publishStatus.current(shared);
         return;
       }
       const result = await handle.diff({
@@ -125,7 +130,7 @@ export function GitDiffSurface(props: Props) {
         path: pathIdentity,
         ...(originalPathIdentity ? { originalPath: originalPathIdentity } : {}),
         target,
-      });
+      }, controller.signal);
       if (current !== serial.current) {
         paint.abandon();
         return;
@@ -139,17 +144,17 @@ export function GitDiffSurface(props: Props) {
         paint.abandon();
         setDiff(undefined);
         setError(undefined);
-        publishStatus.current(result.status);
         return;
       }
       setDiff(result.diff);
       pendingDiffPaint.current = paint;
       setError(undefined);
-      publishStatus.current(result.status);
     } catch (cause) {
       paint.abandon();
-      requestedGeneration.current = undefined;
-      if (current !== serial.current || String(cause).includes("cancelled")) return;
+      // The attempted generation is deliberately retained: a failure that the
+      // repository state has not moved past must not be retried on every
+      // subsequent watch publication. Retry is the user's, through the button.
+      if (current !== serial.current || isAbort(cause)) return;
       setError(String(cause));
     } finally {
       if (current === serial.current) setLoading(false);
@@ -170,7 +175,7 @@ export function GitDiffSurface(props: Props) {
     const loadWhenStatusMoves = () => {
       const next = acquired.state();
       if (next.error) setError(next.error);
-      if (!next.status) return;
+      if (commanding.current || !next.status) return;
       if (next.status.generation === requestedGeneration.current) return;
       void load();
     };
@@ -183,6 +188,8 @@ export function GitDiffSurface(props: Props) {
       pendingDiffPaint.current = undefined;
       loadedGeneration.current = undefined;
       requestedGeneration.current = undefined;
+      abort.current?.abort();
+      abort.current = undefined;
       stop();
       acquired.release();
       repository.current = undefined;
@@ -218,35 +225,36 @@ export function GitDiffSurface(props: Props) {
     run: () => Promise<GitCommandResult>,
   ) => {
     setBusy(true);
+    commanding.current = true;
     try {
       const result = await run();
       reportResult(result, props.onMessage);
-      if (result.status) {
-        repository.current?.accept(result.status);
-        publishStatus.current(result.status);
-      }
-      // Only the remaining diff is owed: the command already delivered the
-      // authoritative status. Clearing first keeps a staged file from still
-      // being shown as an unstaged change while that reload runs.
+      // The shared observation already reconciled the command's authoritative
+      // status, so the only thing still owed is this file's remaining diff.
+      commanding.current = false;
       await load(true);
     } catch (cause) { setError(String(cause)); }
-    finally { setBusy(false); }
+    finally {
+      commanding.current = false;
+      setBusy(false);
+    }
   };
 
   const mutate = async (kind: GitMutationKind, hunkIndex?: number) => {
-    const scope = props.scope;
-    if (!scope || !root || !status?.authoritative || !diff || !repositoryId || !props.canWrite) return;
+    const owner = repository.current;
+    if (!owner || !status?.authoritative || !diff || !repositoryId || !props.canWrite) return;
     const request: GitMutationRequest = {
       kind, path: diff.path, ...(diff.originalPath ? { originalPath: diff.originalPath } : {}), target: diff.target,
       expectedStatusGeneration: status.generation, expectedSourceGeneration: diff.sourceGeneration,
       ...(hunkIndex !== undefined ? { hunkIndex } : {}),
     };
-    await applyCommand(() => props.client.mutate(scope, root, repositoryId, request));
+    await applyCommand(() => owner.mutate(repositoryId, request));
   };
 
   const confirmDiscard = async (pending: PendingDiscard) => {
     const scope = props.scope;
-    if (!scope || !root || !repositoryId || !pending.status.authoritative) return;
+    const owner = repository.current;
+    if (!owner || !scope || !root || !repositoryId || !pending.status.authoritative) return;
     if (root.token !== pending.rootToken || scope.terminalEpoch !== pending.connectionEpoch || repositoryId !== pending.status.repository.id) {
       setError("Discard was cancelled because the repository connection changed.");
       return;
@@ -257,8 +265,8 @@ export function GitDiffSurface(props: Props) {
       ...(pending.hunkIndex !== undefined ? { hunkIndex: pending.hunkIndex } : {}),
     };
     await applyCommand(async () => {
-      const token = await props.client.prepareDiscard(scope, root, repositoryId, request);
-      return props.client.mutate(scope, root, repositoryId, { ...request, confirmationToken: token });
+      const token = await owner.prepareDiscard(repositoryId, request);
+      return owner.mutate(repositoryId, { ...request, confirmationToken: token });
     });
   };
 
@@ -341,6 +349,11 @@ function entryStillChanged(status: GitStatusSnapshot, path: string, target: GitD
   const entry = status.entries.find((candidate) => candidate.path === path);
   if (!entry) return false;
   return target === "staged" ? entry.indexKind !== "none" : entry.worktreeKind !== "none";
+}
+
+/** The one boundary that means "this was cancelled", not "this failed". */
+function isAbort(cause: unknown): boolean {
+  return cause instanceof DOMException && cause.name === "AbortError";
 }
 
 function decodeTextDiff(diff: GitDiff): { original: string; modified: string } | undefined {

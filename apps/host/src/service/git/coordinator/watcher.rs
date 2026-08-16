@@ -13,8 +13,6 @@ use std::path::{Path, PathBuf};
 const FALLBACK_MIN: Duration = Duration::from_millis(750);
 /// Ceiling for the fallback poll interval.
 const FALLBACK_MAX: Duration = Duration::from_secs(30);
-/// How often the native-watch wait rechecks stop/close state.
-const STOP_POLL: Duration = Duration::from_millis(250);
 
 pub(in crate::service::git) enum WatchSignal {
     Changed,
@@ -35,9 +33,29 @@ impl Drop for RepositoryWatcher {
     }
 }
 
+/// One generation of observation.
+///
+/// Establishing a watcher awaits a blocking call, and the last subscriber can
+/// leave during that await. Stamping the generation is what stops the departing
+/// generation's task from later publishing `observing` on behalf of a watcher
+/// that has since been replaced.
+struct Observation {
+    generation: u64,
+    stopped: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
+}
+
+impl Observation {
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        self.wake.notify_waiters();
+    }
+}
+
 #[derive(Default)]
 pub(super) struct WatcherState {
-    stop: Option<Arc<AtomicBool>>,
+    installed: Option<Arc<Observation>>,
+    next_generation: u64,
 }
 
 /// The next fallback interval.
@@ -63,172 +81,232 @@ impl RepositoryCoordinator {
         self: &Arc<Self>,
         capabilities: &Arc<RepositoryCapabilities>,
     ) {
-        let stop = {
+        let observation = {
             let mut state = self.watcher.lock().unwrap();
-            if state.stop.is_some() {
+            if state.installed.is_some() {
                 return;
             }
-            let stop = Arc::new(AtomicBool::new(false));
-            state.stop = Some(Arc::clone(&stop));
-            stop
+            state.next_generation += 1;
+            let observation = Arc::new(Observation {
+                generation: state.next_generation,
+                stopped: Arc::new(AtomicBool::new(false)),
+                wake: Arc::new(tokio::sync::Notify::new()),
+            });
+            state.installed = Some(Arc::clone(&observation));
+            observation
         };
-        let established = {
-            let capabilities = Arc::clone(capabilities);
-            let root = self.key.root.clone();
-            let token = self.key.root_token.clone();
-            #[cfg(test)]
-            let observation = Arc::clone(&self.observation);
-            tokio::task::spawn_blocking(move || {
-                start_repository_watcher(
-                    &capabilities,
-                    &root,
-                    &token,
-                    #[cfg(test)]
-                    observation,
-                )
-            })
-            .await
-        };
-        let native = match established {
-            Ok(Ok(established)) => Some(established),
-            _ => None,
-        };
-        self.observing.store(native.is_some(), Ordering::Release);
+        let native = self.establish(capabilities).await;
+        self.publish_observing(&observation, native.is_some());
         let coordinator = Arc::clone(self);
         let capabilities = Arc::clone(capabilities);
-        tokio::spawn(async move { coordinator.observe(capabilities, stop, native).await });
+        tokio::spawn(async move { coordinator.observe(capabilities, observation, native).await });
+    }
+
+    /// Marks the established native watcher broken, as the platform does.
+    #[cfg(test)]
+    pub(in crate::service::git) fn fail_native_watcher_for_test(&self) {
+        self.native_failed.store(true, Ordering::Release);
+        self.native_broken.notify_waiters();
     }
 
     pub(in crate::service::git) fn stop_watcher(&self) {
-        if let Some(stop) = self.watcher.lock().unwrap().stop.take() {
-            stop.store(true, Ordering::Release);
+        let installed = self.watcher.lock().unwrap().installed.take();
+        if let Some(observation) = installed {
+            observation.stop();
+            self.observing.store(false, Ordering::Release);
         }
-        self.observing.store(false, Ordering::Release);
     }
 
-    fn observation_stopped(&self, stop: &AtomicBool) -> bool {
-        stop.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire)
+    /// Publishes observation state only while this generation is the live one.
+    fn publish_observing(&self, observation: &Arc<Observation>, observing: bool) {
+        let state = self.watcher.lock().unwrap();
+        if state
+            .installed
+            .as_ref()
+            .is_some_and(|installed| installed.generation == observation.generation)
+        {
+            self.observing.store(observing, Ordering::Release);
+        }
+    }
+
+    fn observation_stopped(&self, observation: &Observation) -> bool {
+        observation.stopped.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire)
+    }
+
+    async fn establish(
+        self: &Arc<Self>,
+        capabilities: &Arc<RepositoryCapabilities>,
+    ) -> Option<EstablishedWatcher> {
+        let capabilities = Arc::clone(capabilities);
+        let root = self.key.root.clone();
+        let token = self.key.root_token.clone();
+        let failed = Arc::clone(&self.native_failed);
+        #[cfg(test)]
+        let observation = Arc::clone(&self.observation);
+        tokio::task::spawn_blocking(move || {
+            start_repository_watcher(
+                &capabilities,
+                &root,
+                &token,
+                failed,
+                #[cfg(test)]
+                observation,
+            )
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+    }
+
+    /// Sleeps, unless observation is stopped first.
+    async fn rest(&self, observation: &Observation, duration: Duration) {
+        tokio::select! {
+            _ = tokio::time::sleep(duration) => {}
+            _ = observation.wake.notified() => {}
+        }
     }
 
     async fn observe(
         self: Arc<Self>,
         capabilities: Arc<RepositoryCapabilities>,
-        stop: Arc<AtomicBool>,
+        observation: Arc<Observation>,
         established: Option<EstablishedWatcher>,
     ) {
-        let (mut native, mut signals, mut native_failed) = match established {
-            Some((watcher, receiver, failed)) => (Some(watcher), Some(receiver), failed),
-            None => (None, None, Arc::new(AtomicBool::new(false))),
+        // True while a change could have happened with nobody watching.
+        let mut unobserved = established.is_none();
+        let (mut native, mut signals) = match established {
+            Some((watcher, receiver)) => (Some(watcher), Some(receiver)),
+            None => (None, None),
         };
         let mut fallback = FALLBACK_MIN;
         let mut last_source = self
             .cached_status()
             .map(|status| status.source_generation.clone())
             .unwrap_or_default();
-        while !self.observation_stopped(&stop) {
+        while !self.observation_stopped(&observation) {
+            // A watcher the platform has reported broken is retired here rather
+            // than at the point the failure was noticed, so there is exactly one
+            // place that decides whether this repository is still observed.
+            if native.is_some() && self.native_failed.load(Ordering::Acquire) {
+                native = None;
+                signals = None;
+                unobserved = true;
+                self.publish_observing(&observation, false);
+            }
             if native.is_none() {
-                let capabilities = Arc::clone(&capabilities);
-                let root = self.key.root.clone();
-                let token = self.key.root_token.clone();
-                #[cfg(test)]
-                let observation = Arc::clone(&self.observation);
-                let reestablished = tokio::task::spawn_blocking(move || {
-                    start_repository_watcher(
-                        &capabilities,
-                        &root,
-                        &token,
-                        #[cfg(test)]
-                        observation,
-                    )
-                })
-                .await;
-                match reestablished {
-                    Ok(Ok((watcher, receiver, failed))) => {
+                match self.establish(&capabilities).await {
+                    Some((watcher, receiver)) => {
                         native = Some(watcher);
                         signals = Some(receiver);
-                        native_failed = failed;
                         fallback = FALLBACK_MIN;
                     }
-                    _ => {
+                    None => {
                         native = None;
                         signals = None;
                     }
                 }
-                self.observing.store(native.is_some(), Ordering::Release);
+                self.publish_observing(&observation, native.is_some());
+                // Anything that happened while this repository was unwatched was
+                // never reported, so the first cycle after a gap always reads.
+                let polling = native.is_none();
+                if unobserved || polling {
+                    unobserved = false;
+                    self.invalidate();
+                    self.await_mutation_quiescence(&observation.stopped).await;
+                    self.refresh(
+                        &capabilities,
+                        &observation,
+                        &mut last_source,
+                        &mut fallback,
+                        polling,
+                    )
+                    .await;
+                }
+                if polling {
+                    self.rest(&observation, fallback).await;
+                    continue;
+                }
             }
-            let observed = match signals.as_mut() {
-                Some(receiver) => {
-                    let signal = tokio::select! {
-                        signal = receiver.recv() => signal,
-                        _ = tokio::time::sleep(STOP_POLL) => continue,
-                    };
-                    match signal {
-                        Some(WatchSignal::Changed) if !native_failed.load(Ordering::Acquire) => {
-                            // Invalidated on arrival rather than after the
-                            // debounce, so a status request landing during the
-                            // settle window cannot be served a stale snapshot.
-                            self.invalidate();
-                            tokio::time::sleep(WATCH_DEBOUNCE).await;
-                            while let Ok(WatchSignal::Failed) = receiver.try_recv() {
-                                native_failed.store(true, Ordering::Release);
-                            }
-                            true
-                        }
-                        // A failed or closed native watcher is dropped so the
-                        // next iteration re-establishes it, and the repository
-                        // is re-read once because events may have been missed.
-                        _ => {
-                            native = None;
-                            signals = None;
-                            self.observing.store(false, Ordering::Release);
-                            true
-                        }
-                    }
-                }
-                None => {
-                    tokio::time::sleep(fallback).await;
-                    true
-                }
+            let Some(receiver) = signals.as_mut() else {
+                continue;
             };
-            if self.observation_stopped(&stop) || !observed {
+            let signal = tokio::select! {
+                signal = receiver.recv() => signal,
+                _ = observation.wake.notified() => break,
+                // A watcher marked broken elsewhere must not be waited on.
+                _ = self.native_broken.notified() => continue,
+            };
+            match signal {
+                Some(WatchSignal::Changed) => {
+                    // Invalidated on arrival rather than after the debounce, so
+                    // a status request landing during the settle window cannot
+                    // be served a stale snapshot.
+                    self.invalidate();
+                    self.rest(&observation, WATCH_DEBOUNCE).await;
+                }
+                // A failed or closed native watcher is retired at the top of the
+                // next iteration, which also re-reads once.
+                _ => {
+                    self.native_failed.store(true, Ordering::Release);
+                    self.invalidate();
+                }
+            }
+            if self.observation_stopped(&observation) {
                 break;
             }
-            self.invalidate();
             // A mutation's own writes wake this watcher. Waiting for the
             // mutation to publish its post-command refresh means that refresh
             // is the one authoritative read, not the first of two.
-            self.await_mutation_quiescence().await;
-            if self.observation_stopped(&stop) {
+            self.await_mutation_quiescence(&observation.stopped).await;
+            if self.observation_stopped(&observation) {
                 break;
             }
-            match self.status(&capabilities, Freshness::Coalesced, None).await {
-                Ok(snapshot) => {
-                    let changed = snapshot.source_generation != last_source;
-                    last_source = snapshot.source_generation.clone();
-                    if signals.is_none() {
-                        fallback = next_fallback(fallback, changed);
-                    }
+            self.refresh(
+                &capabilities,
+                &observation,
+                &mut last_source,
+                &mut fallback,
+                false,
+            )
+            .await;
+        }
+        self.publish_observing(&observation, false);
+        drop(native);
+    }
+
+    /// One shared refresh, plus the fallback interval it implies.
+    async fn refresh(
+        self: &Arc<Self>,
+        capabilities: &Arc<RepositoryCapabilities>,
+        observation: &Observation,
+        last_source: &mut String,
+        fallback: &mut Duration,
+        polling: bool,
+    ) {
+        if self.observation_stopped(observation) {
+            return;
+        }
+        match self.status(capabilities, Freshness::Coalesced, None).await {
+            Ok(snapshot) => {
+                let changed = snapshot.source_generation != *last_source;
+                *last_source = snapshot.source_generation.clone();
+                if polling {
+                    *fallback = next_fallback(*fallback, changed);
                 }
-                Err(error) => {
-                    self.publish_error(error.to_string()).await;
-                    if signals.is_none() {
-                        fallback = next_fallback(fallback, false);
-                    }
+            }
+            Err(error) => {
+                self.publish_error(error.to_string()).await;
+                if polling {
+                    *fallback = next_fallback(*fallback, false);
                 }
             }
         }
-        self.observing.store(false, Ordering::Release);
-        drop(native);
     }
 }
 
-/// A live native watcher: the watcher itself, its signal stream, and the flag
-/// its callback raises when the platform reports the watch is broken.
-type EstablishedWatcher = (
-    RepositoryWatcher,
-    tokio::sync::mpsc::Receiver<WatchSignal>,
-    Arc<AtomicBool>,
-);
+/// A live native watcher and its signal stream. Whether it is still healthy is
+/// the coordinator's `native_failed` flag, which its callback raises.
+type EstablishedWatcher = (RepositoryWatcher, tokio::sync::mpsc::Receiver<WatchSignal>);
 
 /// Whether a filesystem event could have changed what Git would report.
 ///
@@ -297,6 +375,7 @@ pub(in crate::service::git) fn start_repository_watcher(
     capabilities: &Arc<RepositoryCapabilities>,
     logical_root: &str,
     root_token: &str,
+    failed: Arc<AtomicBool>,
     #[cfg(test)] observation: Arc<GitObservation>,
 ) -> anyhow::Result<EstablishedWatcher> {
     let root = capabilities.try_clone_root()?;
@@ -314,7 +393,7 @@ pub(in crate::service::git) fn start_repository_watcher(
     );
 
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
-    let failed = Arc::new(AtomicBool::new(false));
+    failed.store(false, Ordering::Release);
     let callback_failed = Arc::clone(&failed);
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
@@ -349,7 +428,6 @@ pub(in crate::service::git) fn start_repository_watcher(
             observation,
         },
         receiver,
-        failed,
     ))
 }
 

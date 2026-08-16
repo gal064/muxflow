@@ -20,9 +20,12 @@ use super::scheduler::{BulkBinding, CancelState, DeadlineGuard};
 /// holding an SSH connection and a remote helper process open indefinitely.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Idle connections kept at once. Two is the scheduler's concurrent-transfer
-/// bound, so this can hold what that many jobs left behind and never more.
-const MAX_IDLE: usize = 2;
+/// Idle connections kept at once.
+///
+/// Two for the scheduler's concurrent-transfer bound plus one for the Git
+/// diff-body lane, which is bounded to a single read: this can hold what every
+/// concurrent bulk consumer left behind and never more.
+const MAX_IDLE: usize = 3;
 
 /// The first request id a fresh connection may use. 1 is the handshake's.
 const FIRST_REQUEST_ID: u64 = 2;

@@ -6,19 +6,20 @@ import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import { GitCommitForm } from "./GitCommitForm";
-import type { GitCommandResult, GitDiffTarget, GitMutationRequest, GitStatusEntry, GitStatusSnapshot, GitWorkspaceClient } from "./types";
+import type { WorkspaceGitState } from "./useWorkspaceGit";
+import type { GitCommandResult, GitDiffTarget, GitMutationRequest, GitStatusEntry, GitStatusSnapshot } from "./types";
 
 interface Props {
-  client: GitWorkspaceClient;
+  /**
+   * The shared repository observation. Mutations go through it so their
+   * authoritative status is reconciled once, where this repository's state
+   * already lives, instead of being routed back down through the application.
+   */
+  git: WorkspaceGitState;
   scope?: FileWorkspaceScope;
   root?: ActiveRoot;
-  status?: GitStatusSnapshot;
-  loading: boolean;
-  error?: string;
   disabled: boolean;
   onOpenDiff(entry: GitStatusEntry, target: GitDiffTarget): void;
-  onRefresh(): void;
-  onStatus(status: GitStatusSnapshot): void;
   onMessage(message: string): void;
 }
 
@@ -26,6 +27,7 @@ type PendingDiscard = { entry: GitStatusEntry; target: GitDiffTarget; status: Gi
 
 export function GitSidebar(props: Props) {
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
+  const onRefresh = () => void props.git.refresh();
   // Stage / unstage / discard used to be a cluster of hover buttons on every
   // row. They are one right-click menu now, which is also the only way they can
   // carry a readable label instead of `+`, `−` and `↶`.
@@ -35,29 +37,31 @@ export function GitSidebar(props: Props) {
   // already gone, and the click handler threw.
   const [menu, setMenu] = useState<{ entry: GitStatusEntry; target: GitDiffTarget; anchor: ContextMenuAnchor }>();
   const [focusedRow, setFocusedRow] = useState<{ path: string; target: GitDiffTarget }>();
-  const [busyPath, setBusyPath] = useState<string>();
+  // The row a mutation is currently being applied to, and what is being done
+  // to it. Shown immediately so the target of a pending action is visible while
+  // the host is still the authority on whether it happened.
+  const [pending, setPending] = useState<{ path: string; label: string }>();
   // Grouping is keyed on the entry list, not the snapshot: an authoritative
   // refresh that reports the same entries must not rebuild a thousand rows.
-  const groups = useMemo(() => groupEntries(props.status?.entries ?? []), [props.status?.entries]);
-  const unavailable = props.disabled || !props.scope || !props.root || !props.status?.authoritative;
+  const groups = useMemo(() => groupEntries(props.git.status?.entries ?? []), [props.git.status?.entries]);
+  const unavailable = props.disabled || !props.scope || !props.root || !props.git.status?.authoritative;
 
-  const mutateFile = async (entry: GitStatusEntry, target: GitDiffTarget, kind: GitMutationRequest["kind"], confirmed = false, capturedStatus = props.status) => {
-    if (!props.scope || !props.root || !capturedStatus || unavailable) return;
+  const mutateFile = async (entry: GitStatusEntry, target: GitDiffTarget, kind: GitMutationRequest["kind"], confirmed = false, capturedStatus = props.git.status) => {
+    if (!capturedStatus || unavailable) return;
     const request: GitMutationRequest = {
       kind, path: entry.path, ...(entry.originalPath ? { originalPath: entry.originalPath } : {}), target,
       expectedStatusGeneration: capturedStatus.generation, expectedSourceGeneration: capturedStatus.sourceGeneration,
     };
-    setBusyPath(entry.path);
+    setPending({ path: entry.path, label: pendingLabelFor(kind) });
     try {
       if (kind === "discardFile") {
         if (!confirmed) throw new Error("Discard was not confirmed.");
-        request.confirmationToken = await props.client.prepareDiscard(props.scope, props.root, capturedStatus.repository.id, request);
+        request.confirmationToken = await props.git.prepareDiscard(capturedStatus.repository.id, request);
       }
-      const result = await props.client.mutate(props.scope, props.root, capturedStatus.repository.id, request);
-      if (result.status) props.onStatus(result.status);
+      const result = await props.git.mutate(capturedStatus.repository.id, request);
       props.onMessage(gitResultMessage(result, `${labelFor(kind)} ${entry.displayPath}`));
     } catch (cause) { props.onMessage(String(cause)); }
-    finally { setBusyPath(undefined); }
+    finally { setPending(undefined); }
   };
 
   // Stable handlers for the memoized groups: a row must not be rebuilt because
@@ -80,11 +84,11 @@ export function GitSidebar(props: Props) {
     setMenu({ entry, target, anchor });
   }, [focusRow]);
   const commit = useCallback(async (message: string) => {
-    const { client, scope, root, status, disabled } = latest.current;
-    if (!scope || !root || !status || disabled || !status.authoritative) return undefined;
-    const result = await client.commit(scope, root, status.repository.id, status.generation, message);
+    const { git, disabled } = latest.current;
+    const status = git.status;
+    if (!status || disabled || !status.authoritative) return undefined;
+    const result = await git.commit(status.repository.id, status.generation, message);
     latest.current.onMessage(gitResultMessage(result, result.outcome === "applied" ? "Commit created." : "Commit failed."));
-    if (result.status) latest.current.onStatus(result.status);
     return result;
   }, []);
 
@@ -92,18 +96,18 @@ export function GitSidebar(props: Props) {
   // one focused or right-clicked. It is stored by path rather than by object:
   // a status refresh replaces every entry, and a captured object would go on
   // describing a change that has since been staged.
-  const focusedEntry = focusedRow && props.status
-    ? props.status.entries.find((entry) => entry.path === focusedRow.path)
+  const focusedEntry = focusedRow && props.git.status
+    ? props.git.status.entries.find((entry) => entry.path === focusedRow.path)
     : undefined;
   const rowActions = useMemo<readonly CommandId[]>(() => {
     if (!focusedEntry || !focusedRow) return [];
     const ids: CommandId[] = [];
     if (!focusedEntry.ignored) ids.push("git.openDiff");
     const mutable = !unavailable && !focusedEntry.conflicted && !focusedEntry.submodule
-      && Boolean(props.scope) && Boolean(props.root) && Boolean(props.status);
+      && Boolean(props.scope) && Boolean(props.root) && Boolean(props.git.status);
     if (mutable) ids.push(focusedRow.target === "staged" ? "git.unstage" : "git.stage", "git.discard");
     return ids;
-  }, [focusedEntry, focusedRow, props.root, props.scope, props.status, unavailable]);
+  }, [focusedEntry, focusedRow, props.root, props.scope, props.git.status, unavailable]);
   const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
   runRowCommand.current = (commandId) => {
     if (!focusedEntry || !focusedRow) return;
@@ -112,8 +116,8 @@ export function GitSidebar(props: Props) {
       case "git.stage": void mutateFile(focusedEntry, "unstaged", "stageFile"); return;
       case "git.unstage": void mutateFile(focusedEntry, "staged", "unstageFile"); return;
       case "git.discard":
-        if (props.status && props.root && props.scope) {
-          setPendingDiscard({ entry: focusedEntry, target: focusedRow.target, status: props.status, rootToken: props.root.token, connectionEpoch: props.scope.terminalEpoch });
+        if (props.git.status && props.root && props.scope) {
+          setPendingDiscard({ entry: focusedEntry, target: focusedRow.target, status: props.git.status, rootToken: props.root.token, connectionEpoch: props.scope.terminalEpoch });
         }
         return;
     }
@@ -127,27 +131,27 @@ export function GitSidebar(props: Props) {
 
   if (!props.root) return <GitEmpty detail="Select a terminal pane to discover its repository." />;
   if (!props.root.gitWorktree) return <GitEmpty detail="The active pane is outside a Git worktree." />;
-  if (props.loading && !props.status) return <GitEmpty detail="Reading Git status…" />;
-  if (props.error && !props.status) return <GitEmpty detail={`Git unavailable: ${props.error}`} action={props.onRefresh} />;
-  if (!props.status) return <GitEmpty detail="Git status is unavailable." action={props.onRefresh} />;
-  if (props.status.oversized) return <GitEmpty detail={`Repository status is too large. ${props.status.error || "The host bounded this snapshot to keep the terminal connection responsive."} ${props.status.totalEntryCount ?? "Unknown"} entries were detected.`} action={props.onRefresh} />;
+  if (props.git.loading && !props.git.status) return <GitEmpty detail="Reading Git status…" />;
+  if (props.git.error && !props.git.status) return <GitEmpty detail={`Git unavailable: ${props.git.error}`} action={onRefresh} />;
+  if (!props.git.status) return <GitEmpty detail="Git status is unavailable." action={onRefresh} />;
+  if (props.git.status.oversized) return <GitEmpty detail={`Repository status is too large. ${props.git.status.error || "The host bounded this snapshot to keep the terminal connection responsive."} ${props.git.status.totalEntryCount ?? "Unknown"} entries were detected.`} action={onRefresh} />;
 
   const stagedCount = groups.staged.length;
   return <section className="git-sidebar" aria-label="Source Control">
     <header className="git-sidebar-header">
-      <strong>{props.status.repository.headName || (props.status.repository.initial ? "Initial repository" : "Detached HEAD")}</strong>
-      <small title={props.status.repository.worktreeRoot}>{props.status.repository.worktreeRoot}</small>
+      <strong>{props.git.status.repository.headName || (props.git.status.repository.initial ? "Initial repository" : "Detached HEAD")}</strong>
+      <small title={props.git.status.repository.worktreeRoot}>{props.git.status.repository.worktreeRoot}</small>
     </header>
-    {props.error && <SurfaceError detail={props.error} />}
-    {props.status.copyDetectionIncomplete && <div className="surface-note" role="status">Copy detection was bounded for this large change set; some copies may appear as additions.</div>}
-    {!props.status.authoritative && <div className="surface-error" role="alert">Git status is resynchronizing. Mutations are disabled.</div>}
+    {props.git.error && <SurfaceError detail={props.git.error} />}
+    {props.git.status.copyDetectionIncomplete && <div className="surface-note" role="status">Copy detection was bounded for this large change set; some copies may appear as additions.</div>}
+    {!props.git.status.authoritative && <div className="surface-error" role="alert">Git status is resynchronizing. Mutations are disabled.</div>}
     <div className="git-status-groups">
       <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
-      <GitGroup title="Staged" entries={groups.staged} target="staged" busyPath={busyPath} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
-      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" busyPath={busyPath} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
-      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" busyPath={busyPath} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
+      <GitGroup title="Staged" entries={groups.staged} target="staged" pending={pending} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
+      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" pending={pending} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
+      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" pending={pending} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
       <GitGroup title="Ignored" entries={groups.ignored} target="unstaged" onFocusEntry={focusRow} onOpen={openDiff} />
-      {props.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
+      {props.git.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
     </div>
     {/* The commit form is not permanent chrome any more: it exists exactly when
         there is something staged to commit. */}
@@ -156,7 +160,7 @@ export function GitSidebar(props: Props) {
       anchor={menu.anchor}
       items={[
         { id: "open", label: "Open diff", disabled: menu.entry.ignored, run: () => props.onOpenDiff(menu.entry, menu.target) },
-        ...(!unavailable && !menu.entry.conflicted && props.scope && props.root && props.status ? [
+        ...(!unavailable && !menu.entry.conflicted && props.scope && props.root && props.git.status ? [
           menu.target === "staged"
             ? { id: "unstage", label: "Unstage", disabled: menu.entry.submodule, run: () => void mutateFile(menu.entry, "staged", "unstageFile") }
             : { id: "stage", label: "Stage", disabled: menu.entry.submodule, run: () => void mutateFile(menu.entry, "unstaged", "stageFile") },
@@ -166,7 +170,7 @@ export function GitSidebar(props: Props) {
             label: menu.entry.untracked ? "Delete untracked file…" : "Discard changes…",
             destructive: true,
             disabled: menu.entry.submodule,
-            run: () => setPendingDiscard({ entry: menu.entry, target: menu.target, status: props.status!, rootToken: props.root!.token, connectionEpoch: props.scope!.terminalEpoch }),
+            run: () => setPendingDiscard({ entry: menu.entry, target: menu.target, status: props.git.status!, rootToken: props.root!.token, connectionEpoch: props.scope!.terminalEpoch }),
           },
         ] : []),
       ]}
@@ -181,7 +185,7 @@ export function GitSidebar(props: Props) {
       onConfirm={() => {
         const captured = pendingDiscard;
         setPendingDiscard(undefined);
-        if (props.root?.token !== captured.rootToken || props.scope?.terminalEpoch !== captured.connectionEpoch || props.status?.repository.id !== captured.status.repository.id) {
+        if (props.root?.token !== captured.rootToken || props.scope?.terminalEpoch !== captured.connectionEpoch || props.git.status?.repository.id !== captured.status.repository.id) {
           props.onMessage("Discard was cancelled because the repository connection changed.");
           return;
         }
@@ -193,7 +197,7 @@ export function GitSidebar(props: Props) {
 }
 
 const GitGroup = memo(function GitGroup(props: {
-  title: string; entries: GitStatusEntry[]; target: GitDiffTarget; busyPath?: string;
+  title: string; entries: GitStatusEntry[]; target: GitDiffTarget; pending?: { path: string; label: string };
   onOpen(entry: GitStatusEntry, target: GitDiffTarget): void;
   onFocusEntry(entry: GitStatusEntry, target: GitDiffTarget): void;
   onMenu?(entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor): void;
@@ -206,7 +210,7 @@ const GitGroup = memo(function GitGroup(props: {
     <ul>
       {visible.map((entry) => <li key={`${props.target}\0${entry.path}`} className={entry.conflicted ? "conflicted" : ""}>
         <button
-          aria-busy={props.busyPath === entry.path}
+          aria-busy={props.pending?.path === entry.path}
           className="git-file"
           disabled={entry.ignored}
           onClick={() => props.onOpen(entry, props.target)}
@@ -233,6 +237,7 @@ const GitGroup = memo(function GitGroup(props: {
           <span className={`git-state ${statusTitle(entry, props.target)}`}>{statusCode(entry, props.target)}</span>
           <span className="git-path">{entry.displayPath}</span>
         </button>
+        {props.pending?.path === entry.path && <small className="git-entry-note">{props.pending.label}</small>}
         {entry.submodule && <small className="git-entry-note">submodule {entry.submoduleState} · actions unavailable</small>}
         {entry.displayOriginalPath && <small className="git-entry-note">{entry.indexKind === "copied" || entry.worktreeKind === "copied" ? "copied" : "renamed"} from {entry.displayOriginalPath}</small>}
         {entry.symlink && <small className="git-entry-note">symbolic link</small>}
@@ -274,6 +279,8 @@ function statusTitle(entry: GitStatusEntry, target: GitDiffTarget): string {
 }
 
 function labelFor(kind: GitMutationRequest["kind"]): string { return ({ stageFile: "Staged", unstageFile: "Unstaged", discardFile: "Discarded", stageHunk: "Staged", unstageHunk: "Unstaged", discardHunk: "Discarded" })[kind]; }
+/** What is being done to a row, while the host is still deciding whether it happened. */
+function pendingLabelFor(kind: GitMutationRequest["kind"]): string { return ({ stageFile: "staging…", unstageFile: "unstaging…", discardFile: "discarding…", stageHunk: "staging hunk…", unstageHunk: "unstaging hunk…", discardHunk: "discarding hunk…" })[kind]; }
 function gitResultMessage(result: GitCommandResult, fallback: string): string {
   const command = [result.stdout.trim(), result.stderr.trim(), result.error].filter(Boolean).join(" · ") || (result.outcome === "applied" ? fallback : result.outcome === "partialOrUnknown" ? "Git outcome is partial or unknown; inspect the repository before retrying." : `Git failed with exit code ${result.exitCode}.`);
   return result.refreshFailed ? `${command} ${result.statusOmitted ? "Post-command status was omitted to keep the connection responsive" : "Status refresh failed"}: ${result.refreshError}` : command;

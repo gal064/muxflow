@@ -164,12 +164,13 @@ async fn concurrent_consumers_share_one_status_pipeline_and_one_native_watcher()
         "seven further consumers reuse the shared snapshot"
     );
 
-    // A plain status request while the shared watcher is idle is answered from
-    // the coordinator's snapshot rather than a fresh pipeline.
+    // An explicitly requested status is the user's only recovery from a
+    // filesystem watcher that missed something, so it always reads afresh —
+    // exactly once, not once per consumer.
     service.status(&fixture.request(), None).await.unwrap();
     assert_eq!(
         service.observation().status_pipelines,
-        settled.status_pipelines
+        settled.status_pipelines + 1
     );
 
     for consumer in 0..8 {
@@ -486,5 +487,81 @@ async fn phase14_warm_diff_and_mutation_process_counts() {
     );
 
     service.unwatch("phase14-process-watch").unwrap();
+    closed.store(true, Ordering::Release);
+}
+
+#[tokio::test]
+async fn a_broken_native_watcher_is_retired_and_re_established() {
+    let fixture = Fixture::new("watch-recovery");
+    fixture.write("file", b"base\n");
+    fixture.git(&["add", "file"]);
+    fixture.git(&["commit", "-qm", "base"]);
+    let closed = Arc::new(AtomicBool::new(false));
+    let service = Arc::new(GitService::new(Arc::clone(&closed), 0));
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut watch = fixture.request();
+    watch.watch_id = "recovering".into();
+    service.watch_activated(watch, sender).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let settled = service.observation();
+    assert_eq!(settled.native_watcher_creations, 1);
+
+    // The platform reports the watch broken. It must be retired and replaced,
+    // not silently kept as the reason a stale snapshot is still trusted.
+    service.fail_native_watcher_for_test();
+    fixture.write("file", b"changed after failure\n");
+    let status = next_status(&mut receiver)
+        .await
+        .expect("a re-established watcher still reports changes");
+    assert!(
+        status
+            .entries
+            .iter()
+            .any(|entry| entry.path == b"file" && entry.worktree_status == "M")
+    );
+    assert!(service.observation().native_watcher_creations >= 2);
+    service.unwatch("recovering").unwrap();
+    closed.store(true, Ordering::Release);
+}
+
+#[tokio::test]
+async fn a_recovered_refresh_is_published_even_when_the_repository_did_not_change() {
+    let fixture = Fixture::new("watch-error-recovery");
+    fixture.write("file", b"base\n");
+    fixture.git(&["add", "file"]);
+    fixture.git(&["commit", "-qm", "base"]);
+    let closed = Arc::new(AtomicBool::new(false));
+    let service = Arc::new(GitService::new(Arc::clone(&closed), 0));
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut watch = fixture.request();
+    watch.watch_id = "error-recovery".into();
+    let bootstrap = service.watch_activated(watch, sender).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    while receiver.try_recv().is_ok() {}
+
+    let coordinator = service.coordinator_for_test(&fixture.request()).unwrap();
+    coordinator.publish_error("transient failure".into()).await;
+    let error = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        error,
+        SequencerControl::OrderedEvent(v1::HostEvent {
+            git: Some(v1::GitEvent { status: None, .. }),
+            ..
+        })
+    ));
+
+    // The very same snapshot, republished. Recovering from an error is a
+    // transition even when the repository state is byte-identical.
+    coordinator
+        .publish_status(&Arc::new(bootstrap.clone()))
+        .await;
+    let recovered = next_status(&mut receiver)
+        .await
+        .expect("recovery must reach subscribers");
+    assert_eq!(recovered.source_generation, bootstrap.source_generation);
+    service.unwatch("error-recovery").unwrap();
     closed.store(true, Ordering::Release);
 }

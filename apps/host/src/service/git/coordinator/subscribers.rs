@@ -176,14 +176,17 @@ impl RepositoryCoordinator {
 
     /// Fans one authoritative snapshot out to every consumer, at most once per
     /// distinct repository state.
-    pub(super) async fn publish_status(self: &Arc<Self>, snapshot: &Arc<v1::GitStatusSnapshot>) {
+    pub(in crate::service::git) async fn publish_status(
+        self: &Arc<Self>,
+        snapshot: &Arc<v1::GitStatusSnapshot>,
+    ) {
+        let next = Publication::Status(snapshot.source_generation.clone());
         {
             let mut published = self.published.lock().unwrap();
-            if published.source_generation == snapshot.source_generation {
+            if *published == next {
                 return;
             }
-            published.source_generation = snapshot.source_generation.clone();
-            published.error.clear();
+            *published = next;
         }
         self.fan_out(|watch_id, root_token| v1::GitEvent {
             watch_id: watch_id.to_owned(),
@@ -195,13 +198,14 @@ impl RepositoryCoordinator {
     }
 
     /// Reports a refresh failure once, not once per failing cycle.
-    pub(super) async fn publish_error(self: &Arc<Self>, error: String) {
+    pub(in crate::service::git) async fn publish_error(self: &Arc<Self>, error: String) {
+        let next = Publication::Error(error.clone());
         {
             let mut published = self.published.lock().unwrap();
-            if published.error == error {
+            if *published == next {
                 return;
             }
-            published.error = error.clone();
+            *published = next;
         }
         self.fan_out(|watch_id, root_token| v1::GitEvent {
             watch_id: watch_id.to_owned(),

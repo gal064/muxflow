@@ -68,6 +68,7 @@ impl GitService {
             bail!("Git diff content offset is outside the described body");
         }
         let key = DiffBodyKey::new(request, &content);
+        let key_for_release = DiffBodyKey::new(request, &content);
         let cached = {
             let held = self.diff_body.lock().unwrap();
             held.as_ref()
@@ -97,11 +98,18 @@ impl GitService {
             .min(body.len().saturating_sub(offset));
         let end = offset.saturating_add(length);
         if end >= body.len() {
-            // The stream is finished. Releasing it bounds retention to one
-            // in-progress body, and makes a later request re-read and
+            // This stream is finished. Releasing it bounds retention to one
+            // in-progress body and makes a later request re-read and
             // re-validate rather than replay something the repository may no
-            // longer contain.
-            self.diff_body.lock().unwrap().take();
+            // longer contain. Released by key, because an interleaved stream
+            // may have taken the slot in the meantime.
+            let mut held = self.diff_body.lock().unwrap();
+            if held
+                .as_ref()
+                .is_some_and(|entry| entry.key == key_for_release)
+            {
+                held.take();
+            }
         }
         Ok(v1::GitDiffContentChunk {
             offset: content.offset,
@@ -123,7 +131,6 @@ impl GitService {
             let _guard = capabilities.metadata.install();
             read_diff_side(
                 &capabilities.stable_root(),
-                &capabilities.repository,
                 &work,
                 side,
                 cancellation.as_deref(),
