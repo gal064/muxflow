@@ -7,7 +7,8 @@ import { agentGeneration } from "./generation";
 import type { AgentRequestScope } from "./types";
 import { defaultAgentSoundPreferences } from "./types";
 import { agent } from "./testFixtures";
-import { useAgentNotificationActivation, type PaneSurfaceResult } from "./useAgentNotificationActivation";
+import type { PaneSurfaceResult } from "../../app/useShellNavigation";
+import { useAgentNotificationActivation } from "./useAgentNotificationActivation";
 import { useAgentRuntime } from "./useAgentRuntime";
 
 const invokeMock = vi.hoisted(() => vi.fn());

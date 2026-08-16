@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import type { Session } from "../../app/types";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
@@ -8,8 +8,9 @@ import { needsAttention, nextSortMode, type AgentListRow, type AgentSortMode } f
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPlacement, AgentRecord } from "../agents/types";
 import type { ConnectionPhase } from "../../state/connectionReducer";
 import { AGENTS_SECTION_MAX_RATIO, AGENTS_SECTION_MIN_RATIO, SIDEBAR_MIN_WIDTH } from "../shell/types";
+import { sameHostConnection, type HostScopeToken } from "../shell/hostScope";
 import { activityWord, type WorkspaceRowModel } from "./workspaceRows";
-import { TransientDrag } from "./transientDrag";
+import { useTransientDrag } from "./transientDrag";
 
 export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close">;
 
@@ -23,13 +24,14 @@ interface WorkspaceSidebarProps {
   /** Share of the sidebar's height given to the agents section. */
   agentsRatio: number;
   canMutate: boolean;
+  commandScope: HostScopeToken;
   hostLabel: string;
   transport: "local" | "ssh";
   latencyMs?: number;
   phase: ConnectionPhase;
   onSelectWorkspace(sessionId: string): void;
-  onWorkspaceCommand(session: Session, commandId: WorkspaceCommandId): void;
-  onSelectAgent(row: AgentListRow): void;
+  onWorkspaceCommand(session: Session, commandId: WorkspaceCommandId, scope: HostScopeToken): void;
+  onSelectAgent(row: AgentListRow, scope: HostScopeToken): void;
   onSortMode(mode: AgentSortMode): void;
   onAgentsRatio(ratio: number): void;
   /** Current width in CSS pixels, already clamped against the window. */
@@ -39,8 +41,8 @@ interface WorkspaceSidebarProps {
   onWidth(width: number): void;
   onOpenSettings(): void;
   onLaunchAgent(adapter: AgentAdapterId, placement: AgentPlacement): void;
-  onResumeAgent(agent: AgentRecord, placement: AgentPlacement): void;
-  onRenameAgent(agent: AgentRecord): void;
+  onResumeAgent(agent: AgentRecord, placement: AgentPlacement, scope: HostScopeToken): void;
+  onRenameAgent(agent: AgentRecord, scope: HostScopeToken): void;
   onReviewHooks(adapter: AgentAdapterId, action: "install" | "uninstall"): void;
   /**
    * Set when this host cannot report agent status at all. The section says so
@@ -64,29 +66,22 @@ interface WorkspaceSidebarProps {
  * so the only control in that header is the ordering.
  */
 export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
-  const [menu, setMenu] = useState<{ session: Session; anchor: ContextMenuAnchor; index: number }>();
+  const [menu, setMenu] = useState<{ session: Session; anchor: ContextMenuAnchor; index: number; scope: HostScopeToken }>();
   // Launching, resuming, renaming and hook review used to be four permanently
   // visible affordances in the agents panel. They are right-click menus now:
   // the section header for "start something", a row for "do something to this".
-  const [agentMenu, setAgentMenu] = useState<{ row?: AgentListRow; anchor: ContextMenuAnchor }>();
-  const [focusedAgentId, setFocusedAgentId] = useState<string>();
+  const [agentMenu, setAgentMenu] = useState<{ row?: AgentListRow; anchor: ContextMenuAnchor; scope: HostScopeToken }>();
+  const [focusedAgentTarget, setFocusedAgentTarget] = useState<{ id: string; scope: HostScopeToken }>();
   const container = useRef<HTMLElement>(null);
-  const [displayedAgentsRatio, setDisplayedAgentsRatio] = useState(props.agentsRatio);
-  const [displayedWidth, setDisplayedWidth] = useState(props.width);
-  const activeSectionDrag = useRef<TransientDrag<number> | undefined>(undefined);
-  const activeWidthDrag = useRef<TransientDrag<number> | undefined>(undefined);
-
-  useEffect(() => setDisplayedAgentsRatio(props.agentsRatio), [props.agentsRatio]);
-  useEffect(() => setDisplayedWidth(props.width), [props.width]);
-  useEffect(() => () => {
-    activeSectionDrag.current?.dispose();
-    activeWidthDrag.current?.dispose();
-  }, []);
+  const [displayedAgentsRatio, startAgentsRatioDrag] = useTransientDrag(props.agentsRatio, props.onAgentsRatio);
+  const [displayedWidth, startWidthDrag] = useTransientDrag(props.width, props.onWidth);
 
   // Resolved against the live list every render: an agent whose pane closed
   // drops out of `props.agents`, and the palette must stop offering to focus it
   // at the same moment its row stops being clickable.
-  const focusedAgent = focusedAgentId ? props.agents.find((row) => row.agent.id === focusedAgentId) : undefined;
+  const focusedAgent = focusedAgentTarget && sameHostConnection(focusedAgentTarget.scope, props.commandScope)
+    ? props.agents.find((row) => row.agent.id === focusedAgentTarget.id)
+    : undefined;
   const focusedAgentResume = focusedAgent ? resumePlacements(props.adapters, focusedAgent.agent)[0] : undefined;
   const rowActions = useMemo<readonly CommandId[]>(() => {
     if (!focusedAgent) return [];
@@ -100,12 +95,12 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   runRowCommand.current = (commandId) => {
     if (!focusedAgent) return;
     switch (commandId) {
-      case "agents.focusRow": props.onSelectAgent(focusedAgent); return;
-      case "agents.renameRow": props.onRenameAgent(focusedAgent.agent); return;
+      case "agents.focusRow": props.onSelectAgent(focusedAgent, focusedAgentTarget!.scope); return;
+      case "agents.renameRow": props.onRenameAgent(focusedAgent.agent, focusedAgentTarget!.scope); return;
       // The context menu offers one item per placement because it has room to.
       // The palette is a single line, so it takes the adapter's first declared
       // placement rather than inventing a second prompt to ask which.
-      case "agents.resumeRow": if (focusedAgentResume) props.onResumeAgent(focusedAgent.agent, focusedAgentResume); return;
+      case "agents.resumeRow": if (focusedAgentResume) props.onResumeAgent(focusedAgent.agent, focusedAgentResume, focusedAgentTarget!.scope); return;
     }
   };
   const rowSource = useMemo<RowCommandSource | undefined>(() => rowActions.length === 0 || !focusedAgent ? undefined : {
@@ -126,28 +121,10 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const startSectionDrag = (event: PointerEvent<HTMLElement>) => {
     const bounds = container.current?.getBoundingClientRect();
     if (!bounds || bounds.height <= 0) return;
-    const target = event.currentTarget;
-    target.setPointerCapture(event.pointerId);
-    const ratioFor = (pointer: globalThis.PointerEvent) => Math.max(
+    startAgentsRatioDrag(event, (pointer) => Math.max(
       AGENTS_SECTION_MIN_RATIO,
       Math.min(AGENTS_SECTION_MAX_RATIO, (bounds.bottom - pointer.clientY) / bounds.height),
-    );
-    const drag = new TransientDrag(displayedAgentsRatio, setDisplayedAgentsRatio, props.onAgentsRatio);
-    activeSectionDrag.current?.dispose();
-    activeSectionDrag.current = drag;
-    const move = (pointer: globalThis.PointerEvent) => {
-      drag.preview(ratioFor(pointer));
-    };
-    const stop = (pointer: globalThis.PointerEvent) => {
-      drag.finish(pointer.type === "pointerup" ? ratioFor(pointer) : undefined);
-      if (activeSectionDrag.current === drag) activeSectionDrag.current = undefined;
-      target.removeEventListener("pointermove", move as EventListener);
-      target.removeEventListener("pointerup", stop as EventListener);
-      target.removeEventListener("pointercancel", stop as EventListener);
-    };
-    target.addEventListener("pointermove", move as EventListener);
-    target.addEventListener("pointerup", stop as EventListener);
-    target.addEventListener("pointercancel", stop as EventListener);
+    ));
   };
 
   return <nav
@@ -175,13 +152,13 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               onClick={() => props.onSelectWorkspace(row.session.id)}
               onContextMenu={(event) => {
                 event.preventDefault();
-                setMenu({ session: row.session, anchor: { x: event.clientX, y: event.clientY }, index });
+                setMenu({ session: row.session, anchor: { x: event.clientX, y: event.clientY }, index, scope: props.commandScope });
               }}
-              onDoubleClick={() => props.canMutate && props.onWorkspaceCommand(row.session, "session.rename")}
+              onDoubleClick={() => props.canMutate && props.onWorkspaceCommand(row.session, "session.rename", props.commandScope)}
               onKeyDown={(event) => {
                 if (isContextMenuKey(event)) {
                   event.preventDefault();
-                  setMenu({ session: row.session, anchor: anchorForElement(event.currentTarget), index });
+                  setMenu({ session: row.session, anchor: anchorForElement(event.currentTarget), index, scope: props.commandScope });
                   return;
                 }
                 focusRelative(event, "[data-workspace-index]", index, props.rows.length);
@@ -237,7 +214,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       onContextMenu={(event) => {
         if (!(event.target as HTMLElement).closest(".agent-button")) {
           event.preventDefault();
-          setAgentMenu({ anchor: { x: event.clientX, y: event.clientY } });
+          setAgentMenu({ anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
         }
       }}
       style={{ flexBasis: `${Math.round(displayedAgentsRatio * 100)}%` }}
@@ -253,7 +230,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           onKeyDown={(event) => {
             if (!isContextMenuKey(event)) return;
             event.preventDefault();
-            setAgentMenu({ anchor: anchorForElement(event.currentTarget) });
+            setAgentMenu({ anchor: anchorForElement(event.currentTarget), scope: props.commandScope });
           }}
           type="button"
         >{props.agentSort}</button>
@@ -295,21 +272,21 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               // be opened. Same reasoning as the palette's unavailable rows.
               aria-disabled={!row.routable}
               data-unavailable={row.routable ? undefined : "true"}
-              onClick={() => { if (row.routable) props.onSelectAgent(row); }}
+              onClick={() => { if (row.routable) props.onSelectAgent(row, props.commandScope); }}
               onContextMenu={(event) => {
                 event.preventDefault();
-                setFocusedAgentId(row.agent.id);
-                setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY } });
+                setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope });
+                setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
               }}
               // Focus and pointer both: macOS WebKit does not focus a button on
               // click, so without the second one the palette's "selected agent"
               // would ignore every agent the user clicked.
-              onFocus={() => setFocusedAgentId(row.agent.id)}
-              onPointerDown={() => setFocusedAgentId(row.agent.id)}
+              onFocus={() => setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope })}
+              onPointerDown={() => setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope })}
               onKeyDown={(event) => {
                 if (isContextMenuKey(event)) {
                   event.preventDefault();
-                  setAgentMenu({ row, anchor: anchorForElement(event.currentTarget) });
+                  setAgentMenu({ row, anchor: anchorForElement(event.currentTarget), scope: props.commandScope });
                   return;
                 }
                 focusRelative(event, "[data-agent-index]", index, props.agents.length);
@@ -353,11 +330,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     {menu && <ContextMenu
       anchor={menu.anchor}
       items={[
-        { id: "rename", label: "Rename workspace…", disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.rename") },
-        { id: "up", label: "Move up", disabled: !props.canMutate || menu.index === 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft") },
-        { id: "down", label: "Move down", disabled: !props.canMutate || menu.index === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight") },
+        { id: "rename", label: "Rename workspace…", disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.rename", menu.scope) },
+        { id: "up", label: "Move up", disabled: !props.canMutate || menu.index === 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft", menu.scope) },
+        { id: "down", label: "Move down", disabled: !props.canMutate || menu.index === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight", menu.scope) },
         "separator",
-        { id: "close", label: "Close workspace…", destructive: true, disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.close") },
+        { id: "close", label: "Close workspace…", destructive: true, disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.close", menu.scope) },
       ]}
       label={`Actions for ${menu.session.name}`}
       onClose={() => setMenu(undefined)}
@@ -381,42 +358,26 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       }}
       onPointerDown={(event) => {
         const left = container.current?.getBoundingClientRect().left ?? 0;
-        const target = event.currentTarget;
-        target.setPointerCapture(event.pointerId);
-        const widthFor = (pointer: globalThis.PointerEvent) => Math.max(
+        startWidthDrag(event, (pointer) => Math.max(
           SIDEBAR_MIN_WIDTH,
           Math.min(props.maxWidth, pointer.clientX - left),
-        );
-        const drag = new TransientDrag(displayedWidth, setDisplayedWidth, props.onWidth);
-        activeWidthDrag.current?.dispose();
-        activeWidthDrag.current = drag;
-        const move = (pointer: globalThis.PointerEvent) => drag.preview(widthFor(pointer));
-        const stop = (pointer: globalThis.PointerEvent) => {
-          drag.finish(pointer.type === "pointerup" ? widthFor(pointer) : undefined);
-          if (activeWidthDrag.current === drag) activeWidthDrag.current = undefined;
-          target.removeEventListener("pointermove", move as EventListener);
-          target.removeEventListener("pointerup", stop as EventListener);
-          target.removeEventListener("pointercancel", stop as EventListener);
-        };
-        target.addEventListener("pointermove", move as EventListener);
-        target.addEventListener("pointerup", stop as EventListener);
-        target.addEventListener("pointercancel", stop as EventListener);
+        ));
       }}
       role="separator"
       tabIndex={0}
     />
 
-    {agentMenu && <ContextMenu
+    {agentMenu && sameHostConnection(agentMenu.scope, props.commandScope) && <ContextMenu
       anchor={agentMenu.anchor}
       items={agentMenu.row
         ? [
-          { id: "focus", label: "Focus this agent's pane", disabled: !agentMenu.row.routable, run: () => props.onSelectAgent(agentMenu.row!) },
-          { id: "rename", label: "Rename agent…", disabled: !props.canMutate, run: () => props.onRenameAgent(agentMenu.row!.agent) },
+          { id: "focus", label: "Focus this agent's pane", disabled: !agentMenu.row.routable, run: () => props.onSelectAgent(agentMenu.row!, agentMenu.scope) },
+          { id: "rename", label: "Rename agent…", disabled: !props.canMutate, run: () => props.onRenameAgent(agentMenu.row!.agent, agentMenu.scope) },
           ...resumePlacements(props.adapters, agentMenu.row.agent).map((placement) => ({
             id: `resume-${placement}`,
             label: `Resume in new ${placement}`,
             disabled: !props.canMutate,
-            run: () => props.onResumeAgent(agentMenu.row!.agent, placement),
+            run: () => props.onResumeAgent(agentMenu.row!.agent, placement, agentMenu.scope),
           })),
         ]
         : launchItems(props.adapters, props.canMutate, props.onLaunchAgent, props.onReviewHooks, props.onSetUpHost)}

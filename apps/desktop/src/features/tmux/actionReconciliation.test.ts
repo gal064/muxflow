@@ -68,6 +68,7 @@ describe("requestReconciledTmuxAction", () => {
 
   it.each([
     { hostProfileId: "replacement" },
+    { connectionKey: "ssh:replacement" },
     { connectionEpoch: 8 },
     { serverIdentity: "server-b" },
   ])("rejects a successful completion from a replaced scope %o", async (replacement) => {

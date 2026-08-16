@@ -109,6 +109,7 @@ interface Props {
    */
   onMeasurements: (measurements: TerminalMeasurements) => void;
   onController: (paneId: string, controller: TerminalPaneController | undefined) => void;
+  paintScopeKey: string;
   onDiagnostic?: (message: string) => void;
   transferClient?: TerminalTransferClient;
   transferRegistry?: TerminalTransferRegistry;
@@ -123,6 +124,7 @@ export function TerminalPane({
   onFocus,
   onMeasurements,
   onController,
+  paintScopeKey,
   onDiagnostic,
   transferClient,
   transferRegistry,
@@ -243,7 +245,7 @@ export function TerminalPane({
       const cachedEpoch = currentCached.terminalEpoch;
       const restored = renderer.restore(currentCached.serialized, () => {
         recordPerfMilestone("startup.terminalPaint");
-        closePanePaintSpans();
+        closePanePaintSpans(paintScopeKey);
         commitRendered(currentCached.outputGeneration, cachedEpoch, true);
       }, currentCached.outputGeneration);
       // A fresh terminal cannot refuse a restore today, but a caller that
@@ -292,7 +294,7 @@ export function TerminalPane({
         clearDeferredOutput();
         renderer.seed(effect.data, () => {
           recordPerfMilestone("startup.terminalPaint");
-          closePanePaintSpans();
+          closePanePaintSpans(paintScopeKey);
           commitRendered(generation, eventEpoch, true);
         }, generation);
         setRendererDiagnostic(undefined);
@@ -318,7 +320,7 @@ export function TerminalPane({
       } else if (effect.kind === "restore") {
         const markRecoveryRendered = () => {
           recordPerfMilestone("startup.terminalPaint");
-          closePanePaintSpans();
+          closePanePaintSpans(paintScopeKey);
           commitRendered(effect.tailThroughGeneration, eventEpoch, true);
         };
         // The snapshot and its raw tail are one screen in two pieces. If the
@@ -455,7 +457,7 @@ export function TerminalPane({
         },
       );
     };
-  }, [hub, pane.id]);
+  }, [hub, paintScopeKey, pane.id]);
 
   useEffect(() => {
     if (!clientId) return;

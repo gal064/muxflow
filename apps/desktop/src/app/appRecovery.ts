@@ -1,46 +1,51 @@
 import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 
-export type AppRecoveryOffer = {
-  hostProfileId: string;
-  previousServerIdentity: string;
-  currentServerIdentity: string;
+export type AppRecoveryScope = HostScopeToken & { serverIdentity: string };
+
+type AppRecoveryFields = {
   count: number;
-  scope: HostScopeToken;
+  previousServerIdentity: string;
+  scope: AppRecoveryScope;
 };
 
-export type AppRecoveryState = AppRecoveryOffer & (
+export type AppRecoveryState = AppRecoveryFields & (
   | { phase: "offered" }
   | { phase: "confirmingDiscard" }
 );
 
-export type AppRecoveryDiscardState = AppRecoveryOffer & { phase: "confirmingDiscard" };
+export type AppRecoveryDiscardState = AppRecoveryFields & { phase: "confirmingDiscard" };
 
-export function offerAppRecovery(offer: AppRecoveryOffer): AppRecoveryState {
-  return { ...offer, phase: "offered" };
-}
+export type AppRecoveryAction =
+  | { type: "offer"; count: number; previousServerIdentity: string; scope: AppRecoveryScope }
+  | { type: "confirmDiscard" }
+  | { type: "cancelDiscard" }
+  | { type: "reconcileScope"; scope: HostScopeToken }
+  | { type: "clear" };
 
-export function confirmAppRecoveryDiscard(state: AppRecoveryState): AppRecoveryState {
-  return { ...state, phase: "confirmingDiscard" };
-}
-
-export function cancelAppRecoveryDiscard(state: AppRecoveryState): AppRecoveryState {
-  return { ...state, phase: "offered" };
-}
-
-/** Topology churn keeps the offer; only replacement of its durable connection clears it. */
-export function reconcileAppRecovery(
+/** One reducer owns both the offer and its modal; no independent open flag exists. */
+export function appRecoveryReducer(
   state: AppRecoveryState | undefined,
-  currentScope: HostScopeToken,
+  action: AppRecoveryAction,
 ): AppRecoveryState | undefined {
-  return state && sameHostConnection(state.scope, currentScope) ? state : undefined;
+  switch (action.type) {
+    case "offer":
+      return {
+        count: action.count,
+        phase: "offered",
+        previousServerIdentity: action.previousServerIdentity,
+        scope: action.scope,
+      };
+    case "confirmDiscard":
+      return state ? { ...state, phase: "confirmingDiscard" } : undefined;
+    case "cancelDiscard":
+      return state ? { ...state, phase: "offered" } : undefined;
+    case "reconcileScope":
+      return state && sameHostConnection(state.scope, action.scope) ? state : undefined;
+    case "clear":
+      return undefined;
+  }
 }
 
-export function appRecoveryModalOpen(state: AppRecoveryState | undefined): boolean {
-  return appRecoveryDiscardState(state) !== undefined;
-}
-
-export function appRecoveryDiscardState(
-  state: AppRecoveryState | undefined,
-): AppRecoveryDiscardState | undefined {
+export function appRecoveryDiscardState(state: AppRecoveryState | undefined): AppRecoveryDiscardState | undefined {
   return state?.phase === "confirmingDiscard" ? state : undefined;
 }

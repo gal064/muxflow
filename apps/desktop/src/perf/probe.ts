@@ -32,7 +32,19 @@ const samples = new Map<string, number[]>();
 const counters = new Map<string, number>();
 const highWater = new Map<string, number>();
 const milestoneOccurrences = new Map<string, number>();
-const openSpans = new Map<string, number>();
+export interface PerfSpanHandle {
+  readonly name: string;
+  readonly scope?: string;
+  readonly started: number;
+}
+
+interface OpenPerfSpan {
+  readonly started: number;
+  readonly owners: Set<PerfSpanHandle>;
+}
+
+const openSpans = new Map<string, OpenPerfSpan>();
+const perfSpanKey = (name: string, scope?: string) => `${name}\0${scope ?? ""}`;
 let pending: string[] = [];
 let enabled = false;
 let appender: Appender | undefined;
@@ -152,22 +164,35 @@ export function startPerfSpan(name: string): () => void {
  * it. Re-opening an already open span keeps the original start, so a burst of
  * clicks measures the user's whole wait rather than only the last one.
  */
-export function openPerfSpan(name: string): void {
-  if (!enabled || openSpans.has(name)) return;
-  openSpans.set(name, now());
+export function openPerfSpan(name: string, scope?: string): PerfSpanHandle | undefined {
+  if (!enabled) return undefined;
+  const key = perfSpanKey(name, scope);
+  const existing = openSpans.get(key);
+  const started = existing?.started ?? now();
+  const handle = { name, scope, started };
+  if (existing) existing.owners.add(handle);
+  else openSpans.set(key, { started, owners: new Set([handle]) });
+  return handle;
 }
 
 /** Closes an open cross-component span. Closing an unopened span is a no-op. */
-export function closePerfSpan(name: string): void {
+export function closePerfSpan(name: string, scope?: string): void {
   if (!enabled) return;
-  const started = openSpans.get(name);
-  if (started === undefined) return;
-  openSpans.delete(name);
-  recordPerfSample(name, now() - started);
+  const key = perfSpanKey(name, scope);
+  const span = openSpans.get(key);
+  if (!span) return;
+  openSpans.delete(key);
+  recordPerfSample(name, now() - span.started);
 }
 
-export function abandonPerfSpan(name: string): void {
-  openSpans.delete(name);
+export function abandonPerfSpan(name: string, owner?: PerfSpanHandle): void {
+  const key = perfSpanKey(name, owner?.scope);
+  const span = openSpans.get(key);
+  if (!span) return;
+  if (owner) {
+    if (!span.owners.delete(owner) || span.owners.size > 0) return;
+  }
+  openSpans.delete(key);
 }
 
 /**
@@ -179,13 +204,15 @@ export const PANE_PAINT_SPANS = ["create.tab", "create.workspace", "pane.split",
 
 export type PanePaintSpan = (typeof PANE_PAINT_SPANS)[number];
 
-export function closePanePaintSpans(): void {
-  for (const name of PANE_PAINT_SPANS) closePerfSpan(name);
+export function closePanePaintSpans(scope: string): void {
+  for (const name of PANE_PAINT_SPANS) closePerfSpan(name, scope);
 }
 
 /** A replaced connection can never paint the pane an old action was waiting for. */
-export function abandonPanePaintSpans(): void {
-  for (const name of PANE_PAINT_SPANS) abandonPerfSpan(name);
+export function abandonPanePaintSpans(scope: string): void {
+  for (const name of PANE_PAINT_SPANS) {
+    openSpans.delete(perfSpanKey(name, scope));
+  }
 }
 
 /** Times an awaited call without changing its result or its rejection. */
