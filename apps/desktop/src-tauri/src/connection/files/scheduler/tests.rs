@@ -1,6 +1,9 @@
 use super::*;
 use crate::connection::TerminalClient;
-use std::sync::Condvar;
+use std::sync::{
+    Condvar,
+    atomic::{AtomicU32, Ordering},
+};
 
 #[path = "tests/admission.rs"]
 mod admission;
@@ -115,13 +118,13 @@ fn injected_queue_full_has_no_event_cancellation_or_owned_guard() {
         id.clone(),
         live_binding(91),
         Arc::new(CancelState::new()),
-        {
+        QueuedPublication::callback({
             let queued = Arc::clone(&queued);
             move || {
                 queued.fetch_add(1, Ordering::AcqRel);
                 Ok(())
             }
-        },
+        }),
         {
             let started = Arc::clone(&started);
             move || {
@@ -168,13 +171,13 @@ fn admitted_queued_transition_precedes_running_and_terminal() {
         format!("ordered-admission-{}", uuid::Uuid::new_v4()),
         live_binding(92),
         Arc::new(CancelState::new()),
-        {
+        QueuedPublication::callback({
             let events = Arc::clone(&events);
             move || {
                 events.lock().unwrap().push("queued");
                 Ok(())
             }
-        },
+        }),
         {
             let events = Arc::clone(&events);
             move || events.lock().unwrap().push("running")
@@ -209,7 +212,7 @@ fn worker_spawn_failure_rolls_back_and_terminalizes_exactly_once() {
         id.clone(),
         live_binding(93),
         Arc::new(CancelState::new()),
-        || Ok(()),
+        QueuedPublication::callback(|| Ok(())),
         {
             let started = Arc::clone(&started);
             move || {
@@ -593,6 +596,7 @@ fn active_epoch_loss_kills_worker_process_and_reports_stale() {
         .recv_timeout(std::time::Duration::from_secs(3))
         .unwrap();
     client.terminal_epoch.store(402, Ordering::Release);
+    invalidate_bulk_scope(client.bulk_scope, "test control connection epoch replaced");
     let (result, reason) = finished_rx
         .recv_timeout(std::time::Duration::from_secs(3))
         .unwrap();
@@ -869,6 +873,7 @@ fn stale_scope_during_verifying_kills_old_transport_without_reconciliation() {
         .unwrap();
     client.terminal_epoch.store(702, Ordering::Release);
     *client.server_identity.lock().unwrap() = "server-702".into();
+    invalidate_bulk_scope(client.bulk_scope, "test control connection scope replaced");
     let (result, reason) = finished_rx
         .recv_timeout(std::time::Duration::from_secs(3))
         .unwrap();

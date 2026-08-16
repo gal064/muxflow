@@ -226,6 +226,48 @@ fn pane_resource_frame_is_compact_and_sequence_atomic() {
     );
 }
 
+#[test]
+fn oversized_pane_resource_crosses_native_delivery_and_releases_exact_credit() {
+    let epoch = 73;
+    let window = DeliveryWindow::new(epoch);
+    let shared_window = Arc::new(Mutex::new(Some(Arc::clone(&window))));
+    let (sender, receiver) = mpsc::channel();
+    let channel = Channel::new(move |body| {
+        if let InvokeResponseBody::Raw(frame) = body {
+            sender.send(frame).unwrap();
+        }
+        Ok(())
+    });
+    let channel = TerminalEventChannel::new(Uuid::new_v4(), channel, shared_window);
+    let snapshot_bytes = delivery_window::NATIVE_DELIVERY_WINDOW_BYTES as usize + 1_024;
+    let event = TerminalEvent::PaneResource {
+        pane_id: "%1".into(),
+        state: "hiddenBuffered".into(),
+        requires_seed: true,
+        recovery_reason: "oversized-recovery".into(),
+        generation: 9,
+        snapshot_generation: 8,
+        tail_through_generation: 9,
+        serialized_snapshot: vec![0x5a; snapshot_bytes],
+        raw_tail: vec![0xa5; 1_024],
+    };
+    let frame = event_frame::encode_event_with_sequence(event, 41);
+    assert!(frame.len() as u64 > delivery_window::NATIVE_DELIVERY_WINDOW_BYTES);
+    let host = HostCharge {
+        bytes: (snapshot_bytes + 1_024) as u64,
+        records: 1,
+    };
+    channel.send_charged(frame.clone(), host).unwrap();
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+        frame
+    );
+    assert_eq!(
+        window.acknowledge(epoch, 1, frame.len() as u64).unwrap(),
+        Some(host)
+    );
+}
+
 fn assert_snapshot_frame_sequence(frame: &[u8], expected: u64) {
     assert_eq!(frame[0], 7);
     let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));

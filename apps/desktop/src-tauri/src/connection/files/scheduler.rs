@@ -1,11 +1,24 @@
-use serde::Serialize;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{
-        Arc, Condvar, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
-    },
+    sync::{Arc, Mutex, OnceLock},
 };
+
+mod admission;
+mod lifecycle;
+mod publication;
+use admission::{Admission, AdmissionOutcome};
+#[cfg(test)]
+pub(super) use lifecycle::BulkChild;
+pub(super) use lifecycle::{
+    BulkBinding, CancelDisposition, CancelReason, CancelResponse, CancelState, DeadlineGuard,
+    TransferPhase,
+};
+pub(super) use publication::QueuedPublication;
+use publication::{PublicationActor, publication_actor};
+
+const ADMISSION_CANCELLATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub(super) fn take_queued_job<T>(
     queue: &mut VecDeque<T>,
@@ -19,313 +32,24 @@ use super::MAX_QUEUED_TRANSFERS;
 use super::transfer_event::{
     CleanupStatus, TransferFailure, TransferFailureKind, TransferOutcome, TransferResult,
 };
-use crate::connection::TerminalClient;
-
-#[derive(Clone)]
-pub(super) struct BulkBinding {
-    pub(super) client: Arc<TerminalClient>,
-    pub(super) expected_server_identity: String,
-    pub(super) connection_epoch: u64,
-}
-
-impl BulkBinding {
-    pub(super) fn capture(
-        client: Arc<TerminalClient>,
-        expected_server_identity: String,
-        connection_epoch: u64,
-    ) -> Result<Self, String> {
-        let binding = Self {
-            client,
-            expected_server_identity,
-            connection_epoch,
-        };
-        binding.validate()?;
-        Ok(binding)
-    }
-
-    pub(super) fn validate(&self) -> Result<(), String> {
-        if !self.client.ready.load(Ordering::Acquire)
-            || self.client.read_only.load(Ordering::Acquire)
-        {
-            return Err("bulk job is not bound to a writable live control connection".into());
-        }
-        if self.client.terminal_epoch.load(Ordering::Acquire) != self.connection_epoch {
-            return Err("stale bulk job: control connection epoch was replaced".into());
-        }
-        if self.expected_server_identity.is_empty()
-            || *self.client.server_identity.lock().unwrap() != self.expected_server_identity
-        {
-            return Err("stale bulk job: tmux server identity was replaced".into());
-        }
-        Ok(())
-    }
-}
-
-pub(super) struct CancelState {
-    requested: AtomicBool,
-    /// A deadline or stale binding must terminate transport even when the
-    /// authoritative helper has not been spawned yet. This is deliberately
-    /// separate from `reason`: a user cancellation may have won that first
-    /// writer while a later deadline still has to kill a silent helper.
-    transport_termination_requested: AtomicBool,
-    process_id: AtomicU32,
-    reason: AtomicU8,
-    phase: AtomicU8,
-    finished: AtomicBool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CancelReason {
-    None,
-    User,
-    StaleBinding,
-    Timeout,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) enum TransferPhase {
-    Queued,
-    Running,
-    Verifying,
-    Finished,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) enum CancelDisposition {
-    CancelRequested,
-    AwaitingAuthoritativeOutcome,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct CancelResponse {
-    pub(super) disposition: CancelDisposition,
-    pub(super) phase: TransferPhase,
-}
-
-impl CancelState {
-    pub(super) fn new() -> Self {
-        Self {
-            requested: AtomicBool::new(false),
-            transport_termination_requested: AtomicBool::new(false),
-            process_id: AtomicU32::new(0),
-            reason: AtomicU8::new(0),
-            phase: AtomicU8::new(0),
-            finished: AtomicBool::new(false),
-        }
-    }
-    pub(super) fn is_cancelled(&self) -> bool {
-        self.requested.load(Ordering::Acquire)
-    }
-    pub(super) fn cancel(&self) {
-        // Running helpers receive the protocol cancellation request first. A
-        // silent peer is still bounded by the inactivity deadline, which is
-        // the only path allowed to kill the transport without claiming that
-        // the remote partial was removed.
-        self.cancel_for(CancelReason::User, false);
-    }
-    fn cancel_for(&self, reason: CancelReason, kill: bool) {
-        let _ = self
-            .reason
-            .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
-        self.requested.store(true, Ordering::Release);
-        // A user cancel that loses the pre-commit race cannot make an already
-        // publishing operation ambiguous. Deadline and stale-scope failures
-        // are different: they must terminate a silent transport so the worker
-        // can reconcile or report an unknown outcome boundedly.
-        if !kill || (self.phase() == TransferPhase::Verifying && reason == CancelReason::User) {
-            return;
-        }
-        self.transport_termination_requested
-            .store(true, Ordering::Release);
-        let process_id = self.process_id.swap(0, Ordering::AcqRel);
-        if process_id != 0 {
-            // SAFETY: process_id is the exact child returned by spawn_bulk_bridge.
-            unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
-        }
-    }
-    pub(super) fn cancel_stale_binding(&self) {
-        self.cancel_for(CancelReason::StaleBinding, true);
-    }
-    pub(super) fn transport_termination_requested(&self) -> bool {
-        self.transport_termination_requested.load(Ordering::Acquire)
-    }
-    pub(super) fn reason(&self) -> CancelReason {
-        match self.reason.load(Ordering::Acquire) {
-            1 => CancelReason::User,
-            2 => CancelReason::StaleBinding,
-            3 => CancelReason::Timeout,
-            _ => CancelReason::None,
-        }
-    }
-    pub(super) fn phase(&self) -> TransferPhase {
-        match self.phase.load(Ordering::Acquire) {
-            1 => TransferPhase::Running,
-            2 => TransferPhase::Verifying,
-            3 => TransferPhase::Finished,
-            _ => TransferPhase::Queued,
-        }
-    }
-
-    fn mark_running(&self) {
-        let _ = self
-            .phase
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
-    }
-    pub(super) fn bind_process(&self, process_id: u32) -> Result<ProcessBinding<'_>, String> {
-        if self.is_cancelled() {
-            return Err("bulk transfer cancelled before its helper started".into());
-        }
-        self.process_id.store(process_id, Ordering::Release);
-        if self.is_cancelled() {
-            self.cancel();
-            return Err("bulk transfer cancelled while its helper started".into());
-        }
-        Ok(ProcessBinding(self))
-    }
-
-    /// Binds the short-lived reconciliation helper after the atomic commit
-    /// boundary. A user cancellation is intentionally unable to kill this
-    /// helper because its response is needed to classify publication.
-    pub(super) fn bind_authoritative_process(
-        &self,
-        process_id: u32,
-    ) -> Result<ProcessBinding<'_>, String> {
-        if self.phase() != TransferPhase::Verifying {
-            return Err("authoritative reconciliation is only valid while verifying".into());
-        }
-        self.process_id.store(process_id, Ordering::Release);
-        // The deadline may have fired before this PID existed. Publishing the
-        // PID before rechecking closes both sides of the race: a concurrent
-        // canceller swaps and kills it, while an earlier canceller leaves the
-        // persistent latch for this binder to observe and kill exactly once.
-        if self.transport_termination_requested() {
-            if self
-                .process_id
-                .compare_exchange(process_id, 0, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                // SAFETY: process_id is the exact child returned by
-                // spawn_bulk_bridge for this binding.
-                unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
-            }
-            return Err("authoritative reconciliation expired while its helper started".into());
-        }
-        Ok(ProcessBinding(self))
-    }
-
-    /// Establishes the atomic commit point for a transfer. Cancellation that
-    /// wins before this call still kills the helper; cancellation after it is
-    /// recorded but cannot turn an already-publishing commit into an ambiguous
-    /// connection loss.
-    pub(super) fn prepare_finalize(&self) -> Result<(), String> {
-        if self.is_cancelled() {
-            return Err("bulk transfer cancelled before finalize".into());
-        }
-        self.phase.store(2, Ordering::Release);
-        if self.is_cancelled() {
-            return Err("bulk transfer cancelled while finalize started".into());
-        }
-        Ok(())
-    }
-
-    fn mark_finished(&self) {
-        self.phase.store(3, Ordering::Release);
-        self.process_id.store(0, Ordering::Release);
-        self.finished.store(true, Ordering::Release);
-    }
-
-    pub(super) fn arm_inactivity_deadline(self: &Arc<Self>) -> DeadlineGuard {
-        self.arm_deadline(std::time::Duration::from_secs(30))
-    }
-
-    fn arm_deadline(self: &Arc<Self>, timeout: std::time::Duration) -> DeadlineGuard {
-        let state = Arc::new(DeadlineState {
-            completed: AtomicBool::new(false),
-            last_activity: Mutex::new(std::time::Instant::now()),
-        });
-        let worker_state = Arc::clone(&state);
-        let cancellation = Arc::clone(self);
-        std::thread::spawn(move || {
-            let poll_interval = std::cmp::min(
-                std::time::Duration::from_secs(1),
-                std::cmp::max(
-                    std::time::Duration::from_millis(10),
-                    timeout.checked_div(4).unwrap_or(timeout),
-                ),
-            );
-            loop {
-                std::thread::sleep(poll_interval);
-                if worker_state.completed.load(Ordering::Acquire) {
-                    return;
-                }
-                if worker_state.last_activity.lock().unwrap().elapsed() >= timeout {
-                    break;
-                }
-            }
-            cancellation.cancel_for(CancelReason::Timeout, true);
-        });
-        DeadlineGuard(state)
-    }
-
-    #[cfg(test)]
-    pub(super) fn arm_test_deadline(
-        self: &Arc<Self>,
-        timeout: std::time::Duration,
-    ) -> DeadlineGuard {
-        self.arm_deadline(timeout)
-    }
-}
-
-struct DeadlineState {
-    completed: AtomicBool,
-    last_activity: Mutex<std::time::Instant>,
-}
-pub(super) struct DeadlineGuard(Arc<DeadlineState>);
-impl DeadlineGuard {
-    pub(super) fn touch(&self) {
-        *self.0.last_activity.lock().unwrap() = std::time::Instant::now();
-    }
-
-    pub(super) fn complete(&self) {
-        self.0.completed.store(true, Ordering::Release);
-    }
-}
-impl Drop for DeadlineGuard {
-    fn drop(&mut self) {
-        self.complete();
-    }
-}
-
-pub(super) struct ProcessBinding<'a>(&'a CancelState);
-impl Drop for ProcessBinding<'_> {
-    fn drop(&mut self) {
-        self.0.process_id.store(0, Ordering::Release);
-    }
-}
-
-/// A bridge child that dies with its owner. Test-only since the bulk lane
-/// started pooling its connections (`bulk_pool`); the scheduler tests still
-/// build raw peers this way.
-#[cfg(test)]
-pub(super) struct BulkChild(pub(super) std::process::Child);
-
 struct EngineJob {
     id: String,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
-    admitted: bool,
-    cancel_latched_during_admission: bool,
     started: Box<dyn FnOnce() + Send>,
     work: Box<dyn FnOnce() -> TransferResult + Send>,
     finished: Box<dyn FnOnce(TransferResult, CancelReason) + Send>,
 }
 
+struct PendingAdmission {
+    binding: BulkBinding,
+    state: Arc<Admission>,
+}
+
 #[derive(Default)]
 struct EngineState {
     active: usize,
+    pending_admissions: HashMap<String, PendingAdmission>,
     active_bindings: HashMap<String, BulkBinding>,
     queue: VecDeque<EngineJob>,
     cancellations: HashMap<String, Arc<CancelState>>,
@@ -334,48 +58,38 @@ struct EngineState {
 #[derive(Default)]
 struct TransferEngine {
     state: Mutex<EngineState>,
-    admission_changed: Condvar,
-    active_bindings_changed: Condvar,
 }
 
 static TRANSFER_ENGINE: OnceLock<Arc<TransferEngine>> = OnceLock::new();
 
 fn transfer_engine() -> Arc<TransferEngine> {
-    Arc::clone(TRANSFER_ENGINE.get_or_init(|| {
-        let engine = Arc::new(TransferEngine::default());
-        spawn_engine_binding_monitor(&engine);
-        engine
-    }))
+    Arc::clone(TRANSFER_ENGINE.get_or_init(|| Arc::new(TransferEngine::default())))
 }
 
 #[cfg(test)]
 pub(super) fn acceptance_engine_counts() -> (usize, usize) {
     let engine = transfer_engine();
     let state = engine.state.lock().unwrap();
-    (state.active, state.queue.len())
+    (
+        state.active,
+        state.queue.len() + state.pending_admissions.len(),
+    )
 }
 
 #[cfg(test)]
 pub(super) fn wait_for_admission_cancellation_latch(id: &str) {
     let engine = transfer_engine();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    let mut state = engine.state.lock().unwrap();
-    loop {
-        if state
-            .queue
-            .iter()
-            .any(|job| job.id == id && job.cancel_latched_during_admission)
-        {
-            return;
-        }
-        let remaining = deadline
-            .checked_duration_since(std::time::Instant::now())
-            .expect("cancellation latched before test deadline");
-        (state, _) = engine
-            .admission_changed
-            .wait_timeout(state, remaining)
-            .unwrap();
-    }
+    let admission = Arc::clone(
+        &engine
+            .state
+            .lock()
+            .unwrap()
+            .pending_admissions
+            .get(id)
+            .expect("test admission remains pending")
+            .state,
+    );
+    admission.wait_until_cancelled(std::time::Duration::from_secs(3));
 }
 
 #[cfg(test)]
@@ -399,7 +113,7 @@ pub(super) fn enqueue_transfer(
         id,
         binding,
         cancellation,
-        || Ok(()),
+        QueuedPublication::callback(|| Ok(())),
         started,
         work,
         finished,
@@ -416,16 +130,48 @@ pub(super) fn enqueue_transfer_with_queued(
     id: String,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
-    queued: impl FnOnce() -> Result<(), String> + Send + 'static,
+    queued: QueuedPublication,
     started: impl FnOnce() + Send + 'static,
     work: impl FnOnce() -> TransferResult + Send + 'static,
     finished: impl FnOnce(TransferResult, CancelReason) + Send + 'static,
+) -> Result<(), String> {
+    enqueue_transfer_with_publisher(
+        id,
+        binding,
+        cancellation,
+        queued,
+        started,
+        work,
+        finished,
+        publication_actor(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enqueue_transfer_with_publisher(
+    id: String,
+    binding: BulkBinding,
+    cancellation: Arc<CancelState>,
+    queued: QueuedPublication,
+    started: impl FnOnce() + Send + 'static,
+    work: impl FnOnce() -> TransferResult + Send + 'static,
+    finished: impl FnOnce(TransferResult, CancelReason) + Send + 'static,
+    publisher: Arc<PublicationActor>,
 ) -> Result<(), String> {
     if let Err(error) = binding.validate() {
         crate::perf_log::record_transfer_admission(crate::perf_log::TransferAdmission::Rejected);
         return Err(error);
     }
     let engine = transfer_engine();
+    let admission = Admission::new(Arc::clone(&cancellation));
+    let mut job = Some(EngineJob {
+        id: id.clone(),
+        binding: binding.clone(),
+        cancellation: Arc::clone(&cancellation),
+        started: Box::new(started),
+        work: Box::new(work),
+        finished: Box::new(finished),
+    });
     {
         let mut state = engine.state.lock().unwrap();
         #[cfg(test)]
@@ -435,116 +181,128 @@ pub(super) fn enqueue_transfer_with_queued(
             );
             return Err("bulk transfer queue is full".into());
         }
-        if state.queue.len() >= MAX_QUEUED_TRANSFERS {
+        if state.queue.len() + state.pending_admissions.len() >= MAX_QUEUED_TRANSFERS {
             crate::perf_log::record_transfer_admission(
                 crate::perf_log::TransferAdmission::Rejected,
             );
             return Err("bulk transfer queue is full".into());
         }
-        if state.cancellations.contains_key(&id) || state.queue.iter().any(|job| job.id == id) {
+        if state.cancellations.contains_key(&id)
+            || state.pending_admissions.contains_key(&id)
+            || state.queue.iter().any(|job| job.id == id)
+        {
             crate::perf_log::record_transfer_admission(
                 crate::perf_log::TransferAdmission::Rejected,
             );
             return Err("bulk transfer ID is already queued or active".into());
         }
-        state.queue.push_back(EngineJob {
-            id: id.clone(),
-            binding: binding.clone(),
-            cancellation: Arc::clone(&cancellation),
-            admitted: false,
-            cancel_latched_during_admission: false,
-            started: Box::new(started),
-            work: Box::new(work),
-            finished: Box::new(finished),
-        });
-        // Cancellation becomes addressable in the same atomic step as the
-        // provisional queue slot. Until queued publication succeeds the job
-        // cannot dispatch, so a concurrent cancel only latches intent; a
-        // publication failure still rolls every artifact back without a
-        // terminal event that could precede the missing queued event.
-        state
-            .cancellations
-            .insert(id.clone(), Arc::clone(&cancellation));
+        state.pending_admissions.insert(
+            id.clone(),
+            PendingAdmission {
+                binding,
+                state: Arc::clone(&admission),
+            },
+        );
+        crate::perf_log::record_transfer_state(
+            state.active,
+            state.queue.len() + state.pending_admissions.len(),
+        );
     }
-    // Event delivery is deliberately outside the engine lock. The FIFO head's
-    // admission barrier prevents every dispatcher from starting it (or later
-    // work) until queued has returned, without letting a slow channel stall
-    // cancellation and engine inspection.
-    let queued_error = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(queued)) {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(error),
-        Err(panic) => Some(format!(
-            "bulk transfer queued event panicked: {}",
-            panic_message(panic)
-        )),
-    };
+    // Event delivery is deliberately outside the engine and runnable-queue
+    // locks. A slow renderer callback owns only this admission reservation;
+    // already published transfers continue to use available worker lanes.
+    let queued_error = publisher.publish(queued).err();
     if let Some(error) = queued_error {
         {
             let mut state = engine.state.lock().unwrap();
-            let rejected = take_queued_job(&mut state.queue, |job| job.id == id);
-            if rejected.is_some() {
-                state.cancellations.remove(&id);
-                cancellation.mark_finished();
-            }
-            engine.admission_changed.notify_all();
-            crate::perf_log::record_transfer_state(state.active, state.queue.len());
+            state.pending_admissions.remove(&id);
+            admission.finish_publication(false);
+            cancellation.mark_finished();
+            crate::perf_log::record_transfer_state(
+                state.active,
+                state.queue.len() + state.pending_admissions.len(),
+            );
         }
         crate::perf_log::record_transfer_admission(crate::perf_log::TransferAdmission::Rejected);
-        // A later admission may have observed this pending FIFO head and
-        // returned without starting. Removing the head must retrigger it.
-        engine.dispatch();
         return Err(format!(
             "bulk transfer queued event could not be delivered: {error}"
         ));
     }
-    {
+    let outcome = {
         let mut state = engine.state.lock().unwrap();
-        // Pending jobs cannot be removed by cancellation and their binding
-        // monitor does not exist until after this commit. A missing entry is
-        // therefore an internal scheduler invariant violation, not a
-        // recoverable post-event rejection (which would create a UI ghost).
-        let pending = state
-            .queue
-            .iter_mut()
-            .find(|job| job.id == id)
-            .expect("pending admission remains queued until commit");
-        pending.admitted = true;
-        engine.admission_changed.notify_all();
+        state
+            .pending_admissions
+            .remove(&id)
+            .expect("pending admission remains registered until publication");
+        let outcome = admission.finish_publication(true);
+        if outcome == AdmissionOutcome::Committed {
+            state
+                .cancellations
+                .insert(id.clone(), Arc::clone(&cancellation));
+            state
+                .queue
+                .push_back(job.take().expect("committed admission owns its job"));
+        }
         crate::perf_log::record_transfer_admission(crate::perf_log::TransferAdmission::Accepted);
-        crate::perf_log::record_transfer_state(state.active, state.queue.len());
+        crate::perf_log::record_transfer_state(
+            state.active,
+            state.queue.len() + state.pending_admissions.len(),
+        );
+        outcome
+    };
+    if outcome == AdmissionOutcome::Cancelled {
+        let reason = cancellation.reason();
+        terminalize_queued(
+            job.take()
+                .expect("cancelled published admission owns its job"),
+            Err(failure_for_cancel(
+                reason,
+                TransferPhase::Queued,
+                "bulk transfer cancelled while queued publication completed".into(),
+            )),
+            reason,
+        );
+    } else {
+        engine.dispatch();
     }
-    engine.dispatch();
     Ok(())
 }
 
 pub(super) fn cancel_transfer(id: &str) -> Result<CancelResponse, String> {
     let engine = transfer_engine();
-    // A publishing admission is not yet externally real: its queued event may
-    // still fail and roll the whole job back. Latch cancellation immediately,
-    // but do not return an observable acknowledgement until admission has
-    // linearized to committed or rolled back.
+    // A publishing admission is not yet externally real. Its independent
+    // state supplies a bounded wait for commit/rollback without occupying the
+    // runnable FIFO or acknowledging cancellation before queued is observable.
+    let pending = engine
+        .state
+        .lock()
+        .unwrap()
+        .pending_admissions
+        .get(id)
+        .map(|pending| Arc::clone(&pending.state));
+    if let Some(pending) = pending {
+        match pending.cancel_and_wait(ADMISSION_CANCELLATION_TIMEOUT)? {
+            AdmissionOutcome::Cancelled => {
+                return Ok(CancelResponse {
+                    disposition: CancelDisposition::CancelRequested,
+                    phase: TransferPhase::Queued,
+                });
+            }
+            AdmissionOutcome::Rejected => {
+                return Err("bulk transfer queued publication was rejected".into());
+            }
+            AdmissionOutcome::Committed => return cancel_transfer(id),
+            AdmissionOutcome::Publishing => unreachable!("bounded wait returns a final outcome"),
+        }
+    }
     let queued = {
         let mut state = engine.state.lock().unwrap();
-        loop {
-            let Some(index) = state.queue.iter().position(|job| job.id == id) else {
-                break None;
-            };
-            if !state.queue[index].admitted {
-                let pending = &mut state.queue[index];
-                pending.cancel_latched_during_admission = true;
-                pending.cancellation.cancel();
-                engine.admission_changed.notify_all();
-                state = engine.admission_changed.wait(state).unwrap();
-                continue;
-            }
-            let queued = state
-                .queue
-                .remove(index)
-                .expect("located queued transfer remains present");
+        let queued = take_queued_job(&mut state.queue, |job| job.id == id);
+        if queued.is_some() {
             state.cancellations.remove(id);
             crate::perf_log::record_transfer_state(state.active, state.queue.len());
-            break Some(queued);
         }
+        queued
     };
     if let Some(job) = queued {
         job.cancellation.cancel();
@@ -581,19 +339,73 @@ pub(super) fn cancel_transfer(id: &str) -> Result<CancelResponse, String> {
     Ok(CancelResponse { disposition, phase })
 }
 
+/// Actively invalidates every transfer owned by a replaced control client.
+///
+/// Connection lifecycle transitions call this before replacing epoch or
+/// identity. That makes staleness event-driven; worker-boundary validation is
+/// retained as defense in depth, not as a 50 ms polling state machine.
+pub(crate) fn invalidate_bulk_scope(scope: uuid::Uuid, message: &str) {
+    let engine = transfer_engine();
+    let (pending, queued, active) = {
+        let mut state = engine.state.lock().unwrap();
+        let pending = state
+            .pending_admissions
+            .values()
+            .filter(|pending| pending.binding.client.bulk_scope == scope)
+            .map(|pending| Arc::clone(&pending.state))
+            .collect::<Vec<_>>();
+        let mut queued = Vec::new();
+        while let Some(index) = state
+            .queue
+            .iter()
+            .position(|job| job.binding.client.bulk_scope == scope)
+        {
+            let job = state
+                .queue
+                .remove(index)
+                .expect("located queued transfer remains present");
+            state.cancellations.remove(&job.id);
+            queued.push(job);
+        }
+        let active = state
+            .active_bindings
+            .iter()
+            .filter(|(_, binding)| binding.client.bulk_scope == scope)
+            .filter_map(|(id, _)| state.cancellations.get(id).cloned())
+            .collect::<Vec<_>>();
+        crate::perf_log::record_transfer_state(
+            state.active,
+            state.queue.len() + state.pending_admissions.len(),
+        );
+        (pending, queued, active)
+    };
+    for admission in pending {
+        admission.cancel_stale();
+    }
+    for cancellation in active {
+        cancellation.cancel_stale_binding();
+    }
+    for job in queued {
+        job.cancellation.cancel_stale_binding();
+        terminalize_queued(
+            job,
+            Err(failure_for_cancel(
+                CancelReason::StaleBinding,
+                TransferPhase::Queued,
+                message.to_owned(),
+            )),
+            CancelReason::StaleBinding,
+        );
+    }
+    engine.dispatch();
+}
+
 impl TransferEngine {
     fn dispatch(self: &Arc<Self>) {
         loop {
             let job = {
                 let mut state = self.state.lock().unwrap();
                 if state.active >= 2 {
-                    return;
-                }
-                if state
-                    .queue
-                    .front()
-                    .is_some_and(|job| !job.admitted || job.cancel_latched_during_admission)
-                {
                     return;
                 }
                 let Some(job) = state.queue.pop_front() else {
@@ -632,7 +444,6 @@ impl TransferEngine {
                 state
                     .active_bindings
                     .insert(job.id.clone(), job.binding.clone());
-                self.active_bindings_changed.notify_one();
                 crate::perf_log::record_transfer_state(state.active, state.queue.len());
                 job
             };
@@ -659,8 +470,6 @@ impl TransferEngine {
                     id,
                     binding,
                     cancellation,
-                    admitted: _,
-                    cancel_latched_during_admission: _,
                     started,
                     work,
                     finished,
@@ -739,34 +548,6 @@ impl TransferEngine {
         state.active_bindings.remove(id);
         state.cancellations.remove(id);
         crate::perf_log::record_transfer_state(state.active, state.queue.len());
-    }
-
-    fn cancel_stale(self: &Arc<Self>, id: &str, message: String) {
-        let queued = {
-            let mut state = self.state.lock().unwrap();
-            let queued = take_queued_job(&mut state.queue, |job| job.id == id && job.admitted);
-            if queued.is_some() {
-                state.cancellations.remove(id);
-                crate::perf_log::record_transfer_state(state.active, state.queue.len());
-            }
-            queued
-        };
-        if let Some(job) = queued {
-            job.cancellation.cancel_stale_binding();
-            terminalize_queued(
-                job,
-                Err(failure_for_cancel(
-                    CancelReason::StaleBinding,
-                    TransferPhase::Queued,
-                    message,
-                )),
-                CancelReason::StaleBinding,
-            );
-            self.dispatch();
-        } else if let Some(cancellation) = self.state.lock().unwrap().cancellations.get(id).cloned()
-        {
-            cancellation.cancel_stale_binding();
-        }
     }
 }
 
@@ -883,49 +664,6 @@ fn failure_for_cancel(
     };
     let cleanup_error = (cleanup_status != CleanupStatus::NotNeeded).then(|| error.clone());
     TransferFailure::new(outcome, failure_kind, cleanup_status, error, cleanup_error)
-}
-
-fn spawn_engine_binding_monitor(engine: &Arc<TransferEngine>) {
-    let engine = Arc::downgrade(engine);
-    // One engine-owned watcher covers the at-most-two active bindings without
-    // creating one polling thread per job. Queued bindings are validated at
-    // their authoritative dequeue boundary instead of being polled.
-    let _ = std::thread::Builder::new()
-        .name("bulk-binding-monitor".into())
-        .spawn(move || {
-            loop {
-                let Some(engine) = engine.upgrade() else {
-                    return;
-                };
-                let mut state = engine.state.lock().unwrap();
-                while state.active_bindings.is_empty() {
-                    state = engine.active_bindings_changed.wait(state).unwrap();
-                }
-                let stale = state
-                    .active_bindings
-                    .iter()
-                    .filter_map(|(id, binding)| {
-                        binding.validate().err().map(|error| (id.clone(), error))
-                    })
-                    .collect::<Vec<_>>();
-                let (state, _) = engine
-                    .active_bindings_changed
-                    .wait_timeout(state, std::time::Duration::from_millis(50))
-                    .unwrap();
-                drop(state);
-                for (id, error) in stale {
-                    engine.cancel_stale(&id, error);
-                }
-            }
-        });
-}
-
-#[cfg(test)]
-impl Drop for BulkChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 #[cfg(test)]

@@ -12,12 +12,13 @@ use uuid::Uuid;
 use super::bulk_pool::BulkLease;
 use super::bulk_protocol::RequestFailure;
 use super::scheduler::{
-    BulkBinding, CancelReason, CancelState, cancel_transfer, enqueue_transfer_with_queued,
+    BulkBinding, CancelReason, CancelState, QueuedPublication, cancel_transfer,
+    enqueue_transfer_with_queued,
 };
 use super::serialization::metadata_json;
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
-    TransferState,
+    TransferState, late_queued_publication_rollback,
 };
 use super::{BULK_CHUNK_BYTES, parse_optional_u64, parse_required_u64};
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
@@ -203,7 +204,18 @@ impl FileIoManager {
         let transfer_id = job.transfer_id().to_owned();
         let cancellation = Arc::clone(job.cancellation());
         let binding = job.binding().clone();
-        let admitted_job = job.clone();
+        let queued = QueuedPublication::raw(
+            job.channel().clone(),
+            file_json_frame(
+                1,
+                TransferEvent::new(job.transfer_id(), job.binding(), TransferState::Queued).value(),
+            )?,
+            file_json_frame(
+                4,
+                late_queued_publication_rollback(job.transfer_id(), job.binding()),
+            )?,
+            "could not publish queued file transfer event",
+        );
         let started_job = job.clone();
         let work_job = job.clone();
         let finished_job = job.clone();
@@ -211,7 +223,7 @@ impl FileIoManager {
             transfer_id,
             binding,
             cancellation,
-            move || send_file_job_state(&admitted_job, 1, TransferState::Queued),
+            queued,
             move || emit_file_job_state(&started_job, 1, TransferState::Running),
             move || match &work_job {
                 FileIoJob::Read(job) => run_file_read(job).map_err(TransferFailure::not_published),
@@ -610,14 +622,19 @@ fn send_file_json(
     kind: u8,
     value: Value,
 ) -> Result<(), String> {
+    let frame = file_json_frame(kind, value)?;
+    channel
+        .send(InvokeResponseBody::Raw(frame))
+        .map_err(|error| format!("could not publish queued file transfer event: {error}"))
+}
+
+fn file_json_frame(kind: u8, value: Value) -> Result<Vec<u8>, String> {
     let mut frame = vec![kind];
     frame.extend_from_slice(
         &serde_json::to_vec(&value)
             .map_err(|error| format!("could not serialize file transfer event: {error}"))?,
     );
-    channel
-        .send(InvokeResponseBody::Raw(frame))
-        .map_err(|error| format!("could not publish queued file transfer event: {error}"))
+    Ok(frame)
 }
 
 fn emit_scoped_file_json(

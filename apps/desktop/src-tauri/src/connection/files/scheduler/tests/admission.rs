@@ -25,7 +25,7 @@ fn queued_delivery_failure_rolls_back_every_admission_artifact() {
         id.clone(),
         live_binding(97),
         Arc::new(CancelState::new()),
-        || Err("injected closed event channel".into()),
+        QueuedPublication::callback(|| Err("injected closed event channel".into())),
         {
             let started = Arc::clone(&started);
             move || {
@@ -48,7 +48,7 @@ fn queued_delivery_failure_rolls_back_every_admission_artifact() {
         },
     )
     .unwrap_err();
-    assert!(error.contains("injected closed event channel"));
+    assert!(error.contains("injected closed event channel"), "{error}");
     assert_eq!(started.load(Ordering::Acquire), 0);
     assert_eq!(worked.load(Ordering::Acquire), 0);
     assert_eq!(terminal.load(Ordering::Acquire), 0);
@@ -67,7 +67,7 @@ fn queued_delivery_failure_rolls_back_every_admission_artifact() {
 }
 
 #[test]
-fn failed_pending_head_retriggers_later_admitted_job() {
+fn pending_publication_does_not_block_later_admitted_job() {
     let _serial = engine_test_lock();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -77,11 +77,11 @@ fn failed_pending_head_retriggers_later_admitted_job() {
             first_id,
             live_binding(98),
             Arc::new(CancelState::new()),
-            move || {
+            QueuedPublication::callback(move || {
                 entered_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
                 Err("injected queued failure".into())
-            },
+            }),
             || panic!("rejected head must not run"),
             || panic!("rejected head must not work"),
             |_, _| panic!("rejected head must not terminalize"),
@@ -96,21 +96,20 @@ fn failed_pending_head_retriggers_later_admitted_job() {
         format!("behind-failed-head-{}", uuid::Uuid::new_v4()),
         live_binding(99),
         Arc::new(CancelState::new()),
-        || Ok(()),
+        QueuedPublication::callback(|| Ok(())),
         || {},
         || Ok(()),
         move |result, _| later_tx.send(result).unwrap(),
     )
     .unwrap();
-    assert!(later_rx.try_recv().is_err());
-    release_tx.send(()).unwrap();
-    assert!(first.join().unwrap().is_err());
     assert!(
         later_rx
             .recv_timeout(std::time::Duration::from_secs(3))
             .unwrap()
             .is_ok()
     );
+    release_tx.send(()).unwrap();
+    assert!(first.join().unwrap().is_err());
     assert_eq!(acceptance_engine_counts(), (0, 0));
 }
 
@@ -126,11 +125,11 @@ fn provisional_admission_latches_cancellation_but_rolls_back_when_publication_fa
             enqueue_id,
             live_binding(100),
             Arc::new(CancelState::new()),
-            move || {
+            QueuedPublication::callback(move || {
                 entered_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
                 Err("injected queued publication failure".into())
-            },
+            }),
             || panic!("rejected pending admission must not start"),
             || panic!("rejected pending admission must not work"),
             |_, _| panic!("rejected pending admission must not terminalize"),
@@ -154,6 +153,57 @@ fn provisional_admission_latches_cancellation_but_rolls_back_when_publication_fa
 }
 
 #[test]
+fn wedged_publication_drops_job_resources_and_bounds_cancellation() {
+    struct JobResource(Arc<AtomicU32>);
+    impl Drop for JobResource {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let _serial = engine_test_lock();
+    let id = format!("wedged-publication-{}", uuid::Uuid::new_v4());
+    let enqueue_id = id.clone();
+    let dropped = Arc::new(AtomicU32::new(0));
+    let resource = JobResource(Arc::clone(&dropped));
+    let (entered, entered_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let enqueue = std::thread::spawn(move || {
+        enqueue_transfer_with_queued(
+            enqueue_id,
+            live_binding(100),
+            Arc::new(CancelState::new()),
+            QueuedPublication::callback(move || {
+                entered.send(()).unwrap();
+                let _ = release_rx.recv();
+                Ok(())
+            }),
+            || panic!("timed-out publication must not start"),
+            move || {
+                let _resource = resource;
+                panic!("timed-out publication must not run")
+            },
+            |_, _| panic!("timed-out publication must not terminalize a rejected job"),
+        )
+    });
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    let started = std::time::Instant::now();
+    let cancellation = cancel_transfer(&id).unwrap_err();
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert!(
+        cancellation.contains("publication") || cancellation.contains("retry"),
+        "{cancellation}"
+    );
+    let enqueue_error = enqueue.join().unwrap().unwrap_err();
+    assert!(enqueue_error.contains("timed out"), "{enqueue_error}");
+    assert_eq!(dropped.load(Ordering::Acquire), 1);
+    assert_eq!(acceptance_engine_counts(), (0, 0));
+    drop(release);
+}
+
+#[test]
 fn cancellation_after_queued_is_observable_latches_until_admission_commits() {
     let _serial = engine_test_lock();
     let (published_tx, published_rx) = std::sync::mpsc::channel();
@@ -166,11 +216,11 @@ fn cancellation_after_queued_is_observable_latches_until_admission_commits() {
             enqueue_id,
             live_binding(100),
             Arc::new(CancelState::new()),
-            move || {
+            QueuedPublication::callback(move || {
                 published_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
                 Ok(())
-            },
+            }),
             || panic!("cancelled pending admission must not start"),
             || panic!("cancelled pending admission must not work"),
             move |result, reason| terminal_tx.send((result, reason)).unwrap(),

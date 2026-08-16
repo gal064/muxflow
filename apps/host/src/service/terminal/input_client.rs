@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc as std_mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail};
@@ -178,10 +178,12 @@ impl PersistentInputClient {
             bail!("persistent terminal input client is unavailable");
         }
         let (sender, receiver) = std_mpsc::sync_channel(1);
-        self.input_tx
-            .send(InputDispatch::Barrier(sender))
-            .map_err(|_| anyhow::anyhow!("persistent terminal input dispatcher is disconnected"))?;
-        match receiver.recv_timeout(INPUT_FENCE_TIMEOUT) {
+        let deadline = Instant::now() + INPUT_FENCE_TIMEOUT;
+        admit_fence(&self.input_tx, sender)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| anyhow::anyhow!("terminal input fence timed out during admission"))?;
+        match receiver.recv_timeout(remaining) {
             Ok(result) => result.map_err(anyhow::Error::msg),
             Err(_) => {
                 self.failed.store(true, Ordering::Release);
@@ -198,6 +200,22 @@ impl PersistentInputClient {
             let _ = child.wait();
         }
     }
+}
+
+fn admit_fence(
+    input_tx: &std_mpsc::SyncSender<InputDispatch>,
+    completion: std_mpsc::SyncSender<Result<(), String>>,
+) -> anyhow::Result<()> {
+    input_tx
+        .try_send(InputDispatch::Barrier(completion))
+        .map_err(|error| match error {
+            std_mpsc::TrySendError::Full(_) => anyhow::anyhow!(
+                "terminal input fence could not enter the full sidecar queue; action refused"
+            ),
+            std_mpsc::TrySendError::Disconnected(_) => {
+                anyhow::anyhow!("persistent terminal input dispatcher is disconnected")
+            }
+        })
 }
 
 impl Drop for PersistentInputClient {
@@ -614,6 +632,17 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn full_sidecar_queue_refuses_fence_within_its_total_deadline() {
+        let (input_tx, _input_rx) = std_mpsc::sync_channel(1);
+        input_tx.try_send(InputDispatch::Stop).unwrap();
+        let (completion, _receiver) = std_mpsc::sync_channel(1);
+        let started = Instant::now();
+        let error = admit_fence(&input_tx, completion).unwrap_err().to_string();
+        assert!(error.contains("full sidecar queue"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(100));
     }
 
     #[test]

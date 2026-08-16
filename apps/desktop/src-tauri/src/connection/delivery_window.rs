@@ -11,6 +11,7 @@ use std::{
 
 pub(super) const NATIVE_DELIVERY_WINDOW_BYTES: u64 = 2 * 1024 * 1024;
 pub(super) const NATIVE_DELIVERY_WINDOW_RECORDS: u64 = 4_096;
+pub(super) const NATIVE_DELIVERY_MAX_FRAME_BYTES: u64 = tmux_agent_protocol::MAX_FRAME_BYTES as u64;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct HostCharge {
@@ -82,16 +83,20 @@ impl DeliveryWindow {
         host: HostCharge,
     ) -> Result<DeliveryReservation, String> {
         let wire_bytes = wire_bytes as u64;
-        if wire_bytes > NATIVE_DELIVERY_WINDOW_BYTES {
-            return Err("one desktop event exceeds the 2 MiB native delivery bound".into());
+        if wire_bytes > NATIVE_DELIVERY_MAX_FRAME_BYTES {
+            return Err("one desktop event exceeds the protocol frame bound".into());
         }
         let mut state = self.state.lock().unwrap();
         loop {
             match &mut *state {
                 State::Closed => return Err("desktop delivery window is closed".into()),
                 State::Open(open)
-                    if open.retained_wire_bytes.saturating_add(wire_bytes)
-                        <= NATIVE_DELIVERY_WINDOW_BYTES
+                    if ((wire_bytes <= NATIVE_DELIVERY_WINDOW_BYTES
+                        && open.retained_wire_bytes.saturating_add(wire_bytes)
+                            <= NATIVE_DELIVERY_WINDOW_BYTES)
+                        || (wire_bytes > NATIVE_DELIVERY_WINDOW_BYTES
+                            && open.retained_wire_bytes == 0
+                            && open.frames.is_empty()))
                         && (open.frames.len() as u64) < NATIVE_DELIVERY_WINDOW_RECORDS =>
                 {
                     open.retained_wire_bytes = open.retained_wire_bytes.saturating_add(wire_bytes);
@@ -294,12 +299,34 @@ mod tests {
     }
 
     #[test]
-    fn one_frame_cannot_escape_the_native_byte_bound() {
+    fn one_protocol_bounded_oversize_frame_uses_an_empty_window() {
         let window = DeliveryWindow::new(1);
+        let wire_bytes = NATIVE_DELIVERY_WINDOW_BYTES as usize + 1;
+        window
+            .reserve(wire_bytes, HostCharge::terminal(wire_bytes))
+            .unwrap()
+            .commit()
+            .unwrap();
+        let waiting = Arc::clone(&window);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            sender
+                .send(waiting.reserve(1, HostCharge::default()).is_ok())
+                .unwrap();
+        });
+        assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
+        assert_eq!(
+            window.acknowledge(1, 1, wire_bytes as u64).unwrap(),
+            Some(HostCharge {
+                bytes: wire_bytes as u64,
+                records: 1,
+            })
+        );
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).unwrap());
         assert!(
             window
                 .reserve(
-                    NATIVE_DELIVERY_WINDOW_BYTES as usize + 1,
+                    NATIVE_DELIVERY_MAX_FRAME_BYTES as usize + 1,
                     HostCharge::default()
                 )
                 .is_err()

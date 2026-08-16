@@ -20,11 +20,12 @@ use super::bulk_pool::BulkLease;
 use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
 use super::local_destination::{DestinationReservations, PreparedDestination, ReservedDestination};
 use super::scheduler::{
-    BulkBinding, CancelState, DeadlineGuard, cancel_transfer, enqueue_transfer_with_queued,
+    BulkBinding, CancelState, DeadlineGuard, QueuedPublication, cancel_transfer,
+    enqueue_transfer_with_queued,
 };
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
-    TransferResult, TransferState,
+    TransferResult, TransferState, late_queued_publication_rollback,
 };
 use super::{BULK_CHUNK_BYTES, parse_required_u64};
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
@@ -229,14 +230,19 @@ fn enqueue(job: Arc<DownloadJob>) -> Result<(), String> {
     let id = job.transfer_id.clone();
     let binding = job.binding.clone();
     let cancellation = Arc::clone(&job.cancellation);
-    let admitted_job = Arc::clone(&job);
+    let queued = QueuedPublication::json(
+        job.channel.clone(),
+        TransferEvent::new(&job.transfer_id, &job.binding, TransferState::Queued).value(),
+        late_queued_publication_rollback(&job.transfer_id, &job.binding),
+        "could not deliver download state",
+    );
     let started_job = Arc::clone(&job);
     let work_job = Arc::clone(&job);
     enqueue_transfer_with_queued(
         id,
         binding,
         cancellation,
-        move || send_download_state(&admitted_job, TransferState::Queued, json!({})),
+        queued,
         move || emit_download_state(&started_job, TransferState::Running, json!({})),
         move || run_download(&work_job),
         move |result, _reason| finish_download_job(&job, result),
