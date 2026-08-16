@@ -206,7 +206,48 @@ describe("GitSidebar", () => {
     expect(JSON.stringify(renderer.toJSON())).toContain("some copies may appear as additions");
     await act(async () => { renderer.unmount(); });
   });
+
+  it("does not rebuild status rows while the commit message is typed", async () => {
+    const wide = { ...status(), entries: Array.from({ length: 400 }, (_, index) => entry(`file-${index}.txt`, { indexKind: "modified", worktreeKind: "modified" })) };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...baseProps()} status={wide} />); });
+    const before = rowHandlers(renderer);
+    expect(before.length).toBeGreaterThan(100);
+
+    const message = renderer.root.findByProps({ "aria-label": "Commit message" });
+    await act(async () => { message.props.onChange({ target: { value: "w" } }); });
+    await act(async () => { message.props.onChange({ target: { value: "wo" } }); });
+    const after = rowHandlers(renderer);
+    expect(after).toHaveLength(before.length);
+    // Identical handler identities prove the memoized groups were never
+    // re-rendered, so a keystroke costs nothing per row.
+    for (const [index, handler] of after.entries()) expect(handler).toBe(before[index]);
+    expect(renderer.root.findByProps({ "aria-label": "Commit message" }).props.value).toBe("wo");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("treats re-focusing the same row as no change at all", async () => {
+    const wide = { ...status(), entries: Array.from({ length: 200 }, (_, index) => entry(`file-${index}.txt`)) };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...baseProps()} status={wide} />); });
+    const row = gitRow(renderer, "file-3.txt");
+    await act(async () => { row.props.onFocus(); });
+    const focused = rowHandlers(renderer);
+    await act(async () => { row.props.onFocus(); });
+    await act(async () => { row.props.onPointerDown(); });
+    const after = rowHandlers(renderer);
+    for (const [index, handler] of after.entries()) expect(handler).toBe(focused[index]);
+    await act(async () => { renderer.unmount(); });
+  });
+
 });
+
+/** Every row's click handler, whose identity changes if its group re-renders. */
+function rowHandlers(renderer: ReturnType<typeof create>) {
+  return renderer.root
+    .findAll((node) => node.props.className === "git-file")
+    .map((node) => node.props.onClick as () => void);
+}
 
 function baseProps() {
   const client: GitWorkspaceClient = {

@@ -50,16 +50,29 @@ describe("TauriGitWorkspaceClient", () => {
   });
 
   it("rejects stale or mismatched diff identity returned by the host", async () => {
-    invokeMock.mockResolvedValueOnce({ operationId: "diff", diff: { repository: wireRepository(), target: "staged", path: [...new TextEncoder().encode("different")], originalPath: [], displayPath: "a", oldContent: [], newContent: [], patch: [], sourceGeneration: "s", binary: false, tooLarge: false, oldMissing: false, newMissing: false, hunkCount: 1 } });
-    await expect(new TauriGitWorkspaceClient().diff(scope, root, "repo-id", "YQ==", undefined, "staged", "7")).rejects.toThrow("stale Git diff identity");
+    invokeMock.mockResolvedValueOnce({ operationId: "diff", status: wireStatus(), diff: wireDiff({ path: [...new TextEncoder().encode("different")] }) });
+    await expect(new TauriGitWorkspaceClient().diff(scope, root, "repo-id", "YQ==", undefined, "staged")).rejects.toThrow("stale Git diff identity");
   });
 
-  it("sends and verifies opaque rename provenance for diffs", async () => {
-    invokeMock.mockResolvedValueOnce({ operationId: "diff", diff: { repository: wireRepository(), target: "staged", path: [...new TextEncoder().encode("new")], originalPath: [...new TextEncoder().encode("old")], displayPath: "new", oldContent: [], newContent: [], patch: [], sourceGeneration: "s", binary: false, tooLarge: false, oldMissing: false, newMissing: false, hunkCount: 0 } });
-    await new TauriGitWorkspaceClient().diff(scope, root, "repo-id", "bmV3", "b2xk", "staged", "7");
-    expect(invokeMock).toHaveBeenCalledWith("git_request", { clientId: "client", command: expect.objectContaining({
+  it("carries the authoritative status a diff was read against in one round trip", async () => {
+    invokeMock.mockResolvedValueOnce({ operationId: "diff", status: wireStatus(), diff: wireDiff({ path: [...new TextEncoder().encode("new")], originalPath: [...new TextEncoder().encode("old")], displayPath: "new" }) });
+    const result = await new TauriGitWorkspaceClient().diff(scope, root, "repo-id", "bmV3", "b2xk", "staged");
+    expect(result.status.generation).toBe("18446744073709551615");
+    expect(result.diff.displayPath).toBe("new");
+    const requests = invokeMock.mock.calls.filter(([command]) => command === "git_request");
+    expect(requests).toHaveLength(1);
+    expect(requests[0][1]).toMatchObject({ command: expect.objectContaining({
       path: [...new TextEncoder().encode("new")], originalPath: [...new TextEncoder().encode("old")], diffTarget: "staged",
     }) });
+    expect(requests[0][1].command.expectedStatusGeneration).toBeUndefined();
+  });
+
+  it("refuses a diff whose accompanying status belongs to another repository", async () => {
+    const foreign = wireStatus();
+    foreign.repository = { ...wireRepository(), repositoryId: "other-repo" };
+    invokeMock.mockResolvedValueOnce({ operationId: "diff", status: foreign, diff: wireDiff({}) });
+    await expect(new TauriGitWorkspaceClient().diff(scope, root, "repo-id", "YQ==", undefined, "staged"))
+      .rejects.toThrow("different repository");
   });
 
   it("routes only root-token-bound status events", () => {
@@ -72,31 +85,22 @@ describe("TauriGitWorkspaceClient", () => {
     expect(events[0]).toMatchObject({ kind: "status", rootToken: "root-token", watchId: "watch", status: { repository: { id: "repo-id" } } });
   });
 
-  it("retries a superseded watch bootstrap without surfacing an internal freshness race", async () => {
-    invokeMock
-      .mockRejectedValueOnce("git_rejected: Git status refresh superseded by a newer snapshot")
-      .mockRejectedValueOnce("git_rejected: Git status refresh superseded by a newer snapshot")
-      .mockResolvedValueOnce({ operationId: "watch", status: wireStatus() })
-      .mockResolvedValue({});
+  it("establishes one watch per acquisition without retrying an internal freshness race", async () => {
+    invokeMock.mockResolvedValueOnce({ operationId: "watch", status: wireStatus() }).mockResolvedValue({});
     const lease = await new TauriGitWorkspaceClient().watch(scope, root);
     const requests = invokeMock.mock.calls.filter(([command]) => command === "git_request");
-    expect(requests).toHaveLength(3);
-    expect(new Set(requests.map(([, args]) => args.command.watchId)).size).toBe(3);
+    expect(requests).toHaveLength(1);
     expect(lease.status.repository.id).toBe("repo-id");
     lease.release();
   });
 
-  it("retries only a pre-command superseded commit request with a fresh operation identity", async () => {
-    invokeMock
-      .mockRejectedValueOnce("git_rejected: Git status refresh superseded by a newer snapshot")
-      .mockResolvedValueOnce({ operationId: "commit", command: {
-        exitCode: 0, stdout: [], stderr: [], applied: true, refreshFailed: false, refreshError: "", outcome: "applied",
-      } });
+  it("sends a commit exactly once, because its outcome is never safe to replay", async () => {
+    invokeMock.mockResolvedValueOnce({ operationId: "commit", command: {
+      exitCode: 0, stdout: [], stderr: [], applied: true, refreshFailed: false, refreshError: "", outcome: "applied",
+    } });
     const result = await new TauriGitWorkspaceClient().commit(scope, root, "repo-id", "7", "message");
     expect(result.outcome).toBe("applied");
-    const requests = invokeMock.mock.calls.filter(([command]) => command === "git_request");
-    expect(requests).toHaveLength(2);
-    expect(new Set(requests.map(([, args]) => args.command.operationId)).size).toBe(2);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "git_request")).toHaveLength(1);
   });
 
   it("turns malformed event generations and byte arrays into a scoped error instead of crashing the shell", () => {
@@ -128,6 +132,13 @@ describe("TauriGitWorkspaceClient", () => {
   });
 });
 
+function wireDiff(overrides: Record<string, unknown>) {
+  return {
+    repository: wireRepository(), target: "staged", path: [...new TextEncoder().encode("a")], originalPath: [], displayPath: "a",
+    oldContent: [], newContent: [], patch: [], sourceGeneration: "s", binary: false, tooLarge: false,
+    oldMissing: false, newMissing: false, hunkCount: 1, ...overrides,
+  };
+}
 function wireRepository() { return { repositoryId: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main", headOid: "abc" }; }
 function wireStatus() {
   return {

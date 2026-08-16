@@ -93,6 +93,8 @@ pub async fn git_request(
         confirmation_token: command.confirmation_token,
         commit_message: command.commit_message,
         watch_id: command.watch_id,
+        // Deferred diff bodies never travel on the control lane.
+        content: None,
     };
     let protocol_request = v1::Request {
         operation: operation.into(),
@@ -219,7 +221,15 @@ fn diff_json(value: &v1::GitDiff) -> Value {
         "path": value.path, "originalPath": value.original_path, "displayPath": value.display_path,
         "oldContent": value.old_content, "newContent": value.new_content, "patch": value.patch,
         "sourceGeneration": value.source_generation, "binary": value.binary, "tooLarge": value.too_large,
-        "oldMissing": value.old_missing, "newMissing": value.new_missing, "hunkCount": value.hunk_count })
+        "oldMissing": value.old_missing, "newMissing": value.new_missing, "hunkCount": value.hunk_count,
+        "oldContentRef": value.old_content_ref.as_ref().map(content_ref_json),
+        "newContentRef": value.new_content_ref.as_ref().map(content_ref_json) })
+}
+
+/// A body the control lane deliberately withheld. The renderer reads it back
+/// over the bulk lane using exactly these two facts.
+fn content_ref_json(value: &v1::GitDiffContentRef) -> Value {
+    json!({ "size": value.size.to_string(), "contentDigest": value.content_digest })
 }
 
 fn command_json(value: &v1::GitCommandResult) -> Value {

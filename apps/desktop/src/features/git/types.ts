@@ -46,6 +46,14 @@ export interface GitStatusSnapshot {
   copyDetectionIncomplete?: boolean;
 }
 
+/// A diff body the control response deliberately withheld because it is large
+/// enough to delay terminal traffic. Read over the bulk lane instead.
+export interface GitDiffContentRef {
+  /** Decimal u64 string. */
+  size: string;
+  contentDigest: string;
+}
+
 export interface GitDiff {
   repository: GitRepository;
   target: GitDiffTarget;
@@ -54,13 +62,25 @@ export interface GitDiff {
   displayPath: string;
   oldContent?: Uint8Array;
   newContent?: Uint8Array;
+  /**
+   * Only hunk mutation needs the raw patch, and the host re-derives it there.
+   * The control response never carries it.
+   */
   patch?: Uint8Array;
+  oldContentRef?: GitDiffContentRef;
+  newContentRef?: GitDiffContentRef;
   sourceGeneration: string;
   binary: boolean;
   tooLarge: boolean;
   oldMissing: boolean;
   newMissing: boolean;
   hunkCount: number;
+}
+
+/// A diff and the authoritative status it was read against, in one round trip.
+export interface GitDiffResult {
+  diff: GitDiff;
+  status: GitStatusSnapshot;
 }
 
 export interface GitMutationRequest {
@@ -111,7 +131,7 @@ export interface GitWatchLease {
 export interface GitWorkspaceClient {
   status(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitStatusSnapshot>;
   watch(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitWatchLease>;
-  diff(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, path: string, originalPath: string | undefined, target: GitDiffTarget, expectedStatusGeneration: string, signal?: AbortSignal): Promise<GitDiff>;
+  diff(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, path: string, originalPath: string | undefined, target: GitDiffTarget, signal?: AbortSignal): Promise<GitDiffResult>;
   prepareDiscard(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, request: GitMutationRequest): Promise<string>;
   mutate(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, request: GitMutationRequest): Promise<GitCommandResult>;
   commit(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult>;

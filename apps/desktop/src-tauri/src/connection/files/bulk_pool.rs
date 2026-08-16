@@ -303,7 +303,7 @@ fn returnable(cancelled: bool, clean: bool, alive: bool) -> bool {
 ///
 /// A lease reuses all of it, and reuses nothing whose stream position or
 /// liveness is in doubt (`Bridge::reusable`).
-pub(super) struct BulkLease {
+pub(crate) struct BulkLease {
     key: BulkKey,
     bridge: Option<Bridge>,
     cancellation: Arc<CancelState>,
@@ -316,7 +316,7 @@ enum AcquisitionMode {
 }
 
 impl BulkLease {
-    pub(super) fn acquire(
+    pub(crate) fn acquire(
         connection: &ConnectionSpec,
         binding: &BulkBinding,
         cancellation: &Arc<CancelState>,
@@ -446,14 +446,14 @@ impl BulkLease {
     }
 
     /// The process id a cancellation kills. See `CancelState::bind_process`.
-    pub(super) fn process_id(&self) -> u32 {
+    pub(crate) fn process_id(&self) -> u32 {
         self.bridge
             .as_ref()
             .map(|bridge| bridge.child.id())
             .unwrap_or(0)
     }
 
-    pub(super) fn client(&mut self) -> BulkProtocolClient<'_> {
+    pub(crate) fn client(&mut self) -> BulkProtocolClient<'_> {
         let bridge = self.bridge.as_mut().expect("a lease holds its bridge");
         BulkProtocolClient::resumed(
             &mut bridge.stdin,
