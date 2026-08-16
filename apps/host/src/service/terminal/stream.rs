@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufReader, Read},
     process::ChildStdout,
     sync::{
@@ -75,8 +75,10 @@ pub(super) struct ControlStreamReader {
 
 pub(super) enum StreamControl {
     Membership {
-        added: Vec<String>,
-        removed: Vec<String>,
+        /// Authoritative replacement membership, rather than a relative
+        /// delta. Delivery precedes the fallible tmux stdin batch, so a retry
+        /// must converge idempotently even when the desired set changed.
+        pane_ids: Vec<String>,
     },
 }
 
@@ -262,6 +264,9 @@ impl StreamState {
             terminal_generation,
             stopped,
         } = runtime;
+        if stopped.load(Ordering::Acquire) {
+            return;
+        }
         match record {
             ControlRecord::Output { pane_id, data } => {
                 let output_generation = terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -287,21 +292,20 @@ impl StreamState {
                         }
                     }
                     _ => {
-                        let disposition = resources.lock().unwrap().record_output(
-                            &pane_id,
-                            &data,
-                            output_generation,
-                        );
-                        if disposition == OutputDisposition::Visible {
-                            emit_terminal(
-                                sender,
-                                overflowed,
-                                v1::EventKind::TerminalOutput,
-                                pane_id,
-                                data,
-                                output_generation,
-                            );
-                        }
+                        let _ = with_active_resources(resources, stopped, |resources| {
+                            let disposition =
+                                resources.record_output(&pane_id, &data, output_generation);
+                            if disposition == OutputDisposition::Visible {
+                                emit_terminal(
+                                    sender,
+                                    overflowed,
+                                    v1::EventKind::TerminalOutput,
+                                    pane_id,
+                                    data,
+                                    output_generation,
+                                );
+                            }
+                        });
                     }
                 }
             }
@@ -349,11 +353,14 @@ impl StreamState {
             },
             ControlRecord::End { tag, .. } => self.finish_block(
                 tag,
-                sender,
-                overflowed,
-                resources,
-                terminal_generation,
-                writer,
+                StreamRuntime {
+                    writer,
+                    sender,
+                    overflowed,
+                    resources,
+                    terminal_generation,
+                    stopped,
+                },
             ),
             ControlRecord::Error { tag, arguments } => {
                 if !self.active_tag_matches(tag) {
@@ -543,15 +550,19 @@ impl StreamState {
         }
     }
 
-    fn finish_block(
-        &mut self,
-        end_tag: CommandTag,
-        sender: &mpsc::Sender<SequencerControl>,
-        overflowed: &AtomicBool,
-        resources: &Arc<Mutex<PaneResourceStore>>,
-        terminal_generation: &Arc<AtomicU64>,
-        writer: &std_mpsc::Sender<super::ControlWrite>,
-    ) {
+    fn finish_block(&mut self, end_tag: CommandTag, runtime: StreamRuntime<'_>) {
+        let StreamRuntime {
+            writer,
+            sender,
+            overflowed,
+            resources,
+            terminal_generation,
+            stopped,
+        } = runtime;
+        if stopped.load(Ordering::Acquire) {
+            self.command_block = CommandBlock::None;
+            return;
+        }
         if !self.active_tag_matches(end_tag) {
             let scope = self.active_scope();
             emit_resnapshot(
@@ -653,35 +664,44 @@ impl StreamState {
                                         seeder.complete(seed_build.bytes, capture_boundary);
                                     let seed_generation =
                                         terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
-                                    resources.lock().unwrap().snapshot(
-                                        &pane_id,
-                                        replay.seed.clone(),
-                                        seed_generation,
+                                    let seed = replay.seed;
+                                    let replay_outputs = replay.replay;
+                                    let diagnostics = seed_build.diagnostics;
+                                    let _ = with_active_resources(
+                                        resources,
+                                        stopped,
+                                        |resources| {
+                                            resources.snapshot(
+                                                &pane_id,
+                                                seed.clone(),
+                                                seed_generation,
+                                            );
+                                            if !resources.is_hidden(&pane_id) {
+                                                if !diagnostics.is_empty() {
+                                                    emit_event(
+                                                        sender,
+                                                        overflowed,
+                                                        v1::HostEvent {
+                                                            kind: v1::EventKind::TerminalSeedDiagnostic
+                                                                .into(),
+                                                            scope: pane_id.clone(),
+                                                            detail: diagnostics.join("; "),
+                                                            ..Default::default()
+                                                        },
+                                                    );
+                                                }
+                                                emit_terminal(
+                                                    sender,
+                                                    overflowed,
+                                                    v1::EventKind::TerminalSeed,
+                                                    pane_id.clone(),
+                                                    seed,
+                                                    seed_generation,
+                                                );
+                                            }
+                                        },
                                     );
-                                    let hidden = resources.lock().unwrap().is_hidden(&pane_id);
-                                    if !hidden && !seed_build.diagnostics.is_empty() {
-                                        emit_event(
-                                            sender,
-                                            overflowed,
-                                            v1::HostEvent {
-                                                kind: v1::EventKind::TerminalSeedDiagnostic.into(),
-                                                scope: pane_id.clone(),
-                                                detail: seed_build.diagnostics.join("; "),
-                                                ..Default::default()
-                                            },
-                                        );
-                                    }
-                                    if !hidden {
-                                        emit_terminal(
-                                            sender,
-                                            overflowed,
-                                            v1::EventKind::TerminalSeed,
-                                            pane_id.clone(),
-                                            replay.seed,
-                                            seed_generation,
-                                        );
-                                    }
-                                    for output in replay.replay {
+                                    for output in replay_outputs {
                                         // Buffered sequence numbers establish
                                         // capture inclusion only. Rebase
                                         // replay delivery after the seed so a
@@ -689,21 +709,27 @@ impl StreamState {
                                         // cannot discard required output.
                                         let replay_generation =
                                             terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
-                                        let disposition = resources.lock().unwrap().record_output(
-                                            &pane_id,
-                                            &output.bytes,
-                                            replay_generation,
+                                        let _ = with_active_resources(
+                                            resources,
+                                            stopped,
+                                            |resources| {
+                                                let disposition = resources.record_output(
+                                                    &pane_id,
+                                                    &output.bytes,
+                                                    replay_generation,
+                                                );
+                                                if disposition == OutputDisposition::Visible {
+                                                    emit_terminal(
+                                                        sender,
+                                                        overflowed,
+                                                        v1::EventKind::TerminalOutput,
+                                                        pane_id.clone(),
+                                                        output.bytes,
+                                                        replay_generation,
+                                                    );
+                                                }
+                                            },
                                         );
-                                        if disposition == OutputDisposition::Visible {
-                                            emit_terminal(
-                                                sender,
-                                                overflowed,
-                                                v1::EventKind::TerminalOutput,
-                                                pane_id.clone(),
-                                                output.bytes,
-                                                replay_generation,
-                                            );
-                                        }
                                     }
                                 }
                             } else {
@@ -825,9 +851,16 @@ impl StreamState {
         }
     }
 
-    fn apply_control(&mut self, control: StreamControl) {
+    pub(super) fn apply_control(&mut self, control: StreamControl) {
         match control {
-            StreamControl::Membership { added, removed } => {
+            StreamControl::Membership { pane_ids } => {
+                let desired: HashSet<_> = pane_ids.iter().map(String::as_str).collect();
+                let removed: Vec<_> = self
+                    .pane_states
+                    .keys()
+                    .filter(|pane_id| !desired.contains(pane_id.as_str()))
+                    .cloned()
+                    .collect();
                 for pane_id in removed {
                     self.pane_states.remove(&pane_id);
                     if self.expected_capture.as_deref() == Some(&pane_id) {
@@ -861,15 +894,14 @@ impl StreamState {
                         self.command_block = CommandBlock::None;
                     }
                 }
-                for pane_id in added {
-                    self.pane_states.insert(
-                        pane_id,
-                        PaneSeedState::Pending {
+                for pane_id in pane_ids {
+                    self.pane_states
+                        .entry(pane_id)
+                        .or_insert_with(|| PaneSeedState::Pending {
                             buffered: Vec::new(),
                             buffered_bytes: 0,
                             overflowed: false,
-                        },
-                    );
+                        });
                 }
             }
         }
@@ -918,6 +950,18 @@ impl StreamState {
             request_capture(writer, pane_id, self.flow.resume_before_capture(pane_id));
         }
     }
+}
+
+pub(super) fn with_active_resources<T>(
+    resources: &Arc<Mutex<PaneResourceStore>>,
+    stopped: &AtomicBool,
+    update: impl FnOnce(&mut PaneResourceStore) -> T,
+) -> Option<T> {
+    let mut resources = resources.lock().unwrap();
+    if stopped.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(update(&mut resources))
 }
 
 fn emit_resnapshot(
@@ -1246,8 +1290,7 @@ mod tests {
         );
         assert!(harness.flow.resume_before_capture("%1"));
         state.apply_control(StreamControl::Membership {
-            added: Vec::new(),
-            removed: vec!["%1".into()],
+            pane_ids: Vec::new(),
         });
         assert!(!harness.flow.resume_before_capture("%1"));
     }
@@ -1286,8 +1329,7 @@ mod tests {
         };
         state.pending_alternate = Some(("%1".into(), Vec::new(), 1));
         state.apply_control(StreamControl::Membership {
-            added: Vec::new(),
-            removed: vec!["%1".into()],
+            pane_ids: vec!["%2".into()],
         });
         assert!(!state.pane_states.contains_key("%1"));
         assert!(state.pane_states.contains_key("%2"));
@@ -1393,7 +1435,18 @@ mod tests {
         )));
         let generation = Arc::new(AtomicU64::new(0));
         let (writer, _writes) = std_mpsc::channel();
-        state.finish_block(tag, &sender, &overflowed, &resources, &generation, &writer);
+        let stopped = AtomicBool::new(false);
+        state.finish_block(
+            tag,
+            StreamRuntime {
+                writer: &writer,
+                sender: &sender,
+                overflowed: &overflowed,
+                resources: &resources,
+                terminal_generation: &generation,
+                stopped: &stopped,
+            },
+        );
         assert!(matches!(state.command_block, CommandBlock::None));
         assert!(
             matches!(
