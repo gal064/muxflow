@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     ops::Deref,
     os::unix::{
-        ffi::OsStringExt,
+        ffi::{OsStrExt, OsStringExt},
         fs::MetadataExt as _,
         io::{AsRawFd as _, FromRawFd as _},
         process::CommandExt,
@@ -59,17 +59,6 @@ impl GitMetadataCapability {
         Ok(Self {
             git_dir: open_metadata_directory(git_dir)?,
             common_dir: open_metadata_directory(common_dir)?,
-        })
-    }
-
-    pub(super) fn try_clone(&self) -> anyhow::Result<Self> {
-        let git_dir = self.git_dir.try_clone()?;
-        let common_dir = self.common_dir.try_clone()?;
-        retain_exec_fd(git_dir.as_raw_fd())?;
-        retain_exec_fd(common_dir.as_raw_fd())?;
-        Ok(Self {
-            git_dir,
-            common_dir,
         })
     }
 
@@ -271,6 +260,13 @@ fn git_output_inner(
     let worktree_only_apply =
         args.first() == Some(&OsStr::new("apply")) && !args.contains(&OsStr::new("--cached"));
     command.args(["-c", "core.quotePath=false"]);
+    // A plain `git status` refreshes and rewrites the index, which the
+    // repository watcher then sees as a change and answers with another
+    // status. Read-only commands therefore run without optional locks, so
+    // observing a quiet repository stays quiet.
+    if is_read_only_command(args) {
+        command.arg("--no-optional-locks");
+    }
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let root_fd = root
         .strip_prefix("/dev/fd/")
@@ -617,6 +613,25 @@ fn read_process_output(mut reader: impl Read) -> std::io::Result<(Vec<u8>, bool)
         overflow |= read > available;
     }
     Ok((stored, overflow))
+}
+
+/// Git verbs this service only ever uses to read.
+///
+/// Deliberately an allowlist: a verb that is missing merely keeps the previous
+/// behaviour, while a mutation wrongly listed here would lose its index lock.
+fn is_read_only_command(args: &[&OsStr]) -> bool {
+    matches!(
+        args.first().map(|verb| verb.as_bytes()),
+        Some(
+            b"status"
+                | b"diff"
+                | b"rev-parse"
+                | b"cat-file"
+                | b"show"
+                | b"ls-files"
+                | b"symbolic-ref"
+        )
+    )
 }
 
 pub(super) fn ensure_success(output: &GitOutput, action: &str) -> anyhow::Result<()> {

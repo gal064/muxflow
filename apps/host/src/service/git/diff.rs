@@ -17,10 +17,49 @@ struct DiffContents {
 const MAX_DIFF_SOURCE_PAIR: u64 = 7 * 1024 * 1024;
 const MAX_SERIALIZED_DIFF_PAYLOAD: usize = 15 * 1024 * 1024;
 
+/// Combined old + new bytes that may still ride the control lane.
+///
+/// The control connection also carries every keystroke and every terminal
+/// frame. A megabyte of diff body in front of them is a visible typing stall,
+/// so anything above this is described in the control response and re-read over
+/// the independent bulk connection.
+pub(super) const INLINE_DIFF_BODY_LIMIT: usize = 256 * 1024;
+
+#[derive(Clone, Copy)]
+pub(super) struct DiffOptions {
+    /// Whether the caller needs the raw patch bytes.
+    ///
+    /// Hunk staging re-derives its patch here and needs them. The editor
+    /// renders `old_content`/`new_content` and never read the patch, so sending
+    /// it duplicated the whole file on the control lane for nothing.
+    pub(super) include_patch: bool,
+    /// Combined body size above which content is referenced, not inlined.
+    pub(super) inline_body_limit: usize,
+}
+
+impl DiffOptions {
+    /// What a hunk mutation needs: the exact patch, and no bulk indirection.
+    pub(super) fn for_mutation() -> Self {
+        Self {
+            include_patch: true,
+            inline_body_limit: usize::MAX,
+        }
+    }
+
+    /// What the editor needs: content only, with large bodies deferred.
+    pub(super) fn for_client() -> Self {
+        Self {
+            include_patch: false,
+            inline_body_limit: INLINE_DIFF_BODY_LIMIT,
+        }
+    }
+}
+
 pub(super) fn read_diff(
     root: &str,
     repository: v1::GitRepository,
     request: &v1::GitRequest,
+    options: DiffOptions,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<v1::GitDiff> {
     validate_git_path(&request.path)?;
@@ -122,11 +161,16 @@ pub(super) fn read_diff(
     } else {
         read_diff_contents(root, &repository, request, target, cancellation)?
     };
+    let inlined_patch = if options.include_patch {
+        patch.len()
+    } else {
+        0
+    };
     if contents
         .old
         .len()
         .saturating_add(contents.new.len())
-        .saturating_add(patch.len())
+        .saturating_add(inlined_patch)
         > MAX_SERIALIZED_DIFF_PAYLOAD
     {
         return bounded_diff_metadata(
@@ -140,15 +184,22 @@ pub(super) fn read_diff(
         )?
         .ok_or_else(|| anyhow::anyhow!("Git diff exceeds the serialized frame budget"));
     }
+    let bodies = DiffBodies::place(contents.old, contents.new, options.inline_body_limit);
     Ok(v1::GitDiff {
         repository: Some(repository),
         target: target.into(),
         path: request.path.clone(),
         original_path: request.original_path.clone(),
         display_path: String::from_utf8_lossy(&request.path).into_owned(),
-        old_content: contents.old,
-        new_content: contents.new,
-        patch,
+        old_content: bodies.old,
+        new_content: bodies.new,
+        old_content_ref: bodies.old_ref,
+        new_content_ref: bodies.new_ref,
+        patch: if options.include_patch {
+            patch
+        } else {
+            Vec::new()
+        },
         source_generation,
         binary,
         too_large: contents.too_large,
@@ -156,6 +207,84 @@ pub(super) fn read_diff(
         new_missing: contents.new_missing,
         hunk_count,
     })
+}
+
+/// Where each side of a textual diff travels.
+struct DiffBodies {
+    old: Vec<u8>,
+    new: Vec<u8>,
+    old_ref: Option<v1::GitDiffContentRef>,
+    new_ref: Option<v1::GitDiffContentRef>,
+}
+
+impl DiffBodies {
+    fn place(old: Vec<u8>, new: Vec<u8>, inline_limit: usize) -> Self {
+        if old.len().saturating_add(new.len()) <= inline_limit {
+            return Self {
+                old,
+                new,
+                old_ref: None,
+                new_ref: None,
+            };
+        }
+        Self {
+            old_ref: content_ref(v1::GitDiffContentSide::Old, &old),
+            new_ref: content_ref(v1::GitDiffContentSide::New, &new),
+            old: Vec::new(),
+            new: Vec::new(),
+        }
+    }
+}
+
+/// Binds a deferred body to its exact bytes. An empty side needs no round trip.
+fn content_ref(side: v1::GitDiffContentSide, body: &[u8]) -> Option<v1::GitDiffContentRef> {
+    if body.is_empty() {
+        return None;
+    }
+    Some(v1::GitDiffContentRef {
+        side: side.into(),
+        size: body.len() as u64,
+        content_digest: blake3::hash(body).to_hex().to_string(),
+    })
+}
+
+/// Re-reads one side of a diff for the bulk lane and proves it is the exact
+/// body the control response described.
+pub(super) fn read_diff_side(
+    root: &str,
+    repository: &v1::GitRepository,
+    request: &v1::GitRequest,
+    side: v1::GitDiffContentSide,
+    cancellation: Option<&AtomicBool>,
+) -> anyhow::Result<Vec<u8>> {
+    let target = v1::GitDiffTarget::try_from(request.diff_target).unwrap_or_default();
+    if target == v1::GitDiffTarget::Unspecified {
+        bail!("diff target is required");
+    }
+    validate_git_path(&request.path)?;
+    let body = match side {
+        v1::GitDiffContentSide::Old => {
+            let old_path = old_object_path(request, target);
+            if target == v1::GitDiffTarget::Staged {
+                if repository.initial {
+                    (Vec::new(), true)
+                } else {
+                    git_object(root, b"HEAD", old_path, cancellation)?
+                }
+            } else {
+                git_object(root, b":0", old_path, cancellation)?
+            }
+        }
+        v1::GitDiffContentSide::New => {
+            if target == v1::GitDiffTarget::Staged {
+                git_object(root, b":0", &request.path, cancellation)?
+            } else {
+                worktree_content(root, &request.path)?
+            }
+        }
+        v1::GitDiffContentSide::Unspecified => bail!("Git diff content side is required"),
+    };
+    Ok(body.0)
 }
 
 fn rewrite_untracked_patch(generated: &[u8], path: &[u8], mode: u32) -> Vec<u8> {

@@ -137,7 +137,10 @@ async fn buffered_cancel_or_eof_before_first_poll_cannot_stage_a_file() {
             expected_server_identity: server_identity(),
             ..Default::default()
         };
-        let baseline = GitService::new().status(&baseline_request).unwrap();
+        let baseline = GitService::new(Arc::new(AtomicBool::new(false)), 0)
+            .status(&baseline_request, None)
+            .await
+            .unwrap();
         let mutation = v1::Request {
             operation: v1::Operation::GitMutation.into(),
             git: Some(v1::GitRequest {
