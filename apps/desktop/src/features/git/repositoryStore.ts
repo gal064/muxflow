@@ -1,13 +1,12 @@
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import { recordPerfCounter, recordPerfHighWater } from "../../perf/probe";
 import type {
-  GitDiff,
-  GitWorkspaceEvent,
   GitDiffResult,
   GitDiffTarget,
   GitStatusSnapshot,
   GitWatchLease,
   GitWorkspaceClient,
+  GitWorkspaceEvent,
 } from "./types";
 
 /**
@@ -309,11 +308,6 @@ export class GitRepositoryStore {
     return remembered ? { status: remembered, loading: true } : undefined;
   }
 
-  /** Drops every remembered observation, e.g. when the connection is replaced. */
-  reset(): void {
-    this.#remembered.clear();
-  }
-
   #remember(key: string, status: GitStatusSnapshot): void {
     this.#remembered.delete(key);
     this.#remembered.set(key, status);
@@ -323,12 +317,4 @@ export class GitRepositoryStore {
       this.#remembered.delete(oldest.value);
     }
   }
-}
-
-/** The diff a consumer already has, when it matches the current status. */
-export function diffMatchesStatus(diff: GitDiff, status: GitStatusSnapshot | undefined): boolean {
-  if (!status || status.repository.id !== diff.repository.id) return false;
-  const entry = status.entries.find((candidate) => candidate.path === diff.path);
-  if (!entry) return false;
-  return diff.target === "staged" ? entry.indexKind !== "none" : entry.worktreeKind !== "none";
 }

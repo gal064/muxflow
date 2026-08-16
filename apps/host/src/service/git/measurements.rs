@@ -61,6 +61,9 @@ pub(super) fn phase14_git_process_snapshot() -> GitProcessMeasurements {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GitObservationCounts {
+    /// Repository discoveries actually executed, as opposed to answered from
+    /// the cached identity.
+    pub discoveries: u64,
     pub native_watcher_creations: u64,
     pub native_watchers: usize,
     pub native_watchers_high_water: usize,
@@ -96,6 +99,10 @@ impl GitObservation {
         let mut value = self.0.lock().unwrap();
         value.subscribers = value.subscribers.saturating_add_signed(delta);
         value.subscribers_high_water = value.subscribers_high_water.max(value.subscribers);
+    }
+
+    pub(super) fn discovery(&self) {
+        self.0.lock().unwrap().discoveries += 1;
     }
 
     pub(super) fn status_pipeline(&self) {

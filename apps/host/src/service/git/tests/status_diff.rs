@@ -584,9 +584,7 @@ async fn repository_discovery_runs_one_batched_rev_parse_and_reuses_it() {
     fixture.git(&["add", "file"]);
     fixture.git(&["commit", "-qm", "base"]);
     let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
-    let before = measurements::phase14_git_process_snapshot();
     let first = service.status(&fixture.request(), None).await.unwrap();
-    let cold = measurements::phase14_git_process_snapshot();
     let repository = first.repository.clone().unwrap();
     // Branch and HEAD come from the porcelain read, not from extra processes.
     assert_eq!(repository.head_name, "master");
@@ -599,11 +597,9 @@ async fn repository_discovery_runs_one_batched_rev_parse_and_reuses_it() {
     refreshed.repository_id = repository.repository_id.clone();
     let second = service.status(&refreshed, None).await.unwrap();
     assert_ne!(second.source_generation, first.source_generation);
-    let warm = measurements::phase14_git_process_snapshot();
     // The second refresh pays no discovery at all: the identity was cached and
-    // revalidated with `fstat`.
-    assert!(
-        warm.git_processes - cold.git_processes < cold.git_processes - before.git_processes,
-        "warm refresh must cost fewer Git processes than the cold one"
-    );
+    // revalidated with `fstat` rather than another `rev-parse`.
+    let observation = service.observation();
+    assert_eq!(observation.discoveries, 1);
+    assert_eq!(observation.status_pipelines, 2);
 }
