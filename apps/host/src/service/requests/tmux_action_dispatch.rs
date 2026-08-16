@@ -141,6 +141,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                     let selection_required = match select_and_refresh_action_outcome(
                         action_kind,
                         terminal,
+                        event_tx,
+                        overflowed,
                         &mut outcome,
                     )
                     .await
@@ -234,26 +236,33 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
 async fn select_and_refresh_action_outcome(
     action_kind: v1::TmuxActionKind,
     terminal: &Arc<Mutex<TerminalClients>>,
+    event_tx: &mpsc::Sender<SequencerControl>,
+    overflowed: &Arc<AtomicBool>,
     outcome: &mut tmux_actions::ActionOutcome,
 ) -> Result<bool, String> {
-    let required = matches!(
+    let required = prepare_action_session_selection(
         action_kind,
-        v1::TmuxActionKind::SelectSession
-            | v1::TmuxActionKind::CreateSession
-            | v1::TmuxActionKind::CreateWindow
-    );
+        || {
+            // A create can return a session that did not exist at the precheck.
+            // This is internal reconciliation only: the ordered topology
+            // acknowledgement remains withheld until selection and refresh.
+            reconcile_terminal_clients(terminal, &outcome.snapshot, event_tx, overflowed);
+        },
+        || {
+            terminal
+                .lock()
+                .unwrap()
+                .select_session(&outcome.result.session_id)
+                .map_err(|error| {
+                    format!(
+                        "outcome unknown: action remained authoritative but client session selection failed: {error}"
+                    )
+                })
+        },
+    )?;
     if !required {
         return Ok(false);
     }
-    terminal
-        .lock()
-        .unwrap()
-        .select_session(&outcome.result.session_id)
-        .map_err(|error| {
-            format!(
-                "outcome unknown: action remained authoritative but client session selection failed: {error}"
-            )
-        })?;
 
     // Selecting the app's control client can resize panes. The caller still
     // holds the topology lock, so this one discovery is the atomic action +
@@ -270,6 +279,25 @@ async fn select_and_refresh_action_outcome(
         })?;
     outcome.snapshot = snapshot;
     outcome.server_identity = identity;
+    Ok(true)
+}
+
+fn prepare_action_session_selection(
+    action_kind: v1::TmuxActionKind,
+    attach_authoritative_snapshot: impl FnOnce(),
+    select_session: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    let required = matches!(
+        action_kind,
+        v1::TmuxActionKind::SelectSession
+            | v1::TmuxActionKind::CreateSession
+            | v1::TmuxActionKind::CreateWindow
+    );
+    if !required {
+        return Ok(false);
+    }
+    attach_authoritative_snapshot();
+    select_session()?;
     Ok(true)
 }
 
@@ -309,6 +337,28 @@ mod tests {
         .unwrap();
         assert_eq!(result, 42);
         assert_eq!(*order.borrow(), ["flush", "discover"]);
+    }
+
+    #[test]
+    fn create_actions_attach_the_authoritative_session_before_selecting_it() {
+        for action_kind in [
+            v1::TmuxActionKind::CreateSession,
+            v1::TmuxActionKind::CreateWindow,
+        ] {
+            let order = std::cell::RefCell::new(Vec::new());
+            assert!(
+                prepare_action_session_selection(
+                    action_kind,
+                    || order.borrow_mut().push("attach"),
+                    || {
+                        order.borrow_mut().push("select");
+                        Ok(())
+                    },
+                )
+                .unwrap()
+            );
+            assert_eq!(*order.borrow(), ["attach", "select"]);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

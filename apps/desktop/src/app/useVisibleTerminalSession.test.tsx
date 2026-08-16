@@ -16,9 +16,10 @@ interface HarnessProps {
   activeSessionId?: string;
   canMutate?: boolean;
   clientId?: string;
+  terminalEpoch?: number;
   onStatus?: (message: string) => void;
   topologyGeneration?: number;
-  selectionAcknowledgement?: { clientId: string; sessionId: string; version: number };
+  selectionAcknowledgement?: { clientId: string; sessionId: string; terminalEpoch: number; version: number };
 }
 
 function Harness(props: HarnessProps) {
@@ -28,6 +29,7 @@ function Harness(props: HarnessProps) {
     clientId: props.clientId,
     onStatus: props.onStatus ?? (() => undefined),
     selectionAcknowledgement: props.selectionAcknowledgement,
+    terminalEpoch: props.terminalEpoch ?? 1,
     topologyGeneration: props.topologyGeneration ?? 1,
   });
   return null;
@@ -65,7 +67,7 @@ describe("useVisibleTerminalSession", () => {
     await render({
       activeSessionId: "$1",
       clientId: "client-1",
-      selectionAcknowledgement: { clientId: "client-1", sessionId: "$1", version: 1 },
+      selectionAcknowledgement: { clientId: "client-1", sessionId: "$1", terminalEpoch: 1, version: 1 },
     });
     expect(selectMock).not.toHaveBeenCalled();
   });
@@ -74,7 +76,7 @@ describe("useVisibleTerminalSession", () => {
     await render({
       activeSessionId: "$1",
       clientId: "client-2",
-      selectionAcknowledgement: { clientId: "client-1", sessionId: "$1", version: 1 },
+      selectionAcknowledgement: { clientId: "client-1", sessionId: "$1", terminalEpoch: 1, version: 1 },
     });
     expect(selectMock.mock.calls).toEqual([["client-2", "$1"]]);
   });
@@ -101,6 +103,27 @@ describe("useVisibleTerminalSession", () => {
       ["client-1", "$2"],
       ["client-2", "$2"],
     ]);
+  });
+
+  it("re-states the workspace when the same native client reconnects at a new epoch", async () => {
+    const { update } = await render({
+      activeSessionId: "$1",
+      clientId: "client-1",
+      terminalEpoch: 7,
+      selectionAcknowledgement: {
+        clientId: "client-1", sessionId: "$1", terminalEpoch: 7, version: 1,
+      },
+    });
+    expect(selectMock).not.toHaveBeenCalled();
+    await update({
+      activeSessionId: "$1",
+      clientId: "client-1",
+      terminalEpoch: 8,
+      selectionAcknowledgement: {
+        clientId: "client-1", sessionId: "$1", terminalEpoch: 7, version: 1,
+      },
+    });
+    expect(selectMock.mock.calls).toEqual([["client-1", "$1"]]);
   });
 
   /**

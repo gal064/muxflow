@@ -41,6 +41,7 @@ function createPaneStreamState(): PaneStreamState {
 }
 
 interface PaneResourceIdentity {
+  byteLength: number;
   state: Extract<PaneEvent, { kind: "paneResource" }>["state"];
   requiresSeed: boolean;
   generation: number;
@@ -84,6 +85,8 @@ export class TerminalEventHub {
   readonly #maxPaneEvents: number;
   #backlogBytes = 0;
   #backlogCount = 0;
+  #identityBytes = 0;
+  #retainedPaneCount = 0;
   #generationEpoch?: number;
   #lastSequence = 0;
   #sequenceFrozen = false;
@@ -157,7 +160,7 @@ export class TerminalEventHub {
           return admission;
         }
         pane.lastGeneration = event.generation;
-        pane.lastPaneResource = resourceIdentity;
+        this.#setPaneResourceIdentity(pane, resourceIdentity);
       } else if (event.generation <= lastGeneration) {
         // A seed is authoritative content, not an increment: dropping one
         // because its generation looks stale leaves the pane waiting for a
@@ -167,7 +170,7 @@ export class TerminalEventHub {
         return admission;
       } else {
         pane.lastGeneration = event.generation;
-        pane.lastPaneResource = undefined;
+        this.#setPaneResourceIdentity(pane, undefined);
       }
       if (event.kind === "paneResource" && event.requiresSeed) {
         pane.awaitingSeed = true;
@@ -191,7 +194,15 @@ export class TerminalEventHub {
     const listener = this.#paneListeners.get(event.paneId);
     if (listener) {
       this.measurements?.add("terminal.hub.fanoutDeliveries");
-      listener(event);
+      try {
+        listener(event);
+      } finally {
+        // The payload allocation has moved to its one renderer. Retaining an
+        // exact detached identity for every mounted pane would scale outside
+        // the hidden-buffer budget; a repeated same-generation resource is
+        // therefore conservatively reseeded after this ownership transfer.
+        if (event.kind === "paneResource") this.#setPaneResourceIdentity(pane, undefined);
+      }
       return admission;
     }
     this.#buffer(pane, event);
@@ -222,6 +233,7 @@ export class TerminalEventHub {
     const backlog = pane?.backlog;
     if (backlog) {
       this.#deleteBacklog(pane);
+      this.#setPaneResourceIdentity(pane, undefined);
       for (const entry of backlog.entries) {
         this.measurements?.add("terminal.hub.fanoutDeliveries");
         listener(entry.event);
@@ -239,7 +251,10 @@ export class TerminalEventHub {
 
   clearPane(paneId: string): void {
     const pane = this.#activePaneStates.get(paneId) ?? this.#dormantPaneStates.get(paneId);
-    if (pane) this.#deleteBacklog(pane);
+    if (pane) {
+      this.#deleteBacklog(pane);
+      this.#setPaneResourceIdentity(pane, undefined);
+    }
     this.#dormantPaneStates.delete(paneId);
     if (this.#paneListeners.has(paneId)) {
       this.#activePaneStates.set(paneId, createPaneStreamState());
@@ -284,11 +299,11 @@ export class TerminalEventHub {
   }
 
   get retainedPaneCount(): number {
-    return this.#backlogCount;
+    return this.#retainedPaneCount;
   }
 
   get retainedByteLength(): number {
-    return this.#backlogBytes;
+    return this.#backlogBytes + this.#identityBytes;
   }
 
   get trackedPaneCount(): number {
@@ -303,6 +318,8 @@ export class TerminalEventHub {
     }
     this.#backlogBytes = 0;
     this.#backlogCount = 0;
+    this.#identityBytes = 0;
+    this.#retainedPaneCount = 0;
     this.#evictedSeedDebt.clear();
     this.#unknownPanesRequireSeed = false;
   }
@@ -330,11 +347,12 @@ export class TerminalEventHub {
       this.#appendBacklog(current, event, event.data.byteLength);
     }
 
-    if (current.byteLength > this.#maxPaneBytes || current.entries.length > this.#maxPaneEvents) {
+    if (current.byteLength + (pane.lastPaneResource?.byteLength ?? 0) > this.#maxPaneBytes
+      || current.entries.length > this.#maxPaneEvents) {
       const limit = this.#maxPaneBytes === DEFAULT_MAX_PANE_BYTES ? "8 MiB" : `${this.#maxPaneBytes} bytes`;
       this.#requireSeed(
         event.paneId,
-        current.byteLength > this.#maxPaneBytes
+        current.byteLength + (pane.lastPaneResource?.byteLength ?? 0) > this.#maxPaneBytes
           ? `frontend hidden recovery buffer exceeded ${limit}`
           : `frontend hidden recovery record capacity exceeded ${this.#maxPaneEvents} events`,
       );
@@ -369,36 +387,67 @@ export class TerminalEventHub {
   }
 
   #setBacklog(pane: PaneStreamState, backlog: PaneBacklog): void {
+    const wasRetained = this.#paneRetainsBytes(pane);
     const previous = pane.backlog;
     if (previous) this.#backlogBytes -= previous.byteLength;
     else this.#backlogCount += 1;
     pane.backlog = backlog;
     this.#backlogBytes += backlog.byteLength;
-    this.measurements?.highWater?.("terminal.hub.retainedBytes", this.#backlogBytes);
-    this.measurements?.highWater?.("terminal.hub.retainedPanes", this.#backlogCount);
+    this.#finishRetentionMutation(pane, wasRetained);
   }
 
   #deleteBacklog(pane: PaneStreamState): void {
     if (!pane.backlog) return;
+    const wasRetained = this.#paneRetainsBytes(pane);
     this.#backlogBytes -= pane.backlog.byteLength;
     this.#backlogCount -= 1;
     pane.backlog = undefined;
+    this.#finishRetentionMutation(pane, wasRetained);
   }
 
   #takeBacklog(pane: PaneStreamState): PaneBacklog | undefined {
     const backlog = pane.backlog;
     if (!backlog) return undefined;
+    const wasRetained = this.#paneRetainsBytes(pane);
     this.#backlogBytes -= backlog.byteLength;
     this.#backlogCount -= 1;
     pane.backlog = undefined;
+    this.#finishRetentionMutation(pane, wasRetained);
     return backlog;
   }
 
+  #setPaneResourceIdentity(pane: PaneStreamState, identity: PaneResourceIdentity | undefined): void {
+    const wasRetained = this.#paneRetainsBytes(pane);
+    if (pane.lastPaneResource) this.#identityBytes -= pane.lastPaneResource.byteLength;
+    const withoutPrevious = this.#backlogBytes + this.#identityBytes;
+    const fitsPane = !identity
+      || identity.byteLength + (pane.backlog?.byteLength ?? 0) <= this.#maxPaneBytes;
+    const fitsTotal = !identity || withoutPrevious + identity.byteLength <= this.#maxTotalBytes;
+    pane.lastPaneResource = fitsPane && fitsTotal ? identity : undefined;
+    if (pane.lastPaneResource) this.#identityBytes += pane.lastPaneResource.byteLength;
+    this.#finishRetentionMutation(pane, wasRetained);
+  }
+
+  #paneRetainsBytes(pane: PaneStreamState): boolean {
+    return pane.backlog !== undefined || pane.lastPaneResource !== undefined;
+  }
+
+  #finishRetentionMutation(pane: PaneStreamState, wasRetained: boolean): void {
+    const isRetained = this.#paneRetainsBytes(pane);
+    if (wasRetained !== isRetained) this.#retainedPaneCount += isRetained ? 1 : -1;
+    this.measurements?.highWater?.(
+      "terminal.hub.retainedBytes",
+      this.#backlogBytes + this.#identityBytes,
+    );
+    this.measurements?.highWater?.("terminal.hub.retainedPanes", this.#retainedPaneCount);
+  }
+
   #enforceBacklogLimits(): void {
-    while (this.#backlogCount > this.#maxBufferedPanes || this.#backlogBytes > this.#maxTotalBytes) {
+    while (this.#backlogCount > this.#maxBufferedPanes
+      || this.#backlogBytes + this.#identityBytes > this.#maxTotalBytes) {
       const oldest = this.#oldestBufferedPane();
       if (oldest === undefined) break;
-      this.#requireSeed(oldest, this.#backlogBytes > this.#maxTotalBytes
+      this.#requireSeed(oldest, this.#backlogBytes + this.#identityBytes > this.#maxTotalBytes
         ? "frontend aggregate hidden recovery budget was exceeded"
         : "frontend hidden-pane LRU capacity was exceeded");
     }
@@ -409,6 +458,7 @@ export class TerminalEventHub {
     const alreadyAwaiting = pane.awaitingSeed;
     pane.awaitingSeed = true;
     this.#deleteBacklog(pane);
+    this.#setPaneResourceIdentity(pane, undefined);
     if (!alreadyAwaiting) this.onSeedRequired?.(paneId, reason);
   }
 
@@ -437,6 +487,7 @@ export class TerminalEventHub {
       if (evicted) {
         const alreadyAwaiting = evicted.awaitingSeed;
         this.#deleteBacklog(evicted);
+        this.#setPaneResourceIdentity(evicted, undefined);
         this.#rememberEvictedSeedDebt(oldest);
         if (!alreadyAwaiting) this.onSeedRequired?.(oldest, "frontend pane metadata LRU capacity was exceeded");
       }
@@ -506,14 +557,16 @@ function samePaneResource(left: PaneResourceIdentity, right: PaneResourceIdentit
 }
 
 function copyPaneResourceIdentity(event: Extract<PaneEvent, { kind: "paneResource" }>): PaneResourceIdentity | undefined {
-  const identityBytes = diagnosticEncoder.encode(event.recoveryReason).byteLength
-    + event.serializedSnapshot.byteLength
-    + event.rawTail.byteLength;
+  const payloadBytes = event.serializedSnapshot.byteLength + event.rawTail.byteLength;
+  const identityBytes = diagnosticEncoder.encode(event.recoveryReason).byteLength + payloadBytes;
   // Exact duplicate recognition is an optimization, not an authority check.
   // Keep it bounded; oversized same-generation checkpoints conservatively
   // request a new seed instead of relying on a collision-prone digest.
   if (identityBytes > MAX_EXACT_RESOURCE_IDENTITY_BYTES) return undefined;
   return {
+    // The immutable reason string is shared with the buffered event; only the
+    // byte arrays below are detached backing allocations owned by this copy.
+    byteLength: payloadBytes,
     state: event.state,
     requiresSeed: event.requiresSeed,
     generation: event.generation,

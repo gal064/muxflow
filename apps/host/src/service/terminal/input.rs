@@ -26,11 +26,7 @@ pub(super) const INBAND_INPUT_MAX_BYTES: usize = HOST_INPUT_COALESCE_BYTES;
 const _: () = assert!(MAX_INPUT_REQUEST_BYTES > INBAND_INPUT_MAX_BYTES);
 
 pub(super) enum InputDispatch {
-    Bytes {
-        pane_id: String,
-        data: Vec<u8>,
-        completion: mpsc::SyncSender<Result<(), String>>,
-    },
+    Bytes { pane_id: String, data: Vec<u8> },
     Barrier(mpsc::SyncSender<Result<(), String>>),
     Stop,
 }
@@ -61,6 +57,7 @@ fn run_input_dispatch_with(
     mut send_batch: impl FnMut(&str, &[u8]) -> Result<(), String>,
 ) {
     let mut deferred = None;
+    let mut pending_error = None;
     loop {
         let message = match deferred.take() {
             Some(message) => message,
@@ -70,24 +67,17 @@ fn run_input_dispatch_with(
             },
         };
         match message {
-            InputDispatch::Bytes {
-                pane_id,
-                mut data,
-                completion,
-            } => {
-                let mut completions = vec![completion];
+            InputDispatch::Bytes { pane_id, mut data } => {
                 while data.len() < HOST_INPUT_COALESCE_BYTES {
                     match receiver.try_recv() {
                         Ok(InputDispatch::Bytes {
                             pane_id: next_pane,
                             data: next_data,
-                            completion,
                         }) if next_pane == pane_id
                             && data.len().saturating_add(next_data.len())
                                 <= HOST_INPUT_COALESCE_BYTES =>
                         {
                             data.extend_from_slice(&next_data);
-                            completions.push(completion);
                         }
                         Ok(message) => {
                             deferred = Some(message);
@@ -98,12 +88,13 @@ fn run_input_dispatch_with(
                     }
                 }
                 let result = send_batch(&pane_id, &data);
-                for completion in completions {
-                    let _ = completion.send(result.clone());
+                if pending_error.is_none() {
+                    pending_error = result.err();
                 }
             }
             InputDispatch::Barrier(sender) => {
-                let _ = sender.send(Ok(()));
+                let result = pending_error.take().map_or(Ok(()), Err);
+                let _ = sender.send(result);
             }
             InputDispatch::Stop => break,
         }
@@ -304,23 +295,27 @@ mod tests {
     }
 
     #[test]
-    fn writer_failure_is_correlated_without_poisoning_the_next_request() {
+    fn writer_failure_is_retained_until_one_authoritative_barrier() {
         let (sender, receiver) = mpsc::channel();
-        let (first_tx, first_rx) = mpsc::sync_channel(1);
-        let (second_tx, second_rx) = mpsc::sync_channel(1);
         sender
             .send(InputDispatch::Bytes {
                 pane_id: "%1".into(),
                 data: b"a".to_vec(),
-                completion: first_tx,
             })
             .unwrap();
         sender
             .send(InputDispatch::Bytes {
                 pane_id: "%2".into(),
                 data: b"b".to_vec(),
-                completion: second_tx,
             })
+            .unwrap();
+        let (first_barrier_tx, first_barrier_rx) = mpsc::sync_channel(1);
+        sender
+            .send(InputDispatch::Barrier(first_barrier_tx))
+            .unwrap();
+        let (second_barrier_tx, second_barrier_rx) = mpsc::sync_channel(1);
+        sender
+            .send(InputDispatch::Barrier(second_barrier_tx))
             .unwrap();
         sender.send(InputDispatch::Stop).unwrap();
         let mut calls = 0;
@@ -333,29 +328,25 @@ mod tests {
             }
         });
         assert_eq!(
-            first_rx.recv().unwrap(),
+            first_barrier_rx.recv().unwrap(),
             Err("injected writer failure".into())
         );
-        assert_eq!(second_rx.recv().unwrap(), Ok(()));
+        assert_eq!(second_barrier_rx.recv().unwrap(), Ok(()));
     }
 
     #[test]
     fn bounded_queue_backpressure_rejects_only_the_unqueued_caller() {
         let (sender, receiver) = mpsc::sync_channel(1);
-        let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
         sender
             .try_send(InputDispatch::Bytes {
                 pane_id: "%1".into(),
                 data: b"accepted".to_vec(),
-                completion: accepted_tx,
             })
             .unwrap();
-        let (rejected_tx, _rejected_rx) = mpsc::sync_channel(1);
         assert!(matches!(
             sender.try_send(InputDispatch::Bytes {
                 pane_id: "%1".into(),
                 data: b"rejected".to_vec(),
-                completion: rejected_tx,
             }),
             Err(mpsc::TrySendError::Full(_))
         ));
@@ -364,21 +355,20 @@ mod tests {
             assert_eq!(bytes, b"accepted");
             Ok(())
         });
-        assert_eq!(accepted_rx.recv().unwrap(), Ok(()));
     }
 
     #[test]
-    fn formerly_multi_batch_request_has_one_atomic_commit_outcome() {
+    fn formerly_multi_batch_request_has_one_atomic_barrier_outcome() {
         let (sender, receiver) = mpsc::channel();
-        let (completion_tx, completion_rx) = mpsc::sync_channel(1);
         let data = vec![b'x'; HOST_INPUT_COALESCE_BYTES * 3 + 17];
         sender
             .send(InputDispatch::Bytes {
                 pane_id: "%1".into(),
                 data: data.clone(),
-                completion: completion_tx,
             })
             .unwrap();
+        let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
+        sender.send(InputDispatch::Barrier(barrier_tx)).unwrap();
         sender.send(InputDispatch::Stop).unwrap();
         let mut commits = 0;
         run_input_dispatch_with(receiver, |pane_id, bytes| {
@@ -389,7 +379,7 @@ mod tests {
         });
         assert_eq!(commits, 1);
         assert_eq!(
-            completion_rx.recv().unwrap(),
+            barrier_rx.recv().unwrap(),
             Err("injected commit-point failure; accepted bytes: 0".into())
         );
     }

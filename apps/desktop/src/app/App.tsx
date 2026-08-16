@@ -95,6 +95,7 @@ export function App() {
   const [hostSessionSelection, setHostSessionSelection] = useState<{
     clientId: string;
     sessionId: string;
+    terminalEpoch: number;
     version: number;
   }>();
   const [activeDownloadStatus, setActiveDownloadStatus] = useState<ActiveDownloadStatus>();
@@ -257,13 +258,14 @@ export function App() {
 
   const acknowledgeHostSessionSelection = useCallback((sessionId: string) => {
     const selectedClientId = clientIdRef.current;
-    if (!selectedClientId) return;
+    if (!selectedClientId || terminalEpoch === undefined) return;
     setHostSessionSelection((previous) => ({
       clientId: selectedClientId,
       sessionId,
+      terminalEpoch,
       version: (previous?.version ?? 0) + 1,
     }));
-  }, [clientIdRef]);
+  }, [clientIdRef, terminalEpoch]);
 
   const setNavigationAppTab = useCallback((sessionId: string, appTabId: string | undefined) => {
     const scope = hostScopeRef.current;
@@ -610,6 +612,7 @@ export function App() {
     clientId,
     onStatus: setStatus,
     selectionAcknowledgement: hostSessionSelection,
+    terminalEpoch,
     topologyGeneration: hostState.generation,
   });
 

@@ -120,10 +120,10 @@ impl TerminalAttachment {
         let stopped = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = std_mpsc::sync_channel(TERMINAL_INPUT_QUEUE);
         let input_stdin = Arc::clone(&stdin);
-        // Input is fire-and-forget from the desktop, so a write that fails here
-        // has no caller left to tell. Report it on the event stream instead:
-        // the user's keystrokes did not reach the pane, and its screen no
-        // longer shows what they believe they typed.
+        // Input admission is fire-and-forget from the desktop. A later action
+        // barrier receives the first write failure, while the event stream
+        // immediately requests recovery because the user's screen no longer
+        // shows what they believe they typed.
         let failure_tx = event_tx.clone();
         let failure_overflowed = Arc::clone(&overflowed);
         std::thread::Builder::new()
@@ -193,12 +193,10 @@ impl TerminalAttachment {
         if data.is_empty() {
             return Ok(());
         }
-        let (completion_tx, _completion_rx) = std_mpsc::sync_channel(1);
         self.input_tx
             .try_send(InputDispatch::Bytes {
                 pane_id: pane_id.to_owned(),
                 data: data.to_vec(),
-                completion: completion_tx,
             })
             .map_err(|error| match error {
                 std_mpsc::TrySendError::Full(_) => {

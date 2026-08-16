@@ -52,10 +52,16 @@ export function useAppRecoveryController(options: AppRecoveryControllerOptions) 
       options.serverIdentity,
       options.sessions,
     ));
-    lastIdentity.current = {
-      hostProfileId: options.currentHostProfileId,
-      serverIdentity: options.serverIdentity,
-    };
+    // A reconnect intentionally clears the live host state before its new
+    // ServerHello arrives. Preserve the last non-empty identity across that
+    // gap for the same profile so A -> undefined -> B can still offer recovery;
+    // never carry it across a profile change.
+    if (options.serverIdentity || previous?.hostProfileId !== options.currentHostProfileId) {
+      lastIdentity.current = {
+        hostProfileId: options.currentHostProfileId,
+        serverIdentity: options.serverIdentity,
+      };
+    }
   }, [options.currentHostProfileId, options.serverIdentity, options.sessions]);
 
   useEffect(() => {

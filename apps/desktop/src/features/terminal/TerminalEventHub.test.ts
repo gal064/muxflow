@@ -200,7 +200,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.publish({ kind: "seedDiagnostic", paneId: "%1", message: "λ", sequence: 4 });
     expect(hub.retainedByteLength).toBe(5);
     hub.publish(resource(5, 3, { recoveryReason: "λ", serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }));
-    expect(hub.retainedByteLength).toBe(5);
+    expect(hub.retainedByteLength).toBe(8);
     const received: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => received.push(event));
     expect(received).toEqual([
@@ -267,6 +267,26 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     checkpoint.rawTail[0] = 99;
     hub.publish({ ...checkpoint, sequence: 2 });
     expect(requests).toEqual(["%1"]);
+  });
+
+  it("charges dormant resource identity copies to the aggregate byte budget", () => {
+    const hub = new TerminalEventHub();
+    hub.publish(resource(1, 2));
+    // Two payload bytes remain in the replay event and two in the exact
+    // detached identity used to reject conflicting same-generation handoffs.
+    expect(hub.retainedByteLength).toBe(4);
+    expect(hub.retainedPaneCount).toBe(1);
+    hub.subscribePane("%1", () => undefined);
+    expect(hub.retainedByteLength).toBe(0);
+    expect(hub.retainedPaneCount).toBe(0);
+  });
+
+  it("releases an active identity even when its renderer throws", () => {
+    const hub = new TerminalEventHub();
+    hub.subscribePane("%1", () => { throw new Error("injected renderer failure"); });
+    expect(() => hub.publish(resource(1, 2))).toThrow("injected renderer failure");
+    expect(hub.retainedByteLength).toBe(0);
+    expect(hub.retainedPaneCount).toBe(0);
   });
 
   it("conservatively reseeds an oversized same-generation checkpoint", () => {

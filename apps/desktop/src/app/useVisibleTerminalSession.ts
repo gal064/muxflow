@@ -9,13 +9,14 @@ interface VisibleTerminalSessionOptions {
   activeSessionId?: string;
   canMutate: boolean;
   clientId?: string;
+  terminalEpoch?: number;
   onStatus(message: string): void;
   /**
    * The host's topology generation. Not part of the fact being asserted — it
    * is the clock on which the one refusal this can hit stops being true.
    */
   topologyGeneration: number;
-  selectionAcknowledgement?: { clientId: string; sessionId: string; version: number };
+  selectionAcknowledgement?: { clientId: string; sessionId: string; terminalEpoch: number; version: number };
 }
 
 /**
@@ -56,6 +57,7 @@ export function useVisibleTerminalSession({
   clientId,
   onStatus,
   selectionAcknowledgement,
+  terminalEpoch,
   topologyGeneration,
 }: VisibleTerminalSessionOptions): void {
   /** The fact this hook has already got the host to agree to. */
@@ -79,10 +81,11 @@ export function useVisibleTerminalSession({
   const issue = useRef(0);
   const settled = useRef<Promise<unknown>>(Promise.resolve());
   useEffect(() => {
-    if (!clientId || !activeSessionId || !canMutate) return;
-    const fact = `${clientId}:${activeSessionId}`;
+    if (!clientId || !activeSessionId || terminalEpoch === undefined || !canMutate) return;
+    const fact = `${clientId}:${terminalEpoch}:${activeSessionId}`;
     if (selectionAcknowledgement?.clientId === clientId
-      && selectionAcknowledgement.sessionId === activeSessionId) {
+      && selectionAcknowledgement.sessionId === activeSessionId
+      && selectionAcknowledgement.terminalEpoch === terminalEpoch) {
       asserted.current = fact;
     }
     // A topology change is a reason to try again, never a reason to re-send
@@ -125,5 +128,5 @@ export function useVisibleTerminalSession({
     return () => window.clearTimeout(timer);
     // `onStatus` is deliberately not a dependency: it is re-created on most
     // renders, and re-running this would re-send the selection for nothing.
-  }, [activeSessionId, canMutate, clientId, selectionAcknowledgement, topologyGeneration]);
+  }, [activeSessionId, canMutate, clientId, selectionAcknowledgement, terminalEpoch, topologyGeneration]);
 }
