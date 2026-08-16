@@ -147,12 +147,11 @@ impl AnchoredMetadata {
     }
 
     pub(super) fn device(&self) -> u64 {
-        self.stat.st_dev as u64
+        lossless_stat_component(self.stat.st_dev)
     }
 
-    #[allow(clippy::unnecessary_cast)]
     pub(super) fn inode(&self) -> u64 {
-        self.stat.st_ino as u64
+        lossless_stat_component(self.stat.st_ino)
     }
 
     pub(super) fn len(&self) -> u64 {
@@ -160,7 +159,7 @@ impl AnchoredMetadata {
     }
 
     pub(super) fn mode(&self) -> u32 {
-        self.stat.st_mode as u32
+        lossless_stat_component(self.stat.st_mode)
     }
 
     pub(super) fn permissions(&self) -> Permissions {
@@ -185,6 +184,16 @@ impl AnchoredMetadata {
 
     fn kind(&self) -> libc::mode_t {
         self.stat.st_mode & libc::S_IFMT
+    }
+}
+
+fn lossless_stat_component<T, U>(value: T) -> U
+where
+    T: TryInto<U>,
+{
+    match value.try_into() {
+        Ok(value) => value,
+        Err(_) => panic!("platform stat component does not fit its canonical representation"),
     }
 }
 

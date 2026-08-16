@@ -356,7 +356,7 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
 }
 
 #[test]
-fn incompatible_server_hello_enters_read_only_without_requesting_a_snapshot() {
+fn incompatible_server_hello_enters_read_only_and_quarantines_its_snapshot() {
     let compatible = v1::ServerHello {
         read_only: false,
         capabilities: HOST_CAPABILITIES,
@@ -438,6 +438,27 @@ fn input_flush_reports_the_first_failed_write() {
         .unwrap();
     let error = client.flush_input().unwrap_err();
     assert!(error.contains("host bridge is disconnected"), "{error}");
+
+    sender.send(ClientInputDispatch::Stop).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn input_flush_reports_bytes_accepted_by_a_replaced_connection() {
+    let client = Arc::new(TerminalClient::new());
+    let (sender, receiver) = mpsc::sync_channel(8);
+    client.input_queue.lock().unwrap().sender = Some(sender.clone());
+    client.ready.store(true, Ordering::Release);
+
+    client
+        .enqueue_input("%1".into(), b"accepted-before-reconnect".to_vec())
+        .unwrap();
+    mark_input_reconnected(&client);
+    let worker_client = Arc::clone(&client);
+    let worker = thread::spawn(move || run_client_input_dispatch(worker_client, receiver));
+
+    let error = client.flush_input().unwrap_err();
+    assert!(error.contains("replaced connection"), "{error}");
 
     sender.send(ClientInputDispatch::Stop).unwrap();
     worker.join().unwrap();

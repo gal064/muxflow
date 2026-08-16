@@ -18,6 +18,7 @@ use uuid::Uuid;
 use super::{
     destination_lease::{DestinationLease, FileIdentity, InspectedDestination, reserve_name},
     download_manager::DownloadCollisionPolicy,
+    identity_component,
 };
 
 pub(super) use super::destination_lease::DestinationReservations;
@@ -818,8 +819,7 @@ fn metadata_at(directory: &File, name: &CString) -> Result<Option<EntryMetadata>
     let stat = unsafe { stat.assume_init() };
     Ok(Some(EntryMetadata {
         identity: FileIdentity {
-            device: u64::try_from(stat.st_dev)
-                .map_err(|_| "destination device identity is invalid".to_owned())?,
+            device: identity_component(stat.st_dev, "destination device")?,
             inode: stat.st_ino,
         },
         regular: (stat.st_mode & libc::S_IFMT) == libc::S_IFREG,

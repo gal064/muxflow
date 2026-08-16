@@ -92,6 +92,11 @@ const COMPACT_VIEWPORT_QUERY = "(max-width: 880px)";
 
 export function App() {
   const [status, setStatus] = useState("Discovering local tmux…");
+  const [hostSessionSelection, setHostSessionSelection] = useState<{
+    clientId: string;
+    sessionId: string;
+    version: number;
+  }>();
   const [activeDownloadStatus, setActiveDownloadStatus] = useState<ActiveDownloadStatus>();
   const agentClient = useMemo(() => new TauriAgentClient(), []);
   const fileClient = useMemo(() => new TauriFileWorkspaceClient(), []);
@@ -250,6 +255,16 @@ export function App() {
   });
   useEffect(() => () => abandonPanePaintSpansForScope(clientId), [clientId]);
 
+  const acknowledgeHostSessionSelection = useCallback((sessionId: string) => {
+    const selectedClientId = clientIdRef.current;
+    if (!selectedClientId) return;
+    setHostSessionSelection((previous) => ({
+      clientId: selectedClientId,
+      sessionId,
+      version: (previous?.version ?? 0) + 1,
+    }));
+  }, [clientIdRef]);
+
   const setNavigationAppTab = useCallback((sessionId: string, appTabId: string | undefined) => {
     const scope = hostScopeRef.current;
     const session = snapshotRef.current.sessions.find((item) => item.id === sessionId);
@@ -259,6 +274,7 @@ export function App() {
   const shellNavigation = useShellNavigation({
     activeSessionId,
     activeWindowId,
+    acknowledgeHostSessionSelection,
     canMutate: hostState.canMutate,
     currentScope: currentHostScope,
     focusPaneController: (paneId) => controllers.current.get(paneId)?.focus(),
@@ -494,7 +510,7 @@ export function App() {
   // user last pointed at — the palette's only way to name a row.
   const rowCommands = useRowCommands();
   const { commandContext, runCommand } = useShellCommands({
-    activePane, activeSession, activeWindow, appState, beginDeferredNavigation: shellNavigation.beginDeferredNavigation, canMutate: hostState.canMutate,
+    activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
 
     closeAppTab: (tab, scope) => {
       const commit = () => setAppState((current) => closeAppTab(current, currentHostProfileId, tab.id));
@@ -518,16 +534,10 @@ export function App() {
       selectAgentRow(target);
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
-    commitCreatedSession: shellNavigation.commitCreatedSession,
-    // This window is one round trip old and is not in the current snapshot yet.
-    // A real `select-window` is also what makes the *next* snapshot agree
-    // — the app mirrors tmux's active flag, so anything only set locally here
-    // would be overwritten the moment the snapshot arrived. The generation is
-    // chained from the create for the same reason `surfacePaneDestination`
-    // chains its own: the create already moved the topology.
-    commitCreatedWindow: (sessionId, windowId, generation, reservedIntent) => {
+    createSession: shellNavigation.createSession,
+    createWindow: (sessionId) => {
       notificationActivation.clearNotificationFocusGuard();
-      shellNavigation.commitCreatedWindow(sessionId, windowId, generation, reservedIntent);
+      shellNavigation.createWindow(sessionId);
     },
     selectRelativeTab: (direction) => {
       const index = combinedTabs.findIndex((tab) => tab.key === activeCombinedTabKey);
@@ -599,6 +609,7 @@ export function App() {
     canMutate: hostState.canMutate,
     clientId,
     onStatus: setStatus,
+    selectionAcknowledgement: hostSessionSelection,
     topologyGeneration: hostState.generation,
   });
 

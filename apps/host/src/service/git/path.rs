@@ -43,9 +43,9 @@ pub(super) struct EntryMetadata {
 impl EntryMetadata {
     fn from_stat(value: libc::stat) -> Self {
         Self {
-            dev: value.st_dev as u64,
+            dev: lossless_stat_component(value.st_dev),
             ino: value.st_ino,
-            mode: value.st_mode as u32,
+            mode: lossless_stat_component(value.st_mode),
             len: value.st_size.max(0) as u64,
             mtime: value.st_mtime,
             mtime_nsec: value.st_mtime_nsec,
@@ -61,14 +61,31 @@ impl EntryMetadata {
         self.len
     }
     pub(super) fn is_file(&self) -> bool {
-        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
+        self.mode & canonical_mode(libc::S_IFMT) == canonical_mode(libc::S_IFREG)
     }
     pub(super) fn is_dir(&self) -> bool {
-        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR)
+        self.mode & canonical_mode(libc::S_IFMT) == canonical_mode(libc::S_IFDIR)
     }
     pub(super) fn is_symlink(&self) -> bool {
-        self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFLNK)
+        self.mode & canonical_mode(libc::S_IFMT) == canonical_mode(libc::S_IFLNK)
     }
+}
+
+fn lossless_stat_component<T, U>(value: T) -> U
+where
+    T: TryInto<U>,
+{
+    match value.try_into() {
+        Ok(value) => value,
+        Err(_) => panic!("platform stat component does not fit its canonical representation"),
+    }
+}
+
+fn canonical_mode<T>(value: T) -> u32
+where
+    T: TryInto<u32>,
+{
+    lossless_stat_component(value)
 }
 
 impl WorktreeRoot {

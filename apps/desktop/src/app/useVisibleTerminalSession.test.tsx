@@ -18,6 +18,7 @@ interface HarnessProps {
   clientId?: string;
   onStatus?: (message: string) => void;
   topologyGeneration?: number;
+  selectionAcknowledgement?: { clientId: string; sessionId: string; version: number };
 }
 
 function Harness(props: HarnessProps) {
@@ -26,6 +27,7 @@ function Harness(props: HarnessProps) {
     canMutate: props.canMutate ?? true,
     clientId: props.clientId,
     onStatus: props.onStatus ?? (() => undefined),
+    selectionAcknowledgement: props.selectionAcknowledgement,
     topologyGeneration: props.topologyGeneration ?? 1,
   });
   return null;
@@ -57,6 +59,24 @@ describe("useVisibleTerminalSession", () => {
   it("tells the host which workspace is on screen as soon as there is a bridge", async () => {
     await render({ activeSessionId: "$1", clientId: "client-1" });
     expect(selectMock.mock.calls).toEqual([["client-1", "$1"]]);
+  });
+
+  it("does not restate a selection acknowledged by the atomic host action", async () => {
+    await render({
+      activeSessionId: "$1",
+      clientId: "client-1",
+      selectionAcknowledgement: { clientId: "client-1", sessionId: "$1", version: 1 },
+    });
+    expect(selectMock).not.toHaveBeenCalled();
+  });
+
+  it("does not apply a selection acknowledgement from another bridge", async () => {
+    await render({
+      activeSessionId: "$1",
+      clientId: "client-2",
+      selectionAcknowledgement: { clientId: "client-1", sessionId: "$1", version: 1 },
+    });
+    expect(selectMock.mock.calls).toEqual([["client-2", "$1"]]);
   });
 
   it("says nothing without a bridge, a workspace, or the right to mutate", async () => {

@@ -398,7 +398,12 @@ impl BulkLease {
             });
         }
 
-        let cancelled = || matches!(mode, AcquisitionMode::Request) && cancellation.is_cancelled();
+        let cancelled = || match mode {
+            AcquisitionMode::Request => cancellation.is_cancelled(),
+            AcquisitionMode::AuthoritativeReconciliation => {
+                cancellation.transport_termination_requested()
+            }
+        };
         let mut child = spawn(connection, &cancelled)?;
         let stdin = child.stdin.take().ok_or("bulk bridge stdin unavailable")?;
         let stdout = child
@@ -429,7 +434,7 @@ impl BulkLease {
             &mut bridge.stdin,
             &mut bridge.reader,
             binding,
-            matches!(mode, AcquisitionMode::Request).then_some(cancellation.as_ref()),
+            &cancelled,
             deadline,
         )?;
         drop(_process_binding);
@@ -719,5 +724,48 @@ mod tests {
         assert_ne!(lease.process_id(), 0);
         drop(lease);
         deadline.complete();
+    }
+
+    #[test]
+    fn authoritative_acquisition_cannot_outlive_a_deadline_that_precedes_spawn() {
+        let client = Arc::new(crate::connection::TerminalClient::new());
+        client
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
+        client
+            .terminal_epoch
+            .store(8, std::sync::atomic::Ordering::Release);
+        *client.server_identity.lock().unwrap() = "server-b".into();
+        let binding = BulkBinding::capture(client, "server-b".into(), 8).unwrap();
+        let cancellation = Arc::new(CancelState::new());
+        cancellation.prepare_finalize().unwrap();
+        let deadline = cancellation.arm_test_deadline(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(80));
+
+        let error = BulkLease::acquire_with_spawn(
+            &ConnectionSpec::Local,
+            &binding,
+            &cancellation,
+            &deadline,
+            AcquisitionMode::AuthoritativeReconciliation,
+            |_, cancelled| {
+                assert!(
+                    cancelled(),
+                    "the authoritative deadline is visible before spawn"
+                );
+                Command::new("sh")
+                    .args(["-c", "exec sleep 30"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .err()
+        .expect("the late authoritative helper must not become a lease");
+
+        deadline.complete();
+        assert!(error.contains("expired"), "{error}");
     }
 }

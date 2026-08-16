@@ -15,28 +15,27 @@ interface VisibleTerminalSessionOptions {
    * is the clock on which the one refusal this can hit stops being true.
    */
   topologyGeneration: number;
+  selectionAcknowledgement?: { clientId: string; sessionId: string; version: number };
 }
 
 /**
- * Keeps the host's idea of the visible workspace equal to this one's.
+ * Keeps the host's idea of the visible workspace equal to this one's when no
+ * atomic navigation action has already established the same fact.
  *
  * The host attaches one tmux control client per session and takes exactly one
  * of them out of `ignore-size`; that client's windows are the ones
- * `refresh-client -C` moves. Which workspace is on screen is decided entirely
- * on this side, and nothing on the wire carried it: the only message that ever
- * moved the host's answer was the connect-time `AttachTerminal`, aimed at
- * whichever session the fresh snapshot happened to list first. Everything after
- * that — a workspace switch, a reconnect, a snapshot that re-resolved the
- * selection — moved this side alone.
+ * `refresh-client -C` moves. Atomic select/create actions now move that client
+ * and acknowledge the exact fact before publishing their topology. Their
+ * acknowledgement primes this hook, avoiding a duplicate
+ * `SelectTerminalSession` round trip. Reconnect and externally driven topology
+ * changes have no such action acknowledgement, so this remains the fallback
+ * that establishes their visible session.
  *
  * So the effect is keyed on the *fact*, not on any of the events that can
  * change it. A new bridge is a new client id and re-asserts; a workspace switch
  * is a new session id and re-asserts; anything else that lands the app on a
- * different session re-asserts for free. That matters more than it sounds:
- * of the paths that change the displayed workspace, only one went through the
- * `SelectSession` tmux action the host reads today, and the reconnect — the
- * quiet one, which happens after every sleep and every network blip — went
- * through none of them.
+ * different session re-asserts for free. The reconnect — the quiet path after
+ * every sleep and network blip — still goes through no tmux action at all.
  *
  * Retried because the failure is transient and known: the host refuses a
  * session whose control client it has not attached yet, and on a fresh bridge
@@ -56,6 +55,7 @@ export function useVisibleTerminalSession({
   canMutate,
   clientId,
   onStatus,
+  selectionAcknowledgement,
   topologyGeneration,
 }: VisibleTerminalSessionOptions): void {
   /** The fact this hook has already got the host to agree to. */
@@ -81,6 +81,10 @@ export function useVisibleTerminalSession({
   useEffect(() => {
     if (!clientId || !activeSessionId || !canMutate) return;
     const fact = `${clientId}:${activeSessionId}`;
+    if (selectionAcknowledgement?.clientId === clientId
+      && selectionAcknowledgement.sessionId === activeSessionId) {
+      asserted.current = fact;
+    }
     // A topology change is a reason to try again, never a reason to re-send
     // something the host already accepted.
     if (asserted.current === fact) return;
@@ -121,5 +125,5 @@ export function useVisibleTerminalSession({
     return () => window.clearTimeout(timer);
     // `onStatus` is deliberately not a dependency: it is re-created on most
     // renders, and re-running this would re-send the selection for nothing.
-  }, [activeSessionId, canMutate, clientId, topologyGeneration]);
+  }, [activeSessionId, canMutate, clientId, selectionAcknowledgement, topologyGeneration]);
 }

@@ -227,6 +227,16 @@ pub(super) fn run_client_input_dispatch(
                     }
                     client.release_input_budget(message_count, dispatched_bytes);
                 } else {
+                    if pending_error.is_none() {
+                        let error = if !input_epoch_is_current(&client, epoch) {
+                            "accepted terminal input belongs to a replaced connection"
+                        } else if !client.ready.load(Ordering::Acquire) {
+                            "accepted terminal input reached a disconnected connection"
+                        } else {
+                            "accepted terminal input reached a read-only connection"
+                        };
+                        pending_error = Some(error.into());
+                    }
                     client.release_input_budget(message_count, data.len());
                 }
             }

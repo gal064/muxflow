@@ -45,6 +45,7 @@ export interface ShellNavigationOptions {
   setAppTab(sessionId: string, appTabId: string | undefined): void;
   setStatus(status: string): void;
   windows: readonly TmuxWindow[];
+  acknowledgeHostSessionSelection?(sessionId: string): void;
 }
 
 export class ShellNavigationSupersededError extends Error {
@@ -83,7 +84,7 @@ export function commitScopedAppTabClose(options: {
 
 export function useShellNavigation(options: ShellNavigationOptions) {
   const coordinator = useMemo(() => new RemoteNavigationCoordinator(), []);
-  const intentVersion = useRef(0);
+  const creationVersion = useRef(0);
   const scopeRef = useRef(options.currentScope);
   const activeSessionIdRef = useRef(options.activeSessionId);
   const activeWindowIdRef = useRef(options.activeWindowId);
@@ -162,6 +163,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope",
       };
       if (!scopeCurrent(scope)) return { kind: "unknown", reason: "scope" };
+      options.acknowledgeHostSessionSelection?.(target.sessionId);
       generation = selected.topologyGeneration;
       generationSource = "action";
       appliedLocation = { sessionId: target.sessionId };
@@ -202,7 +204,6 @@ export function useShellNavigation(options: ShellNavigationOptions) {
 
   const beginTerminalIntent = useCallback(() => {
     protectedAppTab.current = undefined;
-    return ++intentVersion.current;
   }, []);
   const selectSession = useCallback((sessionId: string) => {
     beginTerminalIntent();
@@ -288,29 +289,42 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     void selectWindowDestination({ kind: "window", sessionId: target.sessionId, windowId: target.id });
   }, [beginTerminalIntent, coordinator, options, selectWindowDestination]);
 
-  const beginDeferredNavigation = beginTerminalIntent;
-  const commitCreatedWindow = useCallback((sessionId: string, windowId: string, generation: number, reservedIntent: number) => {
-    if (reservedIntent !== intentVersion.current) return;
-    intentVersion.current += 1;
+  const createWindow = useCallback((sessionId: string) => {
+    beginTerminalIntent();
     const scope = scopeRef.current;
-    void coordinator.navigateLocal({
-      destination: { kind: "window", sessionId, windowId },
-      request: async () => ({
-        kind: "reached",
-        destination: { kind: "window", sessionId, windowId },
-        generation,
-        generationSource: "action",
-      }),
+    const key = `create-window:${++creationVersion.current}`;
+    let created: TmuxActionResult | undefined;
+    let createdSessionId = sessionId;
+    void coordinator.navigate({
+      destination: { kind: "operation", key },
+      request: async () => {
+        try {
+          created = await options.performAction({ kind: "createWindow", sessionId });
+        } catch (error) {
+          return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope", error };
+        }
+        if (!created?.windowId || !scopeCurrent(scope)) {
+          return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope" };
+        }
+        createdSessionId = created.sessionId ?? sessionId;
+        options.acknowledgeHostSessionSelection?.(createdSessionId);
+        return {
+          kind: "reached",
+          destination: { kind: "window", sessionId: createdSessionId, windowId: created.windowId },
+          generation: created.topologyGeneration,
+          generationSource: "action",
+        };
+      },
       commit: () => {
-        if (!scopeCurrent(scope)) return;
-        activeSessionIdRef.current = sessionId;
-        activeWindowIdRef.current = windowId;
-        options.setAppTab(sessionId, undefined);
-        options.setActiveSessionId(sessionId);
-        options.setActiveWindowId(windowId);
+        if (!scopeCurrent(scope) || !created?.windowId) return;
+        activeSessionIdRef.current = createdSessionId;
+        activeWindowIdRef.current = created.windowId;
+        options.setAppTab(createdSessionId, undefined);
+        options.setActiveSessionId(createdSessionId);
+        options.setActiveWindowId(created.windowId);
       },
     });
-  }, [coordinator, options]);
+  }, [beginTerminalIntent, coordinator, options]);
 
   const selectLocalAppTab = useCallback((
     sessionId: string,
@@ -318,7 +332,6 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     appTabId: string,
     commitLocal: () => void,
   ) => {
-    intentVersion.current += 1;
     const scope = scopeRef.current;
     const protectFromPendingRemote = coordinator.hasRemoteFlight();
     if (protectFromPendingRemote) protectedAppTab.current = { appTabId, scope, sessionId, windowId };
@@ -437,28 +450,40 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     return { ok: false, error: accepted.error ?? new Error(`${source} focus request was not accepted.`) };
   }, [beginTerminalIntent, coordinator, options, requestLocation]);
 
-  const commitCreatedSession = useCallback((sessionId: string, generation: number, reservedIntent: number) => {
-    if (reservedIntent !== intentVersion.current) return;
-    intentVersion.current += 1;
+  const createSession = useCallback((name: string) => {
+    beginTerminalIntent();
     const scope = scopeRef.current;
-    void coordinator.navigateLocal({
-      destination: { kind: "session", sessionId },
-      request: async () => ({
-        kind: "reached",
-        destination: { kind: "session", sessionId },
-        generation,
-        generationSource: "action",
-      }),
+    const key = `create-session:${++creationVersion.current}`;
+    let created: TmuxActionResult | undefined;
+    void coordinator.navigate({
+      destination: { kind: "operation", key },
+      request: async () => {
+        try {
+          created = await options.performAction({ kind: "createSession", name });
+        } catch (error) {
+          return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope", error };
+        }
+        if (!created?.sessionId || !scopeCurrent(scope)) {
+          return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope" };
+        }
+        options.acknowledgeHostSessionSelection?.(created.sessionId);
+        return {
+          kind: "reached",
+          destination: { kind: "session", sessionId: created.sessionId },
+          generation: created.topologyGeneration,
+          generationSource: "action",
+        };
+      },
       commit: () => {
-        if (!scopeCurrent(scope)) return;
-        activeSessionIdRef.current = sessionId;
+        if (!scopeCurrent(scope) || !created?.sessionId) return;
+        activeSessionIdRef.current = created.sessionId;
         activeWindowIdRef.current = undefined;
-        options.setAppTab(sessionId, undefined);
-        options.setActiveSessionId(sessionId);
+        options.setAppTab(created.sessionId, undefined);
+        options.setActiveSessionId(created.sessionId);
         options.setActiveWindowId(undefined);
       },
     });
-  }, [coordinator, options]);
+  }, [beginTerminalIntent, coordinator, options]);
 
   const observeAuthoritativeWindow = useCallback((sessionId: string, windowId: string | undefined, generation: number) => {
     const protection = protectedAppTab.current;
@@ -474,7 +499,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
   }, []);
 
   return {
-    beginDeferredNavigation, observeAuthoritativeWindow, selectAppTab, commitCreatedSession,
-    commitCreatedWindow, selectLocalAppTab, selectPane, selectSession, selectWindow, revealLocalTerminal,
+    createSession, createWindow, observeAuthoritativeWindow, selectAppTab, selectLocalAppTab,
+    selectPane, selectSession, selectWindow, revealLocalTerminal,
   };
 }

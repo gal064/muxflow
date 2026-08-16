@@ -138,6 +138,24 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             .await;
             match result {
                 Ok(Ok(mut outcome)) => {
+                    let selection_required = match select_and_refresh_action_outcome(
+                        action_kind,
+                        terminal,
+                        &mut outcome,
+                    )
+                    .await
+                    {
+                        Ok(required) => required,
+                        Err(error) => {
+                            send_response(
+                                control_tx,
+                                request_id,
+                                response_error("outcome_unknown", &error),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
                     let next_generation = generation.fetch_add(1, Ordering::AcqRel) + 1;
                     outcome.result.topology_generation = next_generation;
                     *topology_baseline.lock().unwrap() =
@@ -151,6 +169,24 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                         next_generation,
                         outcome.server_identity,
                     );
+                    let mut success_response = Some(v1::Response {
+                        ok: true,
+                        tmux_action_result: Some(outcome.result),
+                        ..Default::default()
+                    });
+                    if selection_required {
+                        // This acknowledges that selection and geometry
+                        // reconciliation already landed. Put the ack directly
+                        // before its topology event on the one ordered
+                        // sequencer so the desktop can suppress its generic
+                        // visibility restatement before applying the snapshot.
+                        send_response(
+                            control_tx,
+                            request_id,
+                            success_response.take().expect("success response exists"),
+                        )
+                        .await;
+                    }
                     let _ = event_tx
                         .send(SequencerControl::OrderedEvent(v1::HostEvent {
                             kind: v1::EventKind::TopologySnapshot.into(),
@@ -159,42 +195,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                             ..Default::default()
                         }))
                         .await;
-                    let selection_error = matches!(
-                        action_kind,
-                        v1::TmuxActionKind::SelectSession
-                            | v1::TmuxActionKind::CreateSession
-                            | v1::TmuxActionKind::CreateWindow
-                    )
-                    .then(|| {
-                        terminal
-                            .lock()
-                            .unwrap()
-                            .select_session(&outcome.result.session_id)
-                    })
-                    .and_then(Result::err);
-                    if let Some(error) = selection_error {
-                        send_response(
-                            control_tx,
-                            request_id,
-                            response_error(
-                                "outcome_unknown",
-                                &format!(
-                                    "outcome unknown: action remained authoritative but client session selection failed: {error}"
-                                ),
-                            ),
-                        )
-                        .await;
-                    } else {
-                        send_response(
-                            control_tx,
-                            request_id,
-                            v1::Response {
-                                ok: true,
-                                tmux_action_result: Some(outcome.result),
-                                ..Default::default()
-                            },
-                        )
-                        .await;
+                    if let Some(response) = success_response {
+                        send_response(control_tx, request_id, response).await;
                     }
                 }
                 Ok(Err(error)) => {
@@ -224,6 +226,51 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
         }
         _ => unreachable!(),
     }
+}
+
+/// Completes the control-client side of actions whose contract includes
+/// selection, then replaces their pre-selection topology with the geometry
+/// that will be published and acknowledged.
+async fn select_and_refresh_action_outcome(
+    action_kind: v1::TmuxActionKind,
+    terminal: &Arc<Mutex<TerminalClients>>,
+    outcome: &mut tmux_actions::ActionOutcome,
+) -> Result<bool, String> {
+    let required = matches!(
+        action_kind,
+        v1::TmuxActionKind::SelectSession
+            | v1::TmuxActionKind::CreateSession
+            | v1::TmuxActionKind::CreateWindow
+    );
+    if !required {
+        return Ok(false);
+    }
+    terminal
+        .lock()
+        .unwrap()
+        .select_session(&outcome.result.session_id)
+        .map_err(|error| {
+            format!(
+                "outcome unknown: action remained authoritative but client session selection failed: {error}"
+            )
+        })?;
+
+    // Selecting the app's control client can resize panes. The caller still
+    // holds the topology lock, so this one discovery is the atomic action +
+    // selection result rather than a later competing reconciliation.
+    let (snapshot, identity) = tokio::task::spawn_blocking(tmux_actions::discover_before_action)
+        .await
+        .map_err(|error| {
+            format!("outcome unknown: client selection reconciliation task failed: {error}")
+        })?
+        .map_err(|error| {
+            format!(
+                "outcome unknown: client selection landed but its topology could not be reconciled: {error}"
+            )
+        })?;
+    outcome.snapshot = snapshot;
+    outcome.server_identity = identity;
+    Ok(true)
 }
 
 fn topology_epoch_barrier(sender: &mpsc::Sender<SequencerControl>) -> Option<u64> {

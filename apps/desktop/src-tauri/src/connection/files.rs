@@ -33,6 +33,15 @@ pub use upload_manager::UploadManager;
 pub(super) const BULK_CHUNK_BYTES: u32 = 1024 * 1024;
 pub(super) const MAX_QUEUED_TRANSFERS: usize = 128;
 
+fn identity_component<T>(value: T, label: &str) -> Result<u64, String>
+where
+    T: TryInto<u64>,
+{
+    value
+        .try_into()
+        .map_err(|_| format!("invalid {label} identity"))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileCommand {

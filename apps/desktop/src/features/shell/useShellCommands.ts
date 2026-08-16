@@ -24,7 +24,6 @@ interface ShellCommandOptions {
   activeSession?: Session;
   activeWindow?: TmuxWindow;
   appState: PersistedAppState;
-  beginDeferredNavigation(): number;
   canMutate: boolean;
   closeAppTab(tab: AppOwnedTab, scope: HostScopeToken): void;
   combinedTabs: readonly CombinedTab[];
@@ -43,13 +42,8 @@ interface ShellCommandOptions {
   /** Live subscription to what the row surfaces currently offer. */
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
-  commitCreatedSession(sessionId: string, generation: number, reservedIntent: number): void;
-  /**
-   * Commit the destination already selected by the host's single create
-   * transaction. This is local acknowledgement handling, never a second tmux
-   * action or topology generation.
-   */
-  commitCreatedWindow(sessionId: string, windowId: string, generation: number, reservedIntent: number): void;
+  createSession(name: string): void;
+  createWindow(sessionId: string): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
   setConfirmation: Dispatch<SetStateAction<PendingTmuxConfirmation | undefined>>;
@@ -274,12 +268,7 @@ export function useShellCommands(options: ShellCommandOptions): {
         options.setTextPrompt({ title: "New workspace", label: "Workspace name", submit: (name) => {
           options.setTextPrompt(undefined);
           if (!options.isHostScopeCurrent(scope)) return options.setStatus("Workspace creation was cancelled because its host scope changed.");
-          const reservedIntent = options.beginDeferredNavigation();
-          void options.performAction({ kind: "createSession", name }).then((result) => {
-            if (result?.sessionId && options.isHostScopeCurrent(scope)) {
-              options.commitCreatedSession(result.sessionId, result.topologyGeneration, reservedIntent);
-            }
-          });
+          options.createSession(name);
         } });
         return;
       }
@@ -302,16 +291,7 @@ export function useShellCommands(options: ShellCommandOptions): {
       }
       case "window.new": {
         if (!targetSession) return;
-        // Same shape as `session.new`: create, then select what came back, and
-        // only if the app is still pointed at the host that created it.
-        const scope = options.hostScope;
-        const sessionId = targetSession.id;
-        const reservedIntent = options.beginDeferredNavigation();
-        void options.performAction({ kind: "createWindow", sessionId }).then((result) => {
-          if (result?.windowId && options.isHostScopeCurrent(scope)) {
-            options.commitCreatedWindow(sessionId, result.windowId, result.topologyGeneration, reservedIntent);
-          }
-        });
+        options.createWindow(targetSession.id);
         return;
       }
       case "window.rename": {
