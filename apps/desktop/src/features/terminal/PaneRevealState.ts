@@ -1,5 +1,6 @@
 import { paneRecoveryPlan } from "./PaneRecovery";
 import type { TerminalEvent } from "./api";
+import type { OwnedTerminalBytes } from "./TerminalBytes";
 
 export interface PaneRevealState {
   ready: boolean;
@@ -15,13 +16,13 @@ export function outputAfterRecovery<T extends { generation: number }>(
 
 export type PaneRevealEffect =
   | { kind: "none" }
-  | { kind: "seed"; data: Uint8Array }
-  | { kind: "output"; data: Uint8Array }
-  | { kind: "deferOutput"; data: Uint8Array }
+  | { kind: "seed"; data: OwnedTerminalBytes }
+  | { kind: "output"; data: OwnedTerminalBytes }
+  | { kind: "deferOutput"; data: OwnedTerminalBytes }
   | {
       kind: "restore";
       serialized: string;
-      rawTail: Uint8Array;
+      rawTail: OwnedTerminalBytes;
       snapshotGeneration: number;
       tailThroughGeneration: number;
     }

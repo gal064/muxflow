@@ -86,6 +86,23 @@ describe("binary terminal IPC", () => {
     });
   });
 
+  it("retains output in a compact owned allocation independent of its transport frame", () => {
+    const wire = frame(2, "%4", 12, Uint8Array.from([...u64(7), 0, 255, 27]));
+    const event = decodeTerminalEvent(wire);
+    expect(event.kind).toBe("output");
+    if (event.kind !== "output") throw new Error("expected output fixture");
+    expect(event.data.byteOffset).toBe(0);
+    expect(event.data.buffer.byteLength).toBe(3);
+    expect(event.data.buffer).not.toBe(wire);
+    new Uint8Array(wire).fill(9);
+    expect([...event.data]).toEqual([0, 255, 27]);
+
+    const empty = decodeTerminalEvent(frame(2, "%4", 13, u64(8)));
+    expect(empty.kind).toBe("output");
+    if (empty.kind !== "output") throw new Error("expected empty output fixture");
+    expect(empty.data.buffer.byteLength).toBe(0);
+  });
+
   it("rejects frames truncated before the label, sequence, or terminal generation", () => {
     expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37]).buffer)).toThrow("common header");
     expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37, 49, 50, 51, ...u64(1).slice(0, 7)]).buffer)).toThrow("truncated");
@@ -164,6 +181,21 @@ describe("binary terminal IPC", () => {
       rawTail: Uint8Array.from([255, 0]), sequence: 20,
     });
     expect(payload.byteLength).toBe(54);
+  });
+
+  it("owns compact recovery segments without retaining their full transport frame", () => {
+    const wire = frame(9, "%7", 20, paneResourcePayload({
+      reason: textEncoder.encode("overflow"), snapshot: Uint8Array.of(1, 2, 3), tail: Uint8Array.of(4, 5),
+    }));
+    const event = decodeTerminalEvent(wire);
+    expect(event.kind).toBe("paneResource");
+    if (event.kind !== "paneResource") throw new Error("expected pane resource fixture");
+    expect(event.serializedSnapshot.buffer.byteLength).toBe(3);
+    expect(event.rawTail.buffer.byteLength).toBe(2);
+    expect(event.serializedSnapshot.buffer).not.toBe(wire);
+    expect(event.rawTail.buffer).not.toBe(wire);
+    new Uint8Array(wire).fill(9);
+    expect([...event.serializedSnapshot, ...event.rawTail]).toEqual([1, 2, 3, 4, 5]);
   });
 
   it("rejects compact pane recovery truncation, unknown flags, invalid state, and malformed UTF-8", () => {
