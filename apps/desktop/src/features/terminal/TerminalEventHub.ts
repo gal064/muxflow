@@ -270,11 +270,12 @@ export class TerminalEventHub {
       this.#replaceBacklog(current, event, event.data.byteLength);
     } else if (event.kind === "paneResource") {
       const resourceBytes = event.serializedSnapshot.byteLength + event.rawTail.byteLength;
+      const reasonBytes = diagnosticEncoder.encode(event.recoveryReason).byteLength;
       if (resourceBytes > 0) {
-        this.#replaceBacklog(current, event, resourceBytes);
+        this.#replaceBacklog(current, event, resourceBytes + reasonBytes);
       } else {
         this.#removeBacklogKind(current, "paneResource");
-        this.#appendBacklog(current, event, 0);
+        this.#appendBacklog(current, event, reasonBytes);
       }
     } else if (event.kind === "seedDiagnostic") {
       this.#removeBacklogKind(current, "seedDiagnostic");

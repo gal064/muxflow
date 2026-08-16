@@ -153,6 +153,16 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(hub.retainedPaneCount).toBe(0);
   });
 
+  it("bounds a hidden resource's recovery reason even when its byte segments are empty", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub((paneId) => requests.push(paneId), { maxPaneBytes: 4 });
+    hub.publish(resource(1, 1, {
+      recoveryReason: "12345", serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array(),
+    }));
+    expect(requests).toEqual(["%1"]);
+    expect(hub.retainedByteLength).toBe(0);
+  });
+
   it("accounts the exact backing allocations retained for hidden output", () => {
     const hub = new TerminalEventHub();
     hub.publish(output(1, 1, "%7", Uint8Array.of(1, 2, 3)));
@@ -179,12 +189,12 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.publish(resource(3, 2, { serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array() }));
     hub.publish({ kind: "seedDiagnostic", paneId: "%1", message: "λ", sequence: 4 });
     expect(hub.retainedByteLength).toBe(5);
-    hub.publish(resource(5, 3, { serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }));
-    expect(hub.retainedByteLength).toBe(3);
+    hub.publish(resource(5, 3, { recoveryReason: "λ", serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }));
+    expect(hub.retainedByteLength).toBe(5);
     const received: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => received.push(event));
     expect(received).toEqual([
-      resource(5, 3, { serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }),
+      resource(5, 3, { recoveryReason: "λ", serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }),
     ]);
     expect(hub.retainedByteLength).toBe(0);
   });
