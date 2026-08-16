@@ -28,6 +28,7 @@ export class TerminalWriteScheduler {
   #disposed = false;
   #pendingBytes = 0;
   #inFlightBytes = 0;
+  #inFlightRecords = 0;
   #queuedBackingBytes = 0;
   #inFlightBackingBytes = 0;
   #overflowed = false;
@@ -43,8 +44,9 @@ export class TerminalWriteScheduler {
     readonly maxBytesPerFrame = 256 * 1024,
     readonly maxPendingBytes = 8 * 1024 * 1024,
     readonly onPendingBytes?: (bytes: number) => void,
-    readonly onOverflow?: (pendingBytes: number) => void,
+    readonly onOverflow?: (pendingBytes: number, pendingRecords?: number) => void,
     readonly measurements?: OperationRecorder,
+    readonly maxPendingRecords = 4096,
   ) {}
 
   /** Copies borrowed caller data once before it can outlive the call. */
@@ -91,6 +93,7 @@ export class TerminalWriteScheduler {
     this.#immediateResetFrame = undefined;
     this.#pendingBytes = 0;
     this.#inFlightBytes = 0;
+    this.#inFlightRecords = 0;
     this.#queuedBackingBytes = 0;
     this.#inFlightBackingBytes = 0;
     this.#resolveDrainWaiters();
@@ -117,7 +120,7 @@ export class TerminalWriteScheduler {
   }
 
   #commitEmpty(onRendered?: () => void): boolean {
-    if (this.#disposed || !this.#accepting || this.#overflowed) return false;
+    if (!this.#admit(0)) return false;
     // Empty output is still an ordered terminal record. Queue it as a
     // zero-retention barrier so its generation callback cannot overtake bytes
     // already inside xterm's asynchronous parser.
@@ -128,11 +131,14 @@ export class TerminalWriteScheduler {
   #admit(backingByteLength: number): boolean {
     if (this.#disposed || !this.#accepting || this.#overflowed) return false;
     const retainedBytes = this.#queuedBackingBytes + this.#inFlightBackingBytes;
-    if (retainedBytes + backingByteLength <= this.maxPendingBytes) return true;
+    const retainedRecords = this.#queueLength() + this.#inFlightRecords;
+    if (retainedBytes + backingByteLength <= this.maxPendingBytes
+      && retainedRecords + 1 <= this.maxPendingRecords) return true;
     const attemptedBytes = retainedBytes + backingByteLength;
+    const attemptedRecords = retainedRecords + 1;
     this.#dropQueued();
     this.#overflowed = true;
-    this.#notifyOverflow(attemptedBytes);
+    this.#notifyOverflow(attemptedBytes, attemptedRecords);
     return false;
   }
 
@@ -223,6 +229,7 @@ export class TerminalWriteScheduler {
     const rendered: Array<() => void> = [];
     let length = 0;
     let consumedBackingBytes = 0;
+    let consumedRecords = 0;
     let partialRecord = false;
     while (length < this.maxBytesPerFrame && this.#queueLength() > 0) {
       const first = this.#queue[this.#queueHead];
@@ -242,6 +249,7 @@ export class TerminalWriteScheduler {
         this.#queueHead += 1;
         this.#queuedBackingBytes -= first.backingByteLength;
         consumedBackingBytes += first.backingByteLength;
+        consumedRecords += 1;
         this.measurements?.add("terminal.scheduler.dequeueOperations");
         if (first.onRendered) rendered.push(first.onRendered);
       } else {
@@ -260,6 +268,7 @@ export class TerminalWriteScheduler {
     const chunk = joinChunks(pieces, length);
     if (pieces.length > 1) this.measurements?.add("terminal.scheduler.copiedBytes", length);
     this.#inFlightBytes = length;
+    this.#inFlightRecords = consumedRecords;
     this.#inFlightBackingBytes = pieces.length > 1
       ? chunk.buffer.byteLength
       : partialRecord ? 0 : consumedBackingBytes;
@@ -269,6 +278,7 @@ export class TerminalWriteScheduler {
       completed = true;
       this.#pendingBytes -= this.#inFlightBytes;
       this.#inFlightBytes = 0;
+      this.#inFlightRecords = 0;
       this.#inFlightBackingBytes = 0;
       this.#notifyPendingBytes();
       if (succeeded) {
@@ -292,7 +302,7 @@ export class TerminalWriteScheduler {
       this.#dropQueued();
       this.#overflowed = true;
       this.#resolveDrainWaiters();
-      this.#notifyOverflow(failedPendingBytes);
+      this.#notifyOverflow(failedPendingBytes, this.#queueLength() + this.#inFlightRecords);
     }
   }
 
@@ -331,10 +341,10 @@ export class TerminalWriteScheduler {
     }
   }
 
-  #notifyOverflow(pendingBytes: number): void {
+  #notifyOverflow(pendingBytes: number, pendingRecords?: number): void {
     if (!this.onOverflow) return;
     try {
-      this.onOverflow(pendingBytes);
+      this.onOverflow(pendingBytes, pendingRecords);
     } catch {
       this.measurements?.add("terminal.scheduler.observerErrors");
     }

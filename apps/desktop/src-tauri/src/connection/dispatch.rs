@@ -5,6 +5,7 @@ use std::{
 
 use tmux_agent_protocol::v1;
 use tmux_control::{DESKTOP_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
+use tokio::sync::oneshot;
 
 use super::{TerminalClient, input_epoch_is_current};
 
@@ -77,15 +78,15 @@ struct ResizeState {
     next_version: u64,
     connection_epoch: u64,
     stopped: bool,
-    waiters: Vec<(u64, mpsc::Sender<Result<(), String>>)>,
+    waiter: Option<(u64, oneshot::Sender<Result<(), String>>)>,
 }
 
 impl ResizeQueue {
     pub(super) fn replace(
         &self,
         size: TerminalSize,
-    ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
-        let (sender, receiver) = mpsc::channel();
+    ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
+        let (sender, receiver) = oneshot::channel();
         let mut state = self.state.lock().unwrap();
         if state.stopped {
             return Err("terminal bridge is stopped; resize was not queued".into());
@@ -93,7 +94,12 @@ impl ResizeQueue {
         state.next_version = state.next_version.saturating_add(1);
         let version = state.next_version;
         state.desired = Some(VersionedTerminalSize { version, size });
-        state.waiters.push((version, sender));
+        // Only the final dimensions matter. Resolve the superseded caller
+        // promptly instead of retaining one sender (and one async waiter) per
+        // resize event until a slow remote request completes.
+        if let Some((_, superseded)) = state.waiter.replace((version, sender)) {
+            let _ = superseded.send(Ok(()));
+        }
         drop(state);
         self.wake.notify_one();
         Ok(receiver)
@@ -125,15 +131,14 @@ impl ResizeQueue {
         } else {
             Err("terminal connection changed before resize acknowledgement".into())
         };
-        let mut remaining = Vec::with_capacity(state.waiters.len());
-        for (waiter_version, sender) in state.waiters.drain(..) {
-            if waiter_version <= version {
-                let _ = sender.send(result.clone());
-            } else {
-                remaining.push((waiter_version, sender));
-            }
+        if state
+            .waiter
+            .as_ref()
+            .is_some_and(|(waiter_version, _)| *waiter_version <= version)
+            && let Some((_, sender)) = state.waiter.take()
+        {
+            let _ = sender.send(result);
         }
-        state.waiters = remaining;
     }
 
     pub(super) fn reconnected(&self) {
@@ -146,7 +151,7 @@ impl ResizeQueue {
     pub(super) fn stop(&self) {
         let mut state = self.state.lock().unwrap();
         state.stopped = true;
-        for (_, sender) in state.waiters.drain(..) {
+        if let Some((_, sender)) = state.waiter.take() {
             let _ = sender.send(Err("terminal bridge stopped before resize landed".into()));
         }
         drop(state);
@@ -372,9 +377,9 @@ mod tests {
             }
         );
         queue.complete(desired.version, epoch, Ok(()));
-        assert_eq!(first.recv().unwrap(), Ok(()));
-        assert_eq!(second.recv().unwrap(), Ok(()));
-        assert_eq!(final_receiver.recv().unwrap(), Ok(()));
+        assert_eq!(first.blocking_recv().unwrap(), Ok(()));
+        assert_eq!(second.blocking_recv().unwrap(), Ok(()));
+        assert_eq!(final_receiver.blocking_recv().unwrap(), Ok(()));
     }
 
     #[test]
@@ -389,7 +394,7 @@ mod tests {
         let (desired, epoch) = queue.wait_for_attempt(None).unwrap();
         let attempt = Some((desired.version, epoch));
         queue.complete(desired.version, epoch, Err("link lost".into()));
-        assert_eq!(receiver.recv().unwrap(), Err("link lost".into()));
+        assert_eq!(receiver.blocking_recv().unwrap(), Err("link lost".into()));
         queue.reconnected();
         let (retried, reconnect_epoch) = queue.wait_for_attempt(attempt).unwrap();
         assert_eq!(retried.version, desired.version);
@@ -409,7 +414,7 @@ mod tests {
         let (desired, stale_epoch) = queue.wait_for_attempt(None).unwrap();
         queue.reconnected();
         queue.complete(desired.version, stale_epoch, Ok(()));
-        let error = receiver.recv().unwrap().unwrap_err();
+        let error = receiver.blocking_recv().unwrap().unwrap_err();
         assert!(error.contains("connection changed"), "{error}");
     }
 

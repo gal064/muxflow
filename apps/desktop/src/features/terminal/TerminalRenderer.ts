@@ -210,8 +210,8 @@ export class XtermRenderer implements TerminalRenderer {
         if (pending > 4 * 1024 * 1024) this.#options.onDiagnostic?.("Terminal output is catching up…");
         else if (pending === 0 && this.#webgl) this.#options.onDiagnostic?.(undefined);
       },
-      (pending) => this.#requestSeed(
-        `Terminal renderer queue exceeded its 8 MiB bound (${pending} bytes); requesting a fresh seed.`,
+      (pending, records) => this.#requestSeed(
+        `Terminal renderer queue exceeded its bound (${pending} bytes${records === undefined ? "" : `, ${records} records`}); requesting a fresh seed.`,
       ),
     );
     this.#disposables.push(this.#terminal.onScroll(() => {

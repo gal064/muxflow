@@ -333,6 +333,7 @@ struct EngineState {
 #[derive(Default)]
 struct TransferEngine {
     state: Mutex<EngineState>,
+    admission_changed: Condvar,
     active_bindings_changed: Condvar,
 }
 
@@ -460,6 +461,7 @@ pub(super) fn enqueue_transfer_with_queued(
                 state.cancellations.remove(&id);
                 cancellation.mark_finished();
             }
+            engine.admission_changed.notify_all();
             crate::perf_log::record_transfer_state(state.active, state.queue.len());
         }
         crate::perf_log::record_transfer_admission(crate::perf_log::TransferAdmission::Rejected);
@@ -482,6 +484,7 @@ pub(super) fn enqueue_transfer_with_queued(
             .find(|job| job.id == id)
             .expect("pending admission remains queued until commit");
         pending.admitted = true;
+        engine.admission_changed.notify_all();
         crate::perf_log::record_transfer_admission(crate::perf_log::TransferAdmission::Accepted);
         crate::perf_log::record_transfer_state(state.active, state.queue.len());
     }
@@ -491,6 +494,17 @@ pub(super) fn enqueue_transfer_with_queued(
 
 pub(super) fn cancel_transfer(id: &str) -> Result<CancelResponse, String> {
     let engine = transfer_engine();
+    // A publishing admission is not yet externally real: its queued event may
+    // still fail and roll the whole job back. Latch cancellation immediately,
+    // but do not return an observable acknowledgement until admission has
+    // linearized to committed or rolled back.
+    {
+        let mut state = engine.state.lock().unwrap();
+        while let Some(pending) = state.queue.iter().find(|job| job.id == id && !job.admitted) {
+            pending.cancellation.cancel();
+            state = engine.admission_changed.wait(state).unwrap();
+        }
+    }
     let queued = {
         let mut state = engine.state.lock().unwrap();
         let queued = take_queued_job(&mut state.queue, |job| job.id == id && job.admitted);

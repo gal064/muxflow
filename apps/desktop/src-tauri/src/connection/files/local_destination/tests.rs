@@ -74,6 +74,36 @@ fn concurrent_rename_leases_choose_distinct_exact_final_leaves() {
 }
 
 #[test]
+fn saturated_reservations_share_one_incremental_semantic_namespace() {
+    let root = std::env::temp_dir().join(format!("ade-dl-saturated-leases-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let reservations = Arc::new(DestinationReservations::default());
+    let mut leases = Vec::new();
+    for index in 0..128 {
+        leases.push(
+            ReservedDestination::reserve(
+                &root.join(format!("report-{index}.pdf")),
+                DownloadCollisionPolicy::Fail,
+                Arc::clone(&reservations),
+            )
+            .unwrap(),
+        );
+    }
+
+    assert_eq!(reservations.len(), 128);
+    assert_eq!(reservations.semantic_namespace_count(), 1);
+    let namespace = fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
+    assert!(namespace.is_dir());
+    assert_eq!(fs::read_dir(namespace).unwrap().count(), 128);
+
+    drop(leases);
+    assert_eq!(reservations.len(), 0);
+    assert_eq!(reservations.semantic_namespace_count(), 0);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    fs::remove_dir(root).unwrap();
+}
+
+#[test]
 fn reservation_uses_destination_filesystem_case_and_normalization_semantics() {
     let root = std::env::temp_dir().join(format!("ade-dl-semantics-{}", Uuid::new_v4()));
     fs::create_dir(&root).unwrap();

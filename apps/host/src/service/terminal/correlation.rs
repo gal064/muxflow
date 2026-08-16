@@ -17,14 +17,14 @@ use super::validate_tmux_id;
 /// having to know which marker shapes exist.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum MarkerBlock {
-    Input(String),
+    Input { input_id: u64, pane_id: String },
     Resume(String),
     Capture(Option<String>),
 }
 
 pub(super) fn classify_marker_block(pane_id: Option<String>, lines: &[Vec<u8>]) -> MarkerBlock {
-    if let Some(pane_id) = lines.iter().find_map(|line| input_marker_pane(line)) {
-        return MarkerBlock::Input(pane_id);
+    if let Some((input_id, pane_id)) = lines.iter().find_map(|line| input_marker(line)) {
+        return MarkerBlock::Input { input_id, pane_id };
     }
     if let Some(pane_id) = lines.iter().find_map(|line| resume_marker_pane(line)) {
         return MarkerBlock::Resume(pane_id);
@@ -36,8 +36,13 @@ pub(super) fn marker_pane(line: &[u8]) -> Option<String> {
     marker_pane_with_prefix(line, b"__ADE_CAPTURE__:")
 }
 
-fn input_marker_pane(line: &[u8]) -> Option<String> {
-    marker_pane_with_prefix(line, b"__ADE_INPUT__:")
+fn input_marker(line: &[u8]) -> Option<(u64, String)> {
+    let value = std::str::from_utf8(line.strip_prefix(b"__ADE_INPUT__:")?).ok()?;
+    let (input_id, digits) = value.split_once(':')?;
+    let input_id = input_id.parse().ok()?;
+    let pane = format!("%{digits}");
+    validate_tmux_id(&pane, '%').ok()?;
+    Some((input_id, pane))
 }
 
 fn resume_marker_pane(line: &[u8]) -> Option<String> {
@@ -104,26 +109,30 @@ mod tests {
         // through strftime and drops `%0` as an unknown conversion; the reader
         // has to put it back or every marked block goes uncorrelated.
         assert_eq!(
-            input_marker_pane(b"__ADE_INPUT__:12").as_deref(),
-            Some("%12")
+            input_marker(b"__ADE_INPUT__:41:12"),
+            Some((41, "%12".into()))
         );
         assert_eq!(marker_pane(b"__ADE_CAPTURE__:12").as_deref(), Some("%12"));
         assert_eq!(
             resume_marker_pane(b"__ADE_RESUME__:12").as_deref(),
             Some("%12")
         );
-        assert_eq!(input_marker_pane(b"__ADE_INPUT__:%12"), None);
-        assert_eq!(input_marker_pane(b"__ADE_INPUT__:"), None);
-        assert_eq!(input_marker_pane(b"__ADE_INPUT__:1a"), None);
-        assert_eq!(input_marker_pane(b"__ADE_CAPTURE__:12"), None);
+        assert_eq!(input_marker(b"__ADE_INPUT__:41:%12"), None);
+        assert_eq!(input_marker(b"__ADE_INPUT__:"), None);
+        assert_eq!(input_marker(b"__ADE_INPUT__:x:12"), None);
+        assert_eq!(input_marker(b"__ADE_INPUT__:41:1a"), None);
+        assert_eq!(input_marker(b"__ADE_CAPTURE__:12"), None);
         assert_eq!(marker_pane(b"__ADE_CAPTURE__:%12"), None);
     }
 
     #[test]
     fn each_marker_shape_classifies_to_the_block_that_follows_it() {
         assert_eq!(
-            classify_marker_block(None, &[b"__ADE_INPUT__:2".to_vec()]),
-            MarkerBlock::Input("%2".into())
+            classify_marker_block(None, &[b"__ADE_INPUT__:9:2".to_vec()]),
+            MarkerBlock::Input {
+                input_id: 9,
+                pane_id: "%2".into()
+            }
         );
         assert_eq!(
             classify_marker_block(None, &[b"__ADE_CAPTURE__:2".to_vec()]),

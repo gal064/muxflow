@@ -139,15 +139,15 @@ fn provisional_admission_latches_cancellation_but_rolls_back_when_publication_fa
     entered_rx
         .recv_timeout(std::time::Duration::from_secs(3))
         .unwrap();
-    assert_eq!(
-        cancel_transfer(&id).unwrap(),
-        CancelResponse {
-            disposition: CancelDisposition::CancelRequested,
-            phase: TransferPhase::Queued,
-        }
-    );
+    let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+    let cancel_id = id.clone();
+    let cancel =
+        std::thread::spawn(move || cancelled_tx.send(cancel_transfer(&cancel_id)).unwrap());
+    assert!(cancelled_rx.try_recv().is_err());
     release_tx.send(()).unwrap();
     assert!(enqueue.join().unwrap().is_err());
+    assert!(cancelled_rx.recv().unwrap().is_err());
+    cancel.join().unwrap();
     assert!(cancel_transfer(&id).is_err());
     assert_eq!(acceptance_engine_counts(), (0, 0));
 }
@@ -178,16 +178,22 @@ fn cancellation_after_queued_is_observable_latches_until_admission_commits() {
     published_rx
         .recv_timeout(std::time::Duration::from_secs(3))
         .unwrap();
+    let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+    let cancel_id = id.clone();
+    let cancel =
+        std::thread::spawn(move || cancelled_tx.send(cancel_transfer(&cancel_id)).unwrap());
+    assert!(cancelled_rx.try_recv().is_err());
+    assert!(terminal_rx.try_recv().is_err());
+    release_tx.send(()).unwrap();
+    enqueue.join().unwrap().unwrap();
     assert_eq!(
-        cancel_transfer(&id).unwrap(),
+        cancelled_rx.recv().unwrap().unwrap(),
         CancelResponse {
             disposition: CancelDisposition::CancelRequested,
             phase: TransferPhase::Queued,
         }
     );
-    assert!(terminal_rx.try_recv().is_err());
-    release_tx.send(()).unwrap();
-    enqueue.join().unwrap().unwrap();
+    cancel.join().unwrap();
     let (result, reason) = terminal_rx
         .recv_timeout(std::time::Duration::from_secs(3))
         .unwrap();

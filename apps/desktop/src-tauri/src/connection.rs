@@ -254,7 +254,7 @@ impl TerminalClient {
         &self,
         columns: u16,
         rows: u16,
-    ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(), String>>, String> {
         if self.stop_signal.is_stopped() {
             return Err("terminal bridge is stopped; resize was not queued".into());
         }
@@ -573,13 +573,13 @@ pub async fn resize_terminal_client(
 ) -> Result<(), String> {
     let client = get_client(&clients, &client_id)?;
     let receiver = client.enqueue_resize(columns, rows)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        receiver
-            .recv_timeout(REQUEST_TIMEOUT + REQUEST_TIMEOUT + Duration::from_secs(1))
-            .map_err(|_| "terminal resize acknowledgement timed out".to_owned())?
-    })
+    tokio::time::timeout(
+        REQUEST_TIMEOUT + REQUEST_TIMEOUT + Duration::from_secs(1),
+        receiver,
+    )
     .await
-    .map_err(|error| format!("terminal resize task failed: {error}"))?
+    .map_err(|_| "terminal resize acknowledgement timed out".to_owned())?
+    .map_err(|_| "terminal resize acknowledgement channel closed".to_owned())?
 }
 
 /// Async: a tab switch reveals and hides panes, and doing that on the WebView's
