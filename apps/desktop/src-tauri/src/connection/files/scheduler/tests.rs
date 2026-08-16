@@ -716,22 +716,26 @@ fn silent_commit_and_silent_reconciliation_are_bounded_and_release_worker() {
             }
 
             let mut reconciliation = BulkChild(silent_peer());
-            let mut reconciliation_input = reconciliation.0.stdin.take().unwrap();
-            let reconciliation_binding =
-                worker_cancellation.bind_authoritative_process(reconciliation.0.id())?;
-            let reconciliation_deadline =
-                worker_cancellation.arm_deadline(std::time::Duration::from_millis(100));
-            reconciliation_input.write_all(b"r").unwrap();
-            let reconciliation_status =
-                reconciliation.0.wait().map_err(|error| error.to_string())?;
-            reconciliation_deadline.complete();
-            drop(reconciliation_binding);
+            let binding_error = match worker_cancellation
+                .bind_authoritative_process(reconciliation.0.id())
+            {
+                Err(error) => error,
+                Ok(_) => {
+                    return Err("expired reconciliation helper unexpectedly remained bound".into());
+                }
+            };
+            let reconciliation_status = reconciliation
+                .0
+                .wait()
+                .map_err(|error| error.to_string())?;
             if reconciliation_status.success() {
                 return Err("silent reconciliation peer was not terminated by its deadline".into());
             }
             Err(TransferFailure::unknown(
                 TransferFailureKind::Timeout,
-                "commit and ownership reconciliation timed out; owned artifacts retained",
+                format!(
+                    "commit and ownership reconciliation timed out; owned artifacts retained: {binding_error}"
+                ),
             ))
         },
         move |result, reason| finished_tx.send((result, reason)).unwrap(),
@@ -781,6 +785,37 @@ fn silent_commit_and_silent_reconciliation_are_bounded_and_release_worker() {
             .unwrap()
             .is_ok()
     );
+}
+
+#[test]
+fn authoritative_helper_bound_after_deadline_is_killed_immediately() {
+    use std::process::{Command, Stdio};
+
+    let cancellation = Arc::new(CancelState::new());
+    cancellation.prepare_finalize().unwrap();
+    // Preserve the user's first reason while proving that the independent
+    // transport deadline remains effective after the commit boundary.
+    cancellation.cancel();
+    let deadline = cancellation.arm_deadline(std::time::Duration::from_millis(30));
+    std::thread::sleep(std::time::Duration::from_millis(80));
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("exec sleep 30")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let error = match cancellation.bind_authoritative_process(child.id()) {
+        Err(error) => error,
+        Ok(_) => panic!("late authoritative helper unexpectedly remained bound"),
+    };
+    assert!(error.contains("expired"), "{error}");
+    let status = child.wait().unwrap();
+    deadline.complete();
+    assert!(!status.success());
+    assert_eq!(cancellation.reason(), CancelReason::User);
+    assert!(cancellation.transport_termination_requested());
 }
 
 #[test]

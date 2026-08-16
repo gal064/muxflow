@@ -703,15 +703,20 @@ describe("shell navigation hook cross-kind ownership", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("drops a create follow-up reserved before a newer manual app-tab intent", async () => {
-    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => ({ topologyGeneration: 2 }));
+  it("lets a newer app-tab intent supersede an in-flight create destination", async () => {
+    const created = deferred<TmuxActionResult | undefined>();
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind === "createWindow") return created.promise;
+      return { topologyGeneration: 3 };
+    });
     const harness = mountNavigation({ performAction });
     const renderer = await harness.renderer();
-    const reserved = harness.navigation.beginDeferredNavigation();
+    act(() => harness.navigation.createWindow("$1"));
     act(() => harness.navigation.selectAppTab("$1", "@0", "notes"));
-    act(() => harness.navigation.commitCreatedWindow("$1", "@9", 2, reserved));
+    created.resolve({ sessionId: "$1", windowId: "@9", topologyGeneration: 2 });
     await flush();
-    expect(performAction).not.toHaveBeenCalled();
+    await flush();
+    expect(performAction.mock.calls[0]?.[0]).toEqual({ kind: "createWindow", sessionId: "$1" });
     expect(harness.setAppTab).toHaveBeenLastCalledWith("$1", "notes");
     await act(async () => renderer.unmount());
   });

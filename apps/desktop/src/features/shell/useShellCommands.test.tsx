@@ -71,8 +71,8 @@ async function run(
   const setConfirmation = vi.fn<Options["setConfirmation"]>();
   const setStatus = vi.fn<Options["setStatus"]>();
   const closeAppTab = vi.fn<Options["closeAppTab"]>();
-  const commitCreatedSession = vi.fn<Options["commitCreatedSession"]>();
-  const commitCreatedWindow = vi.fn<Options["commitCreatedWindow"]>();
+  const createSession = vi.fn<Options["createSession"]>();
+  const createWindow = vi.fn<Options["createWindow"]>();
   const setAppState = vi.fn();
   const setTextPrompt = vi.fn<Options["setTextPrompt"]>();
   let call: ((commandId: CommandId, target?: CommandTarget) => Promise<void>) | undefined;
@@ -81,11 +81,11 @@ async function run(
     const { runCommand } = useShellCommands({
       activePane: pane, activeSession: session, activeWindow: window,
       appState: { ...defaultAppState, appTabs: [appTab] },
-      beginDeferredNavigation: () => 7, canMutate: true, closeAppTab, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
+      canMutate: true, closeAppTab, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
       currentHostProfileId: "local", focusDirection: vi.fn(), generation: 8,
       hostScope, isHostScopeCurrent: () => true, jumpToUnreadAgent: vi.fn(),
-      requestHostProfileDelete: vi.fn(), rowCommands: [], commitCreatedSession,
-      commitCreatedWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
+      requestHostProfileDelete: vi.fn(), rowCommands: [], createSession,
+      createWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
       selectWorkspaceByIndex: vi.fn(), serverIdentity: "server-a", setAppState,
       setConfirmation, setPaletteOpen: vi.fn(), setSettingsOpen: vi.fn(),
       setShortcutEditorOpen: vi.fn(), setStatus, setTextPrompt,
@@ -101,14 +101,12 @@ async function run(
   await act(async () => { renderer = create(<Harness />); });
   await act(async () => { await call!(commandId, target); });
   await act(async () => renderer.unmount());
-  return { closeAppTab, performAction, setConfirmation, setStatus, commitCreatedSession, commitCreatedWindow, setAppState, setTextPrompt };
+  return { closeAppTab, performAction, setConfirmation, setStatus, createSession, createWindow, setAppState, setTextPrompt };
 }
 
 describe("shell commands", () => {
   it("creates and commits a workspace with one tmux request", async () => {
-    const result = await run("session.new", {
-      result: { sessionId: "$9", topologyGeneration: 9 },
-    });
+    const result = await run("session.new");
     const prompt = result.setTextPrompt.mock.calls[0]?.[0];
     expect(prompt).not.toBeTypeOf("function");
     if (prompt && typeof prompt !== "function") {
@@ -117,9 +115,8 @@ describe("shell commands", () => {
         await Promise.resolve();
       });
     }
-    expect(result.performAction).toHaveBeenCalledTimes(1);
-    expect(result.performAction).toHaveBeenCalledWith({ kind: "createSession", name: "work" });
-    expect(result.commitCreatedSession).toHaveBeenCalledWith("$9", 9, 7);
+    expect(result.performAction).not.toHaveBeenCalled();
+    expect(result.createSession).toHaveBeenCalledWith("work");
   });
 
   it.each([
@@ -165,20 +162,9 @@ describe("shell commands", () => {
   });
 
   it("selects the terminal tab ⌘T just created", async () => {
-    const { performAction, commitCreatedWindow } = await run("window.new", {
-      result: { windowId: "@9", topologyGeneration: 9 },
-    });
-    expect(performAction).toHaveBeenCalledWith({ kind: "createWindow", sessionId: "$1" });
-    expect(commitCreatedWindow).toHaveBeenCalledWith("$1", "@9", 9, 7);
-    expect(performAction).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not steal focus into a window created on a host the user has left", async () => {
-    const { commitCreatedWindow } = await run("window.new", {
-      isHostScopeCurrent: () => false,
-      result: { windowId: "@9", topologyGeneration: 9 },
-    });
-    expect(commitCreatedWindow).not.toHaveBeenCalled();
+    const { performAction, createWindow } = await run("window.new");
+    expect(createWindow).toHaveBeenCalledWith("$1");
+    expect(performAction).not.toHaveBeenCalled();
   });
 
   it("closes a terminal tab and a pane without a dialog, still telling the host it was confirmed", async () => {

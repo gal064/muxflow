@@ -63,6 +63,11 @@ impl BulkBinding {
 
 pub(super) struct CancelState {
     requested: AtomicBool,
+    /// A deadline or stale binding must terminate transport even when the
+    /// authoritative helper has not been spawned yet. This is deliberately
+    /// separate from `reason`: a user cancellation may have won that first
+    /// writer while a later deadline still has to kill a silent helper.
+    transport_termination_requested: AtomicBool,
     process_id: AtomicU32,
     reason: AtomicU8,
     phase: AtomicU8,
@@ -104,6 +109,7 @@ impl CancelState {
     pub(super) fn new() -> Self {
         Self {
             requested: AtomicBool::new(false),
+            transport_termination_requested: AtomicBool::new(false),
             process_id: AtomicU32::new(0),
             reason: AtomicU8::new(0),
             phase: AtomicU8::new(0),
@@ -132,6 +138,8 @@ impl CancelState {
         if !kill || (self.phase() == TransferPhase::Verifying && reason == CancelReason::User) {
             return;
         }
+        self.transport_termination_requested
+            .store(true, Ordering::Release);
         let process_id = self.process_id.swap(0, Ordering::AcqRel);
         if process_id != 0 {
             // SAFETY: process_id is the exact child returned by spawn_bulk_bridge.
@@ -140,6 +148,9 @@ impl CancelState {
     }
     pub(super) fn cancel_stale_binding(&self) {
         self.cancel_for(CancelReason::StaleBinding, true);
+    }
+    pub(super) fn transport_termination_requested(&self) -> bool {
+        self.transport_termination_requested.load(Ordering::Acquire)
     }
     pub(super) fn reason(&self) -> CancelReason {
         match self.reason.load(Ordering::Acquire) {
@@ -186,6 +197,22 @@ impl CancelState {
             return Err("authoritative reconciliation is only valid while verifying".into());
         }
         self.process_id.store(process_id, Ordering::Release);
+        // The deadline may have fired before this PID existed. Publishing the
+        // PID before rechecking closes both sides of the race: a concurrent
+        // canceller swaps and kills it, while an earlier canceller leaves the
+        // persistent latch for this binder to observe and kill exactly once.
+        if self.transport_termination_requested() {
+            if self
+                .process_id
+                .compare_exchange(process_id, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                // SAFETY: process_id is the exact child returned by
+                // spawn_bulk_bridge for this binding.
+                unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
+            }
+            return Err("authoritative reconciliation expired while its helper started".into());
+        }
         Ok(ProcessBinding(self))
     }
 
@@ -241,6 +268,14 @@ impl CancelState {
             cancellation.cancel_for(CancelReason::Timeout, true);
         });
         DeadlineGuard(state)
+    }
+
+    #[cfg(test)]
+    pub(super) fn arm_test_deadline(
+        self: &Arc<Self>,
+        timeout: std::time::Duration,
+    ) -> DeadlineGuard {
+        self.arm_deadline(timeout)
     }
 }
 

@@ -67,13 +67,15 @@ export type TerminalEventAdmission =
   | { kind: "gap"; expected: number; received: number };
 
 /**
- * Routes pane events without retaining an unbounded all-host history. A Map's
- * insertion order is the hidden-pane LRU; subscribing consumes that entry.
+ * Routes pane events without retaining an unbounded all-host history. Active
+ * consumers own a separate registry; a Map's insertion order is exclusively
+ * the dormant-pane LRU, so output delivery never scans mounted panes.
  */
 export class TerminalEventHub {
   readonly #epochListeners = new Set<EpochListener>();
   readonly #paneListeners = new Map<string, PaneListener>();
-  readonly #paneStates = new Map<string, PaneStreamState>();
+  readonly #activePaneStates = new Map<string, PaneStreamState>();
+  readonly #dormantPaneStates = new Map<string, PaneStreamState>();
   readonly #evictedSeedDebt = new Map<string, true>();
   readonly #maxPaneBytes: number;
   readonly #maxTotalBytes: number;
@@ -122,7 +124,7 @@ export class TerminalEventHub {
     }
     if (event.kind === "generationEpoch") return admission;
     if (event.kind !== "seed" && event.kind !== "output" && event.kind !== "paneResource" && event.kind !== "seedDiagnostic") return admission;
-    const wasTracked = this.#paneStates.has(event.paneId);
+    const wasTracked = this.#activePaneStates.has(event.paneId) || this.#dormantPaneStates.has(event.paneId);
     const hadEvictedSeedDebt = this.#evictedSeedDebt.delete(event.paneId);
     const requiresConservativeSeed = !wasTracked && this.#unknownPanesRequireSeed;
     const pane = this.#touchPane(event.paneId);
@@ -213,8 +215,10 @@ export class TerminalEventHub {
     if (this.#paneListeners.has(paneId)) {
       throw new Error(`terminal pane ${paneId} already has an active consumer`);
     }
+    const pane = this.#dormantPaneStates.get(paneId) ?? createPaneStreamState();
+    this.#dormantPaneStates.delete(paneId);
+    this.#activePaneStates.set(paneId, pane);
     this.#paneListeners.set(paneId, listener);
-    const pane = this.#touchPane(paneId);
     const backlog = pane?.backlog;
     if (backlog) {
       this.#deleteBacklog(pane);
@@ -225,14 +229,23 @@ export class TerminalEventHub {
       this.measurements?.add("terminal.hub.backlogDequeues", backlog.entries.length);
     }
     return () => {
-      if (this.#paneListeners.get(paneId) === listener) this.#paneListeners.delete(paneId);
+      if (this.#paneListeners.get(paneId) !== listener) return;
+      this.#paneListeners.delete(paneId);
+      const active = this.#activePaneStates.get(paneId);
+      this.#activePaneStates.delete(paneId);
+      if (active) this.#retainDormantPane(paneId, active);
     };
   }
 
   clearPane(paneId: string): void {
-    const pane = this.#paneStates.get(paneId);
+    const pane = this.#activePaneStates.get(paneId) ?? this.#dormantPaneStates.get(paneId);
     if (pane) this.#deleteBacklog(pane);
-    this.#paneStates.delete(paneId);
+    this.#dormantPaneStates.delete(paneId);
+    if (this.#paneListeners.has(paneId)) {
+      this.#activePaneStates.set(paneId, createPaneStreamState());
+    } else {
+      this.#activePaneStates.delete(paneId);
+    }
     this.#evictedSeedDebt.delete(paneId);
   }
 
@@ -258,7 +271,7 @@ export class TerminalEventHub {
     if (this.#generationEpoch === undefined) return undefined;
     return {
       terminalEpoch: this.#generationEpoch,
-      outputGeneration: this.#paneStates.get(paneId)?.renderedGeneration ?? 0,
+      outputGeneration: (this.#activePaneStates.get(paneId) ?? this.#dormantPaneStates.get(paneId))?.renderedGeneration ?? 0,
     };
   }
 
@@ -279,11 +292,15 @@ export class TerminalEventHub {
   }
 
   get trackedPaneCount(): number {
-    return this.#paneStates.size;
+    return this.#activePaneStates.size + this.#dormantPaneStates.size;
   }
 
   #clearPaneState(): void {
-    this.#paneStates.clear();
+    this.#dormantPaneStates.clear();
+    this.#activePaneStates.clear();
+    for (const paneId of this.#paneListeners.keys()) {
+      this.#activePaneStates.set(paneId, createPaneStreamState());
+    }
     this.#backlogBytes = 0;
     this.#backlogCount = 0;
     this.#evictedSeedDebt.clear();
@@ -388,7 +405,7 @@ export class TerminalEventHub {
   }
 
   #requireSeed(paneId: string, reason: string): void {
-    const pane = this.#paneStates.get(paneId) ?? this.#touchPane(paneId);
+    const pane = this.#activePaneStates.get(paneId) ?? this.#dormantPaneStates.get(paneId) ?? this.#touchPane(paneId);
     const alreadyAwaiting = pane.awaitingSeed;
     pane.awaitingSeed = true;
     this.#deleteBacklog(pane);
@@ -396,20 +413,27 @@ export class TerminalEventHub {
   }
 
   #touchPane(paneId: string): PaneStreamState {
-    const pane = this.#paneStates.get(paneId) ?? createPaneStreamState();
-    this.#paneStates.delete(paneId);
-    this.#paneStates.set(paneId, pane);
-    while (this.#paneStates.size > this.#maxTrackedPanes) {
-      let oldest: string | undefined;
-      for (const candidate of this.#paneStates.keys()) {
-        if (candidate !== paneId && !this.#paneListeners.has(candidate)) {
-          oldest = candidate;
-          break;
-        }
-      }
+    const active = this.#activePaneStates.get(paneId);
+    if (active) return active;
+    const pane = this.#dormantPaneStates.get(paneId) ?? createPaneStreamState();
+    this.#dormantPaneStates.delete(paneId);
+    this.#dormantPaneStates.set(paneId, pane);
+    this.#enforceDormantPaneLimit();
+    return pane;
+  }
+
+  #retainDormantPane(paneId: string, pane: PaneStreamState): void {
+    this.#dormantPaneStates.delete(paneId);
+    this.#dormantPaneStates.set(paneId, pane);
+    this.#enforceDormantPaneLimit();
+  }
+
+  #enforceDormantPaneLimit(): void {
+    while (this.#dormantPaneStates.size > this.#maxTrackedPanes) {
+      const oldest = this.#dormantPaneStates.keys().next().value as string | undefined;
       if (oldest === undefined) break;
-      const evicted = this.#paneStates.get(oldest);
-      this.#paneStates.delete(oldest);
+      const evicted = this.#dormantPaneStates.get(oldest);
+      this.#dormantPaneStates.delete(oldest);
       if (evicted) {
         const alreadyAwaiting = evicted.awaitingSeed;
         this.#deleteBacklog(evicted);
@@ -417,11 +441,10 @@ export class TerminalEventHub {
         if (!alreadyAwaiting) this.onSeedRequired?.(oldest, "frontend pane metadata LRU capacity was exceeded");
       }
     }
-    return pane;
   }
 
   #oldestBufferedPane(): string | undefined {
-    for (const [paneId, pane] of this.#paneStates) {
+    for (const [paneId, pane] of this.#dormantPaneStates) {
       if (pane.backlog) return paneId;
     }
     return undefined;

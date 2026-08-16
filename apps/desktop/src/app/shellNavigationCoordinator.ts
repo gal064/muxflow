@@ -14,7 +14,7 @@ export type NavigationOutcome =
 
 interface NavigationIntent {
   commit(): void;
-  destination: ShellDestination;
+  destination: ShellDestination | { kind: "operation"; key: string };
   request(predecessor: NavigationOutcome | undefined, isCurrent: () => boolean): Promise<NavigationOutcome>;
 }
 
@@ -64,12 +64,13 @@ interface PendingIntent extends NavigationIntent {
   settle(outcome: NavigationOutcome): void;
 }
 
-function destinationKey(destination: ShellDestination): string {
+function destinationKey(destination: NavigationIntent["destination"]): string {
   switch (destination.kind) {
     case "session": return `session:${destination.sessionId}`;
     case "window": return `window:${destination.sessionId}:${destination.windowId}`;
     case "pane": return `pane:${destination.sessionId}:${destination.windowId}:${destination.paneId}`;
     case "appTab": return `app:${destination.sessionId}:${destination.appTabId}`;
+    case "operation": return `operation:${destination.key}`;
   }
 }
 

@@ -8,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use super::identity_component;
+
 pub(super) struct LocalOwnedDirectory {
     file: File,
     path: PathBuf,
@@ -145,7 +147,7 @@ impl LocalOwnedDirectory {
                     regular: stat.st_mode & libc::S_IFMT == libc::S_IFREG,
                     symlink: stat.st_mode & libc::S_IFMT == libc::S_IFLNK,
                     uid: stat.st_uid,
-                    device: u64::try_from(stat.st_dev).unwrap_or(u64::MAX),
+                    device: identity_component(stat.st_dev, "staging device").unwrap_or(u64::MAX),
                     inode: stat.st_ino,
                 },
             ));

@@ -374,15 +374,37 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.publish(seed(1, 5, "%1"));
     hub.markRendered("%1", 5, 7);
 
-    // Churn a dormant pane past the one-slot metadata limit. The subscribed
-    // pane remains authoritative; the dormant newcomer is the eviction target.
+    // Churn dormant panes past their independent one-slot metadata limit. The
+    // subscribed pane remains authoritative without participating in the LRU.
     hub.publish(output(2, 1, "%2"));
     hub.publish(output(3, 1, "%3"));
     hub.publish(output(4, 4, "%1"));
 
     expect(received).toEqual([seed(1, 5, "%1")]);
     expect(hub.visibilityCheckpoint("%1")).toEqual({ terminalEpoch: 7, outputGeneration: 5 });
-    expect(requests).toEqual(["%2", "%3"]);
+    expect(requests).toEqual(["%2"]);
+  });
+
+  it("keeps mounted panes outside the dormant LRU capacity and hot path", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub(
+      (paneId) => requests.push(paneId),
+      { maxTrackedPanes: 1, maxBufferedPanes: 1 },
+    );
+    hub.publish({ kind: "generationEpoch", epoch: 9, sequence: 0 });
+    const received = new Map<string, number>();
+    for (let index = 1; index <= 32; index += 1) {
+      const paneId = `%${index}`;
+      hub.subscribePane(paneId, () => received.set(paneId, (received.get(paneId) ?? 0) + 1));
+      hub.publish(seed(index, index, paneId));
+      hub.markRendered(paneId, index, 9);
+    }
+
+    expect(requests).toEqual([]);
+    expect(received.size).toBe(32);
+    expect(hub.trackedPaneCount).toBe(32);
+    expect(hub.visibilityCheckpoint("%1")).toEqual({ terminalEpoch: 9, outputGeneration: 1 });
+    expect(hub.visibilityCheckpoint("%32")).toEqual({ terminalEpoch: 9, outputGeneration: 32 });
   });
 
   it("requires a seed conservatively after the bounded debt tombstone ages out", () => {

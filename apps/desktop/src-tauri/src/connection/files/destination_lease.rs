@@ -17,6 +17,7 @@ use uuid::Uuid;
 use super::{
     download_manager::DownloadCollisionPolicy,
     download_naming::{directory_name_max, first_free_name},
+    identity_component,
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -410,38 +411,6 @@ fn filesystem_matches_any_with_fault(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assert_fault_leaves_no_residue(fault: SemanticProbeFault) {
-        let root = std::env::temp_dir().join(format!("ade-dl-probe-fault-{}", Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
-        let directory = File::open(&root).unwrap();
-        let reserved = vec![b"report.pdf".to_vec()];
-        let error = filesystem_matches_any_with_fault(
-            &directory,
-            &reserved,
-            OsStr::new("REPORT.PDF"),
-            Some(fault),
-        )
-        .unwrap_err();
-        assert!(error.contains("injected failure"));
-        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
-        std::fs::remove_dir(root).unwrap();
-    }
-
-    #[test]
-    fn directory_setup_failure_cleans_exact_probe_inode() {
-        assert_fault_leaves_no_residue(SemanticProbeFault::AfterDirectoryCreate);
-    }
-
-    #[test]
-    fn leaf_setup_failure_cleans_leaf_and_exact_probe_inode() {
-        assert_fault_leaves_no_residue(SemanticProbeFault::AfterLeafCreate);
-    }
-}
-
 fn with_cleanup_error(primary: String, cleanup: Result<(), String>) -> String {
     match cleanup {
         Ok(()) => primary,
@@ -474,15 +443,6 @@ fn metadata_identity_at(directory: &File, name: &CString) -> Result<Option<FileI
         device: identity_component(stat.st_dev, "device")?,
         inode: identity_component(stat.st_ino, "inode")?,
     }))
-}
-
-fn identity_component<T>(value: T, label: &str) -> Result<u64, String>
-where
-    T: TryInto<u64>,
-{
-    value
-        .try_into()
-        .map_err(|_| format!("invalid destination {label} identity"))
 }
 
 /// Chooses and exclusively leases the exact final leaf. Filesystem inspection
@@ -554,5 +514,37 @@ pub(super) fn reserve_name(
             overwrite_identity: None,
             lease,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_fault_leaves_no_residue(fault: SemanticProbeFault) {
+        let root = std::env::temp_dir().join(format!("ade-dl-probe-fault-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let directory = File::open(&root).unwrap();
+        let reserved = vec![b"report.pdf".to_vec()];
+        let error = filesystem_matches_any_with_fault(
+            &directory,
+            &reserved,
+            OsStr::new("REPORT.PDF"),
+            Some(fault),
+        )
+        .unwrap_err();
+        assert!(error.contains("injected failure"));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn directory_setup_failure_cleans_exact_probe_inode() {
+        assert_fault_leaves_no_residue(SemanticProbeFault::AfterDirectoryCreate);
+    }
+
+    #[test]
+    fn leaf_setup_failure_cleans_leaf_and_exact_probe_inode() {
+        assert_fault_leaves_no_residue(SemanticProbeFault::AfterLeafCreate);
     }
 }

@@ -160,7 +160,7 @@ fn run_bridge_once(
     }
     let mut reader = BufReader::new(stdout);
     let terminal_epoch = ((Uuid::new_v4().as_u128() as u64) & ((1_u64 << 53) - 1)).max(1);
-    let (hello, initial, negotiated_writable) =
+    let (hello, initial, negotiated_writable, mut sequence) =
         handshake_and_snapshot(&mut stdin, &mut reader, terminal_epoch)
             .map_err(|error| with_bridge_diagnostic(error, diagnostic.as_ref()))?;
     if client.stop_signal.is_stopped() {
@@ -180,7 +180,6 @@ fn run_bridge_once(
             epoch: terminal_epoch,
         },
     );
-    let mut sequence = 0;
     let mut terminal_scope_value = None;
     if let Some(initial) = initial {
         sequence = initial.accepted_sequence;
@@ -295,14 +294,21 @@ fn run_bridge_once(
         return Err("terminal bridge stopped before becoming ready".into());
     }
     *connected_at = Some(Instant::now());
-    read_protocol_stream(reader, sequence, &hello.server_identity, channel, client)
+    read_protocol_stream(
+        reader,
+        sequence,
+        &hello.server_identity,
+        channel,
+        client,
+        negotiated_writable,
+    )
 }
 
 pub(super) fn handshake_and_snapshot(
     stdin: &mut impl Write,
     reader: &mut impl Read,
     connection_epoch: u64,
-) -> Result<(v1::ServerHello, Option<InitialHostState>, bool), String> {
+) -> Result<(v1::ServerHello, Option<InitialHostState>, bool, u64), String> {
     write_frame_sync(
         stdin,
         &envelope(
@@ -342,18 +348,20 @@ pub(super) fn handshake_and_snapshot(
     let Some(Payload::ServerHello(hello)) = hello_frame.payload else {
         return Err("host did not return ServerHello".into());
     };
-    if !handshake_allows_snapshot(envelope_major, &hello) {
-        return Ok((hello, None, false));
-    }
-
     let (response, buffered) = read_until_response_with_value(reader, 2)?;
+    let accepted_sequence = response.accepted_sequence;
+    if !handshake_allows_snapshot(envelope_major, &hello) {
+        // Subscribe was intentionally pipelined, so its correlated response
+        // must always be consumed. Keep its sequence watermark while
+        // quarantining the incompatible snapshot and every later event.
+        return Ok((hello, None, false, accepted_sequence));
+    }
     if !response.ok {
         return Err(format!(
             "{}: {}",
             response.error_code, response.display_message
         ));
     }
-    let accepted_sequence = response.accepted_sequence;
     let snapshot = response
         .snapshot
         .ok_or("subscribe response omitted snapshot")?;
@@ -382,6 +390,7 @@ pub(super) fn handshake_and_snapshot(
                 .collect(),
         }),
         true,
+        accepted_sequence,
     ))
 }
 
@@ -436,6 +445,7 @@ fn read_protocol_stream(
     server_identity: &str,
     channel: &TerminalEventChannel,
     client: &Arc<TerminalClient>,
+    admit_events: bool,
 ) -> Result<(), String> {
     let mut resync_request_id = None;
     loop {
@@ -482,6 +492,13 @@ fn read_protocol_stream(
             // Events received after a detected gap are superseded by the
             // authoritative resync barrier. Correlated responses above must
             // still be delivered to callers.
+            continue;
+        }
+        if !admit_events {
+            // An incompatible helper remains connected only to surface its
+            // read-only state. Its subscription was already established by
+            // the pipelined request, so drain and quarantine those events
+            // without applying payloads from a protocol we cannot trust.
             continue;
         }
         match process_event(frame, sequence, server_identity, channel, client) {
@@ -916,11 +933,53 @@ mod tests {
             checked: false,
         };
 
-        let (_, initial, compatible) = handshake_and_snapshot(&mut writer, &mut reader, 9).unwrap();
+        let (_, initial, compatible, accepted_sequence) =
+            handshake_and_snapshot(&mut writer, &mut reader, 9).unwrap();
 
         assert!(reader.checked);
         assert!(compatible);
+        assert_eq!(accepted_sequence, 4);
         assert_eq!(initial.unwrap().accepted_sequence, 4);
+    }
+
+    #[test]
+    fn incompatible_handshake_drains_pipelined_subscribe_and_keeps_its_watermark() {
+        let hello = envelope(
+            1,
+            0,
+            Payload::ServerHello(v1::ServerHello {
+                read_only: true,
+                server_identity: "server-old".into(),
+                ..Default::default()
+            }),
+        );
+        let response = envelope(
+            2,
+            0,
+            Payload::Response(v1::Response {
+                ok: true,
+                accepted_sequence: 17,
+                snapshot: Some(v1::Snapshot {
+                    server_identity: "server-old".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        );
+        let later_event = event(18);
+        let mut bytes = tmux_agent_protocol::encode_frame(&hello).unwrap();
+        bytes.extend(tmux_agent_protocol::encode_frame(&response).unwrap());
+        bytes.extend(tmux_agent_protocol::encode_frame(&later_event).unwrap());
+        let mut reader = Cursor::new(bytes);
+        let mut writer = Vec::new();
+
+        let (_, initial, writable, accepted_sequence) =
+            handshake_and_snapshot(&mut writer, &mut reader, 9).unwrap();
+
+        assert!(!writable);
+        assert!(initial.is_none());
+        assert_eq!(accepted_sequence, 17);
+        assert_eq!(read_frame_sync(&mut reader).unwrap(), Some(later_event));
     }
 
     #[test]
