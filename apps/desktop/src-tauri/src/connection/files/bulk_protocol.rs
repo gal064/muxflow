@@ -36,7 +36,7 @@ impl std::fmt::Display for RequestFailure {
 ///
 /// Keeping framing and control-session binding here ensures downloads and
 /// editor I/O cannot accidentally diverge in handshake or response handling.
-pub(super) struct BulkProtocolClient<'a> {
+pub(crate) struct BulkProtocolClient<'a> {
     stdin: &'a mut ChildStdin,
     reader: &'a mut BufReader<ChildStdout>,
     /// Borrowed, not owned: a decoder can be holding bytes read past the last
@@ -193,7 +193,7 @@ impl<'a> BulkProtocolClient<'a> {
         self.request_classified_inner(request, None, Some(deadline))
     }
 
-    pub(super) fn request_cancellable(
+    pub(crate) fn request_cancellable(
         &mut self,
         request: v1::Request,
         cancellation: &CancelState,

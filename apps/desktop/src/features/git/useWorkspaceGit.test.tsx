@@ -2,6 +2,7 @@
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
+import { GitRepositoryStore } from "./repositoryStore";
 import type { GitStatusSnapshot, GitWorkspaceClient, GitWorkspaceEvent } from "./types";
 import { useWorkspaceGit } from "./useWorkspaceGit";
 
@@ -18,8 +19,9 @@ describe("useWorkspaceGit", () => {
       diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
       subscribe: vi.fn((next) => { listener = next; return () => undefined; }),
     };
+    const store = new GitRepositoryStore(client);
     let current: ReturnType<typeof useWorkspaceGit> | undefined;
-    function Harness({ active }: { active: ActiveRoot }) { current = useWorkspaceGit(client, scope, active); return null; }
+    function Harness({ active }: { active: ActiveRoot }) { current = useWorkspaceGit(store, scope, active); return null; }
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness active={rootOne} />); await Promise.resolve(); });
     await act(async () => { renderer.update(<Harness active={rootTwo} />); await Promise.resolve(); });
@@ -49,8 +51,9 @@ describe("useWorkspaceGit", () => {
       diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
       subscribe: vi.fn((next) => { listeners.push(next); return () => undefined; }),
     };
+    const store = new GitRepositoryStore(client);
     let current: ReturnType<typeof useWorkspaceGit> | undefined;
-    function Harness({ activeScope }: { activeScope: FileWorkspaceScope }) { current = useWorkspaceGit(client, activeScope, active); return null; }
+    function Harness({ activeScope }: { activeScope: FileWorkspaceScope }) { current = useWorkspaceGit(store, activeScope, active); return null; }
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness activeScope={scope} />); await Promise.resolve(); });
     await act(async () => { renderer.update(<Harness activeScope={{ ...scope, terminalEpoch: 2 }} />); await Promise.resolve(); });
@@ -74,17 +77,44 @@ describe("useWorkspaceGit", () => {
       status: vi.fn(), watch: vi.fn(() => watch), diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
       subscribe: vi.fn((next) => { listener = next; return () => undefined; }),
     };
+    const store = new GitRepositoryStore(client);
     let current: ReturnType<typeof useWorkspaceGit> | undefined;
-    function Harness() { current = useWorkspaceGit(client, scope, active); return null; }
+    function Harness() { current = useWorkspaceGit(store, scope, active); return null; }
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
     await act(async () => {
-      listener?.({ kind: "status", rootToken: "same", watchId: "watch", status: snapshot("same", "2") });
       resolveWatch({ watchId: "watch", rootToken: "same", connectionEpoch: 1, status: snapshot("same", "1"), release: vi.fn() });
       await Promise.resolve();
+      listener?.({ kind: "status", rootToken: "same", watchId: "watch", status: snapshot("same", "2") });
     });
     expect(current?.status?.generation).toBe("2");
     await act(async () => { renderer.unmount(); });
+  });
+
+  it("opens a panel beside a live diff tab with no request of its own", async () => {
+    const active = root("shared", "/shared");
+    const watch = vi.fn(async () => ({ watchId: "watch", rootToken: active.token, connectionEpoch: scope.terminalEpoch, status: snapshot("shared", "1"), release: vi.fn() }));
+    const status = vi.fn();
+    const client: GitWorkspaceClient = {
+      status, watch, diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
+      subscribe: vi.fn(() => () => undefined),
+    };
+    const store = new GitRepositoryStore(client);
+    // A diff tab already observes this repository.
+    const diffTab = store.acquire(scope, active);
+    await act(async () => { await Promise.resolve(); });
+    expect(watch).toHaveBeenCalledTimes(1);
+
+    let current: ReturnType<typeof useWorkspaceGit> | undefined;
+    function Harness() { current = useWorkspaceGit(store, scope, active); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    expect(current?.status?.generation).toBe("1");
+    expect(current?.loading).toBe(false);
+    expect(watch).toHaveBeenCalledTimes(1);
+    expect(status).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+    diffTab.release();
   });
 });
 

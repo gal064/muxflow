@@ -4,6 +4,7 @@ import type { FileWorkspaceScope } from "../features/files/types";
 import { useWorkspaceFiles } from "../features/files/useWorkspaceFiles";
 import type { TauriGitWorkspaceClient } from "../features/git/api";
 import { useWorkspaceGit } from "../features/git/useWorkspaceGit";
+import type { GitRepositoryStore } from "../features/git/repositoryStore";
 import { appTabsForWorkspace, workspaceUiRecord } from "../features/shell/model";
 import type { PersistedAppState } from "../features/shell/types";
 import type { TerminalTransferConnectionScope } from "../features/terminal/terminalTransfers";
@@ -19,6 +20,7 @@ type WorkspaceDomainArguments = {
   fileClient: TauriFileWorkspaceClient;
   generation: number;
   gitClient: TauriGitWorkspaceClient;
+  gitRepositories: GitRepositoryStore;
   serverIdentity?: string;
   snapshot: TmuxSnapshot;
   terminalEpoch: number;
@@ -28,7 +30,7 @@ type WorkspaceDomainArguments = {
 export function useWorkspaceDomainController(arguments_: WorkspaceDomainArguments) {
   const {
     activeSessionId, activeWindowId, appState, clientId, connection,
-    currentHostProfileId, fileClient, generation, gitClient, serverIdentity,
+    currentHostProfileId, fileClient, generation, gitClient, gitRepositories, serverIdentity,
     snapshot, terminalEpoch, windows,
   } = arguments_;
   const panes = useMemo(
@@ -55,7 +57,7 @@ export function useWorkspaceDomainController(arguments_: WorkspaceDomainArgument
     mode: connection.mode,
   } : undefined, [clientId, connection.mode, currentHostProfileId, serverIdentity, terminalEpoch]);
   const workspaceFiles = useWorkspaceFiles(fileClient, fileScope);
-  const workspaceGit = useWorkspaceGit(gitClient, fileScope, workspaceFiles.root);
+  const workspaceGit = useWorkspaceGit(gitRepositories, fileScope, workspaceFiles.root);
   const workspaceAppTabs = useMemo(
     () => appTabsForWorkspace(appState, currentHostProfileId, serverIdentity, activeSession),
     [activeSession, appState, currentHostProfileId, serverIdentity],

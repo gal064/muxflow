@@ -28,6 +28,7 @@ import { reconcileDownloadStatus, type ActiveDownloadStatus } from "../features/
 import { ignoredPathsFromStatus } from "../features/files/ignoredPaths";
 import type { FileEntry } from "../features/files/types";
 import { TauriGitWorkspaceClient } from "../features/git/api";
+import { GitRepositoryStore } from "../features/git/repositoryStore";
 import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
 import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
@@ -93,6 +94,8 @@ export function App() {
   const agentClient = useMemo(() => new TauriAgentClient(), []);
   const fileClient = useMemo(() => new TauriFileWorkspaceClient(), []);
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
+  // One shared observation per repository, for the sidebar and every diff tab.
+  const gitRepositories = useMemo(() => new GitRepositoryStore(gitClient), [gitClient]);
   const connectionController = useAppConnectionController({ agentClient, fileClient, gitClient, setStatus });
   const {
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
@@ -165,7 +168,7 @@ export function App() {
     terminalTransferScope, workspaceAppTabs, workspaceFiles, workspaceGit,
   } = useWorkspaceDomainController({
     activeSessionId, activeWindowId, appState, clientId, connection,
-    currentHostProfileId, fileClient, generation: hostState.generation, gitClient,
+    currentHostProfileId, fileClient, generation: hostState.generation, gitClient, gitRepositories,
     serverIdentity: hostState.serverIdentity, snapshot, terminalEpoch, windows,
   });
   const selectedAppTabRef = useRef(selectedAppTab);
@@ -706,6 +709,7 @@ export function App() {
             activeRoot={workspaceFiles.root}
             canWrite={hostState.canMutate}
             client={gitClient}
+            repositories={gitRepositories}
             onMessage={setStatus}
             onStatus={(next) => { if (workspaceFiles.root?.path === next.repository.worktreeRoot) workspaceGit.accept(next); }}
             scope={fileScope}

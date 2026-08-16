@@ -41,6 +41,9 @@ use writer::ControlWriterHandle;
 pub(crate) mod agent;
 pub(crate) mod files;
 pub(crate) mod git;
+pub(crate) mod git_content;
+mod git_operations;
+use git_operations::GitOperations;
 pub(crate) mod tmux_action;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -90,7 +93,7 @@ use transport::{
     ssh_profile_control_socket,
 };
 
-struct TerminalClient {
+pub(crate) struct TerminalClient {
     bulk_scope: Uuid,
     writer: Mutex<Option<ControlWriterHandle>>,
     child: Mutex<Option<Child>>,
@@ -99,7 +102,7 @@ struct TerminalClient {
     read_only: AtomicBool,
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
-    git_operations: Mutex<HashMap<String, u64>>,
+    git_operations: Mutex<GitOperations>,
     input_queue: Mutex<ClientInputQueue>,
     resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
@@ -130,7 +133,7 @@ impl TerminalClient {
             read_only: AtomicBool::new(false),
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
-            git_operations: Mutex::new(HashMap::new()),
+            git_operations: Mutex::new(GitOperations::default()),
             input_queue: Mutex::new(ClientInputQueue::default()),
             resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
@@ -358,13 +361,15 @@ impl TerminalClient {
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = mpsc::channel();
         self.pending.lock().unwrap().insert(request_id, sender);
-        if let Some(operation_id) = &git_operation_id {
-            let mut operations = self.git_operations.lock().unwrap();
-            if operations.contains_key(operation_id) {
-                self.pending.lock().unwrap().remove(&request_id);
-                return Err("duplicate Git operation ID".into());
-            }
-            operations.insert(operation_id.clone(), request_id);
+        if let Some(operation_id) = &git_operation_id
+            && let Err(error) = self
+                .git_operations
+                .lock()
+                .unwrap()
+                .register(operation_id, request_id)
+        {
+            self.pending.lock().unwrap().remove(&request_id);
+            return Err(error);
         }
         let write_result = self
             .writer
@@ -378,7 +383,7 @@ impl TerminalClient {
         if let Err(error) = write_result {
             self.pending.lock().unwrap().remove(&request_id);
             if let Some(operation_id) = &git_operation_id {
-                self.git_operations.lock().unwrap().remove(operation_id);
+                self.git_operations.lock().unwrap().complete(operation_id);
             }
             return Err(error);
         }
@@ -411,19 +416,19 @@ impl TerminalClient {
             }
         };
         if let Some(operation_id) = &git_operation_id {
-            self.git_operations.lock().unwrap().remove(operation_id);
+            self.git_operations.lock().unwrap().complete(operation_id);
         }
         result
     }
 
     fn cancel_git(&self, operation_id: &str) -> Result<(), String> {
-        let request_id = self
-            .git_operations
-            .lock()
-            .unwrap()
-            .get(operation_id)
-            .copied()
-            .ok_or_else(|| "unknown or completed Git operation ID".to_owned())?;
+        // A renderer that aborts immediately can reach here before the request
+        // it is cancelling has been written. Recording a tombstone makes that
+        // abort take effect when the request registers, instead of letting the
+        // host run a Git pipeline nobody is waiting for.
+        let Some(request_id) = self.git_operations.lock().unwrap().cancel(operation_id) else {
+            return Ok(());
+        };
         let writer = self
             .writer
             .lock()
@@ -443,7 +448,7 @@ impl TerminalClient {
     }
 
     fn fail_pending(&self, message: &str) {
-        self.git_operations.lock().unwrap().clear();
+        self.git_operations.lock().unwrap().reset();
         for (_, sender) in self.pending.lock().unwrap().drain() {
             let _ = sender.send(Err(message.into()));
         }

@@ -11,10 +11,8 @@ mod publication;
 use admission::{Admission, AdmissionOutcome};
 #[cfg(test)]
 pub(super) use lifecycle::BulkChild;
-pub(super) use lifecycle::{
-    BulkBinding, CancelDisposition, CancelReason, CancelResponse, CancelState, DeadlineGuard,
-    TransferPhase,
-};
+pub(crate) use lifecycle::{BulkBinding, CancelState, DeadlineGuard};
+pub(super) use lifecycle::{CancelDisposition, CancelReason, CancelResponse, TransferPhase};
 pub(super) use publication::QueuedPublication;
 use publication::{PublicationActor, publication_actor};
 
