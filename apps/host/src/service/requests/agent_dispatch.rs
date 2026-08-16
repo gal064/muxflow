@@ -8,7 +8,7 @@ use tmux_agent_protocol::v1;
 
 use super::super::{
     SequencerControl,
-    agents::{AgentRuntime, HookManager, publish},
+    agents::{AgentRuntime, HookIngestFailure, HookManager, publish},
     filesystem::validate_root_token,
     snapshot::{server_identity, tmux_command},
 };
@@ -70,14 +70,37 @@ fn handle_inner(
             publish(event);
         }
         v1::Operation::AgentHookIngest => {
-            let event = runtime.ingest_hook(
+            match runtime.ingest_live_hook(
                 request
                     .hook_event
                     .as_ref()
                     .context("normalized hook envelope is required")?,
-            )?;
-            response.agent = event.agent.clone();
-            publish(event);
+            ) {
+                Ok(event) => {
+                    response.agent = event.agent.clone();
+                    publish(event);
+                }
+                Err(HookIngestFailure::Duplicate) => {
+                    return Ok(response_error(
+                        "hook_ingest_discarded",
+                        "hook event was already handled",
+                    ));
+                }
+                Err(HookIngestFailure::Permanent(error)) => {
+                    drop(error);
+                    return Ok(response_error(
+                        "hook_ingest_discarded",
+                        "hook event was permanently rejected",
+                    ));
+                }
+                Err(HookIngestFailure::Retryable(error)) => {
+                    drop(error);
+                    return Ok(response_error(
+                        "hook_ingest_retryable",
+                        "hook event could not be persisted; retry later",
+                    ));
+                }
+            }
         }
         v1::Operation::AgentHookManagement => {
             let adapter = v1::AgentAdapterKind::try_from(request.adapter).unwrap_or_default();

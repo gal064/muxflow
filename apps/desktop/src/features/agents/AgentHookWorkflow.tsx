@@ -49,6 +49,11 @@ export interface AgentWorkflow {
   resume(agent: AgentRecord, placement: AgentPlacement): void;
   rename(agent: AgentRecord, displayName: string): void;
   reviewHooks(adapter: AgentAdapterId, action: "install" | "uninstall"): void;
+  /** Opens a review that was already loaded for the captured setup host. */
+  openHookReview(
+    review: Awaited<ReturnType<AgentRuntime["reviewHooks"]>>,
+    host: { profileId: string; identity: string },
+  ): void;
   /** The dialog to render; null when no review is open. */
   dialog: ReactElement | null;
 }
@@ -118,6 +123,14 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
     }).catch((cause) => onStatus(String(cause)));
   }, [host, onStatus, runtime, setReview]);
 
+  const openHookReview = useCallback((diff: Awaited<ReturnType<AgentRuntime["reviewHooks"]>>, reviewedHost: {
+    profileId: string;
+    identity: string;
+  }) => {
+    setError(undefined);
+    setReview({ diff, host: reviewedHost });
+  }, [setReview]);
+
   const dialog = review ? <HookReviewDialog
     applying={applying}
     error={error}
@@ -134,5 +147,5 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
     }}
   /> : null;
 
-  return { launch, resume, rename, reviewHooks, dialog };
+  return { launch, resume, rename, reviewHooks, openHookReview, dialog };
 }

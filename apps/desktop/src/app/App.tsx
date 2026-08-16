@@ -380,7 +380,7 @@ export function App() {
     hostLabel,
     hostProfileId: currentHostProfileId,
     onStatus: setStatus,
-    openReview: (adapter) => agentWorkflow.reviewHooks(adapter, "install"),
+    openReview: agentWorkflow.openHookReview,
     recordDecision: recordHostSetupDecision,
     refreshWiring: agentRuntime.refreshSnapshot,
     reviewHooks: agentRuntime.reviewHooks,
