@@ -126,38 +126,31 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 return;
             }
             let barrier_sender = event_tx.clone();
+            let selection_terminal = Arc::clone(terminal);
+            let selection_events = event_tx.clone();
+            let selection_overflowed = Arc::clone(overflowed);
             let result = tokio::task::spawn_blocking(move || {
                 tmux_actions::execute(
                     action,
                     known_generation,
                     fresh_snapshot,
                     fresh_identity,
-                    || topology_epoch_barrier(&barrier_sender),
+                    move |kind, result| {
+                        prepare_action_session_selection(
+                            kind,
+                            result,
+                            &selection_terminal,
+                            &selection_events,
+                            &selection_overflowed,
+                        )?;
+                        Ok(topology_epoch_barrier(&barrier_sender))
+                    },
                 )
             })
             .await;
             match result {
                 Ok(Ok(mut outcome)) => {
-                    let selection_required = match select_and_refresh_action_outcome(
-                        action_kind,
-                        terminal,
-                        event_tx,
-                        overflowed,
-                        &mut outcome,
-                    )
-                    .await
-                    {
-                        Ok(required) => required,
-                        Err(error) => {
-                            send_response(
-                                control_tx,
-                                request_id,
-                                response_error("outcome_unknown", &error),
-                            )
-                            .await;
-                            return;
-                        }
-                    };
+                    let selection_required = action_selects_session(action_kind);
                     let next_generation = generation.fetch_add(1, Ordering::AcqRel) + 1;
                     outcome.result.topology_generation = next_generation;
                     *topology_baseline.lock().unwrap() =
@@ -230,75 +223,54 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
     }
 }
 
-/// Completes the control-client side of actions whose contract includes
-/// selection, then replaces their pre-selection topology with the geometry
-/// that will be published and acknowledged.
-async fn select_and_refresh_action_outcome(
-    action_kind: v1::TmuxActionKind,
-    terminal: &Arc<Mutex<TerminalClients>>,
-    event_tx: &mpsc::Sender<SequencerControl>,
-    overflowed: &Arc<AtomicBool>,
-    outcome: &mut tmux_actions::ActionOutcome,
-) -> Result<bool, String> {
-    let required = prepare_action_session_selection(
-        action_kind,
-        || {
-            // A create can return a session that did not exist at the precheck.
-            // This is internal reconciliation only: the ordered topology
-            // acknowledgement remains withheld until selection and refresh.
-            reconcile_terminal_clients(terminal, &outcome.snapshot, event_tx, overflowed);
-        },
-        || {
-            terminal
-                .lock()
-                .unwrap()
-                .select_session(&outcome.result.session_id)
-                .map_err(|error| {
-                    format!(
-                        "outcome unknown: action remained authoritative but client session selection failed: {error}"
-                    )
-                })
-        },
-    )?;
-    if !required {
-        return Ok(false);
-    }
-
-    // Selecting the app's control client can resize panes. The caller still
-    // holds the topology lock, so this one discovery is the atomic action +
-    // selection result rather than a later competing reconciliation.
-    let (snapshot, identity) = tokio::task::spawn_blocking(tmux_actions::discover_before_action)
-        .await
-        .map_err(|error| {
-            format!("outcome unknown: client selection reconciliation task failed: {error}")
-        })?
-        .map_err(|error| {
-            format!(
-                "outcome unknown: client selection landed but its topology could not be reconciled: {error}"
-            )
-        })?;
-    outcome.snapshot = snapshot;
-    outcome.server_identity = identity;
-    Ok(true)
-}
-
-fn prepare_action_session_selection(
-    action_kind: v1::TmuxActionKind,
-    attach_authoritative_snapshot: impl FnOnce(),
-    select_session: impl FnOnce() -> Result<(), String>,
-) -> Result<bool, String> {
-    let required = matches!(
+fn action_selects_session(action_kind: v1::TmuxActionKind) -> bool {
+    matches!(
         action_kind,
         v1::TmuxActionKind::SelectSession
             | v1::TmuxActionKind::CreateSession
             | v1::TmuxActionKind::CreateWindow
-    );
-    if !required {
-        return Ok(false);
+    )
+}
+
+/// Completes selection before the action's one authoritative postcheck.
+/// Create-session already returned its exact pane identity, so its control
+/// client can be attached without a discovery solely for attachment.
+fn prepare_action_session_selection(
+    action_kind: v1::TmuxActionKind,
+    result: &v1::TmuxActionResult,
+    terminal: &Arc<Mutex<TerminalClients>>,
+    event_tx: &mpsc::Sender<SequencerControl>,
+    overflowed: &Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    if !action_selects_session(action_kind) {
+        return Ok(());
     }
-    attach_authoritative_snapshot();
-    select_session()?;
-    Ok(true)
+    let mut terminal = terminal.lock().unwrap();
+    if action_kind == v1::TmuxActionKind::CreateSession {
+        if result.session_id.is_empty() || result.pane_id.is_empty() {
+            anyhow::bail!("outcome unknown: create-session returned no attachable pane identity");
+        }
+        terminal
+            .attach(
+                &result.session_id,
+                std::slice::from_ref(&result.pane_id),
+                true,
+                event_tx.clone(),
+                Arc::clone(overflowed),
+            )
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "outcome unknown: created session control client could not attach/select: {error}"
+                )
+            })?;
+    } else {
+        terminal.select_session(&result.session_id).map_err(|error| {
+            anyhow::anyhow!(
+                "outcome unknown: action remained authoritative but client session selection failed: {error}"
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn topology_epoch_barrier(sender: &mpsc::Sender<SequencerControl>) -> Option<u64> {
@@ -340,25 +312,11 @@ mod tests {
     }
 
     #[test]
-    fn create_actions_attach_the_authoritative_session_before_selecting_it() {
-        for action_kind in [
-            v1::TmuxActionKind::CreateSession,
-            v1::TmuxActionKind::CreateWindow,
-        ] {
-            let order = std::cell::RefCell::new(Vec::new());
-            assert!(
-                prepare_action_session_selection(
-                    action_kind,
-                    || order.borrow_mut().push("attach"),
-                    || {
-                        order.borrow_mut().push("select");
-                        Ok(())
-                    },
-                )
-                .unwrap()
-            );
-            assert_eq!(*order.borrow(), ["attach", "select"]);
-        }
+    fn only_session_owning_actions_select_before_the_postcheck() {
+        assert!(action_selects_session(v1::TmuxActionKind::SelectSession));
+        assert!(action_selects_session(v1::TmuxActionKind::CreateSession));
+        assert!(action_selects_session(v1::TmuxActionKind::CreateWindow));
+        assert!(!action_selects_session(v1::TmuxActionKind::SelectWindow));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

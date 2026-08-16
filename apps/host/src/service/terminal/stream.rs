@@ -103,6 +103,16 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
     let mut parser = ControlParser::default();
     let mut state = StreamState::new(&pane_ids, flow);
     let mut buffer = [0_u8; 64 * 1024];
+    let mut pending_output = PendingOutput::default();
+    let runtime = || StreamRuntime {
+        writer: &writer,
+        sender: &event_tx,
+        overflowed: &overflowed,
+        resources: &resources,
+        terminal_generation: &terminal_generation,
+        stopped: &stopped,
+        input_completion: &input_completion,
+    };
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
@@ -113,23 +123,32 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                 parser.push(&buffer[..length]);
                 while let Some(record) = parser.next_record() {
                     match record {
-                        Ok(record) => state.handle(
-                            record,
-                            StreamRuntime {
-                                writer: &writer,
-                                sender: &event_tx,
-                                overflowed: &overflowed,
-                                resources: &resources,
-                                terminal_generation: &terminal_generation,
-                                stopped: &stopped,
-                                input_completion: &input_completion,
-                            },
-                        ),
+                        Ok(ControlRecord::Output { pane_id, data }) => {
+                            for output in pending_output.push(pane_id, data) {
+                                state.handle(output, runtime());
+                            }
+                        }
+                        Ok(record) => {
+                            if let Some(output) = pending_output.take() {
+                                state.handle(output, runtime());
+                            }
+                            state.handle(record, runtime());
+                        }
                         Err(error) => {
+                            if let Some(output) = pending_output.take() {
+                                state.handle(output, runtime());
+                            }
                             emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
                             state.resnapshot_all(&writer, &input_completion);
                         }
                     }
+                }
+                // Bound first-byte latency without giving each `%output` line
+                // its own protobuf record. One read is at most 64 KiB, so a
+                // sustained pane flood becomes roughly one sequencer entry per
+                // read while a lone keystroke echo is still published now.
+                if let Some(output) = pending_output.take() {
+                    state.handle(output, runtime());
                 }
             }
             Err(_) => break,
@@ -149,6 +168,55 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
             &overflowed,
             "tmux session control stream ended",
         );
+    }
+}
+
+const MAX_COALESCED_OUTPUT_BYTES: usize = 64 * 1024;
+
+#[derive(Default)]
+struct PendingOutput {
+    pane_id: Option<String>,
+    data: Vec<u8>,
+}
+
+impl PendingOutput {
+    /// Adds one parsed output record and returns the previous batch when pane
+    /// identity or the byte bound requires an ordering boundary.
+    fn push(&mut self, pane_id: String, data: Vec<u8>) -> Vec<ControlRecord> {
+        let mut ready = Vec::new();
+        if self
+            .pane_id
+            .as_deref()
+            .is_some_and(|current| current != pane_id)
+            && let Some(output) = self.take()
+        {
+            ready.push(output);
+        }
+        for chunk in data.chunks(MAX_COALESCED_OUTPUT_BYTES) {
+            if self.pane_id.is_none() {
+                self.pane_id = Some(pane_id.clone());
+            }
+            let remaining = MAX_COALESCED_OUTPUT_BYTES - self.data.len();
+            let (head, tail) = chunk.split_at(remaining.min(chunk.len()));
+            self.data.extend_from_slice(head);
+            if self.data.len() == MAX_COALESCED_OUTPUT_BYTES
+                && (!tail.is_empty() || chunk.as_ptr_range().end != data.as_ptr_range().end)
+                && let Some(output) = self.take()
+            {
+                ready.push(output);
+                self.pane_id = Some(pane_id.clone());
+            }
+            self.data.extend_from_slice(tail);
+        }
+        ready
+    }
+
+    fn take(&mut self) -> Option<ControlRecord> {
+        let pane_id = self.pane_id.take()?;
+        Some(ControlRecord::Output {
+            pane_id,
+            data: std::mem::take(&mut self.data),
+        })
     }
 }
 
@@ -304,20 +372,25 @@ impl StreamState {
                         }
                     }
                     _ => {
-                        let _ = with_active_resources(resources, stopped, |resources| {
-                            let disposition =
-                                resources.record_output(&pane_id, &data, output_generation);
-                            if disposition == OutputDisposition::Visible {
-                                emit_terminal(
-                                    sender,
-                                    overflowed,
-                                    v1::EventKind::TerminalOutput,
-                                    pane_id,
-                                    data,
-                                    output_generation,
-                                );
-                            }
-                        });
+                        let visible = with_active_resources(resources, stopped, |resources| {
+                            resources.record_output(&pane_id, &data, output_generation)
+                                == OutputDisposition::Visible
+                        })
+                        .unwrap_or(false);
+                        // Never wait for the connection writer while owning
+                        // pane-resource state. A slow desktop must not prevent
+                        // visibility changes, recovery, or cleanup from taking
+                        // that same lock.
+                        if visible {
+                            emit_terminal(
+                                sender,
+                                overflowed,
+                                v1::EventKind::TerminalOutput,
+                                pane_id,
+                                data,
+                                output_generation,
+                            );
+                        }
                     }
                 }
             }

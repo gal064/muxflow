@@ -155,12 +155,10 @@ fn action_discovery_probes_identity_only_for_failed_create_session_discovery() {
 fn action_epoch_barrier_precedes_the_single_post_discovery() {
     let order = std::cell::RefCell::new(Vec::new());
     let expected = topology();
-    let (snapshot, identity, epoch) = finalize_action(
+    order.borrow_mut().push("action-epoch-barrier");
+    let epoch = Some(7);
+    let (snapshot, identity) = finalize_action(
         v1::TmuxActionKind::CreateWindow,
-        || {
-            order.borrow_mut().push("action-epoch-barrier");
-            Some(7)
-        },
         || {
             order.borrow_mut().push("post-discovery");
             Ok((expected.clone(), "tmux:live".into()))
@@ -178,9 +176,9 @@ fn action_epoch_barrier_precedes_the_single_post_discovery() {
 fn failed_epoch_capture_still_runs_authoritative_post_discovery() {
     let discovered = std::cell::Cell::new(false);
     let expected = topology();
-    let (snapshot, identity, epoch) = finalize_action(
+    let epoch: Option<u64> = None;
+    let (snapshot, identity) = finalize_action(
         v1::TmuxActionKind::CreateWindow,
-        || None,
         || {
             discovered.set(true);
             Ok((expected.clone(), "tmux:live".into()))
@@ -198,7 +196,6 @@ fn failed_epoch_capture_still_runs_authoritative_post_discovery() {
 fn post_command_discovery_failures_are_outcome_unknown() {
     let discovery_error = finalize_action(
         v1::TmuxActionKind::CreateWindow,
-        || Some(7),
         || Err(anyhow::anyhow!("tmux unavailable")),
         || "tmux:still-running".into(),
     )

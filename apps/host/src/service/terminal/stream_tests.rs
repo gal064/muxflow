@@ -1,6 +1,45 @@
 use super::*;
 use crate::service::terminal::FlowControl;
 
+#[test]
+fn adjacent_output_is_coalesced_without_crossing_panes_or_the_byte_bound() {
+    let mut pending = PendingOutput::default();
+    assert!(pending.push("%1".into(), vec![1; 32 * 1024]).is_empty());
+    assert!(pending.push("%1".into(), vec![2; 32 * 1024]).is_empty());
+    let flushed = pending.push("%1".into(), vec![3]).pop().unwrap();
+    let ControlRecord::Output { pane_id, data } = flushed else {
+        panic!("expected coalesced output");
+    };
+    assert_eq!(pane_id, "%1");
+    assert_eq!(data.len(), 64 * 1024);
+    assert_eq!(data[0], 1);
+    assert_eq!(data[32 * 1024], 2);
+
+    let flushed = pending.push("%2".into(), vec![4]).pop().unwrap();
+    let ControlRecord::Output { pane_id, data } = flushed else {
+        panic!("expected pane-bound output");
+    };
+    assert_eq!(pane_id, "%1");
+    assert_eq!(data, [3]);
+    let ControlRecord::Output { pane_id, data } = pending.take().unwrap() else {
+        panic!("expected final pane output");
+    };
+    assert_eq!(pane_id, "%2");
+    assert_eq!(data, [4]);
+
+    let mut pending = PendingOutput::default();
+    let flushed = pending.push("%3".into(), vec![5; MAX_COALESCED_OUTPUT_BYTES + 1]);
+    assert_eq!(flushed.len(), 1);
+    let ControlRecord::Output { data, .. } = &flushed[0] else {
+        panic!("expected bounded oversized output");
+    };
+    assert_eq!(data.len(), MAX_COALESCED_OUTPUT_BYTES);
+    let ControlRecord::Output { data, .. } = pending.take().unwrap() else {
+        panic!("expected oversized output remainder");
+    };
+    assert_eq!(data, [5]);
+}
+
 /// Everything `handle` writes to, so a test can read back both what the
 /// desktop was told and what tmux was asked for.
 struct Harness {
