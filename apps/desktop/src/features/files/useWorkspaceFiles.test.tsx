@@ -186,15 +186,143 @@ describe("useWorkspaceFiles", () => {
 
     // An event the host could not map is the one case that owes a recovery
     // list, and a burst of them still owes exactly one.
+    // A recovery is scheduled from an effect, so the burst is delivered first
+    // and the coalescing window is run out afterwards.
     await act(async () => {
       for (let index = 0; index < 5; index += 1) {
         fixture.publish({ kind: "fileChanged", rootToken: "root", path: `/repo/opaque-${index}`, generation: "1" });
       }
-      await clock.settle();
     });
-    expect(fixture.listed).toEqual(["/repo"]);
+    await act(async () => { await clock.settle(); });
+    expect(fixture.listed, "a burst of unmappable events owed more than one list").toEqual(["/repo"]);
     await act(async () => { renderer.unmount(); });
     vi.useRealTimers();
+  });
+
+  it("keeps every row when precise events for one directory arrive in one batch", async () => {
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // One synchronous batch, which is exactly how the host frame reader
+    // delivers a burst. Each patch must build on the one before it.
+    await act(async () => {
+      for (const name of ["b", "c", "d"]) {
+        fixture.publish({
+          kind: "fileChanged", rootToken: "root", path: `/repo/${name}.txt`,
+          generation: "2", entry: entry(`/repo/${name}.txt`, { generation: "2" }),
+        });
+      }
+    });
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.name))
+      .toEqual(["a.txt", "b.txt", "c.txt", "d.txt"]);
+    expect(fixture.listed, "a batch of patchable events still owed a list").toEqual([]);
+
+    // And a batched delete of one of them takes exactly that row.
+    await act(async () => {
+      fixture.publish({ kind: "fileDeleted", rootToken: "root", path: "/repo/b.txt" });
+      fixture.publish({ kind: "fileDeleted", rootToken: "root", path: "/repo/c.txt" });
+    });
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.name)).toEqual(["a.txt", "d.txt"]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("re-arms its watches when the same path becomes a different root", async () => {
+    vi.useFakeTimers();
+    let active: ActiveRoot = { token: "first", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const acquired: Array<{ token: string; directory: string }> = [];
+    const released: string[] = [];
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async () => active),
+      listDirectory: vi.fn(async (_scope, root, directory) => listing(root.token, directory, [entry(`${directory}/after`)])),
+      acquireDirectoryWatch: vi.fn(async (_scope, root, directory) => {
+        acquired.push({ token: root.token, directory });
+        return {
+          snapshot: listing(root.token, directory, [entry(`${directory}/${root.token}`)]),
+          release: () => released.push(`${root.token}:${directory}`),
+        };
+      }),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async () => () => undefined),
+    };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.name)).toEqual(["first"]);
+
+    // The directory was replaced in place: same path, new capability. The old
+    // watches must be released and new ones armed, or the tree keeps a listing
+    // for a root that no longer exists and never hears about it again.
+    active = { token: "second", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "2" };
+    await act(async () => { await vi.advanceTimersByTimeAsync(ACTIVE_ROOT_BACKSTOP_MS + 10); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.root?.token).toBe("second");
+    expect(released).toEqual(["first:/repo"]);
+    expect(acquired).toEqual([{ token: "first", directory: "/repo" }, { token: "second", directory: "/repo" }]);
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.name)).toEqual(["second"]);
+    await act(async () => { renderer.unmount(); });
+    vi.useRealTimers();
+  });
+
+  it("lists a directory whose watch the host refused, instead of showing nothing", async () => {
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const listDirectory = vi.fn(async (_scope: FileWorkspaceScope, active: ActiveRoot, directory: string) =>
+      listing(active.token, directory, [entry(`${directory}/listed`)]));
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async () => root),
+      listDirectory,
+      acquireDirectoryWatch: vi.fn(async () => { throw new Error("watch limit of 128 directories reached"); }),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async () => () => undefined),
+    };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    for (let turn = 0; turn < 4; turn += 1) await act(async () => { await Promise.resolve(); });
+    expect(listDirectory).toHaveBeenCalledWith(expect.anything(), root, "/repo", expect.anything());
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.name)).toEqual(["listed"]);
+    expect(current?.error, "a directory the app could still list must not show an error").toBeUndefined();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("restores the pages an authoritative first-page rescan would have deleted", async () => {
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const page = (names: string[], complete: boolean) => ({
+      ...listing("root", "/repo", names.map((name) => entry(`/repo/${name}`))),
+      complete,
+      ...(complete ? {} : { nextPageToken: "next" }),
+    });
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async () => root),
+      listDirectory: vi.fn(async () => page(["c", "d"], true)),
+      acquireDirectoryWatch: vi.fn(async () => ({ snapshot: page(["a", "b"], false), release: () => undefined })),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async (_scope, next) => { published = next; return () => undefined; }),
+    };
+    let published: ((event: WorkspaceEvent) => void) | undefined;
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    // The user pages to the end.
+    await act(async () => { current?.loadMore("/repo"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.listings.get("/repo")?.entries).toHaveLength(4);
+
+    // An authoritative rescan carries only page one. The rows the user can see
+    // must not disappear because the host answered a smaller question.
+    await act(async () => { published?.({ kind: "directorySnapshot", rootToken: "root", listing: page(["a", "b"], false) }); });
+    for (let turn = 0; turn < 4; turn += 1) await act(async () => { await Promise.resolve(); });
+    expect(current?.listings.get("/repo")?.entries).toHaveLength(4);
+    await act(async () => { renderer.unmount(); });
   });
 
   it("replaces a listing from an authoritative rescan without asking for it again", async () => {

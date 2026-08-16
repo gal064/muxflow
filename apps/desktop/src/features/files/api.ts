@@ -96,14 +96,17 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       recordPerfHighWater("explorer.activeWatches", this.#watches.size);
       try { await ready; } catch (error) { if (this.#watches.get(key) === record) this.#watches.delete(key); throw error; }
     }
-    const snapshot = await record.ready;
+    const held = record;
+    const snapshot = await held.ready;
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       recordPerfCounter("explorer.watchReleases");
+      // The exact record this lease belongs to. A key alone would let a lease
+      // from a retired watch decrement the refcount of the one that replaced it.
       const current = this.#watches.get(key);
-      if (!current) return;
+      if (current !== held) return;
       current.count -= 1;
       if (current.count > 0) return;
       this.#watches.delete(key);

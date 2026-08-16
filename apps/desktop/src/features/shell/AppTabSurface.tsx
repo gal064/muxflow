@@ -32,6 +32,17 @@ interface Props {
 
 const FILE_EDITOR_PAINT = ["workflow.file.editorPaint"] as const;
 
+/**
+ * Where the initial read and its parent watch bootstrap have got to.
+ *
+ * They are started together and either can land first, so the surface has to
+ * remember which — and having remembered, must decide exactly once.
+ */
+type Reconciliation =
+  | { kind: "pending" }
+  | { kind: "bootstrap"; generation: string | undefined }
+  | { kind: "done" };
+
 export function AppTabSurface(props: Props) {
   const [opened, setOpened] = useState<OpenFile>();
   const [view, setView] = useState<AutosaveView>();
@@ -46,11 +57,17 @@ export function AppTabSurface(props: Props) {
   const mountedEditorSurface = useRef<number | undefined>(undefined);
   const readyEditorSurface = useRef<number | undefined>(undefined);
   const pendingPaint = useRef<PaintTicket | undefined>(undefined);
-  /** Generation of the content this surface is currently showing. */
-  const openedGeneration = useRef<string | undefined>(undefined);
-  /** The parent watch's answer, when it arrived before the read completed. */
-  const bootstrapGeneration = useRef<string | undefined>(undefined);
-  const bootstrapReconciled = useRef(false);
+  /**
+   * Generation of a non-text file on screen.
+   *
+   * Text has a better answer — the autosave controller owns the generation and
+   * advances it on every save — and a second copy of that fact went stale the
+   * moment anything was written, which made every self-save echo look like an
+   * external change and cost a full remote re-open.
+   */
+  const shownBinaryGeneration = useRef<string | undefined>(undefined);
+  /** Where the read and its parent watch have got to relative to each other. */
+  const reconciliation = useRef<Reconciliation>({ kind: "pending" });
   const bindEditorHost = useCallback((node: HTMLDivElement | null) => {
     if (node) {
       mountedEditorSurface.current ??= ++editorSurfaceSequence.current;
@@ -115,14 +132,18 @@ export function AppTabSurface(props: Props) {
         return;
       }
       setOpened(next);
-      openedGeneration.current = next.file.generation;
+      shownBinaryGeneration.current = next.kind === "binary" ? next.file.generation : undefined;
       // The watch bootstrap can land while the first read is still in flight.
       // It is the authoritative directory listing, so a difference here is a
-      // real change rather than a reason to re-read on principle.
-      if (!bootstrapReconciled.current && bootstrapGeneration.current !== undefined) {
-        const bootstrap = bootstrapGeneration.current;
-        bootstrapReconciled.current = true;
-        if (bootstrap !== next.file.generation) void load(options);
+      // real change rather than a reason to re-read on principle. The reload is
+      // queued rather than called: re-entering `load` from inside its own
+      // success path invalidates the serial of the invocation still running.
+      const arrived = reconciliation.current;
+      if (arrived.kind === "bootstrap") {
+        reconciliation.current = { kind: "done" };
+        if (arrived.generation !== undefined && arrived.generation !== next.file.generation) {
+          queueMicrotask(() => { if (serial === loadSerial.current) void load(options); });
+        }
       }
       const interactionPaint = paint ?? pendingPaint.current;
       if (next.kind === "text"
@@ -172,7 +193,7 @@ export function AppTabSurface(props: Props) {
     surfaceLifecycle.current += 1;
     setLoading(true);
     setOpened(undefined);
-    openedGeneration.current = undefined;
+    shownBinaryGeneration.current = undefined;
     setView(undefined);
     controller.current?.dispose();
     controller.current = undefined;
@@ -227,6 +248,33 @@ export function AppTabSurface(props: Props) {
   useEffect(() => { if (view?.state === "dirty") props.onDirty(); }, [view?.state]);
 
   /**
+   * The generation of the content on screen.
+   *
+   * Derived, never mirrored: for text the autosave controller already owns it
+   * and advances it on every save, so anything that kept a second copy would
+   * disagree with disk from the first write onwards.
+   */
+  const shownGeneration = () => controller.current?.current().generation ?? shownBinaryGeneration.current;
+
+  /**
+   * The listing entry that describes this file, when the listing is entitled to
+   * an opinion about it.
+   *
+   * A symlink's entry describes the *link*, whose identity does not move when
+   * its target is rewritten, while the open describes the bytes. Comparing the
+   * two would report a change on every single open of every symlinked file, so
+   * a symlink is simply not reconciled from its parent's listing.
+   */
+  const listingOpinion = (snapshot: DirectoryListing) => {
+    const entry = snapshot.entries.find((candidate) => candidate.path === props.tab.resource);
+    if (entry) return entry.kind === "symlink" ? undefined : entry.generation;
+    // Absence proves nothing here. A partial page has simply not reached the
+    // file, and even a complete listing omits names the host never reports.
+    // Only an explicit delete event may retire this tab.
+    return undefined;
+  };
+
+  /**
    * Reconciles the file this surface read against an authoritative listing of
    * its parent directory.
    *
@@ -238,30 +286,22 @@ export function AppTabSurface(props: Props) {
    * generation mismatch, and only once per bootstrap.
    */
   const reconcileBootstrap = (snapshot: DirectoryListing) => {
-    if (bootstrapReconciled.current) return;
-    const entry = snapshot.entries.find((candidate) => candidate.path === props.tab.resource);
-    if (!entry) {
-      // A partial page cannot say the file is gone, only that this page did not
-      // reach it; a complete one can.
-      if (!snapshot.complete) return;
-      bootstrapReconciled.current = true;
-      if (openedGeneration.current !== undefined) setError("The file was deleted externally. The tab remains open.");
+    if (reconciliation.current.kind === "done") return;
+    const generation = listingOpinion(snapshot);
+    const shown = shownGeneration();
+    if (shown === undefined) {
+      reconciliation.current = { kind: "bootstrap", generation };
       return;
     }
-    if (openedGeneration.current === undefined) {
-      bootstrapGeneration.current = entry.generation;
-      return;
-    }
-    bootstrapReconciled.current = true;
-    if (openedGeneration.current !== entry.generation) void load();
+    reconciliation.current = { kind: "done" };
+    if (generation !== undefined && generation !== shown) void load();
   };
 
   useEffect(() => {
     if (!props.scope || !root) return;
     let disposed = false;
     let release: (() => void) | undefined;
-    bootstrapReconciled.current = false;
-    bootstrapGeneration.current = undefined;
+    reconciliation.current = { kind: "pending" };
     void props.client.acquireDirectoryWatch(props.scope, root, parentPath(props.tab.resource)).then((next) => {
       if (disposed) next.release();
       else {
@@ -286,14 +326,8 @@ export function AppTabSurface(props: Props) {
         // events below retain last-writer order.
         const state = controller.current?.current().state;
         if (state === "dirty" || state === "saving") return;
-        const entry = event.listing.entries.find((candidate) => candidate.path === props.tab.resource);
-        if (!entry) {
-          if (event.listing.complete && openedGeneration.current !== undefined) {
-            setError("The file was deleted externally. The tab remains open.");
-          }
-          return;
-        }
-        if (openedGeneration.current !== entry.generation) void load();
+        const generation = listingOpinion(event.listing);
+        if (generation !== undefined && generation !== shownGeneration()) void load();
         return;
       }
       if (!(event.kind === "fileChanged" || event.kind === "fileDeleted") || event.path !== props.tab.resource) return;
@@ -301,7 +335,7 @@ export function AppTabSurface(props: Props) {
         setError("The file was deleted externally. The tab remains open.");
         return;
       }
-      if (event.generation && event.generation === openedGeneration.current) return;
+      if (event.generation && event.generation === shownGeneration()) return;
       void load({ externalOperationId: event.operationId });
     }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });
     return () => { disposed = true; stop?.(); };

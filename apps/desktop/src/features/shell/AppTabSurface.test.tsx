@@ -18,7 +18,8 @@ import type {
 // Monaco itself is not under test here, and loading it in jsdom pulls in the
 // browser clipboard contribution. P6 owns making this boundary lazy in
 // production; this file only asserts the file-open data flow around it.
-vi.mock("@monaco-editor/react", () => ({ default: () => null }));
+function EditorStub(_props: { onChange?(value: string): void }) { return null; }
+vi.mock("@monaco-editor/react", () => ({ default: (props: { onChange?(value: string): void }) => <EditorStub {...props} /> }));
 vi.mock("../files/monaco", () => ({ ADE_MONACO_THEME: "ade-test-theme" }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -60,12 +61,17 @@ interface Fixture {
 function surfaceClient(fixture: Fixture) {
   const generations = [...(fixture.generations ?? ["g1"])];
   const opens: string[] = [];
+  const writes: string[] = [];
   let listener: ((event: WorkspaceEvent) => void) | undefined;
   const client = {
     openFile: vi.fn(async () => {
       const generation = generations.length > 1 ? generations.shift()! : generations[0];
       opens.push(generation);
       return opened(generation);
+    }),
+    writeText: vi.fn(async (_scope: FileWorkspaceScope, _root: ActiveRoot, request: { operationId: string }) => {
+      writes.push(request.operationId);
+      return { path: "/repo/note.txt", generation: "saved", operationId: request.operationId, sizeBytes: "5" };
     }),
     acquireDirectoryWatch: vi.fn(async (): Promise<DirectoryWatchLease> => ({
       snapshot: fixture.bootstrap,
@@ -75,10 +81,10 @@ function surfaceClient(fixture: Fixture) {
       listener = next;
       return () => { listener = undefined; };
     }),
-    writeText: vi.fn(), listDirectory: vi.fn(), resolveActiveRoot: vi.fn(),
+    listDirectory: vi.fn(), resolveActiveRoot: vi.fn(),
     mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
   } as unknown as FileWorkspaceClient;
-  return { client, opens, publish: (event: WorkspaceEvent) => listener?.(event) };
+  return { client, opens, writes, publish: (event: WorkspaceEvent) => listener?.(event) };
 }
 
 async function mount(fixture: Fixture) {
@@ -153,6 +159,45 @@ describe("AppTabSurface", () => {
     await act(async () => { surface.renderer.unmount(); });
   });
 
+  it("keeps a tab whose file a listing simply does not mention", async () => {
+    // Absence from a listing is not authority to declare a deletion: a page
+    // boundary, a name the host never reports, or a path spelled differently
+    // would all retire a perfectly live editor.
+    const surface = await mount({ bootstrap: listing([entry("/repo/other.txt", "z9")]) });
+    expect(surface.opens).toEqual(["g1"]);
+    expect(JSON.stringify(surface.renderer.toJSON())).not.toContain("deleted externally");
+    await act(async () => {
+      surface.publish({
+        kind: "directorySnapshot", rootToken: "root",
+        listing: listing([entry("/repo/other.txt", "z9")]),
+      });
+      await Promise.resolve();
+    });
+    expect(surface.opens).toEqual(["g1"]);
+    expect(JSON.stringify(surface.renderer.toJSON())).not.toContain("deleted externally");
+    // An explicit delete event is the one thing that may retire it.
+    await act(async () => {
+      surface.publish({ kind: "fileDeleted", rootToken: "root", path: "/repo/note.txt" });
+      await Promise.resolve();
+    });
+    expect(JSON.stringify(surface.renderer.toJSON())).toContain("deleted externally");
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
+  it("never reconciles a symlink against an entry that describes the link", async () => {
+    // The link's identity does not move when its target is rewritten, so
+    // comparing it against the bytes would re-open every symlinked file twice.
+    const link = { ...entry("/repo/note.txt", "link-identity"), kind: "symlink" as const, symlinkTarget: "target.txt" };
+    const surface = await mount({ bootstrap: listing([link]), generations: ["g1", "g2"] });
+    expect(surface.opens).toEqual(["g1"]);
+    await act(async () => {
+      surface.publish({ kind: "directorySnapshot", rootToken: "root", listing: listing([link]) });
+      await Promise.resolve();
+    });
+    expect(surface.opens).toEqual(["g1"]);
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
   it("ignores the echo of a precise event describing the content it already has", async () => {
     const surface = await mount({ bootstrap: listing([entry("/repo/note.txt", "g1")]) });
     await act(async () => {
@@ -166,5 +211,36 @@ describe("AppTabSurface", () => {
     });
     expect(surface.opens).toHaveLength(2);
     await act(async () => { surface.renderer.unmount(); });
+  });
+
+  it("costs no remote read for the echo of a save it performed itself", async () => {
+    vi.useFakeTimers();
+    const surface = await mount({ bootstrap: listing([entry("/repo/note.txt", "g1")]) });
+    expect(surface.opens).toEqual(["g1"]);
+    // Type, then let autosave publish. The controller now owns generation
+    // "saved"; anything holding a private copy of "g1" would treat the echo of
+    // its own write as an external change and re-open the file remotely.
+    const editor = surface.renderer.root.findByType(EditorStub);
+    await act(async () => { editor.props.onChange("hello there"); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(surface.writes).toHaveLength(1);
+    await act(async () => {
+      surface.publish({
+        kind: "fileChanged", rootToken: "root", path: "/repo/note.txt",
+        generation: "saved", operationId: surface.writes[0],
+      });
+      await Promise.resolve();
+    });
+    expect(surface.opens, "the echo of our own save cost a remote re-open").toEqual(["g1"]);
+    await act(async () => {
+      surface.publish({
+        kind: "directorySnapshot", rootToken: "root",
+        listing: listing([entry("/repo/note.txt", "saved")]),
+      });
+      await Promise.resolve();
+    });
+    expect(surface.opens).toEqual(["g1"]);
+    await act(async () => { surface.renderer.unmount(); });
+    vi.useRealTimers();
   });
 });
