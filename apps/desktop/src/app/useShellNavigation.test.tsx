@@ -266,6 +266,17 @@ function mountNavigation(overrides: Partial<ShellNavigationOptions> = {}) {
 }
 
 describe("shell navigation hook cross-kind ownership", () => {
+  it("keeps one controller identity across unrelated root rerenders", async () => {
+    const harness = mountNavigation();
+    const renderer = await harness.renderer();
+    const initial = harness.navigation;
+
+    await harness.rerender({ setStatus: vi.fn() });
+
+    expect(harness.navigation).toBe(initial);
+    await act(async () => renderer.unmount());
+  });
+
   it("uses the current epoch-scoped acknowledgement after an ack-only rerender", async () => {
     const oldEpochAck = vi.fn();
     const newEpochAck = vi.fn();

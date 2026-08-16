@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::{BufReader, Read},
     process::ChildStdout,
     sync::{
@@ -108,7 +108,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
             Ok(0) => break,
             Ok(length) => {
                 while let Ok(control) = controls.try_recv() {
-                    state.apply_control(control);
+                    state.apply_control(control, &input_completion);
                 }
                 parser.push(&buffer[..length]);
                 while let Some(record) = parser.next_record() {
@@ -127,7 +127,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                         ),
                         Err(error) => {
                             emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
-                            state.resnapshot_all(&writer);
+                            state.resnapshot_all(&writer, &input_completion);
                         }
                     }
                 }
@@ -139,6 +139,10 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
     while let Some(Err(error)) = parser.next_record() {
         emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
     }
+    state.abort_pending_input(
+        &input_completion,
+        "terminal control stream ended before input completed",
+    );
     if !stopped.load(Ordering::Acquire) {
         state.emit_pane_scoped_recovery(
             &event_tx,
@@ -329,6 +333,10 @@ impl StreamState {
                             tag.number
                         ),
                     );
+                    self.abort_pending_input(
+                        input_completion,
+                        "another tmux command began before terminal input completed",
+                    );
                 }
                 self.command_block = self.start_block(tag);
             }
@@ -424,6 +432,11 @@ impl StreamState {
                 };
                 if let Some(input_id) = rejected_input {
                     let _ = input_completion.send((input_id, Err(detail.clone())));
+                } else {
+                    self.abort_pending_input(
+                        input_completion,
+                        "tmux rejected a command before terminal input completed",
+                    );
                 }
                 // An error abandons whatever multi-block sequence was running,
                 // so every correlation slot has to be released too — otherwise
@@ -892,66 +905,6 @@ impl StreamState {
         }
     }
 
-    pub(super) fn apply_control(&mut self, control: StreamControl) {
-        match control {
-            StreamControl::Membership { pane_ids } => {
-                let desired: HashSet<_> = pane_ids.iter().map(String::as_str).collect();
-                let removed: Vec<_> = self
-                    .pane_states
-                    .keys()
-                    .filter(|pane_id| !desired.contains(pane_id.as_str()))
-                    .cloned()
-                    .collect();
-                for pane_id in removed {
-                    self.pane_states.remove(&pane_id);
-                    if self.expected_capture.as_deref() == Some(&pane_id) {
-                        self.expected_capture = None;
-                    }
-                    if self
-                        .expected_input
-                        .as_ref()
-                        .is_some_and(|(_, expected_pane)| expected_pane == &pane_id)
-                    {
-                        self.expected_input = None;
-                    }
-                    if self.expected_resume.as_deref() == Some(&pane_id) {
-                        self.expected_resume = None;
-                    }
-                    // A pane this client no longer owns is not one it can
-                    // resume, and leaving it here would make the *next* pane to
-                    // take its id inherit a pause that was never its own.
-                    self.flow.cleared(&pane_id);
-                    if self
-                        .pending_alternate
-                        .as_ref()
-                        .is_some_and(|pending| pending.0 == pane_id)
-                    {
-                        self.pending_alternate = None;
-                    }
-                    if self
-                        .pending_metadata
-                        .as_ref()
-                        .is_some_and(|pending| pending.pane_id == pane_id)
-                    {
-                        self.pending_metadata = None;
-                    }
-                    if self.active_scope() == pane_id {
-                        self.command_block = CommandBlock::None;
-                    }
-                }
-                for pane_id in pane_ids {
-                    self.pane_states
-                        .entry(pane_id)
-                        .or_insert_with(|| PaneSeedState::Pending {
-                            buffered: Vec::new(),
-                            buffered_bytes: 0,
-                            overflowed: false,
-                        });
-                }
-            }
-        }
-    }
-
     /// Asks for recovery of exactly the panes this control client owned.
     ///
     /// A pane-scoped resnapshot makes the desktop reseed that pane; an
@@ -974,28 +927,10 @@ impl StreamState {
             emit_resnapshot(sender, overflowed, &pane_id, reason.to_owned());
         }
     }
-
-    fn resnapshot_all(&mut self, writer: &std_mpsc::Sender<super::ControlWrite>) {
-        self.expected_capture = None;
-        self.expected_input = None;
-        self.expected_resume = None;
-        self.pending_alternate = None;
-        self.pending_metadata = None;
-        self.command_block = CommandBlock::None;
-        for (pane_id, state) in &mut self.pane_states {
-            *state = PaneSeedState::Pending {
-                buffered: Vec::new(),
-                buffered_bytes: 0,
-                overflowed: false,
-            };
-            // A parse failure is the one recovery that re-captures every pane at
-            // once, and a paused one among them still needs its resume: the
-            // whole point of this pass is that afterwards every pane is
-            // delivering again.
-            request_capture(writer, pane_id, self.flow.resume_before_capture(pane_id));
-        }
-    }
 }
+
+#[path = "stream_recovery.rs"]
+mod stream_recovery;
 
 #[path = "stream_helpers.rs"]
 mod stream_helpers;

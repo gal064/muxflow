@@ -329,8 +329,11 @@ export function App() {
     [agentRuntime.rollups.byWindow, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
-  const grid = windowGrid(panes);
-  const mountedPanes = mountedTerminalPanes(snapshot.panes, activeWindowId, Boolean(selectedAppTab), Boolean(activeWindow?.zoomed));
+  const grid = useMemo(() => windowGrid(panes), [panes]);
+  const mountedPanes = useMemo(
+    () => mountedTerminalPanes(snapshot.panes, activeWindowId, Boolean(selectedAppTab), Boolean(activeWindow?.zoomed)),
+    [activeWindow?.zoomed, activeWindowId, selectedAppTab, snapshot.panes],
+  );
   const lastAuthoritativeWindow = useRef(new Map<string, string>());
 
   useEffect(() => {
@@ -527,7 +530,7 @@ export function App() {
     onStatus: setStatus,
   });
 
-  const beginDividerDrag = (event: React.PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical") => {
+  const beginDividerDrag = useCallback((event: React.PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical") => {
     if (!hostState.canMutate) return;
     const target = event.currentTarget;
     const origin = axis === "horizontal" ? event.clientX : event.clientY;
@@ -543,7 +546,10 @@ export function App() {
       if (Math.abs(delta) >= 4) void performAction({ kind, paneId: pane.id, resizeCells: cells });
       target.onpointerup = null;
     };
-  };
+  }, [hostState.canMutate, performAction]);
+  const focusTerminalPane = useCallback((pane: Pane) => {
+    void shellNavigation.selectPane(pane, { kind: "silent" });
+  }, [shellNavigation]);
 
   const closeCombinedTab = (tab: CombinedTab, scope: HostScopeToken) => {
     void runCommand("window.close", { kind: tab.kind === "app" ? "appTab" : "terminalTab", id: tab.id, scope });
@@ -722,7 +728,7 @@ export function App() {
             beginDividerDrag={beginDividerDrag}
             clientId={clientId}
             controllers={controllers}
-            focusPane={(pane) => { void shellNavigation.selectPane(pane, { kind: "silent" }); }}
+            focusPane={focusTerminalPane}
             onMeasurements={onMeasurements}
             grid={grid}
             handleInput={handleInput}
@@ -732,7 +738,6 @@ export function App() {
             panes={panes}
             performAction={performAction}
             setStatus={setStatus}
-            snapshot={snapshot}
             surfaceRef={surfaceRef}
             terminalTransferClient={terminalTransferClient}
             terminalTransferRegistry={terminalTransferRegistry}

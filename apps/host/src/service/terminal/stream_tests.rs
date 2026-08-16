@@ -252,9 +252,12 @@ fn losing_a_pane_forgets_that_it_was_paused() {
         harness.runtime(),
     );
     assert!(harness.flow.resume_before_capture("%1"));
-    state.apply_control(StreamControl::Membership {
-        pane_ids: Vec::new(),
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: Vec::new(),
+        },
+        &harness.input_completion_tx,
+    );
     assert!(!harness.flow.resume_before_capture("%1"));
 }
 
@@ -277,6 +280,7 @@ fn a_pause_naming_nothing_valid_records_nothing() {
 
 #[test]
 fn pane_close_prunes_capture_state_without_disturbing_sibling() {
+    let (input_completion, _) = std_mpsc::channel();
     let mut state = StreamState::new(
         &["%1".into(), "%2".into()],
         Arc::new(crate::service::terminal::FlowControl::default()),
@@ -291,9 +295,12 @@ fn pane_close_prunes_capture_state_without_disturbing_sibling() {
         lines: vec![b"stale".to_vec()],
     };
     state.pending_alternate = Some(("%1".into(), Vec::new(), 1));
-    state.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &input_completion,
+    );
     assert!(!state.pane_states.contains_key("%1"));
     assert!(state.pane_states.contains_key("%2"));
     assert!(matches!(state.command_block, CommandBlock::None));
@@ -370,6 +377,70 @@ fn a_rejected_in_band_input_reports_its_tmux_error_to_the_barrier_lane() {
     let error = result.unwrap_err();
     assert!(error.contains("terminal input for %1 was rejected by tmux"));
     assert!(error.contains("can't find pane"));
+}
+
+#[test]
+fn overlapping_begin_aborts_the_exact_active_input_before_recovery() {
+    let (mut state, harness) = Harness::new(&["%1".into()]);
+    state.expected_input = Some((10, "%1".into()));
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::Begin {
+            tag: CommandTag {
+                number: TAG.number + 1,
+                ..TAG
+            },
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+
+    let (input_id, result) = harness.input_completions.try_recv().unwrap();
+    assert_eq!(input_id, 10);
+    assert!(result.unwrap_err().contains("another tmux command began"));
+    assert!(matches!(state.command_block, CommandBlock::Unknown { .. }));
+}
+
+#[test]
+fn membership_removal_aborts_a_marked_input_before_its_command_begins() {
+    let (mut state, harness) = Harness::new(&["%1".into()]);
+    state.expected_input = Some((11, "%1".into()));
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: Vec::new(),
+        },
+        &harness.input_completion_tx,
+    );
+
+    let (input_id, result) = harness.input_completions.try_recv().unwrap();
+    assert_eq!(input_id, 11);
+    assert!(result.unwrap_err().contains("membership ended"));
+    assert!(state.expected_input.is_none());
+}
+
+#[test]
+fn parser_recovery_aborts_active_input_and_releases_its_correlation() {
+    let (mut state, harness) = Harness::new(&["%1".into()]);
+    state.expected_input = Some((12, "%1".into()));
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.resnapshot_all(&harness.writer, &harness.input_completion_tx);
+
+    let (input_id, result) = harness.input_completions.try_recv().unwrap();
+    assert_eq!(input_id, 12);
+    assert!(result.unwrap_err().contains("parser recovery"));
+    assert!(matches!(state.command_block, CommandBlock::None));
 }
 
 #[test]
