@@ -2,7 +2,7 @@ use super::*;
 use crate::connection::TerminalClient;
 
 fn live_binding(epoch: u64) -> BulkBinding {
-    let client = Arc::new(TerminalClient::new(None));
+    let client = Arc::new(TerminalClient::new());
     client.ready.store(true, Ordering::Release);
     client.terminal_epoch.store(epoch, Ordering::Release);
     *client.server_identity.lock().unwrap() = format!("server-{epoch}");
@@ -152,7 +152,7 @@ fn canonical_engine_limits_all_bulk_jobs_to_two_and_stales_queued_binding() {
         .unwrap();
     }
     std::thread::sleep(std::time::Duration::from_millis(100));
-    let stale_client = Arc::new(TerminalClient::new(None));
+    let stale_client = Arc::new(TerminalClient::new());
     stale_client.ready.store(true, Ordering::Release);
     stale_client.terminal_epoch.store(300, Ordering::Release);
     *stale_client.server_identity.lock().unwrap() = "server-300".into();
@@ -282,7 +282,7 @@ fn phase14_full_queue_reports_admission_and_exact_terminal_outcomes() {
 #[test]
 fn active_epoch_loss_kills_worker_process_and_reports_stale() {
     let _serial = engine_test_lock();
-    let client = Arc::new(TerminalClient::new(None));
+    let client = Arc::new(TerminalClient::new());
     client.ready.store(true, Ordering::Release);
     client.terminal_epoch.store(401, Ordering::Release);
     *client.server_identity.lock().unwrap() = "server-401".into();
@@ -522,7 +522,7 @@ fn stale_scope_during_verifying_kills_old_transport_without_reconciliation() {
     use std::process::Stdio;
 
     let _serial = engine_test_lock();
-    let client = Arc::new(TerminalClient::new(None));
+    let client = Arc::new(TerminalClient::new());
     client.ready.store(true, Ordering::Release);
     client.terminal_epoch.store(701, Ordering::Release);
     *client.server_identity.lock().unwrap() = "server-701".into();

@@ -9,13 +9,13 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::{
-    ConnectionSpec, ControlLane, acquire_control_master, ensure_control_master, host_helper_path,
-    ssh_profile_control_socket, validate_ssh_target,
+    ConnectionSpec, ControlLane, SshLease, acquire_control_master,
+    acquire_control_master_for_socket, host_helper_path, ssh_profile_control_socket,
+    validate_ssh_target,
 };
 
 #[tauri::command]
 pub fn probe_remote_helper(connection: ConnectionSpec) -> Result<serde_json::Value, String> {
-    let _lease = acquire_control_master(&connection)?;
     let ConnectionSpec::Ssh {
         profile_id,
         target,
@@ -78,9 +78,10 @@ fn install_remote_helper_inner(
     connection: ConnectionSpec,
     allow_upgrade: bool,
 ) -> Result<String, String> {
-    let _lease = acquire_control_master(&connection)?;
+    let lease = acquire_control_master(&connection)?
+        .ok_or("remote helper installation requires an SSH profile")?;
     let ConnectionSpec::Ssh {
-        profile_id,
+        profile_id: _,
         target,
         config_path,
     } = connection
@@ -88,20 +89,13 @@ fn install_remote_helper_inner(
         return Err("remote helper installation requires an SSH profile".into());
     };
     validate_ssh_target(&target)?;
-    let probe = run_remote_probe(&profile_id, &target, config_path.as_deref())?;
+    let probe = run_remote_probe_with_lease(&target, config_path.as_deref(), &lease)?;
     let remote_arch = probe
         .get("architecture")
         .and_then(serde_json::Value::as_str)
         .ok_or("remote helper probe omitted architecture")?;
     let artifact = helper_artifact_for_arch(remote_arch)?;
     let digest = sha256_file(&artifact)?;
-    let control_socket = ssh_profile_control_socket(&profile_id, &target, config_path.as_deref())?;
-    ensure_control_master(
-        &target,
-        config_path.as_deref(),
-        &control_socket,
-        ControlLane::Interactive,
-    )?;
     let mut command = Command::new(host_helper_path()?);
     command
         .args(["helper", "install", &target, "--artifact"])
@@ -112,7 +106,9 @@ fn install_remote_helper_inner(
             "--expected-arch",
             normalize_architecture(remote_arch),
         ]);
-    command.arg("--control-socket").arg(&control_socket);
+    if let Some(control_socket) = lease.control_socket() {
+        command.arg("--control-socket").arg(control_socket);
+    }
     if let Some(path) = config_path {
         command.args(["--config", &path]);
     }
@@ -134,15 +130,25 @@ fn run_remote_probe(
 ) -> Result<serde_json::Value, String> {
     validate_ssh_target(target)?;
     let control_socket = ssh_profile_control_socket(profile_id, target, config_path)?;
-    ensure_control_master(
+    let lease = acquire_control_master_for_socket(
         target,
         config_path,
         &control_socket,
         ControlLane::Interactive,
     )?;
+    run_remote_probe_with_lease(target, config_path, &lease)
+}
+
+fn run_remote_probe_with_lease(
+    target: &str,
+    config_path: Option<&str>,
+    lease: &SshLease,
+) -> Result<serde_json::Value, String> {
     let mut command = Command::new(host_helper_path()?);
     command.args(["helper", "probe", target]);
-    command.arg("--control-socket").arg(&control_socket);
+    if let Some(control_socket) = lease.control_socket() {
+        command.arg("--control-socket").arg(control_socket);
+    }
     if let Some(path) = config_path {
         command.args(["--config", path]);
     }

@@ -246,7 +246,7 @@ mod tests {
     fn cancelled_terminal_event_has_not_published_outcome_and_no_failure_kind() {
         use std::sync::{Arc, atomic::Ordering};
 
-        let client = Arc::new(crate::connection::TerminalClient::new(None));
+        let client = Arc::new(crate::connection::TerminalClient::new());
         client.ready.store(true, Ordering::Release);
         client.terminal_epoch.store(91, Ordering::Release);
         *client.server_identity.lock().unwrap() = "test-server".into();

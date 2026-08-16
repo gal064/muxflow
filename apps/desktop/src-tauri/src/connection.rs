@@ -24,10 +24,15 @@ use tmux_agent_protocol::{
 };
 use uuid::Uuid;
 
-use tmux_control::{DESKTOP_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
+use tmux_control::MAX_INPUT_REQUEST_BYTES;
 
 mod event_frame;
 use event_frame::{TerminalEvent, encode_event};
+mod dispatch;
+use dispatch::{
+    ClientInputDispatch, ClientInputQueue, INPUT_BYTE_BUDGET, INPUT_MESSAGE_BUDGET, ResizeQueue,
+    StopSignal, TerminalSize, run_client_input_dispatch, run_client_resize_dispatch,
+};
 pub(crate) mod agent;
 pub(crate) mod files;
 pub(crate) mod git;
@@ -76,35 +81,25 @@ pub(crate) mod helper;
 mod transport;
 pub(crate) use transport::close_all_control_masters;
 use transport::{
-    ControlLane, SshLease, acquire_control_master, ensure_control_master, host_helper_path,
-    ssh_profile_control_socket,
+    ControlLane, SshLease, acquire_control_master, acquire_control_master_for_socket,
+    host_helper_path, ssh_profile_control_socket,
 };
 
 struct TerminalClient {
-    _ssh_lease: Option<SshLease>,
     stdin: Mutex<Option<ChildStdin>>,
     child: Mutex<Option<Child>>,
-    stopped: AtomicBool,
+    stop_signal: StopSignal,
     ready: AtomicBool,
     read_only: AtomicBool,
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
     git_operations: Mutex<HashMap<String, u64>>,
-    input_tx: Mutex<Option<mpsc::SyncSender<ClientInputDispatch>>>,
+    input_queue: Mutex<ClientInputQueue>,
+    resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
     terminal_epoch: AtomicU64,
     server_identity: Mutex<String>,
     host_profile_id: Mutex<String>,
-}
-
-enum ClientInputDispatch {
-    Bytes {
-        pane_id: String,
-        data: Vec<u8>,
-        epoch: u64,
-    },
-    Barrier(mpsc::SyncSender<Result<(), String>>),
-    Stop,
 }
 
 struct InitialHostState {
@@ -116,18 +111,18 @@ struct InitialHostState {
 }
 
 impl TerminalClient {
-    fn new(ssh_lease: Option<SshLease>) -> Self {
+    fn new() -> Self {
         Self {
-            _ssh_lease: ssh_lease,
             stdin: Mutex::new(None),
             child: Mutex::new(None),
-            stopped: AtomicBool::new(false),
+            stop_signal: StopSignal::default(),
             ready: AtomicBool::new(false),
             read_only: AtomicBool::new(false),
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
             git_operations: Mutex::new(HashMap::new()),
-            input_tx: Mutex::new(None),
+            input_queue: Mutex::new(ClientInputQueue::default()),
+            resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
             terminal_epoch: AtomicU64::new(0),
             server_identity: Mutex::new(String::new()),
@@ -135,15 +130,38 @@ impl TerminalClient {
         }
     }
 
-    fn start_input_dispatch(self: &Arc<Self>, client_id: &str) -> Result<(), String> {
-        let (sender, receiver) = mpsc::sync_channel(512);
-        *self.input_tx.lock().unwrap() = Some(sender);
+    fn start_dispatchers(self: &Arc<Self>, client_id: &str) -> Result<(), String> {
+        let (sender, receiver) = mpsc::sync_channel(INPUT_MESSAGE_BUDGET);
+        self.input_queue.lock().unwrap().sender = Some(sender);
         let client = Arc::clone(self);
         thread::Builder::new()
             .name(format!("host-input-dispatch-{client_id}"))
             .spawn(move || run_client_input_dispatch(client, receiver))
+            .map_err(|error| format!("failed to start input dispatcher: {error}"))?;
+        let client = Arc::clone(self);
+        thread::Builder::new()
+            .name(format!("host-resize-dispatch-{client_id}"))
+            .spawn(move || run_client_resize_dispatch(client))
             .map(|_| ())
-            .map_err(|error| format!("failed to start input dispatcher: {error}"))
+            .map_err(|error| {
+                self.shutdown_transport("host connection startup failed");
+                format!("failed to start resize dispatcher: {error}")
+            })
+    }
+
+    fn shutdown_transport(&self, pending_message: &str) {
+        self.stop_signal.stop();
+        self.ready.store(false, Ordering::Release);
+        self.resize_queue.stop();
+        self.stdin.lock().unwrap().take();
+        if let Some(sender) = self.input_queue.lock().unwrap().sender.take() {
+            let _ = sender.try_send(ClientInputDispatch::Stop);
+        }
+        self.fail_pending(pending_message);
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     /// Queues a keystroke and returns.
@@ -156,7 +174,7 @@ impl TerminalClient {
     /// rejection arrives as a pane-scoped recovery event on the event stream
     /// and a transport failure tears down the bridge visibly.
     fn enqueue_input(&self, pane_id: String, data: Vec<u8>) -> Result<(), String> {
-        if self.stopped.load(Ordering::Acquire)
+        if self.stop_signal.is_stopped()
             || !self.ready.load(Ordering::Acquire)
             || self.read_only.load(Ordering::Acquire)
         {
@@ -168,38 +186,81 @@ impl TerminalClient {
         if data.is_empty() {
             return Ok(());
         }
-        self.input_tx
-            .lock()
-            .unwrap()
+        if data.len() > MAX_INPUT_REQUEST_BYTES {
+            return Err("terminal input batch exceeds 1 MiB; retry with a smaller batch".into());
+        }
+        let data_len = data.len();
+        let mut queue = self.input_queue.lock().unwrap();
+        if queue.messages >= INPUT_MESSAGE_BUDGET
+            || queue.bytes.saturating_add(data_len) > INPUT_BYTE_BUDGET
+        {
+            return Err("terminal input queue budget is full; retry without dropping bytes".into());
+        }
+        queue.messages += 1;
+        queue.bytes += data_len;
+        let result = queue
+            .sender
             .as_ref()
-            .ok_or_else(|| "terminal input dispatcher is unavailable".to_owned())?
-            .try_send(ClientInputDispatch::Bytes {
-                pane_id,
-                data,
-                epoch: self.input_epoch.load(Ordering::Acquire),
-            })
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => {
-                    "terminal input queue is full; retry without dropping bytes".to_owned()
-                }
-                mpsc::TrySendError::Disconnected(_) => {
-                    "terminal input dispatcher is disconnected".to_owned()
-                }
-            })
+            .ok_or_else(|| "terminal input dispatcher is unavailable".to_owned())
+            .and_then(|sender| {
+                sender
+                    .try_send(ClientInputDispatch::Bytes {
+                        pane_id,
+                        data,
+                        epoch: self.input_epoch.load(Ordering::Acquire),
+                    })
+                    .map_err(|error| match error {
+                        mpsc::TrySendError::Full(_) => {
+                            "terminal input queue is full; retry without dropping bytes".to_owned()
+                        }
+                        mpsc::TrySendError::Disconnected(_) => {
+                            "terminal input dispatcher is disconnected".to_owned()
+                        }
+                    })
+            });
+        if result.is_err() {
+            queue.messages -= 1;
+            queue.bytes -= data_len;
+        }
+        result
+    }
+
+    fn release_input_budget(&self, messages: usize, bytes: usize) {
+        let mut queue = self.input_queue.lock().unwrap();
+        queue.messages = queue.messages.saturating_sub(messages);
+        queue.bytes = queue.bytes.saturating_sub(bytes);
     }
 
     fn flush_input(&self) -> Result<(), String> {
         let (sender, receiver) = mpsc::sync_channel(1);
-        self.input_tx
+        let dispatcher = self
+            .input_queue
             .lock()
             .unwrap()
-            .as_ref()
-            .ok_or_else(|| "terminal input dispatcher is unavailable".to_owned())?
+            .sender
+            .clone()
+            .ok_or_else(|| "terminal input dispatcher is unavailable".to_owned())?;
+        dispatcher
             .send(ClientInputDispatch::Barrier(sender))
             .map_err(|_| "terminal input dispatcher is disconnected".to_owned())?;
         receiver
             .recv_timeout(REQUEST_TIMEOUT)
             .map_err(|_| "terminal input flush timed out".to_owned())?
+    }
+
+    fn enqueue_resize(
+        &self,
+        columns: u16,
+        rows: u16,
+    ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+        if self.stop_signal.is_stopped() {
+            return Err("terminal bridge is stopped; resize was not queued".into());
+        }
+        self.resize_queue.replace(TerminalSize { columns, rows })
+    }
+
+    fn wait_for_reconnect(&self, delay: Duration) -> bool {
+        self.stop_signal.wait_timeout(delay)
     }
 
     fn request(&self, request: v1::Request) -> Result<v1::Response, String> {
@@ -345,69 +406,6 @@ impl TerminalClient {
     }
 }
 
-fn run_client_input_dispatch(
-    client: Arc<TerminalClient>,
-    receiver: mpsc::Receiver<ClientInputDispatch>,
-) {
-    let mut deferred = None;
-    loop {
-        let message = match deferred.take() {
-            Some(message) => message,
-            None => match receiver.recv() {
-                Ok(message) => message,
-                Err(_) => break,
-            },
-        };
-        match message {
-            ClientInputDispatch::Bytes {
-                pane_id,
-                mut data,
-                epoch,
-            } => {
-                while data.len() < DESKTOP_INPUT_COALESCE_BYTES {
-                    match receiver.try_recv() {
-                        Ok(ClientInputDispatch::Bytes {
-                            pane_id: next_pane,
-                            data: next_data,
-                            epoch: next_epoch,
-                        }) if next_pane == pane_id
-                            && next_epoch == epoch
-                            && data.len().saturating_add(next_data.len())
-                                <= DESKTOP_INPUT_COALESCE_BYTES =>
-                        {
-                            data.extend_from_slice(&next_data);
-                        }
-                        Ok(message) => {
-                            deferred = Some(message);
-                            break;
-                        }
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => break,
-                    }
-                }
-                // Accepted by an older connection but not written before it
-                // ended: drop it permanently rather than poison the new
-                // connection's input state with bytes from the old one.
-                if input_epoch_is_current(&client, epoch)
-                    && client.ready.load(Ordering::Acquire)
-                    && !client.read_only.load(Ordering::Acquire)
-                {
-                    let _ = client.dispatch_request(v1::Request {
-                        operation: v1::Operation::TerminalInput.into(),
-                        scope: pane_id,
-                        data,
-                        ..Default::default()
-                    });
-                }
-            }
-            ClientInputDispatch::Barrier(sender) => {
-                let _ = sender.send(Ok(()));
-            }
-            ClientInputDispatch::Stop => break,
-        }
-    }
-}
-
 fn mark_input_reconnected(client: &TerminalClient) {
     client.input_epoch.fetch_add(1, Ordering::AcqRel);
 }
@@ -435,14 +433,23 @@ pub fn start_terminal(
         validate_tmux_id(pane_id, '%')?;
     }
     let client_id = Uuid::new_v4().to_string();
-    let client = Arc::new(TerminalClient::new(acquire_control_master(&connection)?));
+    let client = Arc::new(TerminalClient::new());
     *client.host_profile_id.lock().unwrap() = match &connection {
         ConnectionSpec::Local => "local".into(),
         ConnectionSpec::Ssh { profile_id, .. } => profile_id.clone(),
     };
-    client.start_input_dispatch(&client_id)?;
+    client.start_dispatchers(&client_id)?;
+    // Publish local progress before the supervisor can perform DNS, ProxyJump,
+    // authentication, or any other network work.
+    send_event(
+        &on_event,
+        TerminalEvent::ConnectionState {
+            state: "connecting".into(),
+        },
+    );
     let worker_id = client_id.clone();
     let worker_client = Arc::clone(&client);
+    let failure_channel = on_event.clone();
     thread::Builder::new()
         .name(format!("host-bridge-{client_id}"))
         .spawn(move || {
@@ -455,7 +462,16 @@ pub fn start_terminal(
                 worker_client,
             )
         })
-        .map_err(|error| format!("failed to start host bridge supervisor: {error}"))?;
+        .map_err(|error| {
+            client.shutdown_transport("host bridge supervisor failed to start");
+            send_event(
+                &failure_channel,
+                TerminalEvent::ConnectionState {
+                    state: "disconnected".into(),
+                },
+            );
+            format!("failed to start host bridge supervisor: {error}")
+        })?;
     clients.0.lock().unwrap().insert(client_id.clone(), client);
     Ok(client_id)
 }
@@ -463,17 +479,7 @@ pub fn start_terminal(
 #[tauri::command]
 pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> Result<(), String> {
     if let Some(client) = clients.0.lock().unwrap().remove(&client_id) {
-        client.stopped.store(true, Ordering::Release);
-        client.ready.store(false, Ordering::Release);
-        client.stdin.lock().unwrap().take();
-        if let Some(sender) = client.input_tx.lock().unwrap().take() {
-            let _ = sender.try_send(ClientInputDispatch::Stop);
-        }
-        client.fail_pending("host connection stopped");
-        if let Some(mut child) = client.child.lock().unwrap().take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        client.shutdown_transport("host connection stopped");
         // Pooled bulk bridges are bound to a control connection's server
         // identity and epoch, so once that connection is gone none of *its*
         // bridges can be handed to anything: closing them here frees their ssh
@@ -495,6 +501,9 @@ pub fn send_terminal_input(
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
     validate_tmux_id(&pane_id, '%')?;
+    if data.len() > MAX_INPUT_REQUEST_BYTES {
+        return Err("terminal input batch exceeds 1 MiB; retry with a smaller batch".into());
+    }
     let client = get_client(&clients, &client_id)?;
     client.enqueue_input(pane_id, data.into_bytes())
 }
@@ -557,21 +566,21 @@ pub async fn select_terminal_session(
 }
 
 #[tauri::command]
-pub fn resize_terminal_client(
+pub async fn resize_terminal_client(
     client_id: String,
     columns: u16,
     rows: u16,
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
     let client = get_client(&clients, &client_id)?;
-    client.flush_input()?;
-    client.request(v1::Request {
-        operation: v1::Operation::ResizeTerminal.into(),
-        columns: columns.into(),
-        rows: rows.into(),
-        ..Default::default()
-    })?;
-    Ok(())
+    let receiver = client.enqueue_resize(columns, rows)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        receiver
+            .recv_timeout(REQUEST_TIMEOUT + REQUEST_TIMEOUT + Duration::from_secs(1))
+            .map_err(|_| "terminal resize acknowledgement timed out".to_owned())?
+    })
+    .await
+    .map_err(|error| format!("terminal resize task failed: {error}"))?
 }
 
 /// Async: a tab switch reveals and hides panes, and doing that on the WebView's
@@ -829,7 +838,7 @@ mod tests {
 
     #[test]
     fn incompatible_or_disconnected_client_rejects_mutation_without_queueing() {
-        let client = TerminalClient::new(None);
+        let client = TerminalClient::new();
         let error = client
             .request(v1::Request {
                 operation: v1::Operation::TerminalInput.into(),
@@ -884,9 +893,9 @@ mod tests {
 
     #[test]
     fn disconnected_input_is_rejected_and_reconnect_starts_a_fresh_epoch() {
-        let client = Arc::new(TerminalClient::new(None));
+        let client = Arc::new(TerminalClient::new());
         let (sender, receiver) = mpsc::sync_channel(1);
-        *client.input_tx.lock().unwrap() = Some(sender);
+        client.input_queue.lock().unwrap().sender = Some(sender);
 
         assert!(
             client
@@ -962,9 +971,9 @@ mod tests {
 
     #[test]
     fn queue_backpressure_is_still_refused_synchronously_without_dropping_bytes() {
-        let client = Arc::new(TerminalClient::new(None));
+        let client = Arc::new(TerminalClient::new());
         let (sender, receiver) = mpsc::sync_channel(1);
-        *client.input_tx.lock().unwrap() = Some(sender);
+        client.input_queue.lock().unwrap().sender = Some(sender);
         mark_input_reconnected(&client);
         client.ready.store(true, Ordering::Release);
 
@@ -1096,7 +1105,7 @@ mod tests {
 
     #[test]
     fn pane_scoped_recovery_does_not_disconnect_sibling_sessions() {
-        let client = TerminalClient::new(None);
+        let client = TerminalClient::new();
         client.ready.store(true, Ordering::Release);
         assert_eq!(scoped_terminal_recovery("%12").as_deref(), Some("%12"));
         assert!(scoped_terminal_recovery("terminal").is_none());
@@ -1206,5 +1215,49 @@ mod tests {
             PROTOCOL_MAJOR,
             &missing_capability
         ));
+    }
+
+    #[test]
+    fn startup_rollback_releases_both_dispatch_workers() {
+        let client = Arc::new(TerminalClient::new());
+        client.start_dispatchers("rollback-test").unwrap();
+        let weak = Arc::downgrade(&client);
+
+        client.shutdown_transport("startup rolled back");
+        drop(client);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while weak.upgrade().is_some() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            weak.upgrade().is_none(),
+            "dispatcher workers retained client"
+        );
+    }
+
+    #[test]
+    fn full_input_channel_does_not_block_shutdown_while_resize_flush_waits() {
+        let client = Arc::new(TerminalClient::new());
+        let (dispatcher, receiver) = mpsc::sync_channel(1);
+        dispatcher
+            .send(ClientInputDispatch::Bytes {
+                pane_id: "%1".into(),
+                data: vec![1],
+                epoch: 0,
+            })
+            .unwrap();
+        client.input_queue.lock().unwrap().sender = Some(dispatcher);
+        let _resize = client.enqueue_resize(100, 30).unwrap();
+        let flush_client = Arc::clone(&client);
+        let flush = thread::spawn(move || flush_client.flush_input());
+        thread::sleep(Duration::from_millis(20));
+
+        let started = std::time::Instant::now();
+        client.shutdown_transport("shutdown during resize flush");
+        assert!(started.elapsed() < Duration::from_millis(200));
+
+        drop(receiver);
+        assert!(flush.join().unwrap().is_err());
     }
 }
