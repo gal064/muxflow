@@ -35,12 +35,17 @@ describe("ExplorerTree", () => {
     };
     let renderer!: ReturnType<typeof create>;
     try {
+      const startedAt = performance.now();
       await act(async () => {
         renderer = create(<ExplorerTree root={root} scopeIdentity="phase14" listings={new Map([["/r", wide]])}
           expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
           onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
           onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
       });
+      // Recorded, deliberately not asserted: a jsdom mount is not a browser
+      // paint, so this informs the windowing decision rather than gating it.
+      // The 150 ms budget belongs to the instrumented runtime lane.
+      const mountMillis = Math.round(performance.now() - startedAt);
       const highWater = perfHighWaterSnapshot();
       const renderedRows = renderer.root.findAllByProps({ className: "file-row" }).length;
       const logicalRows = highWater["explorer.logicalRows"];
@@ -48,10 +53,62 @@ describe("ExplorerTree", () => {
       expect(renderedRows).toBeGreaterThan(0);
       expect(renderedRows).toBeLessThanOrEqual(logicalRows);
       expect(highWater["explorer.renderedRows"]).toBe(renderedRows);
-      console.log(`PHASE14_METRIC ${JSON.stringify({ lane: "explorerWide", entries: wide.entries.length, logicalRowsHighWater: logicalRows, renderedRowsHighWater: highWater["explorer.renderedRows"], rowParity: logicalRows === wide.entries.length })}`);
+      console.log(`PHASE14_METRIC ${JSON.stringify({ lane: "explorerWide", entries: wide.entries.length, logicalRowsHighWater: logicalRows, renderedRowsHighWater: highWater["explorer.renderedRows"], rowParity: logicalRows === wide.entries.length, jsdomMountMillis: mountMillis })}`);
     } finally {
       await act(async () => { renderer?.unmount(); });
       resetPerfProbe();
+    }
+  });
+
+  it("keeps roving focus, scroll-to-item, and sibling counts working while windowed", async () => {
+    const wide: DirectoryListing = {
+      ...listing,
+      entries: Array.from({ length: 4_096 }, (_, index) => ({
+        path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
+        sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    };
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => {
+        renderer = create(<ExplorerTree root={root} scopeIdentity="windowed" listings={new Map([["/r", wide]])}
+          expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+          onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+          onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      });
+      const mounted = () => renderer.root.findAllByProps({ className: "file-row" });
+      expect(mounted().length, "a windowed tree must not mount the whole directory").toBeLessThan(4_096);
+
+      // Every mounted row reports its position among its own siblings, which is
+      // the only way an assistive technology can know where it is once the DOM
+      // no longer contains the whole level.
+      const first = mounted()[0];
+      expect(first.props["aria-setsize"]).toBe(4_096);
+      expect(first.props["aria-posinset"]).toBe(1);
+      // Exactly one row is in the tab order, wherever the window sits.
+      expect(mounted().filter((row) => row.props.tabIndex === 0)).toHaveLength(1);
+
+      // Arrow-down past the mounted band keeps focus roving: the window follows
+      // and the row the tree asks to focus is really in the document.
+      const step = (index: number) => act(async () => {
+        renderer.root.findByProps({ "data-tree-index": index }).props.onKeyDown({
+          key: "ArrowDown", target: 1, currentTarget: 1, preventDefault: vi.fn(),
+        });
+      });
+      const band = mounted().length;
+      const target = band + 5;
+      for (let index = 0; index < target; index += 1) await step(index);
+      // The window followed the cursor: the row the tree now considers focused
+      // is mounted, is the only one in the tab order, and still knows where it
+      // sits among its siblings.
+      const arrived = renderer.root.findAllByProps({ "data-tree-index": target });
+      expect(arrived, "arrowing past the mounted band dropped the focused row").not.toHaveLength(0);
+      expect(arrived[0].props.tabIndex).toBe(0);
+      expect(arrived[0].props["aria-posinset"]).toBe(target + 1);
+      expect(mounted().filter((row) => row.props.tabIndex === 0)).toHaveLength(1);
+      expect(mounted().length, "the band must stay bounded while scrolling").toBeLessThan(4_096);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
     }
   });
 

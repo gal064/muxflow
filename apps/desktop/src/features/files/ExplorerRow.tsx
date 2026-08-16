@@ -29,6 +29,9 @@ interface EntryRowProps {
   focused: boolean;
   index: number;
   open: boolean;
+  /** Position among siblings at this level, which windowing hides from the DOM. */
+  positionInSet: number;
+  setSize: number;
 }
 
 export const ExplorerEntryRow = memo(function ExplorerEntryRow(props: EntryRowProps) {
@@ -37,7 +40,9 @@ export const ExplorerEntryRow = memo(function ExplorerEntryRow(props: EntryRowPr
   return <div
     aria-expanded={entry.expandable ? open : undefined}
     aria-level={depth + 1}
+    aria-posinset={props.positionInSet}
     aria-selected={focused}
+    aria-setsize={props.setSize}
     className="file-row"
     data-tree-index={index}
     onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? actions.toggle(entry.path) : actions.open(entry, { preview: true }); }}
@@ -82,12 +87,16 @@ interface MoreRowProps {
   disabled: boolean;
   focused: boolean;
   index: number;
+  positionInSet: number;
+  setSize: number;
 }
 
 export const ExplorerMoreRow = memo(function ExplorerMoreRow(props: MoreRowProps) {
   const { actions, depth, directory, disabled, focused, index } = props;
   return <button
     aria-level={depth + 1}
+    aria-posinset={props.positionInSet}
+    aria-setsize={props.setSize}
     className="load-more-files"
     data-tree-index={index}
     disabled={disabled}
