@@ -19,18 +19,6 @@ use super::{response_error, send_response};
 // sigil and decimal digits, making `:` an unambiguous cross-version separator.
 const PLACEMENT_FORMAT: &str = "#{session_id}:#{window_id}:#{pane_id}";
 
-pub(super) fn handles(operation: v1::Operation) -> bool {
-    matches!(
-        operation,
-        v1::Operation::AgentSnapshot
-            | v1::Operation::AgentAction
-            | v1::Operation::AgentMarkSeen
-            | v1::Operation::AgentHookIngest
-            | v1::Operation::AgentHookManagement
-            | v1::Operation::AgentHostNaming
-    )
-}
-
 pub(super) async fn handle(
     request_id: u64,
     operation: v1::Operation,

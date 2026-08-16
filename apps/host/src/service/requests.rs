@@ -24,9 +24,9 @@ use super::{
 mod active_root_dispatch;
 mod agent_dispatch;
 mod dispatcher;
-pub(super) mod file_ops;
 mod filesystem_dispatch;
 pub(super) mod git_dispatch;
+pub(super) mod operation_policy;
 mod tmux_action_dispatch;
 pub(super) use dispatcher::handle_request;
 
