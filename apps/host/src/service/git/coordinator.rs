@@ -224,6 +224,8 @@ impl RepositoryCoordinator {
             }
         }
         let expected_repository_id = request.repository_id.clone();
+        #[cfg(test)]
+        self.observation.discovery();
         let discovered = tokio::task::spawn_blocking(move || {
             let root = WorktreeRoot::capture(&logical_root)?;
             root.validate_token(&logical_root, &root_token)?;

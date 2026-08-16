@@ -368,18 +368,24 @@ async fn phase14_thirty_two_consumers_report_native_watchers_and_status_processe
     assert_eq!(native_watchers, 1);
     assert_eq!(watch_registrations, 1);
     assert_eq!(status_pipelines, 1);
+    assert_eq!(observation.discoveries, 1);
     assert_eq!(observation.subscribers, 32);
     let git_processes = active.git_processes - before.git_processes;
     let status_processes = active.status_processes - before.status_processes;
     let diff_processes = active.diff_processes - before.diff_processes;
     let mutation_processes = active.mutation_processes - before.mutation_processes;
     assert_eq!(status_processes, 1);
-    assert!(git_processes >= status_processes + diff_processes + mutation_processes);
+    // One batched `rev-parse`, one `status`, and the two `diff --numstat`
+    // classifications the visible binary badge still depends on.
+    assert_eq!(git_processes, 4);
+    assert_eq!(diff_processes, 2);
+    assert_eq!(mutation_processes, 0);
     println!(
         "PHASE14_METRIC {}",
         serde_json::json!({
             "lane": "git32Consumers",
             "consumers": 32,
+            "discoveries": observation.discoveries,
             "nativeWatcherCreations": watcher_creations,
             "nativeWatchers": native_watchers,
             "watchRegistrations": watch_registrations,
@@ -402,4 +408,83 @@ async fn phase14_thirty_two_consumers_report_native_watchers_and_status_processe
     let released = wait_for_release(&service).await;
     assert_eq!(released.subscribers, 0);
     assert_eq!(released.native_watchers, 0);
+}
+
+#[tokio::test]
+#[ignore = "Phase 14 opt-in Git process accounting fixture"]
+async fn phase14_warm_diff_and_mutation_process_counts() {
+    let fixture = Fixture::new("phase14-git-processes");
+    fixture.write("file", b"base\n");
+    fixture.git(&["add", "file"]);
+    fixture.git(&["commit", "-qm", "base"]);
+    fixture.write("file", b"changed\n");
+    let closed = Arc::new(AtomicBool::new(false));
+    let service = Arc::new(GitService::new(Arc::clone(&closed), 0));
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut watch = fixture.request();
+    watch.watch_id = "phase14-process-watch".into();
+    let bootstrap = service.watch_activated(watch, sender).await.unwrap();
+    let repository_id = bootstrap.repository.clone().unwrap().repository_id;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    while receiver.try_recv().is_ok() {}
+
+    // A matching diff, opened while the repository is already observed.
+    let before_diff = measurements::phase14_git_process_snapshot();
+    let observation_before_diff = service.observation();
+    let mut request = fixture.request();
+    request.repository_id = repository_id.clone();
+    request.path = b"file".to_vec();
+    request.diff_target = v1::GitDiffTarget::Unstaged.into();
+    let (diff, carried) = service.diff(&request, None).await.unwrap();
+    assert!(carried.authoritative, "the diff response carries status");
+    assert_eq!(diff.new_content, b"changed\n");
+    let after_diff = measurements::phase14_git_process_snapshot();
+    let diff_git_processes = after_diff.git_processes - before_diff.git_processes;
+    let diff_status_processes = after_diff.status_processes - before_diff.status_processes;
+    let diff_pipelines =
+        service.observation().status_pipelines - observation_before_diff.status_pipelines;
+
+    // A mutation, with the shared watcher live.
+    request.expected_status_generation = carried.generation;
+    request.mutation = v1::GitMutationKind::StageFile.into();
+    request.connection_epoch = 3;
+    let before_mutation = measurements::phase14_git_process_snapshot();
+    let observation_before_mutation = service.observation();
+    let result = service
+        .mutate(request, 3, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, v1::GitCommandOutcome::Applied as i32);
+    assert!(result.status.is_some(), "the mutation carries status");
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let after_mutation = measurements::phase14_git_process_snapshot();
+    let mutation_observation = service.observation();
+
+    println!(
+        "PHASE14_METRIC {}",
+        serde_json::json!({
+            "lane": "gitProcessAccounting",
+            "warmDiffGitProcesses": diff_git_processes,
+            "warmDiffStatusProcesses": diff_status_processes,
+            "warmDiffStatusPipelines": diff_pipelines,
+            "mutationGitProcesses": after_mutation.git_processes - before_mutation.git_processes,
+            "mutationStatusProcesses": after_mutation.status_processes - before_mutation.status_processes,
+            "mutationStatusPipelines": mutation_observation.status_pipelines - observation_before_mutation.status_pipelines,
+            "totalDiscoveries": mutation_observation.discoveries,
+            "nativeWatcherCreations": mutation_observation.native_watcher_creations,
+        })
+    );
+    // The warm diff reuses the observed status: no discovery, no status.
+    assert_eq!(diff_status_processes, 0);
+    assert_eq!(diff_pipelines, 0);
+    assert_eq!(mutation_observation.discoveries, 1);
+    // One authoritative pre-command status and one post-command status. The
+    // watcher's own wake-up for the mutation's writes coalesces onto the latter.
+    assert!(
+        (2..=3).contains(&(after_mutation.status_processes - before_mutation.status_processes)),
+        "a mutation must not burst status subprocesses"
+    );
+
+    service.unwatch("phase14-process-watch").unwrap();
+    closed.store(true, Ordering::Release);
 }
