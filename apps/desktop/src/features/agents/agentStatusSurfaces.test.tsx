@@ -14,6 +14,7 @@ import { agent } from "./testFixtures";
 import type { AgentRecord } from "./types";
 
 const noop = vi.fn();
+const commandScope = { hostProfileId: "remote", connectionKey: "ssh:remote", connectionEpoch: 1, serverIdentity: "server-a", generation: 1 };
 const session: Session = { id: "$1", name: "work", windowCount: 1, attachedClients: 1, order: 0 };
 
 const rowsFor = (agents: readonly AgentRecord[]) => buildAgentRows(
@@ -24,7 +25,7 @@ const rowsFor = (agents: readonly AgentRecord[]) => buildAgentRows(
 );
 
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
-  adapters={[]} agents={[]} agentSort="status" agentsRatio={0.4} canMutate hostLabel="omarchy"
+  adapters={[]} agents={[]} agentSort="status" agentsRatio={0.4} canMutate commandScope={commandScope} hostLabel="omarchy"
   latencyMs={41} maxWidth={426} onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop}
   onRenameAgent={noop} onResumeAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
   onSelectWorkspace={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop}
@@ -148,7 +149,7 @@ describe("one derivation, three surfaces", () => {
     const surfaces = [
       sidebar({ agents: rows, stateGlyphs: true }),
       renderToStaticMarkup(<TabStrip
-        activeKey="terminal:@1" canMutate canSplit onClose={noop} onMove={noop} onNewTerminal={noop}
+        activeKey="terminal:@1" canMutate canSplit commandScope={commandScope} onClose={noop} onMove={noop} onNewTerminal={noop}
         onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} stateGlyphs
         tabs={combineWorkspaceTabs(
           [{ id: "@1", sessionId: "$1", index: 0, name: "claude", active: true, layout: "", zoomed: false }] as never,

@@ -22,6 +22,7 @@ type TerminalWorkspaceSurfaceProps = {
   mountedPanes: Pane[];
   /** Per-pane agent state; a pane whose agent wants a human gets the ring. */
   paneAttention?: ReadonlyMap<string, AgentAttentionRollup>;
+  paintScopeKey: string;
   panes: Pane[];
   snapshot: TmuxSnapshot;
   /** Receives the tiled surface element the tmux client size is measured from. */
@@ -30,6 +31,7 @@ type TerminalWorkspaceSurfaceProps = {
   terminalTransferRegistry: TerminalTransferRegistry;
   terminalTransferScope?: TerminalTransferConnectionScope;
   beginDividerDrag(event: PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical"): void;
+  focusPane(pane: Pane): void;
   handleInput(paneId: string, input: TerminalInput): void;
   /** A terminal reported what it turns pixels into. */
   onMeasurements(measurements: TerminalMeasurements): void;
@@ -58,9 +60,10 @@ export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
         hub={props.hub}
         onController={(paneId, controller) => { if (controller) props.controllers.current.set(paneId, controller); else props.controllers.current.delete(paneId); }}
         onDiagnostic={props.setStatus}
-        onFocus={(paneId) => { if (paneId !== activePane?.id) void props.performAction({ kind: "focusPane", paneId }); }}
+        onFocus={(paneId) => { if (paneId !== activePane?.id) props.focusPane(pane); }}
         onInput={props.handleInput}
         onMeasurements={props.onMeasurements}
+        paintScopeKey={props.paintScopeKey}
         transferClient={props.terminalTransferClient}
         transferRegistry={props.terminalTransferRegistry}
         transferScope={props.terminalTransferScope}

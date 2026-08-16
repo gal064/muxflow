@@ -20,6 +20,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import { TitleBar } from "./TitleBar";
 
 const noop = vi.fn();
+const commandScope = { hostProfileId: "remote", connectionKey: "ssh:remote", connectionEpoch: 1, serverIdentity: "server-a", generation: 1 };
 const session: Session = { id: "$1", name: "A very long workspace name", windowCount: 3, attachedClients: 1, order: 0 };
 const rows: WorkspaceRowModel[] = [{
   session, active: true, attention: "blocked", unread: 2, working: true,
@@ -51,6 +52,7 @@ const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}
   agentSort="workspace"
   agentsRatio={0.4}
   canMutate
+  commandScope={commandScope}
   hostLabel="omarchy"
   latencyMs={41}
   onAgentsRatio={noop}
@@ -136,7 +138,7 @@ describe("application shell accessibility contracts", () => {
     }];
     let renderer!: ReturnType<typeof create>;
     const element = (rows: typeof agents, canMutate = true) => <WorkspaceSidebar
-      adapters={adapters} agents={rows} agentSort="workspace" agentsRatio={0.4} canMutate={canMutate}
+      adapters={adapters} agents={rows} agentSort="workspace" agentsRatio={0.4} canMutate={canMutate} commandScope={commandScope}
       hostLabel="omarchy" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
       onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop}
@@ -152,7 +154,7 @@ describe("application shell accessibility contracts", () => {
     await act(async () => { rowCommandRegistry.run("agents.resumeRow"); });
     // One line in the palette takes the adapter's first declared placement; the
     // context menu is where a choice between placements belongs.
-    expect(onResumeAgent).toHaveBeenCalledWith(expect.objectContaining({ id: "a1" }), "window");
+    expect(onResumeAgent).toHaveBeenCalledWith(expect.objectContaining({ id: "a1" }), "window", commandScope);
     await act(async () => { rowCommandRegistry.run("agents.focusRow"); });
     expect(onSelectAgent).toHaveBeenCalled();
 
@@ -190,7 +192,7 @@ describe("application shell accessibility contracts", () => {
 
   it("renders combined terminal/app tabs as one selected tablist", () => {
     const html = renderToStaticMarkup(<TabStrip
-      activeKey="app:file" canMutate canSplit stateGlyphs={false} onClose={noop} onMove={noop}
+      activeKey="app:file" canMutate canSplit commandScope={commandScope} stateGlyphs={false} onClose={noop} onMove={noop}
       onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
       tabs={[
         { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked" },
@@ -209,6 +211,74 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('aria-label="Agent blocked"');
     // A preview tab says so in the strip, the way VS Code does.
     expect(html).toContain('class="tab-title tab-title-preview"');
+  });
+
+  it("keeps a tab menu command bound to the connection scope that opened it", async () => {
+    const onClose = vi.fn();
+    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none" } as const;
+    const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
+    const element = (scope: typeof commandScope) => <TabStrip
+      activeKey={tab.key} canMutate canSplit commandScope={scope} stateGlyphs={false} onClose={onClose} onMove={noop}
+      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} tabs={[tab]}
+    />;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(element(commandScope)); });
+    await act(async () => renderer.root.findByProps({ role: "tab" }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    await act(async () => { renderer.update(element(replacementScope)); });
+    await act(async () => renderer.root.findByProps({ "data-menu-item": "close" }).props.onClick());
+    expect(onClose).toHaveBeenCalledWith(tab, commandScope);
+    await act(async () => renderer.unmount());
+  });
+
+  it("keeps a workspace menu command bound to the connection scope that opened it", async () => {
+    const onWorkspaceCommand = vi.fn();
+    const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
+    const element = (scope: typeof commandScope) => <WorkspaceSidebar
+      adapters={[]} agents={[]} agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope}
+      hostLabel="omarchy" maxWidth={426} phase="connected" rows={rows} stateGlyphs={false} transport="ssh" width={240}
+      onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
+      onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
+      onWorkspaceCommand={onWorkspaceCommand}
+    />;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(element(commandScope)); });
+    await act(async () => renderer.root.findByProps({ "data-workspace-index": 0 }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    await act(async () => { renderer.update(element(replacementScope)); });
+    await act(async () => renderer.root.findByProps({ "data-menu-item": "rename" }).props.onClick());
+    expect(onWorkspaceCommand).toHaveBeenCalledWith(session, "session.rename", commandScope);
+    await act(async () => renderer.unmount());
+  });
+
+  it("invalidates an agent menu and palette subject when the connection replaces recycled IDs", async () => {
+    const onSelectAgent = vi.fn();
+    const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
+    const agentRows = buildAgentRows(
+      [agent({ id: "recycled", paneId: "%1", displayName: "Old agent" })],
+      () => ({ workspaceOrder: 0, workspaceName: "work" }),
+      () => true,
+      "workspace",
+    );
+    const element = (scope: typeof commandScope, displayName: string) => <WorkspaceSidebar
+      adapters={[]} agents={agentRows.map((row) => ({ ...row, agent: { ...row.agent, displayName } }))}
+      agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} hostLabel="omarchy" maxWidth={426}
+      phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
+      onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
+      onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
+      onWorkspaceCommand={noop}
+    />;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(element(commandScope, "Old agent")); });
+    const oldRow = renderer.root.findByProps({ "data-agent-index": 0 });
+    await act(async () => oldRow.props.onFocus());
+    await act(async () => oldRow.props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    expect(renderer.root.findAllByProps({ "data-menu-item": "focus" })).toHaveLength(1);
+    expect(rowCommandRegistry.available()).toContain("agents.focusRow");
+
+    await act(async () => { renderer.update(element(replacementScope, "Replacement agent")); });
+    expect(renderer.root.findAllByProps({ "data-menu-item": "focus" })).toHaveLength(0);
+    expect(rowCommandRegistry.available()).toEqual([]);
+    expect(onSelectAgent).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
   });
 
   it("keeps Files and Git mutually exclusive in the one right panel", () => {

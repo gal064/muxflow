@@ -23,10 +23,10 @@ export interface CommandContext {
 }
 
 export type CommandTarget =
-  | { kind: "session"; id: string }
-  | { kind: "terminalTab"; id: string }
-  | { kind: "appTab"; id: string }
-  | { kind: "pane"; id: string };
+  | { kind: "session"; id: string; scope: HostScopeToken }
+  | { kind: "terminalTab"; id: string; scope: HostScopeToken }
+  | { kind: "appTab"; id: string; scope: HostScopeToken }
+  | { kind: "pane"; id: string; scope: HostScopeToken };
 
 /** ⌘1–9 workspaces and ⌃1–9 tabs, the cmux keymap's positional selectors. */
 export type IndexDigit = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
@@ -369,3 +369,4 @@ export function shortcutCollisions(platform: Platform, overrides: ShortcutOverri
 export function currentPlatform(userAgent = navigator.userAgent): Platform {
   return /Mac|iPhone|iPad/.test(userAgent) ? "mac" : "linux";
 }
+import type { HostScopeToken } from "../features/shell/hostScope";
