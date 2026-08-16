@@ -6,9 +6,10 @@ import type { PendingTmuxConfirmation } from "../commands/destructiveConfirmatio
 import type { CommandContext, CommandId, Platform, ShortcutOverrides } from "../commands/registry";
 import type { HelperUpgradeState } from "../features/shell/helperUpgrade";
 import type { HostProfile } from "./types";
+import type { AppRecoveryDiscardState } from "./appRecovery";
 
 type AppDialogLayerProps = {
-  appRecoveryDiscard?: { count: number };
+  appRecoveryDiscard?: AppRecoveryDiscardState;
   appStateResetConfirmation: boolean;
   confirmation?: PendingTmuxConfirmation;
   /** The saved host `host.delete` is asking about, if it asked. */

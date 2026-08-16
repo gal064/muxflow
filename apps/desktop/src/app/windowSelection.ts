@@ -3,6 +3,43 @@ import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 
 export type WindowMoveDirection = "left" | "right";
 
+/**
+ * Admits only the newest remote navigation completion. Consecutive requests
+ * for the exact same destination share their host request; an intervening
+ * destination intentionally breaks coalescing because reusing older work could
+ * let the host finish on the intervening target.
+ */
+export class RemoteNavigationCoordinator {
+  #revision = 0;
+  #pending?: { key: string; promise: Promise<TmuxActionResult | undefined> };
+
+  async navigate(
+    key: string,
+    request: () => Promise<TmuxActionResult | undefined>,
+    commit: () => void,
+  ): Promise<boolean> {
+    const revision = ++this.#revision;
+    const pending = this.#pending?.key === key
+      ? this.#pending
+      : { key, promise: request() };
+    this.#pending = pending;
+    let accepted: TmuxActionResult | undefined;
+    try {
+      accepted = await pending.promise;
+    } finally {
+      if (this.#pending === pending) this.#pending = undefined;
+    }
+    if (!accepted || revision !== this.#revision) return false;
+    commit();
+    return true;
+  }
+
+  invalidate(): void {
+    this.#revision += 1;
+    this.#pending = undefined;
+  }
+}
+
 export function relativeWindowReorderAction(
   windows: readonly TmuxWindow[],
   activeWindowId: string,

@@ -74,6 +74,78 @@ interface ShellCommandOptions {
   stepFocusHistory(direction: "back" | "forward"): void;
 }
 
+type CommandTargetInputs = Pick<ShellCommandOptions,
+  "activePane" | "activeSession" | "activeWindow" | "appState" | "currentHostProfileId" | "selectedAppTab" | "snapshot" | "windows"
+>;
+
+type ResolvedCommandTargetFields = {
+  /** `ambient` is the only branch allowed to read the current shell selection. */
+  targetSession?: Session;
+  targetWindow?: TmuxWindow;
+  targetAppTab?: AppOwnedTab;
+  targetPane?: Pane;
+  targetWindows: readonly TmuxWindow[];
+};
+
+export type ResolvedCommandTarget =
+  | (ResolvedCommandTargetFields & { kind: "ambient" })
+  | (ResolvedCommandTargetFields & { kind: "session" })
+  | (ResolvedCommandTargetFields & { kind: "terminalTab" })
+  | (ResolvedCommandTargetFields & { kind: "appTab" })
+  | (ResolvedCommandTargetFields & { kind: "pane" });
+
+/**
+ * Resolve a command subject without mixing an explicit surface with whatever
+ * happens to be selected behind it. Context menus and tab close buttons pass a
+ * target; a missing/stale explicit ID therefore resolves to no subject instead
+ * of falling through to the active workspace, tab, app tab, or pane.
+ */
+export function resolveCommandTarget(
+  inputs: CommandTargetInputs,
+  target?: CommandTarget,
+): ResolvedCommandTarget {
+  if (!target) {
+    return {
+      kind: "ambient",
+      targetSession: inputs.activeSession,
+      targetWindow: inputs.activeWindow,
+      targetAppTab: inputs.selectedAppTab,
+      targetPane: inputs.activePane,
+      targetWindows: inputs.windows,
+    };
+  }
+  switch (target.kind) {
+    case "session":
+      return {
+        kind: target.kind,
+        targetSession: inputs.snapshot.sessions.find((session) => session.id === target.id),
+        targetWindows: [],
+      };
+    case "terminalTab": {
+      const targetWindow = inputs.snapshot.windows.find((window) => window.id === target.id);
+      return {
+        kind: target.kind,
+        targetWindow,
+        targetWindows: targetWindow
+          ? inputs.snapshot.windows.filter((window) => window.sessionId === targetWindow.sessionId).sort((left, right) => left.index - right.index)
+          : [],
+      };
+    }
+    case "appTab":
+      return {
+        kind: target.kind,
+        targetAppTab: inputs.appState.appTabs.find((tab) => tab.id === target.id && tab.hostProfileId === inputs.currentHostProfileId),
+        targetWindows: [],
+      };
+    case "pane":
+      return {
+        kind: target.kind,
+        targetPane: inputs.snapshot.panes.find((pane) => pane.id === target.id),
+        targetWindows: [],
+      };
+  }
+}
+
 /**
  * What a destructive command closes, and whether it asks first.
  *
@@ -122,21 +194,7 @@ export function useShellCommands(options: ShellCommandOptions): {
       if (!outcome.ran) options.setStatus(`${definition.title.replace(/…$/, "")} is unavailable: nothing is selected in that panel any more.`);
       return;
     }
-    const targetSession = target?.kind === "session"
-      ? options.snapshot.sessions.find((session) => session.id === target.id)
-      : options.activeSession;
-    const targetWindow = target?.kind === "terminalTab"
-      ? options.snapshot.windows.find((window) => window.id === target.id)
-      : options.activeWindow;
-    const targetAppTab = target?.kind === "appTab"
-      ? options.appState.appTabs.find((tab) => tab.id === target.id && tab.hostProfileId === options.currentHostProfileId)
-      : options.selectedAppTab;
-    const targetPane = target?.kind === "pane"
-      ? options.snapshot.panes.find((pane) => pane.id === target.id)
-      : options.activePane;
-    const targetWindows = targetWindow
-      ? options.snapshot.windows.filter((window) => window.sessionId === targetWindow.sessionId).sort((left, right) => left.index - right.index)
-      : options.windows;
+    const { targetSession, targetWindow, targetAppTab, targetPane, targetWindows } = resolveCommandTarget(options, target);
     if (commandId === "window.close" && targetAppTab) {
       try {
         await editorFlushRegistry.flushAll();
@@ -270,7 +328,12 @@ export function useShellCommands(options: ShellCommandOptions): {
         "pane.resizeLeft": "resizePaneLeft", "pane.resizeRight": "resizePaneRight",
         "pane.resizeUp": "resizePaneUp", "pane.resizeDown": "resizePaneDown",
       } as const)[commandId], paneId: targetPane.id, resizeCells: 2 }); return;
-      case "pane.zoom": if (targetPane) await options.performAction({ kind: "zoomPane", paneId: targetPane.id, windowId: targetPane.windowId, zoomed: !targetWindow?.zoomed }); return;
+      case "pane.zoom": if (targetPane) await options.performAction({
+        kind: "zoomPane",
+        paneId: targetPane.id,
+        windowId: targetPane.windowId,
+        zoomed: !options.snapshot.windows.find((item) => item.id === targetPane.windowId)?.zoomed,
+      }); return;
       case "terminal.copy": await options.controllers.current.get(targetPane?.id ?? "")?.copy(); return;
       case "terminal.paste": await options.controllers.current.get(targetPane?.id ?? "")?.paste(); return;
       case "terminal.search": options.controllers.current.get(targetPane?.id ?? "")?.showSearch(); return;
