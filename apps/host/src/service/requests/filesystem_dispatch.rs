@@ -1,29 +1,5 @@
 use super::*;
 
-pub(super) fn handles(operation: v1::Operation) -> bool {
-    matches!(
-        operation,
-        v1::Operation::ListDirectory
-            | v1::Operation::WatchDirectory
-            | v1::Operation::UnwatchDirectory
-            | v1::Operation::ReadFile
-            | v1::Operation::WriteFile
-            | v1::Operation::FileMutation
-            | v1::Operation::StartDownload
-            | v1::Operation::ReadDownloadChunk
-            | v1::Operation::CancelDownload
-            | v1::Operation::BeginFileWrite
-            | v1::Operation::WriteFileChunk
-            | v1::Operation::CommitFileWrite
-            | v1::Operation::CancelFileWrite
-            | v1::Operation::PrepareTerminalUpload
-            | v1::Operation::WriteTerminalUploadChunk
-            | v1::Operation::CommitTerminalUpload
-            | v1::Operation::CancelTerminalUpload
-            | v1::Operation::ReconcileTerminalUpload
-    )
-}
-
 pub(super) struct FileDispatchContext<'a> {
     pub(super) control_tx: &'a mpsc::Sender<SequencerControl>,
     pub(super) event_tx: &'a mpsc::Sender<SequencerControl>,
