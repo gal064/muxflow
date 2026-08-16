@@ -182,6 +182,17 @@ impl TransferEvent {
     }
 }
 
+pub(super) fn late_queued_publication_rollback(id: &str, binding: &BulkBinding) -> Value {
+    TransferEvent::new(id, binding, TransferState::Failed)
+        .outcome(TransferOutcome::NotPublished)
+        .failure(
+            TransferFailureKind::Transfer,
+            "queued publication completed after its bounded admission deadline".into(),
+        )
+        .cleanup(CleanupStatus::NotNeeded, None)
+        .value()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

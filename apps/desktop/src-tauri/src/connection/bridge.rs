@@ -68,6 +68,10 @@ pub(super) fn supervise_bridge(
             Ok(()) => {}
             Err(error) => send_event(&channel, TerminalEvent::Error { message: error }),
         }
+        super::files::invalidate_bulk_scope(
+            client.bulk_scope,
+            "bulk transfer control connection disconnected",
+        );
         client.ready.store(false, Ordering::Release);
         if let Some(window) = client.delivery_window.lock().unwrap().take() {
             window.close();
@@ -176,6 +180,10 @@ fn run_bridge_once(
     // Terminal generations are scoped to one helper protocol connection.  Tell
     // the renderer to discard same-server generation watermarks before any seed
     // or output from the new connection is delivered.
+    super::files::invalidate_bulk_scope(
+        client.bulk_scope,
+        "bulk transfer control connection epoch was replaced",
+    );
     super::files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
     let credit_negotiated = hello.capabilities & CAP_TERMINAL_OUTPUT_CREDIT != 0;
     if credit_negotiated

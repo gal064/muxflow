@@ -17,10 +17,12 @@ use super::bulk_pool::BulkLease;
 use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
 use super::cleanup::CleanupReport;
 use super::clipboard_staging::lock_owned_source as lock_owned_clipboard_source;
-use super::scheduler::{BulkBinding, CancelState, cancel_transfer, enqueue_transfer_with_queued};
+use super::scheduler::{
+    BulkBinding, CancelState, QueuedPublication, cancel_transfer, enqueue_transfer_with_queued,
+};
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
-    TransferResult, TransferState,
+    TransferResult, TransferState, late_queued_publication_rollback,
 };
 use super::{BULK_CHUNK_BYTES, parse_required_u64};
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
@@ -250,30 +252,26 @@ impl UploadManager {
         let id = job.transfer_id.clone();
         let binding = job.binding.clone();
         let cancellation = Arc::clone(&job.cancellation);
-        let admitted = job.clone();
+        let queued = TransferEvent::new(&job.transfer_id, &job.binding, TransferState::Queued)
+            .fields(json!({
+                "sourcePath": job.source_path,
+                "name": job.destination_name,
+                "sizeBytes": job.source_identity.size.to_string(),
+            }))
+            .value();
+        let queued = QueuedPublication::json(
+            job.channel.clone(),
+            queued,
+            late_queued_publication_rollback(&job.transfer_id, &job.binding),
+            "could not deliver upload preflight state",
+        );
         let started = job.clone();
         let work = job.clone();
         enqueue_transfer_with_queued(
             id,
             binding,
             cancellation,
-            move || {
-                let queued = TransferEvent::new(
-                    &admitted.transfer_id,
-                    &admitted.binding,
-                    TransferState::Queued,
-                )
-                .fields(json!({
-                    "sourcePath": admitted.source_path,
-                    "name": admitted.destination_name,
-                    "sizeBytes": admitted.source_identity.size.to_string(),
-                }))
-                .value();
-                admitted
-                    .channel
-                    .send(queued)
-                    .map_err(|error| format!("could not deliver upload preflight state: {error}"))
-            },
+            queued,
             move || {
                 let event = TransferEvent::new(
                     &started.transfer_id,
@@ -338,14 +336,19 @@ impl UploadManager {
         let id = job.transfer_id.clone();
         let binding = job.binding.clone();
         let cancellation = Arc::clone(&job.cancellation);
-        let admitted_job = job.clone();
+        let queued = QueuedPublication::json(
+            job.channel.clone(),
+            TransferEvent::new(&job.transfer_id, &job.binding, TransferState::Queued).value(),
+            late_queued_publication_rollback(&job.transfer_id, &job.binding),
+            "could not deliver upload state",
+        );
         let started_job = job.clone();
         let work_job = job.clone();
         enqueue_transfer_with_queued(
             id,
             binding,
             cancellation,
-            move || send_upload_state(&admitted_job, TransferState::Queued, json!({})),
+            queued,
             move || emit(&started_job, TransferState::Running, json!({})),
             move || run_upload(&work_job),
             move |result, _reason| finish_upload_job(&job, result),

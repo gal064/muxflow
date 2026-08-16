@@ -26,6 +26,7 @@ pub use editor_manager::FileIoManager;
 mod serialization;
 pub(crate) use serialization::{file_event_json, file_response_json};
 mod scheduler;
+pub(super) use scheduler::invalidate_bulk_scope;
 mod transfer_event;
 pub(crate) mod upload_manager;
 pub use upload_manager::UploadManager;

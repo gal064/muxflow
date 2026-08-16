@@ -162,6 +162,7 @@ impl TerminalClient {
 
     fn shutdown_transport(&self, pending_message: &str) {
         self.stop_signal.stop();
+        files::invalidate_bulk_scope(self.bulk_scope, pending_message);
         self.ready.store(false, Ordering::Release);
         self.resize_queue.stop();
         if let Some(window) = self.delivery_window.lock().unwrap().take() {
@@ -182,6 +183,10 @@ impl TerminalClient {
     }
 
     fn reconnect_transport(&self) {
+        files::invalidate_bulk_scope(
+            self.bulk_scope,
+            "bulk transfer control connection is reconnecting",
+        );
         self.ready.store(false, Ordering::Release);
         if let Some(window) = self.delivery_window.lock().unwrap().take() {
             window.close();
