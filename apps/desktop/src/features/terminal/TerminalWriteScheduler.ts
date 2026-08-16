@@ -3,7 +3,11 @@ import { copyTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
 
 type FrameRequest = (callback: FrameRequestCallback) => number;
 type FrameCancel = (handle: number) => void;
-interface QueuedWrite { bytes: Uint8Array; onRendered?: () => void }
+interface QueuedWrite {
+  bytes: Uint8Array;
+  backingByteLength: number;
+  onRendered?: () => void;
+}
 
 function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
   if (pieces.length === 1) return pieces[0];
@@ -24,6 +28,8 @@ export class TerminalWriteScheduler {
   #disposed = false;
   #pendingBytes = 0;
   #inFlightBytes = 0;
+  #queuedBackingBytes = 0;
+  #inFlightBackingBytes = 0;
   #overflowed = false;
   #accepting = true;
   #immediateWriteUsed = false;
@@ -54,7 +60,7 @@ export class TerminalWriteScheduler {
   /** Transfers an already-exclusive buffer without another ownership copy. */
   enqueueOwned(bytes: OwnedTerminalBytes, onRendered?: () => void): boolean {
     if (bytes.byteLength === 0) return this.#acceptEmpty(onRendered);
-    if (!this.#admit(bytes.byteLength)) return false;
+    if (!this.#admit(bytes.buffer.byteLength)) return false;
     this.#commit(bytes, onRendered);
     return true;
   }
@@ -85,6 +91,8 @@ export class TerminalWriteScheduler {
     this.#immediateResetFrame = undefined;
     this.#pendingBytes = 0;
     this.#inFlightBytes = 0;
+    this.#queuedBackingBytes = 0;
+    this.#inFlightBackingBytes = 0;
     this.#resolveDrainWaiters();
   }
 
@@ -105,11 +113,7 @@ export class TerminalWriteScheduler {
 
   /** Live backing bytes still strongly referenced by queue slots. */
   get retainedQueueByteLength(): number {
-    let retained = 0;
-    for (let index = 0; index < this.#queue.length; index += 1) {
-      retained += this.#queue[index]?.bytes.byteLength ?? 0;
-    }
-    return retained;
+    return this.#queuedBackingBytes;
   }
 
   #acceptEmpty(onRendered?: () => void): boolean {
@@ -118,10 +122,11 @@ export class TerminalWriteScheduler {
     return true;
   }
 
-  #admit(byteLength: number): boolean {
+  #admit(backingByteLength: number): boolean {
     if (this.#disposed || !this.#accepting || this.#overflowed) return false;
-    if (this.#pendingBytes + byteLength <= this.maxPendingBytes) return true;
-    const attemptedBytes = this.#pendingBytes + byteLength;
+    const retainedBytes = this.#queuedBackingBytes + this.#inFlightBackingBytes;
+    if (retainedBytes + backingByteLength <= this.maxPendingBytes) return true;
+    const attemptedBytes = retainedBytes + backingByteLength;
     this.#dropQueued();
     this.#overflowed = true;
     this.onOverflow?.(attemptedBytes);
@@ -132,8 +137,10 @@ export class TerminalWriteScheduler {
     this.measurements?.add("terminal.scheduler.enqueueOperations");
     this.measurements?.add("terminal.scheduler.inputBytes", bytes.byteLength);
     if (onRendered) this.measurements?.add("terminal.scheduler.callbacksQueued");
-    this.#queue.push({ bytes, onRendered });
+    const backingByteLength = bytes.buffer.byteLength;
+    this.#queue.push({ bytes, backingByteLength, onRendered });
     this.#pendingBytes += bytes.byteLength;
+    this.#queuedBackingBytes += backingByteLength;
     this.measurements?.highWater?.("terminal.scheduler.pendingBytes", this.#pendingBytes);
     this.measurements?.highWater?.("terminal.scheduler.queueDepth", this.#queueLength());
     this.onPendingBytes?.(this.#pendingBytes);
@@ -141,8 +148,12 @@ export class TerminalWriteScheduler {
   }
 
   #dropQueued(): void {
+    if (this.#inFlightBytes > 0 && this.#inFlightBackingBytes === 0) {
+      this.#inFlightBackingBytes = this.#queue[this.#queueHead]?.backingByteLength ?? 0;
+    }
     this.#queue.length = 0;
     this.#queueHead = 0;
+    this.#queuedBackingBytes = 0;
     this.#pendingBytes = this.#inFlightBytes;
     if (this.#frame !== undefined) this.cancelFrame(this.#frame);
     this.#frame = undefined;
@@ -183,10 +194,16 @@ export class TerminalWriteScheduler {
     const pieces: Uint8Array[] = [];
     const rendered: Array<() => void> = [];
     let length = 0;
+    let consumedBackingBytes = 0;
+    let partialRecord = false;
     while (length < this.maxBytesPerFrame && this.#queueLength() > 0) {
       const first = this.#queue[this.#queueHead];
       if (!first) throw new Error("terminal scheduler queue invariant violated");
-      const take = Math.min(first.bytes.byteLength, this.maxBytesPerFrame - length);
+      const remainingBudget = this.maxBytesPerFrame - length;
+      // A joined chunk duplicates its pieces. Never include a partial record
+      // after earlier pieces, because its full backing must remain queued.
+      if (pieces.length > 0 && first.bytes.byteLength > remainingBudget) break;
+      const take = Math.min(first.bytes.byteLength, remainingBudget);
       pieces.push(first.bytes.subarray(0, take));
       length += take;
       if (take === first.bytes.byteLength) {
@@ -195,22 +212,29 @@ export class TerminalWriteScheduler {
         // slots until compaction would let actual retention exceed the cap.
         this.#queue[this.#queueHead] = undefined;
         this.#queueHead += 1;
+        this.#queuedBackingBytes -= first.backingByteLength;
+        consumedBackingBytes += first.backingByteLength;
         this.measurements?.add("terminal.scheduler.dequeueOperations");
         if (first.onRendered) rendered.push(first.onRendered);
       } else {
         first.bytes = first.bytes.subarray(take);
+        partialRecord = true;
       }
     }
     this.#compactQueue();
     const chunk = joinChunks(pieces, length);
     if (pieces.length > 1) this.measurements?.add("terminal.scheduler.copiedBytes", length);
     this.#inFlightBytes = length;
+    this.#inFlightBackingBytes = pieces.length > 1
+      ? chunk.buffer.byteLength
+      : partialRecord ? 0 : consumedBackingBytes;
     let completed = false;
     const done = () => {
       if (completed) return;
       completed = true;
       this.#pendingBytes -= this.#inFlightBytes;
       this.#inFlightBytes = 0;
+      this.#inFlightBackingBytes = 0;
       this.onPendingBytes?.(this.#pendingBytes);
       for (const onRendered of rendered) onRendered();
       this.measurements?.add("terminal.scheduler.callbacksInvoked", rendered.length);
@@ -237,10 +261,12 @@ export class TerminalWriteScheduler {
       return;
     }
     if (this.#queueHead < 64 || this.#queueHead * 2 < this.#queue.length) return;
+    const movedSlots = this.#queue.length - this.#queueHead;
     this.#queue.copyWithin(0, this.#queueHead);
     this.#queue.length -= this.#queueHead;
     this.#queueHead = 0;
     this.measurements?.add("terminal.scheduler.queueCompactions");
+    this.measurements?.add("terminal.scheduler.queueSlotsMoved", movedSlots);
   }
 
   #resolveDrainWaiters(): void {

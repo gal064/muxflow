@@ -274,7 +274,9 @@ describe("TerminalWriteScheduler", () => {
     while (completions.length) completions.shift()!();
     expect(written).toEqual(Array.from({ length: 131 }, (_, index) => index & 0xff));
     expect(rendered).toEqual(Array.from({ length: 131 }, (_, index) => index));
-    expect(measurements.snapshot().counters["terminal.scheduler.queueCompactions"]).toBeGreaterThan(0);
+    const counters = measurements.snapshot().counters;
+    expect(counters["terminal.scheduler.queueCompactions"]).toBeGreaterThan(0);
+    expect(counters["terminal.scheduler.queueSlotsMoved"]).toBeGreaterThan(0);
   });
 
   it("releases consumed buffers below the queue compaction threshold", () => {
@@ -291,6 +293,27 @@ describe("TerminalWriteScheduler", () => {
     expect(scheduler.pendingBytes).toBe(2);
     expect(scheduler.retainedQueueByteLength).toBe(2);
   });
+
+  it("gates admission on a partial record's full retained backing allocation", () => {
+    const completions: Array<() => void> = [];
+    const overflow: number[] = [];
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      () => 1,
+      () => undefined,
+      2,
+      4,
+      undefined,
+      (bytes) => overflow.push(bytes),
+    );
+    expect(scheduler.enqueue(Uint8Array.of(1, 2, 3, 4))).toBe(true);
+    expect(scheduler.retainedQueueByteLength).toBe(4);
+    completions.shift()!();
+    expect(scheduler.pendingBytes).toBe(2);
+    expect(scheduler.retainedQueueByteLength).toBe(4);
+    expect(scheduler.enqueue(Uint8Array.of(5))).toBe(false);
+    expect(overflow).toEqual([5]);
+  });
 });
 
 describe("Phase 14 terminal operation fixture", () => {
@@ -298,9 +321,9 @@ describe("Phase 14 terminal operation fixture", () => {
   // include both the decoder's compact payload ownership and the legacy
   // scheduler/backlog copying; operations include queue work and array moves.
   const baseline = {
-    64: { decoderCopiedBytes: 512, schedulerCopiedBytes: 960, arrayMoveOperations: 28, queueOperations: 16, callbacks: 8, xtermWrites: 2 },
-    1024: { decoderCopiedBytes: 8192, schedulerCopiedBytes: 15_360, arrayMoveOperations: 28, queueOperations: 16, callbacks: 8, xtermWrites: 2 },
-    65536: { decoderCopiedBytes: 524_288, schedulerCopiedBytes: 983_040, arrayMoveOperations: 28, queueOperations: 16, callbacks: 8, xtermWrites: 3 },
+    64: { decoderCopiedBytes: 512, schedulerCopiedBytes: 960, backlogArrayMoves: 28, schedulerArrayMoves: 21, queueOperations: 16, fanoutDeliveries: 8, callbacks: 8, xtermWrites: 2 },
+    1024: { decoderCopiedBytes: 8192, schedulerCopiedBytes: 15_360, backlogArrayMoves: 28, schedulerArrayMoves: 21, queueOperations: 16, fanoutDeliveries: 8, callbacks: 8, xtermWrites: 2 },
+    65536: { decoderCopiedBytes: 524_288, schedulerCopiedBytes: 983_040, backlogArrayMoves: 28, schedulerArrayMoves: 21, queueOperations: 16, fanoutDeliveries: 8, callbacks: 8, xtermWrites: 3 },
   } as const;
 
   it("reports exact event, fanout, copy, queue, callback and frame counts by chunk size", () => {
@@ -347,6 +370,7 @@ describe("Phase 14 terminal operation fixture", () => {
       expect(joined.every((byte, index) => byte === expected[index])).toBe(true);
       const snapshot = measurements.snapshot();
       expect(snapshot.counters["terminal.hub.events"]).toBe(8);
+      expect(snapshot.counters["terminal.hub.fanoutDeliveries"]).toBe(8);
       expect(snapshot.counters["terminal.decoder.frames"]).toBe(8);
       expect(snapshot.counters["terminal.decoder.copiedBytes"]).toBe(chunkBytes * 8);
       expect(snapshot.counters["terminal.scheduler.enqueueOperations"]).toBe(8);
@@ -358,8 +382,12 @@ describe("Phase 14 terminal operation fixture", () => {
         + (snapshot.counters["terminal.scheduler.copiedBytes"] ?? 0);
       const baselineCopyProxyBytes = reference.decoderCopiedBytes + reference.schedulerCopiedBytes;
       const operationProxy = snapshot.counters["terminal.scheduler.enqueueOperations"]
-        + snapshot.counters["terminal.scheduler.dequeueOperations"];
-      const baselineOperationProxy = reference.queueOperations + reference.arrayMoveOperations;
+        + snapshot.counters["terminal.scheduler.dequeueOperations"]
+        + (snapshot.counters["terminal.scheduler.queueSlotsMoved"] ?? 0);
+      const baselineOperationProxy = reference.queueOperations
+        + reference.backlogArrayMoves
+        + reference.schedulerArrayMoves;
+      expect(snapshot.counters["terminal.hub.fanoutDeliveries"]).toBe(reference.fanoutDeliveries);
       expect(snapshot.counters["terminal.scheduler.callbacksInvoked"]).toBe(reference.callbacks);
       expect(snapshot.counters["terminal.scheduler.xtermWrites"]).toBe(reference.xtermWrites);
       expect(copyProxyBytes / baselineCopyProxyBytes).toBeLessThanOrEqual(0.7);
