@@ -47,7 +47,7 @@ function entry(path: string, options: { directory?: boolean; generation?: string
 }
 
 function listing(rootToken: string, directory: string, entries: ReturnType<typeof entry>[] = []) {
-  return { rootToken, directory, revision: "1", entries, overflowRecovery: false, complete: true };
+  return { rootToken, directory, revision: "1", entries, recoveredFromOverflow: false, complete: true };
 }
 
 /**
@@ -91,8 +91,8 @@ describe("useWorkspaceFiles", () => {
     const second = deferred<ActiveRoot>();
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn((scope) => scope.paneId === "%1" ? first.promise : second.promise),
-      listDirectory: vi.fn(async (_scope, root, directory) => ({ rootToken: root.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true })),
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true }, release: () => undefined })), openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      listDirectory: vi.fn(async (_scope, root, directory) => ({ rootToken: root.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true })),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })), openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async () => () => undefined),
     };
     const base = { clientId: "c", hostProfileId: "local", serverIdentity: "s", generation: 1, terminalEpoch: 41, sessionId: "$1" };
@@ -339,7 +339,7 @@ describe("useWorkspaceFiles", () => {
       fixture.publish({
         kind: "directorySnapshot",
         rootToken: "root",
-        listing: { ...listing("root", "/repo", [entry("/repo/rebuilt")]), overflowRecovery: true },
+        listing: { ...listing("root", "/repo", [entry("/repo/rebuilt")]), recoveredFromOverflow: true },
       });
       await clock.settle();
     });
@@ -458,8 +458,8 @@ describe("useWorkspaceFiles", () => {
     const listeners: Array<(event: WorkspaceEvent) => void> = [];
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn(async (active) => ({ ...root, paneId: active.paneId })),
-      listDirectory: vi.fn(async (_scope, active, directory) => ({ rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true })),
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true }, release: () => undefined })),
+      listDirectory: vi.fn(async (_scope, active, directory) => ({ rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true })),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })),
       openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async (_scope, listener) => { listeners.push(listener); return () => undefined; }),
     };
@@ -496,8 +496,8 @@ describe("useWorkspaceFiles", () => {
     let listener: ((event: WorkspaceEvent) => void) | undefined;
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn(async (active) => ({ ...root, paneId: active.paneId })),
-      listDirectory: vi.fn(async (_scope, active, directory) => ({ rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true })),
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true }, release: () => undefined })),
+      listDirectory: vi.fn(async (_scope, active, directory) => ({ rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true })),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })),
       openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
     };
@@ -521,8 +521,8 @@ describe("useWorkspaceFiles", () => {
     let listener: ((event: WorkspaceEvent) => void) | undefined;
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn(async () => root),
-      listDirectory: vi.fn(async (_scope, active, directory) => ({ rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true })),
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true }, release: () => undefined })),
+      listDirectory: vi.fn(async (_scope, active, directory) => ({ rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true })),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })),
       openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
     };

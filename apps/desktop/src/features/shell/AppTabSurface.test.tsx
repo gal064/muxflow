@@ -43,7 +43,7 @@ function entry(path: string, generation: string): FileEntry {
 }
 
 function listing(entries: FileEntry[], overrides: Partial<DirectoryListing> = {}): DirectoryListing {
-  return { rootToken: "root", directory: "/repo", revision: "1", entries, overflowRecovery: false, complete: true, ...overrides };
+  return { rootToken: "root", directory: "/repo", revision: "1", entries, recoveredFromOverflow: false, complete: true, ...overrides };
 }
 
 function opened(generation: string): OpenFile {

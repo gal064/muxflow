@@ -51,7 +51,14 @@ export interface DirectoryListing {
   directory: string;
   revision: string;
   entries: FileEntry[];
-  overflowRecovery: boolean;
+  /**
+   * The host rebuilt this listing because its watcher lost events, so anything
+   * cached *below* this directory may have missed changes too.
+   *
+   * Distinct from `complete`, which is only about whether more pages follow.
+   * One flag answering both questions could answer neither on its own.
+   */
+  recoveredFromOverflow: boolean;
   nextPageToken?: string;
   complete: boolean;
 }

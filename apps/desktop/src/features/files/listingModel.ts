@@ -75,7 +75,7 @@ export function appendPage(previous: DirectoryListing, page: DirectoryListing): 
   return {
     ...page,
     entries: [...byPath.values()],
-    overflowRecovery: previous.overflowRecovery || page.overflowRecovery,
+    recoveredFromOverflow: previous.recoveredFromOverflow || page.recoveredFromOverflow,
   };
 }
 

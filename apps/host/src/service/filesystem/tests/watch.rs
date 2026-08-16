@@ -22,11 +22,14 @@ fn native_watch_routing_is_independent_of_directory_entry_count() {
         target_directory: Arc::new(target_directory),
         fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
     };
-    let mut event = Event::new(notify::EventKind::Any);
-    event.paths.push(watch.target.join("entry-249999"));
-    assert!(watch_matches_events(&watch, &[Ok(event)], false));
-    assert!(watch_matches_events(&watch, &[], true));
-    assert!(!watch_matches_events(&watch, &[], false));
+    let deep = watch.target.join("entry-249999");
+    assert!(watch_matches_changes(
+        &watch,
+        std::slice::from_ref(&deep),
+        false
+    ));
+    assert!(watch_matches_changes(&watch, &[], true));
+    assert!(!watch_matches_changes(&watch, &[], false));
     fs::remove_dir_all(root_path).unwrap();
 }
 
@@ -230,10 +233,8 @@ fn deleted_file_events_use_absolute_root_and_nested_logical_paths() {
         ("root", &root_watch, &root_removed),
         ("nested", &nested_watch, &nested_removed),
     ] {
-        let mut notify = Event::new(notify::EventKind::Any);
         let logical_removed = watch.target.join(removed.file_name().unwrap());
-        notify.paths.push(logical_removed.clone());
-        let events = precise_file_events(watch_id, watch, &[Ok(notify)]);
+        let events = precise_file_events(watch_id, watch, std::slice::from_ref(&logical_removed));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].scope, logical_removed.to_string_lossy());
         let file = events[0].file.as_ref().unwrap();
@@ -453,21 +454,15 @@ fn an_event_about_the_watched_directory_itself_is_never_a_row_inside_it() {
         fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
     };
 
-    let mut about_itself = Event::new(notify::EventKind::Any);
-    about_itself.paths.push(logical_root.clone());
     // The watch is still considered touched, so a rescan can be scheduled for
     // it; what it must not do is invent an entry.
-    assert!(watch_matches_events(
-        &watch,
-        &[Ok(about_itself.clone())],
-        false
-    ));
-    assert!(precise_file_events("self", &watch, &[Ok(about_itself)]).is_empty());
+    let itself = std::slice::from_ref(&logical_root);
+    assert!(watch_matches_changes(&watch, itself, false));
+    assert!(precise_file_events("self", &watch, itself).is_empty());
 
     // A child of the same directory is still reported, exactly once.
-    let mut about_child = Event::new(notify::EventKind::Any);
-    about_child.paths.push(logical_root.join("child"));
-    let events = precise_file_events("self", &watch, &[Ok(about_child)]);
+    let child = logical_root.join("child");
+    let events = precise_file_events("self", &watch, std::slice::from_ref(&child));
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].scope,

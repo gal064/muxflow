@@ -120,14 +120,19 @@ pub async fn file_request(
         ..Default::default()
     };
     let client = get_client(&clients, &client_id)?;
-    let operation_id = request.operation_id.clone();
+    // Claimed here, on the command thread, before anything is dispatched: a
+    // caller that abandons its read in the same tick must find something to
+    // cancel rather than a slot the worker has not created yet.
+    let claim = (!request.operation_id.is_empty())
+        .then(|| client.claim_file_operation(&request.operation_id))
+        .transpose()?;
     let request = v1::Request {
         operation: operation.into(),
         file: Some(request),
         ..Default::default()
     };
     let response =
-        tauri::async_runtime::spawn_blocking(move || client.request_file(request, &operation_id))
+        tauri::async_runtime::spawn_blocking(move || client.request_file(request, claim))
             .await
             .map_err(|error| format!("file request task failed: {error}"))??;
     let file = response.file.ok_or("host omitted file-service response")?;
@@ -225,6 +230,32 @@ mod tests {
         });
         assert_eq!(event["rootToken"], "root-capability");
         assert_eq!(event["watchId"], "editor-parent");
+    }
+
+    /// A read abandoned before its request reached a worker thread must still
+    /// be cancellable: the claim exists from the moment the command thread
+    /// takes the operation ID, and a cancellation that beats dispatch refuses
+    /// the request rather than letting it run for an answer nobody reads.
+    #[test]
+    fn cancelling_before_dispatch_refuses_the_request_instead_of_losing_it() {
+        let client = Arc::new(TerminalClient::new());
+        client.ready.store(true, Ordering::Release);
+        let claim = client.claim_file_operation("op-1").unwrap();
+        // Claimed twice is a caller bug, and stays one.
+        assert!(client.claim_file_operation("op-1").is_err());
+        client.cancel_file("op-1").unwrap();
+        let refused = client
+            .request_file(v1::Request::default(), Some(claim))
+            .unwrap_err();
+        assert!(refused.starts_with("cancelled"), "got {refused}");
+        // The claim's slot is released with it, so the ID is reusable.
+        assert!(client.cancel_file("op-1").is_err());
+    }
+
+    #[test]
+    fn cancelling_an_unknown_file_operation_is_reported_rather_than_silently_ignored() {
+        let client = Arc::new(TerminalClient::new());
+        assert!(client.cancel_file("never-claimed").is_err());
     }
 
     #[test]
