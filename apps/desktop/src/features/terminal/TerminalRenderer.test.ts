@@ -7,7 +7,17 @@ import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPl
 import type { Pane } from "../../app/types";
 import { OperationCounters } from "../../perf/operations";
 import { TerminalEventHub } from "./TerminalEventHub";
-import type { TerminalEvent } from "./api";
+import { decodeTerminalEvent } from "./api";
+
+function wireOutputFrame(sequence: number, generation: number, data: Uint8Array): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(21 + data.byteLength);
+  bytes.set([2, 0, 2, 0x25, 0x31]);
+  const view = new DataView(bytes.buffer);
+  view.setBigUint64(5, BigInt(sequence), false);
+  view.setBigUint64(13, BigInt(generation), false);
+  bytes.set(data, 21);
+  return bytes;
+}
 
 describe("TerminalWriteScheduler", () => {
   it("preserves byte order and respects the per-frame budget", () => {
@@ -197,6 +207,59 @@ describe("TerminalWriteScheduler", () => {
     expect(overflow).toEqual([11]);
     expect(scheduler.pendingBytes).toBe(0);
   });
+
+  it("owns queued bytes against source mutation until xterm acknowledges them", () => {
+    const completions: Array<() => void> = [];
+    const written: Uint8Array[] = [];
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => { written.push(chunk); completions.push(done); },
+      () => 1,
+      () => undefined,
+    );
+    const wire = wireOutputFrame(1, 1, Uint8Array.of(1, 2, 3));
+    const event = decodeTerminalEvent(wire.buffer);
+    expect(event.kind).toBe("output");
+    if (event.kind !== "output") throw new Error("expected output fixture");
+    // Decode borrows the exclusively delivered channel frame; scheduling is
+    // the single copy that owns it for asynchronous xterm consumption.
+    expect(event.data.buffer).toBe(wire.buffer);
+    scheduler.enqueue(event.data);
+    wire.fill(9, 21);
+    expect([...written[0]]).toEqual([1, 2, 3]);
+    completions.shift()!();
+    expect(scheduler.pendingBytes).toBe(0);
+  });
+
+  it("compacts a long consumed prefix without changing byte or callback order", () => {
+    const frames: FrameRequestCallback[] = [];
+    const completions: Array<() => void> = [];
+    const written: number[] = [];
+    const rendered: number[] = [];
+    const measurements = new OperationCounters();
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => { written.push(...chunk); completions.push(done); },
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      64,
+      1024,
+      undefined,
+      undefined,
+      measurements,
+    );
+    for (let index = 0; index < 131; index += 1) {
+      scheduler.enqueue(Uint8Array.of(index), () => rendered.push(index));
+    }
+    let ticks = 0;
+    while (scheduler.pendingBytes > 0 && ticks < 100) {
+      while (completions.length) completions.shift()!();
+      for (const frame of frames.splice(0, frames.length)) frame(ticks * 16);
+      ticks += 1;
+    }
+    while (completions.length) completions.shift()!();
+    expect(written).toEqual(Array.from({ length: 131 }, (_, index) => index & 0xff));
+    expect(rendered).toEqual(Array.from({ length: 131 }, (_, index) => index));
+    expect(measurements.snapshot().counters["terminal.scheduler.queueCompactions"]).toBeGreaterThan(0);
+  });
 });
 
 describe("Phase 14 terminal operation fixture", () => {
@@ -204,22 +267,6 @@ describe("Phase 14 terminal operation fixture", () => {
     for (const chunkBytes of [64, 1024, 64 * 1024]) {
       const measurements = new OperationCounters();
       const hub = new TerminalEventHub(undefined, {}, measurements);
-      const published: number[] = [];
-      hub.subscribe((event) => {
-        if (event.kind === "output") published.push(...event.data);
-      });
-      for (let index = 0; index < 8; index += 1) {
-        const data = new Uint8Array(chunkBytes).fill(index);
-        hub.publish({
-          kind: "output", paneId: "%1", generation: index + 1,
-          sequence: index + 1, data,
-        } satisfies TerminalEvent);
-      }
-      const backlog: number[] = [];
-      hub.subscribePane("%1", (event) => {
-        if (event.kind === "output") backlog.push(...event.data);
-      });
-
       const frames: FrameRequestCallback[] = [];
       const completions: Array<() => void> = [];
       const output: Uint8Array[] = [];
@@ -234,9 +281,16 @@ describe("Phase 14 terminal operation fixture", () => {
         undefined,
         measurements,
       );
+      const expected = new Uint8Array(chunkBytes * 8);
       for (let index = 0; index < 8; index += 1) {
-        scheduler.enqueue(new Uint8Array(chunkBytes).fill(index), () => { callbacks += 1; });
+        const data = new Uint8Array(chunkBytes).fill(index);
+        expected.set(data, index * chunkBytes);
+        const wire = wireOutputFrame(index + 1, index + 1, data);
+        hub.publish(decodeTerminalEvent(wire.buffer, measurements));
       }
+      hub.subscribePane("%1", (event) => {
+        if (event.kind === "output") scheduler.enqueue(event.data, () => { callbacks += 1; });
+      });
       let ticks = 0;
       while (scheduler.pendingBytes > 0 && ticks < 100) {
         while (completions.length) completions.shift()!();
@@ -249,16 +303,28 @@ describe("Phase 14 terminal operation fixture", () => {
       const joined = new Uint8Array(output.reduce((total, chunk) => total + chunk.byteLength, 0));
       let offset = 0;
       for (const chunk of output) { joined.set(chunk, offset); offset += chunk.byteLength; }
-      expect(Array.from(joined)).toEqual(backlog);
-      expect(published).toEqual(backlog);
+      expect(joined.byteLength).toBe(expected.byteLength);
+      expect(joined.every((byte, index) => byte === expected[index])).toBe(true);
       const snapshot = measurements.snapshot();
       expect(snapshot.counters["terminal.hub.events"]).toBe(8);
+      expect(snapshot.counters["terminal.decoder.frames"]).toBe(8);
+      expect(snapshot.counters["terminal.decoder.copiedBytes"]).toBe(0);
       expect(snapshot.counters["terminal.scheduler.enqueueOperations"]).toBe(8);
       expect(snapshot.counters["terminal.scheduler.dequeueOperations"]).toBe(8);
       expect(snapshot.counters["terminal.scheduler.callbacksInvoked"]).toBe(8);
+      const copyProxyBytes = snapshot.counters["terminal.scheduler.copiedBytes"];
+      const baselineCopyProxyBytes = copyProxyBytes + snapshot.counters["terminal.hub.payloadBytes"];
+      const operationProxy = snapshot.counters["terminal.scheduler.enqueueOperations"]
+        + snapshot.counters["terminal.scheduler.dequeueOperations"];
+      const baselineOperationProxy = operationProxy + 28;
+      expect(copyProxyBytes / baselineCopyProxyBytes).toBeLessThanOrEqual(0.7);
+      expect(operationProxy / baselineOperationProxy).toBeLessThanOrEqual(0.7);
       console.log(`PHASE14_METRIC ${JSON.stringify({
         lane: "terminalFrontend", chunkBytes, eventCount: 8,
-        byteExact: true, ...snapshot,
+        byteExact: true, callbackExact: true,
+        copyProxyBytes, baselineCopyProxyBytes,
+        operationProxy, baselineOperationProxy,
+        ...snapshot,
       })}`);
     }
   });

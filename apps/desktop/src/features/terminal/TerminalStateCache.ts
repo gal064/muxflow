@@ -29,8 +29,13 @@ export class TerminalStateCache {
     paneId: string,
     serialized: string,
     checkpoint?: { terminalEpoch: number; outputGeneration: number },
+    encodedByteLength?: number,
   ): void {
-    const byteLength = this.#encoder.encode(serialized).byteLength;
+    const byteLength = encodedByteLength ?? this.#encoder.encode(serialized).byteLength;
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+      this.delete(paneId);
+      return;
+    }
     if (!serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
       this.delete(paneId);
       return;

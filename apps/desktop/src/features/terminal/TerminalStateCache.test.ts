@@ -25,4 +25,11 @@ describe("TerminalStateCache", () => {
     expect(cache.get("%1")).toBeUndefined();
     expect(cache.get("%50")?.serialized).toBe("λλ");
   });
+
+  it("reuses a prepared snapshot's encoded length for exact cache accounting", () => {
+    const cache = new TerminalStateCache(2, 10, 10);
+    cache.set("%1", "λλ", { terminalEpoch: 7, outputGeneration: 9 }, 4);
+    expect(cache.get("%1")).toMatchObject({ byteLength: 4, terminalEpoch: 7, outputGeneration: 9 });
+    expect(cache.retainedByteLength).toBe(4);
+  });
 });

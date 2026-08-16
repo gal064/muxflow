@@ -4,6 +4,7 @@ import type { ConnectionSpec, TmuxSnapshot } from "../../app/types";
 import type { WireFileEvent } from "../files/api";
 import type { WireGitEvent } from "../git/api";
 import type { WireAgentEvent, WireAgentSnapshot } from "../agents/api";
+import type { OperationRecorder } from "../../perf/operations";
 
 interface SequencedTerminalEvent {
   sequence: number;
@@ -67,7 +68,11 @@ export function prepareTerminalSnapshot(
   return { data: encoded, originalByteLength: encoded.byteLength, retained: true };
 }
 
-export function decodeTerminalEvent(buffer: ArrayBuffer): TerminalEvent {
+export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: OperationRecorder): TerminalEvent {
+  measurements?.add("terminal.decoder.frames");
+  // The decoder only creates views into its exclusively received frame. This
+  // explicit zero keeps the Phase 14 ownership counter visible in snapshots.
+  measurements?.add("terminal.decoder.copiedBytes", 0);
   const frame = new Uint8Array(buffer);
   if (frame.length < COMMON_HEADER_BYTES) throw new Error("terminal frame is shorter than its common header");
   const labelLength = (frame[1] << 8) | frame[2];
@@ -221,8 +226,11 @@ function decodePaneResource(paneId: string, sequence: number, payload: Uint8Arra
     generation,
     snapshotGeneration,
     tailThroughGeneration,
-    serializedSnapshot: payload.slice(reasonEnd, snapshotEnd),
-    rawTail: payload.slice(snapshotEnd),
+    // The channel hands this decoder an exclusive ArrayBuffer. Retain views of
+    // it here; TerminalWriteScheduler is the one explicit ownership-copy
+    // boundary before asynchronous xterm parsing.
+    serializedSnapshot: payload.subarray(reasonEnd, snapshotEnd),
+    rawTail: payload.subarray(snapshotEnd),
     sequence,
   };
 }
@@ -237,7 +245,7 @@ function decodeTerminalBytes(
   requirePaneId(paneId, kind);
   if (payload.byteLength < 8) throw new Error(`${kind} frame omitted terminal generation`);
   const generation = decodeSafeU64(payload.subarray(0, 8), `${kind} generation`);
-  return { kind, paneId, generation, data: payload.slice(8), sequence };
+  return { kind, paneId, generation, data: payload.subarray(8), sequence };
 }
 
 function decodeSafeU64(bytes: Uint8Array, label: string): number {

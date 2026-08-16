@@ -408,7 +408,9 @@ export function TerminalPane({
             ? { ...currentCheckpoint, outputGeneration: drained.outputGeneration }
             : { ...currentCheckpoint, outputGeneration: 0 };
           const prepared = prepareTerminalSnapshot(drained.serialized);
-          if (snapshotMatchesEpoch) terminalStateCache.set(pane.id, drained.serialized, checkpoint);
+          if (snapshotMatchesEpoch) {
+            terminalStateCache.set(pane.id, drained.serialized, checkpoint, prepared.originalByteLength);
+          }
           else terminalStateCache.delete(pane.id);
           if (!prepared.retained && snapshotMatchesEpoch) {
             diagnosticRef.current?.(
@@ -496,15 +498,13 @@ export function TerminalPane({
       })();
     };
     revealForCurrentEpoch();
-    const unsubscribe = hub.subscribe((event) => {
-      if (event.kind === "generationEpoch") {
-        terminalStateCache.delete(pane.id);
-        deferredOutputRef.current = [];
-        deferredOutputBytesRef.current = 0;
-        rendererEpochRef.current = undefined;
-        revealStateRef.current = { ready: false, hasLocalState: false };
-        revealForCurrentEpoch();
-      }
+    const unsubscribe = hub.subscribeEpoch(() => {
+      terminalStateCache.delete(pane.id);
+      deferredOutputRef.current = [];
+      deferredOutputBytesRef.current = 0;
+      rendererEpochRef.current = undefined;
+      revealStateRef.current = { ready: false, hasLocalState: false };
+      revealForCurrentEpoch();
     });
     return () => {
       active = false;
