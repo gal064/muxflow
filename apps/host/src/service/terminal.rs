@@ -288,26 +288,21 @@ impl TerminalAttachment {
         pane_ids: &HashSet<String>,
         resources: &mut PaneResourceStore,
     ) -> anyhow::Result<()> {
-        let (added, removed) = membership_delta(&self.pane_ids, pane_ids);
-        self.pane_ids.clone_from(pane_ids);
-        self.stream_tx
-            .send(StreamControl::Membership {
-                added: added.clone(),
-                removed: removed.clone(),
-            })
-            .map_err(|_| anyhow::anyhow!("terminal stream coordinator is disconnected"))?;
-        {
+        let update = {
             let mut stdin = self.stdin.lock().unwrap();
-            writeln!(stdin, "display-message -p '__ADE_MEMBERSHIP__'")?;
-            stdin.flush()?;
-        }
-        if !added.is_empty() {
-            let mut stdin = self.stdin.lock().unwrap();
-            for pane_id in &added {
-                queue_capture(&mut *stdin, pane_id)?;
+            apply_membership_update(&mut self.pane_ids, pane_ids, &self.stream_tx, &mut *stdin)
+        };
+        let removed = match update {
+            Ok(removed) => removed,
+            Err(error) => {
+                // Reader membership is delivered before the correlated tmux
+                // writes and cannot be rolled back atomically with them. End
+                // this attachment so the next reconciliation starts a fresh
+                // reader and captures every committed pane from scratch.
+                self.stop();
+                return Err(error.context("terminal membership update stopped the attachment"));
             }
-            stdin.flush()?;
-        }
+        };
         for pane_id in removed {
             resources.remove(&pane_id);
         }
@@ -353,6 +348,50 @@ impl TerminalAttachment {
             let _ = child.wait();
         }
     }
+}
+
+fn apply_membership_update(
+    current: &mut HashSet<String>,
+    desired: &HashSet<String>,
+    stream_tx: &std_mpsc::Sender<StreamControl>,
+    stdin: &mut impl Write,
+) -> anyhow::Result<Vec<String>> {
+    let (added, removed) = membership_delta(current, desired);
+    if added.is_empty() && removed.is_empty() {
+        return Ok(Vec::new());
+    }
+    send_authoritative_membership(stream_tx, desired)
+        .map_err(|_| anyhow::anyhow!("terminal stream coordinator is disconnected"))?;
+    let write_result = (|| -> anyhow::Result<()> {
+        writeln!(stdin, "display-message -p '__ADE_MEMBERSHIP__'")?;
+        for pane_id in &added {
+            queue_capture(stdin, pane_id)?;
+        }
+        stdin.flush()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        // The reader may already have applied `desired`. Restore the last
+        // committed set before returning so a topology that reverts to
+        // `current` cannot hit the no-op fast path while the reader stays on
+        // the failed membership.
+        let _ = send_authoritative_membership(stream_tx, current);
+        return Err(error);
+    }
+    // Commit only after the reader notification and every correlated tmux
+    // command were accepted. On a partial write the caller can retry the same
+    // delta; treating it as an exact no-op would strand panes without seeds.
+    current.clone_from(desired);
+    Ok(removed)
+}
+
+fn send_authoritative_membership(
+    stream_tx: &std_mpsc::Sender<StreamControl>,
+    pane_ids: &HashSet<String>,
+) -> Result<(), std_mpsc::SendError<StreamControl>> {
+    let mut pane_ids: Vec<_> = pane_ids.iter().cloned().collect();
+    pane_ids.sort();
+    stream_tx.send(StreamControl::Membership { pane_ids })
 }
 
 fn membership_delta(
@@ -409,15 +448,39 @@ impl TerminalClients {
         overflowed: Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
         let desired: HashSet<_> = pane_ids.iter().cloned().collect();
+        let committed = self
+            .clients
+            .get(session_id)
+            .filter(|client| !client.stopped.load(Ordering::Acquire))
+            .map(|client| client.pane_ids.clone());
+        let speculative_added: Vec<_> = committed
+            .as_ref()
+            .map(|current| desired.difference(current).cloned().collect())
+            .unwrap_or_default();
+        let newly_created: Vec<_>;
         {
             let generation = self.generation.load(Ordering::Acquire);
             let mut resources = self.resources.lock().unwrap();
+            newly_created = pane_ids
+                .iter()
+                .filter(|pane_id| resources.get(pane_id).is_none())
+                .cloned()
+                .collect();
             register_mounted_panes(&mut resources, pane_ids, make_visible, generation);
         }
-        if let Some(current) = self.clients.get_mut(session_id)
-            && !current.stopped.load(Ordering::Acquire)
-        {
-            current.update_panes(&desired, &mut self.resources.lock().unwrap())?;
+        if committed.is_some() {
+            let update = self
+                .clients
+                .get_mut(session_id)
+                .expect("committed attachment disappeared under exclusive access")
+                .update_panes(&desired, &mut self.resources.lock().unwrap());
+            if let Err(error) = update {
+                remove_pane_resources(
+                    &mut self.resources.lock().unwrap(),
+                    speculative_added.iter(),
+                );
+                return Err(error);
+            }
             if make_visible {
                 self.select_session(session_id)?;
                 for pane_id in pane_ids {
@@ -426,17 +489,30 @@ impl TerminalClients {
             }
             return Ok(());
         }
-        let attachment = TerminalAttachment::start(
+        let attachment = match TerminalAttachment::start(
             session_id,
             pane_ids,
             event_tx,
             overflowed,
             Arc::clone(&self.resources),
             Arc::clone(&self.generation),
-        )?;
-        if let Some(mut old) = self.clients.insert(session_id.to_owned(), attachment) {
+        ) {
+            Ok(attachment) => attachment,
+            Err(error) => {
+                remove_pane_resources(&mut self.resources.lock().unwrap(), newly_created.iter());
+                return Err(error);
+            }
+        };
+        if let Some(old) = self.clients.get_mut(session_id) {
+            // Stop establishes the reader's ownership fence. Every resource
+            // mutation and its derived event publication hold this same lock,
+            // so a buffered old record either publishes before replacement or
+            // is rejected after stop; it cannot outlive the cleanup.
+            let mut resources = self.resources.lock().unwrap();
             old.stop();
+            remove_unmounted_pane_resources(&mut resources, &old.pane_ids, &desired);
         }
+        self.clients.insert(session_id.to_owned(), attachment);
         if make_visible {
             self.select_session(session_id)?;
         } else if self.visible_session.as_deref() == Some(session_id) {
@@ -707,11 +783,29 @@ fn register_mounted_panes(
     generation: u64,
 ) {
     for pane_id in pane_ids {
-        resources.ensure(pane_id, make_visible, generation);
         if make_visible {
             resources.set_visible(pane_id, true, generation);
+        } else {
+            resources.ensure(pane_id, false, generation);
         }
     }
+}
+
+fn remove_pane_resources<'a>(
+    resources: &mut PaneResourceStore,
+    pane_ids: impl IntoIterator<Item = &'a String>,
+) {
+    for pane_id in pane_ids {
+        resources.remove(pane_id);
+    }
+}
+
+fn remove_unmounted_pane_resources(
+    resources: &mut PaneResourceStore,
+    previous: &HashSet<String>,
+    desired: &HashSet<String>,
+) {
+    remove_pane_resources(resources, previous.difference(desired));
 }
 
 /// Queues a screen capture for one pane.
@@ -882,275 +976,5 @@ fn check_client_size(columns: u32, rows: u32) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The bound is a blast radius, not the fix for P12-U006: the sizes that
-    /// actually damaged the user's windows (108x298, 108x314) are *inside* it,
-    /// and what stops those is the desktop no longer deriving the client size
-    /// from a pane's share of the topology. What this guarantees is that a
-    /// future computation can only be wrong by a bounded amount, loudly.
-    #[test]
-    fn client_resize_refuses_sizes_no_display_has_and_names_them() {
-        for (columns, rows) in [(80, 501), (501, 24), (2000, 2000), (80, 1), (1, 24), (0, 0)] {
-            let error = check_client_size(columns, rows)
-                .expect_err(&format!("{columns}x{rows} must never reach refresh-client"))
-                .to_string();
-            assert!(
-                error.contains(&format!("{columns}x{rows}")),
-                "rejection must name the size it refused, got {error}"
-            );
-            assert!(error.contains("between 2 and 500 cells"), "got {error}");
-        }
-        for (columns, rows) in [(2, 2), (188, 51), (239, 57), (500, 500)] {
-            check_client_size(columns, rows).unwrap();
-        }
-    }
-
-    /// tmux's lexer rejects `refresh-client -A %5:continue`, and a rejected
-    /// resume leaves the pane paused for the rest of the session (P12-U001).
-    /// The assertion is byte-exact because the quoting *is* the fix.
-    #[test]
-    fn resume_command_quotes_the_pause_argument_tmux_lexer_rejects() {
-        let sink = Arc::new(Mutex::new(Vec::new()));
-        write_capture_request_resuming(&sink, "%5", true).unwrap();
-        let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
-        let lines: Vec<_> = written.lines().collect();
-        assert_eq!(lines[0], "display-message -p '__ADE_RESUME__:5'");
-        assert_eq!(lines[1], "refresh-client -A '%5:continue'");
-        // tmux drops output produced while a pane is paused rather than
-        // replaying it, so the capture that shares this lock hold is what
-        // actually recovers the screen. The resume alone would leave a hole.
-        assert_eq!(lines[2], "display-message -p '__ADE_CAPTURE__:5'");
-        assert!(lines[3].starts_with("capture-pane -p -e -J -S -2000 -t %5"));
-
-        let sink = Arc::new(Mutex::new(Vec::new()));
-        write_capture_request_resuming(&sink, "%5", false).unwrap();
-        let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
-        assert!(!written.contains("refresh-client"));
-        assert!(!written.contains("__ADE_RESUME__"));
-    }
-
-    #[test]
-    fn membership_changes_are_in_place_and_deterministic() {
-        let current = HashSet::from(["%3".into(), "%1".into()]);
-        let desired = HashSet::from(["%2".into(), "%3".into()]);
-        assert_eq!(
-            membership_delta(&current, &desired),
-            (vec!["%2".into()], vec!["%1".into()])
-        );
-    }
-
-    #[test]
-    fn mounting_one_pane_does_not_reveal_inactive_window_resources() {
-        let mut resources = PaneResourceStore::with_total_limit(32, 1024, 4096);
-        resources.ensure("%1", false, 1);
-        resources.ensure("%2", false, 1);
-        register_mounted_panes(&mut resources, &["%1".into()], true, 2);
-        assert!(!resources.is_hidden("%1"));
-        assert!(resources.is_hidden("%2"));
-    }
-
-    #[test]
-    fn seed_restores_every_tmux_exposed_terminal_mode() {
-        let seed = build_seed(
-            "%1",
-            vec![b"primary history".to_vec()],
-            vec![b"alternate screen".to_vec()],
-            &[b"__ADE_META__:%1:4:5:1:1:0:1:0:1:0:0:1:1:0:80:".to_vec()],
-        )
-        .unwrap();
-        for expected in [
-            b"\x1b[?1049h".as_slice(),
-            b"\x1b[?2004h",
-            b"\x1b[?1002h",
-            b"\x1b[?1006h",
-            b"\x1b[?1004l",
-            b"\x1b[?25l",
-            b"\x1b[?1h",
-            b"\x1b=",
-            b"\x1b[?7l",
-            b"\x1b[6;5H",
-        ] {
-            assert!(
-                seed.bytes
-                    .windows(expected.len())
-                    .any(|window| window == expected),
-                "missing mode sequence {expected:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn incomplete_or_unknown_capture_metadata_requires_resnapshot() {
-        assert!(build_seed("%1", vec![b"screen".to_vec()], vec![], &[]).is_none());
-        assert!(
-            build_seed(
-                "%1",
-                vec![],
-                vec![],
-                &[b"__ADE_META__:%1:0:0:0:0:0:0:0:0:0:0:0:0:unknown:80:".to_vec()]
-            )
-            .is_none()
-        );
-        let tmux_33_seed = build_seed(
-            "%11",
-            vec![],
-            vec![],
-            &[b"__ADE_META__:%11:0:0:0::0:0:0:0:0:1:0:0:1:80:".to_vec()],
-        )
-        .expect("tmux 3.3a's unavailable bracket-paste flag should use a safe default");
-        assert!(
-            tmux_33_seed
-                .bytes
-                .windows(b"\x1b[?2004l".len())
-                .any(|window| window == b"\x1b[?2004l")
-        );
-        assert!(
-            tmux_33_seed
-                .diagnostics
-                .iter()
-                .any(|value| value.contains("bracketed-paste"))
-        );
-        assert!(
-            tmux_33_seed
-                .diagnostics
-                .iter()
-                .any(|value| value.contains("focus-reporting"))
-        );
-        assert!(
-            parse_capture_metadata(b"__ADE_META__:%11:0:0:0:0:0:0:0:0:0:1:0:0:1:80:", "%11")
-                .is_some()
-        );
-        assert!(
-            parse_capture_metadata(
-                b"__ADE_META__:       %11:0:0:0:0:0:0:0:0:0:1:0:0:1:80:",
-                "%11"
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn reconnect_marks_every_pane_pending_for_a_fresh_seed() {
-        let pane_ids: Vec<_> = (0..33).map(|index| format!("%{index}")).collect();
-        let state = StreamState::new(&pane_ids, Arc::new(FlowControl::default()));
-        assert_eq!(state.pane_states.len(), 33);
-        assert!(
-            state
-                .pane_states
-                .values()
-                .all(|state| matches!(state, PaneSeedState::Pending { .. }))
-        );
-    }
-
-    #[test]
-    fn capture_and_metadata_are_correlated_across_distinct_tmux_command_blocks() {
-        let mut state = StreamState::new(&["%1".into()], Arc::new(FlowControl::default()));
-        state.expected_capture = Some("%1".into());
-        let tag = |number| CommandTag {
-            timestamp: 1,
-            number,
-            flags: 1,
-        };
-        let CommandBlock::CapturePrimary { pane_id, .. } = state.start_block(tag(2)) else {
-            panic!("capture-pane block was not correlated with its marker");
-        };
-        if let Some(PaneSeedState::Pending {
-            buffered,
-            buffered_bytes,
-            ..
-        }) = state.pane_states.get_mut("%1")
-        {
-            buffered.push((1, b"already captured".to_vec()));
-            *buffered_bytes = b"already captured".len();
-        }
-        state.pending_alternate = Some((pane_id, vec![b"visible screen".to_vec()], 1));
-        let PaneSeedState::Pending { buffered, .. } = state.pane_states.get("%1").unwrap() else {
-            panic!("pane stopped awaiting its seed");
-        };
-        assert_eq!(buffered.len(), 1);
-        let CommandBlock::CaptureAlternate {
-            pane_id,
-            visible_lines,
-            ..
-        } = state.start_block(tag(3))
-        else {
-            panic!("second capture block was not correlated with the first");
-        };
-        state.pending_metadata = Some(PendingCaptureMetadata {
-            pane_id: pane_id.clone(),
-            visible_lines: visible_lines.clone(),
-            saved_normal_lines: vec![b"saved normal screen".to_vec()],
-            visible_boundary: 1,
-        });
-        let CommandBlock::CaptureMetadata {
-            saved_normal_lines, ..
-        } = state.start_block(tag(4))
-        else {
-            panic!("metadata block was not correlated with both screen captures");
-        };
-        let seed = build_seed(
-            &pane_id,
-            visible_lines,
-            saved_normal_lines,
-            &[b"__ADE_META__:%1:0:0:1:1:0:0:0:0:0:1:0:0:1:80:".to_vec()],
-        )
-        .expect("metadata should complete seed");
-        let position = |needle: &[u8]| {
-            seed.bytes
-                .windows(needle.len())
-                .position(|window| window == needle)
-        };
-        // The pane is in the alternate screen, so what tmux displays — the
-        // first capture — has to land *after* the switch to it, and the saved
-        // normal grid before. Painting them the other way round is what made
-        // every agent-pane seed come up blank (P12-U003).
-        let switch = position(b"\x1b[?1049h").expect("alternate screen switch");
-        assert!(position(b"saved normal screen").unwrap() < switch);
-        assert!(position(b"visible screen").unwrap() > switch);
-    }
-
-    #[test]
-    fn capture_boundary_tracks_the_active_screen_without_duplicate_replay() {
-        let mut seeder = ScreenSeeder::default();
-        seeder.buffer(10, b"in primary capture".to_vec());
-        seeder.buffer(11, b"between captures".to_vec());
-        seeder.buffer(13, b"after capture".to_vec());
-        let replay = seeder.complete(b"seed".to_vec(), 12).replay;
-        assert_eq!(replay.len(), 1);
-        assert_eq!(replay[0].sequence, 13);
-        assert_eq!(replay[0].bytes, b"after capture");
-    }
-
-    #[test]
-    fn joined_capture_reconstructs_soft_wrap_at_authoritative_width() {
-        let command = capture_command("%1");
-        assert!(command.matches("capture-pane -p -e -J").count() == 2);
-        assert!(command.contains("#{pane_width}"));
-        let logical_line = vec![b'w'; 160];
-        let seed = build_seed(
-            "%1",
-            vec![logical_line.clone()],
-            vec![],
-            &[b"__ADE_META__:%1:0:0:0:1:0:0:0:0:0:1:0:0:0:80:".to_vec()],
-        )
-        .unwrap();
-        assert!(
-            seed.bytes
-                .windows(logical_line.len())
-                .any(|window| window == logical_line)
-        );
-        let wrap_enable = seed
-            .bytes
-            .windows(b"\x1b[?7h".len())
-            .position(|window| window == b"\x1b[?7h")
-            .unwrap();
-        let line = seed
-            .bytes
-            .windows(logical_line.len())
-            .position(|window| window == logical_line)
-            .unwrap();
-        assert!(wrap_enable < line);
-    }
-}
+#[path = "terminal_tests.rs"]
+mod tests;

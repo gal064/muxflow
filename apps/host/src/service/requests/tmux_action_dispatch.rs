@@ -9,6 +9,7 @@ pub(super) struct TmuxActionContext<'a> {
     pub(super) terminal: &'a Arc<Mutex<TerminalClients>>,
     pub(super) topology_lock: &'a Arc<tokio::sync::Mutex<()>>,
     pub(super) topology_baseline: &'a Arc<Mutex<Option<(tmux_control::TmuxSnapshot, String)>>>,
+    pub(super) topology_signal: &'a super::super::topology::TopologySignal,
 }
 
 pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxActionContext<'_>) {
@@ -21,6 +22,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
         terminal,
         topology_lock,
         topology_baseline,
+        topology_signal,
     } = context;
     match v1::Operation::TmuxAction {
         v1::Operation::TmuxAction => {
@@ -41,9 +43,31 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             // first session is allowed to run with no tmux server, and every
             // other action is not (M10-E060).
             let action_kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
-            let fresh =
-                tokio::task::spawn_blocking(move || tmux_actions::discover_for_action(action_kind))
+            // Accepted terminal input must land before the one fresh topology
+            // precheck used by the action. Doing this after discovery made the
+            // action rediscover inside `execute`, paying a second remote tmux
+            // fork merely to cover changes during the barrier itself.
+            let fresh_task = match begin_after_input_barrier(
+                || terminal.lock().unwrap().flush_input(),
+                || {
+                    tokio::task::spawn_blocking(move || {
+                        tmux_actions::discover_for_action(action_kind)
+                    })
+                },
+            ) {
+                Ok(task) => task,
+                Err(error) => {
+                    send_response(
+                        control_tx,
+                        request_id,
+                        response_error("terminal_input_flush_failed", &error.to_string()),
+                    )
                     .await;
+                    pending.lock().unwrap().remove(&request_id);
+                    return;
+                }
+            };
+            let fresh = fresh_task.await;
             let (fresh_snapshot, fresh_identity) = match fresh {
                 Ok(Ok(value)) => value,
                 Ok(Err(error)) => {
@@ -101,19 +125,15 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 pending.lock().unwrap().remove(&request_id);
                 return;
             }
-            let flush_result = { terminal.lock().unwrap().flush_input() };
-            if let Err(error) = flush_result {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("terminal_input_flush_failed", &error.to_string()),
-                )
-                .await;
-                pending.lock().unwrap().remove(&request_id);
-                return;
-            }
+            let barrier_sender = event_tx.clone();
             let result = tokio::task::spawn_blocking(move || {
-                tmux_actions::execute(action, known_generation, fresh_snapshot, fresh_identity)
+                tmux_actions::execute(
+                    action,
+                    known_generation,
+                    fresh_snapshot,
+                    fresh_identity,
+                    || topology_epoch_barrier(&barrier_sender),
+                )
             })
             .await;
             match result {
@@ -122,6 +142,9 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                     outcome.result.topology_generation = next_generation;
                     *topology_baseline.lock().unwrap() =
                         Some((outcome.snapshot.clone(), outcome.server_identity.clone()));
+                    if let Some(epoch) = outcome.covered_dirty_epoch {
+                        topology_signal.acknowledge_through(epoch);
+                    }
                     reconcile_terminal_clients(terminal, &outcome.snapshot, event_tx, overflowed);
                     let snapshot = snapshot_from_identity(
                         outcome.snapshot,
@@ -195,5 +218,78 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             }
         }
         _ => unreachable!(),
+    }
+}
+
+fn topology_epoch_barrier(sender: &mpsc::Sender<SequencerControl>) -> Option<u64> {
+    let (completion, completed) = std::sync::mpsc::sync_channel(1);
+    sender
+        .try_send(SequencerControl::TopologyEpochBarrier(completion))
+        .ok()?;
+    completed.recv_timeout(Duration::from_secs(2)).ok()
+}
+
+fn begin_after_input_barrier<T>(
+    flush: impl FnOnce() -> anyhow::Result<()>,
+    begin: impl FnOnce() -> T,
+) -> anyhow::Result<T> {
+    flush()?;
+    Ok(begin())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_precheck_begins_once_and_only_after_input_flush() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let result = begin_after_input_barrier(
+            || {
+                order.borrow_mut().push("flush");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("discover");
+                42
+            },
+        )
+        .unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(*order.borrow(), ["flush", "discover"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn topology_epoch_barrier_captures_prior_dirty_but_not_later_dirty() {
+        let signal = super::super::super::topology::TopologySignal::default();
+        let writer_signal = signal.clone();
+        let (sender, mut receiver) = mpsc::channel(4);
+        let writer = tokio::spawn(async move {
+            while let Some(message) = receiver.recv().await {
+                match message {
+                    SequencerControl::TopologyEpochBarrier(completion) => {
+                        let _ = completion.send(writer_signal.current_epoch());
+                    }
+                    message => writer_signal.observe_event(&message),
+                }
+            }
+        });
+        sender
+            .send(SequencerControl::OrderedEvent(v1::HostEvent {
+                kind: v1::EventKind::TopologyDirty.into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let barrier_sender = sender.clone();
+        let covered = tokio::task::spawn_blocking(move || topology_epoch_barrier(&barrier_sender))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(covered, 1);
+        signal.mark_dirty();
+        assert_eq!(signal.current_epoch(), 2);
+        drop(sender);
+        writer.await.unwrap();
     }
 }

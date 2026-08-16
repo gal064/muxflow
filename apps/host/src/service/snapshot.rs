@@ -120,10 +120,20 @@ pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
 }
 
 pub(super) fn discover_authoritative() -> anyhow::Result<(TmuxSnapshot, String)> {
-    if server_identity() == "tmux:none" {
-        return Ok((TmuxSnapshot::default(), "tmux:none".into()));
+    normalize_authoritative_discovery(discover_consistent(), server_identity)
+}
+
+fn normalize_authoritative_discovery(
+    discovered: anyhow::Result<(TmuxSnapshot, String)>,
+    current_identity: impl FnOnce() -> String,
+) -> anyhow::Result<(TmuxSnapshot, String)> {
+    match discovered {
+        Ok(discovered) => Ok(discovered),
+        Err(_) if current_identity() == "tmux:none" => {
+            Ok((TmuxSnapshot::default(), "tmux:none".into()))
+        }
+        Err(error) => Err(error),
     }
-    discover_consistent()
 }
 
 pub(super) fn reorder_session(
@@ -341,6 +351,23 @@ mod tests {
         reorder_ids(&mut order, "$3", 99).unwrap();
         assert_eq!(order, ["$1", "$2", "$3"]);
         assert!(reorder_ids(&mut order, "$99", 0).is_err());
+    }
+
+    #[test]
+    fn authoritative_discovery_probes_identity_only_after_discovery_fails() {
+        let discovered = (TmuxSnapshot::default(), "tmux:live".to_owned());
+        let resolved = normalize_authoritative_discovery(Ok(discovered.clone()), || {
+            panic!("successful discovery must not fork an identity probe")
+        })
+        .unwrap();
+        assert_eq!(resolved, discovered);
+
+        let resolved =
+            normalize_authoritative_discovery(Err(anyhow::anyhow!("server unavailable")), || {
+                "tmux:none".into()
+            })
+            .unwrap();
+        assert_eq!(resolved, (TmuxSnapshot::default(), "tmux:none".into()));
     }
 
     #[test]

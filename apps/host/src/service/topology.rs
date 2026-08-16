@@ -26,6 +26,7 @@ const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Clone, Default)]
 pub(super) struct TopologySignal {
     epoch: Arc<AtomicU64>,
+    acknowledged_epoch: Arc<AtomicU64>,
     notify: Arc<Notify>,
 }
 
@@ -44,6 +45,18 @@ impl TopologySignal {
         ) {
             self.mark_dirty();
         }
+    }
+
+    pub(super) fn current_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    pub(super) fn acknowledge_through(&self, epoch: u64) {
+        self.acknowledged_epoch.fetch_max(epoch, Ordering::AcqRel);
+    }
+
+    fn acknowledges(&self, epoch: u64) -> bool {
+        self.acknowledged_epoch.load(Ordering::Acquire) >= epoch
     }
 }
 
@@ -101,6 +114,17 @@ impl TopologyActor {
                         .begin()
                         .expect("topology actor owns the reconciliation pass");
                     let guard = self.lock.lock().await;
+                    if notified && self.signal.acknowledges(observed_epoch) {
+                        drop(guard);
+                        if self.signal.epoch.load(Ordering::Acquire) != observed_epoch {
+                            layout_generation.mark_dirty();
+                        }
+                        if !layout_generation.finish(started_at) {
+                            last_reconciled_epoch = observed_epoch;
+                            break;
+                        }
+                        continue;
+                    }
                     let discovered = tokio::task::spawn_blocking(discover_authoritative).await;
                     match discovered {
                         Ok(Ok((current, identity))) => {
@@ -178,7 +202,11 @@ impl TopologyActor {
                         layout_generation.mark_dirty();
                     }
                     if !layout_generation.finish(started_at) {
-                        last_reconciled_epoch = self.signal.epoch.load(Ordering::Acquire);
+                        // This pass reconciled exactly the epoch captured at
+                        // its start. A dirty notification may arrive between
+                        // the comparison above and here; recording a newer
+                        // load would incorrectly consume that notification.
+                        last_reconciled_epoch = observed_epoch;
                         break;
                     }
                 }
@@ -206,5 +234,34 @@ mod tests {
         let follow_up = generation.begin().unwrap();
         assert!(!generation.finish(follow_up));
         assert_eq!(signal.epoch.load(Ordering::Acquire), 101);
+    }
+
+    #[test]
+    fn action_acknowledgement_consumes_only_covered_dirty_epochs() {
+        let signal = TopologySignal::default();
+        signal.mark_dirty();
+        let covered = signal.current_epoch();
+        signal.acknowledge_through(covered);
+        assert!(signal.acknowledges(covered));
+
+        signal.mark_dirty();
+        let later = signal.current_epoch();
+        assert!(!signal.acknowledges(later));
+    }
+
+    #[test]
+    fn later_dirty_between_final_check_and_completion_is_not_consumed() {
+        let signal = TopologySignal::default();
+        signal.mark_dirty();
+        let observed_epoch = signal.current_epoch();
+
+        // Model the final comparison as having seen no later dirtiness, then
+        // inject one in the exact window before the completed pass records
+        // what it reconciled.
+        assert_eq!(signal.current_epoch(), observed_epoch);
+        signal.mark_dirty();
+        let last_reconciled_epoch = observed_epoch;
+
+        assert_ne!(signal.current_epoch(), last_reconciled_epoch);
     }
 }

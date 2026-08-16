@@ -137,6 +137,10 @@ pub async fn serve_with_shutdown(
     let writer_task = tokio::spawn(async move {
         let mut sequencer = ProtocolSequencer::default();
         while let Some(message) = control_rx.recv().await {
+            if let SequencerControl::TopologyEpochBarrier(completion) = message {
+                let _ = completion.send(writer_topology_signal.current_epoch());
+                continue;
+            }
             writer_topology_signal.observe_event(&message);
             let frame = sequencer.frame(message);
             if write_frame(&mut writer, &frame).await.is_err() {
@@ -170,7 +174,7 @@ pub async fn serve_with_shutdown(
         baseline: Arc::clone(&topology_baseline),
         terminal: Arc::clone(&terminal),
         sender: control_tx.clone(),
-        signal: topology_signal,
+        signal: topology_signal.clone(),
     }
     .spawn();
 
@@ -282,6 +286,7 @@ pub async fn serve_with_shutdown(
                         terminal: Arc::clone(&terminal),
                         topology_lock: Arc::clone(&topology_lock),
                         topology_baseline: Arc::clone(&topology_baseline),
+                        topology_signal: topology_signal.clone(),
                         files: Arc::clone(&files),
                         git: Arc::clone(&git),
                         bulk_connection: client_hello.bulk_connection,
@@ -379,16 +384,17 @@ fn reconcile_terminal_clients_locked(
     overflowed: &Arc<AtomicBool>,
 ) {
     terminal.reconcile(snapshot);
+    let mut panes_by_session: HashMap<&str, Vec<String>> = HashMap::new();
+    for pane in &snapshot.panes {
+        panes_by_session
+            .entry(&pane.session_id)
+            .or_default()
+            .push(pane.id.clone());
+    }
     for session in &snapshot.sessions {
-        let pane_ids: Vec<_> = snapshot
-            .panes
-            .iter()
-            .filter(|pane| pane.session_id == session.id)
-            .map(|pane| pane.id.clone())
-            .collect();
-        if pane_ids.is_empty() {
+        let Some(pane_ids) = panes_by_session.remove(session.id.as_str()) else {
             continue;
-        }
+        };
         if let Err(error) = terminal.attach(
             &session.id,
             &pane_ids,
