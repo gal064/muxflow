@@ -328,6 +328,13 @@ impl PaneResourceStore {
         resource.tail_through_generation = tail_through_generation;
         if resource.requires_seed {
             release(resource, "visible output handoff journal was not retained");
+        } else if snapshot.is_empty() {
+            // An empty IPC payload cannot distinguish a valid blank renderer
+            // serialization from an omitted oversized/refused serialization.
+            // Never claim HiddenBuffered without a usable recovery base: the
+            // reveal path will request one authoritative seed instead of
+            // deferring later output until its overflow bound.
+            release(resource, "renderer handoff omitted a recoverable snapshot");
         } else if exceeds_resource {
             release(resource, "renderer handoff exceeded the hidden-pane budget");
         } else {
@@ -725,6 +732,35 @@ mod tests {
         assert_eq!(recovery.snapshot_generation, 10);
         assert_eq!(recovery.tail_through_generation, 13);
         assert!(store.reveal("%1", 16).unwrap().raw_tail.is_empty());
+    }
+
+    #[test]
+    fn empty_or_omitted_renderer_handoff_requires_seed_before_later_output() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        for pane_id in ["%1", "%2"] {
+            store.ensure(pane_id, true, 1);
+            let hidden = store
+                .hide_with_checkpoint(
+                    pane_id,
+                    Vec::new(),
+                    VisibilityCheckpoint {
+                        epoch: 7,
+                        generation: 0,
+                    },
+                    2,
+                )
+                .unwrap();
+            assert_eq!(hidden.state, PaneResourceState::Released);
+            assert!(hidden.requires_seed);
+            assert_eq!(
+                store.record_output(pane_id, b"later", 3),
+                OutputDisposition::Released
+            );
+            let reveal = store.reveal(pane_id, 4).unwrap();
+            assert!(reveal.requires_seed);
+            assert!(reveal.serialized_snapshot.is_empty());
+            assert!(reveal.raw_tail.is_empty());
+        }
     }
 
     #[test]

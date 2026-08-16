@@ -292,6 +292,7 @@ fn begin_after_input_barrier<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::OutputCredit;
 
     #[test]
     fn fresh_precheck_begins_once_and_only_after_input_flush() {
@@ -309,6 +310,18 @@ mod tests {
         .unwrap();
         assert_eq!(result, 42);
         assert_eq!(*order.borrow(), ["flush", "discover"]);
+    }
+
+    #[test]
+    fn fresh_server_create_session_reaches_discovery_without_a_sidecar() {
+        let terminal = Arc::new(Mutex::new(TerminalClients::new(Arc::new(
+            OutputCredit::negotiated(false),
+        ))));
+        let action = v1::TmuxActionKind::CreateSession;
+        let reached =
+            begin_after_input_barrier(|| terminal.lock().unwrap().flush_input(), || action)
+                .unwrap();
+        assert_eq!(reached, v1::TmuxActionKind::CreateSession);
     }
 
     #[test]

@@ -135,6 +135,10 @@ pub(super) fn enqueue_transfer_with_queued(
     work: impl FnOnce() -> TransferResult + Send + 'static,
     finished: impl FnOnce(TransferResult, CancelReason) + Send + 'static,
 ) -> Result<(), String> {
+    let publisher = publication_actor().map_err(|error| {
+        crate::perf_log::record_transfer_admission(crate::perf_log::TransferAdmission::Rejected);
+        format!("bulk transfer queued publisher could not start: {error}")
+    })?;
     enqueue_transfer_with_publisher(
         id,
         binding,
@@ -143,7 +147,7 @@ pub(super) fn enqueue_transfer_with_queued(
         started,
         work,
         finished,
-        publication_actor(),
+        publisher,
     )
 }
 

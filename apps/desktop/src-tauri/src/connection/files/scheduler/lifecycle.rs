@@ -159,12 +159,16 @@ impl CancelState {
     }
 
     pub(crate) fn bind_process(&self, process_id: u32) -> Result<ProcessBinding<'_>, String> {
-        if self.is_cancelled() {
-            return Err("bulk transfer cancelled before its helper started".into());
-        }
         self.process_id.store(process_id, Ordering::Release);
+        if self.transport_termination_requested() {
+            self.kill_if_bound(process_id);
+            return Err("bulk transfer transport expired while its helper started".into());
+        }
         if self.is_cancelled() {
-            self.cancel();
+            // Ordinary request cancellation has no authoritative outcome to
+            // reconcile. A helper that was spawned before the request flag
+            // became visible must not escape late process ownership.
+            self.kill_if_bound(process_id);
             return Err("bulk transfer cancelled while its helper started".into());
         }
         Ok(ProcessBinding(self))
@@ -179,17 +183,21 @@ impl CancelState {
         }
         self.process_id.store(process_id, Ordering::Release);
         if self.transport_termination_requested() {
-            if self
-                .process_id
-                .compare_exchange(process_id, 0, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                // SAFETY: process_id is the exact reconciliation child.
-                unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
-            }
+            self.kill_if_bound(process_id);
             return Err("authoritative reconciliation expired while its helper started".into());
         }
         Ok(ProcessBinding(self))
+    }
+
+    fn kill_if_bound(&self, process_id: u32) {
+        if self
+            .process_id
+            .compare_exchange(process_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            // SAFETY: process_id is the exact child published by the caller.
+            unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
+        }
     }
 
     pub(crate) fn prepare_finalize(&self) -> Result<(), String> {

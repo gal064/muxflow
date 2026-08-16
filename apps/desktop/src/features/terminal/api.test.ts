@@ -17,6 +17,7 @@ import {
   terminalBridgeScope,
   type TerminalEvent,
 } from "./api";
+import { TerminalEventHub } from "./TerminalEventHub";
 
 const channels = vi.hoisted(() => [] as Array<{ onmessage?: (message: ArrayBuffer) => void }>);
 
@@ -326,6 +327,34 @@ describe("binary terminal IPC", () => {
     await Promise.resolve();
     const calls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "acknowledge_terminal_delivery");
     expect(calls.at(-1)?.[1]).toMatchObject({ cumulativeFrameCount: 1 });
+  });
+
+  it("keeps the next cumulative boundary exact after a pane listener throws", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "start_terminal") return "client-consumed-listener-error";
+      return undefined;
+    });
+    const hub = new TerminalEventHub();
+    hub.subscribePane("%1", () => { throw new Error("renderer rejected admitted output"); });
+    const epoch = frame(10, "terminal", 0, u64(17));
+    const rejected = frame(2, "%1", 1, Uint8Array.from([...u64(1), 120]));
+    const heldForSeed = frame(2, "%1", 2, Uint8Array.from([...u64(2), 121]));
+    const clientId = await startTerminal("", [], { mode: "local" }, (event) => hub.publish(event));
+    channels[0].onmessage?.(epoch);
+    channels[0].onmessage?.(rejected);
+    channels[0].onmessage?.(heldForSeed);
+
+    await vi.waitFor(() => {
+      const calls = vi.mocked(invoke).mock.calls.filter(
+        ([command]) => command === "acknowledge_terminal_delivery",
+      );
+      expect(calls.at(-1)?.[1]).toMatchObject({
+        clientId,
+        connectionEpoch: 17,
+        cumulativeFrameCount: 3,
+        cumulativeByteLength: epoch.byteLength + rejected.byteLength + heldForSeed.byteLength,
+      });
+    });
   });
 
   it("uses a new epoch event to recover from an older in-flight acknowledgement failure", async () => {

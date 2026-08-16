@@ -823,6 +823,48 @@ fn authoritative_helper_bound_after_deadline_is_killed_immediately() {
 }
 
 #[test]
+fn ordinary_helper_bound_after_stale_invalidation_is_killed_immediately() {
+    use std::process::Command;
+
+    let cancellation = CancelState::new();
+    cancellation.cancel_stale_binding();
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("exec sleep 30")
+        .spawn()
+        .unwrap();
+    let error = match cancellation.bind_process(child.id()) {
+        Err(error) => error,
+        Ok(_) => panic!("late stale helper unexpectedly remained bound"),
+    };
+    assert!(error.contains("expired"), "{error}");
+    assert!(!child.wait().unwrap().success());
+    assert!(cancellation.transport_termination_requested());
+}
+
+#[test]
+fn ordinary_helper_bound_after_timeout_is_killed_immediately() {
+    use std::process::Command;
+
+    let cancellation = Arc::new(CancelState::new());
+    let deadline = cancellation.arm_deadline(std::time::Duration::from_millis(30));
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("exec sleep 30")
+        .spawn()
+        .unwrap();
+    let error = match cancellation.bind_process(child.id()) {
+        Err(error) => error,
+        Ok(_) => panic!("late timed-out helper unexpectedly remained bound"),
+    };
+    assert!(error.contains("expired"), "{error}");
+    assert!(!child.wait().unwrap().success());
+    deadline.complete();
+    assert_eq!(cancellation.reason(), CancelReason::Timeout);
+}
+
+#[test]
 fn stale_scope_during_verifying_kills_old_transport_without_reconciliation() {
     use std::io::Write as _;
     use std::process::Stdio;
