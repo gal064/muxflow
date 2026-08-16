@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Window as TmuxWindow } from "./types";
-import { relativeWindowReorderAction, requestActiveWindow, resolveActiveWindowId } from "./windowSelection";
+import { relativeWindowReorderAction, RemoteNavigationCoordinator, requestActiveWindow, resolveActiveWindowId } from "./windowSelection";
 
 const windows = (activeId: string): TmuxWindow[] => [
   { id: "@1", sessionId: "$1", index: 0, name: "one", active: activeId === "@1", layout: "" },
@@ -47,5 +47,34 @@ describe("authoritative window selection", () => {
     const crossSession = windows("@1");
     crossSession[1] = { ...crossSession[1], sessionId: "$2" };
     expect(relativeWindowReorderAction(crossSession, "@1", "right")).toBeUndefined();
+  });
+
+  it("admits only the latest rapid remote navigation completion", async () => {
+    const coordinator = new RemoteNavigationCoordinator();
+    const resolve: Array<(result: { topologyGeneration: number }) => void> = [];
+    const commit = [vi.fn(), vi.fn(), vi.fn()];
+    const requests = ["A", "B", "C"].map((key, index) => coordinator.navigate(
+      key,
+      () => new Promise((done) => resolve.push(done)),
+      commit[index],
+    ));
+    resolve[1]({ topologyGeneration: 2 });
+    resolve[0]({ topologyGeneration: 1 });
+    resolve[2]({ topologyGeneration: 3 });
+    await expect(Promise.all(requests)).resolves.toEqual([false, false, true]);
+    expect(commit.map((callback) => callback.mock.calls.length)).toEqual([0, 0, 1]);
+  });
+
+  it("coalesces only consecutive requests for the exact same destination", async () => {
+    const coordinator = new RemoteNavigationCoordinator();
+    let complete!: (result: { topologyGeneration: number }) => void;
+    const request = vi.fn(() => new Promise<{ topologyGeneration: number }>((done) => { complete = done; }));
+    const first = coordinator.navigate("session:$1", request, vi.fn());
+    const latestCommit = vi.fn();
+    const second = coordinator.navigate("session:$1", request, latestCommit);
+    expect(request).toHaveBeenCalledOnce();
+    complete({ topologyGeneration: 2 });
+    await expect(Promise.all([first, second])).resolves.toEqual([false, true]);
+    expect(latestCommit).toHaveBeenCalledOnce();
   });
 });

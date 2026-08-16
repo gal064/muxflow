@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import type { Session } from "../../app/types";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
@@ -9,6 +9,7 @@ import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPl
 import type { ConnectionPhase } from "../../state/connectionReducer";
 import { AGENTS_SECTION_MAX_RATIO, AGENTS_SECTION_MIN_RATIO, SIDEBAR_MIN_WIDTH } from "../shell/types";
 import { activityWord, type WorkspaceRowModel } from "./workspaceRows";
+import { TransientDrag } from "./transientDrag";
 
 export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close">;
 
@@ -70,6 +71,17 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const [agentMenu, setAgentMenu] = useState<{ row?: AgentListRow; anchor: ContextMenuAnchor }>();
   const [focusedAgentId, setFocusedAgentId] = useState<string>();
   const container = useRef<HTMLElement>(null);
+  const [displayedAgentsRatio, setDisplayedAgentsRatio] = useState(props.agentsRatio);
+  const [displayedWidth, setDisplayedWidth] = useState(props.width);
+  const activeSectionDrag = useRef<TransientDrag<number> | undefined>(undefined);
+  const activeWidthDrag = useRef<TransientDrag<number> | undefined>(undefined);
+
+  useEffect(() => setDisplayedAgentsRatio(props.agentsRatio), [props.agentsRatio]);
+  useEffect(() => setDisplayedWidth(props.width), [props.width]);
+  useEffect(() => () => {
+    activeSectionDrag.current?.dispose();
+    activeWidthDrag.current?.dispose();
+  }, []);
 
   // Resolved against the live list every render: an agent whose pane closed
   // drops out of `props.agents`, and the palette must stop offering to focus it
@@ -116,20 +128,34 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     if (!bounds || bounds.height <= 0) return;
     const target = event.currentTarget;
     target.setPointerCapture(event.pointerId);
+    const ratioFor = (pointer: globalThis.PointerEvent) => Math.max(
+      AGENTS_SECTION_MIN_RATIO,
+      Math.min(AGENTS_SECTION_MAX_RATIO, (bounds.bottom - pointer.clientY) / bounds.height),
+    );
+    const drag = new TransientDrag(displayedAgentsRatio, setDisplayedAgentsRatio, props.onAgentsRatio);
+    activeSectionDrag.current?.dispose();
+    activeSectionDrag.current = drag;
     const move = (pointer: globalThis.PointerEvent) => {
-      props.onAgentsRatio((bounds.bottom - pointer.clientY) / bounds.height);
+      drag.preview(ratioFor(pointer));
     };
-    const stop = () => {
+    const stop = (pointer: globalThis.PointerEvent) => {
+      drag.finish(pointer.type === "pointerup" ? ratioFor(pointer) : undefined);
+      if (activeSectionDrag.current === drag) activeSectionDrag.current = undefined;
       target.removeEventListener("pointermove", move as EventListener);
-      target.removeEventListener("pointerup", stop);
-      target.removeEventListener("pointercancel", stop);
+      target.removeEventListener("pointerup", stop as EventListener);
+      target.removeEventListener("pointercancel", stop as EventListener);
     };
     target.addEventListener("pointermove", move as EventListener);
-    target.addEventListener("pointerup", stop);
-    target.addEventListener("pointercancel", stop);
+    target.addEventListener("pointerup", stop as EventListener);
+    target.addEventListener("pointercancel", stop as EventListener);
   };
 
-  return <nav aria-label="Workspaces and agents" className="sidebar" ref={container}>
+  return <nav
+    aria-label="Workspaces and agents"
+    className="sidebar"
+    ref={container}
+    style={{ "--sidebar-width": `${displayedWidth}px` } as CSSProperties}
+  >
     <div className="sidebar-section sidebar-workspaces">
       <div className="section-label" id="sidebar-workspaces-label">Workspaces</div>
       <div aria-labelledby="sidebar-workspaces-label" className="sidebar-scroll" role="list">
@@ -193,13 +219,13 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       aria-orientation="horizontal"
       aria-valuemax={Math.round(AGENTS_SECTION_MAX_RATIO * 100)}
       aria-valuemin={Math.round(AGENTS_SECTION_MIN_RATIO * 100)}
-      aria-valuenow={Math.round(props.agentsRatio * 100)}
+      aria-valuenow={Math.round(displayedAgentsRatio * 100)}
       className="section-divider"
       onKeyDown={(event) => {
         const delta = event.key === "ArrowUp" ? 0.04 : event.key === "ArrowDown" ? -0.04 : 0;
         if (!delta) return;
         event.preventDefault();
-        props.onAgentsRatio(props.agentsRatio + delta);
+        props.onAgentsRatio(displayedAgentsRatio + delta);
       }}
       onPointerDown={startSectionDrag}
       role="separator"
@@ -214,7 +240,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           setAgentMenu({ anchor: { x: event.clientX, y: event.clientY } });
         }
       }}
-      style={{ flexBasis: `${Math.round(props.agentsRatio * 100)}%` }}
+      style={{ flexBasis: `${Math.round(displayedAgentsRatio * 100)}%` }}
     >
       <div className="section-head">
         <span className="section-label" id="sidebar-agents-label">Agents</span>
@@ -345,25 +371,36 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       aria-orientation="vertical"
       aria-valuemax={Math.round(props.maxWidth)}
       aria-valuemin={SIDEBAR_MIN_WIDTH}
-      aria-valuenow={Math.round(props.width)}
+      aria-valuenow={Math.round(displayedWidth)}
       className="sidebar-resize"
       onKeyDown={(event) => {
         const delta = event.key === "ArrowLeft" ? -16 : event.key === "ArrowRight" ? 16 : 0;
         if (!delta) return;
         event.preventDefault();
-        props.onWidth(props.width + delta);
+        props.onWidth(displayedWidth + delta);
       }}
       onPointerDown={(event) => {
         const left = container.current?.getBoundingClientRect().left ?? 0;
         const target = event.currentTarget;
         target.setPointerCapture(event.pointerId);
-        const move = (pointer: globalThis.PointerEvent) => props.onWidth(pointer.clientX - left);
-        const stop = () => {
+        const widthFor = (pointer: globalThis.PointerEvent) => Math.max(
+          SIDEBAR_MIN_WIDTH,
+          Math.min(props.maxWidth, pointer.clientX - left),
+        );
+        const drag = new TransientDrag(displayedWidth, setDisplayedWidth, props.onWidth);
+        activeWidthDrag.current?.dispose();
+        activeWidthDrag.current = drag;
+        const move = (pointer: globalThis.PointerEvent) => drag.preview(widthFor(pointer));
+        const stop = (pointer: globalThis.PointerEvent) => {
+          drag.finish(pointer.type === "pointerup" ? widthFor(pointer) : undefined);
+          if (activeWidthDrag.current === drag) activeWidthDrag.current = undefined;
           target.removeEventListener("pointermove", move as EventListener);
-          target.removeEventListener("pointerup", stop);
+          target.removeEventListener("pointerup", stop as EventListener);
+          target.removeEventListener("pointercancel", stop as EventListener);
         };
         target.addEventListener("pointermove", move as EventListener);
-        target.addEventListener("pointerup", stop);
+        target.addEventListener("pointerup", stop as EventListener);
+        target.addEventListener("pointercancel", stop as EventListener);
       }}
       role="separator"
       tabIndex={0}

@@ -7,7 +7,7 @@ import type { TerminalPaneController } from "../terminal/TerminalPane";
 import type { TmuxActionResult } from "../tmux/actions";
 import type { HostScopeToken } from "./hostScope";
 import { defaultAppState, type PersistedAppState } from "./types";
-import { useShellCommands } from "./useShellCommands";
+import { resolveCommandTarget, useShellCommands } from "./useShellCommands";
 
 const session: Session = { id: "$1", name: "muxflow", windowCount: 1, attachedClients: 1, order: 0 };
 const window: TmuxWindow = { id: "@1", sessionId: "$1", index: 1, name: "zsh", active: true, layout: "" };
@@ -25,6 +25,11 @@ const appTab: PersistedAppState["appTabs"][number] = {
   id: "tab-1", hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1",
   sessionName: "muxflow", kind: "file", resource: "/home/user/notes.md", title: "notes.md", order: 0,
 };
+
+const ambientSession: Session = { ...session, id: "$ambient", name: "ambient" };
+const ambientWindow: TmuxWindow = { ...window, id: "@ambient", sessionId: ambientSession.id };
+const ambientPane: Pane = { ...pane, id: "%ambient", sessionId: ambientSession.id, windowId: ambientWindow.id };
+const ambientAppTab: PersistedAppState["appTabs"][number] = { ...appTab, id: "tab-ambient", sessionId: ambientSession.id };
 
 type Options = Parameters<typeof useShellCommands>[0];
 
@@ -79,6 +84,56 @@ async function run(
 }
 
 describe("shell commands", () => {
+  it.each([
+    [undefined, "ambient", ["$ambient", "@ambient", "tab-ambient", "%ambient"]],
+    [{ kind: "session", id: "$1" } as const, "session", ["$1", undefined, undefined, undefined]],
+    [{ kind: "terminalTab", id: "@1" } as const, "terminalTab", [undefined, "@1", undefined, undefined]],
+    [{ kind: "appTab", id: "tab-1" } as const, "appTab", [undefined, undefined, "tab-1", undefined]],
+    [{ kind: "pane", id: "%1" } as const, "pane", [undefined, undefined, undefined, "%1"]],
+  ])("resolves %s as an isolated %s command target", (target, kind, expected) => {
+    const resolved = resolveCommandTarget({
+      activePane: ambientPane,
+      activeSession: ambientSession,
+      activeWindow: ambientWindow,
+      appState: { ...defaultAppState, appTabs: [appTab, ambientAppTab] },
+      currentHostProfileId: "local",
+      selectedAppTab: ambientAppTab,
+      snapshot,
+      windows: [ambientWindow],
+    }, target);
+    expect(resolved.kind).toBe(kind);
+    expect([
+      resolved.targetSession?.id,
+      resolved.targetWindow?.id,
+      resolved.targetAppTab?.id,
+      resolved.targetPane?.id,
+    ]).toEqual(expected);
+  });
+
+  it.each([
+    { kind: "session", id: "$missing" } as const,
+    { kind: "terminalTab", id: "@missing" } as const,
+    { kind: "appTab", id: "tab-missing" } as const,
+    { kind: "pane", id: "%missing" } as const,
+  ])("never substitutes ambient state for stale explicit target $kind", (target) => {
+    const resolved = resolveCommandTarget({
+      activePane: ambientPane,
+      activeSession: ambientSession,
+      activeWindow: ambientWindow,
+      appState: { ...defaultAppState, appTabs: [ambientAppTab] },
+      currentHostProfileId: "local",
+      selectedAppTab: ambientAppTab,
+      snapshot,
+      windows: [ambientWindow],
+    }, target);
+    expect([
+      resolved.targetSession,
+      resolved.targetWindow,
+      resolved.targetAppTab,
+      resolved.targetPane,
+    ]).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
   it("selects the terminal tab ⌘T just created", async () => {
     // The host creates the window detached, so tmux's active window does not
     // move; the app mirrors that flag on every snapshot, so without an explicit

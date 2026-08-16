@@ -183,6 +183,11 @@ export function closePanePaintSpans(): void {
   for (const name of PANE_PAINT_SPANS) closePerfSpan(name);
 }
 
+/** A replaced connection can never paint the pane an old action was waiting for. */
+export function abandonPanePaintSpans(): void {
+  for (const name of PANE_PAINT_SPANS) abandonPerfSpan(name);
+}
+
 /** Times an awaited call without changing its result or its rejection. */
 export async function measurePerf<T>(name: string, work: () => Promise<T>): Promise<T> {
   if (!enabled) return work();

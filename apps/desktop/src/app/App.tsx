@@ -18,7 +18,7 @@ import { setTerminalScreenReaderMode } from "../features/terminal/accessibilityP
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
-import { abandonPerfSpan, openPerfSpan, type PanePaintSpan } from "../perf/probe";
+import { abandonPanePaintSpans, abandonPerfSpan, openPerfSpan, type PanePaintSpan } from "../perf/probe";
 import { requestTmuxAction, type TmuxAction } from "../features/tmux/actions";
 import { requestReconciledTmuxAction } from "../features/tmux/actionReconciliation";
 import { useAgentWorkflow } from "../features/agents/AgentHookWorkflow";
@@ -78,7 +78,16 @@ import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
 import type { ConnectionSpec, HostProfile, Pane, PersistedProfiles } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
-import { requestActiveWindow } from "./windowSelection";
+import { RemoteNavigationCoordinator } from "./windowSelection";
+import {
+  appRecoveryModalOpen,
+  appRecoveryDiscardState,
+  cancelAppRecoveryDiscard,
+  confirmAppRecoveryDiscard,
+  offerAppRecovery,
+  reconcileAppRecovery,
+  type AppRecoveryState,
+} from "./appRecovery";
 import { useAppConnectionController } from "./useAppConnectionController";
 import { useClientResize } from "./useClientResize";
 import { useVisibleTerminalSession } from "./useVisibleTerminalSession";
@@ -155,8 +164,9 @@ export function App() {
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
-  const [appRecoveryDiscardConfirmation, setAppRecoveryDiscardConfirmation] = useState(false);
-  const [pendingAppRecovery, setPendingAppRecovery] = useState<{ hostProfileId: string; previousServerIdentity: string; currentServerIdentity: string; count: number; scope: HostScopeToken }>();
+  // Offer and confirmation are one state machine. There is no independent
+  // `modalOpen` bit that can survive after its recovery payload is invalidated.
+  const [appRecovery, setAppRecovery] = useState<AppRecoveryState>();
   const [completedDownload, setCompletedDownload] = useState<DownloadCompletion & { noticeId?: number }>();
   const downloadPickerOpen = useRef(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
@@ -177,6 +187,7 @@ export function App() {
   const terminalTransferClient = useMemo(() => new TauriTerminalTransferClient(), []);
   const terminalTransferRegistry = useTerminalTransferRegistry();
   const latency = useHostLatency();
+  const remoteNavigation = useMemo(() => new RemoteNavigationCoordinator(), []);
 
   useEffect(() => dispatchHelper({ type: "reset" }), [currentHelperConnectionKey]);
   // Renderers read this once, when they are created; changing it must not tear
@@ -210,6 +221,13 @@ export function App() {
   // A new bridge is a new link; the last one's measured round-trip describes
   // nothing about it.
   useEffect(() => { resetHostLatency(); }, [clientId]);
+  // An accepted action from the previous durable connection cannot produce a
+  // paint in this one. Invalidate selection completions and close the old
+  // cross-component measurements at the same boundary.
+  useEffect(() => {
+    remoteNavigation.invalidate();
+    abandonPanePaintSpans();
+  }, [currentHostScope.connectionEpoch, currentHostScope.connectionKey, currentHostScope.hostProfileId, currentHostScope.serverIdentity]);
 
   // Width is observed, never saved. What a narrow window does to the rails is
   // decided at render time by `effectiveRails`; writing it into the preferences
@@ -239,7 +257,13 @@ export function App() {
         && previous.hostProfileId === currentHostProfileId
         && previous.serverIdentity !== hostState.serverIdentity) {
         const count = recoverableAppTabCount(current, currentHostProfileId, previous.serverIdentity, snapshot.sessions);
-        if (count > 0) setPendingAppRecovery({ hostProfileId: currentHostProfileId, previousServerIdentity: previous.serverIdentity, currentServerIdentity: hostState.serverIdentity, count, scope: currentHostScope });
+        if (count > 0) setAppRecovery(offerAppRecovery({
+          hostProfileId: currentHostProfileId,
+          previousServerIdentity: previous.serverIdentity,
+          currentServerIdentity: hostState.serverIdentity,
+          count,
+          scope: currentHostScope,
+        }));
       }
       return reconcileWorkspaceIdentity(current, currentHostProfileId, hostState.serverIdentity, snapshot.sessions);
     });
@@ -247,8 +271,8 @@ export function App() {
   }, [currentHostProfileId, hostState.serverIdentity, snapshot.sessions]);
 
   useEffect(() => {
-    if (pendingAppRecovery && !sameHostScope(pendingAppRecovery.scope, currentHostScope)) setPendingAppRecovery(undefined);
-  }, [currentHostScope.connectionEpoch, currentHostScope.connectionKey, currentHostScope.generation, currentHostScope.hostProfileId, currentHostScope.serverIdentity, pendingAppRecovery]);
+    setAppRecovery((current) => reconcileAppRecovery(current, currentHostScope));
+  }, [currentHostScope.connectionEpoch, currentHostScope.connectionKey, currentHostScope.hostProfileId, currentHostScope.serverIdentity]);
 
   const {
     activePane, activeSession, activeWindow, fileScope, panes, selectedAppTab,
@@ -278,6 +302,7 @@ export function App() {
     }
     // The user's wait for a create or a split ends when a pane paints, not when
     // tmux acks; the pane that paints closes this span (see TerminalPane).
+    const initialScope = hostScopeRef.current;
     const paneSpan = INTERACTION_SPAN_BY_ACTION[action.kind];
     if (paneSpan) openPerfSpan(paneSpan);
     try {
@@ -285,14 +310,18 @@ export function App() {
         clientId,
         action,
         capturedPrecondition,
-        initialScope: hostScopeRef.current,
+        initialScope,
         currentScope: () => hostScopeRef.current,
       });
+      if (!sameHostConnection(initialScope, hostScopeRef.current)) {
+        if (paneSpan) abandonPerfSpan(paneSpan);
+        return undefined;
+      }
       setStatus("Waiting for authoritative tmux state…");
       return result;
     } catch (error) {
       if (paneSpan) abandonPerfSpan(paneSpan);
-      setStatus(String(error));
+      if (sameHostConnection(initialScope, hostScopeRef.current)) setStatus(String(error));
       return undefined;
     }
   }, [clientId, hostState.canMutate, hostState.generation, hostState.serverIdentity]);
@@ -330,7 +359,7 @@ export function App() {
         generation,
       });
     } catch (error) {
-      setStatus(String(error));
+      if (sameHostConnection(scope, hostScopeRef.current)) setStatus(String(error));
       return { ok: false, error };
     }
     // `sameHostConnection`, not `sameHostScope`. The guard exists to catch the
@@ -540,9 +569,11 @@ export function App() {
       setStatus("Viewing the last known workspace. Writes remain frozen.");
       return;
     }
-    void performAction({ kind: "selectSession", sessionId }).then((accepted) => {
-      if (accepted) setActiveSessionId(sessionId);
-    });
+    void remoteNavigation.navigate(
+      `session:${sessionId}`,
+      () => performAction({ kind: "selectSession", sessionId }),
+      () => setActiveSessionId(sessionId),
+    );
   }, [activeSessionId, hostState.canMutate, notificationActivation, performAction]);
 
   const selectWindow = useCallback((windowId: string) => {
@@ -553,7 +584,13 @@ export function App() {
       setStatus("Viewing the last known terminal tab. Writes remain frozen.");
       return;
     }
-    void requestActiveWindow(windows, activeWindowId, windowId, performAction, setActiveWindowId);
+    const target = windows.find((window) => window.id === windowId);
+    if (!target || target.id === activeWindowId) return;
+    void remoteNavigation.navigate(
+      `window:${target.sessionId}:${target.id}`,
+      () => performAction({ kind: "selectWindow", sessionId: target.sessionId, windowId: target.id }),
+      () => setActiveWindowId(target.id),
+    );
   }, [activeSession, activeWindowId, currentHostProfileId, hostState.canMutate, hostState.serverIdentity, notificationActivation, performAction, setAppState, windows]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
@@ -656,7 +693,7 @@ export function App() {
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
     || Boolean(confirmation) || Boolean(textPrompt)
-    || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecoveryDiscardConfirmation
+    || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecoveryModalOpen(appRecovery)
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
   useEffect(() => {
@@ -1124,11 +1161,11 @@ export function App() {
     </div>}
     {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}
     {appStateRecovery && <div className="toast" role="alert"><strong>Saved shell state is write-frozen</strong><span>{appStateRecovery}</span><button onClick={() => setAppStateResetConfirmation(true)} type="button">Reset saved shell state…</button></div>}
-    {pendingAppRecovery && <div className="toast" role="status"><strong>App tabs found from the replaced tmux server</strong><span>{pendingAppRecovery.count} tab{pendingAppRecovery.count === 1 ? "" : "s"} can be rebound by unique workspace name. Terminal and pane identities are never reused.</span><div><button onClick={() => {
-      if (!sameHostScope(pendingAppRecovery.scope, hostScopeRef.current)) return setPendingAppRecovery(undefined);
-      setAppState((current) => recoverAppTabsFromPreviousServer(current, pendingAppRecovery.hostProfileId, pendingAppRecovery.previousServerIdentity, pendingAppRecovery.currentServerIdentity, snapshot.sessions));
-      setPendingAppRecovery(undefined);
-    }} type="button">Restore app tabs</button><button onClick={() => setAppRecoveryDiscardConfirmation(true)} type="button">Discard old tabs…</button></div></div>}
+    {appRecovery && <div className="toast" role="status"><strong>App tabs found from the replaced tmux server</strong><span>{appRecovery.count} tab{appRecovery.count === 1 ? "" : "s"} can be rebound by unique workspace name. Terminal and pane identities are never reused.</span><div><button onClick={() => {
+      if (!sameHostConnection(appRecovery.scope, hostScopeRef.current)) return setAppRecovery(undefined);
+      setAppState((current) => recoverAppTabsFromPreviousServer(current, appRecovery.hostProfileId, appRecovery.previousServerIdentity, appRecovery.currentServerIdentity, snapshot.sessions));
+      setAppRecovery(undefined);
+    }} type="button">Restore app tabs</button><button onClick={() => setAppRecovery((current) => current && confirmAppRecoveryDiscard(current))} type="button">Discard old tabs…</button></div></div>}
 
     <TerminalTransferHistory client={terminalTransferClient} onError={(error) => setStatus(String(error))} registry={terminalTransferRegistry} />
     {agentWorkflow.dialog}
@@ -1173,18 +1210,17 @@ export function App() {
       stateGlyphs={appState.shell.agentStateGlyphs}
     />}
     <AppDialogLayer
-      appRecoveryDiscard={appRecoveryDiscardConfirmation ? pendingAppRecovery : undefined}
+      appRecoveryDiscard={appRecoveryDiscardState(appRecovery)}
       appStateResetConfirmation={appStateResetConfirmation}
       commandContext={commandContext}
       confirmation={confirmation}
       helperState={helperState}
       hostDelete={hostDeleteConfirmation}
-      onAppRecoveryDiscardCancel={() => setAppRecoveryDiscardConfirmation(false)}
+      onAppRecoveryDiscardCancel={() => setAppRecovery((current) => current && cancelAppRecoveryDiscard(current))}
       onAppRecoveryDiscardConfirm={() => {
-        if (!pendingAppRecovery) return;
-        setAppState((current) => discardServerAppState(current, pendingAppRecovery.hostProfileId, pendingAppRecovery.previousServerIdentity));
-        setAppRecoveryDiscardConfirmation(false);
-        setPendingAppRecovery(undefined);
+        if (!appRecovery || !sameHostConnection(appRecovery.scope, hostScopeRef.current)) return setAppRecovery(undefined);
+        setAppState((current) => discardServerAppState(current, appRecovery.hostProfileId, appRecovery.previousServerIdentity));
+        setAppRecovery(undefined);
       }}
       onAppStateResetCancel={() => setAppStateResetConfirmation(false)}
       onAppStateResetConfirm={() => {
