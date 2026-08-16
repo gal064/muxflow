@@ -120,6 +120,11 @@ enum Operation {
   // client participates in sizing and nothing else, and paying an attach for
   // that reseeds every pane of the session on every switch.
   OPERATION_SELECT_TERMINAL_SESSION = 43;
+  // Re-reads one side of an already classified Git diff over the independent
+  // bulk connection. The control lane withholds large diff bodies so a
+  // multi-megabyte file cannot head-of-line block terminal traffic; this
+  // streams the same bytes back under an exact size + digest binding.
+  OPERATION_GIT_DIFF_CONTENT = 44;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -626,6 +631,41 @@ message GitDiff {
   bool old_missing = 12;
   bool new_missing = 13;
   uint32 hunk_count = 14;
+  // Set instead of `old_content`/`new_content` when the body is large enough
+  // that inlining it would stall the shared control lane. The desktop fetches
+  // the exact same bytes with OPERATION_GIT_DIFF_CONTENT over the bulk lane.
+  GitDiffContentRef old_content_ref = 15;
+  GitDiffContentRef new_content_ref = 16;
+}
+
+enum GitDiffContentSide {
+  GIT_DIFF_CONTENT_SIDE_UNSPECIFIED = 0;
+  GIT_DIFF_CONTENT_SIDE_OLD = 1;
+  GIT_DIFF_CONTENT_SIDE_NEW = 2;
+}
+
+// A diff body deliberately withheld from the control response. `size` and
+// `content_digest` bind the deferred bulk read to the exact bytes the diff was
+// classified from; a mismatch is reported rather than silently substituted.
+message GitDiffContentRef {
+  GitDiffContentSide side = 1;
+  uint64 size = 2;
+  string content_digest = 3;
+}
+
+message GitDiffContentRequest {
+  GitDiffContentSide side = 1;
+  string expected_content_digest = 2;
+  uint64 expected_size = 3;
+  uint64 offset = 4;
+  uint32 length = 5;
+}
+
+message GitDiffContentChunk {
+  uint64 offset = 1;
+  bytes data = 2;
+  bool last = 3;
+  uint64 total_size = 4;
 }
 
 message GitConfirmation {
@@ -681,14 +721,19 @@ message GitRequest {
   string commit_message = 14;
   string watch_id = 15;
   string expected_server_identity = 16;
+  GitDiffContentRequest content = 17;
 }
 
 message GitResponse {
   string operation_id = 1;
+  // Every authoritative Git response carries the status it was validated
+  // against, so a diff never needs a prerequisite status round trip and a
+  // mutation never needs a follow-up one.
   GitStatusSnapshot status = 2;
   GitDiff diff = 3;
   GitConfirmation confirmation = 4;
   GitCommandResult command = 5;
+  GitDiffContentChunk content_chunk = 6;
 }
 
 message GitEvent {

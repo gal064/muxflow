@@ -174,6 +174,14 @@ impl OperationPolicy {
                 Scheduling::Detached,
                 Handler::Git,
             ),
+            // Diff bodies are the only Git payload large enough to matter to
+            // terminal latency, so they alone take the independent bulk lane.
+            v1::Operation::GitDiffContent => (
+                Access::ReadOnly,
+                Lane::Bulk,
+                Scheduling::Inline,
+                Handler::Git,
+            ),
             v1::Operation::WatchGit
             | v1::Operation::UnwatchGit
             | v1::Operation::PrepareGitDiscard
@@ -316,6 +324,7 @@ mod tests {
         assert_policy(WatchGit, M, C, Dd, GH);
         assert_policy(UnwatchGit, M, C, Dd, GH);
         assert_policy(GitDiff, R, C, Dd, GH);
+        assert_policy(GitDiffContent, R, B, I, GH);
         assert_policy(PrepareGitDiscard, M, C, Dd, GH);
         assert_policy(GitMutation, M, C, Dd, GH);
         assert_policy(GitCommit, M, C, Dd, GH);

@@ -97,7 +97,6 @@ pub(crate) async fn handle_request(
                     event_tx,
                     git,
                     connection_epoch,
-                    closed: &closed,
                 },
             )
             .await;

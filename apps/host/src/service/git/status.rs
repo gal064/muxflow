@@ -6,45 +6,44 @@ use std::{collections::HashSet, sync::atomic::AtomicBool};
 use super::path::WorktreeRoot;
 use super::runner::{GitMetadataCapability, git_output_cancellable};
 
+/// Discovers the repository's static identity in one Git process.
+///
+/// `rev-parse` answers each query in argument order, so the worktree root, the
+/// git directory and the common directory arrive together. HEAD and the branch
+/// name are deliberately *not* asked for here: `git status --porcelain=v2
+/// --branch` already reports both authoritatively, and asking twice made a
+/// warm status refresh cost five processes before it read anything.
 pub(super) fn discover_repository(
     root: &str,
     logical_root: &str,
     root_identity: (u64, u64),
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<v1::GitRepository> {
-    let top = runner::git_stdout_cancellable(
+    let paths = runner::git_stdout_cancellable(
         root,
         &[
             OsStr::new("rev-parse"),
             OsStr::new("--path-format=absolute"),
             OsStr::new("--show-toplevel"),
-        ],
-        cancellation,
-    )?;
-    let worktree_root = trim_one_newline(top);
-    if worktree_root.as_bytes() != logical_root.as_bytes() {
-        bail!("active root is not the requested Git worktree root");
-    }
-    let git_dir = trim_one_newline(runner::git_stdout_cancellable(
-        root,
-        &[
-            OsStr::new("rev-parse"),
-            OsStr::new("--path-format=absolute"),
             OsStr::new("--git-dir"),
-        ],
-        cancellation,
-    )?)
-    .into_bytes();
-    let common_dir = trim_one_newline(runner::git_stdout_cancellable(
-        root,
-        &[
-            OsStr::new("rev-parse"),
-            OsStr::new("--path-format=absolute"),
             OsStr::new("--git-common-dir"),
         ],
         cancellation,
-    )?)
-    .into_bytes();
+    )?;
+    let mut lines = paths.split(|byte| *byte == b'\n');
+    let mut next_path = |label: &str| -> anyhow::Result<Vec<u8>> {
+        let value = lines
+            .next()
+            .filter(|line| !line.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("git rev-parse omitted the repository {label}"))?;
+        Ok(trim_one_carriage_return(value.to_vec()))
+    };
+    let worktree_root = String::from_utf8_lossy(&next_path("worktree root")?).into_owned();
+    let git_dir = next_path("git directory")?;
+    let common_dir = next_path("common directory")?;
+    if worktree_root.as_bytes() != logical_root.as_bytes() {
+        bail!("active root is not the requested Git worktree root");
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(logical_root.as_bytes());
     hasher.update(&root_identity.0.to_le_bytes());
@@ -59,48 +58,15 @@ pub(super) fn discover_repository(
     let common_identity = directory_identity(&common_dir)?;
     hasher.update(&common_identity.0.to_le_bytes());
     hasher.update(&common_identity.1.to_le_bytes());
-    let head = git_output_cancellable(
-        root,
-        &[
-            OsStr::new("rev-parse"),
-            OsStr::new("--verify"),
-            OsStr::new("HEAD"),
-        ],
-        None,
-        cancellation,
-    )?;
-    let initial = !head.status.success();
-    let head_oid = if initial {
-        String::new()
-    } else {
-        trim_one_newline(head.output.stdout)
-    };
-    let symbolic = git_output_cancellable(
-        root,
-        &[
-            OsStr::new("symbolic-ref"),
-            OsStr::new("--quiet"),
-            OsStr::new("--short"),
-            OsStr::new("HEAD"),
-        ],
-        None,
-        cancellation,
-    )?;
-    let detached_head = !initial && !symbolic.status.success();
-    let head_name = if symbolic.status.success() {
-        trim_one_newline(symbolic.output.stdout)
-    } else {
-        String::new()
-    };
+    // HEAD state is left empty on purpose: `read_status_cancellable` fills it
+    // from the same porcelain output it must read anyway. The repository id is
+    // a function of the directories only, so it is unaffected.
     Ok(v1::GitRepository {
         repository_id: hasher.finalize().to_hex().to_string(),
         worktree_root,
         git_dir,
         common_dir,
-        initial,
-        detached_head,
-        head_name,
-        head_oid,
+        ..Default::default()
     })
 }
 
@@ -363,12 +329,10 @@ pub(super) fn apply_copy_detection(
     Ok(false)
 }
 
-fn trim_one_newline(mut value: Vec<u8>) -> String {
-    if value.ends_with(b"\n") {
+/// `rev-parse` output is split on `\n`; only a stray `\r` can remain.
+fn trim_one_carriage_return(mut value: Vec<u8>) -> Vec<u8> {
+    if value.ends_with(b"\r") {
         value.pop();
-        if value.ends_with(b"\r") {
-            value.pop();
-        }
     }
-    String::from_utf8_lossy(&value).into_owned()
+    value
 }

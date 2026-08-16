@@ -5,7 +5,6 @@ pub(super) struct GitDispatchContext<'a> {
     pub(super) event_tx: &'a mpsc::Sender<SequencerControl>,
     pub(super) git: &'a Arc<super::super::git::GitService>,
     pub(super) connection_epoch: u64,
-    pub(super) closed: &'a Arc<AtomicBool>,
 }
 
 pub(super) async fn handle(
@@ -27,70 +26,67 @@ pub(super) async fn handle(
     let operation_id = git_request.operation_id.clone();
     let mut watch_activation = None;
     let response = match operation {
-        v1::Operation::GitStatus | v1::Operation::GitDiff => {
-            let service = Arc::clone(context.git);
-            let work = git_request.clone();
-            let work_cancellation = Arc::clone(&cancellation);
-            match tokio::task::spawn_blocking(move || {
-                if operation == v1::Operation::GitStatus {
-                    service
-                        .status_cancellable(&work, Some(&work_cancellation))
-                        .map(GitReadResult::Status)
-                } else {
-                    service
-                        .diff_cancellable(&work, Some(&work_cancellation))
-                        .map(GitReadResult::Diff)
-                }
-            })
+        v1::Operation::GitStatus => match context
+            .git
+            .status(&git_request, Some(Arc::clone(&cancellation)))
             .await
-            {
-                Ok(Ok(GitReadResult::Status(status))) => {
-                    git_response(&operation_id, |v| v.status = Some(status))
-                }
-                Ok(Ok(GitReadResult::Diff(diff))) => {
-                    git_response(&operation_id, |v| v.diff = Some(diff))
-                }
-                Ok(Err(error)) => git_error(&error),
-                Err(error) => response_error("git_task_failed", &error.to_string()),
-            }
-        }
+        {
+            Ok(status) => git_response(&operation_id, |v| v.status = Some(status)),
+            Err(error) => git_error(&error),
+        },
+        // The diff response carries the status it was read against, so the
+        // desktop no longer pays a status round trip before every diff.
+        v1::Operation::GitDiff => match context
+            .git
+            .diff(&git_request, Some(Arc::clone(&cancellation)))
+            .await
+        {
+            Ok((diff, status)) => git_response(&operation_id, |v| {
+                v.diff = Some(diff);
+                v.status = Some(status);
+            }),
+            Err(error) => git_error(&error),
+        },
+        v1::Operation::GitDiffContent => match context
+            .git
+            .diff_content(&git_request, Some(Arc::clone(&cancellation)))
+            .await
+        {
+            Ok(chunk) => git_response(&operation_id, |v| v.content_chunk = Some(chunk)),
+            Err(error) => git_error(&error),
+        },
         v1::Operation::WatchGit => {
-            let service = Arc::clone(context.git);
-            let sender = context.event_tx.clone();
-            let closed = Arc::clone(context.closed);
-            let work_cancellation = Arc::clone(&cancellation);
-            let result = tokio::task::spawn_blocking(move || {
-                service.watch_cancellable(git_request, sender, closed, work_cancellation)
-            })
-            .await;
-            match result {
-                Ok(Ok(bootstrap)) if !cancellation.load(Ordering::Acquire) => {
+            match context
+                .git
+                .watch(
+                    git_request,
+                    context.event_tx.clone(),
+                    Arc::clone(&cancellation),
+                )
+                .await
+            {
+                Ok(bootstrap) if !cancellation.load(Ordering::Acquire) => {
                     watch_activation = Some(bootstrap.activate);
                     git_response(&operation_id, |v| v.status = Some(bootstrap.status))
                 }
-                Ok(Ok(_)) => git_error(&anyhow::anyhow!("Git watch bootstrap cancelled")),
-                Ok(Err(error)) => git_error(&error),
-                Err(error) => response_error("git_task_failed", &error.to_string()),
+                Ok(_) => git_error(&anyhow::anyhow!("Git watch bootstrap cancelled")),
+                Err(error) => git_error(&error),
             }
         }
         v1::Operation::UnwatchGit => match context.git.unwatch(&git_request.watch_id) {
             Ok(()) => git_response(&operation_id, |_| {}),
             Err(error) => git_error(&error),
         },
-        v1::Operation::PrepareGitDiscard => {
-            let service = Arc::clone(context.git);
-            let work = git_request.clone();
-            let epoch = context.connection_epoch;
-            let result =
-                tokio::task::spawn_blocking(move || service.prepare_discard(&work, epoch)).await;
-            match result {
-                Ok(Ok(confirmation)) => {
-                    git_response(&operation_id, |v| v.confirmation = Some(confirmation))
-                }
-                Ok(Err(error)) => git_error(&error),
-                Err(error) => response_error("git_task_failed", &error.to_string()),
+        v1::Operation::PrepareGitDiscard => match context
+            .git
+            .prepare_discard(&git_request, context.connection_epoch)
+            .await
+        {
+            Ok(confirmation) => {
+                git_response(&operation_id, |v| v.confirmation = Some(confirmation))
             }
-        }
+            Err(error) => git_error(&error),
+        },
         v1::Operation::GitMutation => match context
             .git
             .mutate(
@@ -121,13 +117,8 @@ pub(super) async fn handle(
     if let Some(activate) = watch_activation {
         // Response and events share the sequencer queue. Activating only after
         // the response is enqueued makes bootstrap ordering deterministic.
-        let _ = activate.send(());
+        activate.activate();
     }
-}
-
-enum GitReadResult {
-    Status(v1::GitStatusSnapshot),
-    Diff(v1::GitDiff),
 }
 
 fn git_error(error: &anyhow::Error) -> v1::Response {

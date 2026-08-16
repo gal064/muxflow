@@ -13,7 +13,13 @@ pub(super) fn mutate_hunk(
     mutation: v1::GitMutationKind,
     cancellation: &AtomicBool,
 ) -> anyhow::Result<GitOutput> {
-    let current = read_diff(root, repository.clone(), request, Some(cancellation))?;
+    let current = read_diff(
+        root,
+        repository.clone(),
+        request,
+        DiffOptions::for_mutation(),
+        Some(cancellation),
+    )?;
     if current.source_generation != request.expected_source_generation {
         bail!("stale source diff generation");
     }
