@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { closePanePaintSpans, recordPerfMilestone } from "../../perf/probe";
+import { createPaintTicket } from "../../perf/paintTicket";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import type { Pane } from "../../app/types";
 import type { TerminalEventHub } from "./TerminalEventHub";
@@ -174,6 +175,7 @@ export function TerminalPane({
     if (!container.current) return;
     const lifecycle = (paneLifecycleVersions.get(pane.id) ?? 0) + 1;
     paneLifecycleVersions.set(pane.id, lifecycle);
+    const initialPaint = createPaintTicket([], lifecycle);
     let rendererActive = true;
     let rendererEpoch: number | undefined;
     const renderer = new XtermRenderer({
@@ -202,7 +204,7 @@ export function TerminalPane({
         }
       },
     });
-    const commitRendered = (generation: number, terminalEpoch: number | undefined, establishesEpoch = false) => {
+    const commitRendered = (generation: number, terminalEpoch: number | undefined, establishesEpoch = false): boolean => {
       if (establishesEpoch && hub.generationEpoch === terminalEpoch) {
         rendererEpoch = terminalEpoch;
         if (rendererActive) rendererEpochRef.current = terminalEpoch;
@@ -213,8 +215,25 @@ export function TerminalPane({
       // and the reveal checkpoint (hub counter) describe different cutoffs —
       // the stale-splice half of P12-U003.3. A superseded lifecycle is a
       // different pane instance and must stay silent.
-      if (paneLifecycleVersions.get(pane.id) !== lifecycle) return;
+      if (paneLifecycleVersions.get(pane.id) !== lifecycle) return false;
       hub.markRendered(pane.id, generation, terminalEpoch);
+      return true;
+    };
+    const publishInitialPaint = (
+      generation: number,
+      terminalEpoch: number | undefined,
+      establishesEpoch = false,
+    ) => {
+      if (!commitRendered(generation, terminalEpoch, establishesEpoch)) return;
+      initialPaint.afterPaint(
+        (ticket) => ticket.lifecycleGeneration === lifecycle
+          && rendererActive
+          && paneLifecycleVersions.get(pane.id) === lifecycle,
+        () => {
+          recordPerfMilestone("startup.terminalPaint");
+          closePanePaintSpans(clientId, pane.id);
+        },
+      );
     };
     rendererRef.current = renderer;
     const terminalContainer = container.current;
@@ -242,9 +261,7 @@ export function TerminalPane({
     if (currentCached) {
       const cachedEpoch = currentCached.terminalEpoch;
       const restored = renderer.restore(currentCached.serialized, () => {
-        recordPerfMilestone("startup.terminalPaint");
-        closePanePaintSpans();
-        commitRendered(currentCached.outputGeneration, cachedEpoch, true);
+        publishInitialPaint(currentCached.outputGeneration, cachedEpoch, true);
       }, currentCached.outputGeneration);
       // A fresh terminal cannot refuse a restore today, but a caller that
       // ignores the answer is how the tail-splice bug happened; if it ever
@@ -291,9 +308,7 @@ export function TerminalPane({
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
         renderer.seed(effect.data, () => {
-          recordPerfMilestone("startup.terminalPaint");
-          closePanePaintSpans();
-          commitRendered(generation, eventEpoch, true);
+          publishInitialPaint(generation, eventEpoch, true);
         }, generation);
         setRendererDiagnostic(undefined);
         if (seedDiagnosticForNextSeedRef.current) seedDiagnosticForNextSeedRef.current = false;
@@ -317,9 +332,7 @@ export function TerminalPane({
         if (effect.requestSeed) requestFreshSeed(effect.reason);
       } else if (effect.kind === "restore") {
         const markRecoveryRendered = () => {
-          recordPerfMilestone("startup.terminalPaint");
-          closePanePaintSpans();
-          commitRendered(effect.tailThroughGeneration, eventEpoch, true);
+          publishInitialPaint(effect.tailThroughGeneration, eventEpoch, true);
         };
         // The snapshot and its raw tail are one screen in two pieces. If the
         // snapshot was refused, the tail must not be written onto whatever the
@@ -389,6 +402,7 @@ export function TerminalPane({
 
     return () => {
       rendererActive = false;
+      initialPaint.abandon();
       lastRevealKeyRef.current = undefined;
       observer.disconnect();
       unsubscribeEvents();

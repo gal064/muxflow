@@ -7,7 +7,8 @@ import { SurfaceError } from "../../ui/SurfaceError";
 import { attachEditorLayout } from "../files/editorLayout";
 import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot, GitWorkspaceClient, GitWorkspaceEvent } from "./types";
 import { ADE_MONACO_THEME } from "../files/monaco";
-import { closePerfSpan, recordPerfMilestone } from "../../perf/probe";
+import { recordPerfMilestone } from "../../perf/probe";
+import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
 
 interface Props {
   tab: AppOwnedTab;
@@ -23,7 +24,23 @@ type PendingDiscard = { kind: "discardFile" | "discardHunk"; hunkIndex?: number;
 
 export function GitDiffSurface(props: Props) {
   const detachLayout = useRef<(() => void) | undefined>(undefined);
-  useEffect(() => () => { detachLayout.current?.(); detachLayout.current = undefined; }, []);
+  const editorSurfaceSequence = useRef(0);
+  const mountedEditorSurface = useRef<number | undefined>(undefined);
+  const readyEditorSurface = useRef<number | undefined>(undefined);
+  const bindEditorHost = useCallback((node: HTMLDivElement | null) => {
+    if (node) {
+      mountedEditorSurface.current ??= ++editorSurfaceSequence.current;
+    } else {
+      mountedEditorSurface.current = undefined;
+      readyEditorSurface.current = undefined;
+    }
+  }, []);
+  useEffect(() => () => {
+    detachLayout.current?.();
+    detachLayout.current = undefined;
+    mountedEditorSurface.current = undefined;
+    readyEditorSurface.current = undefined;
+  }, []);
   const [diff, setDiff] = useState<GitDiff>();
   const [status, setStatus] = useState<GitStatusSnapshot>();
   const [loading, setLoading] = useState(true);
@@ -31,9 +48,11 @@ export function GitDiffSurface(props: Props) {
   const [busy, setBusy] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
   const serial = useRef(0);
+  const committedLoadSerial = useRef(0);
   const abort = useRef<AbortController | undefined>(undefined);
   const loadedGeneration = useRef<string | undefined>(undefined);
   const watchedGeneration = useRef<string | undefined>(undefined);
+  const pendingDiffPaint = useRef<PaintTicket | undefined>(undefined);
   const root = useMemo<ActiveRoot | undefined>(() => props.tab.rootPath && props.tab.rootToken ? {
     path: props.tab.rootPath, cwd: props.tab.rootPath, token: props.tab.rootToken, paneId: props.scope?.paneId ?? "",
     gitWorktree: true, revision: "0",
@@ -42,9 +61,11 @@ export function GitDiffSurface(props: Props) {
   const pathIdentity = props.tab.gitPath;
   const originalPathIdentity = props.tab.gitOriginalPath;
   const target = props.tab.gitTarget;
+  const decodedText = useMemo(() => diff ? decodeTextDiff(diff) : undefined, [diff]);
+  const diffUsesEditor = Boolean(diff && !diff.binary && !diff.tooLarge && decodedText);
   useEffect(() => {
-    if (diff) recordPerfMilestone("editor.monacoRequest");
-  }, [diff]);
+    if (diffUsesEditor) recordPerfMilestone("editor.monacoRequest");
+  }, [diffUsesEditor]);
 
   const load = useCallback(async (clearStale = false) => {
     if (!props.scope || !root || !repositoryId || !pathIdentity || !target) return;
@@ -53,6 +74,9 @@ export function GitDiffSurface(props: Props) {
     const controller = new AbortController();
     abort.current = controller;
     setLoading(true);
+    pendingDiffPaint.current?.abandon();
+    pendingDiffPaint.current = undefined;
+    const paint = createPaintTicket(["workflow.git.diffPaint"], current);
     if (clearStale) {
       setDiff(undefined);
       setStatus(undefined);
@@ -63,7 +87,11 @@ export function GitDiffSurface(props: Props) {
       if (nextStatus.repository.id !== repositoryId) throw new Error("This diff belongs to a different repository. Return to its workspace or close the tab.");
       const nextEntry = nextStatus.entries.find((entry) => entry.path === pathIdentity);
       if (!nextEntry || (target === "staged" ? nextEntry.indexKind === "none" : nextEntry.worktreeKind === "none")) {
-        if (current !== serial.current || controller.signal.aborted) return;
+        if (current !== serial.current || controller.signal.aborted) {
+          paint.abandon();
+          return;
+        }
+        paint.abandon();
         loadedGeneration.current = nextStatus.generation;
         setStatus(nextStatus);
         setDiff(undefined);
@@ -72,8 +100,12 @@ export function GitDiffSurface(props: Props) {
         return;
       }
       const nextDiff = await props.client.diff(props.scope, root, repositoryId, pathIdentity, originalPathIdentity, target, nextStatus.generation, controller.signal);
-      if (current !== serial.current || controller.signal.aborted) return;
+      if (current !== serial.current || controller.signal.aborted) {
+        paint.abandon();
+        return;
+      }
       if (watchedGeneration.current && BigInt(watchedGeneration.current) > BigInt(nextStatus.generation)) {
+        paint.abandon();
         void load(clearStale);
         return;
       }
@@ -81,9 +113,11 @@ export function GitDiffSurface(props: Props) {
       loadedGeneration.current = nextStatus.generation;
       setStatus(nextStatus);
       setDiff(nextDiff);
+      pendingDiffPaint.current = paint;
       setError(undefined);
       props.onStatus(nextStatus);
     } catch (cause) {
+      paint.abandon();
       if (controller.signal.aborted || current !== serial.current) return;
       setError(String(cause));
     } finally {
@@ -93,8 +127,35 @@ export function GitDiffSurface(props: Props) {
 
   useEffect(() => {
     void load();
-    return () => { serial.current += 1; abort.current?.abort(); loadedGeneration.current = undefined; watchedGeneration.current = undefined; };
+    return () => {
+      serial.current += 1;
+      committedLoadSerial.current = 0;
+      pendingDiffPaint.current?.abandon();
+      pendingDiffPaint.current = undefined;
+      abort.current?.abort();
+      loadedGeneration.current = undefined;
+      watchedGeneration.current = undefined;
+    };
   }, [load]);
+
+  useEffect(() => {
+    if (loading || error || !diff) return;
+    committedLoadSerial.current = serial.current;
+    const paint = pendingDiffPaint.current;
+    if (!paint) return;
+    if (diffUsesEditor) {
+      paint.expectSurface(
+        mountedEditorSurface.current ?? editorSurfaceSequence.current + 1,
+      );
+      if (paint.surfaceGeneration !== mountedEditorSurface.current
+        || readyEditorSurface.current !== mountedEditorSurface.current) return;
+    }
+    pendingDiffPaint.current = undefined;
+    paint.afterPaint((ticket) => ticket.lifecycleGeneration === serial.current
+      && ticket.lifecycleGeneration === committedLoadSerial.current
+      && (!diffUsesEditor || ticket.surfaceGeneration === mountedEditorSurface.current),
+    diffUsesEditor ? () => recordPerfMilestone("editor.paint") : undefined);
+  }, [diff, diffUsesEditor, error, loading]);
 
   useEffect(() => {
     if (!props.scope || !root || !repositoryId) return;
@@ -195,7 +256,7 @@ export function GitDiffSurface(props: Props) {
   if (error && !diff) return <GitDiffEmpty title={props.tab.title} detail={error} retry={() => void load()} />;
   if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${target} changes.`} retry={() => void load()} />;
 
-  const text = decodeTextDiff(diff);
+  const text = decodedText;
   const currentEntry = status.entries.find((entry) => entry.path === diff.path);
   const mutationBlock = currentEntry?.submodule ? "Submodule pointer changes are read-only in v1." : currentEntry?.conflicted ? "Resolve conflicts in the terminal before using Git actions." : undefined;
   const pathChange = currentEntry && [currentEntry.indexKind, currentEntry.worktreeKind].some((kind) => kind === "renamed" || kind === "copied");
@@ -214,7 +275,7 @@ export function GitDiffSurface(props: Props) {
       {mutationBlock && <div className="git-diff-error" role="note">{mutationBlock}</div>}
       {error && <SurfaceError className="git-diff-error" detail={error} />}
     </div>
-    <div className="git-diff-content">
+    <div className="git-diff-content" ref={diffUsesEditor ? bindEditorHost : undefined}>
       {diff.binary || !text ? <GitDiffEmpty title={diff.displayPath} detail={diff.binary ? "Binary changes cannot be displayed or edited as text." : "This diff contains non-UTF-8 content and is shown safely as binary."} />
         : diff.tooLarge ? <GitDiffEmpty title={diff.displayPath} detail="This diff is too large for the editor. File-level Git actions remain available." />
           : <DiffEditor
@@ -224,8 +285,18 @@ export function GitDiffSurface(props: Props) {
             modified={text.modified}
             modifiedModelPath={modelUri(props.tab, "modified")}
             onMount={(editor) => {
-              recordPerfMilestone("editor.paint");
-              closePerfSpan("workflow.git.diffPaint");
+              const paint = pendingDiffPaint.current;
+              const surface = mountedEditorSurface.current;
+              readyEditorSurface.current = surface;
+              if (paint && surface
+                && paint.surfaceGeneration === surface
+                && paint.lifecycleGeneration === committedLoadSerial.current) {
+                pendingDiffPaint.current = undefined;
+                paint.afterPaint((ticket) => ticket.lifecycleGeneration === serial.current
+                  && ticket.lifecycleGeneration === committedLoadSerial.current
+                  && ticket.surfaceGeneration === mountedEditorSurface.current,
+                () => recordPerfMilestone("editor.paint"));
+              }
               detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor);
             }}
             options={{ automaticLayout: true, enableSplitViewResizing: true, minimap: { enabled: false }, originalEditable: false, readOnly: true, renderSideBySide: true, scrollBeyondLastLine: false }}

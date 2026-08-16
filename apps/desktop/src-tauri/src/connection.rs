@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     process::{Child, ChildStdin},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -95,6 +95,9 @@ struct TerminalClient {
     terminal_epoch: AtomicU64,
     server_identity: Mutex<String>,
     host_profile_id: Mutex<String>,
+    measurement_enabled: bool,
+    reconnect_wait: Condvar,
+    reconnect_lock: Mutex<()>,
 }
 
 enum ClientInputDispatch {
@@ -116,7 +119,12 @@ struct InitialHostState {
 }
 
 impl TerminalClient {
+    #[cfg(test)]
     fn new(ssh_lease: Option<SshLease>) -> Self {
+        Self::new_measured(ssh_lease)
+    }
+
+    fn new_measured(ssh_lease: Option<SshLease>) -> Self {
         Self {
             _ssh_lease: ssh_lease,
             stdin: Mutex::new(None),
@@ -132,7 +140,22 @@ impl TerminalClient {
             terminal_epoch: AtomicU64::new(0),
             server_identity: Mutex::new(String::new()),
             host_profile_id: Mutex::new(String::new()),
+            measurement_enabled: crate::perf_log::enabled(),
+            reconnect_wait: Condvar::new(),
+            reconnect_lock: Mutex::new(()),
         }
+    }
+
+    fn wait_for_reconnect(&self, duration: Duration) {
+        let guard = self.reconnect_lock.lock().unwrap();
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        drop(
+            self.reconnect_wait
+                .wait_timeout_while(guard, duration, |_| !self.stopped.load(Ordering::Acquire))
+                .unwrap(),
+        );
     }
 
     fn start_input_dispatch(self: &Arc<Self>, client_id: &str) -> Result<(), String> {
@@ -424,6 +447,7 @@ pub fn start_terminal(
     session_id: String,
     pane_ids: Vec<String>,
     connection: ConnectionSpec,
+    measurement_id: String,
     on_event: Channel<InvokeResponseBody>,
     clients: State<'_, TerminalClients>,
 ) -> Result<String, String> {
@@ -434,8 +458,12 @@ pub fn start_terminal(
     for pane_id in &pane_ids {
         validate_tmux_id(pane_id, '%')?;
     }
+    let measurement_id =
+        Uuid::parse_str(&measurement_id).map_err(|_| "invalid terminal measurement ID")?;
     let client_id = Uuid::new_v4().to_string();
-    let client = Arc::new(TerminalClient::new(acquire_control_master(&connection)?));
+    let client = Arc::new(TerminalClient::new_measured(acquire_control_master(
+        &connection,
+    )?));
     *client.host_profile_id.lock().unwrap() = match &connection {
         ConnectionSpec::Local => "local".into(),
         ConnectionSpec::Ssh { profile_id, .. } => profile_id.clone(),
@@ -451,7 +479,10 @@ pub fn start_terminal(
                 connection,
                 session_id,
                 pane_ids,
-                on_event,
+                TerminalEventChannel {
+                    measurement_id,
+                    channel: on_event,
+                },
                 worker_client,
             )
         })
@@ -464,6 +495,7 @@ pub fn start_terminal(
 pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> Result<(), String> {
     if let Some(client) = clients.0.lock().unwrap().remove(&client_id) {
         client.stopped.store(true, Ordering::Release);
+        client.reconnect_wait.notify_all();
         client.ready.store(false, Ordering::Release);
         client.stdin.lock().unwrap().take();
         if let Some(sender) = client.input_tx.lock().unwrap().take() {
@@ -474,6 +506,9 @@ pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> 
             let _ = child.kill();
             let _ = child.wait();
         }
+        // TerminalEventChannel::drop quiesces measurement ownership when the
+        // ordinary detached teardown finishes; the renderer polls that
+        // observation within its own bounded measurement deadline.
         // Pooled bulk bridges are bound to a control connection's server
         // identity and epoch, so once that connection is gone none of *its*
         // bridges can be handed to anything: closing them here frees their ssh
@@ -483,6 +518,7 @@ pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> 
         // still reachable.
         let server_identity = client.server_identity.lock().unwrap().clone();
         files::bulk_pool::close_pooled_bulk_bridges(&server_identity);
+        return Ok(());
     }
     Ok(())
 }
@@ -784,8 +820,25 @@ fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
     }
 }
 
-fn send_event(channel: &Channel<InvokeResponseBody>, event: TerminalEvent) {
-    let _ = crate::perf_log::send_bridge_frame(channel, encode_event(event));
+pub(super) struct TerminalEventChannel {
+    measurement_id: Uuid,
+    channel: Channel<InvokeResponseBody>,
+}
+
+impl TerminalEventChannel {
+    fn send(&self, frame: Vec<u8>) -> Result<(), String> {
+        crate::perf_log::send_bridge_frame(self.measurement_id, &self.channel, frame)
+    }
+}
+
+impl Drop for TerminalEventChannel {
+    fn drop(&mut self) {
+        crate::perf_log::quiesce_bridge_measurement(self.measurement_id);
+    }
+}
+
+fn send_event(channel: &TerminalEventChannel, event: TerminalEvent) {
+    let _ = channel.send(encode_event(event));
 }
 
 fn validate_tmux_id(value: &str, prefix: char) -> Result<(), String> {

@@ -193,6 +193,10 @@ pub(super) fn execute(
 
     let (snapshot, server_identity) =
         normalize_post_action(kind, discover_consistent(), server_identity)?;
+    if result.pane_id.is_empty() {
+        result.pane_id = interaction_pane_id(kind, &postcondition_action, &result, &snapshot)
+            .unwrap_or_default();
+    }
     let identity_preserved =
         identity_transition_allowed(kind, bootstrapping, &identity, &server_identity);
     if !identity_preserved
@@ -213,6 +217,34 @@ pub(super) fn execute(
         snapshot,
         server_identity,
     })
+}
+
+fn interaction_pane_id(
+    kind: v1::TmuxActionKind,
+    action: &v1::TmuxAction,
+    result: &v1::TmuxActionResult,
+    snapshot: &tmux_control::TmuxSnapshot,
+) -> Option<String> {
+    let window_id = match kind {
+        v1::TmuxActionKind::CreateSession => {
+            return snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.session_id == result.session_id && pane.active)
+                .map(|pane| pane.id.clone());
+        }
+        v1::TmuxActionKind::CreateWindow => &result.window_id,
+        v1::TmuxActionKind::SelectWindow => &action.window_id,
+        v1::TmuxActionKind::SplitPaneRight | v1::TmuxActionKind::SplitPaneDown => {
+            return (!result.pane_id.is_empty()).then(|| result.pane_id.clone());
+        }
+        _ => return None,
+    };
+    snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.window_id == *window_id && pane.active)
+        .map(|pane| pane.id.clone())
 }
 
 /// `discover_consistent` refuses when no tmux server is running, and every
@@ -668,6 +700,65 @@ mod tests {
             v1::TmuxActionKind::CloseSession,
         ] {
             assert!(!bootstraps_server(kind, "tmux:none"), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_painted_workflow_resolves_one_authoritative_pane() {
+        let snapshot = topology();
+        let cases = [
+            (
+                v1::TmuxActionKind::CreateSession,
+                v1::TmuxAction::default(),
+                v1::TmuxActionResult {
+                    session_id: "$1".into(),
+                    ..Default::default()
+                },
+                "%1",
+            ),
+            (
+                v1::TmuxActionKind::CreateWindow,
+                v1::TmuxAction::default(),
+                v1::TmuxActionResult {
+                    window_id: "@2".into(),
+                    ..Default::default()
+                },
+                "%2",
+            ),
+            (
+                v1::TmuxActionKind::SelectWindow,
+                v1::TmuxAction {
+                    window_id: "@1".into(),
+                    ..Default::default()
+                },
+                v1::TmuxActionResult::default(),
+                "%1",
+            ),
+            (
+                v1::TmuxActionKind::SplitPaneRight,
+                v1::TmuxAction::default(),
+                v1::TmuxActionResult {
+                    pane_id: "%2".into(),
+                    ..Default::default()
+                },
+                "%2",
+            ),
+            (
+                v1::TmuxActionKind::SplitPaneDown,
+                v1::TmuxAction::default(),
+                v1::TmuxActionResult {
+                    pane_id: "%2".into(),
+                    ..Default::default()
+                },
+                "%2",
+            ),
+        ];
+        for (kind, action, result, expected) in cases {
+            assert_eq!(
+                interaction_pane_id(kind, &action, &result, &snapshot).as_deref(),
+                Some(expected),
+                "{kind:?}"
+            );
         }
     }
 

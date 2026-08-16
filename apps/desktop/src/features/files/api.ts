@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { measurePerf, recordPerfCounter, recordPerfHighWater, startPerfSpan } from "../../perf/probe";
+import { measurePerfOutcome, measurePerfRequest, recordPerfCounter, recordPerfHighWater, recordPerfJsonBytesDeferred, startPerfSpan } from "../../perf/probe";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES } from "./types";
 import type {
   ActiveRoot,
@@ -61,23 +61,26 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   readonly #watches = new Map<string, { clientId: string; count: number; watchId: string; ready: Promise<DirectoryListing> }>();
 
   async resolveActiveRoot(scope: FileWorkspaceScope): Promise<ActiveRoot> {
-    const response = await this.#request(scope, {
-      operation: "resolveActiveRoot", operationId: crypto.randomUUID(), paneId: scope.paneId,
-      expectedServerIdentity: scope.serverIdentity, expectedTopologyGeneration: String(scope.generation),
-    });
-    if (!response.activeRoot) throw new Error("Host omitted the active root.");
-    return this.#root(response.activeRoot);
+    return this.#request(scope, {
+        operation: "resolveActiveRoot", operationId: crypto.randomUUID(), paneId: scope.paneId,
+        expectedServerIdentity: scope.serverIdentity, expectedTopologyGeneration: String(scope.generation),
+      }, (response) => {
+        if (!response.activeRoot) throw new Error("Host omitted the active root.");
+        return this.#root(response.activeRoot);
+      }, "files.resolveActiveRoot");
   }
 
   async listDirectory(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, pageToken = ""): Promise<DirectoryListing> {
     recordPerfCounter("explorer.directoryListRequests");
-    const response = await this.#request(scope, this.#rootCommand(root, {
+    const directoryListing = await this.#request(scope, this.#rootCommand(root, {
       operation: "listDirectory", operationId: crypto.randomUUID(), path: directory, pageToken, pageSize: 4096,
-    }));
-    if (!response.directory) throw new Error("Host omitted the directory listing.");
-    recordPerfCounter("explorer.listPayloadEntries", response.directory.entries.length);
-    recordPerfCounter("explorer.listMappedPayloadBytes", encoder.encode(JSON.stringify(response.directory)).byteLength);
-    return this.#directory(response.directory, root.token);
+    }), (response) => {
+      if (!response.directory) throw new Error("Host omitted the directory listing.");
+      recordPerfCounter("explorer.listPayloadEntries", response.directory.entries.length);
+      recordPerfJsonBytesDeferred("explorer.listMappedPayloadBytes", response.directory);
+      return this.#directory(response.directory, root.token);
+    }, "files.listDirectory.request");
+    return directoryListing;
   }
 
   async acquireDirectoryWatch(scope: FileWorkspaceScope, root: ActiveRoot, directory: string): Promise<DirectoryWatchLease> {
@@ -90,10 +93,10 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       const watchId = crypto.randomUUID();
       const ready = this.#request(scope, this.#rootCommand(root, {
         operation: "watchDirectory", operationId: crypto.randomUUID(), path: directory, watchId,
-      })).then((response) => {
+      }), (response) => {
         if (!response.directory) throw new Error("Host omitted the watch bootstrap snapshot.");
         return this.#directory(response.directory, root.token);
-      });
+      }, "files.watchDirectory.request");
       record = { clientId: scope.clientId, count: 1, watchId, ready };
       this.#watches.set(key, record);
       recordPerfHighWater("explorer.activeWatches", this.#watches.size);
@@ -113,6 +116,8 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       void current.ready.then(() => this.#request(
         { ...scope, clientId: current.clientId },
         { operation: "unwatchDirectory", operationId: crypto.randomUUID(), watchId: current.watchId },
+        () => undefined,
+        "files.unwatchDirectory.request",
       )).catch(() => undefined);
     };
     return { snapshot, release };
@@ -125,7 +130,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
    */
   openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile> {
     recordPerfCounter("file.openRequests");
-    return measurePerf("file.open", () => this.#openFile(scope, root, path, signal));
+    return measurePerfOutcome("file.open", () => this.#openFile(scope, root, path, signal));
   }
 
   async #openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile> {
@@ -180,7 +185,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     });
     else if (mutation.kind === "delete") Object.assign(command, { mutation: "delete", path: mutation.path, nonEmptyConfirmed: mutation.confirmedNonEmpty });
     else Object.assign(command, { mutation: mutation.kind, path: mutation.path, destination: mutation.destination, overwriteConfirmed: mutation.overwrite, nonEmptyConfirmed: mutation.confirmedNonEmpty });
-    await this.#request(scope, command);
+    await this.#request(scope, command, () => undefined, "files.mutationAck");
   }
 
   async startDownload(scope: FileWorkspaceScope, root: ActiveRoot, request: DownloadRequest): Promise<TransferStatus> {
@@ -201,7 +206,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       latest = transfer;
       this.#publish({ kind: "transfer", transfer });
     };
-    const transferId = await invoke<string>("start_download", {
+    const downloadCommand = {
       clientId: scope.clientId,
       profileId: scope.hostProfileId,
       expectedServerIdentity: scope.serverIdentity,
@@ -212,7 +217,12 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       destination: request.destination,
       folder: request.kind === "folder",
       collision: request.collision === "overwrite" ? "overwriteConfirmed" : request.collision,
-      onEvent,
+    };
+    const boundary = { ...downloadCommand, onEvent };
+    const transferId = await measurePerfRequest("file.downloadAdmission", "file", boundary, async (requestBoundary) => {
+      const id = await invoke<string>("start_download", requestBoundary);
+      if (!id) throw new Error("Native download admission omitted its transfer ID.");
+      return id;
     });
     return latest ?? {
       id: transferId, scopeKey: keyForTransferConnection(scope), path: request.path, destination: request.destination, kind: request.kind,
@@ -221,7 +231,10 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   }
 
   cancelTransfer(_scope: FileWorkspaceScope, transferId: string): Promise<void> {
-    return invoke("cancel_download", { transferId });
+    const boundary = { transferId };
+    return measurePerfRequest(
+      "file.downloadCancellation", "file", boundary, (request) => invoke("cancel_download", request),
+    );
   }
 
   async subscribe(_scope: FileWorkspaceScope, listener: (event: WorkspaceEvent) => void): Promise<() => void> {
@@ -264,6 +277,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       if (expectedOffset > BigInt(limit)) throw new Error(`Bulk file content exceeded the ${purpose === "text" ? "10 MiB" : "25 MiB"} limit.`);
       chunks.push(chunk);
     }, signal);
+    if (!sawContent) firstContent();
     if (!completed.metadata || !completed.contentKind) throw new Error("Host omitted file content metadata.");
     const total = completed.totalBytes === undefined ? expectedOffset : BigInt(completed.totalBytes);
     if (!completed.metadataOnly && total !== expectedOffset) throw new Error("Bulk file byte count verification failed.");
@@ -280,6 +294,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     onChunk?: (offset: bigint, chunk: Uint8Array) => void,
     signal?: AbortSignal,
   ): Promise<WireFileIoEvent> {
+    recordPerfCounter("file.ioRequestAttempts");
     return new Promise((resolve, reject) => {
       let settled = false;
       let metadata: WireMetadata | undefined;
@@ -288,14 +303,20 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       const abort = () => {
         if (settled) return;
         settled = true;
-        recordPerfCounter("file.ioCancellations");
-        if (transferId) void invoke("cancel_file_io", { transferId }).catch(() => undefined);
+        recordPerfCounter("file.ioRequestCancellations");
+        if (transferId) {
+          const boundary = { transferId };
+          void measurePerfRequest(
+            "file.ioCancellation", "file", boundary, (request) => invoke("cancel_file_io", request),
+          ).catch(() => undefined);
+        }
         reject(new DOMException("File load was cancelled.", "AbortError"));
       };
       signal?.addEventListener("abort", abort, { once: true });
-      const finishError = (error: unknown) => {
+      const finishError = (error: unknown, cancelled = false) => {
         if (settled) return;
         settled = true;
+        recordPerfCounter(cancelled ? "file.ioRequestCancellations" : "file.ioRequestFailures");
         signal?.removeEventListener("abort", abort);
         reject(error instanceof Error ? error : new Error(String(error)));
       };
@@ -317,26 +338,47 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
           metadata = event.metadata ?? metadata;
           contentKind = event.contentKind ?? contentKind;
           if (frame[0] === 4 || event.state === "error" || event.state === "cancelled") {
-            finishError(new Error(event.error || (event.state === "cancelled" ? "File transfer cancelled." : "File transfer failed.")));
+            finishError(
+              new Error(event.error || (event.state === "cancelled" ? "File transfer cancelled." : "File transfer failed.")),
+              event.state === "cancelled",
+            );
           } else if (frame[0] === 3) {
             settled = true;
             signal?.removeEventListener("abort", abort);
+            recordPerfCounter("file.ioRequestSuccesses");
             resolve({ ...event, ...(metadata ? { metadata } : {}), ...(contentKind ? { contentKind } : {}) });
           }
         } catch (error) { finishError(error); }
       };
       if (signal?.aborted) { abort(); return; }
-      invoke<string>(command, { ...args, onEvent: channel }).then((id) => {
+      const boundary = { ...args, onEvent: channel };
+      measurePerfRequest("file.ioAdmission", "file", boundary, async (requestBoundary) => {
+        const id = await invoke<string>(command, requestBoundary);
+        if (!id) throw new Error("Native file I/O admission omitted its transfer ID.");
+        return id;
+      }, { byteCounters: ["file.ioRequestBytes"] }).then((id) => {
         transferId = id;
-        if (signal?.aborted) void invoke("cancel_file_io", { transferId: id }).catch(() => undefined);
+        if (signal?.aborted) {
+          const cancelBoundary = { transferId: id };
+          void measurePerfRequest(
+            "file.ioCancellation", "file", cancelBoundary, (request) => invoke("cancel_file_io", request),
+          ).catch(() => undefined);
+        }
       }).catch(finishError);
     });
   }
 
-  async #request(scope: FileWorkspaceScope, command: Record<string, unknown>): Promise<WireResponse> {
-    recordPerfCounter("desktop.hostRequests");
-    recordPerfCounter("desktop.hostRequestBytes", encoder.encode(JSON.stringify(command)).byteLength);
-    return invoke("file_request", { clientId: scope.clientId, command });
+  async #request<T>(
+    scope: FileWorkspaceScope,
+    command: Record<string, unknown>,
+    validate: (response: WireResponse) => T,
+    metricName: string,
+  ): Promise<T> {
+    const boundary = { clientId: scope.clientId, command };
+    return measurePerfRequest(metricName, "file", boundary, async (requestBoundary) => {
+      const response = await invoke<WireResponse>("file_request", requestBoundary);
+      return validate(response);
+    });
   }
 
   #rootCommand(root: ActiveRoot, command: Record<string, unknown>): Record<string, unknown> {

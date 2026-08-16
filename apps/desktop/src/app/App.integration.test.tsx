@@ -45,6 +45,8 @@ describe("App orchestration", () => {
       if (command === "load_app_state") return Promise.resolve(defaultAppState);
       if (command === "list_host_profiles") return profiles;
       if (command === "start_terminal") return Promise.resolve("client-1");
+      if (command === "stop_terminal") return Promise.resolve(undefined);
+      if (command === "bridge_final_totals") return Promise.resolve({ cumulativeFrameCount: 0, cumulativeByteLength: 0, quiesced: true });
       return Promise.resolve(undefined);
     });
     let renderer: ReactTestRenderer;
@@ -73,6 +75,8 @@ describe("App orchestration", () => {
         profiles: [{ id: "local", label: "Local", connection: { mode: "local" } }],
       });
       if (command === "start_terminal") return Promise.resolve(`client-${++client}`);
+      if (command === "stop_terminal") return Promise.resolve(undefined);
+      if (command === "bridge_final_totals") return Promise.resolve({ cumulativeFrameCount: 0, cumulativeByteLength: 0, quiesced: true });
       return Promise.resolve(undefined);
     });
     let renderer: ReactTestRenderer;

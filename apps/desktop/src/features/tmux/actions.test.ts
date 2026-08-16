@@ -1,7 +1,32 @@
-import { describe, expect, it } from "vitest";
-import { isDestructiveTmuxAction, isStaleTmuxTopologyError, toWireTmuxAction } from "./actions";
+import { invoke } from "@tauri-apps/api/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { enablePerfProbe, perfCounterSnapshot, resetPerfProbe } from "../../perf/probe";
+import { isDestructiveTmuxAction, isStaleTmuxTopologyError, requestTmuxAction, toWireTmuxAction } from "./actions";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+afterEach(() => {
+  resetPerfProbe();
+  vi.mocked(invoke).mockReset();
+});
 
 describe("tmux action boundary", () => {
+  it("measures the exact client-and-action boundary passed to Tauri", async () => {
+    enablePerfProbe(async () => undefined);
+    vi.mocked(invoke).mockResolvedValue({ topologyGeneration: 43 });
+
+    await requestTmuxAction("client", { kind: "createWindow", sessionId: "$1", name: "work" }, {
+      serverIdentity: "tmux:one", generation: 42,
+    });
+
+    const boundary = vi.mocked(invoke).mock.calls[0][1];
+    const exactBoundaryBytes = new TextEncoder().encode(JSON.stringify(boundary)).byteLength;
+    expect(perfCounterSnapshot()).toMatchObject({
+      "desktop.hostRequestBytes": exactBoundaryBytes,
+      "tmux.hostRequestBytes": exactBoundaryBytes,
+      "tmux.action.requestBytes": exactBoundaryBytes,
+    });
+  });
+
   it("carries authoritative identity/generation and defaults confirmation off", () => {
     expect(toWireTmuxAction({ kind: "closePane", paneId: "%7" }, {
       serverIdentity: "tmux:one", generation: 42,

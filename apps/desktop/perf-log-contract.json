@@ -1,0 +1,4 @@
+{
+  "maxLinesPerAppend": 4096,
+  "maxLineBytes": 4096
+}

@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { enablePerfProbe, perfCounterSnapshot, resetPerfProbe } from "../../perf/probe";
 import { TauriGitWorkspaceClient } from "./api";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 
@@ -9,15 +10,24 @@ const scope: FileWorkspaceScope = { clientId: "client", hostProfileId: "local", 
 const root: ActiveRoot = { token: "root-token", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "9" };
 
 beforeEach(() => invokeMock.mockReset());
+afterEach(() => resetPerfProbe());
 
 describe("TauriGitWorkspaceClient", () => {
   it("preserves opaque path bytes and decimal u64 generations", async () => {
+    enablePerfProbe(async () => undefined);
     invokeMock.mockResolvedValueOnce({ operationId: "status", status: wireStatus() });
     const status = await new TauriGitWorkspaceClient().status(scope, root);
     expect(status).toMatchObject({ generation: "18446744073709551615", totalEntryCount: "1", copyDetectionIncomplete: true, entries: [{ path: "LS1hIGZpbGUJeAo=", displayPath: "--a file\\tx\\n" }] });
     expect(invokeMock).toHaveBeenCalledWith("git_request", { clientId: "client", command: expect.objectContaining({
       operation: "status", root: "/repo", rootToken: "root-token", connectionEpoch: "41", expectedServerIdentity: "server",
     }) });
+    const boundary = invokeMock.mock.calls[0][1];
+    const exactBoundaryBytes = new TextEncoder().encode(JSON.stringify(boundary)).byteLength;
+    expect(perfCounterSnapshot()).toMatchObject({
+      "desktop.hostRequestBytes": exactBoundaryBytes,
+      "git.hostRequestBytes": exactBoundaryBytes,
+      "git.requestBytes": exactBoundaryBytes,
+    });
   });
 
   it("addresses mutations by opaque path and never by the lossy display path", async () => {

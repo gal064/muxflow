@@ -217,6 +217,8 @@ pub fn run() {
             notification_permission_status,
             connection::start_terminal,
             connection::stop_terminal,
+            perf_log::bridge::finalize_bridge_measurement,
+            perf_log::bridge::bridge_final_totals,
             connection::send_terminal_input,
             connection::send_terminal_input_bytes,
             connection::resize_terminal_client,
@@ -244,12 +246,10 @@ pub fn run() {
             connection::files::upload_manager::stage_clipboard_png,
             connection::files::native_clipboard::read_native_terminal_clipboard,
             external_links::open_external_link,
-            perf_log::perf_log_enabled,
-            perf_log::append_perf_log,
-            perf_log::acknowledge_bridge_event,
-            perf_log::bridge_measurement_snapshot,
-            perf_log::transfer_measurement_snapshot,
-            perf_log::remote_measurement_snapshot,
+            perf_log::sink::perf_log_enabled,
+            perf_log::sink::append_perf_log,
+            perf_log::bridge::acknowledge_bridge_events,
+            perf_log::operations::sample_native_measurements,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tmux Agent IDE");

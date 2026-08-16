@@ -1,21 +1,33 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { enablePerfProbe, perfCounterSnapshot, resetPerfProbe } from "../../perf/probe";
 import {
   decodeTerminalEvent,
+  FINAL_BRIDGE_DELIVERY_WAIT_MS,
+  FINAL_BRIDGE_SHUTDOWN_WAIT_MS,
   MAX_HOST_TERMINAL_INPUT_BYTES,
   prepareTerminalSnapshot,
   requestTerminalSeed,
   sendBinaryInput,
   sendInput,
   setTerminalVisibility,
+  startTerminal,
+  stopTerminal,
   terminalBridgeKey,
   terminalBridgeScope,
+  type TerminalEvent,
 } from "./api";
 
+const channels = vi.hoisted(() => [] as Array<{ onmessage?: (message: ArrayBuffer) => void }>);
+
 vi.mock("@tauri-apps/api/core", () => ({
-  Channel: class MockChannel<T> { onmessage?: (message: T) => void; },
+  Channel: class MockChannel<T> {
+    onmessage?: (message: T) => void;
+    constructor() { channels.push(this as { onmessage?: (message: ArrayBuffer) => void }); }
+  },
   invoke: vi.fn(() => Promise.resolve()),
 }));
+vi.mock("../../perf/bootstrap", () => ({ perfProbeReady: () => Promise.resolve(true) }));
 
 const textEncoder = new TextEncoder();
 
@@ -60,7 +72,12 @@ function paneResourcePayload(options: {
   ]);
 }
 
-beforeEach(() => vi.mocked(invoke).mockClear());
+beforeEach(() => {
+  resetPerfProbe();
+  vi.mocked(invoke).mockReset();
+  vi.mocked(invoke).mockResolvedValue(undefined);
+  channels.length = 0;
+});
 
 describe("binary terminal IPC", () => {
   it("decodes the common sequence and arbitrary output bytes without JSON byte arrays", () => {
@@ -219,6 +236,18 @@ describe("binary terminal IPC", () => {
     expect([...frame.subarray(14)]).toEqual([0x00, 0x1b, 0xff]);
   });
 
+  it("accounts exact text objects and binary frames at the Tauri boundary", async () => {
+    enablePerfProbe(async () => undefined);
+    const textBoundary = { clientId: "client-1", paneId: "%7", data: "λ" };
+    await sendInput(textBoundary.clientId, textBoundary.paneId, textBoundary.data);
+    const textBytes = new TextEncoder().encode(JSON.stringify(textBoundary)).byteLength;
+    expect(perfCounterSnapshot()["terminal.hostRequestBytes"]).toBe(textBytes);
+
+    await sendBinaryInput("client-1", "%7", Uint8Array.of(0, 255));
+    const binaryFrame = vi.mocked(invoke).mock.calls.at(-1)?.[1] as unknown as Uint8Array;
+    expect(perfCounterSnapshot()["terminal.hostRequestBytes"]).toBe(textBytes + binaryFrame.byteLength);
+  });
+
   it("decodes a nonzero safe big-endian terminal generation epoch", () => {
     expect(decodeTerminalEvent(frame(10, "terminal", 0, u64(0x001f_ffff_ffff_fffen)))).toEqual({
       kind: "generationEpoch", epoch: 0x001f_ffff_ffff_fffe, sequence: 0,
@@ -249,5 +278,173 @@ describe("binary terminal IPC", () => {
     expect(terminalBridgeKey(connection, 2)).toBe(initialKey);
     expect(terminalBridgeKey(connection, 3)).not.toBe(initialKey);
     expect(terminalBridgeScope()).toEqual({ sessionId: "", paneIds: [] });
+  });
+
+  it("retries one cumulative bridge acknowledgement with the lifecycle measurement ID", async () => {
+    vi.useFakeTimers();
+    let acknowledgementAttempts = 0;
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "start_terminal") return "client-measured";
+      if (command === "bridge_final_totals") return {
+        cumulativeFrameCount: 1,
+        cumulativeByteLength: frame(6, "connected", 0).byteLength,
+        quiesced: true,
+      };
+      if (command === "acknowledge_bridge_events" && acknowledgementAttempts++ === 0) {
+        throw new Error("transient acknowledgement failure");
+      }
+      return undefined;
+    });
+    try {
+      const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+      channels[0].onmessage?.(frame(6, "connected", 0));
+      await vi.advanceTimersByTimeAsync(20);
+      await stopTerminal(clientId);
+
+      const calls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "acknowledge_bridge_events");
+      expect(calls).toHaveLength(2);
+      expect(calls[0][1]).toEqual(calls[1][1]);
+      expect(calls[0][1]).toMatchObject({
+        cumulativeFrameCount: 1,
+        cumulativeByteLength: frame(6, "connected", 0).byteLength,
+      });
+      expect((calls[0][1] as { measurementId: string }).measurementId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps acknowledgement admission open until the stopped producer's final frame arrives", async () => {
+    vi.useFakeTimers();
+    const finalFrame = frame(6, "disconnected", 0);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "start_terminal") return "client-final-frame";
+      if (command === "stop_terminal") {
+        setTimeout(() => channels[0].onmessage?.(finalFrame), 10);
+        return undefined;
+      }
+      if (command === "bridge_final_totals") return {
+        cumulativeFrameCount: 1, cumulativeByteLength: finalFrame.byteLength, quiesced: true,
+      };
+      return undefined;
+    });
+    try {
+      const events: TerminalEvent[] = [];
+      const clientId = await startTerminal("", [], { mode: "local" }, (event) => events.push(event));
+      const stopping = stopTerminal(clientId);
+      await vi.advanceTimersByTimeAsync(10);
+      await stopping;
+
+      expect(events).toEqual([{ kind: "connectionState", state: "disconnected", sequence: 0 }]);
+      const calls = vi.mocked(invoke).mock.calls;
+      const acknowledgementIndex = calls.findIndex(([command]) => command === "acknowledge_bridge_events");
+      const finalizeIndex = calls.findIndex(([command]) => command === "finalize_bridge_measurement");
+      expect(acknowledgementIndex).toBeGreaterThan(-1);
+      expect(finalizeIndex).toBeGreaterThan(acknowledgementIndex);
+      expect(calls[acknowledgementIndex][1]).toMatchObject({
+        cumulativeFrameCount: 1,
+        cumulativeByteLength: finalFrame.byteLength,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds final delivery wait and still finalizes native outstanding evidence", async () => {
+    vi.useFakeTimers();
+    enablePerfProbe(async () => undefined);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "start_terminal") return "client-missing-frame";
+      if (command === "bridge_final_totals") {
+        return { cumulativeFrameCount: 1, cumulativeByteLength: 64, quiesced: true };
+      }
+      return undefined;
+    });
+    try {
+      const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+      const stopping = stopTerminal(clientId);
+      await vi.advanceTimersByTimeAsync(FINAL_BRIDGE_DELIVERY_WAIT_MS);
+      await stopping;
+
+      const commands = vi.mocked(invoke).mock.calls.map(([command]) => command);
+      expect(commands).not.toContain("acknowledge_bridge_events");
+      expect(commands).toContain("finalize_bridge_measurement");
+      expect(perfCounterSnapshot()).toMatchObject({
+        "bridge.finalDeliveryTimeouts": 1,
+        "bridge.finalDeliveryOutstandingFrames": 1,
+        "bridge.finalDeliveryOutstandingBytes": 64,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds unresolved measurement acknowledgements and finalization behind ordinary stop", async () => {
+    vi.useFakeTimers();
+    enablePerfProbe(async () => undefined);
+    const never = new Promise<never>(() => undefined);
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === "start_terminal") return Promise.resolve("client-stuck-measurement");
+      if (command === "stop_terminal") return Promise.resolve(undefined);
+      if (command === "bridge_final_totals") {
+        return Promise.resolve({ cumulativeFrameCount: 1, cumulativeByteLength: 8, quiesced: true });
+      }
+      if (command === "acknowledge_bridge_events" || command === "finalize_bridge_measurement") return never;
+      return Promise.resolve(undefined);
+    });
+    try {
+      const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+      channels[0].onmessage?.(frame(6, "connected", 0));
+      const stopping = stopTerminal(clientId);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(FINAL_BRIDGE_SHUTDOWN_WAIT_MS);
+      await expect(stopping).resolves.toBeUndefined();
+
+      expect(perfCounterSnapshot()).toMatchObject({
+        "bridge.measurementInvokeTimeouts": expect.any(Number),
+        "bridge.finalizationIncomplete": 1,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps admission open to the absolute deadline when native quiescence never arrives", async () => {
+    vi.useFakeTimers();
+    enablePerfProbe(async () => undefined);
+    const never = new Promise<never>(() => undefined);
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === "start_terminal") return Promise.resolve("client-unquiesced");
+      if (command === "stop_terminal") return Promise.resolve(undefined);
+      if (command === "bridge_final_totals") return never;
+      return Promise.resolve(undefined);
+    });
+    try {
+      const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+      const stopping = stopTerminal(clientId);
+      let settled = false;
+      void stopping.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(FINAL_BRIDGE_SHUTDOWN_WAIT_MS / 2);
+      channels[0].onmessage?.(frame(6, "disconnected", 0));
+      for (let elapsed = FINAL_BRIDGE_SHUTDOWN_WAIT_MS / 2; !settled && elapsed <= FINAL_BRIDGE_SHUTDOWN_WAIT_MS; elapsed += 50) {
+        await vi.advanceTimersByTimeAsync(50);
+      }
+      expect(settled).toBe(true);
+      await expect(stopping).resolves.toBeUndefined();
+
+      const commands = vi.mocked(invoke).mock.calls.map(([command]) => command);
+      expect(commands).not.toContain("finalize_bridge_measurement");
+      expect(commands).toContain("acknowledge_bridge_events");
+      expect(perfCounterSnapshot()).toMatchObject({
+        "bridge.finalQuiesceTimeouts": 1,
+        "bridge.shutdownDeadlineTimeouts": 1,
+        "bridge.finalizationIncomplete": 1,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
