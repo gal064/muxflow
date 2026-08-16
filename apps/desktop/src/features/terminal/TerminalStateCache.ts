@@ -1,3 +1,5 @@
+import type { PreparedTerminalSnapshot } from "./api";
+
 export interface CachedTerminalState {
   serialized: string;
   savedAt: number;
@@ -8,7 +10,6 @@ export interface CachedTerminalState {
 
 export class TerminalStateCache {
   readonly #states = new Map<string, CachedTerminalState>();
-  readonly #encoder = new TextEncoder();
   #retainedBytes = 0;
 
   constructor(
@@ -27,16 +28,11 @@ export class TerminalStateCache {
 
   set(
     paneId: string,
-    serialized: string,
+    prepared: PreparedTerminalSnapshot,
     checkpoint?: { terminalEpoch: number; outputGeneration: number },
-    encodedByteLength?: number,
   ): void {
-    const byteLength = encodedByteLength ?? this.#encoder.encode(serialized).byteLength;
-    if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
-      this.delete(paneId);
-      return;
-    }
-    if (!serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
+    const { serialized, originalByteLength: byteLength } = prepared;
+    if (!prepared.retained || !serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
       this.delete(paneId);
       return;
     }
