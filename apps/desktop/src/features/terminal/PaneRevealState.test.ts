@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./PaneRevealState";
+import { copyTerminalBytes } from "./TerminalBytes";
 
 const hiddenResource = (overrides = {}) => ({
   kind: "paneResource" as const,
@@ -10,8 +11,8 @@ const hiddenResource = (overrides = {}) => ({
   generation: 1,
   snapshotGeneration: 0,
   tailThroughGeneration: 1,
-  serializedSnapshot: new TextEncoder().encode("screen"),
-  rawTail: Uint8Array.of(2),
+  serializedSnapshot: copyTerminalBytes(new TextEncoder().encode("screen")),
+  rawTail: copyTerminalBytes(Uint8Array.of(2)),
   sequence: 1,
   ...overrides,
 });
@@ -19,7 +20,7 @@ const hiddenResource = (overrides = {}) => ({
 describe("mounted pane reveal ordering", () => {
   it("defers output until the visibility response supplies PaneResource recovery", () => {
     let state: PaneRevealState = { ready: false, hasLocalState: false };
-    const early = reducePaneReveal(state, { kind: "output", paneId: "%1", generation: 1, data: Uint8Array.of(1), sequence: 1 });
+    const early = reducePaneReveal(state, { kind: "output", paneId: "%1", generation: 1, data: copyTerminalBytes(Uint8Array.of(1)), sequence: 1 });
     expect(early.effect.kind).toBe("deferOutput");
     state = early.state;
     const recovery = reducePaneReveal(state, hiddenResource());
@@ -37,7 +38,7 @@ describe("mounted pane reveal ordering", () => {
   });
 
   it("drops output already represented by the raw tail and keeps only later generations", () => {
-    const tail = Uint8Array.from([66, 67, 68]);
+    const tail = copyTerminalBytes(Uint8Array.from([66, 67, 68]));
     const recovery = reducePaneReveal(
       { ready: false, hasLocalState: false },
       hiddenResource({
@@ -45,7 +46,7 @@ describe("mounted pane reveal ordering", () => {
         generation: 24,
         snapshotGeneration: 20,
         tailThroughGeneration: 23,
-        serializedSnapshot: new TextEncoder().encode("A"),
+        serializedSnapshot: copyTerminalBytes(new TextEncoder().encode("A")),
         rawTail: tail,
       }),
     );
@@ -71,8 +72,8 @@ describe("mounted pane reveal ordering", () => {
       state: "released",
       requiresSeed: true,
       recoveryReason: "host LRU eviction",
-      serializedSnapshot: new Uint8Array(),
-      rawTail: new Uint8Array(),
+      serializedSnapshot: copyTerminalBytes(new Uint8Array()),
+      rawTail: copyTerminalBytes(new Uint8Array()),
     }));
     expect(result).toEqual({
       state: { ready: false, hasLocalState: false },

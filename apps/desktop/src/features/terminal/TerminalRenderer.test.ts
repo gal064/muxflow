@@ -2,12 +2,25 @@ import { describe, expect, it, vi } from "vitest";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { restoreDecision, TerminalWriteScheduler, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
+import { restoreDecision, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
+import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan, reconcilePaneGrid } from "./TerminalPane";
 import type { Pane } from "../../app/types";
 import { OperationCounters } from "../../perf/operations";
 import { TerminalEventHub } from "./TerminalEventHub";
-import type { TerminalEvent } from "./api";
+import { decodeTerminalEvent } from "./api";
+import { copyTerminalBytes } from "./TerminalBytes";
+import { TerminalGenerationWatermark } from "./TerminalGenerationWatermark";
+
+function wireOutputFrame(sequence: number, generation: number, data: Uint8Array): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(21 + data.byteLength);
+  bytes.set([2, 0, 2, 0x25, 0x31]);
+  const view = new DataView(bytes.buffer);
+  view.setBigUint64(5, BigInt(sequence), false);
+  view.setBigUint64(13, BigInt(generation), false);
+  bytes.set(data, 21);
+  return bytes;
+}
 
 describe("TerminalWriteScheduler", () => {
   it("preserves byte order and respects the per-frame budget", () => {
@@ -197,29 +210,248 @@ describe("TerminalWriteScheduler", () => {
     expect(overflow).toEqual([11]);
     expect(scheduler.pendingBytes).toBe(0);
   });
+
+  it("owns queued bytes against source mutation until xterm acknowledges them", () => {
+    const completions: Array<() => void> = [];
+    const written: Uint8Array[] = [];
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => { written.push(chunk); completions.push(done); },
+      () => 1,
+      () => undefined,
+    );
+    const wire = wireOutputFrame(1, 1, Uint8Array.of(1, 2, 3));
+    const event = decodeTerminalEvent(wire.buffer);
+    expect(event.kind).toBe("output");
+    if (event.kind !== "output") throw new Error("expected output fixture");
+    // Decode is the one transport ownership copy; the scheduler transfers that
+    // exclusive allocation without copying it again.
+    expect(event.data.buffer).not.toBe(wire.buffer);
+    expect(event.data.buffer.byteLength).toBe(event.data.byteLength);
+    wire.fill(9, 21);
+    scheduler.enqueueOwned(event.data);
+    expect([...written[0]]).toEqual([1, 2, 3]);
+    completions.shift()!();
+    expect(scheduler.pendingBytes).toBe(0);
+  });
+
+  it("copies a borrowed scheduler input before its caller can mutate it", () => {
+    const written: Uint8Array[] = [];
+    const scheduler = new TerminalWriteScheduler(
+      (chunk) => written.push(chunk),
+      () => 1,
+      () => undefined,
+    );
+    const borrowed = Uint8Array.of(1, 2, 3);
+    scheduler.enqueue(borrowed);
+    borrowed.fill(9);
+    expect([...written[0]]).toEqual([1, 2, 3]);
+  });
+
+  it("compacts a long consumed prefix without changing byte or callback order", () => {
+    const frames: FrameRequestCallback[] = [];
+    const completions: Array<() => void> = [];
+    const written: number[] = [];
+    const rendered: number[] = [];
+    const measurements = new OperationCounters();
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => { written.push(...chunk); completions.push(done); },
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      64,
+      1024,
+      undefined,
+      undefined,
+      measurements,
+    );
+    for (let index = 0; index < 131; index += 1) {
+      scheduler.enqueue(Uint8Array.of(index), () => rendered.push(index));
+    }
+    let ticks = 0;
+    while (scheduler.pendingBytes > 0 && ticks < 100) {
+      while (completions.length) completions.shift()!();
+      for (const frame of frames.splice(0, frames.length)) frame(ticks * 16);
+      ticks += 1;
+    }
+    while (completions.length) completions.shift()!();
+    expect(written).toEqual(Array.from({ length: 131 }, (_, index) => index & 0xff));
+    expect(rendered).toEqual(Array.from({ length: 131 }, (_, index) => index));
+    const counters = measurements.snapshot().counters;
+    expect(counters["terminal.scheduler.queueCompactions"]).toBeGreaterThan(0);
+    expect(counters["terminal.scheduler.queueSlotsMoved"]).toBeGreaterThan(0);
+  });
+
+  it("releases consumed buffers below the queue compaction threshold", () => {
+    const completions: Array<() => void> = [];
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      () => 1,
+      () => undefined,
+    );
+    scheduler.enqueue(Uint8Array.of(1));
+    scheduler.enqueue(Uint8Array.of(2, 3));
+    expect(scheduler.retainedQueueByteLength).toBe(2);
+    completions.shift()!();
+    expect(scheduler.pendingBytes).toBe(2);
+    expect(scheduler.retainedQueueByteLength).toBe(2);
+  });
+
+  it("gates admission on a partial record's full retained backing allocation", () => {
+    const completions: Array<() => void> = [];
+    const overflow: number[] = [];
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      () => 1,
+      () => undefined,
+      2,
+      4,
+      undefined,
+      (bytes) => overflow.push(bytes),
+    );
+    expect(scheduler.enqueue(Uint8Array.of(1, 2, 3, 4))).toBe(true);
+    expect(scheduler.retainedQueueByteLength).toBe(4);
+    completions.shift()!();
+    expect(scheduler.pendingBytes).toBe(2);
+    expect(scheduler.retainedQueueByteLength).toBe(4);
+    expect(scheduler.enqueue(Uint8Array.of(5))).toBe(false);
+    expect(overflow).toEqual([5]);
+  });
+
+  it("does not advance rendered callbacks when xterm throws before accepting a write", async () => {
+    const overflow: number[] = [];
+    const rendered = vi.fn();
+    let lateCompletion: (() => void) | undefined;
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => { lateCompletion = done; throw new Error("parser unavailable"); },
+      () => 1,
+      () => undefined,
+      64,
+      1024,
+      undefined,
+      (bytes) => overflow.push(bytes),
+    );
+    expect(scheduler.enqueue(Uint8Array.of(1, 2, 3), rendered)).toBe(true);
+    expect(rendered).not.toHaveBeenCalled();
+    expect(overflow).toEqual([3]);
+    expect(scheduler.pendingBytes).toBe(0);
+    expect(scheduler.overflowed).toBe(true);
+    lateCompletion?.();
+    expect(rendered).not.toHaveBeenCalled();
+    await expect(scheduler.sealAndDrain()).resolves.toBeUndefined();
+  });
+
+  it("treats a synchronous callback as success even if writeChunk subsequently throws", () => {
+    const overflow = vi.fn();
+    const rendered = vi.fn();
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => { done(); throw new Error("after completion"); },
+      () => 1,
+      () => undefined,
+      64,
+      1024,
+      undefined,
+      overflow,
+    );
+    expect(scheduler.enqueue(Uint8Array.of(1), rendered)).toBe(true);
+    expect(rendered).toHaveBeenCalledOnce();
+    expect(overflow).not.toHaveBeenCalled();
+    expect(scheduler.pendingBytes).toBe(0);
+    expect(scheduler.overflowed).toBe(false);
+  });
+
+  it("keeps an old in-flight completion out of a new seed's hide watermark", async () => {
+    const frames: FrameRequestCallback[] = [];
+    const completions: Array<() => void> = [];
+    const generations = new TerminalGenerationWatermark();
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      64,
+      1024,
+    );
+    scheduler.enqueue(Uint8Array.of(99), generations.enqueued(99));
+    generations.resetAuthoritativeStream();
+    scheduler.replace(Uint8Array.of(1), true, generations.enqueued(1));
+
+    completions.shift()!();
+    expect(generations.appliedGeneration).toBe(0);
+    for (const frame of frames.splice(0, frames.length)) frame(16);
+    completions.shift()!();
+    await scheduler.sealAndDrain();
+    expect(generations.appliedGeneration).toBe(1);
+  });
+
+  it("resolves a sealed drain even when pending and rendered observers throw", async () => {
+    const completions: Array<() => void> = [];
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      () => 1,
+      () => undefined,
+      64,
+      1024,
+      () => { throw new Error("pending observer"); },
+    );
+    scheduler.enqueue(Uint8Array.of(1), () => { throw new Error("render observer"); });
+    const drained = scheduler.sealAndDrain();
+    completions.shift()!();
+    await expect(drained).resolves.toBeUndefined();
+    expect(scheduler.pendingBytes).toBe(0);
+  });
+
+  it("continues queued work and sibling notifications after a rendered callback throws", () => {
+    const frames: FrameRequestCallback[] = [];
+    const completions: Array<() => void> = [];
+    const written: number[] = [];
+    const sibling = vi.fn();
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => { written.push(...chunk); completions.push(done); },
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      64,
+      1024,
+    );
+    scheduler.enqueue(Uint8Array.of(1));
+    scheduler.enqueue(Uint8Array.of(2), () => { throw new Error("first observer"); });
+    scheduler.enqueue(Uint8Array.of(3), sibling);
+    completions.shift()!();
+    for (const frame of frames.splice(0, frames.length)) frame(16);
+    completions.shift()!();
+    expect(written).toEqual([1, 2, 3]);
+    expect(sibling).toHaveBeenCalledOnce();
+    expect(scheduler.pendingBytes).toBe(0);
+  });
+
+  it("finishes failure cleanup even when the overflow observer throws", async () => {
+    const scheduler = new TerminalWriteScheduler(
+      () => { throw new Error("parser unavailable"); },
+      () => 1,
+      () => undefined,
+      64,
+      1024,
+      undefined,
+      () => { throw new Error("overflow observer"); },
+    );
+    expect(scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    expect(scheduler.overflowed).toBe(true);
+    expect(scheduler.pendingBytes).toBe(0);
+    await expect(scheduler.sealAndDrain()).resolves.toBeUndefined();
+  });
 });
 
 describe("Phase 14 terminal operation fixture", () => {
+  // Captured from the identical deterministic fixture on b082f66. Copy totals
+  // include both the decoder's compact payload ownership and the legacy
+  // scheduler/backlog copying; operations include queue work and array moves.
+  const baseline = {
+    64: { decoderCopiedBytes: 512, schedulerCopiedBytes: 960, backlogArrayMoves: 28, schedulerArrayMoves: 21, queueOperations: 16, fanoutDeliveries: 8, callbacks: 8, xtermWrites: 2 },
+    1024: { decoderCopiedBytes: 8192, schedulerCopiedBytes: 15_360, backlogArrayMoves: 28, schedulerArrayMoves: 21, queueOperations: 16, fanoutDeliveries: 8, callbacks: 8, xtermWrites: 2 },
+    65536: { decoderCopiedBytes: 524_288, schedulerCopiedBytes: 983_040, backlogArrayMoves: 28, schedulerArrayMoves: 21, queueOperations: 16, fanoutDeliveries: 8, callbacks: 8, xtermWrites: 3 },
+  } as const;
+
   it("reports exact event, fanout, copy, queue, callback and frame counts by chunk size", () => {
     for (const chunkBytes of [64, 1024, 64 * 1024]) {
       const measurements = new OperationCounters();
       const hub = new TerminalEventHub(undefined, {}, measurements);
-      const published: number[] = [];
-      hub.subscribe((event) => {
-        if (event.kind === "output") published.push(...event.data);
-      });
-      for (let index = 0; index < 8; index += 1) {
-        const data = new Uint8Array(chunkBytes).fill(index);
-        hub.publish({
-          kind: "output", paneId: "%1", generation: index + 1,
-          sequence: index + 1, data,
-        } satisfies TerminalEvent);
-      }
-      const backlog: number[] = [];
-      hub.subscribePane("%1", (event) => {
-        if (event.kind === "output") backlog.push(...event.data);
-      });
-
       const frames: FrameRequestCallback[] = [];
       const completions: Array<() => void> = [];
       const output: Uint8Array[] = [];
@@ -234,9 +466,16 @@ describe("Phase 14 terminal operation fixture", () => {
         undefined,
         measurements,
       );
+      const expected = new Uint8Array(chunkBytes * 8);
       for (let index = 0; index < 8; index += 1) {
-        scheduler.enqueue(new Uint8Array(chunkBytes).fill(index), () => { callbacks += 1; });
+        const data = new Uint8Array(chunkBytes).fill(index);
+        expected.set(data, index * chunkBytes);
+        const wire = wireOutputFrame(index + 1, index + 1, data);
+        hub.publish(decodeTerminalEvent(wire.buffer, measurements));
       }
+      hub.subscribePane("%1", (event) => {
+        if (event.kind === "output") scheduler.enqueueOwned(event.data, () => { callbacks += 1; });
+      });
       let ticks = 0;
       while (scheduler.pendingBytes > 0 && ticks < 100) {
         while (completions.length) completions.shift()!();
@@ -249,16 +488,38 @@ describe("Phase 14 terminal operation fixture", () => {
       const joined = new Uint8Array(output.reduce((total, chunk) => total + chunk.byteLength, 0));
       let offset = 0;
       for (const chunk of output) { joined.set(chunk, offset); offset += chunk.byteLength; }
-      expect(Array.from(joined)).toEqual(backlog);
-      expect(published).toEqual(backlog);
+      expect(joined.byteLength).toBe(expected.byteLength);
+      expect(joined.every((byte, index) => byte === expected[index])).toBe(true);
       const snapshot = measurements.snapshot();
       expect(snapshot.counters["terminal.hub.events"]).toBe(8);
+      expect(snapshot.counters["terminal.hub.fanoutDeliveries"]).toBe(8);
+      expect(snapshot.counters["terminal.decoder.frames"]).toBe(8);
+      expect(snapshot.counters["terminal.decoder.copiedBytes"]).toBe(chunkBytes * 8);
       expect(snapshot.counters["terminal.scheduler.enqueueOperations"]).toBe(8);
       expect(snapshot.counters["terminal.scheduler.dequeueOperations"]).toBe(8);
       expect(snapshot.counters["terminal.scheduler.callbacksInvoked"]).toBe(8);
+      const reference = baseline[chunkBytes as keyof typeof baseline];
+      expect(reference).toBeDefined();
+      const copyProxyBytes = snapshot.counters["terminal.decoder.copiedBytes"]
+        + (snapshot.counters["terminal.scheduler.copiedBytes"] ?? 0);
+      const baselineCopyProxyBytes = reference.decoderCopiedBytes + reference.schedulerCopiedBytes;
+      const operationProxy = snapshot.counters["terminal.scheduler.enqueueOperations"]
+        + snapshot.counters["terminal.scheduler.dequeueOperations"]
+        + (snapshot.counters["terminal.scheduler.queueSlotsMoved"] ?? 0);
+      const baselineOperationProxy = reference.queueOperations
+        + reference.backlogArrayMoves
+        + reference.schedulerArrayMoves;
+      expect(snapshot.counters["terminal.hub.fanoutDeliveries"]).toBe(reference.fanoutDeliveries);
+      expect(snapshot.counters["terminal.scheduler.callbacksInvoked"]).toBe(reference.callbacks);
+      expect(snapshot.counters["terminal.scheduler.xtermWrites"]).toBe(reference.xtermWrites);
+      expect(copyProxyBytes / baselineCopyProxyBytes).toBeLessThanOrEqual(0.7);
+      expect(operationProxy / baselineOperationProxy).toBeLessThanOrEqual(0.7);
       console.log(`PHASE14_METRIC ${JSON.stringify({
         lane: "terminalFrontend", chunkBytes, eventCount: 8,
-        byteExact: true, ...snapshot,
+        byteExact: true, callbackExact: true,
+        copyProxyBytes, baselineCopyProxyBytes,
+        operationProxy, baselineOperationProxy,
+        ...snapshot,
       })}`);
     }
   });
@@ -541,8 +802,8 @@ describe("pane resource recovery", () => {
   const resource = {
     kind: "paneResource", paneId: "%1", state: "hiddenBuffered", requiresSeed: false,
     recoveryReason: "", generation: 2, snapshotGeneration: 1, tailThroughGeneration: 2,
-    serializedSnapshot: new TextEncoder().encode("screen λ"),
-    rawTail: Uint8Array.of(27, 91, 109),
+    serializedSnapshot: copyTerminalBytes(new TextEncoder().encode("screen λ")),
+    rawTail: copyTerminalBytes(Uint8Array.of(27, 91, 109)),
     sequence: 2,
   } as const;
 
@@ -556,6 +817,6 @@ describe("pane resource recovery", () => {
   it("awaits a seed for released or malformed recovery state", () => {
     expect(paneRecoveryPlan({ ...resource, state: "released", requiresSeed: true, recoveryReason: "evicted" }))
       .toEqual({ kind: "awaitSeed", reason: "evicted" });
-    expect(paneRecoveryPlan({ ...resource, serializedSnapshot: Uint8Array.of(0xff) }).kind).toBe("awaitSeed");
+    expect(paneRecoveryPlan({ ...resource, serializedSnapshot: copyTerminalBytes(Uint8Array.of(0xff)) }).kind).toBe("awaitSeed");
   });
 });

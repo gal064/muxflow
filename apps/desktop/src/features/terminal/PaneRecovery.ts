@@ -1,4 +1,5 @@
 import type { TerminalEvent } from "./api";
+import type { OwnedTerminalBytes } from "./TerminalBytes";
 
 const serializedSnapshotDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -8,7 +9,7 @@ export type PaneRecoveryPlan =
   | {
       kind: "restore";
       serialized: string;
-      rawTail: Uint8Array;
+      rawTail: OwnedTerminalBytes;
       snapshotGeneration: number;
       tailThroughGeneration: number;
     };
