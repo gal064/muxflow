@@ -1,8 +1,11 @@
 use std::{
     fs::{self, File},
     io::{Read, Write},
+    os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail};
@@ -285,7 +288,20 @@ struct SshControl {
     target: String,
     config: Option<PathBuf>,
     socket: PathBuf,
-    owned_socket: bool,
+    borrowed_identity: Option<SocketIdentity>,
+    owned_master: Option<OwnedControlMaster>,
+}
+
+#[derive(Debug)]
+struct OwnedControlMaster {
+    child: Child,
+    socket_identity: SocketIdentity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
 }
 
 impl SshControl {
@@ -295,6 +311,28 @@ impl SshControl {
         shared_socket: Option<&Path>,
     ) -> anyhow::Result<Self> {
         validate_target(target)?;
+        if let Some(socket) = shared_socket {
+            let borrowed_identity = safe_socket_identity(socket)?.with_context(|| {
+                format!(
+                    "borrowed OpenSSH control socket is missing: {}",
+                    socket.display()
+                )
+            })?;
+            let borrowed = Self {
+                target: target.into(),
+                config: config.map(ToOwned::to_owned),
+                socket: socket.to_owned(),
+                borrowed_identity: Some(borrowed_identity),
+                owned_master: None,
+            };
+            if borrowed.check_control_master()? {
+                return Ok(borrowed);
+            }
+            bail!(
+                "borrowed OpenSSH control socket is not responsive; its owner must revalidate it"
+            );
+        }
+
         // OpenSSH appends a temporary suffix while creating a control socket;
         // keep this path short enough for Linux's 108-byte AF_UNIX limit.
         let runtime = PathBuf::from(format!("/tmp/tmux-agent-ide-{}", unsafe {
@@ -302,36 +340,22 @@ impl SshControl {
         }))
         .join("ssh");
         crate::paths::prepare_runtime_dir(&runtime)?;
-        let socket = shared_socket
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| runtime.join(format!("control-{}.sock", Uuid::new_v4())));
-        let value = Self {
+        let socket = runtime.join(format!("control-{}.sock", Uuid::new_v4()));
+        if safe_socket_identity(&socket)?.is_some() {
+            bail!("refusing an existing private OpenSSH control-socket path");
+        }
+        let mut value = Self {
             target: target.into(),
             config: config.map(ToOwned::to_owned),
             socket,
-            owned_socket: shared_socket.is_none(),
+            borrowed_identity: None,
+            owned_master: None,
         };
-        let check = value
-            .base_command()
-            .arg("-S")
-            .arg(&value.socket)
-            .args(["-O", "check"])
-            .arg(&value.target)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if check.is_ok_and(|status| status.success()) {
-            return Ok(value);
-        }
-        if value.socket.exists() {
-            fs::remove_file(&value.socket).context("remove stale OpenSSH control socket")?;
-        }
-        let output = value
+        let mut child = value
             .base_command()
             .args([
                 "-M",
                 "-N",
-                "-f",
                 "-o",
                 "ControlMaster=yes",
                 "-o",
@@ -340,23 +364,62 @@ impl SshControl {
             .arg("-S")
             .arg(&value.socket)
             .arg(&value.target)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
             .context("start OpenSSH control master")?;
-        if !output.status.success() {
-            bail!(
-                "OpenSSH control master failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match safe_socket_identity(&value.socket) {
+                Ok(Some(socket_identity)) => {
+                    value.owned_master = Some(OwnedControlMaster {
+                        child,
+                        socket_identity,
+                    });
+                    return Ok(value);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    terminate_child_bounded(child, None);
+                    return Err(error);
+                }
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    bail!("OpenSSH control master exited before creating its socket");
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    terminate_child_bounded(child, None);
+                    return Err(error.into());
+                }
+            }
+            if Instant::now() >= deadline {
+                terminate_child_bounded(child, None);
+                bail!("OpenSSH control master timed out before creating its socket");
+            }
+            thread::sleep(Duration::from_millis(10));
         }
-        Ok(value)
+    }
+
+    fn check_control_master(&self) -> anyhow::Result<bool> {
+        self.validate_control_socket()?;
+        let mut command = self.multiplexed_command();
+        command
+            .args(["-O", "check"])
+            .arg(&self.target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        run_control_command(command, Duration::from_secs(2))
     }
 
     fn command(&self, script: &str) -> anyhow::Result<Vec<u8>> {
+        self.validate_control_socket()?;
         let output = self
-            .base_command()
+            .multiplexed_command()
             .arg("-T")
-            .arg("-S")
-            .arg(&self.socket)
             .arg(&self.target)
             .arg(script)
             .output()?;
@@ -409,23 +472,113 @@ impl SshControl {
         ]);
         command
     }
+
+    fn multiplexed_command(&self) -> Command {
+        let mut command = self.base_command();
+        // `-S` alone still inherits ControlMaster=auto from user config. If the
+        // borrowed owner disappears in the narrow gap after validation, that
+        // would create an untracked master at its path. A mux client never
+        // needs to become a master, and `ProxyCommand=false` makes the missing-
+        // socket fallback fail closed instead of opening a direct connection.
+        command
+            .args(["-o", "ControlMaster=no", "-o", "ProxyCommand=false"])
+            .arg("-S")
+            .arg(&self.socket);
+        command
+    }
+
+    fn validate_control_socket(&self) -> anyhow::Result<()> {
+        let expected_identity = self.borrowed_identity.or_else(|| {
+            self.owned_master
+                .as_ref()
+                .map(|owned| owned.socket_identity)
+        });
+        if let Some(identity) = expected_identity
+            && safe_socket_identity(&self.socket)? != Some(identity)
+        {
+            bail!("OpenSSH control socket disappeared or was replaced");
+        }
+        Ok(())
+    }
 }
 
 impl Drop for SshControl {
     fn drop(&mut self) {
-        if !self.owned_socket {
-            return;
+        if let Some(owned) = self.owned_master.take() {
+            terminate_child_bounded(owned.child, Some((&self.socket, owned.socket_identity)));
         }
-        let _ = self
-            .base_command()
-            .arg("-S")
-            .arg(&self.socket)
-            .args(["-O", "exit"])
-            .arg(&self.target)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = fs::remove_file(&self.socket);
+    }
+}
+
+fn run_control_command(mut command: Command, timeout: Duration) -> anyhow::Result<bool> {
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status.success()),
+            Ok(None) => {}
+            Err(error) => {
+                terminate_child_bounded(child, None);
+                return Err(error.into());
+            }
+        }
+        if Instant::now() >= deadline {
+            terminate_child_bounded(child, None);
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn terminate_child_bounded(mut child: Child, owned_socket: Option<(&Path, SocketIdentity)>) {
+    let _ = child.kill();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => {
+                if let Some((socket, identity)) = owned_socket {
+                    remove_socket_if_identity(socket, identity);
+                }
+                return;
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let socket = owned_socket.map(|(path, identity)| (path.to_owned(), identity));
+                let _ = thread::Builder::new()
+                    .name("ssh-helper-master-reaper".into())
+                    .spawn(move || {
+                        let _ = child.wait();
+                        if let Some((socket, identity)) = socket {
+                            remove_socket_if_identity(&socket, identity);
+                        }
+                    });
+                return;
+            }
+        }
+    }
+}
+
+fn safe_socket_identity(socket: &Path) -> anyhow::Result<Option<SocketIdentity>> {
+    let metadata = match fs::symlink_metadata(socket) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        bail!("refusing an unowned or unsafe OpenSSH control socket");
+    }
+    Ok(Some(SocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }))
+}
+
+fn remove_socket_if_identity(socket: &Path, owned_identity: SocketIdentity) {
+    if safe_socket_identity(socket).ok().flatten() == Some(owned_identity) {
+        let _ = fs::remove_file(socket);
     }
 }
 
@@ -507,6 +660,10 @@ fn tmux_supported(version: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+        sync::mpsc,
+    };
 
     #[test]
     fn rejects_unsafe_targets_and_paths() {
@@ -521,5 +678,128 @@ mod tests {
         assert!(tmux_supported("tmux 3.3a"));
         assert!(tmux_supported("tmux 3.7"));
         assert!(!tmux_supported("tmux 3.2"));
+    }
+
+    #[test]
+    fn nonresponsive_borrowed_socket_returns_promptly_without_mutation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("borrowed.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let original_identity = safe_socket_identity(&socket).unwrap().unwrap();
+        let (accepted_sender, accepted_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            accepted_sender.send(()).unwrap();
+            let _ = release_receiver.recv();
+        });
+
+        let started = Instant::now();
+        let error = SshControl::start(
+            "nonresponsive-host",
+            Some(Path::new("/dev/null")),
+            Some(&socket),
+        )
+        .err()
+        .expect("a nonresponsive borrowed socket must be refused");
+
+        assert!(error.to_string().contains("not responsive"), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        accepted_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            safe_socket_identity(&socket).unwrap(),
+            Some(original_identity),
+            "borrowed sockets must never be unlinked or replaced"
+        );
+        release_sender.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn owned_teardown_preserves_a_replacement_inode() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("owned.sock");
+        let original_listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let original_identity = safe_socket_identity(&socket).unwrap().unwrap();
+        let child = Command::new("sh").args(["-c", "sleep 5"]).spawn().unwrap();
+        let control = SshControl {
+            target: "unused-host".into(),
+            config: None,
+            socket: socket.clone(),
+            borrowed_identity: None,
+            owned_master: Some(OwnedControlMaster {
+                child,
+                socket_identity: original_identity,
+            }),
+        };
+        drop(original_listener);
+        fs::remove_file(&socket).unwrap();
+        let replacement_listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let replacement_identity = safe_socket_identity(&socket).unwrap().unwrap();
+
+        drop(control);
+
+        assert_eq!(
+            safe_socket_identity(&socket).unwrap(),
+            Some(replacement_identity)
+        );
+        drop(replacement_listener);
+    }
+
+    #[test]
+    fn mux_clients_override_auto_master_config_and_fail_if_the_socket_disappears() {
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("borrowed-auto.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let borrowed_identity = safe_socket_identity(&socket).unwrap().unwrap();
+        let config = temporary.path().join("ssh-config");
+        fs::write(
+            &config,
+            "Host *\n  ControlMaster auto\n  ControlPersist 60\n  ProxyCommand ignored-proxy\n",
+        )
+        .unwrap();
+        let control = SshControl {
+            target: "configured-host".into(),
+            config: Some(config),
+            socket: socket.clone(),
+            borrowed_identity: Some(borrowed_identity),
+            owned_master: None,
+        };
+        let arguments: Vec<_> = control
+            .multiplexed_command()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["ControlMaster=no", "-o"])
+        );
+        assert!(arguments.iter().any(|value| value == "ProxyCommand=false"));
+        let effective = control
+            .multiplexed_command()
+            .arg("-G")
+            .arg(&control.target)
+            .output()
+            .unwrap();
+        assert!(effective.status.success());
+        let effective = String::from_utf8(effective.stdout).unwrap();
+        assert!(effective.lines().any(|line| line == "controlmaster false"));
+        assert!(effective.lines().any(|line| line == "proxycommand false"));
+
+        drop(listener);
+        fs::remove_file(&socket).unwrap();
+        let error = control.command("true").unwrap_err();
+        assert!(error.to_string().contains("disappeared or was replaced"));
+        assert!(
+            !socket.exists(),
+            "a mux client must not recreate its socket"
+        );
     }
 }

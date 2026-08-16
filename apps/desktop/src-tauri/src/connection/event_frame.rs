@@ -1,4 +1,4 @@
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) enum TerminalEvent {
     GenerationEpoch {
         epoch: u64,
@@ -89,25 +89,27 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
     } else {
         snapshot_sequence(&event).unwrap_or(protocol_sequence)
     };
-    let (kind, label, payload) = match event {
+    match event {
         TerminalEvent::GenerationEpoch { epoch } => {
-            (10, "terminal".into(), epoch.to_be_bytes().to_vec())
+            encode_parts(10, "terminal", sequence, 8, |frame| {
+                frame.extend_from_slice(&epoch.to_be_bytes());
+            })
         }
         TerminalEvent::Seed {
             pane_id,
             generation,
             data,
-        } => (1, pane_id, terminal_payload(generation, data)),
+        } => encode_terminal(1, pane_id, sequence, generation, data),
         TerminalEvent::Output {
             pane_id,
             generation,
             data,
-        } => (2, pane_id, terminal_payload(generation, data)),
-        TerminalEvent::TopologyDirty { name } => (3, name, Vec::new()),
-        TerminalEvent::Error { message } => (4, message, Vec::new()),
-        TerminalEvent::Exit { reason } => (5, reason, Vec::new()),
-        TerminalEvent::ConnectionState { state } => (6, state, Vec::new()),
-        TerminalEvent::ProtocolProgress => (8, "protocol".into(), Vec::new()),
+        } => encode_terminal(2, pane_id, sequence, generation, data),
+        TerminalEvent::TopologyDirty { name } => encode_empty(3, name, sequence),
+        TerminalEvent::Error { message } => encode_empty(4, message, sequence),
+        TerminalEvent::Exit { reason } => encode_empty(5, reason, sequence),
+        TerminalEvent::ConnectionState { state } => encode_empty(6, state, sequence),
+        TerminalEvent::ProtocolProgress => encode_empty(8, "protocol".into(), sequence),
         TerminalEvent::PaneResource {
             pane_id,
             state,
@@ -125,27 +127,33 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
                 "released" => 3,
                 _ => 0,
             };
-            let reason = recovery_reason.into_bytes();
-            let mut payload =
-                Vec::with_capacity(38 + reason.len() + serialized_snapshot.len() + raw_tail.len());
-            payload.push(state);
-            payload.push(u8::from(requires_seed));
-            payload.extend_from_slice(&generation.to_be_bytes());
-            payload.extend_from_slice(&snapshot_generation.to_be_bytes());
-            payload.extend_from_slice(&tail_through_generation.to_be_bytes());
-            payload.extend_from_slice(&(reason.len() as u32).to_be_bytes());
-            payload.extend_from_slice(&(serialized_snapshot.len() as u32).to_be_bytes());
-            payload.extend_from_slice(&(raw_tail.len() as u32).to_be_bytes());
-            payload.extend_from_slice(&reason);
-            payload.extend_from_slice(&serialized_snapshot);
-            payload.extend_from_slice(&raw_tail);
-            (9, pane_id, payload)
+            let payload_len =
+                38 + recovery_reason.len() + serialized_snapshot.len() + raw_tail.len();
+            encode_parts(9, &pane_id, sequence, payload_len, |frame| {
+                frame.push(state);
+                frame.push(u8::from(requires_seed));
+                frame.extend_from_slice(&generation.to_be_bytes());
+                frame.extend_from_slice(&snapshot_generation.to_be_bytes());
+                frame.extend_from_slice(&tail_through_generation.to_be_bytes());
+                frame.extend_from_slice(&(recovery_reason.len() as u32).to_be_bytes());
+                frame.extend_from_slice(&(serialized_snapshot.len() as u32).to_be_bytes());
+                frame.extend_from_slice(&(raw_tail.len() as u32).to_be_bytes());
+                frame.extend_from_slice(recovery_reason.as_bytes());
+                frame.extend_from_slice(&serialized_snapshot);
+                frame.extend_from_slice(&raw_tail);
+            })
         }
-        TerminalEvent::SeedDiagnostic { pane_id, message } => (11, pane_id, message.into_bytes()),
-        TerminalEvent::FlowStalled { pane_id, message } => (15, pane_id, message.into_bytes()),
-        TerminalEvent::FileService { scope, payload } => (12, scope, payload),
-        TerminalEvent::GitService { scope, payload } => (13, scope, payload),
-        TerminalEvent::AgentService { scope, payload } => (14, scope, payload),
+        TerminalEvent::SeedDiagnostic { pane_id, message } => {
+            encode_bytes(11, pane_id, sequence, message.into_bytes())
+        }
+        TerminalEvent::FlowStalled { pane_id, message } => {
+            encode_bytes(15, pane_id, sequence, message.into_bytes())
+        }
+        TerminalEvent::FileService { scope, payload } => encode_bytes(12, scope, sequence, payload),
+        TerminalEvent::GitService { scope, payload } => encode_bytes(13, scope, sequence, payload),
+        TerminalEvent::AgentService { scope, payload } => {
+            encode_bytes(14, scope, sequence, payload)
+        }
         TerminalEvent::Snapshot {
             snapshot,
             sequence,
@@ -161,18 +169,49 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
                 "snapshot": snapshot,
             }))
             .unwrap_or_default();
-            (7, "snapshot".into(), payload)
+            encode_bytes(7, "snapshot".into(), sequence, payload)
         }
-    };
-    let label = label.into_bytes();
+    }
+}
+
+fn encode_parts(
+    kind: u8,
+    label: &str,
+    sequence: u64,
+    payload_len: usize,
+    append_payload: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
     let length = u16::try_from(label.len()).unwrap_or(u16::MAX);
-    let mut frame = Vec::with_capacity(11 + usize::from(length) + payload.len());
+    let mut frame = Vec::with_capacity(11 + usize::from(length) + payload_len);
     frame.push(kind);
     frame.extend_from_slice(&length.to_be_bytes());
-    frame.extend_from_slice(&label[..usize::from(length)]);
+    frame.extend_from_slice(&label.as_bytes()[..usize::from(length)]);
     frame.extend_from_slice(&sequence.to_be_bytes());
-    frame.extend_from_slice(&payload);
+    append_payload(&mut frame);
     frame
+}
+
+fn encode_empty(kind: u8, label: String, sequence: u64) -> Vec<u8> {
+    encode_parts(kind, &label, sequence, 0, |_| {})
+}
+
+fn encode_bytes(kind: u8, label: String, sequence: u64, payload: Vec<u8>) -> Vec<u8> {
+    encode_parts(kind, &label, sequence, payload.len(), |frame| {
+        frame.extend_from_slice(&payload);
+    })
+}
+
+fn encode_terminal(
+    kind: u8,
+    pane_id: String,
+    sequence: u64,
+    generation: u64,
+    data: Vec<u8>,
+) -> Vec<u8> {
+    encode_parts(kind, &pane_id, sequence, 8 + data.len(), |frame| {
+        frame.extend_from_slice(&generation.to_be_bytes());
+        frame.extend_from_slice(&data);
+    })
 }
 
 fn snapshot_sequence(event: &TerminalEvent) -> Option<u64> {
@@ -180,13 +219,6 @@ fn snapshot_sequence(event: &TerminalEvent) -> Option<u64> {
         TerminalEvent::Snapshot { sequence, .. } => Some(*sequence),
         _ => None,
     }
-}
-
-fn terminal_payload(generation: u64, data: Vec<u8>) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(8 + data.len());
-    payload.extend_from_slice(&generation.to_be_bytes());
-    payload.extend_from_slice(&data);
-    payload
 }
 
 #[cfg(test)]
