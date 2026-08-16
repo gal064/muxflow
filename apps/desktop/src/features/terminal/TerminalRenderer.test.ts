@@ -380,6 +380,62 @@ describe("TerminalWriteScheduler", () => {
     await scheduler.sealAndDrain();
     expect(generations.appliedGeneration).toBe(1);
   });
+
+  it("resolves a sealed drain even when pending and rendered observers throw", async () => {
+    const completions: Array<() => void> = [];
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      () => 1,
+      () => undefined,
+      64,
+      1024,
+      () => { throw new Error("pending observer"); },
+    );
+    scheduler.enqueue(Uint8Array.of(1), () => { throw new Error("render observer"); });
+    const drained = scheduler.sealAndDrain();
+    completions.shift()!();
+    await expect(drained).resolves.toBeUndefined();
+    expect(scheduler.pendingBytes).toBe(0);
+  });
+
+  it("continues queued work and sibling notifications after a rendered callback throws", () => {
+    const frames: FrameRequestCallback[] = [];
+    const completions: Array<() => void> = [];
+    const written: number[] = [];
+    const sibling = vi.fn();
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => { written.push(...chunk); completions.push(done); },
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      64,
+      1024,
+    );
+    scheduler.enqueue(Uint8Array.of(1));
+    scheduler.enqueue(Uint8Array.of(2), () => { throw new Error("first observer"); });
+    scheduler.enqueue(Uint8Array.of(3), sibling);
+    completions.shift()!();
+    for (const frame of frames.splice(0, frames.length)) frame(16);
+    completions.shift()!();
+    expect(written).toEqual([1, 2, 3]);
+    expect(sibling).toHaveBeenCalledOnce();
+    expect(scheduler.pendingBytes).toBe(0);
+  });
+
+  it("finishes failure cleanup even when the overflow observer throws", async () => {
+    const scheduler = new TerminalWriteScheduler(
+      () => { throw new Error("parser unavailable"); },
+      () => 1,
+      () => undefined,
+      64,
+      1024,
+      undefined,
+      () => { throw new Error("overflow observer"); },
+    );
+    expect(scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    expect(scheduler.overflowed).toBe(true);
+    expect(scheduler.pendingBytes).toBe(0);
+    await expect(scheduler.sealAndDrain()).resolves.toBeUndefined();
+  });
 });
 
 describe("Phase 14 terminal operation fixture", () => {

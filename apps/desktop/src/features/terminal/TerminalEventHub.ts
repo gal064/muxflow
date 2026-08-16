@@ -86,7 +86,9 @@ export class TerminalEventHub {
     this.#maxPaneBytes = limits.maxPaneBytes ?? DEFAULT_MAX_PANE_BYTES;
     this.#maxTotalBytes = limits.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
     this.#maxBufferedPanes = limits.maxBufferedPanes ?? DEFAULT_MAX_BUFFERED_PANES;
-    this.#maxTrackedPanes = limits.maxTrackedPanes ?? Math.max(64, this.#maxBufferedPanes * 4);
+    // A pane cannot be buffered safely without one metadata slot: otherwise
+    // the event that creates its backlog evicts its own generation/debt state.
+    this.#maxTrackedPanes = Math.max(1, limits.maxTrackedPanes ?? Math.max(64, this.#maxBufferedPanes * 4));
     this.#maxPaneEvents = limits.maxPaneEvents ?? DEFAULT_MAX_PANE_EVENTS;
   }
 
@@ -119,15 +121,16 @@ export class TerminalEventHub {
       const alreadyAwaiting = this.#awaitingSeed.has(event.paneId);
       this.#awaitingSeed.add(event.paneId);
       this.#deleteBacklog(event.paneId);
-      if (requiresConservativeSeed && !hadEvictedSeedDebt && !alreadyAwaiting) {
-        this.onSeedRequired?.(event.paneId, "frontend pane recovery debt outlived the metadata LRU");
-      }
       // Neither incremental output nor an empty handoff can repair content
       // discarded with an evicted hidden backlog. Do not let either advance
       // the generation watermark ahead of the fresh seed we already owe.
-      if (event.kind === "output"
+      const cannotRepairDebt = event.kind === "output"
         || (event.kind === "paneResource" && !event.requiresSeed
-          && event.serializedSnapshot.byteLength + event.rawTail.byteLength === 0)) {
+          && event.serializedSnapshot.byteLength + event.rawTail.byteLength === 0);
+      if (cannotRepairDebt) {
+        if (requiresConservativeSeed && !hadEvictedSeedDebt && !alreadyAwaiting) {
+          this.onSeedRequired?.(event.paneId, "frontend pane recovery debt outlived the metadata LRU");
+        }
         return admission;
       }
     }
@@ -409,10 +412,6 @@ export class TerminalEventHub {
   }
 
   #rememberEvictedSeedDebt(paneId: string): void {
-    if (this.#maxTrackedPanes <= 0) {
-      this.#unknownPanesRequireSeed = true;
-      return;
-    }
     this.#evictedSeedDebt.delete(paneId);
     this.#evictedSeedDebt.set(paneId, true);
     while (this.#evictedSeedDebt.size > this.#maxTrackedPanes) {
