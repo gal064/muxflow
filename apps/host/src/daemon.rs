@@ -91,6 +91,17 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
         write_safe_log(SafeErrorClass::HookFallbackIngestionFailed);
     }
 
+    // A persistence failure can recover without a daemon restart (for example,
+    // after transient quota pressure). Keep draining the durable mailbox while
+    // this daemon is alive; live ingest also drains synchronously before it
+    // accepts a newer event, so the timer can never be an overtaking lane.
+    let hook_retry = tokio::spawn(async {
+        loop {
+            sleep(Duration::from_secs(2)).await;
+            let _ = tokio::task::spawn_blocking(service::agents::ingest_fallbacks).await;
+        }
+    });
+
     let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
     loop {
         tokio::select! {
@@ -116,6 +127,7 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
         }
         }
     }
+    hook_retry.abort();
     drop(listener);
     // Flush coalesced operational counters before cooperative shutdown. This
     // is ordered against the background writer and never runs on hot paths.
