@@ -115,7 +115,7 @@ fn failed_pending_head_retriggers_later_admitted_job() {
 }
 
 #[test]
-fn provisional_admission_is_not_cancellable_before_queued_publication() {
+fn provisional_admission_latches_cancellation_but_rolls_back_when_publication_fails() {
     let _serial = engine_test_lock();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -139,10 +139,60 @@ fn provisional_admission_is_not_cancellable_before_queued_publication() {
     entered_rx
         .recv_timeout(std::time::Duration::from_secs(3))
         .unwrap();
-    assert!(cancel_transfer(&id).is_err());
+    assert_eq!(
+        cancel_transfer(&id).unwrap(),
+        CancelResponse {
+            disposition: CancelDisposition::CancelRequested,
+            phase: TransferPhase::Queued,
+        }
+    );
     release_tx.send(()).unwrap();
     assert!(enqueue.join().unwrap().is_err());
     assert!(cancel_transfer(&id).is_err());
+    assert_eq!(acceptance_engine_counts(), (0, 0));
+}
+
+#[test]
+fn cancellation_after_queued_is_observable_latches_until_admission_commits() {
+    let _serial = engine_test_lock();
+    let (published_tx, published_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (terminal_tx, terminal_rx) = std::sync::mpsc::channel();
+    let id = format!("cancel-published-admission-{}", uuid::Uuid::new_v4());
+    let enqueue_id = id.clone();
+    let enqueue = std::thread::spawn(move || {
+        enqueue_transfer_with_queued(
+            enqueue_id,
+            live_binding(100),
+            Arc::new(CancelState::new()),
+            move || {
+                published_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            },
+            || panic!("cancelled pending admission must not start"),
+            || panic!("cancelled pending admission must not work"),
+            move |result, reason| terminal_tx.send((result, reason)).unwrap(),
+        )
+    });
+    published_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .unwrap();
+    assert_eq!(
+        cancel_transfer(&id).unwrap(),
+        CancelResponse {
+            disposition: CancelDisposition::CancelRequested,
+            phase: TransferPhase::Queued,
+        }
+    );
+    assert!(terminal_rx.try_recv().is_err());
+    release_tx.send(()).unwrap();
+    enqueue.join().unwrap().unwrap();
+    let (result, reason) = terminal_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .unwrap();
+    assert!(result.is_err());
+    assert_eq!(reason, CancelReason::User);
     assert_eq!(acceptance_engine_counts(), (0, 0));
 }
 

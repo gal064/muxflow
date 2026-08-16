@@ -266,6 +266,20 @@ function mountNavigation(overrides: Partial<ShellNavigationOptions> = {}) {
 }
 
 describe("shell navigation hook cross-kind ownership", () => {
+  it("uses the current epoch-scoped acknowledgement after an ack-only rerender", async () => {
+    const oldEpochAck = vi.fn();
+    const newEpochAck = vi.fn();
+    const harness = mountNavigation({ acknowledgeHostSessionSelection: oldEpochAck });
+    const renderer = await harness.renderer();
+    await harness.rerender({ acknowledgeHostSessionSelection: newEpochAck });
+
+    act(() => harness.navigation.selectSession("$2"));
+    await flush();
+    expect(oldEpochAck).not.toHaveBeenCalled();
+    expect(newEpochAck).toHaveBeenCalledWith("$2");
+    await act(async () => renderer.unmount());
+  });
+
   it("sends a post-commit reversal before any authoritative snapshot rerender", async () => {
     const actions: string[] = [];
     const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {

@@ -200,7 +200,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       return { kind: "partial", location: appliedLocation, generation, generationSource };
     }
     return { kind: "reached", destination, generation, generationSource };
-  }, [options.performAction]);
+  }, [options.acknowledgeHostSessionSelection, options.performAction]);
 
   const beginTerminalIntent = useCallback(() => {
     protectedAppTab.current = undefined;

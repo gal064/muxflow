@@ -119,6 +119,7 @@ impl TerminalAttachment {
 
         let stopped = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = std_mpsc::sync_channel(TERMINAL_INPUT_QUEUE);
+        let (input_completion_tx, input_completion_rx) = std_mpsc::channel();
         let input_stdin = Arc::clone(&stdin);
         // Input admission is fire-and-forget from the desktop. A later action
         // barrier receives the first write failure, while the event stream
@@ -129,18 +130,23 @@ impl TerminalAttachment {
         std::thread::Builder::new()
             .name(format!("host-tmux-input-{session_id}"))
             .spawn(move || {
-                run_input_dispatch(input_rx, input_stdin, |pane_id, error| {
-                    emit_event(
-                        &failure_tx,
-                        &failure_overflowed,
-                        v1::HostEvent {
-                            kind: v1::EventKind::TerminalResnapshotRequired.into(),
-                            scope: pane_id.to_owned(),
-                            detail: format!("terminal input was not written: {error}"),
-                            ..Default::default()
-                        },
-                    );
-                })
+                run_input_dispatch(
+                    input_rx,
+                    input_stdin,
+                    input_completion_rx,
+                    |pane_id, error| {
+                        emit_event(
+                            &failure_tx,
+                            &failure_overflowed,
+                            v1::HostEvent {
+                                kind: v1::EventKind::TerminalResnapshotRequired.into(),
+                                scope: pane_id.to_owned(),
+                                detail: format!("terminal input was not written: {error}"),
+                                ..Default::default()
+                            },
+                        );
+                    },
+                )
             })?;
         let (stream_tx, stream_rx) = std_mpsc::channel();
         let reader_stopped = Arc::clone(&stopped);
@@ -163,6 +169,7 @@ impl TerminalAttachment {
                     stopped: reader_stop_signal,
                     controls: stream_rx,
                     flow: reader_flow,
+                    input_completion: input_completion_tx,
                 });
                 reader_stopped.store(true, Ordering::Release);
             })?;

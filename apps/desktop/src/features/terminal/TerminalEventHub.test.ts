@@ -289,6 +289,38 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(hub.retainedPaneCount).toBe(0);
   });
 
+  it("requires a seed after a mounted consumer rejects an admitted event", () => {
+    const requests: string[] = [];
+    const received: TerminalEvent[] = [];
+    const hub = new TerminalEventHub((paneId) => requests.push(paneId));
+    hub.subscribePane("%1", (event) => {
+      received.push(event);
+      if (event.kind === "output") throw new Error("renderer rejected output");
+    });
+    expect(() => hub.publish(output(1, 1))).toThrow("renderer rejected output");
+    expect(hub.publish(output(2, 2))).toEqual({ kind: "accepted" });
+    expect(received).toEqual([output(1, 1)]);
+    expect(requests).toEqual(["%1"]);
+  });
+
+  it("rolls back subscription ownership and requires a seed when backlog replay throws", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub((paneId) => requests.push(paneId));
+    hub.publish(output(1, 1));
+    hub.publish(output(2, 2));
+    expect(() => hub.subscribePane("%1", () => {
+      throw new Error("renderer unavailable");
+    })).toThrow("renderer unavailable");
+
+    const received: TerminalEvent[] = [];
+    expect(() => hub.subscribePane("%1", (event) => received.push(event))).not.toThrow();
+    hub.publish(output(3, 3));
+    expect(received).toEqual([]);
+    hub.publish(seed(4, 4));
+    expect(received).toEqual([seed(4, 4)]);
+    expect(requests).toEqual(["%1"]);
+  });
+
   it("conservatively reseeds an oversized same-generation checkpoint", () => {
     const requests: string[] = [];
     const hub = new TerminalEventHub((paneId) => requests.push(paneId));

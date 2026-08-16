@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
     },
 };
@@ -333,6 +333,7 @@ struct EngineState {
 #[derive(Default)]
 struct TransferEngine {
     state: Mutex<EngineState>,
+    active_bindings_changed: Condvar,
 }
 
 static TRANSFER_ENGINE: OnceLock<Arc<TransferEngine>> = OnceLock::new();
@@ -430,6 +431,14 @@ pub(super) fn enqueue_transfer_with_queued(
             work: Box::new(work),
             finished: Box::new(finished),
         });
+        // Cancellation becomes addressable in the same atomic step as the
+        // provisional queue slot. Until queued publication succeeds the job
+        // cannot dispatch, so a concurrent cancel only latches intent; a
+        // publication failure still rolls every artifact back without a
+        // terminal event that could precede the missing queued event.
+        state
+            .cancellations
+            .insert(id.clone(), Arc::clone(&cancellation));
     }
     // Event delivery is deliberately outside the engine lock. The FIFO head's
     // admission barrier prevents every dispatcher from starting it (or later
@@ -448,6 +457,7 @@ pub(super) fn enqueue_transfer_with_queued(
             let mut state = engine.state.lock().unwrap();
             let rejected = take_queued_job(&mut state.queue, |job| job.id == id);
             if rejected.is_some() {
+                state.cancellations.remove(&id);
                 cancellation.mark_finished();
             }
             crate::perf_log::record_transfer_state(state.active, state.queue.len());
@@ -472,9 +482,6 @@ pub(super) fn enqueue_transfer_with_queued(
             .find(|job| job.id == id)
             .expect("pending admission remains queued until commit");
         pending.admitted = true;
-        state
-            .cancellations
-            .insert(id.clone(), Arc::clone(&cancellation));
         crate::perf_log::record_transfer_admission(crate::perf_log::TransferAdmission::Accepted);
         crate::perf_log::record_transfer_state(state.active, state.queue.len());
     }
@@ -575,6 +582,7 @@ impl TransferEngine {
                 state
                     .active_bindings
                     .insert(job.id.clone(), job.binding.clone());
+                self.active_bindings_changed.notify_one();
                 crate::perf_log::record_transfer_state(state.active, state.queue.len());
                 job
             };
@@ -838,20 +846,25 @@ fn spawn_engine_binding_monitor(engine: &Arc<TransferEngine>) {
                 let Some(engine) = engine.upgrade() else {
                     return;
                 };
-                let stale = {
-                    let state = engine.state.lock().unwrap();
-                    state
-                        .active_bindings
-                        .iter()
-                        .filter_map(|(id, binding)| {
-                            binding.validate().err().map(|error| (id.clone(), error))
-                        })
-                        .collect::<Vec<_>>()
-                };
+                let mut state = engine.state.lock().unwrap();
+                while state.active_bindings.is_empty() {
+                    state = engine.active_bindings_changed.wait(state).unwrap();
+                }
+                let stale = state
+                    .active_bindings
+                    .iter()
+                    .filter_map(|(id, binding)| {
+                        binding.validate().err().map(|error| (id.clone(), error))
+                    })
+                    .collect::<Vec<_>>();
+                let (state, _) = engine
+                    .active_bindings_changed
+                    .wait_timeout(state, std::time::Duration::from_millis(50))
+                    .unwrap();
+                drop(state);
                 for (id, error) in stale {
                     engine.cancel_stale(&id, error);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         });
 }
