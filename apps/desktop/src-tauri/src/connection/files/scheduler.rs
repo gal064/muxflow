@@ -421,9 +421,6 @@ pub(super) fn enqueue_transfer_with_queued(
             );
             return Err("bulk transfer ID is already queued or active".into());
         }
-        state
-            .cancellations
-            .insert(id.clone(), Arc::clone(&cancellation));
         state.queue.push_back(EngineJob {
             id: id.clone(),
             binding: binding.clone(),
@@ -451,7 +448,6 @@ pub(super) fn enqueue_transfer_with_queued(
             let mut state = engine.state.lock().unwrap();
             let rejected = take_queued_job(&mut state.queue, |job| job.id == id);
             if rejected.is_some() {
-                state.cancellations.remove(&id);
                 cancellation.mark_finished();
             }
             crate::perf_log::record_transfer_state(state.active, state.queue.len());
@@ -476,6 +472,9 @@ pub(super) fn enqueue_transfer_with_queued(
             .find(|job| job.id == id)
             .expect("pending admission remains queued until commit");
         pending.admitted = true;
+        state
+            .cancellations
+            .insert(id.clone(), Arc::clone(&cancellation));
         crate::perf_log::record_transfer_admission(crate::perf_log::TransferAdmission::Accepted);
         crate::perf_log::record_transfer_state(state.active, state.queue.len());
     }

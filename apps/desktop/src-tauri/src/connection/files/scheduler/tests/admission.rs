@@ -115,16 +115,12 @@ fn failed_pending_head_retriggers_later_admitted_job() {
 }
 
 #[test]
-fn cancellation_waits_for_queued_publication_before_terminal() {
+fn provisional_admission_is_not_cancellable_before_queued_publication() {
     let _serial = engine_test_lock();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let (terminal_tx, terminal_rx) = std::sync::mpsc::channel();
-    let events = Arc::new(Mutex::new(Vec::new()));
     let id = format!("cancel-pending-admission-{}", uuid::Uuid::new_v4());
     let enqueue_id = id.clone();
-    let queued_events = Arc::clone(&events);
-    let terminal_events = Arc::clone(&events);
     let enqueue = std::thread::spawn(move || {
         enqueue_transfer_with_queued(
             enqueue_id,
@@ -133,30 +129,20 @@ fn cancellation_waits_for_queued_publication_before_terminal() {
             move || {
                 entered_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
-                queued_events.lock().unwrap().push("queued");
-                Ok(())
+                Err("injected queued publication failure".into())
             },
-            || panic!("cancelled pending admission must not start"),
-            || panic!("cancelled pending admission must not work"),
-            move |result, reason| {
-                terminal_events.lock().unwrap().push("terminal");
-                terminal_tx.send((result, reason)).unwrap();
-            },
+            || panic!("rejected pending admission must not start"),
+            || panic!("rejected pending admission must not work"),
+            |_, _| panic!("rejected pending admission must not terminalize"),
         )
     });
     entered_rx
         .recv_timeout(std::time::Duration::from_secs(3))
         .unwrap();
-    assert_eq!(cancel_transfer(&id).unwrap().phase, TransferPhase::Queued);
-    assert!(terminal_rx.try_recv().is_err());
+    assert!(cancel_transfer(&id).is_err());
     release_tx.send(()).unwrap();
-    enqueue.join().unwrap().unwrap();
-    let (result, reason) = terminal_rx
-        .recv_timeout(std::time::Duration::from_secs(3))
-        .unwrap();
-    assert!(result.is_err());
-    assert_eq!(reason, CancelReason::User);
-    assert_eq!(*events.lock().unwrap(), ["queued", "terminal"]);
+    assert!(enqueue.join().unwrap().is_err());
+    assert!(cancel_transfer(&id).is_err());
     assert_eq!(acceptance_engine_counts(), (0, 0));
 }
 
