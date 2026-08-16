@@ -2,8 +2,7 @@ use std::{
     io::BufReader,
     process::{ChildStdin, ChildStdout},
     sync::{Arc, atomic::Ordering},
-    thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tmux_agent_protocol::{
@@ -14,7 +13,10 @@ use tmux_agent_protocol::{
 use uuid::Uuid;
 
 use super::event_frame::encode_event_with_sequence;
-use super::transport::{BridgeStderr, spawn_bridge, with_bridge_diagnostic};
+use super::transport::{
+    BridgeStderr, SshLease, acquire_control_master_cancellable, spawn_bridge,
+    with_bridge_diagnostic,
+};
 use super::{
     ConnectionSpec, InitialHostState, TerminalClient, TerminalEvent, TerminalEventChannel,
     mark_input_reconnected, send_event, snapshot_from_proto, validate_tmux_id,
@@ -29,26 +31,38 @@ pub(super) fn supervise_bridge(
     client: Arc<TerminalClient>,
 ) {
     let mut attempt = 0_u32;
-    while !client.stopped.load(Ordering::Acquire) {
-        send_event(
-            &channel,
-            TerminalEvent::ConnectionState {
-                state: if attempt == 0 {
-                    "connecting"
-                } else {
-                    "reconnecting"
-                }
-                .into(),
-            },
-        );
-        match run_bridge_once(
-            &client_id,
-            &connection,
-            &session_id,
-            &pane_ids,
-            &channel,
-            &client,
-        ) {
+    while !client.stop_signal.is_stopped() {
+        if attempt != 0 {
+            send_event(
+                &channel,
+                TerminalEvent::ConnectionState {
+                    state: "reconnecting".into(),
+                },
+            );
+        }
+        // DNS, ProxyJump, authentication, and master establishment all happen
+        // on this supervisor. `start_terminal` has already returned a local
+        // connecting event, and the acquired lease is passed into bridge
+        // startup so startup cannot immediately repeat `ssh -O check`.
+        let lease =
+            acquire_control_master_cancellable(&connection, || client.stop_signal.is_stopped());
+        if client.stop_signal.is_stopped() {
+            break;
+        }
+        let mut connected_at = None;
+        let result = match lease.as_ref() {
+            Ok(lease) => run_bridge_once(
+                &connection,
+                lease.as_ref(),
+                &session_id,
+                &pane_ids,
+                &channel,
+                &client,
+                &mut connected_at,
+            ),
+            Err(error) => Err(error.clone()),
+        };
+        match result {
             Ok(()) => {}
             Err(error) => send_event(&channel, TerminalEvent::Error { message: error }),
         }
@@ -62,8 +76,13 @@ pub(super) fn supervise_bridge(
             let _ = child.kill();
             let _ = child.wait();
         }
-        if client.stopped.load(Ordering::Acquire) {
+        if client.stop_signal.is_stopped() {
             break;
+        }
+        // A bridge failure makes the master's health unknown. The next lease
+        // performs exactly one per-socket validation before reconnecting.
+        if let Ok(Some(lease)) = lease {
+            lease.require_revalidation();
         }
         send_event(
             &channel,
@@ -71,13 +90,22 @@ pub(super) fn supervise_bridge(
                 state: "disconnected".into(),
             },
         );
-        attempt = attempt.saturating_add(1);
-        let delay = Duration::from_millis(reconnect_delay_millis(&client_id, attempt));
-        if client.measurement_enabled {
-            client.wait_for_reconnect(delay);
-        } else {
-            thread::sleep(delay);
+        attempt = next_reconnect_attempt(attempt, connected_at.map(|at| at.elapsed()));
+        if !client.wait_for_reconnect(Duration::from_millis(reconnect_delay_millis(
+            &client_id, attempt,
+        ))) {
+            break;
         }
+    }
+}
+
+const STABLE_CONNECTION_RESET: Duration = Duration::from_secs(10);
+
+fn next_reconnect_attempt(previous: u32, connected_for: Option<Duration>) -> u32 {
+    if connected_for.is_some_and(|duration| duration >= STABLE_CONNECTION_RESET) {
+        1
+    } else {
+        previous.saturating_add(1)
     }
 }
 
@@ -106,25 +134,38 @@ pub(super) fn reconnect_jitter(client_id: &str, attempt: u32) -> u64 {
 }
 
 fn run_bridge_once(
-    client_id: &str,
     connection: &ConnectionSpec,
+    ssh_lease: Option<&SshLease>,
     session_id: &str,
     pane_ids: &[String],
     channel: &TerminalEventChannel,
     client: &Arc<TerminalClient>,
+    connected_at: &mut Option<Instant>,
 ) -> Result<(), String> {
-    let mut bridge = spawn_bridge(connection, client_id)?;
+    let mut bridge = spawn_bridge(connection, ssh_lease)?;
     let mut stdin = bridge.stdin.take().ok_or("host bridge stdin unavailable")?;
     let stdout = bridge
         .stdout
         .take()
         .ok_or("host bridge stdout unavailable")?;
     let diagnostic = bridge.stderr.take().map(BridgeStderr::capture);
+    {
+        let mut child = client.child.lock().unwrap();
+        if client.stop_signal.is_stopped() {
+            let _ = bridge.kill();
+            let _ = bridge.wait();
+            return Err("terminal bridge stopped during connection setup".into());
+        }
+        *child = Some(bridge);
+    }
     let mut reader = BufReader::new(stdout);
     let terminal_epoch = ((Uuid::new_v4().as_u128() as u64) & ((1_u64 << 53) - 1)).max(1);
     let (hello, initial, negotiated_writable) =
         handshake_and_snapshot(&mut stdin, &mut reader, terminal_epoch)
             .map_err(|error| with_bridge_diagnostic(error, diagnostic.as_ref()))?;
+    if client.stop_signal.is_stopped() {
+        return Err("terminal bridge stopped during handshake".into());
+    }
     // Terminal generations are scoped to one helper protocol connection.  Tell
     // the renderer to discard same-server generation watermarks before any seed
     // or output from the new connection is delivered.
@@ -235,18 +276,24 @@ fn run_bridge_once(
             }
         }
     }
-    *client.stdin.lock().unwrap() = Some(stdin);
-    *client.child.lock().unwrap() = Some(bridge);
-    if !read_only {
-        mark_input_reconnected(client);
-        client.ready.store(true, Ordering::Release);
-        send_event(
-            channel,
-            TerminalEvent::ConnectionState {
-                state: "connected".into(),
-            },
-        );
+    let published = client.stop_signal.if_running(|| {
+        *client.stdin.lock().unwrap() = Some(stdin);
+        if !read_only {
+            mark_input_reconnected(client);
+            client.ready.store(true, Ordering::Release);
+            client.resize_queue.reconnected();
+            send_event(
+                channel,
+                TerminalEvent::ConnectionState {
+                    state: "connected".into(),
+                },
+            );
+        }
+    });
+    if !published {
+        return Err("terminal bridge stopped before becoming ready".into());
     }
+    *connected_at = Some(Instant::now());
     read_protocol_stream(reader, sequence, &hello.server_identity, channel, client)
 }
 
@@ -368,9 +415,11 @@ fn read_until_response_with_value(
         let frame = read_frame_sync(reader)
             .map_err(|error| error.to_string())?
             .ok_or("host disconnected while awaiting response")?;
-        if frame.request_id == request_id
-            && let Some(Payload::Response(response)) = frame.payload.clone()
-        {
+        let mut frame = frame;
+        if frame.request_id == request_id && matches!(frame.payload, Some(Payload::Response(_))) {
+            let Some(Payload::Response(response)) = frame.payload.take() else {
+                unreachable!("payload kind was checked before it was moved")
+            };
             return Ok((response, buffered));
         }
         buffered.push(frame);
@@ -389,7 +438,11 @@ fn read_protocol_stream(
         let frame = read_frame_sync(&mut reader)
             .map_err(|error| error.to_string())?
             .ok_or("host bridge closed")?;
-        if let Some(Payload::Response(response)) = frame.payload.clone() {
+        let mut frame = frame;
+        if matches!(frame.payload, Some(Payload::Response(_))) {
+            let Some(Payload::Response(response)) = frame.payload.take() else {
+                unreachable!("payload kind was checked before it was moved")
+            };
             if resync_request_id == Some(frame.request_id) {
                 if !response.ok {
                     return Err(format!("resync failed: {}", response.display_message));
@@ -781,5 +834,23 @@ mod tests {
 
         let response = envelope(9, 0, Payload::Response(v1::Response::default()));
         assert!(!event_follows_snapshot_barrier(&response, 41));
+    }
+
+    #[test]
+    fn short_post_handshake_failures_continue_the_same_backoff_run() {
+        assert_eq!(next_reconnect_attempt(0, None), 1);
+        assert_eq!(
+            next_reconnect_attempt(1, Some(Duration::from_millis(50))),
+            2
+        );
+        assert_eq!(
+            next_reconnect_attempt(2, Some(STABLE_CONNECTION_RESET - Duration::from_millis(1))),
+            3
+        );
+    }
+
+    #[test]
+    fn stable_connection_resets_the_backoff_run() {
+        assert_eq!(next_reconnect_attempt(9, Some(STABLE_CONNECTION_RESET)), 1);
     }
 }

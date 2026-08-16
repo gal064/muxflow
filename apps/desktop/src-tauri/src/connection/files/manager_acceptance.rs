@@ -21,10 +21,14 @@ use super::{
     scheduler::{BulkBinding, acceptance_engine_counts, cancel_transfer, engine_test_lock},
     upload_manager::enqueue_acceptance_upload,
 };
-use crate::connection::{ConnectionSpec, TerminalClient, transport::spawn_bridge};
+use crate::connection::{
+    ConnectionSpec, TerminalClient,
+    transport::{SshLease, acquire_control_master, spawn_bridge},
+};
 
 struct ControlLane {
     child: Child,
+    _lease: Option<SshLease>,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     next_request: u64,
@@ -39,7 +43,8 @@ impl Drop for ControlLane {
 
 impl ControlLane {
     fn connect(connection: &ConnectionSpec) -> Result<(Self, v1::ServerHello), String> {
-        let mut child = spawn_bridge(connection, "phase7-manager-acceptance")?;
+        let lease = acquire_control_master(connection)?;
+        let mut child = spawn_bridge(connection, lease.as_ref())?;
         let mut stdin = child
             .stdin
             .take()
@@ -79,6 +84,7 @@ impl ControlLane {
         Ok((
             Self {
                 child,
+                _lease: lease,
                 stdin,
                 reader,
                 next_request: 2,
@@ -267,7 +273,7 @@ fn run_manager_acceptance() -> Result<(), String> {
     let (mut control, hello) = ControlLane::connect(&connection)?;
     let active_root = control.active_root()?;
     let epoch = 9_007_199_254_740_995_u64;
-    let client = Arc::new(TerminalClient::new(None));
+    let client = Arc::new(TerminalClient::new());
     client
         .ready
         .store(true, std::sync::atomic::Ordering::Release);

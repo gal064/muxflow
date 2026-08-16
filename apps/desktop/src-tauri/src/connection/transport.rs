@@ -1,47 +1,26 @@
 use std::{
-    collections::HashMap,
-    fs,
     io::Read,
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
-    },
     path::{Path, PathBuf},
     process::{Child, ChildStderr, Command, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
-use sha2::{Digest, Sha256};
+use super::ConnectionSpec;
 
-use super::{ConnectionSpec, validate_ssh_target};
+mod control_master;
+use control_master::ssh_profile_control_socket_for_lane;
+pub(crate) use control_master::{ControlLane, close_all_control_masters};
+pub(super) use control_master::{
+    SshLease, acquire_control_master, acquire_control_master_cancellable,
+    acquire_control_master_for_socket, ssh_profile_control_socket,
+};
 
-#[derive(Clone)]
-struct SshMaster {
-    target: String,
-    config_path: Option<String>,
-    socket: PathBuf,
-    leases: usize,
-}
-
-pub(super) struct SshLease {
-    socket: PathBuf,
-}
-
-impl Drop for SshLease {
-    fn drop(&mut self) {
-        release_control_master(&self.socket);
-    }
-}
-
-static SSH_MASTERS: OnceLock<Mutex<HashMap<PathBuf, SshMaster>>> = OnceLock::new();
-
-fn ssh_masters() -> &'static Mutex<HashMap<PathBuf, SshMaster>> {
-    SSH_MASTERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-pub(super) fn spawn_bridge(connection: &ConnectionSpec, _client_id: &str) -> Result<Child, String> {
+pub(super) fn spawn_bridge(
+    connection: &ConnectionSpec,
+    ssh_lease: Option<&SshLease>,
+) -> Result<Child, String> {
     let measured = matches!(connection, ConnectionSpec::Ssh { .. });
     if measured {
         crate::perf_log::record_remote_operation(
@@ -57,23 +36,16 @@ pub(super) fn spawn_bridge(connection: &ConnectionSpec, _client_id: &str) -> Res
                 command
             }
             ConnectionSpec::Ssh {
-                profile_id,
                 target,
                 config_path,
+                ..
             } => {
-                let socket =
-                    ssh_profile_control_socket(profile_id, target, config_path.as_deref())?;
-                ensure_control_master(
-                    target,
-                    config_path.as_deref(),
-                    &socket,
-                    ControlLane::Interactive,
-                )?;
                 let mut command = ssh_base(config_path.as_deref());
+                command.arg("-T");
+                ssh_lease
+                    .ok_or("SSH bridge startup requires an acquired control-master lease")?
+                    .configure(&mut command, target, config_path.as_deref())?;
                 command
-                    .arg("-T")
-                    .arg("-S")
-                    .arg(socket)
                     .arg(target)
                     .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
                 command
@@ -166,7 +138,9 @@ pub(super) fn with_bridge_diagnostic(error: String, stderr: Option<&BridgeStderr
     }
 }
 
-pub(crate) fn spawn_bulk_bridge(connection: &ConnectionSpec) -> Result<Child, String> {
+pub(crate) fn spawn_bulk_bridge(
+    connection: &ConnectionSpec,
+) -> Result<(Child, Option<SshLease>), String> {
     let measured = matches!(connection, ConnectionSpec::Ssh { .. });
     if measured {
         crate::perf_log::record_remote_operation(
@@ -175,11 +149,11 @@ pub(crate) fn spawn_bulk_bridge(connection: &ConnectionSpec) -> Result<Child, St
     }
     let result = (|| {
         connection.validate()?;
-        let mut command = match connection {
+        let (mut command, lease) = match connection {
             ConnectionSpec::Local => {
                 let mut command = Command::new(host_helper_path()?);
                 command.args(["bridge", "--stdio"]);
-                command
+                (command, None)
             }
             ConnectionSpec::Ssh {
                 profile_id,
@@ -196,26 +170,29 @@ pub(crate) fn spawn_bulk_bridge(connection: &ConnectionSpec) -> Result<Child, St
                 // persistent master gives the same isolation at no per-request
                 // cost, and a failure to establish it falls back to the previous
                 // one-off connection rather than failing the transfer.
-                match bulk_control_socket(profile_id, target, config_path.as_deref()) {
-                    Ok(socket) => {
-                        command.arg("-S").arg(socket);
+                let lease = match bulk_control_lease(profile_id, target, config_path.as_deref()) {
+                    Ok(lease) => {
+                        lease.configure(&mut command, target, config_path.as_deref())?;
+                        Some(lease)
                     }
                     Err(_) => {
                         command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
+                        None
                     }
-                }
+                };
                 command
                     .arg(target)
                     .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
-                command
+                (command, lease)
             }
         };
-        command
+        let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| format!("failed to start independent bulk bridge: {error}"))
+            .map_err(|error| format!("failed to start independent bulk bridge: {error}"))?;
+        Ok((child, lease))
     })();
     if measured {
         crate::perf_log::record_remote_operation(if result.is_ok() {
@@ -230,40 +207,14 @@ pub(crate) fn spawn_bulk_bridge(connection: &ConnectionSpec) -> Result<Child, St
 /// Resolves (creating if needed) the persistent master that carries bulk file
 /// I/O. It is a different socket from the control master on purpose: the point
 /// of the bulk lane is a separate TCP connection, not a separate handshake.
-fn bulk_control_socket(
+fn bulk_control_lease(
     profile_id: &str,
     target: &str,
     config_path: Option<&str>,
-) -> Result<PathBuf, String> {
-    let socket = ssh_profile_control_socket(&format!("{profile_id}-bulk"), target, config_path)?;
-    ensure_control_master(target, config_path, &socket, ControlLane::Bulk)?;
-    Ok(socket)
-}
-
-pub(super) fn acquire_control_master(
-    connection: &ConnectionSpec,
-) -> Result<Option<SshLease>, String> {
-    let ConnectionSpec::Ssh {
-        profile_id,
-        target,
-        config_path,
-    } = connection
-    else {
-        return Ok(None);
-    };
-    let socket = ssh_profile_control_socket(profile_id, target, config_path.as_deref())?;
-    ensure_control_master(
-        target,
-        config_path.as_deref(),
-        &socket,
-        ControlLane::Interactive,
-    )?;
-    let mut masters = ssh_masters().lock().unwrap();
-    let master = masters
-        .get_mut(&socket)
-        .ok_or("SSH control master registry lost the acquired profile")?;
-    master.leases += 1;
-    Ok(Some(SshLease { socket }))
+) -> Result<SshLease, String> {
+    let socket =
+        ssh_profile_control_socket_for_lane(profile_id, target, config_path, ControlLane::Bulk)?;
+    acquire_control_master_for_socket(target, config_path, &socket, ControlLane::Bulk)
 }
 
 pub(super) fn host_helper_path() -> Result<PathBuf, String> {
@@ -301,277 +252,6 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
     ))
 }
 
-// A Unix socket bind must fit `sockaddr_un::sun_path` including its terminator:
-// 104 bytes on Darwin, 108 on Linux. OpenSSH binds a temporary sibling first,
-// appending a dot and sixteen random characters before renaming it into place,
-// so the published path needs that much extra headroom.
-const CONTROL_SOCKET_PATH_BYTES: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
-const CONTROL_SOCKET_TEMPORARY_BYTES: usize = 17;
-
-// Strict, because the bound counts the terminating NUL that must also fit.
-fn control_socket_binds(socket: &Path) -> bool {
-    socket.as_os_str().as_bytes().len() + CONTROL_SOCKET_TEMPORARY_BYTES < CONTROL_SOCKET_PATH_BYTES
-}
-
-// macOS gives every user a per-boot temporary directory roughly 49 bytes long,
-// which leaves no room for the control socket. Fall back to the same short,
-// uid-scoped root the helper already uses for its own runtime socket. The
-// directory is still created 0700 and rejected unless this user owns it, so a
-// pre-created path belonging to anyone else fails closed rather than downgrading.
-const SHORT_CONTROL_ROOT: &str = "/tmp";
-
-pub(super) fn ssh_profile_control_socket(
-    profile_id: &str,
-    target: &str,
-    config_path: Option<&str>,
-) -> Result<PathBuf, String> {
-    let preferred = std::env::temp_dir();
-    // A failure here is a real safety refusal, not a sizing problem, so it must
-    // propagate instead of silently relocating the socket.
-    let socket = ssh_profile_control_socket_in(&preferred, profile_id, target, config_path)?;
-    if control_socket_binds(&socket) {
-        return Ok(socket);
-    }
-    if preferred != Path::new(SHORT_CONTROL_ROOT) {
-        let short = ssh_profile_control_socket_in(
-            Path::new(SHORT_CONTROL_ROOT),
-            profile_id,
-            target,
-            config_path,
-        )?;
-        if control_socket_binds(&short) {
-            return Ok(short);
-        }
-    }
-    Err(format!(
-        "SSH control socket path does not fit this platform's {CONTROL_SOCKET_PATH_BYTES}-byte \
-         limit: {}",
-        socket.display()
-    ))
-}
-
-fn ssh_profile_control_socket_in(
-    temporary_root: &Path,
-    profile_id: &str,
-    target: &str,
-    config_path: Option<&str>,
-) -> Result<PathBuf, String> {
-    validate_ssh_target(target)?;
-    let base = temporary_root.join(format!("tmux-agent-ide-{}", unsafe { libc::geteuid() }));
-    ensure_private_directory(&base)?;
-    let directory = base.join("ssh");
-    ensure_private_directory(&directory)?;
-    let mut digest = Sha256::new();
-    digest.update(profile_id.as_bytes());
-    digest.update([0]);
-    digest.update(target.as_bytes());
-    digest.update([0]);
-    if let Some(path) = config_path {
-        digest.update(path.as_bytes());
-    }
-    let key = format!("{:x}", digest.finalize());
-    Ok(directory.join(format!("profile-{}.sock", &key[..20])))
-}
-
-fn ensure_private_directory(directory: &Path) -> Result<(), String> {
-    match fs::DirBuilder::new().mode(0o700).create(directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.to_string()),
-    }
-    let metadata = fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
-    if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(
-            "SSH control directory must be an owned, private, non-symlink directory".into(),
-        );
-    }
-    if metadata.mode() & 0o077 != 0 {
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-            .map_err(|error| error.to_string())?;
-        let secured = fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
-        if !secured.file_type().is_dir()
-            || secured.uid() != unsafe { libc::geteuid() }
-            || secured.mode() & 0o077 != 0
-        {
-            return Err(
-                "SSH control directory must be an owned, private, non-symlink directory".into(),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_control_socket(socket: &Path) -> Result<bool, String> {
-    let metadata = match fs::symlink_metadata(socket) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.to_string()),
-    };
-    if !metadata.file_type().is_socket()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err("refusing an unowned or unsafe SSH control-socket path".into());
-    }
-    Ok(true)
-}
-
-/// Which multiplexed SSH connection a master serves.
-///
-/// The two lanes want opposite transport settings, and because these are
-/// properties of the master rather than of a multiplexed client, the choice has
-/// to be made here.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ControlLane {
-    /// Keystrokes, control frames and terminal output.
-    Interactive,
-    /// File bodies and transfers.
-    Bulk,
-}
-
-pub(super) fn ensure_control_master(
-    target: &str,
-    config_path: Option<&str>,
-    socket: &Path,
-    lane: ControlLane,
-) -> Result<(), String> {
-    crate::perf_log::record_remote_operation(
-        crate::perf_log::RemoteOperation::ControlMasterEnsureAttempt,
-    );
-    let result = ensure_control_master_inner(target, config_path, socket, lane);
-    if result.is_err() {
-        crate::perf_log::record_remote_operation(
-            crate::perf_log::RemoteOperation::ControlMasterFailure,
-        );
-    }
-    result
-}
-
-fn ensure_control_master_inner(
-    target: &str,
-    config_path: Option<&str>,
-    socket: &Path,
-    lane: ControlLane,
-) -> Result<(), String> {
-    validate_control_socket(socket)?;
-    let mut masters = ssh_masters().lock().unwrap();
-    crate::perf_log::record_remote_operation(
-        crate::perf_log::RemoteOperation::ControlMasterCheckAttempt,
-    );
-    let check = ssh_base(config_path)
-        .arg("-S")
-        .arg(socket)
-        .args(["-O", "check"])
-        .arg(target)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if check.is_ok_and(|status| status.success()) {
-        crate::perf_log::record_remote_operation(
-            crate::perf_log::RemoteOperation::ControlMasterReuseSuccess,
-        );
-        masters
-            .entry(socket.to_owned())
-            .or_insert_with(|| SshMaster {
-                target: target.into(),
-                config_path: config_path.map(ToOwned::to_owned),
-                socket: socket.to_owned(),
-                leases: 0,
-            });
-        return Ok(());
-    }
-    if validate_control_socket(socket)? {
-        fs::remove_file(socket).map_err(|error| error.to_string())?;
-    }
-    let mut master = ssh_base(config_path);
-    if lane == ControlLane::Interactive {
-        apply_control_lane_options(&mut master);
-    }
-    let output = master
-        .args([
-            "-M",
-            "-N",
-            "-f",
-            "-o",
-            "ControlMaster=yes",
-            "-o",
-            "ControlPersist=60",
-        ])
-        .arg("-S")
-        .arg(socket)
-        .arg(target)
-        .output()
-        .map_err(|error| error.to_string())?;
-    if output.status.success() {
-        if !validate_control_socket(socket)? {
-            return Err("OpenSSH succeeded without creating its private control socket".into());
-        }
-        masters.insert(
-            socket.to_owned(),
-            SshMaster {
-                target: target.into(),
-                config_path: config_path.map(ToOwned::to_owned),
-                socket: socket.to_owned(),
-                leases: 0,
-            },
-        );
-        crate::perf_log::record_remote_operation(
-            crate::perf_log::RemoteOperation::ControlMasterEstablishmentSuccess,
-        );
-        Ok(())
-    } else {
-        Err(format!(
-            "OpenSSH control master failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
-}
-
-fn release_control_master(socket: &Path) {
-    let master = {
-        let mut masters = ssh_masters().lock().unwrap();
-        let Some(master) = masters.get_mut(socket) else {
-            return;
-        };
-        master.leases = master.leases.saturating_sub(1);
-        if master.leases != 0 {
-            return;
-        }
-        masters.remove(socket)
-    };
-    if let Some(master) = master {
-        let _ = ssh_base(master.config_path.as_deref())
-            .arg("-S")
-            .arg(&master.socket)
-            .args(["-O", "exit"])
-            .arg(&master.target)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = fs::remove_file(master.socket);
-    }
-}
-
-pub(crate) fn close_all_control_masters() {
-    let masters: Vec<_> = ssh_masters()
-        .lock()
-        .unwrap()
-        .drain()
-        .map(|(_, value)| value)
-        .collect();
-    for master in masters {
-        let _ = ssh_base(master.config_path.as_deref())
-            .arg("-S")
-            .arg(&master.socket)
-            .args(["-O", "exit"])
-            .arg(&master.target)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = fs::remove_file(master.socket);
-    }
-}
-
 fn ssh_base(config_path: Option<&str>) -> Command {
     let mut command = Command::new("ssh");
     if let Some(path) = config_path {
@@ -603,74 +283,4 @@ fn ssh_base(config_path: Option<&str>) -> Command {
 /// of the master connection, so they are applied where masters are created.
 fn apply_control_lane_options(command: &mut Command) {
     command.args(["-o", "Compression=yes", "-o", "IPQoS=lowdelay"]);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn control_socket_identity_is_profile_scoped() {
-        let first = ssh_profile_control_socket("profile-a", "same-host", None).unwrap();
-        let second = ssh_profile_control_socket("profile-b", "same-host", None).unwrap();
-        assert_ne!(first, second);
-        assert_eq!(
-            first,
-            ssh_profile_control_socket("profile-a", "same-host", None).unwrap()
-        );
-    }
-
-    #[test]
-    fn control_socket_fits_the_platform_bind_limit_from_the_real_temporary_root() {
-        let socket = ssh_profile_control_socket("profile-a", "same-host", None).unwrap();
-        assert!(
-            control_socket_binds(&socket),
-            "{} leaves no room for OpenSSH's temporary bind",
-            socket.display()
-        );
-    }
-
-    #[test]
-    fn control_socket_relocates_when_the_temporary_root_is_too_long() {
-        let temporary = tempfile::tempdir().unwrap();
-        // Reproduce a macOS-length per-user temporary root, which alone pushes
-        // the control socket past the 104-byte Darwin bind limit.
-        let deep = temporary.path().join("a".repeat(80));
-        fs::create_dir(&deep).unwrap();
-        let direct = ssh_profile_control_socket_in(&deep, "profile-a", "same-host", None).unwrap();
-        assert!(!control_socket_binds(&direct));
-        let resolved = ssh_profile_control_socket("profile-a", "same-host", None).unwrap();
-        assert!(control_socket_binds(&resolved));
-    }
-
-    #[test]
-    fn control_directory_rejects_symlink_and_repairs_owned_legacy_mode() {
-        let temporary = tempfile::tempdir().unwrap();
-        let uid_root = temporary
-            .path()
-            .join(format!("tmux-agent-ide-{}", unsafe { libc::geteuid() }));
-        let foreign = temporary.path().join("foreign");
-        fs::create_dir(&foreign).unwrap();
-        std::os::unix::fs::symlink(&foreign, &uid_root).unwrap();
-        assert!(ssh_profile_control_socket_in(temporary.path(), "p", "host", None).is_err());
-        fs::remove_file(&uid_root).unwrap();
-        fs::create_dir(&uid_root).unwrap();
-        fs::set_permissions(&uid_root, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(ssh_profile_control_socket_in(temporary.path(), "p", "host", None).is_ok());
-        assert_eq!(
-            fs::metadata(uid_root).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-    }
-
-    #[test]
-    fn control_socket_rejects_regular_files_and_symlinks() {
-        let temporary = tempfile::tempdir().unwrap();
-        let socket = temporary.path().join("mux.sock");
-        fs::write(&socket, b"foreign").unwrap();
-        assert!(validate_control_socket(&socket).is_err());
-        fs::remove_file(&socket).unwrap();
-        std::os::unix::fs::symlink("missing", &socket).unwrap();
-        assert!(validate_control_socket(&socket).is_err());
-    }
 }

@@ -9,7 +9,10 @@ use std::{
 
 use tmux_agent_protocol::FrameAccumulator;
 
-use super::super::{ConnectionSpec, transport::spawn_bulk_bridge};
+use super::super::{
+    ConnectionSpec,
+    transport::{SshLease, spawn_bulk_bridge},
+};
 use super::bulk_protocol::BulkProtocolClient;
 use super::scheduler::{BulkBinding, CancelState};
 
@@ -184,6 +187,7 @@ impl<T> SharedPool<T> {
 /// decoder that may still be holding bytes read past the last response.
 struct Bridge {
     child: Child,
+    _control_lease: Option<SshLease>,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     decoder: FrameAccumulator,
@@ -343,7 +347,7 @@ impl BulkLease {
             });
         }
 
-        let mut child = spawn_bulk_bridge(connection)?;
+        let (mut child, control_lease) = spawn_bulk_bridge(connection)?;
         let stdin = child.stdin.take().ok_or("bulk bridge stdin unavailable")?;
         let stdout = child
             .stdout
@@ -351,6 +355,7 @@ impl BulkLease {
             .ok_or("bulk bridge stdout unavailable")?;
         let mut bridge = Bridge {
             child,
+            _control_lease: control_lease,
             stdin,
             reader: BufReader::new(stdout),
             decoder: FrameAccumulator::default(),

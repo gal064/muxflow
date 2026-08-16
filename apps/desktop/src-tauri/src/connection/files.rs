@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn bulk_binding_rejects_replaced_epoch_and_server() {
-        let client = Arc::new(TerminalClient::new(None));
+        let client = Arc::new(TerminalClient::new());
         client.ready.store(true, Ordering::Release);
         client.terminal_epoch.store(41, Ordering::Release);
         *client.server_identity.lock().unwrap() = "server-a".into();

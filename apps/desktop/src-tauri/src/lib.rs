@@ -176,11 +176,6 @@ pub fn run() {
                 })
                 .build(),
         )
-        .on_window_event(|_, event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
-                connection::close_all_control_masters();
-            }
-        })
         .setup(|app| {
             power_events::start(app.handle().clone());
             let config_dir = app.path().app_config_dir()?;
@@ -251,8 +246,13 @@ pub fn run() {
             perf_log::bridge::acknowledge_bridge_events,
             perf_log::operations::sample_native_measurements,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run tmux Agent IDE");
+        .build(tauri::generate_context!())
+        .expect("failed to build tmux Agent IDE")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                connection::close_all_control_masters();
+            }
+        });
 }
 
 #[cfg(test)]
