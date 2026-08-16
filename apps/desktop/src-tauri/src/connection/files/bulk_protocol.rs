@@ -5,9 +5,8 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope, read_frame_sync,
+    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope,
     v1::{self, envelope::Payload},
-    write_frame_sync,
 };
 
 use super::scheduler::{BulkBinding, CancelState, DeadlineGuard};
@@ -67,26 +66,61 @@ impl<'a> BulkProtocolClient<'a> {
         stdin: &mut ChildStdin,
         reader: &mut BufReader<ChildStdout>,
         binding: &BulkBinding,
+        cancellation: &CancelState,
+        deadline: &DeadlineGuard,
     ) -> Result<(), String> {
-        write_frame_sync(
-            stdin,
-            &envelope(
-                1,
-                0,
-                Payload::ClientHello(v1::ClientHello {
-                    desktop_version: env!("CARGO_PKG_VERSION").into(),
-                    requested_capabilities: HOST_CAPABILITIES,
-                    expected_helper_version: HELPER_VERSION.into(),
-                    bulk_connection: true,
-                    expected_server_identity: binding.expected_server_identity.clone(),
-                    connection_epoch: binding.connection_epoch,
-                }),
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-        let frame = read_frame_sync(reader)
-            .map_err(|error| error.to_string())?
-            .ok_or("bulk bridge closed during handshake")?;
+        set_nonblocking(reader.get_ref().as_raw_fd(), "response")?;
+        set_nonblocking(stdin.as_raw_fd(), "request")?;
+        let mut decoder = FrameAccumulator::default();
+        let mut next_id = 2;
+        let mut clean = true;
+        let mut client =
+            BulkProtocolClient::resumed(stdin, reader, &mut decoder, &mut next_id, &mut clean);
+        client
+            .write_envelope_cancellable(
+                &envelope(
+                    1,
+                    0,
+                    Payload::ClientHello(v1::ClientHello {
+                        desktop_version: env!("CARGO_PKG_VERSION").into(),
+                        requested_capabilities: HOST_CAPABILITIES,
+                        expected_helper_version: HELPER_VERSION.into(),
+                        bulk_connection: true,
+                        expected_server_identity: binding.expected_server_identity.clone(),
+                        connection_epoch: binding.connection_epoch,
+                    }),
+                ),
+                Some(cancellation),
+                Some(deadline),
+            )
+            .map_err(|error| error.to_string())?;
+        let frame = loop {
+            if cancellation.is_cancelled() {
+                return Err("bulk bridge handshake cancelled".into());
+            }
+            if let Some(frame) = client
+                .decoder
+                .next_frame()
+                .map_err(|error| error.to_string())?
+            {
+                break frame;
+            }
+            let mut bytes = [0_u8; 64 * 1024];
+            match client.reader.read(&mut bytes) {
+                Ok(0) => return Err("bulk bridge closed during handshake".into()),
+                Ok(count) => {
+                    client
+                        .decoder
+                        .push(&bytes[..count])
+                        .map_err(|error| error.to_string())?;
+                    deadline.touch();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_ready(client.reader.get_ref().as_raw_fd(), libc::POLLIN, 20)?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        };
         let Some(Payload::ServerHello(hello)) = frame.payload else {
             return Err("bulk bridge omitted ServerHello".into());
         };
@@ -104,19 +138,6 @@ impl<'a> BulkProtocolClient<'a> {
             );
         }
         binding.validate()?;
-        for (fd, label) in [
-            (reader.get_ref().as_raw_fd(), "response"),
-            (stdin.as_raw_fd(), "request"),
-        ] {
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-            {
-                return Err(format!(
-                    "could not make bulk {label} stream cancellable: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -380,6 +401,17 @@ impl<'a> BulkProtocolClient<'a> {
     }
 }
 
+fn set_nonblocking(fd: i32, label: &str) -> Result<(), String> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(format!(
+            "could not make bulk {label} stream cancellable: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
 fn wait_ready(fd: i32, events: libc::c_short, timeout_ms: libc::c_int) -> Result<(), String> {
     let mut descriptor = libc::pollfd {
         fd,
@@ -426,6 +458,37 @@ mod tests {
             }),
         ))
         .expect("an encodable response")
+    }
+
+    #[test]
+    fn cancelled_handshake_never_blocks_on_a_silent_peer() {
+        let (_request_read, request_write) = pipe();
+        let (response_read, _response_write) = pipe();
+        let mut stdin = ChildStdin::from(request_write);
+        let mut reader = BufReader::new(ChildStdout::from(response_read));
+        let client = std::sync::Arc::new(crate::connection::TerminalClient::new());
+        client
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
+        client
+            .terminal_epoch
+            .store(7, std::sync::atomic::Ordering::Release);
+        *client.server_identity.lock().unwrap() = "server-7".into();
+        let binding = BulkBinding::capture(client, "server-7".into(), 7).unwrap();
+        let cancellation = std::sync::Arc::new(CancelState::new());
+        let deadline = cancellation.arm_inactivity_deadline();
+        cancellation.cancel();
+        let started = std::time::Instant::now();
+        let error = BulkProtocolClient::handshake(
+            &mut stdin,
+            &mut reader,
+            &binding,
+            &cancellation,
+            &deadline,
+        )
+        .unwrap_err();
+        assert!(error.contains("cancel"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
     }
 
     /// Two jobs on one bridge, over a real pipe pair rather than a mock.

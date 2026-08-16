@@ -1,5 +1,6 @@
 use super::*;
 use crate::connection::TerminalClient;
+use std::sync::Condvar;
 
 #[path = "tests/admission.rs"]
 mod admission;
@@ -411,6 +412,10 @@ fn canonical_engine_limits_all_bulk_jobs_to_two_and_stales_queued_binding() {
     )
     .unwrap();
     *stale_client.server_identity.lock().unwrap() = "replacement".into();
+    // Queued bindings are validated at dequeue. Releasing the active workers
+    // lets the stale job reach that authoritative boundary without starting.
+    *blocker_gate.0.lock().unwrap() = true;
+    blocker_gate.1.notify_all();
     let (result, reason) = stale_rx
         .recv_timeout(std::time::Duration::from_secs(3))
         .unwrap();
@@ -419,8 +424,6 @@ fn canonical_engine_limits_all_bulk_jobs_to_two_and_stales_queued_binding() {
     assert_eq!(failure.outcome, TransferOutcome::NotPublished);
     assert_eq!(failure.failure_kind, TransferFailureKind::StaleScope);
     assert_eq!(reason, CancelReason::StaleBinding);
-    *blocker_gate.0.lock().unwrap() = true;
-    blocker_gate.1.notify_all();
     for receiver in blocker_receivers {
         receiver
             .recv_timeout(std::time::Duration::from_secs(3))
@@ -430,7 +433,7 @@ fn canonical_engine_limits_all_bulk_jobs_to_two_and_stales_queued_binding() {
 
 #[test]
 #[ignore = "Phase 14 opt-in full admission queue fixture"]
-fn phase14_full_queue_reports_admission_and_completion_results() {
+fn phase14_full_queue_reports_admission_and_exact_terminal_outcomes() {
     let _serial = engine_test_lock();
     crate::perf_log::reset_transfer_measurements();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));

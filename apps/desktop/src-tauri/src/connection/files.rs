@@ -165,7 +165,7 @@ pub(super) fn parse_required_u64(label: &str, value: &str) -> Result<u64, String
 
 #[cfg(test)]
 mod tests {
-    use super::scheduler::{BulkBinding, CancelState, acquire_bulk_permit};
+    use super::scheduler::{BulkBinding, CancelState};
     use super::serialization::metadata_json;
     use super::*;
     use crate::connection::TerminalClient;
@@ -192,19 +192,6 @@ mod tests {
         });
         assert_eq!(event["rootToken"], "root-capability");
         assert_eq!(event["watchId"], "editor-parent");
-    }
-
-    #[test]
-    fn global_bulk_permit_never_exceeds_two_connections() {
-        let _serial = scheduler::engine_test_lock();
-        let cancellation = CancelState::new();
-        let first = acquire_bulk_permit(&cancellation).unwrap();
-        let second = acquire_bulk_permit(&cancellation).unwrap();
-        let cancelled = CancelState::new();
-        cancelled.cancel();
-        assert!(acquire_bulk_permit(&cancelled).is_err());
-        drop(first);
-        drop(second);
     }
 
     #[test]

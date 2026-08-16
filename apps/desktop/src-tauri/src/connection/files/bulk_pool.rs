@@ -9,25 +9,19 @@ use std::{
 
 use tmux_agent_protocol::FrameAccumulator;
 
-use super::super::{
-    ConnectionSpec,
-    transport::{SshLease, spawn_bulk_bridge},
-};
+use super::super::{ConnectionSpec, transport::spawn_bulk_bridge};
 use super::bulk_protocol::BulkProtocolClient;
-use super::scheduler::{BulkBinding, CancelState};
+use super::scheduler::{BulkBinding, CancelState, DeadlineGuard};
 
 /// How long a bulk connection is kept alive with nothing to do.
 ///
 /// Long enough that a person reading one file and then another pays the
 /// handshake once, short enough that a laptop closed on a live app is not
-/// holding an ssh channel and a remote helper process open indefinitely. The
-/// ssh master behind it has its own `ControlPersist=60`, so this deliberately
-/// does not outlive the transport it rides.
+/// holding an SSH connection and a remote helper process open indefinitely.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Idle connections kept at once. Two is the concurrent-transfer bound
-/// (`acquire_bulk_permit`), so this can hold what that many jobs left behind
-/// and never more.
+/// Idle connections kept at once. Two is the scheduler's concurrent-transfer
+/// bound, so this can hold what that many jobs left behind and never more.
 const MAX_IDLE: usize = 2;
 
 /// The first request id a fresh connection may use. 1 is the handshake's.
@@ -187,7 +181,6 @@ impl<T> SharedPool<T> {
 /// decoder that may still be holding bytes read past the last response.
 struct Bridge {
     child: Child,
-    _control_lease: Option<SshLease>,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     decoder: FrameAccumulator,
@@ -320,6 +313,7 @@ impl BulkLease {
         connection: &ConnectionSpec,
         binding: &BulkBinding,
         cancellation: &Arc<CancelState>,
+        deadline: &DeadlineGuard,
     ) -> Result<Self, String> {
         let cancellation = Arc::clone(cancellation);
         let key = BulkKey {
@@ -347,7 +341,8 @@ impl BulkLease {
             });
         }
 
-        let (mut child, control_lease) = spawn_bulk_bridge(connection)?;
+        let cancelled = || cancellation.is_cancelled();
+        let mut child = spawn_bulk_bridge(connection, &cancelled)?;
         let stdin = child.stdin.take().ok_or("bulk bridge stdin unavailable")?;
         let stdout = child
             .stdout
@@ -355,17 +350,27 @@ impl BulkLease {
             .ok_or("bulk bridge stdout unavailable")?;
         let mut bridge = Bridge {
             child,
-            _control_lease: control_lease,
             stdin,
             reader: BufReader::new(stdout),
             decoder: FrameAccumulator::default(),
             next_request_id: FIRST_REQUEST_ID,
             clean: true,
         };
+        // The helper is cancellation-owned before any handshake I/O. User,
+        // stale-binding, and inactivity cancellation can therefore interrupt
+        // a silent peer instead of occupying one of the two engine lanes.
+        let _process_binding = cancellation.bind_process(bridge.child.id())?;
         // The handshake is part of establishing the bridge, not part of the job:
         // a reused bridge has already made it, which is one of the round trips
         // this pool exists to stop paying.
-        BulkProtocolClient::handshake(&mut bridge.stdin, &mut bridge.reader, binding)?;
+        BulkProtocolClient::handshake(
+            &mut bridge.stdin,
+            &mut bridge.reader,
+            binding,
+            &cancellation,
+            deadline,
+        )?;
+        drop(_process_binding);
         Ok(Self {
             key,
             bridge: Some(bridge),

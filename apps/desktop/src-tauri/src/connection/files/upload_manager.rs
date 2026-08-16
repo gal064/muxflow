@@ -392,7 +392,8 @@ fn run_upload_preflight(job: &UploadPreflightJob) -> Result<(), String> {
         return Err("upload source changed while preflight was queued".into());
     }
     let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
+    let mut lease =
+        BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &_deadline)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     let descriptor = prepare_remote(
@@ -488,7 +489,8 @@ fn run_upload(job: &UploadJob) -> TransferResult {
     validate_png_if_requested(&mut source, &identity, job.image_png)?;
     let session = {
         let deadline = job.cancellation.arm_inactivity_deadline();
-        let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
+        let mut lease =
+            BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &deadline)?;
         let _process_binding = job.cancellation.bind_process(lease.process_id())?;
         let mut protocol = lease.client();
         prepare_remote(
@@ -720,7 +722,8 @@ fn reconcile_upload_outcome(
 ) -> Result<v1::UploadDescriptor, String> {
     job.binding.validate()?;
     let deadline = job.cancellation.arm_inactivity_deadline();
-    let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
+    let mut lease =
+        BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &deadline)?;
     let _process_binding = job
         .cancellation
         .bind_authoritative_process(lease.process_id())?;

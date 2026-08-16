@@ -1385,9 +1385,9 @@ mod tests {
             match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
                 Ok(_) => fallback::HookReplayDisposition::Applied,
                 Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                    fallback::HookReplayDisposition::Discard
+                    fallback::HookReplayDisposition::Discarded
                 }
-                Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retain,
+                Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
             }
         })
         .unwrap();
@@ -1480,7 +1480,7 @@ mod tests {
         let mut attempts = 0;
         let retained = fallback::consume(&dir, |_| {
             attempts += 1;
-            fallback::HookReplayDisposition::Retain
+            fallback::HookReplayDisposition::Retryable
         })
         .unwrap();
         assert_eq!(retained.applied, 0);
@@ -1493,7 +1493,7 @@ mod tests {
         assert!(later.exists(), "later replay must remain ordered behind it");
 
         let discarded =
-            fallback::consume(&dir, |_| fallback::HookReplayDisposition::Discard).unwrap();
+            fallback::consume(&dir, |_| fallback::HookReplayDisposition::Discarded).unwrap();
         assert_eq!(discarded.applied, 0);
         assert_eq!(discarded.retained, 0);
         assert!(!path.exists(), "a permanent/duplicate disposition is final");
@@ -1530,10 +1530,10 @@ mod tests {
                     match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
                         Ok(_) => fallback::HookReplayDisposition::Applied,
                         Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                            fallback::HookReplayDisposition::Discard
+                            fallback::HookReplayDisposition::Discarded
                         }
                         Err(HookIngestFailure::Retryable(_)) => {
-                            fallback::HookReplayDisposition::Retain
+                            fallback::HookReplayDisposition::Retryable
                         }
                     }
                 })?;
@@ -1582,10 +1582,10 @@ mod tests {
                     match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
                         Ok(_) => fallback::HookReplayDisposition::Applied,
                         Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                            fallback::HookReplayDisposition::Discard
+                            fallback::HookReplayDisposition::Discarded
                         }
                         Err(HookIngestFailure::Retryable(_)) => {
-                            fallback::HookReplayDisposition::Retain
+                            fallback::HookReplayDisposition::Retryable
                         }
                     }
                 })
@@ -1628,9 +1628,9 @@ mod tests {
             match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
                 Ok(_) => fallback::HookReplayDisposition::Applied,
                 Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                    fallback::HookReplayDisposition::Discard
+                    fallback::HookReplayDisposition::Discarded
                 }
-                Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retain,
+                Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
             }
         })
         .unwrap();
