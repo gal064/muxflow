@@ -5,7 +5,7 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope,
+    CAP_FILE_STREAM, FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope,
     v1::{self, envelope::Payload},
 };
 
@@ -135,6 +135,12 @@ impl<'a> BulkProtocolClient<'a> {
         {
             return Err(
                 "bulk bridge handshake did not match its control identity/epoch binding".into(),
+            );
+        }
+        if hello.capabilities & CAP_FILE_STREAM == 0 {
+            // Refuse the bridge rather than discover it one open at a time.
+            return Err(
+                "host helper does not support single-request file opens; upgrade the helper".into(),
             );
         }
         binding.validate()?;

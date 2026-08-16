@@ -32,9 +32,22 @@ pub(super) async fn handle(
     }
     let service = Arc::clone(files);
     let work = file.clone();
-    let opened = tokio::task::spawn_blocking(move || {
-        service.open_file_stream_authorized(&work.root, &work.root_token, &work.path)
-    })
+    let open_cancellation = Arc::clone(&cancellation);
+    // The classification read touches a real filesystem, which on this host can
+    // be a slow one. The heartbeat proves liveness to the desktop's inactivity
+    // watchdog while it runs, and the read itself observes cancellation.
+    let opened = super::filesystem_dispatch::await_file_task(
+        tokio::task::spawn_blocking(move || {
+            service.open_file_stream_authorized(
+                &work.root,
+                &work.root_token,
+                &work.path,
+                &open_cancellation,
+            )
+        }),
+        control_tx,
+        &file.operation_id,
+    )
     .await;
     let body = match opened {
         Ok(Ok(body)) => body,
@@ -42,7 +55,7 @@ pub(super) async fn handle(
             send_response(
                 control_tx,
                 request_id,
-                response_error("file_open_rejected", &error.to_string()),
+                super::filesystem_dispatch::file_failure_response("file_open_rejected", &error),
             )
             .await;
             return;
@@ -66,20 +79,32 @@ pub(super) async fn handle(
         .await;
         return;
     }
-    send_stream_frame(
+    let header = body.header().clone();
+    let terminal = file_response(&file.operation_id, |value| {
+        value.content = Some(v1::FileContent {
+            metadata: header.metadata.clone(),
+            kind: header.content_kind,
+            content: Vec::new(),
+            generation: header.generation,
+        });
+    });
+    if !send_stream_frame(
         control_tx,
         request_id,
         v1::FileStreamFrame {
             operation_id: file.operation_id.clone(),
-            header: Some(body.header().clone()),
+            header: Some(header.clone()),
             ..Default::default()
         },
     )
-    .await;
+    .await
+    {
+        return;
+    }
 
-    if body.header().content_streaming {
+    if header.content_streaming {
         let digest = body.digest().to_owned();
-        let mut chunks = body.chunks().peekable();
+        let mut chunks = body.into_chunks().peekable();
         let mut sent_any = false;
         while let Some((offset, chunk)) = chunks.next() {
             if cancellation.load(Ordering::Acquire) {
@@ -93,24 +118,27 @@ pub(super) async fn handle(
             }
             sent_any = true;
             let eof = chunks.peek().is_none();
-            send_stream_frame(
+            if !send_stream_frame(
                 control_tx,
                 request_id,
                 v1::FileStreamFrame {
                     operation_id: file.operation_id.clone(),
                     offset,
-                    data: chunk.to_vec(),
+                    data: chunk,
                     eof,
                     blake3: if eof { digest.clone() } else { String::new() },
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            {
+                return;
+            }
         }
-        if !sent_any {
+        if !sent_any
             // An empty file still owes one eof frame, or the desktop cannot
             // tell "zero bytes" from "the body was cut short".
-            send_stream_frame(
+            && !send_stream_frame(
                 control_tx,
                 request_id,
                 v1::FileStreamFrame {
@@ -120,32 +148,28 @@ pub(super) async fn handle(
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+        {
+            return;
         }
     }
-    send_response(
-        control_tx,
-        request_id,
-        file_response(&file.operation_id, |value| {
-            value.content = Some(v1::FileContent {
-                metadata: body.header().metadata.clone(),
-                kind: body.header().content_kind,
-                content: Vec::new(),
-                generation: body.header().generation,
-            });
-        }),
-    )
-    .await;
+    send_response(control_tx, request_id, terminal).await;
 }
 
+/// Writes one body frame, reporting whether the connection is still there.
+///
+/// A closed lane means nothing will read the rest of this body, so the caller
+/// stops rather than iterating every remaining window into a channel nobody
+/// owns.
 async fn send_stream_frame(
     control_tx: &mpsc::Sender<SequencerControl>,
     request_id: u64,
     frame: v1::FileStreamFrame,
-) {
-    let _ = control_tx
+) -> bool {
+    control_tx
         .send(SequencerControl::FileStream { request_id, frame })
-        .await;
+        .await
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -161,6 +185,12 @@ mod tests {
     struct BulkPeer {
         stream: UnixStream,
         next_request_id: u64,
+    }
+
+    impl BulkPeer {
+        fn advertised_capabilities(hello: &v1::ServerHello) -> u64 {
+            hello.capabilities
+        }
     }
 
     impl BulkPeer {
@@ -192,6 +222,13 @@ mod tests {
                 panic!("expected a server hello")
             };
             assert!(!hello.read_only);
+            // A desktop that cannot see this bit refuses the bridge outright
+            // rather than failing one file open at a time.
+            assert_ne!(
+                Self::advertised_capabilities(&hello) & tmux_agent_protocol::CAP_FILE_STREAM,
+                0,
+                "a host that serves OpenFileStream must advertise it"
+            );
             (
                 Self {
                     stream: client,
@@ -343,6 +380,78 @@ mod tests {
         let header = frames[0].header.as_ref().unwrap();
         assert_eq!(header.content_kind, v1::FileContentKind::Binary as i32);
         assert!(!header.content_streaming);
+        drop(peer);
+        task.abort();
+        let _ = task.await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A cancelled open ends the exchange exactly once, so the desktop's bulk
+    /// bridge is never left waiting on a response that will not come.
+    #[tokio::test]
+    async fn a_cancelled_open_ends_with_one_terminal_response() {
+        let (root, path, token) = text_fixture(4 * 1024 * 1024);
+        let (mut peer, task) = BulkPeer::connect().await;
+        let request_id = peer.next_request_id;
+        peer.next_request_id += 1;
+        write_frame(
+            &mut peer.stream,
+            &envelope(
+                request_id,
+                0,
+                Payload::Request(v1::Request {
+                    operation: v1::Operation::OpenFileStream.into(),
+                    file: Some(v1::FileServiceRequest {
+                        operation_id: "open-cancel".into(),
+                        root: path.clone(),
+                        root_token: token.clone(),
+                        path: "note.txt".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        write_frame(
+            &mut peer.stream,
+            &envelope(
+                0,
+                0,
+                Payload::Cancel(v1::Cancel {
+                    target_request_id: request_id,
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let mut responses = 0;
+        let mut body_frames = 0;
+        loop {
+            let frame = timeout(Duration::from_secs(5), read_frame(&mut peer.stream))
+                .await
+                .expect("the exchange never ended")
+                .unwrap()
+                .unwrap();
+            match frame.payload {
+                Some(Payload::FileStream(_)) if frame.request_id == request_id => body_frames += 1,
+                Some(Payload::Response(response)) if frame.request_id == request_id => {
+                    responses += 1;
+                    // Either it was cancelled before it started, or it was cut
+                    // short mid-body — never a success that streamed part of a
+                    // file the desktop would then publish.
+                    if !response.ok {
+                        assert_eq!(response.error_code, "cancelled");
+                    }
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert_eq!(responses, 1, "one exchange owes exactly one response");
+        assert!(body_frames <= 5, "a cancelled body must stay bounded");
         drop(peer);
         task.abort();
         let _ = task.await;

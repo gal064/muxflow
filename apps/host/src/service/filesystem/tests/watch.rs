@@ -429,3 +429,49 @@ fn releasing_one_watch_leaves_every_other_registration_untouched() {
     assert_eq!(service.watches.lock().unwrap().len(), 2);
     fs::remove_dir_all(root).unwrap();
 }
+
+/// An event about the watched directory itself is not an entry in it.
+///
+/// Mapped as one it produced a row for the directory inside its own listing,
+/// under a second path spelling with a trailing separator — two names for one
+/// directory crossing the layer boundary, which every downstream key treats as
+/// two different directories.
+#[test]
+fn an_event_about_the_watched_directory_itself_is_never_a_row_inside_it() {
+    let root_path = std::env::temp_dir().join(format!("ade-watch-self-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root_path).unwrap();
+    fs::write(root_path.join("child"), "x").unwrap();
+    let root = Arc::new(RootCapability::capture(root_path.to_str().unwrap()).unwrap());
+    let logical_root = root.logical_root().to_owned();
+    let directory = root.open_root_directory().unwrap();
+    let watch = Watch {
+        root_token: root.token().to_owned(),
+        root: Arc::clone(&root),
+        path: logical_root.to_string_lossy().into_owned(),
+        target: logical_root.clone(),
+        target_directory: Arc::new(directory),
+        fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
+    };
+
+    let mut about_itself = Event::new(notify::EventKind::Any);
+    about_itself.paths.push(logical_root.clone());
+    // The watch is still considered touched, so a rescan can be scheduled for
+    // it; what it must not do is invent an entry.
+    assert!(watch_matches_events(
+        &watch,
+        &[Ok(about_itself.clone())],
+        false
+    ));
+    assert!(precise_file_events("self", &watch, &[Ok(about_itself)]).is_empty());
+
+    // A child of the same directory is still reported, exactly once.
+    let mut about_child = Event::new(notify::EventKind::Any);
+    about_child.paths.push(logical_root.join("child"));
+    let events = precise_file_events("self", &watch, &[Ok(about_child)]);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].scope,
+        logical_root.join("child").to_string_lossy()
+    );
+    fs::remove_dir_all(root_path).unwrap();
+}

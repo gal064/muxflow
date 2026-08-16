@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::bulk_pool::BulkLease;
 use super::bulk_protocol::RequestFailure;
 use super::scheduler::{
-    BulkBinding, CancelReason, CancelState, QueuedPublication, cancel_transfer,
+    BulkBinding, CancelReason, CancelState, DeadlineGuard, QueuedPublication, cancel_transfer,
     enqueue_transfer_with_queued,
 };
 use super::serialization::metadata_json;
@@ -273,7 +273,7 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
         BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &_deadline)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
-    let mut state = FileReadStream::new(job);
+    let mut state = FileReadStream::new(job, &_deadline);
     let response = protocol
         .stream_cancellable(
             v1::Request {
@@ -307,6 +307,10 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
 /// body frames, and a terminal response that has to agree with both.
 struct FileReadStream<'a> {
     job: &'a FileReadJob,
+    /// Refreshed by every accepted frame. Without it the inactivity watchdog
+    /// counts the whole transfer as one silence, so a large open on a slow
+    /// remote link is cancelled precisely while it is making steady progress.
+    deadline: &'a DeadlineGuard,
     header: Option<v1::FileStreamHeader>,
     offset: u64,
     hasher: blake3::Hasher,
@@ -314,9 +318,10 @@ struct FileReadStream<'a> {
 }
 
 impl<'a> FileReadStream<'a> {
-    fn new(job: &'a FileReadJob) -> Self {
+    fn new(job: &'a FileReadJob, deadline: &'a DeadlineGuard) -> Self {
         Self {
             job,
+            deadline,
             header: None,
             offset: 0,
             hasher: blake3::Hasher::new(),
@@ -325,6 +330,7 @@ impl<'a> FileReadStream<'a> {
     }
 
     fn accept(&mut self, frame: v1::FileStreamFrame) -> Result<(), String> {
+        self.deadline.touch();
         if let Some(header) = frame.header {
             if self.header.is_some() {
                 return Err("file open stream repeated its header".into());

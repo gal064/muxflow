@@ -188,16 +188,16 @@ fn a_page_token_is_bound_to_its_exact_server_root_and_directory() {
             &left.next_page_token,
             2,
         )
-        .unwrap_err()
-        .to_string();
-    assert!(crossed.contains("stale_page_token"), "got {crossed}");
+        .unwrap_err();
+    // The classification, not the wording: the wire code is the error's
+    // identity, so renaming the message cannot silently reclassify it.
+    assert_eq!(FileFailure::of(&crossed), FileFailure::StalePageToken);
+    assert_eq!(FileFailure::StalePageToken.code(), "stale_page_token");
     for malformed in ["bad", "p1:deadbeefdeadbeef", "p1::::"] {
-        assert!(
-            service
-                .list_directory_page(root.to_str().unwrap(), "left", "page", malformed, 2)
-                .is_err(),
-            "{malformed} was accepted"
-        );
+        let rejected = service
+            .list_directory_page(root.to_str().unwrap(), "left", "page", malformed, 2)
+            .expect_err("{malformed} was accepted");
+        assert_eq!(FileFailure::of(&rejected), FileFailure::StalePageToken);
     }
     fs::remove_dir_all(root).unwrap();
 }
@@ -261,9 +261,9 @@ fn a_cancelled_listing_stops_the_bounded_scan_instead_of_completing_it() {
             0,
             &cancelled,
         )
-        .unwrap_err()
-        .to_string();
-    assert!(error.starts_with("cancelled"), "got {error}");
+        .unwrap_err();
+    assert_eq!(FileFailure::of(&error), FileFailure::Cancelled);
+    assert_eq!(FileFailure::Cancelled.code(), "cancelled");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -299,9 +299,17 @@ fn stale_root_token_rejects_same_path_replacement_before_worker_open() {
 fn an_unchanged_root_capability_keeps_the_generation_its_client_already_holds() {
     let (root, service) = fixture();
     let token = root_token(root.to_str().unwrap()).unwrap();
-    let first = service.root_generation_for(&token);
-    assert_eq!(service.root_generation_for(&token), first);
-    assert_eq!(service.root_generation_for(&token), first);
-    assert_ne!(service.root_generation_for("a-different-capability"), first);
+    let first = root_generation(&token);
+    assert_eq!(root_generation(&token), first);
+    assert_ne!(root_generation("a-different-capability"), first);
+    // Never the protobuf default, which a client reads as "unsaid".
+    assert_ne!(first, 0);
+    // Derived, so no number of distinct roots can make an existing one look
+    // replaced — the map this used to keep evicted by clearing itself.
+    for index in 0..512 {
+        assert_ne!(root_generation(&format!("capability-{index}")), 0);
+    }
+    assert_eq!(root_generation(&token), first);
+    drop(service);
     fs::remove_dir_all(root).unwrap();
 }

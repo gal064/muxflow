@@ -553,3 +553,24 @@ fn active_root_probe_round_trips_a_known_capability_and_its_unchanged_answer() {
     assert!(decoded.root_unchanged);
     assert!(decoded.directory.is_none());
 }
+
+/// Single-request file opens are negotiated, not assumed.
+///
+/// The daemon lives on a host the user upgrades separately from the app, so a
+/// desktop that finds this bit missing must refuse the connection rather than
+/// handshake cleanly and then fail every file open it is asked for.
+#[test]
+fn single_request_file_opens_are_a_negotiated_capability() {
+    use tmux_agent_protocol::{CAP_FILE_STREAM, CAP_TERMINAL_OUTPUT_CREDIT, HOST_CAPABILITIES};
+    assert_eq!(CAP_FILE_STREAM, 1 << 15);
+    // Append-only: every previously assigned bit keeps its position.
+    assert_eq!(CAP_TERMINAL_OUTPUT_CREDIT, 1 << 14);
+    assert_ne!(HOST_CAPABILITIES & CAP_FILE_STREAM, 0);
+    let older_peer = HOST_CAPABILITIES & !CAP_FILE_STREAM;
+    assert_eq!(older_peer & CAP_FILE_STREAM, 0);
+    assert_ne!(
+        HOST_CAPABILITIES & !older_peer,
+        0,
+        "an older peer must be detectably missing something"
+    );
+}
