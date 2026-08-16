@@ -1,4 +1,11 @@
+use super::listing_page::{
+    EntryKey, PageBinding, SNAPSHOT_ENTRY_LIMIT, decode_page_token, encode_page_token, entry_key,
+};
 use super::*;
+
+/// A directory read nothing can cancel: the watcher's own rescans, whose
+/// lifetime is the watch rather than one client request.
+pub(super) static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 impl FileService {
     #[cfg(test)]
@@ -9,7 +16,7 @@ impl FileService {
         watch_id: &str,
     ) -> anyhow::Result<v1::DirectorySnapshot> {
         let token = root_token(root)?;
-        self.list_directory_page_authorized(root, &token, path, watch_id, "", 0)
+        self.list_directory_page_authorized(root, &token, path, watch_id, "", 0, &NEVER_CANCELLED)
     }
 
     #[cfg(test)]
@@ -22,9 +29,18 @@ impl FileService {
         page_size: u32,
     ) -> anyhow::Result<v1::DirectorySnapshot> {
         let token = root_token(root)?;
-        self.list_directory_page_authorized(root, &token, path, watch_id, page_token, page_size)
+        self.list_directory_page_authorized(
+            root,
+            &token,
+            path,
+            watch_id,
+            page_token,
+            page_size,
+            &NEVER_CANCELLED,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn list_directory_page_authorized(
         &self,
         root: &str,
@@ -33,81 +49,110 @@ impl FileService {
         watch_id: &str,
         page_token: &str,
         page_size: u32,
+        cancellation: &AtomicBool,
     ) -> anyhow::Result<v1::DirectorySnapshot> {
         let root = RootCapability::validate(root, root_token)?;
-        list_directory_impl(
+        self.list_directory_snapshot(
             &root,
             path,
             watch_id,
             self.next_generation(),
             page_token,
             page_size,
+            cancellation,
         )
+    }
+
+    /// Reads one page of a directory, reusing a retained ordered snapshot when
+    /// the caller is continuing a listing it already started.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn list_directory_snapshot(
+        &self,
+        root: &RootCapability,
+        path: &str,
+        watch_id: &str,
+        generation: u64,
+        page_token: &str,
+        page_size: u32,
+        cancellation: &AtomicBool,
+    ) -> anyhow::Result<v1::DirectorySnapshot> {
+        let (logical_target, directory) = open_listable_directory(root, path)?;
+        let binding = PageBinding::capture(root, &logical_target, &directory)?;
+        let page_size = normalize_page_size(page_size);
+        let cursor = decode_page_token(&binding, page_token)?;
+
+        // A retained snapshot answers without touching the filesystem again.
+        // `page` returns `None` exactly when it cannot — expired, bound to
+        // another directory, or exhausted past a truncated scan — and the
+        // token's own resume key then drives one further bounded scan.
+        if let Some(cursor) = &cursor
+            && let Some(retained) = self.pages.page(&binding, cursor, page_size)
+        {
+            let next_page_token = retained.next.as_ref().map(|(index, key)| {
+                encode_page_token(&binding, &retained.snapshot_id, *index, key)
+            });
+            return Ok(snapshot(
+                root,
+                &logical_target,
+                watch_id,
+                generation,
+                retained.entries,
+                next_page_token,
+            ));
+        }
+
+        let resume_after = cursor.and_then(|cursor| cursor.resume_after);
+        let (entries, truncated) = scan_ordered_entries(
+            root,
+            &logical_target,
+            &directory,
+            resume_after.as_ref(),
+            cancellation,
+        )?;
+        let taken = entries.len().min(page_size);
+        let has_more = entries.len() > taken || truncated;
+        let page: Vec<v1::FileMetadata> = entries[..taken]
+            .iter()
+            .map(|(_, metadata)| metadata.clone())
+            .collect();
+        let next_page_token = if has_more {
+            let last_key = entries[taken - 1].0.clone();
+            let snapshot_id = self.pages.insert(binding.clone(), entries, truncated);
+            Some(encode_page_token(&binding, &snapshot_id, taken, &last_key))
+        } else {
+            None
+        };
+        Ok(snapshot(
+            root,
+            &logical_target,
+            watch_id,
+            generation,
+            page,
+            next_page_token,
+        ))
     }
 }
 
-pub(super) fn list_directory_impl(
-    root: &RootCapability,
-    path: &str,
-    watch_id: &str,
-    generation: u64,
-    page_token: &str,
-    page_size: u32,
-) -> anyhow::Result<v1::DirectorySnapshot> {
-    let (logical_target, _) = root.resolve_new(path)?;
-    let directory = if logical_target == root.logical_root() {
-        root.open_root_directory()?
-    } else {
-        root.anchor(&logical_target)?.open_directory()?
-    };
-    ensure_enterable(root, &logical_target)?;
-    let page_size = if page_size == 0 {
+fn normalize_page_size(page_size: u32) -> usize {
+    if page_size == 0 {
         DEFAULT_DIRECTORY_PAGE
     } else {
         usize::try_from(page_size)
             .unwrap_or(MAX_DIRECTORY_ENTRIES)
             .clamp(1, MAX_DIRECTORY_ENTRIES)
-    };
-    let start = decode_page_token(page_token)?;
-    let mut candidates = BTreeMap::<(u8, Vec<u8>), v1::FileMetadata>::new();
-    let entries = if logical_target == root.logical_root() {
-        root.directory_entries()?
-    } else {
-        root.anchor(&logical_target)?.directory_entries()?
-    };
-    for name in entries {
-        // Before the page window, not after it: the entry is not in this
-        // listing at all, so it must not consume a page slot or become the
-        // pagination token the next page resumes from.
-        if is_always_hidden(&name) {
-            continue;
-        }
-        let entry = AnchoredPath::in_directory(&directory, name.clone())?;
-        let metadata = metadata_for_directory_entry(&entry, &logical_target.join(&name))?;
-        let rank = u8::from(metadata.kind != i32::from(v1::FileKind::Directory));
-        let key = (rank, name.as_bytes().to_vec());
-        if start.as_ref().is_some_and(|start| key <= *start) {
-            continue;
-        }
-        candidates.insert(key, metadata);
-        if candidates.len() > page_size.saturating_add(1) {
-            candidates.pop_last();
-        }
     }
-    let overflowed = candidates.len() > page_size;
-    if overflowed {
-        candidates.pop_last();
-    }
-    let next_page_token = if overflowed {
-        candidates
-            .last_key_value()
-            .map(|(key, _)| encode_page_token(key))
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let entries = candidates.into_values().collect();
-    Ok(v1::DirectorySnapshot {
+}
+
+fn snapshot(
+    root: &RootCapability,
+    logical_target: &Path,
+    watch_id: &str,
+    generation: u64,
+    entries: Vec<v1::FileMetadata>,
+    next_page_token: Option<String>,
+) -> v1::DirectorySnapshot {
+    let overflowed = next_page_token.is_some();
+    v1::DirectorySnapshot {
         watch_id: watch_id.to_owned(),
         root: root.logical_root().to_string_lossy().into_owned(),
         path: logical_target.to_string_lossy().into_owned(),
@@ -115,9 +160,66 @@ pub(super) fn list_directory_impl(
         entries,
         overflowed,
         authoritative: true,
-        next_page_token,
+        next_page_token: next_page_token.unwrap_or_default(),
         complete: !overflowed,
-    })
+    }
+}
+
+fn open_listable_directory(root: &RootCapability, path: &str) -> anyhow::Result<(PathBuf, File)> {
+    let (logical_target, _) = root.resolve_new(path)?;
+    let directory = if logical_target == root.logical_root() {
+        root.open_root_directory()?
+    } else {
+        root.anchor(&logical_target)?.open_directory()?
+    };
+    ensure_enterable(root, &logical_target)?;
+    Ok((logical_target, directory))
+}
+
+/// Enumerates and stats one bounded ordered window of a directory.
+///
+/// The ordered set is bounded at [`SNAPSHOT_ENTRY_LIMIT`] and entries at or
+/// before `resume_after` are dropped rather than retained, so peak memory is a
+/// window rather than the directory. Ranking an entry requires its metadata, so
+/// one scan still stats every visible name once — but only once per window,
+/// rather than once per page as an unbacked resume-by-key scan did.
+fn scan_ordered_entries(
+    root: &RootCapability,
+    logical_target: &Path,
+    directory: &File,
+    resume_after: Option<&EntryKey>,
+    cancellation: &AtomicBool,
+) -> anyhow::Result<(Vec<(EntryKey, v1::FileMetadata)>, bool)> {
+    let names = if logical_target == root.logical_root() {
+        root.directory_entries()?
+    } else {
+        root.anchor(logical_target)?.directory_entries()?
+    };
+    let mut ordered = BTreeMap::<EntryKey, v1::FileMetadata>::new();
+    let mut truncated = false;
+    for name in names {
+        if cancellation.load(Ordering::Acquire) {
+            bail!("cancelled: directory listing cancelled");
+        }
+        // Before the page window, not after it: the entry is not in this
+        // listing at all, so it must not consume a page slot or become the
+        // pagination token the next page resumes from.
+        if is_always_hidden(&name) {
+            continue;
+        }
+        let entry = AnchoredPath::in_directory(directory, name.clone())?;
+        let metadata = metadata_for_directory_entry(&entry, &logical_target.join(&name))?;
+        let key = entry_key(&metadata, &name);
+        if resume_after.is_some_and(|resume_after| key <= *resume_after) {
+            continue;
+        }
+        ordered.insert(key, metadata);
+        if ordered.len() > SNAPSHOT_ENTRY_LIMIT {
+            ordered.pop_last();
+            truncated = true;
+        }
+    }
+    Ok((ordered.into_iter().collect(), truncated))
 }
 
 pub(super) fn resolve_watch_directory(
@@ -160,32 +262,4 @@ fn ensure_enterable(root: &RootCapability, logical_target: &Path) -> anyhow::Res
         );
     }
     Ok(())
-}
-
-fn encode_page_token(key: &(u8, Vec<u8>)) -> String {
-    let mut value = format!("{}:", key.0);
-    for byte in &key.1 {
-        use std::fmt::Write as _;
-        let _ = write!(value, "{byte:02x}");
-    }
-    value
-}
-
-fn decode_page_token(value: &str) -> anyhow::Result<Option<(u8, Vec<u8>)>> {
-    if value.is_empty() {
-        return Ok(None);
-    }
-    let (rank, encoded) = value
-        .split_once(':')
-        .context("invalid directory page token")?;
-    let rank = rank.parse::<u8>().context("invalid directory page token")?;
-    if rank > 1 || encoded.len() % 2 != 0 || encoded.len() > 8192 {
-        bail!("invalid directory page token");
-    }
-    let mut bytes = Vec::with_capacity(encoded.len() / 2);
-    for pair in encoded.as_bytes().chunks_exact(2) {
-        let text = std::str::from_utf8(pair).context("invalid directory page token")?;
-        bytes.push(u8::from_str_radix(text, 16).context("invalid directory page token")?);
-    }
-    Ok(Some((rank, bytes)))
 }

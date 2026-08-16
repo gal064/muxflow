@@ -13,11 +13,11 @@ const root: ActiveRoot = { token: "root-1", paneId: "%1", cwd: "/r", path: "/r",
 const listing: DirectoryListing = {
   rootToken: "root-1", directory: "/r", revision: "2", overflowRecovery: false, complete: true,
   entries: [
-    { path: "/r/.env", name: ".env", kind: "file", sizeBytes: "10", modifiedMillis: "1", executable: false, expandable: false },
-    { path: "/r/ignored.log", name: "ignored.log", kind: "file", sizeBytes: "20", modifiedMillis: "1", executable: false, expandable: false },
-    { path: "/r/.git", name: ".git", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: false },
-    { path: "/r/node_modules", name: "node_modules", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: false },
-    { path: "/r/link", name: "link", kind: "symlink", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: false, targetKind: "directory", symlinkTarget: "/outside" },
+    { path: "/r/.env", name: ".env", kind: "file", sizeBytes: "10", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+    { path: "/r/ignored.log", name: "ignored.log", kind: "file", sizeBytes: "20", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+    { path: "/r/.git", name: ".git", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+    { path: "/r/node_modules", name: "node_modules", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+    { path: "/r/link", name: "link", kind: "symlink", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: false, targetKind: "directory", symlinkTarget: "/outside" },
   ],
 };
 
@@ -30,7 +30,7 @@ describe("ExplorerTree", () => {
       ...listing,
       entries: Array.from({ length: 4_096 }, (_, index) => ({
         path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
-        sizeBytes: "1", modifiedMillis: "1", executable: false, expandable: false,
+        sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
       })),
     };
     let renderer!: ReturnType<typeof create>;
@@ -83,13 +83,13 @@ describe("ExplorerTree", () => {
       ...listing,
       entries: [
         ...listing.entries,
-        { path: "/r/target", name: "target", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true },
-        { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true },
+        { path: "/r/target", name: "target", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true },
+        { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true },
       ],
     };
     const targetListing: DirectoryListing = {
       rootToken: "root-1", directory: "/r/target", revision: "2", overflowRecovery: false, complete: true,
-      entries: [{ path: "/r/target/debug", name: "debug", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true }],
+      entries: [{ path: "/r/target/debug", name: "debug", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true }],
     };
     const listings = new Map([["/r", withTarget], ["/r/target", targetListing]]);
     const expanded = new Set(["/r", "/r/target"]);
@@ -145,7 +145,7 @@ describe("ExplorerTree", () => {
     const onToggle = vi.fn();
     const withDirectory: DirectoryListing = {
       ...listing,
-      entries: [...listing.entries, { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true }],
+      entries: [...listing.entries, { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true }],
     };
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", withDirectory]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}

@@ -137,6 +137,14 @@ impl OperationPolicy {
                 Scheduling::Detached,
                 Handler::Filesystem,
             ),
+            // Detached deliberately: the reader loop must stay free to admit
+            // this request's own Cancel while its bounded body is streaming.
+            v1::Operation::OpenFileStream => (
+                Access::ReadOnly,
+                Lane::Bulk,
+                Scheduling::Detached,
+                Handler::Filesystem,
+            ),
             v1::Operation::WatchDirectory
             | v1::Operation::UnwatchDirectory
             | v1::Operation::FileMutation
@@ -304,6 +312,7 @@ mod tests {
         assert_policy(UnwatchDirectory, M, C, Dd, FH);
         assert_policy(FileMutation, M, C, Dd, FH);
         assert_policy(ReadFile, R, C, Dd, FH);
+        assert_policy(OpenFileStream, R, B, Dd, FH);
         assert_policy(WriteFile, M, C, Dd, FH);
         assert_policy(StartDownload, M, B, I, FH);
         assert_policy(ReadDownloadChunk, M, B, I, FH);

@@ -9,11 +9,11 @@ import { useWorkspaceFiles } from "./useWorkspaceFiles";
 
 /** The hook's own constants, so the test moves with them rather than guessing. */
 const DIRECTORY_REFRESH_COALESCE_MS = 150;
-const ACTIVE_ROOT_POLL_MS = 2_000;
+const ACTIVE_ROOT_BACKSTOP_MS = 15_000;
 
 /**
  * Fake-timer clock that remembers where it is, so a test can place an event
- * relative to the root poll's phase rather than guessing at it.
+ * relative to the root backstop's phase rather than guessing at it.
  */
 function fakeClock() {
   let elapsed = 0;
@@ -26,9 +26,57 @@ function fakeClock() {
     advance,
     /** Runs out the coalescing window and lets React catch up. */
     settle: () => advance(DIRECTORY_REFRESH_COALESCE_MS + 10),
-    /** Stops `lead` ms short of the next active-root poll. */
-    justBeforePoll: (lead: number) => advance(ACTIVE_ROOT_POLL_MS - (elapsed % ACTIVE_ROOT_POLL_MS) - lead),
+    /** Stops `lead` ms short of the next active-root backstop probe. */
+    justBeforePoll: (lead: number) => advance(ACTIVE_ROOT_BACKSTOP_MS - (elapsed % ACTIVE_ROOT_BACKSTOP_MS) - lead),
   };
+}
+
+const BASE_SCOPE = { clientId: "c", hostProfileId: "local", serverIdentity: "s", generation: 1, terminalEpoch: 41, sessionId: "$1", paneId: "%1" } as const;
+
+function entry(path: string, options: { directory?: boolean; generation?: string } = {}) {
+  return {
+    path,
+    name: path.split("/").at(-1) ?? path,
+    kind: (options.directory ? "directory" : "file") as "directory" | "file",
+    sizeBytes: "1",
+    modifiedMillis: "1",
+    generation: options.generation ?? "1",
+    executable: false,
+    expandable: Boolean(options.directory),
+  };
+}
+
+function listing(rootToken: string, directory: string, entries: ReturnType<typeof entry>[] = []) {
+  return { rootToken, directory, revision: "1", entries, overflowRecovery: false, complete: true };
+}
+
+/**
+ * A client whose watch bootstrap is the directory's listing, as the production
+ * one's is, so a test can count exactly how many remote reads an interaction
+ * costs.
+ */
+function watchingClient(directories: Map<string, ReturnType<typeof entry>[]>, root: ActiveRoot) {
+  const acquired: string[] = [];
+  const released: string[] = [];
+  const listed: string[] = [];
+  let listener: ((event: WorkspaceEvent) => void) | undefined;
+  const client: FileWorkspaceClient = {
+    resolveActiveRoot: vi.fn(async () => root),
+    listDirectory: vi.fn(async (_scope, active, directory) => {
+      listed.push(directory);
+      return listing(active.token, directory, directories.get(directory) ?? []);
+    }),
+    acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => {
+      acquired.push(directory);
+      return {
+        snapshot: listing(active.token, directory, directories.get(directory) ?? []),
+        release: () => released.push(directory),
+      };
+    }),
+    openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+    subscribe: vi.fn(async (_scope, next) => { listener = next; return () => { listener = undefined; }; }),
+  };
+  return { acquired, client, listed, released, publish: (event: WorkspaceEvent) => listener?.(event) };
 }
 
 function deferred<T>() {
@@ -63,51 +111,136 @@ describe("useWorkspaceFiles", () => {
     await act(async () => { renderer.unmount(); await Promise.resolve(); });
   });
 
-  it("refreshes the affected parent for precise native create/change/delete events", async () => {
-    vi.useFakeTimers();
-    const clock = fakeClock();
-    const root = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
-    let listener: ((event: WorkspaceEvent) => void) | undefined;
-    let activeRoot = root;
-    const listing = (active: ActiveRoot, directory: string) =>
-      ({ rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true });
-    const listDirectory = vi.fn(async (_scope, active: ActiveRoot, directory: string) => listing(active, directory));
-    const client: FileWorkspaceClient = {
-      resolveActiveRoot: vi.fn(async () => activeRoot), listDirectory,
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true }, release: () => undefined })), openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
-      subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
-    };
-    const scope: FileWorkspaceScope = { clientId: "c", hostProfileId: "local", serverIdentity: "s", generation: 1, terminalEpoch: 41, sessionId: "$1", paneId: "%1" };
+  it("expands, revisits, and collapses through watch leases alone, never a second list", async () => {
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([
+      ["/repo", [entry("/repo/src", { directory: true }), entry("/repo/a.txt")]],
+      ["/repo/src", [entry("/repo/src/main.ts")]],
+    ]), root);
     let current: ReturnType<typeof useWorkspaceFiles> | undefined;
-    function Harness() { current = useWorkspaceFiles(client, scope); return null; }
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
-    const reads = () => listDirectory.mock.calls.filter((call) => call[2] === "/repo").length;
-    const before = reads();
-    // A burst, as an agent writing into the workspace root produces. They are
-    // one directory's worth of news and must cost one re-read, not five: over
-    // SSH each one is a round trip, and each one used to replace the whole list.
+    await act(async () => { await Promise.resolve(); });
+
+    // The root's listing arrived with its watch: one round trip, not two.
+    expect(fixture.acquired).toEqual(["/repo"]);
+    expect(fixture.listed).toEqual([]);
+    expect(current?.listings.get("/repo")?.entries).toHaveLength(2);
+
+    await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.acquired, "expanding one folder acquired exactly one watch").toEqual(["/repo", "/repo/src"]);
+    expect(fixture.listed, "expansion paid a redundant directory list").toEqual([]);
+    expect(current?.listings.get("/repo/src")?.entries).toHaveLength(1);
+
+    // Collapsing releases that one watch and touches nothing else.
+    await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
+    expect(fixture.released).toEqual(["/repo/src"]);
+    expect(fixture.acquired).toEqual(["/repo", "/repo/src"]);
+
+    // Revisiting paints from the cache on the spot, then revalidates.
+    await act(async () => { current?.toggleDirectory("/repo/src"); });
+    expect(current?.listings.get("/repo/src")?.entries, "a cached revisit did not paint locally").toHaveLength(1);
+    expect(current?.loading.has("/repo/src")).toBe(false);
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.acquired).toEqual(["/repo", "/repo/src", "/repo/src"]);
+    expect(fixture.listed).toEqual([]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("patches a listing from a precise event and lists only when it genuinely cannot", async () => {
+    vi.useFakeTimers();
+    const clock = fakeClock();
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // A created file is one row, and costs no request at all.
+    await act(async () => {
+      fixture.publish({ kind: "fileChanged", rootToken: "root", path: "/repo/new.txt", generation: "5", entry: entry("/repo/new.txt", { generation: "5" }) });
+      await clock.settle();
+    });
+    expect(fixture.listed, "a precise create re-listed the whole directory").toEqual([]);
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.path)).toEqual(["/repo/a.txt", "/repo/new.txt"]);
+
+    // So is an edit to a row already present.
+    await act(async () => {
+      fixture.publish({ kind: "fileChanged", rootToken: "root", path: "/repo/a.txt", generation: "9", entry: entry("/repo/a.txt", { generation: "9" }) });
+      await clock.settle();
+    });
+    expect(fixture.listed).toEqual([]);
+    expect(current?.listings.get("/repo")?.entries.find((item) => item.path === "/repo/a.txt")?.generation).toBe("9");
+
+    // And a delete.
+    await act(async () => {
+      fixture.publish({ kind: "fileDeleted", rootToken: "root", path: "/repo/new.txt" });
+      await clock.settle();
+    });
+    expect(fixture.listed).toEqual([]);
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.path)).toEqual(["/repo/a.txt"]);
+
+    // An event the host could not map is the one case that owes a recovery
+    // list, and a burst of them still owes exactly one.
     await act(async () => {
       for (let index = 0; index < 5; index += 1) {
-        listener?.({ kind: "fileChanged", rootToken: "root", path: `/repo/new-${index}.txt`, generation: "2" });
+        fixture.publish({ kind: "fileChanged", rootToken: "root", path: `/repo/opaque-${index}`, generation: "1" });
       }
-      await Promise.resolve();
+      await clock.settle();
     });
-    expect(reads(), "a burst re-read the directory before its window closed").toBe(before);
-    await act(async () => { await clock.settle(); });
-    expect(reads()).toBe(before + 1);
-    // And the window reopens, so a directory under continuous change still
-    // refreshes rather than being starved by the events behind it.
-    await act(async () => { listener?.({ kind: "fileChanged", rootToken: "root", path: "/repo/later.txt", generation: "3" }); await clock.settle(); });
-    expect(reads()).toBe(before + 2);
-    // The wait put a root change between the check that admitted the event and
-    // the request it authorised. An event for the root that has since been left
-    // must not be read against the root that replaced it — the completion guards
-    // cannot catch that one, because they compare against the root the request
-    // carried, which is the new one.
-    // Timed so the root actually moves *inside* the window rather than before
-    // it opens or after it shuts: sit just short of the root poll, raise the
-    // event, then let the poll land and only then let the window close.
+    expect(fixture.listed).toEqual(["/repo"]);
+    await act(async () => { renderer.unmount(); });
+    vi.useRealTimers();
+  });
+
+  it("replaces a listing from an authoritative rescan without asking for it again", async () => {
+    vi.useFakeTimers();
+    const clock = fakeClock();
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      fixture.publish({
+        kind: "directorySnapshot",
+        rootToken: "root",
+        listing: { ...listing("root", "/repo", [entry("/repo/rebuilt")]), overflowRecovery: true },
+      });
+      await clock.settle();
+    });
+    expect(fixture.listed, "an authoritative snapshot was answered with another list").toEqual([]);
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.path)).toEqual(["/repo/rebuilt"]);
+    await act(async () => { renderer.unmount(); });
+    vi.useRealTimers();
+  });
+
+  it("never reads a path from the root it was raised under against the root that replaced it", async () => {
+    vi.useFakeTimers();
+    const clock = fakeClock();
+    let activeRoot: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const listDirectory = vi.fn(async (_scope: FileWorkspaceScope, active: ActiveRoot, directory: string) => listing(active.token, directory));
+    let listener: ((event: WorkspaceEvent) => void) | undefined;
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async () => activeRoot),
+      listDirectory,
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: listing(active.token, directory), release: () => undefined })),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
+    };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    // Sit just short of the backstop, raise an unmappable event so a recovery
+    // list is deferred, then let the root move inside that window.
     await act(async () => { await clock.justBeforePoll(20); });
     activeRoot = { token: "next", paneId: "%1", cwd: "/other", path: "/other", gitWorktree: true, revision: "2" };
     await act(async () => {
@@ -116,9 +249,8 @@ describe("useWorkspaceFiles", () => {
     });
     expect(current?.root?.token, "the fixture never moved the root inside the window").toBe("next");
     await act(async () => { await clock.settle(); });
-    expect(current?.root?.token).toBe("next");
     expect(
-      listDirectory.mock.calls.some((call) => call[2] === "/repo" && (call[1] as ActiveRoot).token === "next"),
+      listDirectory.mock.calls.some((call) => call[2] === "/repo"),
       "a path from the previous root was listed against the root that replaced it",
     ).toBe(false);
     await act(async () => { renderer.unmount(); });

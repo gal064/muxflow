@@ -81,6 +81,8 @@ pub struct FileCommand {
     pub page_token: String,
     #[serde(default)]
     pub page_size: u32,
+    #[serde(default)]
+    pub known_root_token: String,
 }
 
 /// Async so the host round trip never runs on the WebView's main thread: a
@@ -114,19 +116,40 @@ pub async fn file_request(
         root_token: command.root_token,
         page_token: command.page_token,
         page_size: command.page_size,
+        known_root_token: command.known_root_token,
         ..Default::default()
     };
     let client = get_client(&clients, &client_id)?;
+    let operation_id = request.operation_id.clone();
     let request = v1::Request {
         operation: operation.into(),
         file: Some(request),
         ..Default::default()
     };
-    let response = tauri::async_runtime::spawn_blocking(move || client.request(request))
-        .await
-        .map_err(|error| format!("file request task failed: {error}"))??;
+    let response =
+        tauri::async_runtime::spawn_blocking(move || client.request_file(request, &operation_id))
+            .await
+            .map_err(|error| format!("file request task failed: {error}"))??;
     let file = response.file.ok_or("host omitted file-service response")?;
     Ok(file_response_json(&file))
+}
+
+/// Cancels an in-flight control-lane file request by its renderer operation ID.
+///
+/// The renderer owns the operation ID from the moment it issues the request, so
+/// a collapse, root replacement, or superseded preview can stop bounded remote
+/// enumeration that nothing will read — rather than paying for it and throwing
+/// the answer away.
+#[tauri::command]
+pub fn cancel_file_request(
+    client_id: String,
+    operation_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    if operation_id.is_empty() {
+        return Err("operation ID is required".into());
+    }
+    get_client(&clients, &client_id)?.cancel_file(&operation_id)
 }
 
 fn operation_from_name(value: &str) -> Result<v1::Operation, String> {

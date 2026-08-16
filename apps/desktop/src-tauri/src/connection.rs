@@ -99,7 +99,10 @@ struct TerminalClient {
     read_only: AtomicBool,
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
-    git_operations: Mutex<HashMap<String, u64>>,
+    /// Request ids of in-flight, cancellable operations, keyed by the lane
+    /// that owns the operation id. Two lanes mint ids independently, so one
+    /// map keyed by the id alone could cancel the wrong request.
+    operations: Mutex<HashMap<(OperationLane, String), u64>>,
     input_queue: Mutex<ClientInputQueue>,
     resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
@@ -109,6 +112,22 @@ struct TerminalClient {
     delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
     delivery_ack_serialization: Mutex<()>,
     pending_delivery_ack: Mutex<Option<(u64, HostCharge)>>,
+}
+
+/// Which operation-id namespace an in-flight cancellable request belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum OperationLane {
+    Git,
+    File,
+}
+
+impl OperationLane {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Git => "Git",
+            Self::File => "file",
+        }
+    }
 }
 
 struct InitialHostState {
@@ -130,7 +149,7 @@ impl TerminalClient {
             read_only: AtomicBool::new(false),
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
-            git_operations: Mutex::new(HashMap::new()),
+            operations: Mutex::new(HashMap::new()),
             input_queue: Mutex::new(ClientInputQueue::default()),
             resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
@@ -335,14 +354,34 @@ impl TerminalClient {
         request: v1::Request,
         operation_id: &str,
     ) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, GIT_REQUEST_TIMEOUT, Some(operation_id.to_owned()))
+        self.request_with_timeout(
+            request,
+            GIT_REQUEST_TIMEOUT,
+            Some((OperationLane::Git, operation_id.to_owned())),
+        )
+    }
+
+    /// A control-lane file request the renderer can cancel by operation id.
+    ///
+    /// Explorer listings are the one control-lane file operation worth
+    /// cancelling: a collapsed folder, a replaced root, or a superseded
+    /// preview leaves a bounded remote enumeration running that nothing will
+    /// ever read, and on the remote link that is the whole cost of the action.
+    fn request_file(
+        &self,
+        request: v1::Request,
+        operation_id: &str,
+    ) -> Result<v1::Response, String> {
+        let key =
+            (!operation_id.is_empty()).then(|| (OperationLane::File, operation_id.to_owned()));
+        self.request_with_timeout(request, REQUEST_TIMEOUT, key)
     }
 
     fn request_with_timeout(
         &self,
         request: v1::Request,
         timeout: Duration,
-        git_operation_id: Option<String>,
+        operation: Option<(OperationLane, String)>,
     ) -> Result<v1::Response, String> {
         let deadline = Instant::now() + timeout;
         if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
@@ -358,13 +397,13 @@ impl TerminalClient {
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = mpsc::channel();
         self.pending.lock().unwrap().insert(request_id, sender);
-        if let Some(operation_id) = &git_operation_id {
-            let mut operations = self.git_operations.lock().unwrap();
-            if operations.contains_key(operation_id) {
+        if let Some(key) = &operation {
+            let mut operations = self.operations.lock().unwrap();
+            if operations.contains_key(key) {
                 self.pending.lock().unwrap().remove(&request_id);
-                return Err("duplicate Git operation ID".into());
+                return Err(format!("duplicate {} operation ID", key.0.label()));
             }
-            operations.insert(operation_id.clone(), request_id);
+            operations.insert(key.clone(), request_id);
         }
         let write_result = self
             .writer
@@ -377,8 +416,8 @@ impl TerminalClient {
             });
         if let Err(error) = write_result {
             self.pending.lock().unwrap().remove(&request_id);
-            if let Some(operation_id) = &git_operation_id {
-                self.git_operations.lock().unwrap().remove(operation_id);
+            if let Some(key) = &operation {
+                self.operations.lock().unwrap().remove(key);
             }
             return Err(error);
         }
@@ -410,20 +449,28 @@ impl TerminalClient {
                 )
             }
         };
-        if let Some(operation_id) = &git_operation_id {
-            self.git_operations.lock().unwrap().remove(operation_id);
+        if let Some(key) = &operation {
+            self.operations.lock().unwrap().remove(key);
         }
         result
     }
 
     fn cancel_git(&self, operation_id: &str) -> Result<(), String> {
+        self.cancel_operation(OperationLane::Git, operation_id)
+    }
+
+    fn cancel_file(&self, operation_id: &str) -> Result<(), String> {
+        self.cancel_operation(OperationLane::File, operation_id)
+    }
+
+    fn cancel_operation(&self, lane: OperationLane, operation_id: &str) -> Result<(), String> {
         let request_id = self
-            .git_operations
+            .operations
             .lock()
             .unwrap()
-            .get(operation_id)
+            .get(&(lane, operation_id.to_owned()))
             .copied()
-            .ok_or_else(|| "unknown or completed Git operation ID".to_owned())?;
+            .ok_or_else(|| format!("unknown or completed {} operation ID", lane.label()))?;
         let writer = self
             .writer
             .lock()
@@ -443,7 +490,7 @@ impl TerminalClient {
     }
 
     fn fail_pending(&self, message: &str) {
-        self.git_operations.lock().unwrap().clear();
+        self.operations.lock().unwrap().clear();
         for (_, sender) in self.pending.lock().unwrap().drain() {
             let _ = sender.send(Err(message.into()));
         }

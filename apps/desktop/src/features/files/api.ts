@@ -7,49 +7,32 @@ import type {
   DirectoryListing,
   DirectoryWatchLease,
   DownloadRequest,
-  FileEntry,
   FileMutation,
   FileWorkspaceClient,
   FileWorkspaceScope,
+  ListDirectoryOptions,
   OpenFile,
+  ResolveRootOptions,
   TextFile,
   TransferStatus,
   WorkspaceEvent,
   WriteTextRequest,
   WriteTextResult,
 } from "./types";
+import type { WireContent, WireDownloadEvent, WireFileEvent, WireFileIoEvent, WireMetadata, WireResponse } from "./wire";
 import {
-  isTerminalTransferState,
-  transferCleanupStatusFromWire,
-  transferFailureKindFromWire,
-  transferOutcomeFromWire,
-  transferStateFromWire,
-  validateTransferStateOutcome,
-} from "../transfers/transferState";
+  applyLineEnding,
+  detectLineEnding,
+  isRenderableEntry,
+  mapDirectory,
+  mapDownloadEvent,
+  mapEntry,
+  mapRoot,
+} from "./wire";
 
-interface WireMetadata {
-  path: string; name: string; kind: string; size: string; modifiedUnixMillis: string; mode: number;
-  symlink: boolean; symlinkTarget: string; expandable: boolean; generation: string; mime: string; imagePreviewEligible: boolean;
-  symlinkTargetKind?: string;
-}
-interface WireRoot { paneId: string; root: string; rootToken: string; gitWorktree: boolean; serverIdentity: string; topologyGeneration: string; rootGeneration: string }
-interface WireDirectory { watchId: string; root: string; path: string; generation: string; entries: WireMetadata[]; overflowed: boolean; authoritative: boolean; nextPageToken: string; complete: boolean }
-interface WireContent { metadata?: WireMetadata; kind: "text" | "binary" | "image" | "tooLarge" | "unspecified"; content: number[]; generation: string }
-interface WireResponse { operationId: string; activeRoot?: WireRoot; directory?: WireDirectory; content?: WireContent; metadata?: WireMetadata }
-export interface WireFileEvent { operationId: string; activeRoot?: WireRoot; directory?: WireDirectory; metadata?: WireMetadata; deleted?: boolean; rootToken?: string; watchId?: string; transferId: string; transferredBytes: string; totalBytes: string; state: string; error: string }
-interface WireDownloadEvent {
-  transferId: string; state: string; transferredBytes?: string; totalBytes?: string; totalKnown?: boolean;
-  throughputBytesPerSecond?: string | number; etaSeconds?: number; destination?: string;
-  artifactKind?: "file" | "tarArchive"; blake3?: string; error?: string; cleanupError?: string;
-  cleanupStatus?: string; outcome?: string; failureKind?: string; serverIdentity?: string;
-  expectedServerIdentity?: string; connectionEpoch?: string; terminal?: boolean;
-}
-interface WireFileIoEvent {
-  transferId: string; operationId?: string; state: string; purpose?: "text" | "imagePreview";
-  metadata?: WireMetadata; metadataOnly?: boolean; contentKind?: WireContent["kind"];
-  transferredBytes?: string; totalBytes?: string; generation?: string; blake3?: string; error?: string;
-}
-interface FileReadTransfer { metadata: WireMetadata; contentKind: WireContent["kind"]; bytes?: Uint8Array; generation: string }
+export type { WireFileEvent } from "./wire";
+
+interface OpenedFile { metadata: WireMetadata; contentKind: WireContent["kind"]; bytes?: Uint8Array; generation: string }
 
 const encoder = new TextEncoder();
 const fatalDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -57,32 +40,42 @@ const fatalDecoder = new TextDecoder("utf-8", { fatal: true });
 /** Renderer adapter for the production host file service. */
 export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   readonly #listeners = new Set<(event: WorkspaceEvent) => void>();
-  readonly #rootTokens = new Map<string, string>();
   readonly #watches = new Map<string, { clientId: string; count: number; watchId: string; ready: Promise<DirectoryListing> }>();
 
-  async resolveActiveRoot(scope: FileWorkspaceScope): Promise<ActiveRoot> {
+  async resolveActiveRoot(scope: FileWorkspaceScope, options: ResolveRootOptions = {}): Promise<ActiveRoot> {
     return this.#request(scope, {
-        operation: "resolveActiveRoot", operationId: crypto.randomUUID(), paneId: scope.paneId,
-        expectedServerIdentity: scope.serverIdentity, expectedTopologyGeneration: String(scope.generation),
-      }, (response) => {
-        if (!response.activeRoot) throw new Error("Host omitted the active root.");
-        return this.#root(response.activeRoot);
-      }, "files.resolveActiveRoot");
+      operation: "resolveActiveRoot", operationId: crypto.randomUUID(), paneId: scope.paneId,
+      expectedServerIdentity: scope.serverIdentity, expectedTopologyGeneration: String(scope.generation),
+      knownRootToken: options.knownRootToken ?? "",
+    }, (response) => {
+      if (!response.activeRoot) throw new Error("Host omitted the active root.");
+      if (response.rootUnchanged) recordPerfCounter("explorer.rootProbeUnchanged");
+      return mapRoot(response.activeRoot);
+    }, "files.resolveActiveRoot");
   }
 
-  async listDirectory(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, pageToken = ""): Promise<DirectoryListing> {
+  async listDirectory(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, options: ListDirectoryOptions = {}): Promise<DirectoryListing> {
     recordPerfCounter("explorer.directoryListRequests");
-    const directoryListing = await this.#request(scope, this.#rootCommand(root, {
-      operation: "listDirectory", operationId: crypto.randomUUID(), path: directory, pageToken, pageSize: 4096,
+    const operationId = crypto.randomUUID();
+    return this.#request(scope, this.#rootCommand(root, {
+      operation: "listDirectory", operationId, path: directory, pageToken: options.pageToken ?? "", pageSize: 4096,
     }), (response) => {
       if (!response.directory) throw new Error("Host omitted the directory listing.");
       recordPerfCounter("explorer.listPayloadEntries", response.directory.entries.length);
       recordPerfJsonBytesDeferred("explorer.listMappedPayloadBytes", response.directory);
-      return this.#directory(response.directory, root.token);
-    }, "files.listDirectory.request");
-    return directoryListing;
+      return mapDirectory(response.directory, root.token);
+    }, "files.listDirectory.request", { scope, operationId, signal: options.signal });
   }
 
+  /**
+   * Acquires a shared watch on one directory, whose bootstrap snapshot *is* the
+   * directory's initial listing.
+   *
+   * Arming a watch already costs the host a full authoritative listing, so a
+   * caller that also issued a list paid a second remote round trip for an
+   * answer it was about to be handed. Callers take the lease and read
+   * `snapshot`.
+   */
   async acquireDirectoryWatch(scope: FileWorkspaceScope, root: ActiveRoot, directory: string): Promise<DirectoryWatchLease> {
     recordPerfCounter("explorer.watchSubscribers");
     const key = watchKey(scope, root, directory);
@@ -95,7 +88,8 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
         operation: "watchDirectory", operationId: crypto.randomUUID(), path: directory, watchId,
       }), (response) => {
         if (!response.directory) throw new Error("Host omitted the watch bootstrap snapshot.");
-        return this.#directory(response.directory, root.token);
+        recordPerfCounter("explorer.watchBootstrapEntries", response.directory.entries.length);
+        return mapDirectory(response.directory, root.token);
       }, "files.watchDirectory.request");
       record = { clientId: scope.clientId, count: 1, watchId, ready };
       this.#watches.set(key, record);
@@ -113,6 +107,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       current.count -= 1;
       if (current.count > 0) return;
       this.#watches.delete(key);
+      recordPerfCounter("explorer.unwatchRequests");
       void current.ready.then(() => this.#request(
         { ...scope, clientId: current.clientId },
         { operation: "unwatchDirectory", operationId: crypto.randomUUID(), watchId: current.watchId },
@@ -134,30 +129,27 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   }
 
   async #openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile> {
-    let transfer = await this.#readFile(scope, root, path, "text", signal);
-    if (transfer.contentKind === "text" && transfer.bytes) {
+    const opened = await this.#readOpenedFile(scope, root, path, signal);
+    if (opened.contentKind === "text" && opened.bytes) {
       let value: string;
-      try { value = fatalDecoder.decode(transfer.bytes); } catch { throw new Error("Host returned invalid UTF-8 for a text file."); }
+      try { value = fatalDecoder.decode(opened.bytes); } catch { throw new Error("Host returned invalid UTF-8 for a text file."); }
       const file: TextFile = {
-        path: transfer.metadata.path,
+        path: opened.metadata.path,
         content: value,
-        generation: transfer.generation,
-        sizeBytes: String(transfer.metadata.size),
+        generation: opened.generation,
+        sizeBytes: String(opened.metadata.size),
         lineEnding: detectLineEnding(value),
         encoding: "utf-8",
       };
       return { kind: "text", file };
     }
-    if (transfer.contentKind === "image" && transfer.metadata.imagePreviewEligible) {
-      transfer = await this.#readFile(scope, root, path, "imagePreview", signal);
-    }
     const file: BinaryFile = {
-      path: transfer.metadata.path,
-      generation: transfer.generation,
-      sizeBytes: String(transfer.metadata.size),
-      mime: transfer.metadata.mime || "application/octet-stream",
-      previewKind: transfer.contentKind === "image" ? "image" : "binary",
-      ...(transfer.bytes ? { previewBytes: transfer.bytes } : {}),
+      path: opened.metadata.path,
+      generation: opened.generation,
+      sizeBytes: String(opened.metadata.size),
+      mime: opened.metadata.mime || "application/octet-stream",
+      previewKind: opened.contentKind === "image" ? "image" : "binary",
+      ...(opened.bytes ? { previewBytes: opened.bytes } : {}),
     };
     return { kind: "binary", file };
   }
@@ -190,15 +182,16 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
 
   async startDownload(scope: FileWorkspaceScope, root: ActiveRoot, request: DownloadRequest): Promise<TransferStatus> {
     if (!request.destination) throw new Error("Choose a local download destination.");
+    const scopeKey = keyForTransferConnection(scope);
     let latest: TransferStatus | undefined;
     const onEvent = new Channel<WireDownloadEvent>();
     onEvent.onmessage = (event) => {
       let transfer: TransferStatus;
       try {
-        transfer = mapDownloadEvent(event, request, scope);
+        transfer = mapDownloadEvent(event, request, scope, scopeKey);
       } catch (error) {
         transfer = {
-          id: event.transferId || crypto.randomUUID(), scopeKey: keyForTransferConnection(scope), path: request.path, destination: request.destination, kind: request.kind,
+          id: event.transferId || crypto.randomUUID(), scopeKey, path: request.path, destination: request.destination, kind: request.kind,
           state: "failed", outcome: "notPublished", failureKind: "transfer", completedBytes: "0", filesCompleted: "0",
           error: error instanceof Error ? error.message : String(error),
         };
@@ -225,7 +218,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       return id;
     });
     return latest ?? {
-      id: transferId, scopeKey: keyForTransferConnection(scope), path: request.path, destination: request.destination, kind: request.kind,
+      id: transferId, scopeKey, path: request.path, destination: request.destination, kind: request.kind,
       state: "queued", completedBytes: "0", filesCompleted: "0",
     };
   }
@@ -242,28 +235,46 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     return () => this.#listeners.delete(listener);
   }
 
-  /** Called only after the terminal event sequencer admitted this host frame. */
+  /**
+   * Called only after the terminal event sequencer admitted this host frame.
+   *
+   * Everything the host mapped is carried through: an authoritative rescan
+   * arrives as the listing it is, and a precise change arrives with the exact
+   * entry it describes. Consumers decide whether to patch, replace, or recover.
+   */
   publishWireEvent(event: WireFileEvent): void {
-    if (event.activeRoot) this.#publish({ kind: "rootChanged", root: this.#root(event.activeRoot) });
-    if (event.directory) {
-      if (event.rootToken) this.#publish({ kind: "directoryChanged", rootToken: event.rootToken, directory: event.directory.path, overflow: event.directory.overflowed });
+    if (event.activeRoot) this.#publish({ kind: "rootChanged", root: mapRoot(event.activeRoot) });
+    if (event.directory && event.rootToken) {
+      this.#publish({
+        kind: "directorySnapshot",
+        rootToken: event.rootToken,
+        listing: mapDirectory(event.directory, event.rootToken),
+      });
     }
     if (event.metadata && event.rootToken) {
       if (event.deleted) this.#publish({ kind: "fileDeleted", rootToken: event.rootToken, path: event.metadata.path });
-      else this.#publish({ kind: "fileChanged", rootToken: event.rootToken, path: event.metadata.path, generation: String(event.metadata.generation), ...(event.operationId ? { operationId: event.operationId } : {}) });
+      else this.#publish({
+        kind: "fileChanged",
+        rootToken: event.rootToken,
+        path: event.metadata.path,
+        generation: String(event.metadata.generation),
+        ...(event.operationId ? { operationId: event.operationId } : {}),
+        ...(isRenderableEntry(event.metadata) ? { entry: mapEntry(event.metadata) } : {}),
+      });
     }
   }
 
   #publish(event: WorkspaceEvent): void { for (const listener of this.#listeners) listener(event); }
 
-  async #readFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, purpose: "text" | "imagePreview", signal?: AbortSignal): Promise<FileReadTransfer> {
+  /** One bulk request, one classification, one continuous body. */
+  async #readOpenedFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenedFile> {
     const chunks: Uint8Array[] = [];
     let expectedOffset = 0n;
-    const firstContent = startPerfSpan(`file.${purpose}.timeToFirstContent`);
+    const firstContent = startPerfSpan("file.timeToFirstContent");
     let sawContent = false;
     const completed = await this.#fileIo("start_file_read", {
       clientId: scope.clientId, profileId: scope.hostProfileId, expectedServerIdentity: scope.serverIdentity,
-      connectionEpoch: String(scope.terminalEpoch), root: root.path, rootToken: root.token, path, purpose,
+      connectionEpoch: String(scope.terminalEpoch), root: root.path, rootToken: root.token, path,
     }, (offset, chunk) => {
       if (!sawContent) {
         sawContent = true;
@@ -273,14 +284,15 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       recordPerfCounter("file.contentBytes", chunk.byteLength);
       if (offset !== expectedOffset) throw new Error("Bulk file chunks arrived out of sequence.");
       expectedOffset += BigInt(chunk.byteLength);
-      const limit = purpose === "text" ? TEXT_FILE_LIMIT_BYTES : IMAGE_PREVIEW_LIMIT_BYTES;
-      if (expectedOffset > BigInt(limit)) throw new Error(`Bulk file content exceeded the ${purpose === "text" ? "10 MiB" : "25 MiB"} limit.`);
+      if (expectedOffset > BigInt(IMAGE_PREVIEW_LIMIT_BYTES)) throw new Error("Bulk file content exceeded the 25 MiB limit.");
       chunks.push(chunk);
     }, signal);
     if (!sawContent) firstContent();
     if (!completed.metadata || !completed.contentKind) throw new Error("Host omitted file content metadata.");
     const total = completed.totalBytes === undefined ? expectedOffset : BigInt(completed.totalBytes);
     if (!completed.metadataOnly && total !== expectedOffset) throw new Error("Bulk file byte count verification failed.");
+    const limit = completed.contentKind === "text" ? TEXT_FILE_LIMIT_BYTES : IMAGE_PREVIEW_LIMIT_BYTES;
+    if (expectedOffset > BigInt(limit)) throw new Error(`Bulk file content exceeded the ${completed.contentKind === "text" ? "10 MiB" : "25 MiB"} limit.`);
     const bytes = completed.metadataOnly ? undefined : concatenate(chunks, Number(expectedOffset));
     return {
       metadata: completed.metadata, contentKind: completed.contentKind,
@@ -304,12 +316,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
         if (settled) return;
         settled = true;
         recordPerfCounter("file.ioRequestCancellations");
-        if (transferId) {
-          const boundary = { transferId };
-          void measurePerfRequest(
-            "file.ioCancellation", "file", boundary, (request) => invoke("cancel_file_io", request),
-          ).catch(() => undefined);
-        }
+        if (transferId) cancelFileIo(transferId);
         reject(new DOMException("File load was cancelled.", "AbortError"));
       };
       signal?.addEventListener("abort", abort, { once: true });
@@ -358,46 +365,54 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
         return id;
       }, { byteCounters: ["file.ioRequestBytes"] }).then((id) => {
         transferId = id;
-        if (signal?.aborted) {
-          const cancelBoundary = { transferId: id };
-          void measurePerfRequest(
-            "file.ioCancellation", "file", cancelBoundary, (request) => invoke("cancel_file_io", request),
-          ).catch(() => undefined);
-        }
+        if (signal?.aborted) cancelFileIo(id);
       }).catch(finishError);
     });
   }
 
+  /**
+   * One control-lane file request.
+   *
+   * When the caller supplies an abort signal the renderer's operation ID is
+   * carried to the host, so aborting stops bounded remote work rather than only
+   * discarding its answer locally.
+   */
   async #request<T>(
     scope: FileWorkspaceScope,
     command: Record<string, unknown>,
     validate: (response: WireResponse) => T,
     metricName: string,
+    cancellable?: { scope: FileWorkspaceScope; operationId: string; signal?: AbortSignal },
   ): Promise<T> {
     const boundary = { clientId: scope.clientId, command };
-    return measurePerfRequest(metricName, "file", boundary, async (requestBoundary) => {
-      const response = await invoke<WireResponse>("file_request", requestBoundary);
-      return validate(response);
-    });
+    const abort = cancellable?.signal;
+    if (abort?.aborted) throw new DOMException("Directory read was cancelled.", "AbortError");
+    const stopRemoteWork = () => {
+      recordPerfCounter("explorer.listCancellations");
+      void invoke("cancel_file_request", { clientId: cancellable!.scope.clientId, operationId: cancellable!.operationId })
+        .catch(() => undefined);
+    };
+    if (abort) abort.addEventListener("abort", stopRemoteWork, { once: true });
+    try {
+      return await measurePerfRequest(metricName, "file", boundary, async (requestBoundary) => {
+        const response = await invoke<WireResponse>("file_request", requestBoundary);
+        return validate(response);
+      });
+    } finally {
+      abort?.removeEventListener("abort", stopRemoteWork);
+    }
   }
 
   #rootCommand(root: ActiveRoot, command: Record<string, unknown>): Record<string, unknown> {
     return { ...command, root: root.path, rootToken: root.token };
   }
+}
 
-  #root(value: WireRoot): ActiveRoot {
-    this.#rootTokens.set(value.root, value.rootToken);
-    return { token: value.rootToken, paneId: value.paneId, cwd: value.root, path: value.root, gitWorktree: value.gitWorktree, revision: String(value.rootGeneration) };
-  }
-
-  #directory(value: WireDirectory, rootToken: string): DirectoryListing {
-    this.#rootTokens.set(value.root, rootToken);
-    return {
-      rootToken, directory: value.path, revision: String(value.generation), entries: value.entries.map(mapEntry),
-      overflowRecovery: value.overflowed, nextPageToken: value.nextPageToken || undefined, complete: value.complete,
-    };
-  }
-
+function cancelFileIo(transferId: string): void {
+  const boundary = { transferId };
+  void measurePerfRequest(
+    "file.ioCancellation", "file", boundary, (request) => invoke("cancel_file_io", request),
+  ).catch(() => undefined);
 }
 
 export function keyForScope(scope: FileWorkspaceScope): string {
@@ -415,68 +430,6 @@ export function sameRoot(left: ActiveRoot | undefined, right: ActiveRoot | undef
 
 function watchKey(scope: FileWorkspaceScope, root: ActiveRoot, path: string): string { return `${scope.clientId}\0${root.token}\0${path}`; }
 function joinPath(parent: string, name: string): string { return `${parent.replace(/\/$/, "")}/${name}`; }
-
-function mapEntry(value: WireMetadata): FileEntry {
-  return {
-    path: value.path, name: value.name, kind: value.kind === "directory" || value.kind === "symlink" ? value.kind : "file",
-    sizeBytes: String(value.size), modifiedMillis: String(value.modifiedUnixMillis), executable: (value.mode & 0o111) !== 0,
-    ...(value.symlinkTarget ? { symlinkTarget: value.symlinkTarget } : {}), expandable: value.expandable,
-    ...(value.symlinkTargetKind && ["file", "directory", "missing", "other"].includes(value.symlinkTargetKind)
-      ? { targetKind: value.symlinkTargetKind as NonNullable<FileEntry["targetKind"]> } : {}),
-  };
-}
-
-function detectLineEnding(value: string): TextFile["lineEnding"] {
-  const crlf = (value.match(/\r\n/g) ?? []).length;
-  const lf = (value.match(/(?<!\r)\n/g) ?? []).length;
-  if (crlf && lf) return "mixed";
-  if (crlf) return "crlf";
-  if (lf) return "lf";
-  return "none";
-}
-
-function applyLineEnding(value: string, lineEnding: TextFile["lineEnding"]): string {
-  if (lineEnding !== "crlf") return value;
-  return value.replace(/\r?\n/g, "\r\n");
-}
-
-function mapDownloadEvent(event: WireDownloadEvent, request: DownloadRequest, scope: FileWorkspaceScope): TransferStatus {
-  if (event.serverIdentity !== scope.serverIdentity || event.expectedServerIdentity !== scope.serverIdentity || event.connectionEpoch !== String(scope.terminalEpoch)) {
-    throw new Error("Host returned a download event for a stale connection scope.");
-  }
-  const state = transferStateFromWire(event.state);
-  if (event.terminal !== isTerminalTransferState(state)) {
-    throw new Error("Host returned an inconsistent download terminal marker.");
-  }
-  const outcome = transferOutcomeFromWire(event.outcome, state);
-  const failureKind = transferFailureKindFromWire(event.failureKind);
-  const cleanupStatus = transferCleanupStatusFromWire(event.cleanupStatus);
-  validateTransferStateOutcome(state, outcome, failureKind);
-  const completedBytes = checkedDecimal(event.transferredBytes ?? "0", "downloaded byte count");
-  const totalBytes = event.totalBytes === undefined ? undefined : checkedDecimal(event.totalBytes, "download total");
-  const bytesPerSecond = event.throughputBytesPerSecond === undefined ? undefined
-    : typeof event.throughputBytesPerSecond === "number"
-      ? Number.isFinite(event.throughputBytesPerSecond) && event.throughputBytesPerSecond >= 0
-        ? String(Math.floor(event.throughputBytesPerSecond)) : undefined
-      : checkedDecimal(event.throughputBytesPerSecond, "download throughput");
-  return {
-    id: event.transferId, scopeKey: keyForTransferConnection(scope), path: request.path, destination: event.destination ?? request.destination, kind: request.kind, state,
-    ...(outcome ? { outcome } : {}),
-    ...(failureKind ? { failureKind } : {}),
-    completedBytes, ...(totalBytes !== undefined && event.totalKnown !== false ? { totalBytes } : {}),
-    filesCompleted: state === "completed" ? "1" : "0", ...(bytesPerSecond !== undefined ? { bytesPerSecond } : {}),
-    ...(event.etaSeconds !== undefined && Number.isFinite(event.etaSeconds) ? { etaSeconds: event.etaSeconds } : {}),
-    ...(event.blake3 ? { digest: event.blake3 } : {}), ...(event.error ? { error: event.error } : {}),
-    ...(event.cleanupError ? { cleanupError: event.cleanupError } : {}),
-    ...(cleanupStatus ? { cleanupStatus } : {}),
-  };
-}
-
-function checkedDecimal(value: string | number, label: string): string {
-  const text = String(value);
-  if (!/^(0|[1-9]\d*)$/.test(text)) throw new Error(`Host returned an invalid ${label}.`);
-  return text;
-}
 
 function concatenate(chunks: Uint8Array[], total: number): Uint8Array {
   const value = new Uint8Array(total);

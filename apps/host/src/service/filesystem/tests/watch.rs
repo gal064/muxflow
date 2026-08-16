@@ -1,0 +1,367 @@
+//! Watch registration, precise native events, and the per-target polling
+//! fallback that only failed targets ever pay for.
+
+use super::*;
+
+#[test]
+fn native_watch_routing_is_independent_of_directory_entry_count() {
+    let root_path = std::env::temp_dir().join(format!("ade-watch-route-{}", Uuid::new_v4()));
+    fs::create_dir_all(root_path.join("huge")).unwrap();
+    let root = Arc::new(RootCapability::capture(root_path.to_str().unwrap()).unwrap());
+    let logical_root = root.logical_root().to_owned();
+    let target_directory = root
+        .anchor(&logical_root.join("huge"))
+        .unwrap()
+        .open_directory()
+        .unwrap();
+    let watch = Watch {
+        root_token: root.token().to_owned(),
+        root,
+        path: logical_root.join("huge").to_string_lossy().into_owned(),
+        target: logical_root.join("huge"),
+        target_directory: Arc::new(target_directory),
+        fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
+    };
+    let mut event = Event::new(notify::EventKind::Any);
+    event.paths.push(watch.target.join("entry-249999"));
+    assert!(watch_matches_events(&watch, &[Ok(event)], false));
+    assert!(watch_matches_events(&watch, &[], true));
+    assert!(!watch_matches_events(&watch, &[], false));
+    fs::remove_dir_all(root_path).unwrap();
+}
+
+#[test]
+fn fallback_watch_registration_and_fingerprint_cover_all_change_shapes() {
+    let (root, service) = fixture();
+    fs::write(root.join("file"), "one").unwrap();
+    let initial = watch_fingerprint(&root).unwrap();
+    let snapshot = service
+        .watch_directory(root.to_str().unwrap(), "", "fallback")
+        .unwrap();
+    assert!(snapshot.authoritative);
+    // No native watcher was ever installed for this fixture, so this exact
+    // target — and only this one — is on the polling fallback.
+    assert!(
+        !service
+            .watches
+            .lock()
+            .unwrap()
+            .get("fallback")
+            .expect("the watch is registered")
+            .fallback
+            .lock()
+            .unwrap()
+            .is_native()
+    );
+    fs::write(root.join("file"), "longer").unwrap();
+    let edited = watch_fingerprint(&root).unwrap();
+    assert_ne!(initial, edited);
+    fs::write(root.join("created"), "x").unwrap();
+    let created = watch_fingerprint(&root).unwrap();
+    assert_ne!(edited, created);
+    fs::remove_file(root.join("created")).unwrap();
+    assert_ne!(created, watch_fingerprint(&root).unwrap());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fallback_fingerprint_covers_in_place_edits_beyond_4096_entries() {
+    let root = std::env::temp_dir().join(format!("ade-fallback-large-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    for index in 0..=4096 {
+        fs::write(root.join(format!("entry-{index:04}")), b"a").unwrap();
+    }
+    let before = watch_fingerprint(&root).unwrap();
+    let scan = Mutex::new(FallbackTarget::polling(before));
+    fs::write(root.join("entry-4096"), b"changed beyond old bound").unwrap();
+    assert_ne!(before, watch_fingerprint(&root).unwrap());
+    let mut shards = 0;
+    loop {
+        let shard =
+            scan_fallback_shard_with_limits(&root, &scan, 64, Duration::from_secs(1)).unwrap();
+        assert!(shard.processed <= 64);
+        shards += 1;
+        if shard.completed {
+            assert!(shard.changed);
+            break;
+        }
+    }
+    assert!(shards > 64, "the scanner must resume across bounded shards");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fallback_fingerprint_fold_covers_250k_records_with_a_hard_shard_cap() {
+    let mut records = (0_u64..250_000).map(|value| value.wrapping_mul(31));
+    let mut covered = 0;
+    let mut shards = 0;
+    loop {
+        let (_, processed, completed) =
+            fold_fingerprint_records(FALLBACK_SCAN_ENTRY_BUDGET, Duration::from_secs(1), || {
+                Ok(records.next())
+            })
+            .unwrap();
+        assert!(processed <= FALLBACK_SCAN_ENTRY_BUDGET);
+        covered += processed;
+        shards += 1;
+        if completed {
+            break;
+        }
+    }
+    assert_eq!(covered, 250_000);
+    assert!(shards > 100);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fallback_filesystem_scan_never_blocks_the_async_control_worker() {
+    let root = std::env::temp_dir().join(format!("ade-fallback-latency-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let scan = Arc::new(Mutex::new(FallbackTarget::polling(
+        watch_fingerprint(&root).unwrap(),
+    )));
+    let held_scan = Arc::clone(&scan);
+    let ready = Arc::new(std::sync::Barrier::new(2));
+    let held_ready = Arc::clone(&ready);
+    let holder = std::thread::spawn(move || {
+        let _guard = held_scan.lock().unwrap();
+        held_ready.wait();
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    ready.wait();
+
+    let scan_task = tokio::spawn(super::watch_fallback::advance_target_async(
+        root.clone(),
+        scan,
+        Instant::now(),
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), async {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        })
+        .await
+        .is_ok(),
+        "the current-thread runtime must stay responsive while filesystem work waits"
+    );
+    assert!(scan_task.await.unwrap().is_ok());
+    holder.join().unwrap();
+    fs::remove_dir(root).unwrap();
+}
+
+/// Only the exact target whose native registration failed ever polls, and a
+/// completed scan that found nothing publishes nothing.
+#[test]
+fn the_polling_fallback_is_per_target_backed_off_and_silent_while_unchanged() {
+    let root = std::env::temp_dir().join(format!("ade-fallback-target-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("file"), "one").unwrap();
+    let target = Arc::new(Mutex::new(FallbackTarget::polling(
+        watch_fingerprint(&root).unwrap(),
+    )));
+    let mut now = Instant::now();
+
+    // The first completed scan matches the registration fingerprint: nothing
+    // changed, so nothing is published and the next scan is deferred.
+    let mut turn = advance_target(&target, &root, now).unwrap();
+    while turn == FallbackTurn::Scanning {
+        turn = advance_target(&target, &root, now).unwrap();
+    }
+    assert_eq!(turn, FallbackTurn::Unchanged);
+    assert_eq!(
+        advance_target(&target, &root, now).unwrap(),
+        FallbackTurn::Idle,
+        "an unchanged target must back off rather than rescan immediately"
+    );
+
+    // A real change is reported once the backoff elapses.
+    fs::write(root.join("file"), "changed").unwrap();
+    now += Duration::from_secs(10);
+    let mut turn = advance_target(&target, &root, now).unwrap();
+    while turn == FallbackTurn::Scanning {
+        turn = advance_target(&target, &root, now).unwrap();
+    }
+    assert_eq!(turn, FallbackTurn::Changed);
+
+    // A healthy native target is never scanned at all.
+    let native = Arc::new(Mutex::new(FallbackTarget::native(0)));
+    assert_eq!(
+        advance_target(&native, &root, now).unwrap(),
+        FallbackTurn::Idle
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn deleted_file_events_use_absolute_root_and_nested_logical_paths() {
+    let root_path = std::env::temp_dir().join(format!("ade-delete-path-{}", Uuid::new_v4()));
+    fs::create_dir_all(root_path.join("nested")).unwrap();
+    fs::write(root_path.join("removed"), "root").unwrap();
+    fs::write(root_path.join("nested/removed"), "nested").unwrap();
+    let root = Arc::new(RootCapability::capture(root_path.to_str().unwrap()).unwrap());
+    let logical_root = root.logical_root().to_owned();
+    let root_directory = root.open_root_directory().unwrap();
+    let nested_directory = root
+        .anchor(&logical_root.join("nested"))
+        .unwrap()
+        .open_directory()
+        .unwrap();
+    let root_watch = Watch {
+        root_token: root.token().to_owned(),
+        root: Arc::clone(&root),
+        path: logical_root.to_string_lossy().into_owned(),
+        target: logical_root.clone(),
+        target_directory: Arc::new(root_directory),
+        fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
+    };
+    let nested_watch = Watch {
+        root_token: root.token().to_owned(),
+        root,
+        path: logical_root.join("nested").to_string_lossy().into_owned(),
+        target: logical_root.join("nested"),
+        target_directory: Arc::new(nested_directory),
+        fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
+    };
+    let root_removed = root_path.join("removed");
+    let nested_removed = root_path.join("nested/removed");
+    fs::remove_file(&root_removed).unwrap();
+    fs::remove_file(&nested_removed).unwrap();
+
+    for (watch_id, watch, removed) in [
+        ("root", &root_watch, &root_removed),
+        ("nested", &nested_watch, &nested_removed),
+    ] {
+        let mut notify = Event::new(notify::EventKind::Any);
+        let logical_removed = watch.target.join(removed.file_name().unwrap());
+        notify.paths.push(logical_removed.clone());
+        let events = precise_file_events(watch_id, watch, &[Ok(notify)]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].scope, logical_removed.to_string_lossy());
+        let file = events[0].file.as_ref().unwrap();
+        assert!(file.deleted);
+        assert_eq!(
+            file.metadata.as_ref().unwrap().path,
+            logical_removed.to_string_lossy()
+        );
+    }
+    fs::remove_dir_all(root_path).unwrap();
+}
+
+#[test]
+fn independent_watch_ids_are_reference_counted_per_directory() {
+    let (root, service) = fixture();
+    service
+        .watch_directory(root.to_str().unwrap(), "", "explorer")
+        .unwrap();
+    service
+        .watch_directory(root.to_str().unwrap(), "", "editor-parent")
+        .unwrap();
+    assert_eq!(service.watches.lock().unwrap().len(), 2);
+    service.unwatch_directory("explorer").unwrap();
+    assert!(
+        service
+            .watches
+            .lock()
+            .unwrap()
+            .contains_key("editor-parent")
+    );
+    service.unwatch_directory("editor-parent").unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn native_watch_emits_precise_file_change_without_polling() {
+    let root = std::env::temp_dir().join(format!("ade-watch-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let service = Arc::new(FileService::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let (sender, mut receiver) = mpsc::channel(8);
+    let _registration = crate::service::register_control_event_sink(sender.clone());
+    service.spawn_watcher(Arc::clone(&closed), sender, overflowed);
+    service
+        .watch_directory(root.to_str().unwrap(), "", "watch-native")
+        .unwrap();
+    fs::write(root.join("created"), "event").unwrap();
+    let expected = fs::canonicalize(&root)
+        .unwrap()
+        .join("created")
+        .to_string_lossy()
+        .into_owned();
+    let observed = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(message) = receiver.recv().await {
+            if matches!(message, SequencerControl::OrderedEvent(v1::HostEvent {
+                kind,
+                scope,
+                ..
+            }) if kind == v1::EventKind::FileChanged as i32 && scope == expected)
+            {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    closed.store(true, Ordering::Release);
+    assert!(observed);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn native_watch_delete_events_keep_absolute_metadata_for_root_and_nested_paths() {
+    let root = std::env::temp_dir().join(format!("ade-watch-delete-{}", Uuid::new_v4()));
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("removed"), "root").unwrap();
+    fs::write(root.join("nested/removed"), "nested").unwrap();
+    let service = Arc::new(FileService::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let (sender, mut receiver) = mpsc::channel(16);
+    let _registration = crate::service::register_control_event_sink(sender.clone());
+    service.spawn_watcher(Arc::clone(&closed), sender, overflowed);
+    service
+        .watch_directory(root.to_str().unwrap(), "", "watch-delete-root")
+        .unwrap();
+    service
+        .watch_directory(root.to_str().unwrap(), "nested", "watch-delete-nested")
+        .unwrap();
+
+    let canonical_root = fs::canonicalize(&root).unwrap();
+    let expected_root = canonical_root
+        .join("removed")
+        .to_string_lossy()
+        .into_owned();
+    let expected_nested = canonical_root
+        .join("nested/removed")
+        .to_string_lossy()
+        .into_owned();
+    fs::remove_file(&expected_root).unwrap();
+    fs::remove_file(&expected_nested).unwrap();
+    let mut expected = BTreeSet::from([expected_root, expected_nested]);
+    let observed = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(message) = receiver.recv().await {
+            let SequencerControl::OrderedEvent(event) = message else {
+                continue;
+            };
+            if event.kind != v1::EventKind::FileChanged as i32 {
+                continue;
+            }
+            let Some(file) = event.file else { continue };
+            let Some(metadata) = file.metadata else {
+                continue;
+            };
+            if file.deleted && metadata.path == event.scope {
+                expected.remove(&metadata.path);
+            }
+            if expected.is_empty() {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    closed.store(true, Ordering::Release);
+    assert!(observed);
+    fs::remove_dir_all(root).unwrap();
+}

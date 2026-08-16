@@ -117,8 +117,7 @@ describe("TauriFileWorkspaceClient", () => {
     const metadata = { path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "18446744073709551615", mime: "text/plain", imagePreviewEligible: false };
     invokeMock.mockImplementation(async (command, args) => {
       expect(command).toBe("start_file_read");
-      const channel = (args as { purpose: string; onEvent: { onmessage?: (value: ArrayBuffer) => void } }).onEvent;
-      expect((args as { purpose: string }).purpose).toBe("text");
+      const channel = (args as { onEvent: { onmessage?: (value: ArrayBuffer) => void } }).onEvent;
       queueMicrotask(() => {
         channel.onmessage?.(jsonFrame(1, { transferId: "read", state: "metadata", metadata, contentKind: "text" }));
         channel.onmessage?.(chunkFrame(0n, new TextEncoder().encode("a\r\nb")));
@@ -157,10 +156,103 @@ describe("TauriFileWorkspaceClient", () => {
     client.publishWireEvent({ operationId: "agent", rootToken: "token", metadata: { path: "/repo/a", name: "a", kind: "file", size: "1", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "99", mime: "", imagePreviewEligible: false }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
     client.publishWireEvent({ operationId: "delete", rootToken: "token", deleted: true, metadata: { path: "/repo/gone", name: "gone", kind: "file", size: "1", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "100", mime: "", imagePreviewEligible: false }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
     expect(events).toEqual([
-      { kind: "directoryChanged", rootToken: "token", directory: "/repo", overflow: true },
-      { kind: "fileChanged", rootToken: "token", path: "/repo/a", generation: "99", operationId: "agent" },
+      {
+        kind: "directorySnapshot",
+        rootToken: "token",
+        listing: {
+          rootToken: "token", directory: "/repo", revision: "2", entries: [],
+          overflowRecovery: true, nextPageToken: undefined, complete: true,
+        },
+      },
+      {
+        kind: "fileChanged", rootToken: "token", path: "/repo/a", generation: "99", operationId: "agent",
+        entry: {
+          path: "/repo/a", name: "a", kind: "file", sizeBytes: "1", modifiedMillis: "1",
+          generation: "99", executable: false, expandable: false,
+        },
+      },
       { kind: "fileDeleted", rootToken: "token", path: "/repo/gone" },
     ]);
+  });
+
+  it("carries an authoritative rescan through as its listing rather than an invalidation", async () => {
+    const client = new TauriFileWorkspaceClient();
+    const events: WorkspaceEvent[] = [];
+    await client.subscribe(scope, (event) => events.push(event));
+    client.publishWireEvent({
+      operationId: "", rootToken: "token", watchId: "w",
+      directory: {
+        watchId: "w", root: "/repo", path: "/repo", generation: "9", overflowed: false, authoritative: true,
+        nextPageToken: "", complete: true,
+        entries: [{ path: "/repo/kept", name: "kept", kind: "file", size: "2", modifiedUnixMillis: "5", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "77", mime: "", imagePreviewEligible: false }],
+      },
+      transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "",
+    });
+    const published = events[0];
+    expect(published?.kind).toBe("directorySnapshot");
+    if (published?.kind !== "directorySnapshot") throw new Error("expected a mapped snapshot");
+    expect(published.listing.entries).toEqual([expect.objectContaining({ name: "kept", generation: "77" })]);
+  });
+
+  it("drops a precise event whose metadata cannot be drawn instead of inventing a row", async () => {
+    const client = new TauriFileWorkspaceClient();
+    const events: WorkspaceEvent[] = [];
+    await client.subscribe(scope, (event) => events.push(event));
+    client.publishWireEvent({
+      operationId: "", rootToken: "token",
+      metadata: { path: "/repo/unmapped", name: "", kind: "unspecified", size: "0", modifiedUnixMillis: "0", mode: 0, symlink: false, symlinkTarget: "", expandable: false, generation: "0", mime: "", imagePreviewEligible: false },
+      transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "",
+    });
+    expect(events).toEqual([{ kind: "fileChanged", rootToken: "token", path: "/repo/unmapped", generation: "0" }]);
+  });
+
+  it("opens an eligible image in one bulk request, with no separate text probe", async () => {
+    const metadata = { path: "/repo/logo.png", name: "logo.png", kind: "file", size: "3", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "12", mime: "image/png", imagePreviewEligible: true };
+    invokeMock.mockImplementation(async (command, args) => {
+      expect(command).toBe("start_file_read");
+      expect(args).not.toHaveProperty("purpose");
+      const channel = (args as { onEvent: { onmessage?: (value: ArrayBuffer) => void } }).onEvent;
+      queueMicrotask(() => {
+        channel.onmessage?.(jsonFrame(1, { transferId: "read", state: "metadata", metadata, contentKind: "image" }));
+        channel.onmessage?.(chunkFrame(0n, new Uint8Array([1, 2, 3])));
+        channel.onmessage?.(jsonFrame(3, { transferId: "read", state: "completed", totalBytes: "3", generation: "12", metadata, contentKind: "image", metadataOnly: false }));
+      });
+      return "read";
+    });
+    const opened = await new TauriFileWorkspaceClient().openFile(scope, root, "/repo/logo.png");
+    expect(opened).toMatchObject({ kind: "binary", file: { previewKind: "image", mime: "image/png", generation: "12" } });
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the caller's own root capability so an unchanged root costs no rediscovery", async () => {
+    enablePerfProbe(async () => undefined);
+    invokeMock.mockResolvedValueOnce({
+      operationId: "op", rootUnchanged: true,
+      activeRoot: { paneId: "%1", root: "/repo", rootToken: "token", gitWorktree: true, serverIdentity: "server", topologyGeneration: "7", rootGeneration: "3" },
+    });
+    await new TauriFileWorkspaceClient().resolveActiveRoot(scope, { knownRootToken: "token" });
+    expect(invokeMock).toHaveBeenCalledWith("file_request", {
+      clientId: "client",
+      command: expect.objectContaining({ operation: "resolveActiveRoot", knownRootToken: "token" }),
+    });
+    expect(perfCounterSnapshot()["explorer.rootProbeUnchanged"]).toBe(1);
+  });
+
+  it("stops bounded remote enumeration when a directory read is abandoned", async () => {
+    let settle!: () => void;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "cancel_file_request") return undefined;
+      return new Promise((resolve) => { settle = () => resolve({ operationId: "list", directory: { watchId: "", root: "/repo", path: "/repo", generation: "1", entries: [], overflowed: false, authoritative: true, nextPageToken: "", complete: true } }); });
+    });
+    const abort = new AbortController();
+    const client = new TauriFileWorkspaceClient();
+    const listing = client.listDirectory(scope, root, "/repo", { signal: abort.signal });
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("file_request", expect.anything()));
+    const operationId = (invokeMock.mock.calls[0][1] as { command: { operationId: string } }).command.operationId;
+    abort.abort();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("cancel_file_request", { clientId: "client", operationId }));
+    settle();
+    await listing;
   });
 
   it("uses the canonical verifying/unknown outcome schema and preserves cleanup failure", async () => {
