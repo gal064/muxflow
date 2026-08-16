@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     process::Command,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -113,12 +113,12 @@ pub async fn serve_with_shutdown(
             helper_version: host_helper_version,
             operating_system: std::env::consts::OS.into(),
             architecture: std::env::consts::ARCH.into(),
-            tmux_version: command_version("tmux", "-V"),
+            tmux_version: daemon_command_version(CommandVersion::Tmux),
             server_identity: current_server_identity,
             capabilities: HOST_CAPABILITIES & client_hello.requested_capabilities,
             read_only,
             incompatibility,
-            git_version: command_version("git", "--version"),
+            git_version: daemon_command_version(CommandVersion::Git),
             connection_epoch: client_hello.connection_epoch,
         }),
     );
@@ -600,6 +600,22 @@ fn command_version(program: &str, argument: &str) -> String {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .unwrap_or_default()
+}
+
+enum CommandVersion {
+    Tmux,
+    Git,
+}
+
+fn daemon_command_version(version: CommandVersion) -> String {
+    static TMUX: OnceLock<String> = OnceLock::new();
+    static GIT: OnceLock<String> = OnceLock::new();
+    match version {
+        CommandVersion::Tmux => TMUX.get_or_init(|| command_version("tmux", "-V")).clone(),
+        CommandVersion::Git => GIT
+            .get_or_init(|| command_version("git", "--version"))
+            .clone(),
+    }
 }
 
 fn testing_enabled() -> bool {
