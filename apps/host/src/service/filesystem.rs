@@ -27,15 +27,18 @@ use super::{SequencerControl, broadcast_control_event, emit_event};
 
 mod download;
 mod editor_io;
+mod failure;
 mod listing;
 mod listing_page;
 mod mutations;
 mod open_stream;
 mod path_policy;
 mod terminal_upload;
+pub(crate) use failure::FileFailure;
 pub(crate) use terminal_upload::UploadCommitFailure;
 mod watch_fallback;
 mod watch_service;
+use failure::{cancelled, stale_generation, stale_page_token};
 use listing::{NEVER_CANCELLED, resolve_watch_directory};
 use listing_page::DirectoryPageCache;
 use mutations::mutation_metadata;
@@ -49,8 +52,6 @@ const MAX_DIRECTORY_ENTRIES: usize = 10_000;
 const DEFAULT_DIRECTORY_PAGE: usize = 4096;
 const MAX_WATCHES: usize = 128;
 const MAX_TRANSFER_CHUNK: usize = 1024 * 1024;
-/// How many distinct root capabilities keep a stable root generation.
-const MAX_TRACKED_ROOTS: usize = 64;
 /// How long the parked fallback poller waits before re-checking `closed`.
 const IDLE_PARK: Duration = Duration::from_millis(500);
 
@@ -97,10 +98,6 @@ pub(super) struct FileService {
     /// Ordered point-in-time directory views, so a later page slices one
     /// instead of re-stating the whole remote directory.
     pages: DirectoryPageCache,
-    /// Root generations already issued, so an unchanged active root keeps the
-    /// identity its client already holds instead of minting a new one on every
-    /// backstop probe.
-    root_generations: Mutex<HashMap<String, u64>>,
 }
 
 impl FileService {
@@ -114,32 +111,27 @@ impl FileService {
             native_watcher: Mutex::new(None),
             fallback_signal: tokio::sync::Notify::new(),
             pages: DirectoryPageCache::default(),
-            root_generations: Mutex::new(HashMap::new()),
         }
     }
 
     fn next_generation(&self) -> u64 {
         self.generation.fetch_add(1, Ordering::AcqRel) + 1
     }
+}
 
-    /// The generation this root capability already has, or a fresh one.
-    ///
-    /// Stable per token, because the desktop treats a changed root generation
-    /// as a replaced root and drops every path, listing, and content cache
-    /// bound to it. A backstop probe that merely confirms the same root must
-    /// not look like a replacement.
-    pub(super) fn root_generation_for(&self, root_token: &str) -> u64 {
-        let mut generations = self.root_generations.lock().unwrap();
-        if let Some(existing) = generations.get(root_token) {
-            return *existing;
-        }
-        let generation = self.next_generation();
-        if generations.len() >= MAX_TRACKED_ROOTS {
-            generations.clear();
-        }
-        generations.insert(root_token.to_owned(), generation);
-        generation
-    }
+/// The generation of a root capability.
+///
+/// Derived from the token rather than counted, so the same root always answers
+/// with the same generation and a different one always answers differently —
+/// with no map to bound, evict, or accidentally clear underneath every root at
+/// once. The token is already the capability's exact identity.
+pub(super) fn root_generation(root_token: &str) -> u64 {
+    let digest = blake3::hash(root_token.as_bytes());
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest.as_bytes()[..8]);
+    // Never zero: a zero generation is the protobuf default, which callers read
+    // as "the host said nothing".
+    u64::from_le_bytes(bytes) | 1
 }
 
 impl Drop for FileService {
@@ -273,7 +265,13 @@ fn metadata_for_in_root(root: &Path, path: &Path) -> anyhow::Result<v1::FileMeta
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_default(),
         expandable: link_metadata.is_dir() && !collapsed,
-        generation: metadata_generation(effective),
+        // The *leaf's* identity, never the followed target's, so one path has
+        // one generation whichever way it was observed. A directory listing
+        // cannot follow a symlink — it resolves entries descriptor-relative and
+        // no-follow on purpose — so a followed generation here would disagree
+        // with every listing of the same entry and make the editor re-read
+        // every symlinked file it opened.
+        generation: metadata_generation(&link_metadata),
         mime,
         image_preview_eligible: effective.is_file()
             && image_mime(path).is_some()

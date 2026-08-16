@@ -11,7 +11,7 @@ use tmux_agent_protocol::v1;
 use tokio::{sync::mpsc, time::sleep};
 
 use super::active_root::resolve_cached;
-use super::filesystem::{FileService, root_token, validate_root_token};
+use super::filesystem::{FileService, root_generation, root_token, validate_root_token};
 use super::snapshot::discover_authoritative;
 use super::terminal::VisibilityChange;
 use super::{

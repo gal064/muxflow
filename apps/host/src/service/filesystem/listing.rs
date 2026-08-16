@@ -199,7 +199,7 @@ fn scan_ordered_entries(
     let mut truncated = false;
     for name in names {
         if cancellation.load(Ordering::Acquire) {
-            bail!("cancelled: directory listing cancelled");
+            return Err(cancelled("directory listing"));
         }
         // Before the page window, not after it: the entry is not in this
         // listing at all, so it must not consume a page slot or become the

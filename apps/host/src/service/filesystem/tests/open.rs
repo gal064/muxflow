@@ -19,13 +19,12 @@ fn one_open_classifies_and_carries_exactly_the_content_policy_allows() {
     assert_eq!(text.header().content_kind, v1::FileContentKind::Text as i32);
     assert!(text.header().content_streaming);
     assert_eq!(text.header().total_bytes, 5);
-    assert_eq!(
-        text.chunks().map(|(_, chunk)| chunk.len()).sum::<usize>(),
-        5
-    );
     assert_eq!(text.digest(), blake3::hash(b"hello").to_hex().to_string());
-    let metadata = text.header().metadata.as_ref().unwrap();
-    assert_eq!(metadata.generation, text.header().generation);
+    let header = text.header().clone();
+    let metadata = header.metadata.as_ref().unwrap();
+    assert_eq!(metadata.generation, header.generation);
+    let body: Vec<u8> = text.into_chunks().flat_map(|(_, chunk)| chunk).collect();
+    assert_eq!(body, b"hello");
 
     // A binary file is classified and never streamed: the editor cannot show
     // it, so paying for its bytes is pure waste on the remote link.
@@ -37,7 +36,7 @@ fn one_open_classifies_and_carries_exactly_the_content_policy_allows() {
         v1::FileContentKind::Binary as i32
     );
     assert!(!binary.header().content_streaming);
-    assert_eq!(binary.chunks().count(), 0);
+    assert_eq!(binary.into_chunks().count(), 0);
 
     // An empty file still streams: zero bytes is content, not an absence.
     let empty = service
@@ -45,7 +44,7 @@ fn one_open_classifies_and_carries_exactly_the_content_policy_allows() {
         .unwrap();
     assert!(empty.header().content_streaming);
     assert_eq!(empty.header().total_bytes, 0);
-    assert_eq!(empty.chunks().count(), 0);
+    assert_eq!(empty.into_chunks().count(), 0);
 
     // An eligible image is streamed by the same one request that classified
     // it, so no second "was that an image?" probe is ever needed.
@@ -91,7 +90,7 @@ fn an_oversized_text_file_is_classified_without_being_read() {
     );
     assert!(!opened.header().content_streaming);
     assert_eq!(opened.header().total_bytes, 0);
-    assert_eq!(opened.chunks().count(), 0);
+    assert_eq!(opened.into_chunks().count(), 0);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -253,5 +252,72 @@ fn editor_commits_are_serialized_last_writer_wins() {
         .commit_file_write("writer-b", blake3::hash(b"two").to_hex().as_ref())
         .unwrap();
     assert_eq!(fs::read_to_string(root.join("note.txt")).unwrap(), "two");
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// One path, one generation, whichever way it was observed.
+///
+/// The editor accepts its first read when the parent watch's listing agrees
+/// with it. If a listing and an open described the same file with different
+/// generations, that agreement could never happen and every open of that file
+/// class would pay a second full remote read.
+#[test]
+fn a_listing_and_an_open_report_the_same_generation_for_the_same_path() {
+    let (root, service) = fixture();
+    fs::write(root.join("plain.txt"), "body").unwrap();
+    fs::write(root.join("target.txt"), "body").unwrap();
+    std::os::unix::fs::symlink("target.txt", root.join("link.txt")).unwrap();
+
+    let listed = service
+        .list_directory(root.to_str().unwrap(), "", "list")
+        .unwrap();
+    let entry = |name: &str| {
+        listed
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+            .generation
+    };
+    for name in ["plain.txt", "link.txt"] {
+        let opened = service
+            .open_file_stream(root.to_str().unwrap(), name)
+            .unwrap();
+        let metadata = opened.header().metadata.as_ref().unwrap();
+        assert_eq!(
+            metadata.generation,
+            entry(name),
+            "{name} has two generations depending on who asked"
+        );
+    }
+
+    // The *content's* identity is carried separately, so a save still binds to
+    // the bytes rather than to the link that points at them.
+    let link = service
+        .open_file_stream(root.to_str().unwrap(), "link.txt")
+        .unwrap();
+    assert_ne!(link.header().generation, entry("link.txt"));
+    let plain = service
+        .open_file_stream(root.to_str().unwrap(), "plain.txt")
+        .unwrap();
+    assert_eq!(plain.header().generation, entry("plain.txt"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_cancelled_open_stops_reading_instead_of_finishing_the_file() {
+    let (root, service) = fixture();
+    fs::write(root.join("note.txt"), vec![b'a'; 4096]).unwrap();
+    let cancelled = AtomicBool::new(true);
+    let outcome = service.open_file_stream_authorized(
+        root.to_str().unwrap(),
+        &root_token(root.to_str().unwrap()).unwrap(),
+        "note.txt",
+        &cancelled,
+    );
+    let Err(error) = outcome else {
+        panic!("a cancelled open still read the file");
+    };
+    assert_eq!(FileFailure::of(&error), FileFailure::Cancelled);
     fs::remove_dir_all(root).unwrap();
 }

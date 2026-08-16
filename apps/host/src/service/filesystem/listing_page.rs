@@ -114,7 +114,7 @@ pub(super) fn decode_page_token(
         return Ok(None);
     }
     let mut parts = value.splitn(6, ':');
-    let invalid = || anyhow::anyhow!("stale_page_token: invalid directory page token");
+    let invalid = || stale_page_token("invalid directory page token");
     let prefix = parts.next().ok_or_else(invalid)?;
     let digest = parts.next().ok_or_else(invalid)?;
     let snapshot_id = parts.next().ok_or_else(invalid)?;
@@ -125,9 +125,9 @@ pub(super) fn decode_page_token(
         return Err(invalid());
     }
     if digest != binding.digest() {
-        bail!(
-            "stale_page_token: directory page token belongs to another server, root, or directory"
-        );
+        return Err(stale_page_token(
+            "directory page token belongs to another server, root, or directory",
+        ));
     }
     let index = index.parse::<usize>().map_err(|_| invalid())?;
     let rank = rank.parse::<u8>().map_err(|_| invalid())?;
@@ -151,17 +151,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(value: &str) -> anyhow::Result<Vec<u8>> {
+    let invalid = || stale_page_token("invalid directory page token");
     if !value.len().is_multiple_of(2) || value.len() > 8192 {
-        bail!("stale_page_token: invalid directory page token");
+        return Err(invalid());
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
     for pair in value.as_bytes().chunks_exact(2) {
-        let text =
-            std::str::from_utf8(pair).context("stale_page_token: invalid directory page token")?;
-        bytes.push(
-            u8::from_str_radix(text, 16)
-                .context("stale_page_token: invalid directory page token")?,
-        );
+        let text = std::str::from_utf8(pair).map_err(|_| invalid())?;
+        bytes.push(u8::from_str_radix(text, 16).map_err(|_| invalid())?);
     }
     Ok(bytes)
 }

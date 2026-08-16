@@ -11,7 +11,7 @@ pub(super) struct FileDispatchContext<'a> {
 /// Await blocking filesystem work while proving liveness on the bulk lane.
 /// The desktop treats any well-formed frame as deadline activity, while the
 /// request id remains reserved for the authoritative response.
-async fn await_file_task<T: Send + 'static>(
+pub(super) async fn await_file_task<T: Send + 'static>(
     mut task: tokio::task::JoinHandle<T>,
     control_tx: &mpsc::Sender<SequencerControl>,
     operation_id: &str,
@@ -45,6 +45,17 @@ async fn await_file_task_with_interval<T: Send + 'static>(
             }
         }
     }
+}
+
+/// Renders a filesystem error under its own typed code, falling back to the
+/// caller's operation-specific one when the error claims none.
+pub(super) fn file_failure_response(rejected: &'static str, error: &anyhow::Error) -> v1::Response {
+    let failure = crate::service::filesystem::FileFailure::of(error);
+    let code = match failure.code() {
+        "" => rejected,
+        code => code,
+    };
+    response_error(code, &error.to_string())
 }
 
 fn upload_commit_failure_response(
@@ -134,7 +145,13 @@ pub(super) async fn handle(
             let listing_cancellation = Arc::clone(&cancellation);
             let result = tokio::task::spawn_blocking(move || {
                 if watch {
-                    service.watch_directory_authorized(&root, &root_token, &path, &watch_id)
+                    service.watch_directory_cancellable(
+                        &root,
+                        &root_token,
+                        &path,
+                        &watch_id,
+                        &listing_cancellation,
+                    )
                 } else {
                     service.list_directory_page_authorized(
                         &root,
@@ -152,17 +169,7 @@ pub(super) async fn handle(
                 Ok(Ok(snapshot)) => {
                     file_response(&file.operation_id, |value| value.directory = Some(snapshot))
                 }
-                Ok(Err(error)) => {
-                    let message = error.to_string();
-                    let code = if message.starts_with("cancelled") {
-                        "cancelled"
-                    } else if message.starts_with("stale_page_token") {
-                        "stale_page_token"
-                    } else {
-                        "directory_rejected"
-                    };
-                    response_error(code, &message)
-                }
+                Ok(Err(error)) => file_failure_response("directory_rejected", &error),
                 Err(error) => response_error("directory_task_failed", &error.to_string()),
             };
             send_response(control_tx, request_id, response).await;

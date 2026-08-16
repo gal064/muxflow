@@ -108,6 +108,14 @@ pub const CAP_GIT: u64 = 1 << 11;
 pub const CAP_AGENTS: u64 = 1 << 12;
 pub const CAP_TERMINAL_UPLOAD: u64 = 1 << 13;
 pub const CAP_TERMINAL_OUTPUT_CREDIT: u64 = 1 << 14;
+/// One descriptor-bound editor open per request, replacing the metadata +
+/// preflight + per-chunk staircase.
+///
+/// Negotiated rather than assumed because the daemon lives on a remote host the
+/// user upgrades separately: without a bit, a desktop paired with an older
+/// helper handshakes cleanly, runs terminals and the Explorer, and then fails
+/// every single file open with an unknown-operation error.
+pub const CAP_FILE_STREAM: u64 = 1 << 15;
 pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_ORDERED_EVENTS
     | CAP_CANCELLATION
@@ -122,7 +130,8 @@ pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_GIT
     | CAP_AGENTS
     | CAP_TERMINAL_UPLOAD
-    | CAP_TERMINAL_OUTPUT_CREDIT;
+    | CAP_TERMINAL_OUTPUT_CREDIT
+    | CAP_FILE_STREAM;
 
 #[derive(Debug, Error)]
 pub enum FrameError {

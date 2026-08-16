@@ -1,5 +1,6 @@
 use super::watch_fallback::{
     FALLBACK_TICK, FallbackTurn, advance_target_async, native_retry_due, record_native_retry,
+    scan_due,
 };
 use super::*;
 
@@ -210,6 +211,13 @@ impl FileService {
                             continue;
                         }
                     }
+                    // Backed-off targets are decided here rather than inside a
+                    // blocking worker: dispatching one per target per tick to
+                    // learn that none of them is due is thousands of no-op
+                    // round trips a second on a connection with many watches.
+                    if !scan_due(&watch.fallback, now) {
+                        continue;
+                    }
                     let stable_target = descriptor_path(watch.target_directory.as_raw_fd());
                     let turn =
                         advance_target_async(stable_target, Arc::clone(&watch.fallback), now).await;
@@ -254,12 +262,29 @@ impl FileService {
         self.watch_directory_authorized(root, &token, path, watch_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn watch_directory_authorized(
         &self,
         root: &str,
         root_token: &str,
         path: &str,
         watch_id: &str,
+    ) -> anyhow::Result<v1::DirectorySnapshot> {
+        self.watch_directory_cancellable(root, root_token, path, watch_id, &NEVER_CANCELLED)
+    }
+
+    /// Arms a watch and returns the directory's authoritative listing.
+    ///
+    /// The listing is cancellable because it *is* the expansion's listing: a
+    /// folder opened and closed again on a slow remote link must stop the
+    /// enumeration it started, not pay for it and discard the answer.
+    pub(crate) fn watch_directory_cancellable(
+        &self,
+        root: &str,
+        root_token: &str,
+        path: &str,
+        watch_id: &str,
+        cancellation: &AtomicBool,
     ) -> anyhow::Result<v1::DirectorySnapshot> {
         validate_token("watch ID", watch_id)?;
         let root = Arc::new(RootCapability::validate(root, root_token)?);
@@ -296,12 +321,21 @@ impl FileService {
                 fallback,
             },
         );
+        // Still under the registry lock: a target this ID no longer holds loses
+        // its native registration only if no other watch covers it, and that
+        // decision cannot be raced by a concurrent registration.
+        if let Some(previous) = previous.as_ref()
+            && previous.target != target
+            && !watches
+                .values()
+                .any(|watch| watch.target == previous.target)
+            && let Some(watcher) = self.native_watcher.lock().unwrap().as_mut()
+        {
+            let _ = watcher.unwatch(&previous.target);
+        }
         drop(watches);
         if !native {
             self.fallback_signal.notify_one();
-        }
-        if let Some(previous) = previous.as_ref() {
-            self.retire_replaced_target(previous, &target);
         }
         match self.list_directory_snapshot(
             &root,
@@ -310,7 +344,7 @@ impl FileService {
             self.next_generation(),
             "",
             0,
-            &NEVER_CANCELLED,
+            cancellation,
         ) {
             Ok(snapshot) => Ok(snapshot),
             Err(error) => {
@@ -327,26 +361,6 @@ impl FileService {
                 }
                 Err(error)
             }
-        }
-    }
-
-    /// Drops the native registration of a target this watch ID no longer holds
-    /// and no other watch covers.
-    fn retire_replaced_target(&self, previous: &Watch, replacement: &Path) {
-        if previous.target == replacement {
-            return;
-        }
-        let still_watched = self
-            .watches
-            .lock()
-            .unwrap()
-            .values()
-            .any(|watch| watch.target == previous.target);
-        if still_watched {
-            return;
-        }
-        if let Some(watcher) = self.native_watcher.lock().unwrap().as_mut() {
-            let _ = watcher.unwatch(&previous.target);
         }
     }
 
@@ -395,7 +409,13 @@ pub(super) fn precise_file_events(
         .iter()
         .filter_map(|event| event.as_ref().ok())
         .flat_map(|event| event.paths.iter())
-        .filter(|path| *path == &watch.target || path.parent() == Some(watch.target.as_path()))
+        // Children only. An event about the watched directory *itself* is not
+        // an entry in it: mapped as one it produced a row for the directory
+        // inside its own listing, under a second path spelling with a trailing
+        // separator that every downstream key then treated as a different
+        // directory. Directory-level change reaches the desktop as the
+        // authoritative rescan its own parent's watch reports.
+        .filter(|path| path.parent() == Some(watch.target.as_path()))
         // An entry no listing reports must not wake the explorer either. On
         // macOS every folder Finder has ever opened gains a `.DS_Store` that is
         // rewritten behind the user's back, and each rewrite would otherwise

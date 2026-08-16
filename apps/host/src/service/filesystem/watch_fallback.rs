@@ -147,6 +147,12 @@ pub(super) fn advance_target(
     Ok(FallbackTurn::Unchanged)
 }
 
+/// Whether this target is due for another bounded scan shard.
+pub(super) fn scan_due(target: &Arc<Mutex<FallbackTarget>>, now: Instant) -> bool {
+    let state = target.lock().unwrap();
+    !state.native && now >= state.next_scan
+}
+
 /// Whether this target is due for another attempt at native registration.
 pub(super) fn native_retry_due(target: &Arc<Mutex<FallbackTarget>>, now: Instant) -> bool {
     let state = target.lock().unwrap();
