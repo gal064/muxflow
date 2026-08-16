@@ -71,8 +71,10 @@ pub(super) struct ControlStreamReader {
     pub(super) stopped: Arc<AtomicBool>,
     pub(super) controls: std_mpsc::Receiver<StreamControl>,
     pub(super) flow: Arc<super::FlowControl>,
-    pub(super) input_completion: std_mpsc::Sender<Result<(), String>>,
+    pub(super) input_completion: std_mpsc::Sender<InputCompletion>,
 }
+
+pub(super) type InputCompletion = (u64, Result<(), String>);
 
 pub(super) enum StreamControl {
     Membership {
@@ -169,6 +171,7 @@ pub(super) enum CommandBlock {
     /// the only place a rejected keystroke can still be attributed.
     Input {
         tag: CommandTag,
+        input_id: u64,
         pane_id: String,
         lines: Vec<Vec<u8>>,
     },
@@ -205,7 +208,7 @@ pub(super) enum CommandBlock {
 pub(super) struct StreamState {
     pub(super) pane_states: HashMap<String, PaneSeedState>,
     pub(super) expected_capture: Option<String>,
-    pub(super) expected_input: Option<String>,
+    pub(super) expected_input: Option<(u64, String)>,
     pub(super) expected_resume: Option<String>,
     pub(super) pending_alternate: Option<(String, Vec<Vec<u8>>, u64)>,
     pub(super) pending_metadata: Option<PendingCaptureMetadata>,
@@ -230,7 +233,7 @@ struct StreamRuntime<'a> {
     resources: &'a Arc<Mutex<PaneResourceStore>>,
     terminal_generation: &'a Arc<AtomicU64>,
     stopped: &'a AtomicBool,
-    input_completion: &'a std_mpsc::Sender<Result<(), String>>,
+    input_completion: &'a std_mpsc::Sender<InputCompletion>,
 }
 
 impl StreamState {
@@ -396,13 +399,18 @@ impl StreamState {
                 // desktop and the logs would leak the pane, not explain the
                 // failure.
                 let (detail, rejected_resume, rejected_input) = match &self.command_block {
-                    CommandBlock::Input { pane_id, lines, .. } => (
+                    CommandBlock::Input {
+                        input_id,
+                        pane_id,
+                        lines,
+                        ..
+                    } => (
                         format!(
                             "terminal input for {pane_id} was rejected by tmux: {}",
                             error_reason(&arguments, lines)
                         ),
                         None,
-                        true,
+                        Some(*input_id),
                     ),
                     CommandBlock::Resume { pane_id, lines, .. } => (
                         format!(
@@ -410,12 +418,12 @@ impl StreamState {
                             error_reason(&arguments, lines)
                         ),
                         Some(pane_id.clone()),
-                        false,
+                        None,
                     ),
-                    _ => (arguments, None, false),
+                    _ => (arguments, None, None),
                 };
-                if rejected_input {
-                    let _ = input_completion.send(Err(detail.clone()));
+                if let Some(input_id) = rejected_input {
+                    let _ = input_completion.send((input_id, Err(detail.clone())));
                 }
                 // An error abandons whatever multi-block sequence was running,
                 // so every correlation slot has to be released too — otherwise
@@ -572,20 +580,24 @@ impl StreamState {
             input_completion,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
-            if matches!(self.command_block, CommandBlock::Input { .. }) {
-                let _ = input_completion.send(Err(
-                    "terminal control stream stopped before input completed".into(),
+            if let CommandBlock::Input { input_id, .. } = &self.command_block {
+                let _ = input_completion.send((
+                    *input_id,
+                    Err("terminal control stream stopped before input completed".into()),
                 ));
             }
             self.command_block = CommandBlock::None;
             return;
         }
         if !self.active_tag_matches(end_tag) {
-            if matches!(self.command_block, CommandBlock::Input { .. }) {
-                let _ = input_completion.send(Err(format!(
-                    "terminal input completion tag mismatched {}",
-                    end_tag.number
-                )));
+            if let CommandBlock::Input { input_id, .. } = &self.command_block {
+                let _ = input_completion.send((
+                    *input_id,
+                    Err(format!(
+                        "terminal input completion tag mismatched {}",
+                        end_tag.number
+                    )),
+                ));
             }
             let scope = self.active_scope();
             emit_resnapshot(
@@ -600,7 +612,9 @@ impl StreamState {
         match std::mem::replace(&mut self.command_block, CommandBlock::None) {
             CommandBlock::Unknown { pane_id, lines, .. } => {
                 match classify_marker_block(pane_id, &lines) {
-                    MarkerBlock::Input(pane_id) => self.expected_input = Some(pane_id),
+                    MarkerBlock::Input { input_id, pane_id } => {
+                        self.expected_input = Some((input_id, pane_id));
+                    }
                     MarkerBlock::Resume(pane_id) => self.expected_resume = Some(pane_id),
                     MarkerBlock::Capture(pane_id) => {
                         self.expected_capture =
@@ -613,8 +627,8 @@ impl StreamState {
             // at all otherwise. The capture written with it is what actually
             // recovers the pane, because output produced while paused is
             // dropped rather than replayed.
-            CommandBlock::Input { .. } => {
-                let _ = input_completion.send(Ok(()));
+            CommandBlock::Input { input_id, .. } => {
+                let _ = input_completion.send((input_id, Ok(())));
             }
             CommandBlock::Resume { .. } => {}
             CommandBlock::CapturePrimary { pane_id, lines, .. } => {
@@ -829,9 +843,10 @@ impl StreamState {
                 pane_id,
                 lines: Vec::new(),
             }
-        } else if let Some(pane_id) = self.expected_input.take() {
+        } else if let Some((input_id, pane_id)) = self.expected_input.take() {
             CommandBlock::Input {
                 tag,
+                input_id,
                 pane_id,
                 lines: Vec::new(),
             }
@@ -892,7 +907,11 @@ impl StreamState {
                     if self.expected_capture.as_deref() == Some(&pane_id) {
                         self.expected_capture = None;
                     }
-                    if self.expected_input.as_deref() == Some(&pane_id) {
+                    if self
+                        .expected_input
+                        .as_ref()
+                        .is_some_and(|(_, expected_pane)| expected_pane == &pane_id)
+                    {
                         self.expected_input = None;
                     }
                     if self.expected_resume.as_deref() == Some(&pane_id) {

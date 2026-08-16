@@ -45,7 +45,7 @@ struct DestinationReservation {
 #[derive(Default)]
 struct ReservationState {
     entries: HashMap<DestinationKey, DestinationReservation>,
-    generation: u64,
+    semantic_namespaces: HashMap<FileIdentity, SemanticProbe>,
 }
 
 #[derive(Default)]
@@ -79,88 +79,63 @@ impl DestinationReservations {
         directory_path: &Path,
         leaf: &OsStr,
     ) -> Result<Option<DestinationLease>, String> {
-        loop {
-            let (generation, reserved_leaves) = {
-                let state = self
-                    .state
-                    .lock()
-                    .map_err(|_| "download destination reservation registry is unavailable")?;
-                (
-                    state.generation,
-                    state
-                        .entries
-                        .keys()
-                        .filter(|key| key.directory == directory_identity)
-                        .map(|key| key.leaf.clone())
-                        .collect::<Vec<_>>(),
-                )
-            };
-            if reserved_leaves
-                .iter()
-                .any(|reserved| reserved.as_slice() == leaf.as_bytes())
-            {
-                return Ok(None);
-            }
-            if !reserved_leaves.is_empty()
-                && filesystem_matches_any(directory, &reserved_leaves, leaf)?
-            {
-                return Ok(None);
-            }
-
-            let key = DestinationKey {
-                directory: directory_identity,
-                leaf: leaf.as_bytes().to_vec(),
-            };
-            let owner = Uuid::new_v4();
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| "download destination reservation registry is unavailable")?;
-            if state.generation != generation {
-                continue;
-            }
-            state.entries.insert(
-                key.clone(),
-                DestinationReservation {
-                    owner,
-                    display: directory_path.join(leaf),
-                },
-            );
-            state.generation = state.generation.wrapping_add(1);
-            return Ok(Some(DestinationLease {
-                registry: Arc::clone(self),
-                key,
-                owner,
-            }));
+        let key = DestinationKey {
+            directory: directory_identity,
+            leaf: leaf.as_bytes().to_vec(),
+        };
+        let owner = Uuid::new_v4();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "download destination reservation registry is unavailable")?;
+        if state.entries.contains_key(&key) {
+            return Ok(None);
         }
+        let namespace = match state.semantic_namespaces.entry(directory_identity) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(SemanticProbe::create(directory, None)?)
+            }
+        };
+        if namespace.contains(leaf)? {
+            return Ok(None);
+        }
+        namespace.add_leaf(leaf.as_bytes())?;
+        state.entries.insert(
+            key.clone(),
+            DestinationReservation {
+                owner,
+                display: directory_path.join(leaf),
+            },
+        );
+        Ok(Some(DestinationLease {
+            registry: Arc::clone(self),
+            key,
+            owner,
+        }))
     }
 
     fn contains(
         &self,
-        directory: &File,
+        _directory: &File,
         directory_identity: FileIdentity,
         leaf: &OsStr,
     ) -> Result<bool, String> {
-        let reserved_leaves = self
+        let state = self
             .state
             .lock()
-            .map_err(|_| "download destination reservation registry is unavailable")?
-            .entries
-            .keys()
-            .filter(|key| key.directory == directory_identity)
-            .map(|key| key.leaf.clone())
-            .collect::<Vec<_>>();
-        if reserved_leaves
-            .iter()
-            .any(|reserved| reserved.as_slice() == leaf.as_bytes())
-        {
+            .map_err(|_| "download destination reservation registry is unavailable")?;
+        let key = DestinationKey {
+            directory: directory_identity,
+            leaf: leaf.as_bytes().to_vec(),
+        };
+        if state.entries.contains_key(&key) {
             return Ok(true);
         }
-        if reserved_leaves.is_empty() {
-            Ok(false)
-        } else {
-            filesystem_matches_any(directory, &reserved_leaves, leaf)
-        }
+        state
+            .semantic_namespaces
+            .get(&directory_identity)
+            .map_or(Ok(false), |namespace| namespace.contains(leaf))
     }
 
     fn release(&self, key: &DestinationKey, owner: Uuid) {
@@ -172,8 +147,23 @@ impl DestinationReservations {
             .get(key)
             .is_some_and(|reservation| reservation.owner == owner)
         {
+            let Some(namespace) = state.semantic_namespaces.get_mut(&key.directory) else {
+                return;
+            };
+            // Fail closed on cleanup failure: keeping the reservation is safer
+            // than allowing another transfer to claim a semantic alias while
+            // its retained probe leaf still says the name is owned.
+            if namespace.remove_leaf(&key.leaf).is_err() {
+                return;
+            }
             state.entries.remove(key);
-            state.generation = state.generation.wrapping_add(1);
+            if !state
+                .entries
+                .keys()
+                .any(|entry| entry.directory == key.directory)
+            {
+                state.semantic_namespaces.remove(&key.directory);
+            }
         }
     }
 
@@ -187,6 +177,11 @@ impl DestinationReservations {
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.state.lock().unwrap().entries.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn semantic_namespace_count(&self) -> usize {
+        self.state.lock().unwrap().semantic_namespaces.len()
     }
 }
 
@@ -322,6 +317,25 @@ impl SemanticProbe {
         Ok(metadata_identity_at(directory, &name)?.is_some())
     }
 
+    fn remove_leaf(&mut self, leaf: &[u8]) -> Result<(), String> {
+        let name = CString::new(leaf).map_err(|_| "destination basename contains a NUL byte")?;
+        let directory = self
+            .directory
+            .as_ref()
+            .ok_or("destination semantic probe directory is unavailable")?;
+        // SAFETY: the private probe descriptor and retained leaf name are valid.
+        if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(format!("could not remove semantic probe leaf: {error}"));
+            }
+        }
+        if let Some(index) = self.leaves.iter().position(|retained| retained == &name) {
+            self.leaves.swap_remove(index);
+        }
+        Ok(())
+    }
+
     fn cleanup(&mut self) -> Result<(), String> {
         if !self.armed {
             return Ok(());
@@ -375,14 +389,7 @@ impl SemanticProbe {
     }
 }
 
-fn filesystem_matches_any(
-    parent: &File,
-    reserved: &[Vec<u8>],
-    candidate: &OsStr,
-) -> Result<bool, String> {
-    filesystem_matches_any_with_fault(parent, reserved, candidate, None)
-}
-
+#[cfg(test)]
 fn filesystem_matches_any_with_fault(
     parent: &File,
     reserved: &[Vec<u8>],

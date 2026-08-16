@@ -16,7 +16,6 @@ import { sendBinaryInput, sendInput } from "../features/terminal/api";
 import type { TerminalInput } from "../features/terminal/TerminalRenderer";
 import { setTerminalScreenReaderMode } from "../features/terminal/accessibilityPreference";
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
-import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import { abandonPanePaintSpansForScope } from "../perf/probe";
 import type { TmuxAction } from "../features/tmux/actions";
@@ -24,17 +23,12 @@ import { TauriAgentClient } from "../features/agents/api";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
 import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
 import { emitTestNotification, notificationPermissionStatus } from "../features/agents/notifications";
-import { keyForScope, keyForTransferConnection, TauriFileWorkspaceClient } from "../features/files/api";
-import { ExplorerTree } from "../features/files/ExplorerTree";
+import { TauriFileWorkspaceClient } from "../features/files/api";
 import { reconcileDownloadStatus, type ActiveDownloadStatus } from "../features/files/downloadStatus";
-import { DownloadActions } from "../features/files/DownloadActions";
-import { chooseDownloadDestination, type DownloadIntent } from "../features/files/downloadFlow";
 import { ignoredPathsFromStatus } from "../features/files/ignoredPaths";
-import type { ActiveRoot, DownloadRequest, FileEntry, FileMutation } from "../features/files/types";
+import type { FileEntry } from "../features/files/types";
 import { TauriGitWorkspaceClient } from "../features/git/api";
-import { GitSidebar } from "../features/git/GitSidebar";
 import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
-import { RightPanel } from "../features/shell/RightPanel";
 import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
 import { emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
@@ -52,14 +46,12 @@ import {
   openFileTab,
   openGitDiffTab,
   pinAppTab,
-  relocateFileTabs,
   selectAppTab,
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
   type CombinedTab,
 } from "../features/shell/model";
 import { useContextMenusOpen } from "../ui/ContextMenu";
-import { SurfaceError } from "../ui/SurfaceError";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
@@ -79,6 +71,9 @@ import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
 import { useAppAgentController } from "./useAppAgentController";
 import { useAppShellChrome } from "./useAppShellChrome";
 import { useAppHostSettingsActions } from "./useAppHostSettingsActions";
+import { useAppFileActions } from "./useAppFileActions";
+import { AppNoticeLayer } from "./AppNoticeLayer";
+import { AppRightPanel } from "./AppRightPanel";
 
 const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then((module) => ({ default: module.AppTabSurface })));
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
@@ -131,7 +126,6 @@ export function App() {
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
-  const downloadPickerOpen = useRef(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
@@ -572,79 +566,18 @@ export function App() {
   /** A preview tab stops being disposable the moment the user commits to it. */
   const pinOpenTab = (tabId: string) => setAppState((current) => pinAppTab(current, currentHostProfileId, tabId));
 
-  const mutateFile = async (mutation: FileMutation) => {
-    if (!fileScope || !workspaceFiles.root || !hostState.canMutate) throw new Error("File changes are unavailable while the host is read-only.");
-    const mutationScope = fileScope;
-    const mutationHostProfileId = currentHostProfileId;
-    const mutationRoot = workspaceFiles.root;
-    try {
-      await fileClient.mutate(mutationScope, mutationRoot, mutation);
-      if (mutation.kind === "rename" || mutation.kind === "move") {
-        setAppState((current) => relocateFileTabs(
-          current,
-          mutationHostProfileId,
-          mutationScope.serverIdentity,
-          mutationRoot.path,
-          mutation.path,
-          mutation.destination,
-        ));
-      }
-      const directory = "parent" in mutation
-        ? mutation.parent
-        : mutation.path.slice(0, mutation.path.lastIndexOf("/")) || mutationRoot.path;
-      // No toast: the tree redraws with the rename, the new file, or the row
-      // gone. The failure below is the part nothing else on screen would say.
-      workspaceFiles.refresh(directory);
-    } catch (error) {
-      setStatus(String(error));
-      throw error;
-    }
-  };
-
-  const startDownload = async (request: DownloadRequest, downloadRoot: ActiveRoot = workspaceFiles.root!) => {
-    if (!fileScope || !downloadRoot) throw new Error("Downloads require a live file host.");
-    try {
-      const transfer = await fileClient.startDownload(fileScope, downloadRoot, request);
-      workspaceFiles.recordTransfer(transfer);
-      const banner = `Download ${transfer.state}: ${request.path}`;
-      setActiveDownloadStatus({ id: transfer.id, path: request.path, banner });
-      setStatus(banner);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      workspaceFiles.recordTransfer({
-        id: crypto.randomUUID(), scopeKey: keyForTransferConnection(fileScope), path: request.path, destination: request.destination, kind: request.kind,
-        state: "failed", outcome: "notPublished", failureKind: "transfer", completedBytes: "0", filesCompleted: "0", error: message,
-      });
-      setStatus(message);
-    }
-  };
-
-  /**
-   * The whole download gesture: the OS save panel, then the transfer. There is
-   * no in-app step, so cancelling the panel ends it with nothing said.
-   */
-  const startDownloadFlow = async (intent: DownloadIntent, downloadRoot: ActiveRoot) => {
-    // Three call sites invoke this fire-and-forget, and the in-app modal that
-    // used to serialize them is gone — without this, two quick downloads open
-    // two save panels.
-    if (downloadPickerOpen.current) return;
-    downloadPickerOpen.current = true;
-    const chosen = await chooseDownloadDestination(intent)
-      .catch((error) => { setStatus(`Could not open the save panel: ${String(error)}`); return undefined; })
-      .finally(() => { downloadPickerOpen.current = false; });
-    if (!chosen) return;
-    // `overwrite`, not `rename`: the default name the panel opened with was
-    // already unique, so reaching an existing file means the user aimed at one
-    // and answered the panel's own Replace prompt. Where the panel could not
-    // have asked — a folder archive the backend will rename to `.tar` — refuse
-    // instead, because nothing may be replaced without being confirmed.
-    await startDownload({
-      path: intent.path,
-      kind: intent.kind,
-      destination: chosen.destination,
-      collision: chosen.panelConfirmed ? "overwrite" : "fail",
-    }, downloadRoot);
-  };
+  const { mutateFile, startDownloadFlow } = useAppFileActions({
+    canMutate: hostState.canMutate,
+    client: fileClient,
+    currentHostProfileId,
+    recordTransfer: workspaceFiles.recordTransfer,
+    refreshDirectory: workspaceFiles.refresh,
+    root: workspaceFiles.root,
+    scope: fileScope,
+    setActiveDownloadStatus,
+    setAppState,
+    setStatus,
+  });
 
   const moveCombinedTab = (tab: CombinedTab, direction: "left" | "right", scope: HostScopeToken) => {
     void runCommand(direction === "left" ? "window.moveLeft" : "window.moveRight", {
@@ -807,87 +740,57 @@ export function App() {
           />}
         </div>
       </section>
-      {panelOpen && <RightPanel
-        files={<ExplorerTree
-          disabled={!hostState.canMutate}
-          error={workspaceFiles.error}
-          expanded={workspaceFiles.expanded}
-          ignoredPaths={ignoredPaths}
-          listings={workspaceFiles.listings}
-          loading={workspaceFiles.loading}
-          requestedReads={workspaceFiles.requestedReads}
-          onCancelTransfer={async (id) => { if (fileScope) await fileClient.cancelTransfer(fileScope, id); }}
-          onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
-          onLoadMore={workspaceFiles.loadMore}
-          onMutate={mutateFile}
-          onOpen={openExplorerEntry}
-          onRefresh={workspaceFiles.refresh}
-          onToggle={workspaceFiles.toggleDirectory}
-          root={workspaceFiles.root}
-          scopeIdentity={fileScope ? keyForScope(fileScope) : "disconnected"}
-          transfers={workspaceFiles.transfers}
-        />}
-        git={<GitSidebar
-          client={gitClient}
-          disabled={!hostState.canMutate}
-          error={workspaceGit.error}
-          loading={workspaceGit.loading}
-          onMessage={setStatus}
-          onOpenDiff={(entry, target) => {
-            if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
-            const session = activeSession;
-            const serverIdentity = hostState.serverIdentity;
-            const root = workspaceFiles.root;
-            const gitStatus = workspaceGit.status;
-            shellNavigation.selectLocalAppTab(
-              session.id,
-              activeWindowId,
-              `git:${gitStatus.repository.id}:${target}:${entry.path}`,
-              () => setAppState((current) => openGitDiffTab(
-                current, currentHostProfileId, serverIdentity, session, entry, target, gitStatus, root,
-              )),
-            );
-          }}
-          onRefresh={() => void workspaceGit.refresh()}
-          onStatus={workspaceGit.accept}
-          root={workspaceFiles.root}
-          scope={fileScope}
-          status={workspaceGit.status}
-        />}
+      {panelOpen && <AppRightPanel
+        canMutate={hostState.canMutate}
+        fileClient={fileClient}
+        fileScope={fileScope}
+        gitClient={gitClient}
+        ignoredPaths={ignoredPaths}
+        onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
+        onGitDiff={(entry, target) => {
+          if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
+          const session = activeSession;
+          const serverIdentity = hostState.serverIdentity;
+          const root = workspaceFiles.root;
+          const gitStatus = workspaceGit.status;
+          shellNavigation.selectLocalAppTab(
+            session.id,
+            activeWindowId,
+            `git:${gitStatus.repository.id}:${target}:${entry.path}`,
+            () => setAppState((current) => openGitDiffTab(
+              current, currentHostProfileId, serverIdentity, session, entry, target, gitStatus, root,
+            )),
+          );
+        }}
+        onMessage={setStatus}
+        onMutate={mutateFile}
+        onOpenFile={openExplorerEntry}
         onSurface={(surface) => void runCommand(surface === "files" ? "view.showFiles" : "view.showGit")}
         surface={appState.shell.panelSurface}
+        workspaceFiles={workspaceFiles}
+        workspaceGit={workspaceGit}
       />}
     </div>
 
-    {/* The visible half of the status channel. Fixed-position, so it never
-        takes a pixel from the terminal surface the client size is measured
-        from; the full text is also in the live region below. */}
-    {notice && <div className={notice.severity === "problem" ? "toast toast-problem" : "toast"} role={notice.severity === "problem" ? "alert" : "status"}>
-      {/* A problem is usually a host rejection arriving verbatim — the raw
-          `file_mutation_rejected: …` of M10-E059. It gets the summary-plus-
-          disclosure treatment; ordinary progress is already a sentence and is
-          left alone. The live region below still carries the full text. */}
-      {notice.severity === "problem"
-        ? <SurfaceError className="toast-body" detail={notice.message} role="none" />
-        : <span>{notice.message}</span>}
-      {/* Only on the notice this exact download raised: matching the message
-          means a later status replaces the buttons along with the text, so
-          they can never end up offering a file the toast is not about. */}
-      {/* One row, not three: `.toast` is a grid, so bare buttons each take a
-          line of their own. `.toast > div` is the existing row treatment the
-          sibling toasts below already use. */}
-      <div>
-        {completedDownload?.noticeId === notice.id && <DownloadActions destination={completedDownload.destination} onResult={(error) => { if (error) setStatus(error); }} />}
-        <button aria-label="Dismiss" onClick={() => { setNotice(undefined); setCompletedDownload(undefined); }} type="button">Dismiss</button>
-      </div>
-    </div>}
-    {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}
-    {appStateRecovery && <div className="toast" role="alert"><strong>Saved shell state is write-frozen</strong><span>{appStateRecovery}</span><button onClick={() => setAppStateResetConfirmation(true)} type="button">Reset saved shell state…</button></div>}
-    {appRecovery.offer && <div className="toast" role="status"><strong>App tabs found from the replaced tmux server</strong><span>{appRecovery.offer.count} tab{appRecovery.offer.count === 1 ? "" : "s"} can be rebound by unique workspace name. Terminal and pane identities are never reused.</span><div><button onClick={appRecovery.restore} type="button">Restore app tabs</button><button onClick={appRecovery.requestDiscard} type="button">Discard old tabs…</button></div></div>}
-
-    <TerminalTransferHistory client={terminalTransferClient} onError={(error) => setStatus(String(error))} registry={terminalTransferRegistry} />
-    {agentWorkflow.dialog}
-    {agentHostSetup.dialog}
+    <AppNoticeLayer
+      agentDialog={agentWorkflow.dialog}
+      agentSetupDialog={agentHostSetup.dialog}
+      appStateRecovery={appStateRecovery}
+      completedDownload={completedDownload}
+      notice={notice}
+      onClearDownload={() => setCompletedDownload(undefined)}
+      onDismissNotice={() => setNotice(undefined)}
+      onDownloadResult={(error) => { if (error) setStatus(error); }}
+      onOfferDiscard={appRecovery.requestDiscard}
+      onOfferRestore={appRecovery.restore}
+      onProfileReset={() => setProfileResetConfirmation(true)}
+      onStateReset={() => setAppStateResetConfirmation(true)}
+      onTransferError={(error) => setStatus(String(error))}
+      profileRecovery={profileRecovery}
+      recoveryOffer={appRecovery.offer}
+      terminalTransferClient={terminalTransferClient}
+      terminalTransferRegistry={terminalTransferRegistry}
+    />
     {settingsOpen && <SettingsDialog
       agentSetup={{
         available: agentHostSetup.offerable,

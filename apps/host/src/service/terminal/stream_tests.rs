@@ -13,8 +13,8 @@ struct Harness {
     resources: Arc<Mutex<PaneResourceStore>>,
     generation: Arc<AtomicU64>,
     stopped: AtomicBool,
-    input_completion_tx: std_mpsc::Sender<Result<(), String>>,
-    input_completions: std_mpsc::Receiver<Result<(), String>>,
+    input_completion_tx: std_mpsc::Sender<InputCompletion>,
+    input_completions: std_mpsc::Receiver<InputCompletion>,
 }
 
 impl Harness {
@@ -308,13 +308,15 @@ fn an_in_band_input_block_is_correlated_to_the_pane_that_was_typed_into() {
         &["%1".into(), "%2".into()],
         Arc::new(crate::service::terminal::FlowControl::default()),
     );
-    state.expected_input = Some("%2".into());
+    state.expected_input = Some((7, "%2".into()));
     let block = state.start_block(CommandTag {
         timestamp: 1,
         number: 2,
         flags: 1,
     });
-    assert!(matches!(block, CommandBlock::Input { ref pane_id, .. } if pane_id == "%2"));
+    assert!(
+        matches!(block, CommandBlock::Input { input_id: 7, ref pane_id, .. } if pane_id == "%2")
+    );
     state.command_block = block;
     assert_eq!(state.active_scope(), "%2");
 }
@@ -322,7 +324,7 @@ fn an_in_band_input_block_is_correlated_to_the_pane_that_was_typed_into() {
 #[test]
 fn an_in_band_input_completion_is_reported_only_after_tmux_ends_its_block() {
     let (mut state, harness) = Harness::new(&["%1".into()]);
-    state.expected_input = Some("%1".into());
+    state.expected_input = Some((8, "%1".into()));
     state.handle(
         ControlRecord::Begin {
             tag: TAG,
@@ -338,13 +340,13 @@ fn an_in_band_input_completion_is_reported_only_after_tmux_ends_its_block() {
         },
         harness.runtime(),
     );
-    assert_eq!(harness.input_completions.try_recv().unwrap(), Ok(()));
+    assert_eq!(harness.input_completions.try_recv().unwrap(), (8, Ok(())));
 }
 
 #[test]
 fn a_rejected_in_band_input_reports_its_tmux_error_to_the_barrier_lane() {
     let (mut state, harness) = Harness::new(&["%1".into()]);
-    state.expected_input = Some("%1".into());
+    state.expected_input = Some((9, "%1".into()));
     state.handle(
         ControlRecord::Begin {
             tag: TAG,
@@ -363,7 +365,9 @@ fn a_rejected_in_band_input_reports_its_tmux_error_to_the_barrier_lane() {
         },
         harness.runtime(),
     );
-    let error = harness.input_completions.try_recv().unwrap().unwrap_err();
+    let (input_id, result) = harness.input_completions.try_recv().unwrap();
+    assert_eq!(input_id, 9);
+    let error = result.unwrap_err();
     assert!(error.contains("terminal input for %1 was rejected by tmux"));
     assert!(error.contains("can't find pane"));
 }

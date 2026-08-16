@@ -57,6 +57,7 @@ pub(super) struct TerminalAttachment {
     /// it remembers one. So the carry-across is needed exactly once per client
     /// per size, and a workspace switched away from and back costs nothing.
     last_size: Option<(u32, u32)>,
+    next_input_id: u64,
 }
 
 pub(super) struct VisibilityChange {
@@ -182,6 +183,7 @@ impl TerminalAttachment {
             stream_tx,
             flow,
             last_size: None,
+            next_input_id: 0,
         })
     }
 
@@ -200,8 +202,13 @@ impl TerminalAttachment {
         if data.is_empty() {
             return Ok(());
         }
+        self.next_input_id = self
+            .next_input_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("terminal input correlation sequence exhausted"))?;
         self.input_tx
             .try_send(InputDispatch::Bytes {
+                input_id: self.next_input_id,
                 pane_id: pane_id.to_owned(),
                 data: data.to_vec(),
             })
@@ -939,8 +946,9 @@ fn queue_marker(kind: &str, pane_id: &str) -> String {
 }
 
 /// The marker an in-band input request writes ahead of its `send-keys`.
-pub(super) fn queue_input(pane_id: &str) -> String {
-    queue_marker("__ADE_INPUT__", pane_id)
+pub(super) fn queue_input(input_id: u64, pane_id: &str) -> String {
+    let digits = pane_id.strip_prefix('%').unwrap_or(pane_id);
+    format!("display-message -p '__ADE_INPUT__:{input_id}:{digits}'")
 }
 
 fn capture_command(pane_id: &str) -> String {

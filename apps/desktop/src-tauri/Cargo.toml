@@ -28,6 +28,7 @@ tauri = { version = "2.11.5", features = [] }
 tauri-plugin-dialog = "2.7.2"
 tmux-agent-protocol = { path = "../../../crates/protocol" }
 tmux-control = { path = "../../../crates/tmux-control" }
+tokio = { version = "1", features = ["sync", "time"] }
 uuid.workspace = true
 
 [dev-dependencies]

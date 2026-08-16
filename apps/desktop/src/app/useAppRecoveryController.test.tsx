@@ -13,11 +13,12 @@ interface HarnessProps {
   serverIdentity?: string;
   session: Session;
   connectionEpoch: number;
+  hostProfileId?: string;
 }
 
 let currentOffer: ReturnType<typeof useAppRecoveryController>["offer"];
 
-function Harness({ serverIdentity, session, connectionEpoch }: HarnessProps) {
+function Harness({ serverIdentity, session, connectionEpoch, hostProfileId = "remote" }: HarnessProps) {
   const [appState, setAppState] = useState<PersistedAppState>(() => ({
     ...defaultAppState,
     appTabs: [{
@@ -33,15 +34,15 @@ function Harness({ serverIdentity, session, connectionEpoch }: HarnessProps) {
     }],
   }));
   const scope: HostScopeToken = {
-    hostProfileId: "remote",
-    connectionKey: "ssh:remote",
+    hostProfileId,
+    connectionKey: `ssh:${hostProfileId}`,
     connectionEpoch,
     serverIdentity,
     generation: 1,
   };
   currentOffer = useAppRecoveryController({
     appState,
-    currentHostProfileId: "remote",
+    currentHostProfileId: hostProfileId,
     currentScope: scope,
     serverIdentity,
     sessions: [session],
@@ -77,6 +78,35 @@ describe("useAppRecoveryController", () => {
       count: 1,
       previousServerIdentity: "server-a",
       scope: { serverIdentity: "server-b" },
+    });
+  });
+
+  it("retains replacement history independently for each host profile", async () => {
+    const oldSession: Session = {
+      id: "$1", name: "workspace", windowCount: 1, attachedClients: 0, order: 0,
+    };
+    const replacementSession: Session = { ...oldSession, id: "$99" };
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <Harness hostProfileId="remote" serverIdentity="server-a" session={oldSession} connectionEpoch={1} />,
+      );
+    });
+    await act(async () => {
+      renderer.update(
+        <Harness hostProfileId="other" serverIdentity="server-other" session={oldSession} connectionEpoch={2} />,
+      );
+    });
+    await act(async () => {
+      renderer.update(
+        <Harness hostProfileId="remote" serverIdentity="server-b" session={replacementSession} connectionEpoch={3} />,
+      );
+    });
+
+    expect(currentOffer).toMatchObject({
+      count: 1,
+      previousServerIdentity: "server-a",
+      scope: { hostProfileId: "remote", serverIdentity: "server-b" },
     });
   });
 });

@@ -22,27 +22,28 @@ interface AppRecoveryControllerOptions {
 /** Owns replacement-server reconciliation and the complete recovery dialog lifecycle. */
 export function useAppRecoveryController(options: AppRecoveryControllerOptions) {
   const [state, dispatch] = useReducer(appRecoveryReducer, undefined);
-  const lastIdentity = useRef<{ hostProfileId: string; serverIdentity?: string } | undefined>(undefined);
+  // Each saved host owns its own replacement history. A single global slot
+  // forgot host A as soon as the user visited host B, so returning to a
+  // replaced A could silently bind persisted tabs to the wrong tmux server.
+  const lastIdentities = useRef(new Map<string, string>());
   const scopeRef = useRef(options.currentScope);
   const sessionsRef = useRef(options.sessions);
   scopeRef.current = options.currentScope;
   sessionsRef.current = options.sessions;
 
   useEffect(() => {
-    const previous = lastIdentity.current;
-    if (previous?.serverIdentity && options.serverIdentity
-      && previous.hostProfileId === options.currentHostProfileId
-      && previous.serverIdentity !== options.serverIdentity) {
+    const previous = lastIdentities.current.get(options.currentHostProfileId);
+    if (previous && options.serverIdentity && previous !== options.serverIdentity) {
       const count = recoverableAppTabCount(
         options.appState,
         options.currentHostProfileId,
-        previous.serverIdentity,
+        previous,
         options.sessions,
       );
       if (count > 0) dispatch({
         type: "offer",
         count,
-        previousServerIdentity: previous.serverIdentity,
+        previousServerIdentity: previous,
         scope: { ...options.currentScope, serverIdentity: options.serverIdentity },
       });
     }
@@ -53,14 +54,10 @@ export function useAppRecoveryController(options: AppRecoveryControllerOptions) 
       options.sessions,
     ));
     // A reconnect intentionally clears the live host state before its new
-    // ServerHello arrives. Preserve the last non-empty identity across that
-    // gap for the same profile so A -> undefined -> B can still offer recovery;
-    // never carry it across a profile change.
-    if (options.serverIdentity || previous?.hostProfileId !== options.currentHostProfileId) {
-      lastIdentity.current = {
-        hostProfileId: options.currentHostProfileId,
-        serverIdentity: options.serverIdentity,
-      };
+    // ServerHello arrives. Undefined never erases the last authoritative
+    // identity, and visiting another profile updates only that profile's slot.
+    if (options.serverIdentity) {
+      lastIdentities.current.set(options.currentHostProfileId, options.serverIdentity);
     }
   }, [options.currentHostProfileId, options.serverIdentity, options.sessions]);
 

@@ -2,14 +2,13 @@ use std::{
     io::Write,
     process::Stdio,
     sync::{Arc, Mutex, OnceLock, mpsc},
-    time::Duration,
 };
 
 use tmux_control::{HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
 use uuid::Uuid;
 
 use super::super::snapshot::tmux_command;
-use super::{queue_input, validate_tmux_id};
+use super::{queue_input, stream::InputCompletion, validate_tmux_id};
 
 /// Largest payload written in band through the already-open control client.
 ///
@@ -27,7 +26,11 @@ pub(super) const INBAND_INPUT_MAX_BYTES: usize = HOST_INPUT_COALESCE_BYTES;
 const _: () = assert!(MAX_INPUT_REQUEST_BYTES > INBAND_INPUT_MAX_BYTES);
 
 pub(super) enum InputDispatch {
-    Bytes { pane_id: String, data: Vec<u8> },
+    Bytes {
+        input_id: u64,
+        pane_id: String,
+        data: Vec<u8>,
+    },
     Barrier(mpsc::SyncSender<Result<(), String>>),
     Stop,
 }
@@ -35,15 +38,28 @@ pub(super) enum InputDispatch {
 pub(super) fn run_input_dispatch<W: Write>(
     receiver: mpsc::Receiver<InputDispatch>,
     control_stdin: Arc<Mutex<W>>,
-    input_completion: mpsc::Receiver<Result<(), String>>,
+    input_completion: mpsc::Receiver<InputCompletion>,
     report_failure: impl Fn(&str, &str),
 ) {
-    run_input_dispatch_with(receiver, move |pane_id, data| {
+    run_input_dispatch_with(receiver, move |input_id, pane_id, data| {
         if data.len() <= INBAND_INPUT_MAX_BYTES {
-            send_input_inband(&control_stdin, pane_id, data)?;
-            input_completion
-                .recv_timeout(Duration::from_secs(2))
-                .map_err(|error| format!("timed out waiting for tmux input completion: {error}"))?
+            send_input_inband(&control_stdin, input_id, pane_id, data)?;
+            loop {
+                let (completed_id, result) = input_completion.recv().map_err(|_| {
+                    "terminal control stream closed before input completed".to_owned()
+                })?;
+                if completed_id == input_id {
+                    break result;
+                }
+                if completed_id > input_id {
+                    break Err(format!(
+                        "terminal input completion advanced from {input_id} to {completed_id}"
+                    ));
+                }
+                // A stale completion is never allowed to acknowledge this
+                // request. It can only originate before correlation became
+                // authoritative; discard it and keep waiting for the exact id.
+            }
         } else {
             // Ordering against the in-band path is preserved because this
             // dispatch thread is the only writer of input: the previous
@@ -59,7 +75,7 @@ pub(super) fn run_input_dispatch<W: Write>(
 
 fn run_input_dispatch_with(
     receiver: mpsc::Receiver<InputDispatch>,
-    mut send_batch: impl FnMut(&str, &[u8]) -> Result<(), String>,
+    mut send_batch: impl FnMut(u64, &str, &[u8]) -> Result<(), String>,
 ) {
     let mut deferred = None;
     let mut pending_error = None;
@@ -72,10 +88,15 @@ fn run_input_dispatch_with(
             },
         };
         match message {
-            InputDispatch::Bytes { pane_id, mut data } => {
+            InputDispatch::Bytes {
+                mut input_id,
+                pane_id,
+                mut data,
+            } => {
                 while data.len() < HOST_INPUT_COALESCE_BYTES {
                     match receiver.try_recv() {
                         Ok(InputDispatch::Bytes {
+                            input_id: next_id,
                             pane_id: next_pane,
                             data: next_data,
                         }) if next_pane == pane_id
@@ -83,6 +104,7 @@ fn run_input_dispatch_with(
                                 <= HOST_INPUT_COALESCE_BYTES =>
                         {
                             data.extend_from_slice(&next_data);
+                            input_id = next_id;
                         }
                         Ok(message) => {
                             deferred = Some(message);
@@ -92,14 +114,16 @@ fn run_input_dispatch_with(
                         Err(mpsc::TryRecvError::Disconnected) => break,
                     }
                 }
-                let result = send_batch(&pane_id, &data);
+                let result = send_batch(input_id, &pane_id, &data);
                 if pending_error.is_none() {
                     pending_error = result.err();
                 }
             }
             InputDispatch::Barrier(sender) => {
-                let result = pending_error.take().map_or(Ok(()), Err);
-                let _ = sender.send(result);
+                let result = pending_error.clone().map_or(Ok(()), Err);
+                if sender.send(result).is_ok() {
+                    pending_error = None;
+                }
             }
             InputDispatch::Stop => break,
         }
@@ -121,12 +145,13 @@ fn run_input_dispatch_with(
 /// follows it is the thing that fails.
 fn send_input_inband<W: Write>(
     stdin: &Arc<Mutex<W>>,
+    input_id: u64,
     pane_id: &str,
     data: &[u8],
 ) -> Result<(), String> {
     validate_tmux_id(pane_id, '%').map_err(|error| error.to_string())?;
     let mut line = String::with_capacity(48 + pane_id.len() * 2 + data.len() * 3);
-    queue_input_marker(&mut line, pane_id);
+    queue_input_marker(&mut line, input_id, pane_id);
     line.push_str("send-keys -H -t ");
     line.push_str(pane_id);
     for byte in data {
@@ -152,8 +177,8 @@ fn send_input_inband<W: Write>(
     Ok(())
 }
 
-fn queue_input_marker(line: &mut String, pane_id: &str) {
-    line.push_str(queue_input(pane_id).as_str());
+fn queue_input_marker(line: &mut String, input_id: u64, pane_id: &str) {
+    line.push_str(queue_input(input_id, pane_id).as_str());
     line.push('\n');
 }
 
@@ -304,12 +329,14 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         sender
             .send(InputDispatch::Bytes {
+                input_id: 1,
                 pane_id: "%1".into(),
                 data: b"a".to_vec(),
             })
             .unwrap();
         sender
             .send(InputDispatch::Bytes {
+                input_id: 2,
                 pane_id: "%2".into(),
                 data: b"b".to_vec(),
             })
@@ -324,7 +351,7 @@ mod tests {
             .unwrap();
         sender.send(InputDispatch::Stop).unwrap();
         let mut calls = 0;
-        run_input_dispatch_with(receiver, |_, _| {
+        run_input_dispatch_with(receiver, |_, _, _| {
             calls += 1;
             if calls == 1 {
                 Err("injected writer failure".into())
@@ -340,23 +367,75 @@ mod tests {
     }
 
     #[test]
+    fn an_abandoned_barrier_cannot_consume_the_authoritative_failure() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(InputDispatch::Bytes {
+                input_id: 1,
+                pane_id: "%1".into(),
+                data: b"a".to_vec(),
+            })
+            .unwrap();
+        let (abandoned_tx, abandoned_rx) = mpsc::sync_channel(1);
+        drop(abandoned_rx);
+        sender.send(InputDispatch::Barrier(abandoned_tx)).unwrap();
+        let (live_tx, live_rx) = mpsc::sync_channel(1);
+        sender.send(InputDispatch::Barrier(live_tx)).unwrap();
+        sender.send(InputDispatch::Stop).unwrap();
+
+        run_input_dispatch_with(receiver, |_, _, _| Err("late tmux failure".into()));
+
+        assert_eq!(live_rx.recv().unwrap(), Err("late tmux failure".into()));
+    }
+
+    #[test]
+    fn a_stale_completion_never_acknowledges_a_later_input() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(InputDispatch::Bytes {
+                input_id: 2,
+                pane_id: "%1".into(),
+                data: b"a".to_vec(),
+            })
+            .unwrap();
+        let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
+        sender.send(InputDispatch::Barrier(barrier_tx)).unwrap();
+        sender.send(InputDispatch::Stop).unwrap();
+        let (completion_tx, completion_rx) = mpsc::channel();
+        completion_tx.send((1, Ok(()))).unwrap();
+        completion_tx
+            .send((2, Err("the matching request failed".into())))
+            .unwrap();
+        let stdin = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        run_input_dispatch(receiver, stdin, completion_rx, |_, _| {});
+
+        assert_eq!(
+            barrier_rx.recv().unwrap(),
+            Err("the matching request failed".into())
+        );
+    }
+
+    #[test]
     fn bounded_queue_backpressure_rejects_only_the_unqueued_caller() {
         let (sender, receiver) = mpsc::sync_channel(1);
         sender
             .try_send(InputDispatch::Bytes {
+                input_id: 1,
                 pane_id: "%1".into(),
                 data: b"accepted".to_vec(),
             })
             .unwrap();
         assert!(matches!(
             sender.try_send(InputDispatch::Bytes {
+                input_id: 2,
                 pane_id: "%1".into(),
                 data: b"rejected".to_vec(),
             }),
             Err(mpsc::TrySendError::Full(_))
         ));
         drop(sender);
-        run_input_dispatch_with(receiver, |_, bytes| {
+        run_input_dispatch_with(receiver, |_, _, bytes| {
             assert_eq!(bytes, b"accepted");
             Ok(())
         });
@@ -368,6 +447,7 @@ mod tests {
         let data = vec![b'x'; HOST_INPUT_COALESCE_BYTES * 3 + 17];
         sender
             .send(InputDispatch::Bytes {
+                input_id: 1,
                 pane_id: "%1".into(),
                 data: data.clone(),
             })
@@ -376,7 +456,7 @@ mod tests {
         sender.send(InputDispatch::Barrier(barrier_tx)).unwrap();
         sender.send(InputDispatch::Stop).unwrap();
         let mut commits = 0;
-        run_input_dispatch_with(receiver, |pane_id, bytes| {
+        run_input_dispatch_with(receiver, |_, pane_id, bytes| {
             commits += 1;
             assert_eq!(pane_id, "%1");
             assert_eq!(bytes, data);
@@ -392,18 +472,18 @@ mod tests {
     #[test]
     fn in_band_input_is_byte_exact_hex_behind_its_own_correlation_marker() {
         let stdin = Arc::new(Mutex::new(Vec::<u8>::new()));
-        send_input_inband(&stdin, "%12", &[0x00, 0x03, 0x1b, 0xff, b'a']).unwrap();
+        send_input_inband(&stdin, 41, "%12", &[0x00, 0x03, 0x1b, 0xff, b'a']).unwrap();
         let written = String::from_utf8(stdin.lock().unwrap().clone()).unwrap();
         let mut lines = written.lines();
         // The pane sigil is absent on purpose: tmux runs a display message
         // through strftime, which swallows a literal `%12`.
         assert_eq!(
             lines.next().unwrap(),
-            "display-message -p '__ADE_INPUT__:12'"
+            "display-message -p '__ADE_INPUT__:41:12'"
         );
         assert_eq!(lines.next().unwrap(), "send-keys -H -t %12 00 03 1b ff 61");
         assert!(lines.next().is_none());
-        assert!(send_input_inband(&stdin, "%12; kill-server", b"x").is_err());
+        assert!(send_input_inband(&stdin, 42, "%12; kill-server", b"x").is_err());
     }
 
     /// The `__ADE_CAPTURE__` marker and its `capture-pane` must reach tmux with
@@ -429,7 +509,7 @@ mod tests {
             let input_stdin = Arc::clone(&stdin);
             workers.push(thread::spawn(move || {
                 for _ in 0..50 {
-                    send_input_inband(&input_stdin, "%2", b"z").unwrap();
+                    send_input_inband(&input_stdin, index * 50 + 1, "%2", b"z").unwrap();
                 }
             }));
         }

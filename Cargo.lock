@@ -4239,6 +4239,7 @@ dependencies = [
  "tempfile",
  "tmux-agent-protocol",
  "tmux-control",
+ "tokio",
  "uuid",
  "zbus",
 ]

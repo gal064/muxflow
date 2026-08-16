@@ -152,6 +152,33 @@ describe("TerminalWriteScheduler", () => {
     expect(completions).toEqual([]);
   });
 
+  it("bounds empty ordered records while xterm is stalled", () => {
+    const completions: Array<() => void> = [];
+    const overflow = vi.fn();
+    const rendered = vi.fn();
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      () => 1,
+      () => undefined,
+      1024,
+      1024,
+      undefined,
+      overflow,
+      undefined,
+      3,
+    );
+    expect(scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    expect(scheduler.enqueue(new Uint8Array(), rendered)).toBe(true);
+    expect(scheduler.enqueue(new Uint8Array(), rendered)).toBe(true);
+    expect(scheduler.enqueue(new Uint8Array(), rendered)).toBe(false);
+    expect(overflow).toHaveBeenCalledOnce();
+    expect(overflow).toHaveBeenCalledWith(1, 4);
+    expect(scheduler.overflowed).toBe(true);
+    expect(rendered).not.toHaveBeenCalled();
+    completions.shift()!();
+    expect(rendered).not.toHaveBeenCalled();
+  });
+
   it("seals new writes and drains scheduled plus in-flight callbacks before resolving", async () => {
     const frames: FrameRequestCallback[] = [];
     const completions: Array<() => void> = [];
