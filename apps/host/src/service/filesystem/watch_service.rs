@@ -65,23 +65,30 @@ impl FileService {
                 let Some(()) = first else { break };
                 sleep(Duration::from_millis(75)).await;
                 while native_rx.try_recv().is_ok() {}
-                let paths = std::mem::take(&mut *native_dirty.lock().unwrap());
-                let events: Vec<_> = paths
+                let changed: Vec<PathBuf> = std::mem::take(&mut *native_dirty.lock().unwrap())
                     .into_iter()
-                    .map(|path| {
-                        let mut event = Event::new(notify::EventKind::Any);
-                        event.paths.push(path);
-                        Ok(event)
-                    })
                     .collect();
                 let watches = service.watch_entries();
                 let all_rescan = native_rescan.swap(false, Ordering::AcqRel);
                 for (watch_id, watch) in watches
                     .into_iter()
-                    .filter(|(_, watch)| watch_matches_events(watch, &events, all_rescan))
+                    .filter(|(_, watch)| watch_matches_changes(watch, &changed, all_rescan))
                 {
                     if !all_rescan {
-                        for event in precise_file_events(&watch_id, &watch, &events) {
+                        // `precise_file_events` stats every dirty path, which on
+                        // this host can be a slow filesystem and is now the
+                        // primary path for the whole feature. It does not belong
+                        // on a runtime worker.
+                        let mapped = {
+                            let watch = watch.clone();
+                            let watch_id = watch_id.clone();
+                            let changed = changed.clone();
+                            tokio::task::spawn_blocking(move || {
+                                precise_file_events(&watch_id, &watch, &changed)
+                            })
+                            .await
+                        };
+                        for event in mapped.unwrap_or_default() {
                             broadcast_control_event(event);
                         }
                         continue;
@@ -157,7 +164,7 @@ impl FileService {
         if !self.watch_is_current(watch_id, watch) {
             return;
         }
-        snapshot.overflowed = snapshot.overflowed || overflow_recovery;
+        snapshot.recovered_from_overflow = overflow_recovery;
         snapshot.authoritative = true;
         emit_event(
             sender,
@@ -383,32 +390,30 @@ impl FileService {
     }
 }
 
-pub(super) fn watch_matches_events(
+/// Whether any dirty path belongs to this watch's directory.
+///
+/// The directory itself counts, so a change to the directory can still schedule
+/// a rescan of it — it just never becomes an entry inside itself.
+pub(super) fn watch_matches_changes(
     watch: &Watch,
-    events: &[notify::Result<Event>],
+    changed: &[PathBuf],
     authoritative_rescan: bool,
 ) -> bool {
     authoritative_rescan
-        || events.iter().any(|event| {
-            event.as_ref().is_ok_and(|event| {
-                event.paths.iter().any(|changed| {
-                    changed == &watch.target || changed.parent() == Some(watch.target.as_path())
-                })
-            })
-        })
+        || changed
+            .iter()
+            .any(|path| path == &watch.target || path.parent() == Some(watch.target.as_path()))
 }
 
 pub(super) fn precise_file_events(
     watch_id: &str,
     watch: &Watch,
-    events: &[notify::Result<Event>],
+    changed: &[PathBuf],
 ) -> Vec<v1::HostEvent> {
     let root = watch.root.logical_root();
     let mut affected = BTreeMap::<PathBuf, bool>::new();
-    for path in events
+    for path in changed
         .iter()
-        .filter_map(|event| event.as_ref().ok())
-        .flat_map(|event| event.paths.iter())
         // Children only. An event about the watched directory *itself* is not
         // an entry in it: mapped as one it produced a row for the directory
         // inside its own listing, under a second path spelling with a trailing

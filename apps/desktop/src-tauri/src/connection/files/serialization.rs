@@ -52,6 +52,7 @@ fn directory_json(value: &v1::DirectorySnapshot) -> Value {
         "authoritative": value.authoritative,
         "nextPageToken": value.next_page_token,
         "complete": value.complete,
+        "recoveredFromOverflow": value.recovered_from_overflow,
     })
 }
 

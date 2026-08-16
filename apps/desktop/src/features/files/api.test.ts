@@ -161,7 +161,7 @@ describe("TauriFileWorkspaceClient", () => {
         rootToken: "token",
         listing: {
           rootToken: "token", directory: "/repo", revision: "2", entries: [],
-          overflowRecovery: true, nextPageToken: undefined, complete: true,
+          recoveredFromOverflow: false, nextPageToken: undefined, complete: true,
         },
       },
       {

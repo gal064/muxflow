@@ -503,10 +503,16 @@ message DirectorySnapshot {
   string path = 3;
   uint64 generation = 4;
   repeated FileMetadata entries = 5;
+  // More entries follow this page. Says nothing about lost events.
   bool overflowed = 6;
   bool authoritative = 7;
   string next_page_token = 8;
   bool complete = 9;
+  // The watcher lost events and rebuilt this listing from the filesystem, so
+  // anything cached *below* this directory may have missed changes too. A
+  // separate field from `overflowed` because they answer different questions
+  // and drive different client decisions.
+  bool recovered_from_overflow = 10;
 }
 
 message FileContent {

@@ -89,18 +89,29 @@ impl FileService {
             && let Some(retained) = self.pages.page(&binding, cursor, page_size)
         {
             let next_page_token = retained.next.as_ref().map(|(index, key)| {
-                encode_page_token(&binding, &retained.snapshot_id, *index, key)
+                encode_page_token(
+                    &binding,
+                    &retained.snapshot_id,
+                    *index,
+                    retained.generation,
+                    key,
+                )
             });
             return Ok(snapshot(
                 root,
                 &logical_target,
                 watch_id,
-                generation,
+                retained.generation,
                 retained.entries,
                 next_page_token,
             ));
         }
 
+        // Every page of one listing reports the revision the listing started
+        // with, so an assembled multi-page listing has a coherent one.
+        let generation = cursor
+            .as_ref()
+            .map_or(generation, |cursor| cursor.generation);
         let resume_after = cursor.and_then(|cursor| cursor.resume_after);
         let (entries, truncated) = scan_ordered_entries(
             root,
@@ -117,8 +128,16 @@ impl FileService {
             .collect();
         let next_page_token = if has_more {
             let last_key = entries[taken - 1].0.clone();
-            let snapshot_id = self.pages.insert(binding.clone(), entries, truncated);
-            Some(encode_page_token(&binding, &snapshot_id, taken, &last_key))
+            let snapshot_id = self
+                .pages
+                .insert(binding.clone(), entries, generation, truncated);
+            Some(encode_page_token(
+                &binding,
+                &snapshot_id,
+                taken,
+                generation,
+                &last_key,
+            ))
         } else {
             None
         };
@@ -162,6 +181,7 @@ fn snapshot(
         authoritative: true,
         next_page_token: next_page_token.unwrap_or_default(),
         complete: !overflowed,
+        recovered_from_overflow: false,
     }
 }
 

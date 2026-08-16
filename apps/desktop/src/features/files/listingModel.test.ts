@@ -27,7 +27,7 @@ function entry(path: string, directory = false): FileEntry {
 function listing(entries: FileEntry[], overrides: Partial<DirectoryListing> = {}): DirectoryListing {
   return {
     rootToken: "root", directory: "/r", revision: "1", entries,
-    overflowRecovery: false, complete: true, ...overrides,
+    recoveredFromOverflow: false, complete: true, ...overrides,
   };
 }
 
@@ -73,11 +73,11 @@ describe("listingModel", () => {
 
   it("appends a later page without losing the rows already shown", () => {
     const first = listing([entry("/r/a.txt")], { complete: false, nextPageToken: "one" });
-    const second = listing([entry("/r/b.txt")], { complete: true, overflowRecovery: true });
+    const second = listing([entry("/r/b.txt")], { complete: true, recoveredFromOverflow: true });
     const joined = appendPage(first, second);
     expect(joined.entries.map((item) => item.name)).toEqual(["a.txt", "b.txt"]);
     expect(joined.complete).toBe(true);
-    expect(joined.overflowRecovery).toBe(true);
+    expect(joined.recoveredFromOverflow).toBe(true);
   });
 
   it("owes a watch only to directories the tree can currently reach", () => {

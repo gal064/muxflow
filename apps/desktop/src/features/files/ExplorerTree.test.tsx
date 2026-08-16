@@ -11,7 +11,7 @@ import type { ActiveRoot, DirectoryListing } from "./types";
 
 const root: ActiveRoot = { token: "root-1", paneId: "%1", cwd: "/r", path: "/r", gitWorktree: true, revision: "1" };
 const listing: DirectoryListing = {
-  rootToken: "root-1", directory: "/r", revision: "2", overflowRecovery: false, complete: true,
+  rootToken: "root-1", directory: "/r", revision: "2", recoveredFromOverflow: false, complete: true,
   entries: [
     { path: "/r/.env", name: ".env", kind: "file", sizeBytes: "10", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
     { path: "/r/ignored.log", name: "ignored.log", kind: "file", sizeBytes: "20", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
@@ -198,7 +198,7 @@ describe("ExplorerTree", () => {
       ],
     };
     const targetListing: DirectoryListing = {
-      rootToken: "root-1", directory: "/r/target", revision: "2", overflowRecovery: false, complete: true,
+      rootToken: "root-1", directory: "/r/target", revision: "2", recoveredFromOverflow: false, complete: true,
       entries: [{ path: "/r/target/debug", name: "debug", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true }],
     };
     const listings = new Map([["/r", withTarget], ["/r/target", targetListing]]);

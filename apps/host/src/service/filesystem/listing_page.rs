@@ -29,6 +29,12 @@ pub(super) fn entry_key(metadata: &v1::FileMetadata, name: &OsStr) -> EntryKey {
 pub(super) struct DirectorySnapshotPage {
     binding: PageBinding,
     entries: Vec<(EntryKey, v1::FileMetadata)>,
+    /// The generation every page of this listing reports.
+    ///
+    /// One listing has one revision. Minting a fresh one per page gave an
+    /// assembled multi-page listing a revision that described only its last
+    /// page, which is a version number for something nobody was holding.
+    generation: u64,
     /// The scan stopped at [`SNAPSHOT_ENTRY_LIMIT`], so entries after the last
     /// retained key exist and need one further scan.
     truncated: bool,
@@ -63,7 +69,12 @@ impl PageBinding {
         })
     }
 
-    fn digest(&self) -> String {
+    /// The binding's identity, including the generation the token continues.
+    ///
+    /// Generation is inside the digest rather than beside it so a token cannot
+    /// be edited to claim a different listing revision than the one it was
+    /// issued for.
+    fn digest(&self, generation: u64) -> String {
         let mut hasher = blake3::Hasher::new();
         for part in [
             self.server_identity.as_bytes(),
@@ -75,6 +86,7 @@ impl PageBinding {
         }
         hasher.update(&self.device.to_le_bytes());
         hasher.update(&self.inode.to_le_bytes());
+        hasher.update(&generation.to_le_bytes());
         hasher.finalize().to_hex()[..16].to_owned()
     }
 }
@@ -85,6 +97,9 @@ pub(super) struct PageCursor {
     pub(super) snapshot_id: String,
     /// Index of the first entry of this page within that snapshot.
     pub(super) index: usize,
+    /// The generation the listing this token continues was issued under, so
+    /// every page of it reports one revision even after the snapshot expires.
+    pub(super) generation: u64,
     /// The last key already delivered. Self-describing, so a token whose
     /// snapshot has expired still resumes exactly rather than restarting.
     pub(super) resume_after: Option<EntryKey>,
@@ -96,11 +111,12 @@ pub(super) fn encode_page_token(
     binding: &PageBinding,
     snapshot_id: &str,
     index: usize,
+    generation: u64,
     resume_after: &EntryKey,
 ) -> String {
     format!(
-        "{TOKEN_PREFIX}:{}:{snapshot_id}:{index}:{}:{}",
-        binding.digest(),
+        "{TOKEN_PREFIX}:{}:{snapshot_id}:{index}:{generation}:{}:{}",
+        binding.digest(generation),
         resume_after.0,
         hex_encode(&resume_after.1),
     )
@@ -113,30 +129,33 @@ pub(super) fn decode_page_token(
     if value.is_empty() {
         return Ok(None);
     }
-    let mut parts = value.splitn(6, ':');
+    let mut parts = value.splitn(7, ':');
     let invalid = || stale_page_token("invalid directory page token");
     let prefix = parts.next().ok_or_else(invalid)?;
     let digest = parts.next().ok_or_else(invalid)?;
     let snapshot_id = parts.next().ok_or_else(invalid)?;
     let index = parts.next().ok_or_else(invalid)?;
+    let generation = parts.next().ok_or_else(invalid)?;
     let rank = parts.next().ok_or_else(invalid)?;
     let name = parts.next().ok_or_else(invalid)?;
     if prefix != TOKEN_PREFIX {
         return Err(invalid());
     }
-    if digest != binding.digest() {
+    let index = index.parse::<usize>().map_err(|_| invalid())?;
+    let generation = generation.parse::<u64>().map_err(|_| invalid())?;
+    let rank = rank.parse::<u8>().map_err(|_| invalid())?;
+    if digest != binding.digest(generation) {
         return Err(stale_page_token(
-            "directory page token belongs to another server, root, or directory",
+            "directory page token belongs to another server, root, directory, or listing",
         ));
     }
-    let index = index.parse::<usize>().map_err(|_| invalid())?;
-    let rank = rank.parse::<u8>().map_err(|_| invalid())?;
     if rank > 1 || snapshot_id.len() > 64 {
         return Err(invalid());
     }
     Ok(Some(PageCursor {
         snapshot_id: snapshot_id.to_owned(),
         index,
+        generation,
         resume_after: Some((rank, hex_decode(name)?)),
     }))
 }
@@ -174,6 +193,7 @@ pub(super) struct RetainedPage {
     pub(super) entries: Vec<v1::FileMetadata>,
     pub(super) next: Option<(usize, EntryKey)>,
     pub(super) snapshot_id: String,
+    pub(super) generation: u64,
 }
 
 impl DirectoryPageCache {
@@ -182,6 +202,7 @@ impl DirectoryPageCache {
         &self,
         binding: PageBinding,
         entries: Vec<(EntryKey, v1::FileMetadata)>,
+        generation: u64,
         truncated: bool,
     ) -> String {
         let snapshot_id = Uuid::new_v4().simple().to_string();
@@ -202,6 +223,7 @@ impl DirectoryPageCache {
             DirectorySnapshotPage {
                 binding,
                 entries,
+                generation,
                 truncated,
                 created: Instant::now(),
             },
@@ -219,7 +241,10 @@ impl DirectoryPageCache {
     ) -> Option<RetainedPage> {
         let snapshots = self.snapshots.lock().unwrap();
         let page = snapshots.get(&cursor.snapshot_id)?;
-        if page.binding != *binding || page.created.elapsed() > SNAPSHOT_TTL {
+        if page.binding != *binding
+            || page.generation != cursor.generation
+            || page.created.elapsed() > SNAPSHOT_TTL
+        {
             return None;
         }
         if cursor.index > page.entries.len() {
@@ -233,6 +258,7 @@ impl DirectoryPageCache {
                 entries: Vec::new(),
                 next: None,
                 snapshot_id: cursor.snapshot_id.clone(),
+                generation: page.generation,
             });
         }
         let taken = window.len().min(page_size);
@@ -249,6 +275,7 @@ impl DirectoryPageCache {
             entries,
             next: has_more.then(|| (next_index, window[taken - 1].0.clone())),
             snapshot_id: cursor.snapshot_id.clone(),
+            generation: page.generation,
         })
     }
 }

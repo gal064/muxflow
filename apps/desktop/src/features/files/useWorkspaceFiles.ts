@@ -337,6 +337,17 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     if (event.kind === "directorySnapshot") {
       // Authoritative: the host re-listed and this *is* the directory now.
       recordPerfCounter("explorer.authoritativeSnapshots");
+      if (event.listing.recoveredFromOverflow) {
+        // The watcher lost events, so what it lost may have been below this
+        // directory as well. Cached listings for the subtree are no longer
+        // safe to paint from; the ones on screen revalidate through their own
+        // watches, and the ones that are not stop being a local answer.
+        recordPerfCounter("explorer.overflowRecoveries");
+        const activeScope = scopeRef.current;
+        if (activeScope) {
+          cache.current.invalidateSubtree(activeScope.clientId, root.token, event.listing.directory);
+        }
+      }
       applyListing(root, event.listing.directory, event.listing);
       return;
     }

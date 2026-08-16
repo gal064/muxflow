@@ -4,7 +4,7 @@ import { DirectoryWatchLeases } from "./watchLeases";
 import type { DirectoryListing, DirectoryWatchLease } from "./types";
 
 function listing(rootToken: string, directory: string, overrides: Partial<DirectoryListing> = {}): DirectoryListing {
-  return { rootToken, directory, revision: "1", entries: [], overflowRecovery: false, complete: true, ...overrides };
+  return { rootToken, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true, ...overrides };
 }
 
 function recorder() {

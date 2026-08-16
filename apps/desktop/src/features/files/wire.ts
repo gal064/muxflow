@@ -14,7 +14,7 @@ export interface WireMetadata {
   symlinkTargetKind?: string;
 }
 export interface WireRoot { paneId: string; root: string; rootToken: string; gitWorktree: boolean; serverIdentity: string; topologyGeneration: string; rootGeneration: string }
-export interface WireDirectory { watchId: string; root: string; path: string; generation: string; entries: WireMetadata[]; overflowed: boolean; authoritative: boolean; nextPageToken: string; complete: boolean }
+export interface WireDirectory { watchId: string; root: string; path: string; generation: string; entries: WireMetadata[]; overflowed: boolean; authoritative: boolean; nextPageToken: string; complete: boolean; recoveredFromOverflow?: boolean }
 export interface WireContent { metadata?: WireMetadata; kind: "text" | "binary" | "image" | "tooLarge" | "unspecified"; content: number[]; generation: string }
 export interface WireResponse { operationId: string; activeRoot?: WireRoot; directory?: WireDirectory; content?: WireContent; metadata?: WireMetadata; rootUnchanged?: boolean }
 export interface WireFileEvent { operationId: string; activeRoot?: WireRoot; directory?: WireDirectory; metadata?: WireMetadata; deleted?: boolean; rootToken?: string; watchId?: string; transferId: string; transferredBytes: string; totalBytes: string; state: string; error: string }
@@ -38,7 +38,8 @@ export function mapRoot(value: WireRoot): ActiveRoot {
 export function mapDirectory(value: WireDirectory, rootToken: string): DirectoryListing {
   return {
     rootToken, directory: value.path, revision: String(value.generation), entries: value.entries.map(mapEntry),
-    overflowRecovery: value.overflowed, nextPageToken: value.nextPageToken || undefined, complete: value.complete,
+    recoveredFromOverflow: Boolean(value.recoveredFromOverflow),
+    nextPageToken: value.nextPageToken || undefined, complete: value.complete,
   };
 }
 
