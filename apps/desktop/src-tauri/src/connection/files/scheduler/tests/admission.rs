@@ -143,6 +143,7 @@ fn provisional_admission_latches_cancellation_but_rolls_back_when_publication_fa
     let cancel_id = id.clone();
     let cancel =
         std::thread::spawn(move || cancelled_tx.send(cancel_transfer(&cancel_id)).unwrap());
+    wait_for_admission_cancellation_latch(&id);
     assert!(cancelled_rx.try_recv().is_err());
     release_tx.send(()).unwrap();
     assert!(enqueue.join().unwrap().is_err());
@@ -182,6 +183,7 @@ fn cancellation_after_queued_is_observable_latches_until_admission_commits() {
     let cancel_id = id.clone();
     let cancel =
         std::thread::spawn(move || cancelled_tx.send(cancel_transfer(&cancel_id)).unwrap());
+    wait_for_admission_cancellation_latch(&id);
     assert!(cancelled_rx.try_recv().is_err());
     assert!(terminal_rx.try_recv().is_err());
     release_tx.send(()).unwrap();
