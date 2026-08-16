@@ -329,14 +329,19 @@ pub(super) fn enqueue_transfer(
     work: impl FnOnce() -> TransferResult + Send + 'static,
     finished: impl FnOnce(TransferResult, CancelReason) + Send + 'static,
 ) -> Result<(), String> {
-    binding.validate()?;
+    if let Err(error) = binding.validate() {
+        crate::perf_log::record_transfer_admission(false);
+        return Err(error);
+    }
     let engine = transfer_engine();
     {
         let mut state = engine.state.lock().unwrap();
         if state.queue.len() >= MAX_QUEUED_TRANSFERS {
+            crate::perf_log::record_transfer_admission(false);
             return Err("bulk transfer queue is full".into());
         }
         if state.cancellations.contains_key(&id) {
+            crate::perf_log::record_transfer_admission(false);
             return Err("bulk transfer ID is already queued or active".into());
         }
         state
@@ -350,6 +355,8 @@ pub(super) fn enqueue_transfer(
             work: Box::new(work),
             finished: Box::new(finished),
         });
+        crate::perf_log::record_transfer_admission(true);
+        crate::perf_log::record_transfer_state(state.active, state.queue.len());
     }
     spawn_binding_monitor(&engine, id, binding, cancellation);
     engine.dispatch();
@@ -363,6 +370,7 @@ pub(super) fn cancel_transfer(id: &str) -> Result<CancelResponse, String> {
         let queued = take_queued_job(&mut state.queue, |job| job.id == id);
         if queued.is_some() {
             state.cancellations.remove(id);
+            crate::perf_log::record_transfer_state(state.active, state.queue.len());
         }
         queued
     };
@@ -377,6 +385,7 @@ pub(super) fn cancel_transfer(id: &str) -> Result<CancelResponse, String> {
             )),
             CancelReason::User,
         );
+        crate::perf_log::record_transfer_outcome();
         engine.dispatch();
         return Ok(CancelResponse {
             disposition: CancelDisposition::CancelRequested,
@@ -428,6 +437,7 @@ impl TransferEngine {
                     continue;
                 }
                 state.active += 1;
+                crate::perf_log::record_transfer_state(state.active, state.queue.len());
                 job
             };
             let engine = Arc::clone(self);
@@ -464,6 +474,7 @@ impl TransferEngine {
                     let reason = cancellation.reason();
                     cancellation.mark_finished();
                     finished(result, reason);
+                    crate::perf_log::record_transfer_outcome();
                     engine.complete(&id);
                 })
                 .expect("failed to start bounded bulk-transfer worker");
@@ -475,6 +486,7 @@ impl TransferEngine {
             let mut state = self.state.lock().unwrap();
             state.active = state.active.saturating_sub(1);
             state.cancellations.remove(id);
+            crate::perf_log::record_transfer_state(state.active, state.queue.len());
         }
         self.dispatch();
     }
@@ -485,6 +497,7 @@ impl TransferEngine {
             let queued = take_queued_job(&mut state.queue, |job| job.id == id);
             if queued.is_some() {
                 state.cancellations.remove(id);
+                crate::perf_log::record_transfer_state(state.active, state.queue.len());
             }
             queued
         };
@@ -499,6 +512,7 @@ impl TransferEngine {
                 )),
                 CancelReason::StaleBinding,
             );
+            crate::perf_log::record_transfer_outcome();
             self.dispatch();
         } else if let Some(cancellation) = self.state.lock().unwrap().cancellations.get(id).cloned()
         {

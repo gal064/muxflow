@@ -1,4 +1,5 @@
 import type { TerminalEvent } from "./api";
+import type { OperationRecorder } from "../../perf/operations";
 
 type Listener = (event: TerminalEvent) => void;
 type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" }>;
@@ -51,6 +52,7 @@ export class TerminalEventHub {
   constructor(
     readonly onSeedRequired?: (paneId: string, reason: string) => void,
     limits: TerminalEventHubLimits = {},
+    readonly measurements?: OperationRecorder,
   ) {
     this.#maxPaneBytes = limits.maxPaneBytes ?? DEFAULT_MAX_PANE_BYTES;
     this.#maxTotalBytes = limits.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
@@ -59,6 +61,10 @@ export class TerminalEventHub {
   }
 
   publish(event: TerminalEvent, beforeDelivery?: () => void): TerminalEventAdmission {
+    this.measurements?.add("terminal.hub.events");
+    if (event.kind === "seed" || event.kind === "output") {
+      this.measurements?.add("terminal.hub.payloadBytes", event.data.byteLength);
+    }
     const admission = this.#admitSequence(event);
     if (admission.kind === "stale" || admission.kind === "gap") return admission;
     if (event.kind === "generationEpoch" && event.epoch !== this.#generationEpoch) {
@@ -66,7 +72,10 @@ export class TerminalEventHub {
       this.#clearPaneState();
     }
     beforeDelivery?.();
-    for (const listener of this.#listeners) listener(event);
+    for (const listener of this.#listeners) {
+      this.measurements?.add("terminal.hub.fanoutDeliveries");
+      listener(event);
+    }
     if (event.kind === "generationEpoch") return admission;
     if (event.kind !== "seed" && event.kind !== "output" && event.kind !== "paneResource" && event.kind !== "seedDiagnostic") return admission;
     this.#touchTrackedPane(event.paneId);
@@ -111,7 +120,10 @@ export class TerminalEventHub {
     }
     const listeners = this.#paneListeners.get(event.paneId);
     if (listeners?.size) {
-      for (const listener of listeners) listener(event);
+      for (const listener of listeners) {
+        this.measurements?.add("terminal.hub.fanoutDeliveries");
+        listener(event);
+      }
       return admission;
     }
     this.#buffer(event);
@@ -131,6 +143,7 @@ export class TerminalEventHub {
     if (backlog) {
       this.#deleteBacklog(paneId);
       for (const event of backlog.events) listener(event);
+      this.measurements?.add("terminal.hub.backlogDequeues", backlog.events.length);
     }
     return () => {
       listeners.delete(listener);
@@ -206,6 +219,7 @@ export class TerminalEventHub {
   }
 
   #buffer(event: PaneEvent): void {
+    this.measurements?.add("terminal.hub.backlogEnqueues");
     const current = this.#backlogs.get(event.paneId) ?? { events: [], byteLength: 0 };
     let next: PaneBacklog;
     if (event.kind === "seed") {
@@ -231,6 +245,7 @@ export class TerminalEventHub {
         byteLength: current.byteLength - oldDiagnosticBytes + diagnosticBytes,
       };
     } else {
+      this.measurements?.add("terminal.hub.backlogArrayCopies", current.events.length);
       next = { events: [...current.events, event], byteLength: current.byteLength + event.data.byteLength };
     }
 
@@ -249,6 +264,8 @@ export class TerminalEventHub {
     this.#backlogs.delete(paneId);
     this.#backlogs.set(paneId, backlog);
     this.#backlogBytes += backlog.byteLength;
+    this.measurements?.highWater?.("terminal.hub.retainedBytes", this.#backlogBytes);
+    this.measurements?.highWater?.("terminal.hub.retainedPanes", this.#backlogs.size);
   }
 
   #deleteBacklog(paneId: string): void {

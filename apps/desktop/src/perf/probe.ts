@@ -29,11 +29,15 @@ const FLUSH_INTERVAL_MS = 2_000;
 type Appender = (lines: string[]) => Promise<void>;
 
 const samples = new Map<string, number[]>();
+const counters = new Map<string, number>();
+const highWater = new Map<string, number>();
+const milestoneOccurrences = new Map<string, number>();
 const openSpans = new Map<string, number>();
 let pending: string[] = [];
 let enabled = false;
 let appender: Appender | undefined;
 let flushTimer: ReturnType<typeof setTimeout> | undefined;
+let longTaskObserver: PerformanceObserver | undefined;
 
 function now(): number {
   return typeof performance === "undefined" ? Date.now() : performance.now();
@@ -46,6 +50,19 @@ function now(): number {
 export function enablePerfProbe(sink: Appender): void {
   enabled = true;
   appender = sink;
+  if (typeof PerformanceObserver !== "undefined") {
+    try {
+      longTaskObserver = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          recordPerfCounter("react.longTasks");
+          recordPerfSample("react.longTask", entry.duration);
+        }
+      });
+      longTaskObserver.observe({ entryTypes: ["longtask"] });
+    } catch {
+      longTaskObserver = undefined;
+    }
+  }
 }
 
 export function perfProbeEnabled(): boolean {
@@ -56,10 +73,55 @@ export function resetPerfProbe(): void {
   enabled = false;
   appender = undefined;
   samples.clear();
+  counters.clear();
+  highWater.clear();
+  milestoneOccurrences.clear();
   openSpans.clear();
   pending = [];
   if (flushTimer !== undefined) clearTimeout(flushTimer);
+  longTaskObserver?.disconnect();
+  longTaskObserver = undefined;
   flushTimer = undefined;
+}
+
+/**
+ * Deterministic Phase 14 operation accounting. Unlike a duration sample these
+ * values are suitable for unit gates: a refactor either performed an extra
+ * copy/list/watch/queue operation or it did not. They share the Phase 12 sink
+ * and are completely inert until that sink is explicitly enabled.
+ */
+export function recordPerfCounter(name: string, delta = 1): void {
+  if (!enabled || !Number.isSafeInteger(delta)) return;
+  const value = (counters.get(name) ?? 0) + delta;
+  counters.set(name, value);
+  pending.push(JSON.stringify({ t: Date.now(), kind: "counter", name, delta, value }));
+  scheduleFlush();
+}
+
+export function recordPerfHighWater(name: string, value: number): void {
+  if (!enabled || !Number.isSafeInteger(value) || value < 0) return;
+  if (value <= (highWater.get(name) ?? -1)) return;
+  highWater.set(name, value);
+  pending.push(JSON.stringify({ t: Date.now(), kind: "highWater", name, value }));
+  scheduleFlush();
+}
+
+/** Records an ordered startup/interaction milestone and its occurrence. */
+export function recordPerfMilestone(name: string, atMs = now()): number {
+  if (!enabled) return 0;
+  const occurrence = (milestoneOccurrences.get(name) ?? 0) + 1;
+  milestoneOccurrences.set(name, occurrence);
+  pending.push(JSON.stringify({ t: Date.now(), kind: "milestone", name, occurrence, atMs }));
+  scheduleFlush();
+  return occurrence;
+}
+
+export function perfCounterSnapshot(): Record<string, number> {
+  return Object.fromEntries([...counters.entries()].sort(([left], [right]) => left.localeCompare(right)));
+}
+
+export function perfHighWaterSnapshot(): Record<string, number> {
+  return Object.fromEntries([...highWater.entries()].sort(([left], [right]) => left.localeCompare(right)));
 }
 
 export function recordPerfSample(name: string, milliseconds: number): void {

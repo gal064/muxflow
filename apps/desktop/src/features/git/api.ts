@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { measurePerf, openPerfSpan, recordPerfCounter, recordPerfHighWater } from "../../perf/probe";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type {
   GitChangeKind,
@@ -43,7 +44,9 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   readonly #listeners = new Set<(event: GitWorkspaceEvent) => void>();
 
   async status(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitStatusSnapshot> {
-    const response = await retrySuperseded(async () => {
+    recordPerfCounter("git.statusRequests");
+    openPerfSpan("workflow.git.panelPaint");
+    const response = await measurePerf("git.status", () => retrySuperseded(async () => {
       throwIfAborted(signal);
       const operationId = crypto.randomUUID();
       return await abortable(
@@ -51,12 +54,15 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
         signal,
         () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }),
       );
-    }, signal);
+    }, signal));
     if (!response.status) throw new Error("Host omitted Git status.");
+    recordPerfCounter("git.statusEntries", response.status.entries.length);
+    recordPerfCounter("git.statusMappedPayloadBytes", new TextEncoder().encode(JSON.stringify(response.status)).byteLength);
     return mapStatus(response.status);
   }
 
   async watch(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitWatchLease> {
+    recordPerfCounter("git.watchRequests");
     const { operationId, response, watchId } = await retrySuperseded(async () => {
       throwIfAborted(signal);
       const watchId = crypto.randomUUID();
@@ -78,6 +84,7 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
       release: () => {
         if (released) return;
         released = true;
+        recordPerfCounter("git.watchReleases");
         void this.#request(scope, root, { operation: "unwatch", operationId: crypto.randomUUID(), watchId }).catch(() => undefined);
       },
     };
@@ -93,7 +100,9 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     expectedStatusGeneration: string,
     signal?: AbortSignal,
   ): Promise<GitDiff> {
-    const response = await retrySuperseded(async () => {
+    recordPerfCounter("git.diffRequests");
+    openPerfSpan("workflow.git.diffPaint");
+    const response = await measurePerf("git.diff", () => retrySuperseded(async () => {
       throwIfAborted(signal);
       const operationId = crypto.randomUUID();
       return await abortable(this.#request(scope, root, {
@@ -101,8 +110,9 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
         ...(originalPath ? { originalPath: [...fromBase64(originalPath)] } : {}),
         diffTarget: target, expectedStatusGeneration,
       }), signal, () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }));
-    }, signal);
+    }, signal));
     if (!response.diff) throw new Error("Host omitted the Git diff.");
+    recordPerfCounter("git.diffPayloadBytes", response.diff.oldContent.length + response.diff.newContent.length + response.diff.patch.length);
     const diff = mapDiff(response.diff);
     if (diff.repository.id !== repositoryId || diff.path !== path || (diff.originalPath ?? "") !== (originalPath ?? "") || diff.target !== target) {
       throw new Error("Host returned a stale Git diff identity.");
@@ -118,33 +128,39 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   }
 
   async mutate(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, request: GitMutationRequest): Promise<GitCommandResult> {
+    recordPerfCounter("git.mutationRequests");
     if ((request.kind === "discardFile" || request.kind === "discardHunk") && !request.confirmationToken) {
       throw new Error("Discard requires confirmation.");
     }
     // The host emits this exact rejection only while pre-command status is
     // being established. Once Git starts, uncertainty is returned as a
     // command outcome and must never pass through this retry path.
-    const response = await retrySuperseded(
+    const response = await measurePerf("workflow.git.mutationAck", () => retrySuperseded(
       () => this.#request(scope, root, mutationCommand("mutate", repositoryId, request)),
-    );
+    ));
     if (!response.command) throw new Error("Host omitted the Git mutation result.");
     return mapCommand(response.command);
   }
 
   async commit(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult> {
+    recordPerfCounter("git.commitRequests");
     if (!message.trim()) throw new Error("Enter a commit message.");
     // See mutate(): post-command outcomes are responses, never retryable
     // superseded-status transport errors.
-    const response = await retrySuperseded(() => this.#request(scope, root, {
+    const response = await measurePerf("workflow.git.mutationAck", () => retrySuperseded(() => this.#request(scope, root, {
       operation: "commit", operationId: crypto.randomUUID(), repositoryId, expectedStatusGeneration, commitMessage: message,
-    }));
+    })));
     if (!response.command) throw new Error("Host omitted the Git commit result.");
     return mapCommand(response.command);
   }
 
   subscribe(listener: (event: GitWorkspaceEvent) => void): () => void {
     this.#listeners.add(listener);
-    return () => this.#listeners.delete(listener);
+    recordPerfCounter("git.subscriberAdds");
+    recordPerfHighWater("git.subscribers", this.#listeners.size);
+    return () => {
+      if (this.#listeners.delete(listener)) recordPerfCounter("git.subscriberReleases");
+    };
   }
 
   publishWireEvent(event: WireGitEvent): void {
@@ -159,6 +175,8 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   #publish(event: GitWorkspaceEvent): void { for (const listener of this.#listeners) listener(event); }
 
   #request(scope: FileWorkspaceScope, root: ActiveRoot, command: Record<string, unknown>): Promise<WireResponse> {
+    recordPerfCounter("desktop.hostRequests");
+    recordPerfCounter("git.requestBytes", new TextEncoder().encode(JSON.stringify(command)).byteLength);
     return invoke("git_request", {
       clientId: scope.clientId,
       command: {
@@ -291,11 +309,13 @@ function toBase64(value: number[]): string {
 function abortable<T>(promise: Promise<T>, signal?: AbortSignal, cancelRemote?: () => Promise<unknown>): Promise<T> {
   if (!signal) return promise;
   if (signal.aborted) {
+    recordPerfCounter("git.cancellations");
     void cancelRemote?.().catch(() => undefined);
     return Promise.reject(new DOMException("Git request was cancelled.", "AbortError"));
   }
   return new Promise((resolve, reject) => {
     const cancel = () => {
+      recordPerfCounter("git.cancellations");
       void cancelRemote?.().catch(() => undefined);
       reject(new DOMException("Git request was cancelled.", "AbortError"));
     };

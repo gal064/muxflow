@@ -10,6 +10,7 @@ import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { AppOwnedTab } from "./types";
 import { ADE_MONACO_THEME } from "../files/monaco";
+import { closePerfSpan, openPerfSpan, recordPerfMilestone } from "../../perf/probe";
 
 interface Props {
   tab: AppOwnedTab;
@@ -48,6 +49,11 @@ export function AppTabSurface(props: Props) {
     };
     return props.activeRoot;
   }, [props.activeRoot, props.scope?.paneId, props.tab.rootPath, props.tab.rootToken]);
+  const editorRequested = opened?.kind === "text"
+    && !(props.tab.kind === "markdown" && (props.tab.viewMode ?? "split") === "preview");
+  useEffect(() => {
+    if (editorRequested) recordPerfMilestone("editor.monacoRequest");
+  }, [editorRequested, props.tab.id]);
 
   const load = async (externalOperationId?: string) => {
     if (!props.scope || !root) return;
@@ -55,6 +61,7 @@ export function AppTabSurface(props: Props) {
     const abort = new AbortController();
     loadAbort.current = abort;
     const serial = ++loadSerial.current;
+    openPerfSpan("workflow.file.editorPaint");
     try {
       const next = await props.client.openFile(props.scope, root, props.tab.resource, abort.signal);
       if (serial !== loadSerial.current) return;
@@ -200,7 +207,11 @@ export function AppTabSurface(props: Props) {
       <Editor
         language={languageForPath(props.tab.resource)}
         onChange={(content) => { if (props.canWrite && typeof content === "string") controller.current?.edit(content, opened.file.lineEnding); }}
-        onMount={(editor) => { detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor); }}
+        onMount={(editor) => {
+          recordPerfMilestone("editor.paint");
+          closePerfSpan("workflow.file.editorPaint");
+          detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor);
+        }}
         options={{ automaticLayout: true, minimap: { enabled: false }, readOnly: !props.canWrite, scrollBeyondLastLine: false, wordWrap: props.tab.kind === "markdown" ? "on" : "off" }}
         path={modelPath(props.tab)}
         saveViewState

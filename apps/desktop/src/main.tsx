@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { StrictMode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import "@xterm/xterm/css/xterm.css";
 // Tokens first: every rule in styles.css resolves against these custom
@@ -8,8 +8,14 @@ import "./styles.css";
 import { App } from "./app/App";
 import { bootstrapPerfProbe } from "./perf/bootstrap";
 import { terminalFacesReady } from "./features/terminal/theme";
+import { recordPerfMilestone } from "./perf/probe";
 
-void bootstrapPerfProbe();
+const moduleStartedAt = performance.now();
+const perfReady = bootstrapPerfProbe().then((enabled) => {
+  if (enabled) recordPerfMilestone("startup.moduleStart", moduleStartedAt);
+  return enabled;
+});
+let firstReactCommitCaptured = false;
 
 /**
  * Longest the app will wait for its bundled font before rendering anyway.
@@ -42,21 +48,34 @@ const FONT_READY_TIMEOUT_MS = 2_000;
  * four styles are named because the terminal rasterises bold and italic runs
  * into the same atlas and a late bold face splits it the same way.
  */
-async function fontsReady(): Promise<void> {
+async function fontsReady(): Promise<"ready" | "timeout" | "unavailable"> {
   const fonts = document.fonts;
-  if (!fonts) return;
+  if (!fonts) return "unavailable";
   // `ready` still follows, so the chrome's own faces are settled too, and a face
   // the terminal's list does not name is no worse off than it was before.
   const faces = terminalFacesReady().then(() => fonts.ready);
-  await Promise.race([
-    faces.then(() => undefined, () => undefined),
-    new Promise<void>((resolve) => setTimeout(resolve, FONT_READY_TIMEOUT_MS)),
+  return Promise.race([
+    faces.then(() => "ready" as const, () => "unavailable" as const),
+    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), FONT_READY_TIMEOUT_MS)),
   ]);
+}
+
+function StartupCommitMilestone() {
+  useLayoutEffect(() => {
+    if (firstReactCommitCaptured) return;
+    firstReactCommitCaptured = true;
+    const atMs = performance.now();
+    void perfReady.then((enabled) => {
+      if (enabled) recordPerfMilestone("startup.firstReactCommit", atMs);
+    });
+  }, []);
+  return null;
 }
 
 function mount(): void {
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
+      <StartupCommitMilestone />
       <App />
     </StrictMode>,
   );
@@ -65,8 +84,11 @@ function mount(): void {
 // Rendering is never conditional on the font check succeeding: a rejection
 // between here and `render` would otherwise leave a permanently blank window
 // with nothing to look at and nothing logged.
-void fontsReady().then(mount, (error) => {
+void fontsReady().then((outcome) => {
+  void perfReady.then(() => recordPerfMilestone(`startup.font.${outcome}`));
+  mount();
+}, (error) => {
   console.warn("font readiness check failed; rendering anyway", error);
+  void perfReady.then(() => recordPerfMilestone("startup.font.error"));
   mount();
 });
-

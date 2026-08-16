@@ -104,6 +104,21 @@ pub struct VisibilityCheckpoint {
     pub generation: u64,
 }
 
+/// Deterministic operation counts used by the opt-in Phase 14 fixture.
+/// `PaneResourceStore` carries no counter state unless constructed through the
+/// measurement constructor, so normal terminal output keeps its old hot path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaneResourceMeasurements {
+    pub full_accounting_scans: usize,
+    pub accounting_entries_visited: usize,
+    pub lru_retain_operations: usize,
+    pub lru_entries_visited: usize,
+    pub lru_pops: usize,
+    pub append_operations: usize,
+    pub appended_bytes: usize,
+    pub evictions: usize,
+}
+
 /// Bounded host-side recovery material for panes whose renderer is hidden or
 /// disposed. Terminal bytes remain opaque and are never decoded here.
 #[derive(Debug)]
@@ -115,6 +130,7 @@ pub struct PaneResourceStore {
     max_hidden_panes: usize,
     max_resource_bytes: usize,
     max_total_bytes: usize,
+    measurements: Option<PaneResourceMeasurements>,
 }
 
 impl PaneResourceStore {
@@ -139,7 +155,23 @@ impl PaneResourceStore {
             max_hidden_panes,
             max_resource_bytes,
             max_total_bytes,
+            measurements: None,
         }
+    }
+
+    pub fn with_measurements(
+        max_hidden_panes: usize,
+        max_resource_bytes: usize,
+        max_total_bytes: usize,
+    ) -> Self {
+        let mut store =
+            Self::with_total_limit(max_hidden_panes, max_resource_bytes, max_total_bytes);
+        store.measurements = Some(PaneResourceMeasurements::default());
+        store
+    }
+
+    pub fn measurements(&self) -> Option<&PaneResourceMeasurements> {
+        self.measurements.as_ref()
     }
 
     pub fn ensure(&mut self, pane_id: &str, visible: bool, generation: u64) {
@@ -372,6 +404,10 @@ impl PaneResourceStore {
     }
 
     fn append_hidden(&mut self, pane_id: &str, bytes: &[u8], generation: u64) {
+        if let Some(measurements) = &mut self.measurements {
+            measurements.append_operations += 1;
+            measurements.appended_bytes = measurements.appended_bytes.saturating_add(bytes.len());
+        }
         let resource = self.resources.get_mut(pane_id).expect("resource ensured");
         if resource
             .serialized_snapshot
@@ -400,7 +436,19 @@ impl PaneResourceStore {
             .is_none_or(|resource| resource.state != PaneResourceState::Visible)
     }
 
-    pub fn retained_bytes(&self) -> usize {
+    pub fn retained_bytes(&mut self) -> usize {
+        if let Some(measurements) = &mut self.measurements {
+            measurements.full_accounting_scans += 1;
+            measurements.accounting_entries_visited = measurements
+                .accounting_entries_visited
+                .saturating_add(self.resources.len())
+                .saturating_add(
+                    self.output_journals
+                        .values()
+                        .map(VecDeque::len)
+                        .sum::<usize>(),
+                );
+        }
         let resources = self.resources.values().fold(0_usize, |total, resource| {
             total
                 .saturating_add(resource.serialized_snapshot.len())
@@ -424,6 +472,12 @@ impl PaneResourceStore {
     }
 
     pub fn remove(&mut self, pane_id: &str) {
+        if let Some(measurements) = &mut self.measurements {
+            measurements.lru_retain_operations += 1;
+            measurements.lru_entries_visited = measurements
+                .lru_entries_visited
+                .saturating_add(self.resource_lru.len());
+        }
         self.resource_lru.retain(|value| value != pane_id);
         self.output_journals.remove(pane_id);
         self.handoff_checkpoints.remove(pane_id);
@@ -431,11 +485,23 @@ impl PaneResourceStore {
     }
 
     fn touch_resource(&mut self, pane_id: &str) {
+        if let Some(measurements) = &mut self.measurements {
+            measurements.lru_retain_operations += 1;
+            measurements.lru_entries_visited = measurements
+                .lru_entries_visited
+                .saturating_add(self.resource_lru.len());
+        }
         self.resource_lru.retain(|value| value != pane_id);
         self.resource_lru.push_back(pane_id.to_owned());
     }
 
-    fn retained_panes(&self) -> usize {
+    fn retained_panes(&mut self) -> usize {
+        if let Some(measurements) = &mut self.measurements {
+            measurements.full_accounting_scans += 1;
+            measurements.accounting_entries_visited = measurements
+                .accounting_entries_visited
+                .saturating_add(self.resources.len());
+        }
         self.resources
             .iter()
             .filter(|(pane_id, resource)| {
@@ -450,6 +516,10 @@ impl PaneResourceStore {
             .count()
     }
 
+    pub fn retained_panes_for_measurement(&mut self) -> usize {
+        self.retained_panes()
+    }
+
     fn enforce_limits(&mut self) {
         while self.retained_panes() > self.max_hidden_panes
             || self.retained_bytes() > self.max_total_bytes
@@ -459,6 +529,9 @@ impl PaneResourceStore {
             let Some(pane_id) = self.resource_lru.pop_front() else {
                 break;
             };
+            if let Some(measurements) = &mut self.measurements {
+                measurements.lru_pops += 1;
+            }
             let has_bytes = self.resources.get(&pane_id).is_some_and(|resource| {
                 !resource.serialized_snapshot.is_empty() || !resource.raw_tail.is_empty()
             }) || self
@@ -474,6 +547,9 @@ impl PaneResourceStore {
             }
             self.output_journals.remove(&pane_id);
             if let Some(resource) = self.resources.get_mut(&pane_id) {
+                if let Some(measurements) = &mut self.measurements {
+                    measurements.evictions += 1;
+                }
                 let reason = if over_bytes {
                     "global pane-resource byte budget was exceeded"
                 } else {
@@ -744,5 +820,85 @@ mod tests {
                 >= 68
         );
         assert!(store.is_hidden("%99"));
+    }
+
+    #[test]
+    #[ignore = "Phase 14 opt-in operation-count fixture"]
+    fn phase14_pane_resource_scaling_and_reveal_parity() {
+        for pane_count in [32_usize, 256, 1_024] {
+            let chunks_per_pane = 8_usize;
+            let chunk = vec![b'x'; 64];
+            let mut store = PaneResourceStore::with_measurements(
+                pane_count + 1,
+                4 * 1024 * 1024,
+                128 * 1024 * 1024,
+            );
+            for pane in 0..pane_count {
+                let pane_id = format!("%{pane}");
+                store.set_visible(&pane_id, false, 1);
+                store.snapshot(&pane_id, format!("screen-{pane}").into_bytes(), 2);
+                for generation in 0..chunks_per_pane {
+                    store.append(&pane_id, &chunk, generation as u64 + 3);
+                }
+            }
+            let expected_bytes = (0..pane_count)
+                .map(|pane| format!("screen-{pane}").len() + chunks_per_pane * chunk.len())
+                .sum::<usize>();
+            let retained_bytes = store.retained_bytes();
+            let retained_panes = store.retained_panes_for_measurement();
+            assert_eq!(retained_bytes, expected_bytes);
+            assert_eq!(retained_panes, pane_count);
+            let recovery = store.reveal(&format!("%{}", pane_count - 1), 99).unwrap();
+            assert_eq!(
+                recovery.serialized_snapshot,
+                format!("screen-{}", pane_count - 1).as_bytes()
+            );
+            assert_eq!(recovery.raw_tail, vec![b'x'; chunks_per_pane * chunk.len()]);
+            let measurements = store.measurements().unwrap();
+            println!(
+                "PHASE14_METRIC {}",
+                serde_json::json!({
+                    "lane": "paneResource",
+                    "paneCount": pane_count,
+                    "chunksPerPane": chunks_per_pane,
+                    "retainedBytes": retained_bytes,
+                    "retainedPanes": retained_panes,
+                    "fullAccountingScans": measurements.full_accounting_scans,
+                    "accountingEntriesVisited": measurements.accounting_entries_visited,
+                    "lruRetainOperations": measurements.lru_retain_operations,
+                    "lruEntriesVisited": measurements.lru_entries_visited,
+                    "lruPops": measurements.lru_pops,
+                    "appendOperations": measurements.append_operations,
+                    "appendedBytes": measurements.appended_bytes,
+                    "evictions": measurements.evictions,
+                    "revealParity": true,
+                })
+            );
+        }
+
+        let mut eviction_store = PaneResourceStore::with_measurements(1, 1_024, 4_096);
+        eviction_store.snapshot("%old", vec![b'a'; 64], 1);
+        eviction_store.snapshot("%new", vec![b'b'; 64], 2);
+        assert_eq!(
+            eviction_store.get("%old").unwrap().state,
+            PaneResourceState::Released
+        );
+        assert_eq!(
+            eviction_store.get("%new").unwrap().state,
+            PaneResourceState::HiddenBuffered
+        );
+        let measurements = eviction_store.measurements().unwrap();
+        assert_eq!(measurements.evictions, 1);
+        assert_eq!(measurements.lru_pops, 1);
+        println!(
+            "PHASE14_METRIC {}",
+            serde_json::json!({
+                "lane": "paneResourceEviction",
+                "evictions": measurements.evictions,
+                "lruPops": measurements.lru_pops,
+                "oldPaneReleased": true,
+                "newPaneRetained": true,
+            })
+        );
     }
 }

@@ -187,6 +187,99 @@ fn canonical_engine_limits_all_bulk_jobs_to_two_and_stales_queued_binding() {
 }
 
 #[test]
+#[ignore = "Phase 14 opt-in full admission queue fixture"]
+fn phase14_full_queue_reports_admission_and_exact_terminal_outcomes() {
+    let _serial = engine_test_lock();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    for index in 0..2 {
+        let gate = Arc::clone(&gate);
+        let finished_tx = finished_tx.clone();
+        enqueue_transfer(
+            format!("phase14-active-{index}"),
+            live_binding(10_000 + index),
+            Arc::new(CancelState::new()),
+            || {},
+            move || {
+                let (lock, changed) = &*gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                Ok(())
+            },
+            move |result, _| finished_tx.send(result).unwrap(),
+        )
+        .unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while acceptance_engine_counts().0 != 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(acceptance_engine_counts(), (2, 0));
+
+    let mut queued_ids = Vec::new();
+    for index in 0..MAX_QUEUED_TRANSFERS {
+        let id = format!("phase14-queued-{index}");
+        queued_ids.push(id.clone());
+        let finished_tx = finished_tx.clone();
+        enqueue_transfer(
+            id,
+            live_binding(20_000 + index as u64),
+            Arc::new(CancelState::new()),
+            || panic!("queued fixture work must be cancelled before release"),
+            || Ok(()),
+            move |result, _| finished_tx.send(result).unwrap(),
+        )
+        .unwrap();
+    }
+    assert_eq!(acceptance_engine_counts(), (2, MAX_QUEUED_TRANSFERS));
+    let rejected = enqueue_transfer(
+        "phase14-overflow".into(),
+        live_binding(30_000),
+        Arc::new(CancelState::new()),
+        || {},
+        || Ok(()),
+        |_, _| {},
+    )
+    .unwrap_err();
+    assert!(rejected.contains("queue is full"));
+
+    for id in &queued_ids {
+        assert_eq!(cancel_transfer(id).unwrap().phase, TransferPhase::Queued);
+    }
+    assert_eq!(acceptance_engine_counts(), (2, 0));
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    let mut outcomes = Vec::new();
+    for _ in 0..(MAX_QUEUED_TRANSFERS + 2) {
+        outcomes.push(
+            finished_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("every accepted transfer must terminalize"),
+        );
+    }
+    assert_eq!(outcomes.len(), MAX_QUEUED_TRANSFERS + 2);
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 2);
+    assert_eq!(
+        outcomes.iter().filter(|result| result.is_err()).count(),
+        MAX_QUEUED_TRANSFERS
+    );
+    println!(
+        "PHASE14_METRIC {}",
+        serde_json::json!({
+            "lane": "transferAdmission",
+            "activeHighWater": 2,
+            "queuedHighWater": MAX_QUEUED_TRANSFERS,
+            "accepted": MAX_QUEUED_TRANSFERS + 2,
+            "rejected": 1,
+            "terminalOutcomes": outcomes.len(),
+            "outcomeParity": outcomes.len() == MAX_QUEUED_TRANSFERS + 2,
+        })
+    );
+}
+
+#[test]
 fn active_epoch_loss_kills_worker_process_and_reports_stale() {
     let _serial = engine_test_lock();
     let client = Arc::new(TerminalClient::new(None));

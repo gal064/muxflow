@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import { rowCommandRegistry } from "../../commands/rowCommands";
+import { enablePerfProbe, perfHighWaterSnapshot, resetPerfProbe } from "../../perf/probe";
 import { ExplorerTree } from "./ExplorerTree";
 import type { ActiveRoot, DirectoryListing } from "./types";
 
@@ -23,6 +24,33 @@ const listing: DirectoryListing = {
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("ExplorerTree", () => {
+  it("exposes the deterministic 4,096-row Phase 14 DOM high-water hook", async () => {
+    enablePerfProbe(async () => undefined);
+    const wide: DirectoryListing = {
+      ...listing,
+      entries: Array.from({ length: 4_096 }, (_, index) => ({
+        path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
+        sizeBytes: "1", modifiedMillis: "1", executable: false, expandable: false,
+      })),
+    };
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => {
+        renderer = create(<ExplorerTree root={root} scopeIdentity="phase14" listings={new Map([["/r", wide]])}
+          expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+          onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+          onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      });
+      const highWater = perfHighWaterSnapshot();
+      expect(highWater["explorer.domRows"]).toBe(4_096);
+      expect(renderer.root.findAllByProps({ className: "file-row" })).toHaveLength(4_096);
+      console.log(`PHASE14_METRIC ${JSON.stringify({ lane: "explorerWide", entries: 4_096, domRowsHighWater: highWater["explorer.domRows"], rowParity: true })}`);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+      resetPerfProbe();
+    }
+  });
+
   it("shows dotfiles/ignored entries while protected and symlink directories stay collapsed", () => {
     const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}
       onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);

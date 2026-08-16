@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { measurePerf } from "../../perf/probe";
+import { measurePerf, perfProbeEnabled, recordPerfCounter, startPerfSpan } from "../../perf/probe";
 import type { ConnectionSpec, TmuxSnapshot } from "../../app/types";
 import type { WireFileEvent } from "../files/api";
 import type { WireGitEvent } from "../git/api";
@@ -273,8 +273,21 @@ export async function startTerminal(
   onEvent: (event: TerminalEvent) => void,
 ): Promise<string> {
   const channel = new Channel<ArrayBuffer>();
-  channel.onmessage = (frame) => onEvent(decodeTerminalEvent(frame));
-  return invoke<string>("start_terminal", { sessionId, paneIds, connection, onEvent: channel });
+  channel.onmessage = (frame) => {
+    const admission = startPerfSpan("bridge.jsAdmission");
+    recordPerfCounter("bridge.ingressBytes", frame.byteLength);
+    recordPerfCounter("desktop.hostEvents");
+    try {
+      onEvent(decodeTerminalEvent(frame));
+    } finally {
+      admission();
+      if (perfProbeEnabled()) {
+        void invoke("acknowledge_bridge_event", { byteLength: frame.byteLength }).catch(() => undefined);
+      }
+    }
+  };
+  return measurePerf("workflow.connect", () =>
+    invoke<string>("start_terminal", { sessionId, paneIds, connection, onEvent: channel }));
 }
 
 export function stopTerminal(clientId: string): Promise<void> {

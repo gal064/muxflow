@@ -246,6 +246,10 @@ pub fn run() {
             external_links::open_external_link,
             perf_log::perf_log_enabled,
             perf_log::append_perf_log,
+            perf_log::acknowledge_bridge_event,
+            perf_log::bridge_measurement_snapshot,
+            perf_log::transfer_measurement_snapshot,
+            perf_log::remote_measurement_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tmux Agent IDE");
