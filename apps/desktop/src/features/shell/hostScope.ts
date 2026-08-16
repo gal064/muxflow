@@ -27,3 +27,8 @@ export function sameHostConnection(left: HostScopeToken, right: HostScopeToken):
     && left.connectionEpoch === right.connectionEpoch
     && left.serverIdentity === right.serverIdentity;
 }
+
+/** Stable identity for work that may outlive topology-generation changes. */
+export function hostConnectionKey(scope: HostScopeToken): string {
+  return [scope.hostProfileId, scope.connectionKey, scope.connectionEpoch, scope.serverIdentity ?? ""].join("\0");
+}

@@ -30,6 +30,7 @@ type TerminalWorkspaceSurfaceProps = {
   terminalTransferRegistry: TerminalTransferRegistry;
   terminalTransferScope?: TerminalTransferConnectionScope;
   beginDividerDrag(event: PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical"): void;
+  focusPane(pane: Pane): void;
   handleInput(paneId: string, input: TerminalInput): void;
   /** A terminal reported what it turns pixels into. */
   onMeasurements(measurements: TerminalMeasurements): void;
@@ -58,7 +59,7 @@ export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
         hub={props.hub}
         onController={(paneId, controller) => { if (controller) props.controllers.current.set(paneId, controller); else props.controllers.current.delete(paneId); }}
         onDiagnostic={props.setStatus}
-        onFocus={(paneId) => { if (paneId !== activePane?.id) void props.performAction({ kind: "focusPane", paneId }); }}
+        onFocus={(paneId) => { if (paneId !== activePane?.id) props.focusPane(pane); }}
         onInput={props.handleInput}
         onMeasurements={props.onMeasurements}
         transferClient={props.terminalTransferClient}

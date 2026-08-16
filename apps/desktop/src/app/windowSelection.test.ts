@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Window as TmuxWindow } from "./types";
-import { relativeWindowReorderAction, requestActiveWindow, resolveActiveWindowId } from "./windowSelection";
+import { relativeWindowReorderAction, resolveActiveWindowId } from "./windowSelection";
 
 const windows = (activeId: string): TmuxWindow[] => [
   { id: "@1", sessionId: "$1", index: 0, name: "one", active: activeId === "@1", layout: "" },
@@ -10,20 +10,6 @@ const windows = (activeId: string): TmuxWindow[] => [
 describe("authoritative window selection", () => {
   it("follows an external tmux active-window change even when the old window still exists", () => {
     expect(resolveActiveWindowId(windows("@2"), "@1")).toBe("@2");
-  });
-
-  it("renders a GUI-selected tab after tmux accepts selectWindow", async () => {
-    const performAction = vi.fn(async () => ({ windowId: "@2", topologyGeneration: 2 }));
-    const setActiveWindowId = vi.fn();
-    await expect(requestActiveWindow(windows("@1"), "@1", "@2", performAction, setActiveWindowId)).resolves.toBe(true);
-    expect(performAction).toHaveBeenCalledWith({ kind: "selectWindow", sessionId: "$1", windowId: "@2" });
-    expect(setActiveWindowId).toHaveBeenCalledWith("@2");
-  });
-
-  it("does not change the rendered tab when disconnected/read-only gating rejects the mutation", async () => {
-    const setActiveWindowId = vi.fn();
-    await expect(requestActiveWindow(windows("@1"), "@1", "@2", async () => undefined, setActiveWindowId)).resolves.toBe(false);
-    expect(setActiveWindowId).not.toHaveBeenCalled();
   });
 
   it("moves left and right relative to adjacent stable window IDs", () => {
@@ -48,4 +34,5 @@ describe("authoritative window selection", () => {
     crossSession[1] = { ...crossSession[1], sessionId: "$2" };
     expect(relativeWindowReorderAction(crossSession, "@1", "right")).toBeUndefined();
   });
+
 });

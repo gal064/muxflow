@@ -1,5 +1,5 @@
 import type { Window as TmuxWindow } from "./types";
-import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
+import type { TmuxAction } from "../features/tmux/actions";
 
 export type WindowMoveDirection = "left" | "right";
 
@@ -29,22 +29,4 @@ export function resolveActiveWindowId(
   return windows.find((window) => window.active)?.id
     ?? windows.find((window) => window.id === current)?.id
     ?? windows[0]?.id;
-}
-
-export async function requestActiveWindow(
-  windows: readonly TmuxWindow[],
-  current: string | undefined,
-  requested: string,
-  performAction: (action: TmuxAction) => Promise<TmuxActionResult | undefined>,
-  setActiveWindowId: (windowId: string) => void,
-): Promise<boolean> {
-  const target = windows.find((window) => window.id === requested);
-  if (!target || target.id === current) return false;
-  const accepted = await performAction({
-    kind: "selectWindow",
-    sessionId: target.sessionId,
-    windowId: target.id,
-  });
-  if (accepted) setActiveWindowId(target.id);
-  return Boolean(accepted);
 }

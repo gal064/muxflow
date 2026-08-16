@@ -4,18 +4,20 @@ import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor
 import { StateDot } from "../../ui/StateDot";
 import { fileIcon } from "../files/fileIcons";
 import type { CombinedTab } from "../shell/model";
+import type { HostScopeToken } from "../shell/hostScope";
 
 interface TabStripProps {
   tabs: readonly CombinedTab[];
   activeKey?: string;
   canMutate: boolean;
   canSplit: boolean;
+  commandScope: HostScopeToken;
   /** Draws a shape as well as a color in each activity dot. */
   stateGlyphs: boolean;
   onSelect(tab: CombinedTab): void;
-  onClose(tab: CombinedTab): void;
-  onMove(tab: CombinedTab, direction: "left" | "right"): void;
-  onRenameTerminal(tab: Extract<CombinedTab, { kind: "terminal" }>): void;
+  onClose(tab: CombinedTab, scope: HostScopeToken): void;
+  onMove(tab: CombinedTab, direction: "left" | "right", scope: HostScopeToken): void;
+  onRenameTerminal(tab: Extract<CombinedTab, { kind: "terminal" }>, scope: HostScopeToken): void;
   /** Double-clicking a preview tab makes it permanent, as VS Code's does. */
   onPin(tab: Extract<CombinedTab, { kind: "app" }>): void;
   onNewTerminal(): void;
@@ -51,7 +53,7 @@ function TabGlyph({ tab }: { tab: Extract<CombinedTab, { kind: "app" }> }) {
  * nothing away.
  */
 export function TabStrip(props: TabStripProps) {
-  const [menu, setMenu] = useState<{ tab: CombinedTab; anchor: ContextMenuAnchor }>();
+  const [menu, setMenu] = useState<{ tab: CombinedTab; anchor: ContextMenuAnchor; scope: HostScopeToken }>();
   const tabs = useRef<HTMLDivElement>(null);
   // The strip scrolls rather than pushing its neighbours, which means the tab
   // that just became active can be outside it. Measured with the right panel
@@ -69,7 +71,7 @@ export function TabStrip(props: TabStripProps) {
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: CombinedTab, index: number) => {
     if (isContextMenuKey(event)) {
       event.preventDefault();
-      setMenu({ tab, anchor: anchorForElement(event.currentTarget) });
+      setMenu({ tab, anchor: anchorForElement(event.currentTarget), scope: props.commandScope });
       return;
     }
     let next = index;
@@ -104,18 +106,18 @@ export function TabStrip(props: TabStripProps) {
             onAuxClick={(event) => {
               // Middle-click closes, the way every tabbed app does. Terminal
               // tabs still route through the confirmation contract.
-              if (event.button === 1) { event.preventDefault(); props.onClose(tab); }
+              if (event.button === 1) { event.preventDefault(); props.onClose(tab, props.commandScope); }
             }}
             onClick={() => props.onSelect(tab)}
             onContextMenu={(event) => {
               // Opening a menu is not a selection: selecting first would make a
               // right-click on a terminal tab issue a real tmux select-window.
               event.preventDefault();
-              setMenu({ tab, anchor: { x: event.clientX, y: event.clientY } });
+              setMenu({ tab, anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
             }}
             onDoubleClick={() => {
               if (tab.kind === "app") props.onPin(tab);
-              else if (props.canMutate) props.onRenameTerminal(tab);
+              else if (props.canMutate) props.onRenameTerminal(tab, props.commandScope);
             }}
             onKeyDown={(event) => onTabKeyDown(event, tab, index)}
             role="tab"
@@ -140,7 +142,7 @@ export function TabStrip(props: TabStripProps) {
           {tab.kind === "app" && <button
             aria-label={`Close ${tab.title}`}
             className="tab-close"
-            onClick={() => props.onClose(tab)}
+            onClick={() => props.onClose(tab, props.commandScope)}
             type="button"
           ><Icon name="close" size={11} /></button>}
         </div>;
@@ -154,17 +156,17 @@ export function TabStrip(props: TabStripProps) {
       anchor={menu.anchor}
       items={[
         ...(menu.tab.kind === "terminal"
-          ? [{ id: "rename", label: "Rename tab…", disabled: !props.canMutate, run: () => props.onRenameTerminal(menu.tab as Extract<CombinedTab, { kind: "terminal" }>) }]
+          ? [{ id: "rename", label: "Rename tab…", disabled: !props.canMutate, run: () => props.onRenameTerminal(menu.tab as Extract<CombinedTab, { kind: "terminal" }>, menu.scope) }]
           : []),
-        { id: "left", label: "Move left", disabled: !menu.tab.canMoveLeft || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "left") },
-        { id: "right", label: "Move right", disabled: !menu.tab.canMoveRight || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "right") },
+        { id: "left", label: "Move left", disabled: !menu.tab.canMoveLeft || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "left", menu.scope) },
+        { id: "right", label: "Move right", disabled: !menu.tab.canMoveRight || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "right", menu.scope) },
         "separator",
         {
           id: "close",
           label: menu.tab.kind === "terminal" ? "Close tab…" : "Close tab",
           destructive: menu.tab.kind === "terminal",
           disabled: menu.tab.kind === "terminal" && !props.canMutate,
-          run: () => props.onClose(menu.tab),
+          run: () => props.onClose(menu.tab, menu.scope),
         },
       ]}
       label={`Actions for ${menu.tab.title}`}
