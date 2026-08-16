@@ -91,12 +91,16 @@ describe("TerminalEventHub hidden-pane buffering", () => {
   it("delivers dedicated epoch subscriptions only for admitted epoch frames", () => {
     const hub = new TerminalEventHub();
     const epochs: number[] = [];
+    let appDeliveries = 0;
     const unsubscribe = hub.subscribeEpoch((event) => epochs.push(event.epoch));
     hub.publish(output(1, 1));
-    hub.publish({ kind: "generationEpoch", epoch: 41, sequence: 0 });
+    hub.publish({ kind: "generationEpoch", epoch: 41, sequence: 0 }, () => { appDeliveries += 1; });
     hub.publish(output(1, 1));
+    hub.publish({ kind: "generationEpoch", epoch: 41, sequence: 0 }, () => { appDeliveries += 1; });
+    expect(hub.publish(output(2, 2))).toEqual({ kind: "accepted" });
     hub.publish({ kind: "connectionState", state: "connected", sequence: 0 });
     expect(epochs).toEqual([41]);
+    expect(appDeliveries).toBe(1);
     unsubscribe();
     hub.publish({ kind: "generationEpoch", epoch: 42, sequence: 0 });
     expect(epochs).toEqual([41]);
@@ -230,6 +234,34 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     const received: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => received.push(event));
     expect(received).toEqual([checkpoint]);
+  });
+
+  it("retains only detached identity after delivering a resource to an active pane", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub((paneId) => requests.push(paneId));
+    hub.subscribePane("%1", () => undefined);
+    const checkpoint = resource(1, 2);
+    hub.publish(checkpoint);
+    expect(hub.retainedByteLength).toBe(0);
+    if (checkpoint.kind !== "paneResource") throw new Error("expected resource fixture");
+    checkpoint.rawTail[0] = 99;
+    hub.publish({ ...checkpoint, sequence: 2 });
+    expect(requests).toEqual(["%1"]);
+  });
+
+  it("releases consumed resource allocations while retaining detached identity", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub((paneId) => requests.push(paneId));
+    const checkpoint = resource(1, 2);
+    hub.publish(checkpoint);
+    const consumed: TerminalEvent[] = [];
+    hub.subscribePane("%1", (event) => consumed.push(event));
+    expect(hub.retainedByteLength).toBe(0);
+    const delivered = consumed[0];
+    if (delivered.kind !== "paneResource") throw new Error("expected resource fixture");
+    delivered.serializedSnapshot[0] = 99;
+    hub.publish({ ...delivered, sequence: 2 });
+    expect(requests).toEqual(["%1"]);
   });
 
   it("keeps output arriving after hide serialization outside the exact cutoff and available for recovery", () => {

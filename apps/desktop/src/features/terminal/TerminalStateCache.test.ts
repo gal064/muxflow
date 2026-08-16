@@ -44,4 +44,14 @@ describe("TerminalStateCache", () => {
     expect(cache.get("%1")).toBeUndefined();
     expect(cache.retainedByteLength).toBe(0);
   });
+
+  it("freezes preparation metadata and accounts from its canonical bytes", () => {
+    const cache = new TerminalStateCache(2, 10, 10);
+    const snapshot = prepared("λ");
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(() => { (snapshot as unknown as { serialized: string }).serialized = "x".repeat(100); }).toThrow();
+    cache.set("%1", snapshot);
+    expect(cache.get("%1")?.byteLength).toBe(snapshot.data.byteLength);
+    expect(cache.retainedByteLength).toBe(2);
+  });
 });

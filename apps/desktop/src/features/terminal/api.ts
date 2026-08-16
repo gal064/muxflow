@@ -51,10 +51,10 @@ declare const preparedTerminalSnapshot: unique symbol;
 
 export interface PreparedTerminalSnapshot {
   readonly [preparedTerminalSnapshot]: true;
-  serialized: string;
-  data: OwnedTerminalBytes;
-  originalByteLength: number;
-  retained: boolean;
+  readonly serialized: string;
+  readonly data: OwnedTerminalBytes;
+  readonly originalByteLength: number;
+  readonly retained: boolean;
 }
 
 export interface TerminalVisibilityCheckpoint {
@@ -68,19 +68,19 @@ export function prepareTerminalSnapshot(
 ): PreparedTerminalSnapshot {
   const encoded = encoder.encode(serialized);
   if (encoded.byteLength > maxBytes) {
-    return {
+    return Object.freeze({
       serialized,
       data: ownTerminalBytes(new Uint8Array()),
       originalByteLength: encoded.byteLength,
       retained: false,
-    } as PreparedTerminalSnapshot;
+    }) as PreparedTerminalSnapshot;
   }
-  return {
+  return Object.freeze({
     serialized,
     data: ownTerminalBytes(encoded),
     originalByteLength: encoded.byteLength,
     retained: true,
-  } as PreparedTerminalSnapshot;
+  }) as PreparedTerminalSnapshot;
 }
 
 export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: OperationRecorder): TerminalEvent {
