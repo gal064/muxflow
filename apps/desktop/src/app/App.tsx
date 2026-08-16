@@ -518,16 +518,16 @@ export function App() {
       selectAgentRow(target);
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
-    selectCreatedSession: shellNavigation.selectCreatedSession,
+    commitCreatedSession: shellNavigation.commitCreatedSession,
     // This window is one round trip old and is not in the current snapshot yet.
     // A real `select-window` is also what makes the *next* snapshot agree
     // — the app mirrors tmux's active flag, so anything only set locally here
     // would be overwritten the moment the snapshot arrived. The generation is
     // chained from the create for the same reason `surfacePaneDestination`
     // chains its own: the create already moved the topology.
-    selectCreatedWindow: (sessionId, windowId, generation, reservedIntent) => {
+    commitCreatedWindow: (sessionId, windowId, generation, reservedIntent) => {
       notificationActivation.clearNotificationFocusGuard();
-      shellNavigation.selectCreatedWindow(sessionId, windowId, generation, reservedIntent);
+      shellNavigation.commitCreatedWindow(sessionId, windowId, generation, reservedIntent);
     },
     selectRelativeTab: (direction) => {
       const index = combinedTabs.findIndex((tab) => tab.key === activeCombinedTabKey);

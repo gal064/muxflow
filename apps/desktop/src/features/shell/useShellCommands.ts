@@ -43,18 +43,13 @@ interface ShellCommandOptions {
   /** Live subscription to what the row surfaces currently offer. */
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
-  selectCreatedSession(sessionId: string, reservedIntent: number): void;
+  commitCreatedSession(sessionId: string, generation: number, reservedIntent: number): void;
   /**
-   * Land on the terminal tab ⌘T just made. The host creates it detached, so
-   * tmux's active window does not move and the app — which mirrors that flag
-   * on every snapshot — would put the selection straight back.
-   *
-   * `generation` is the one the creation returned, not the one in scope: the
-   * create bumped the topology and the app's own scope does not catch up until
-   * the next snapshot, so a selection sent against the older number is
-   * rejected as stale and only lands on a retry.
+   * Commit the destination already selected by the host's single create
+   * transaction. This is local acknowledgement handling, never a second tmux
+   * action or topology generation.
    */
-  selectCreatedWindow(sessionId: string, windowId: string, generation: number, reservedIntent: number): void;
+  commitCreatedWindow(sessionId: string, windowId: string, generation: number, reservedIntent: number): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
   setConfirmation: Dispatch<SetStateAction<PendingTmuxConfirmation | undefined>>;
@@ -281,7 +276,9 @@ export function useShellCommands(options: ShellCommandOptions): {
           if (!options.isHostScopeCurrent(scope)) return options.setStatus("Workspace creation was cancelled because its host scope changed.");
           const reservedIntent = options.beginDeferredNavigation();
           void options.performAction({ kind: "createSession", name }).then((result) => {
-            if (result?.sessionId && options.isHostScopeCurrent(scope)) options.selectCreatedSession(result.sessionId, reservedIntent);
+            if (result?.sessionId && options.isHostScopeCurrent(scope)) {
+              options.commitCreatedSession(result.sessionId, result.topologyGeneration, reservedIntent);
+            }
           });
         } });
         return;
@@ -312,7 +309,7 @@ export function useShellCommands(options: ShellCommandOptions): {
         const reservedIntent = options.beginDeferredNavigation();
         void options.performAction({ kind: "createWindow", sessionId }).then((result) => {
           if (result?.windowId && options.isHostScopeCurrent(scope)) {
-            options.selectCreatedWindow(sessionId, result.windowId, result.topologyGeneration, reservedIntent);
+            options.commitCreatedWindow(sessionId, result.windowId, result.topologyGeneration, reservedIntent);
           }
         });
         return;

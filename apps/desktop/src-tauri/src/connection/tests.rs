@@ -422,3 +422,23 @@ fn full_input_channel_does_not_block_shutdown_while_resize_flush_waits() {
     drop(receiver);
     assert!(flush.join().unwrap().is_err());
 }
+
+#[test]
+fn input_flush_reports_the_first_failed_write() {
+    let client = Arc::new(TerminalClient::new());
+    let (sender, receiver) = mpsc::sync_channel(8);
+    client.input_queue.lock().unwrap().sender = Some(sender.clone());
+    mark_input_reconnected(&client);
+    client.ready.store(true, Ordering::Release);
+    let worker_client = Arc::clone(&client);
+    let worker = thread::spawn(move || run_client_input_dispatch(worker_client, receiver));
+
+    client
+        .enqueue_input("%1".into(), b"accepted".to_vec())
+        .unwrap();
+    let error = client.flush_input().unwrap_err();
+    assert!(error.contains("host bridge is disconnected"), "{error}");
+
+    sender.send(ClientInputDispatch::Stop).unwrap();
+    worker.join().unwrap();
+}

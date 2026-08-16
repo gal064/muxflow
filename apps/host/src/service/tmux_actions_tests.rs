@@ -427,7 +427,8 @@ fn every_action_has_an_identity_relative_authoritative_postcondition() {
     );
 
     let mut after = before.clone();
-    let mut created = window("@3", 2, false);
+    after.windows[0].active = false;
+    let mut created = window("@3", 2, true);
     created.name = "new".into();
     after.windows.push(created);
     check(

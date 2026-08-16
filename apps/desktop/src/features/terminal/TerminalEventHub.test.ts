@@ -362,6 +362,29 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(received).toEqual([seed(4, 3, "%1"), output(5, 4, "%1")]);
   });
 
+  it("pins an active pane's generation, resource identity, and rendered checkpoint", () => {
+    const requests: string[] = [];
+    const received: TerminalEvent[] = [];
+    const hub = new TerminalEventHub(
+      (paneId) => requests.push(paneId),
+      { maxTrackedPanes: 1, maxBufferedPanes: 2 },
+    );
+    hub.publish({ kind: "generationEpoch", epoch: 7, sequence: 0 });
+    hub.subscribePane("%1", (event) => received.push(event));
+    hub.publish(seed(1, 5, "%1"));
+    hub.markRendered("%1", 5, 7);
+
+    // Churn a dormant pane past the one-slot metadata limit. The subscribed
+    // pane remains authoritative; the dormant newcomer is the eviction target.
+    hub.publish(output(2, 1, "%2"));
+    hub.publish(output(3, 1, "%3"));
+    hub.publish(output(4, 4, "%1"));
+
+    expect(received).toEqual([seed(1, 5, "%1")]);
+    expect(hub.visibilityCheckpoint("%1")).toEqual({ terminalEpoch: 7, outputGeneration: 5 });
+    expect(requests).toEqual(["%2", "%3"]);
+  });
+
   it("requires a seed conservatively after the bounded debt tombstone ages out", () => {
     const requests: string[] = [];
     const hub = new TerminalEventHub(

@@ -214,7 +214,7 @@ export class TerminalEventHub {
       throw new Error(`terminal pane ${paneId} already has an active consumer`);
     }
     this.#paneListeners.set(paneId, listener);
-    const pane = this.#paneStates.get(paneId);
+    const pane = this.#touchPane(paneId);
     const backlog = pane?.backlog;
     if (backlog) {
       this.#deleteBacklog(pane);
@@ -400,11 +400,17 @@ export class TerminalEventHub {
     this.#paneStates.delete(paneId);
     this.#paneStates.set(paneId, pane);
     while (this.#paneStates.size > this.#maxTrackedPanes) {
-      const oldest = this.#paneStates.keys().next().value as string | undefined;
+      let oldest: string | undefined;
+      for (const candidate of this.#paneStates.keys()) {
+        if (candidate !== paneId && !this.#paneListeners.has(candidate)) {
+          oldest = candidate;
+          break;
+        }
+      }
       if (oldest === undefined) break;
       const evicted = this.#paneStates.get(oldest);
       this.#paneStates.delete(oldest);
-      if (evicted && (evicted.backlog || evicted.awaitingSeed)) {
+      if (evicted) {
         const alreadyAwaiting = evicted.awaitingSeed;
         this.#deleteBacklog(evicted);
         this.#rememberEvictedSeedDebt(oldest);

@@ -406,6 +406,86 @@ fn shutdown_cancels_a_check_on_a_nonresponsive_control_socket() {
 }
 
 #[test]
+fn in_flight_idle_disposal_completion_unblocks_shutdown() {
+    let temporary = tempfile::tempdir().unwrap();
+    let master =
+        master_entry("idle-close-race", None, &temporary.path().join("race.sock")).unwrap();
+    master.coordination.state.lock().unwrap().lifecycle = MasterLifecycle::Establishing;
+
+    let closing_master = master.clone();
+    let (closed_tx, closed_rx) = mpsc::channel();
+    let closer = thread::spawn(move || {
+        close_master(&closing_master);
+        closed_tx.send(()).unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Closing { in_flight: true }
+    ) && Instant::now() < deadline
+    {
+        thread::yield_now();
+    }
+    assert!(
+        closed_rx.try_recv().is_err(),
+        "shutdown must wait for idle disposal"
+    );
+
+    finish_in_flight(&master);
+    closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    closer.join().unwrap();
+    assert!(matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Closing { in_flight: false }
+    ));
+}
+
+#[test]
+fn revalidation_requested_during_probe_is_not_lost() {
+    let temporary = tempfile::tempdir().unwrap();
+    let master = master_entry("probe-race", None, &temporary.path().join("probe.sock")).unwrap();
+    {
+        let mut state = master.coordination.state.lock().unwrap();
+        state.leases = 1;
+        state.lifecycle = MasterLifecycle::Ready {
+            process: MasterProcess::External,
+            needs_probe: false,
+        };
+    }
+    let lease = SshLease {
+        master: master.clone(),
+        route: LeaseRoute::Direct,
+    };
+    let probe_started = Arc::new(Barrier::new(2));
+    let probe_resume = Arc::new(Barrier::new(2));
+    let probes = Arc::new(AtomicUsize::new(0));
+    let worker_master = master.clone();
+    let worker_started = Arc::clone(&probe_started);
+    let worker_resume = Arc::clone(&probe_resume);
+    let worker_probes = Arc::clone(&probes);
+    let worker = thread::spawn(move || {
+        coordinate_master_state(
+            &worker_master,
+            &|| false,
+            |_, _| {
+                if worker_probes.fetch_add(1, Ordering::AcqRel) == 0 {
+                    worker_started.wait();
+                    worker_resume.wait();
+                }
+                Ok(MasterLiveness::Live)
+            },
+            || panic!("live master must not be re-established"),
+        )
+    });
+    probe_started.wait();
+    lease.require_revalidation();
+    probe_resume.wait();
+    assert!(worker.join().unwrap().unwrap().reused);
+    assert_eq!(probes.load(Ordering::Acquire), 2);
+    drop(lease);
+}
+
+#[test]
 fn replacement_inode_is_reclassified_external_and_bypassed() {
     let temporary = tempfile::tempdir().unwrap();
     let socket = temporary.path().join("replacement-before-coordinate.sock");

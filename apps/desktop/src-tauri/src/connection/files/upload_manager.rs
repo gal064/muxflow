@@ -722,8 +722,12 @@ fn reconcile_upload_outcome(
 ) -> Result<v1::UploadDescriptor, String> {
     job.binding.validate()?;
     let deadline = job.cancellation.arm_inactivity_deadline();
-    let mut lease =
-        BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &deadline)?;
+    let mut lease = BulkLease::acquire_authoritative(
+        &job.connection,
+        &job.binding,
+        &job.cancellation,
+        &deadline,
+    )?;
     let _process_binding = job
         .cancellation
         .bind_authoritative_process(lease.process_id())?;

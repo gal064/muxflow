@@ -66,7 +66,7 @@ impl<'a> BulkProtocolClient<'a> {
         stdin: &mut ChildStdin,
         reader: &mut BufReader<ChildStdout>,
         binding: &BulkBinding,
-        cancellation: &CancelState,
+        cancellation: Option<&CancelState>,
         deadline: &DeadlineGuard,
     ) -> Result<(), String> {
         set_nonblocking(reader.get_ref().as_raw_fd(), "response")?;
@@ -90,12 +90,12 @@ impl<'a> BulkProtocolClient<'a> {
                         connection_epoch: binding.connection_epoch,
                     }),
                 ),
-                Some(cancellation),
+                cancellation,
                 Some(deadline),
             )
             .map_err(|error| error.to_string())?;
         let frame = loop {
-            if cancellation.is_cancelled() {
+            if cancellation.is_some_and(CancelState::is_cancelled) {
                 return Err("bulk bridge handshake cancelled".into());
             }
             if let Some(frame) = client
@@ -483,7 +483,7 @@ mod tests {
             &mut stdin,
             &mut reader,
             &binding,
-            &cancellation,
+            Some(&cancellation),
             &deadline,
         )
         .unwrap_err();

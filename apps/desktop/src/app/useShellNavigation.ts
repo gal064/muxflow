@@ -289,18 +289,28 @@ export function useShellNavigation(options: ShellNavigationOptions) {
   }, [beginTerminalIntent, coordinator, options, selectWindowDestination]);
 
   const beginDeferredNavigation = beginTerminalIntent;
-  const selectCreatedWindow = useCallback((sessionId: string, windowId: string, generation: number, reservedIntent: number) => {
+  const commitCreatedWindow = useCallback((sessionId: string, windowId: string, generation: number, reservedIntent: number) => {
     if (reservedIntent !== intentVersion.current) return;
     intentVersion.current += 1;
-    const identity = scopeRef.current.serverIdentity;
-    if (!identity) return;
-    void selectWindowDestination({
-      kind: "window",
-      sessionId,
-      windowId,
-      precondition: { serverIdentity: identity, generation },
+    const scope = scopeRef.current;
+    void coordinator.navigateLocal({
+      destination: { kind: "window", sessionId, windowId },
+      request: async () => ({
+        kind: "reached",
+        destination: { kind: "window", sessionId, windowId },
+        generation,
+        generationSource: "action",
+      }),
+      commit: () => {
+        if (!scopeCurrent(scope)) return;
+        activeSessionIdRef.current = sessionId;
+        activeWindowIdRef.current = windowId;
+        options.setAppTab(sessionId, undefined);
+        options.setActiveSessionId(sessionId);
+        options.setActiveWindowId(windowId);
+      },
     });
-  }, [selectWindowDestination]);
+  }, [coordinator, options]);
 
   const selectLocalAppTab = useCallback((
     sessionId: string,
@@ -427,10 +437,28 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     return { ok: false, error: accepted.error ?? new Error(`${source} focus request was not accepted.`) };
   }, [beginTerminalIntent, coordinator, options, requestLocation]);
 
-  const selectCreatedSession = useCallback((sessionId: string, reservedIntent: number) => {
+  const commitCreatedSession = useCallback((sessionId: string, generation: number, reservedIntent: number) => {
     if (reservedIntent !== intentVersion.current) return;
-    selectSession(sessionId);
-  }, [selectSession]);
+    intentVersion.current += 1;
+    const scope = scopeRef.current;
+    void coordinator.navigateLocal({
+      destination: { kind: "session", sessionId },
+      request: async () => ({
+        kind: "reached",
+        destination: { kind: "session", sessionId },
+        generation,
+        generationSource: "action",
+      }),
+      commit: () => {
+        if (!scopeCurrent(scope)) return;
+        activeSessionIdRef.current = sessionId;
+        activeWindowIdRef.current = undefined;
+        options.setAppTab(sessionId, undefined);
+        options.setActiveSessionId(sessionId);
+        options.setActiveWindowId(undefined);
+      },
+    });
+  }, [coordinator, options]);
 
   const observeAuthoritativeWindow = useCallback((sessionId: string, windowId: string | undefined, generation: number) => {
     const protection = protectedAppTab.current;
@@ -446,7 +474,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
   }, []);
 
   return {
-    beginDeferredNavigation, observeAuthoritativeWindow, selectAppTab, selectCreatedSession,
-    selectCreatedWindow, selectLocalAppTab, selectPane, selectSession, selectWindow, revealLocalTerminal,
+    beginDeferredNavigation, observeAuthoritativeWindow, selectAppTab, commitCreatedSession,
+    commitCreatedWindow, selectLocalAppTab, selectPane, selectSession, selectWindow, revealLocalTerminal,
   };
 }

@@ -1,5 +1,5 @@
 use std::{
-    io::BufReader,
+    io::{BufReader, Read, Write},
     process::{ChildStdin, ChildStdout},
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
@@ -169,6 +169,7 @@ fn run_bridge_once(
     // Terminal generations are scoped to one helper protocol connection.  Tell
     // the renderer to discard same-server generation watermarks before any seed
     // or output from the new connection is delivered.
+    super::files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
     client
         .terminal_epoch
         .store(terminal_epoch, Ordering::Release);
@@ -297,9 +298,9 @@ fn run_bridge_once(
     read_protocol_stream(reader, sequence, &hello.server_identity, channel, client)
 }
 
-fn handshake_and_snapshot(
-    stdin: &mut ChildStdin,
-    reader: &mut BufReader<ChildStdout>,
+pub(super) fn handshake_and_snapshot(
+    stdin: &mut impl Write,
+    reader: &mut impl Read,
     connection_epoch: u64,
 ) -> Result<(v1::ServerHello, Option<InitialHostState>, bool), String> {
     write_frame_sync(
@@ -318,17 +319,9 @@ fn handshake_and_snapshot(
         ),
     )
     .map_err(|error| error.to_string())?;
-    let hello_frame = read_frame_sync(reader)
-        .map_err(|error| error.to_string())?
-        .ok_or("host closed during handshake")?;
-    let envelope_major = hello_frame.protocol_major;
-    let Some(Payload::ServerHello(hello)) = hello_frame.payload else {
-        return Err("host did not return ServerHello".into());
-    };
-    if !handshake_allows_snapshot(envelope_major, &hello) {
-        return Ok((hello, None, false));
-    }
-
+    // Subscribe is valid immediately after ClientHello. Pipeline both writes
+    // before waiting for ServerHello so an SSH RTT does not sit between them;
+    // the response remains quarantined until compatibility is validated.
     write_frame_sync(
         stdin,
         &envelope(
@@ -342,6 +335,17 @@ fn handshake_and_snapshot(
         ),
     )
     .map_err(|error| error.to_string())?;
+    let hello_frame = read_frame_sync(reader)
+        .map_err(|error| error.to_string())?
+        .ok_or("host closed during handshake")?;
+    let envelope_major = hello_frame.protocol_major;
+    let Some(Payload::ServerHello(hello)) = hello_frame.payload else {
+        return Err("host did not return ServerHello".into());
+    };
+    if !handshake_allows_snapshot(envelope_major, &hello) {
+        return Ok((hello, None, false));
+    }
+
     let (response, buffered) = read_until_response_with_value(reader, 2)?;
     if !response.ok {
         return Err(format!(
@@ -392,7 +396,7 @@ pub(super) fn handshake_allows_snapshot(envelope_major: u32, hello: &v1::ServerH
 }
 
 fn read_until_response(
-    reader: &mut BufReader<ChildStdout>,
+    reader: &mut impl Read,
     request_id: u64,
 ) -> Result<Vec<v1::Envelope>, String> {
     let (response, buffered) = read_until_response_with_value(reader, request_id)?;
@@ -407,7 +411,7 @@ fn read_until_response(
 }
 
 fn read_until_response_with_value(
-    reader: &mut BufReader<ChildStdout>,
+    reader: &mut impl Read,
     request_id: u64,
 ) -> Result<(v1::Response, Vec<v1::Envelope>), String> {
     let mut buffered = Vec::new();
@@ -821,6 +825,47 @@ pub(super) fn validate_event_sequence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::Cursor,
+        sync::{Arc, Mutex},
+    };
+
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct PipelinedReader {
+        writes: Arc<Mutex<Vec<u8>>>,
+        responses: Cursor<Vec<u8>>,
+        checked: bool,
+    }
+
+    impl Read for PipelinedReader {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if !self.checked {
+                let written = self.writes.lock().unwrap().clone();
+                let mut requests = Cursor::new(written);
+                let hello = read_frame_sync(&mut requests).unwrap().unwrap();
+                let subscribe = read_frame_sync(&mut requests).unwrap().unwrap();
+                assert_eq!(hello.request_id, 1);
+                assert!(matches!(hello.payload, Some(Payload::ClientHello(_))));
+                assert_eq!(subscribe.request_id, 2);
+                assert!(matches!(subscribe.payload, Some(Payload::Request(_))));
+                assert_eq!(requests.position(), requests.get_ref().len() as u64);
+                self.checked = true;
+            }
+            self.responses.read(bytes)
+        }
+    }
 
     fn event(sequence: u64) -> v1::Envelope {
         envelope(0, sequence, Payload::Event(v1::HostEvent::default()))
@@ -834,6 +879,48 @@ mod tests {
 
         let response = envelope(9, 0, Payload::Response(v1::Response::default()));
         assert!(!event_follows_snapshot_barrier(&response, 41));
+    }
+
+    #[test]
+    fn client_hello_and_subscribe_are_written_before_the_first_read() {
+        let hello = envelope(
+            1,
+            0,
+            Payload::ServerHello(v1::ServerHello {
+                capabilities: HOST_CAPABILITIES,
+                server_identity: "server-a".into(),
+                ..Default::default()
+            }),
+        );
+        let response = envelope(
+            2,
+            0,
+            Payload::Response(v1::Response {
+                ok: true,
+                accepted_sequence: 4,
+                snapshot: Some(v1::Snapshot {
+                    server_identity: "server-a".into(),
+                    generation: 3,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        );
+        let mut responses = tmux_agent_protocol::encode_frame(&hello).unwrap();
+        responses.extend(tmux_agent_protocol::encode_frame(&response).unwrap());
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = RecordingWriter(Arc::clone(&writes));
+        let mut reader = PipelinedReader {
+            writes,
+            responses: Cursor::new(responses),
+            checked: false,
+        };
+
+        let (_, initial, compatible) = handshake_and_snapshot(&mut writer, &mut reader, 9).unwrap();
+
+        assert!(reader.checked);
+        assert!(compatible);
+        assert_eq!(initial.unwrap().accepted_sequence, 4);
     }
 
     #[test]

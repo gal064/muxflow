@@ -36,6 +36,7 @@ struct MasterCoordination {
 struct SshMasterState {
     lifecycle: MasterLifecycle,
     generation: u64,
+    revalidation_generation: u64,
     leases: usize,
     idle_generation: u64,
 }
@@ -45,6 +46,7 @@ impl Default for SshMasterState {
         Self {
             lifecycle: MasterLifecycle::Idle,
             generation: 0,
+            revalidation_generation: 0,
             leases: 0,
             idle_generation: 0,
         }
@@ -110,10 +112,11 @@ impl SshLease {
 
     pub(in crate::connection) fn require_revalidation(&self) {
         let mut state = self.master.coordination.state.lock().unwrap();
+        state.revalidation_generation = state.revalidation_generation.wrapping_add(1);
         if let MasterLifecycle::Ready { needs_probe, .. } = &mut state.lifecycle {
             *needs_probe = true;
-            self.master.coordination.changed.notify_all();
         }
+        self.master.coordination.changed.notify_all();
     }
 
     pub(in crate::connection) fn control_socket(&self) -> Option<&Path> {
@@ -351,7 +354,7 @@ fn coordinate_master_state(
             return Err("SSH control-master establishment cancelled".into());
         }
         let mut state = master.coordination.state.lock().unwrap();
-        let (mut process, needs_probe) = match &state.lifecycle {
+        let (mut process, needs_probe, revalidation_generation) = match &state.lifecycle {
             MasterLifecycle::Closing { .. } => {
                 return Err("SSH control masters are closing; retry connection setup".into());
             }
@@ -377,7 +380,7 @@ fn coordinate_master_state(
                 else {
                     unreachable!("ready lifecycle was just matched")
                 };
-                (process, needs_probe)
+                (process, needs_probe, state.revalidation_generation)
             }
         };
         master.coordination.changed.notify_all();
@@ -390,7 +393,17 @@ fn coordinate_master_state(
             finish_closing(master);
             return Err("SSH control masters are closing; retry connection setup".into());
         }
+        let revalidation_requested = state.revalidation_generation != revalidation_generation;
         match live {
+            Ok(MasterLiveness::Live) if revalidation_requested => {
+                state.lifecycle = MasterLifecycle::Ready {
+                    process,
+                    needs_probe: true,
+                };
+                master.coordination.changed.notify_all();
+                drop(state);
+                continue;
+            }
             Ok(MasterLiveness::Live) => {
                 state.lifecycle = MasterLifecycle::Ready {
                     process,
@@ -442,7 +455,7 @@ fn coordinate_master_state(
             Err(error) => {
                 state.lifecycle = MasterLifecycle::Ready {
                     process,
-                    needs_probe,
+                    needs_probe: needs_probe || revalidation_requested,
                 };
                 master.coordination.changed.notify_all();
                 return Err(error);
@@ -487,10 +500,14 @@ fn coordinate_master_state(
     })
 }
 
-fn finish_coordination(master: &SshMaster) {
+fn finish_in_flight(master: &SshMaster) {
     let mut state = master.coordination.state.lock().unwrap();
-    if matches!(state.lifecycle, MasterLifecycle::Establishing) {
-        state.lifecycle = MasterLifecycle::Idle;
+    match state.lifecycle {
+        MasterLifecycle::Establishing => state.lifecycle = MasterLifecycle::Idle,
+        MasterLifecycle::Closing { in_flight: true } => {
+            state.lifecycle = MasterLifecycle::Closing { in_flight: false };
+        }
+        _ => {}
     }
     master.coordination.changed.notify_all();
 }
@@ -580,7 +597,7 @@ fn release_control_master(master: &SshMaster, idle_timeout: Duration) {
             master.coordination.changed.notify_all();
             drop(state);
             dispose_process(&master, process);
-            finish_coordination(&master);
+            finish_in_flight(&master);
         });
 }
 

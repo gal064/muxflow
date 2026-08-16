@@ -333,6 +333,7 @@ fn action_postcondition(
         v1::TmuxActionKind::CloseSession => session(&action.session_id).is_none(),
         v1::TmuxActionKind::CreateWindow => window(&result.window_id).is_some_and(|item| {
             item.session_id == action.session_id
+                && item.active
                 && (action.name.is_empty() || item.name == action.name)
         }),
         v1::TmuxActionKind::RenameWindow => {

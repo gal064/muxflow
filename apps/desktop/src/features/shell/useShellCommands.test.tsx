@@ -71,8 +71,10 @@ async function run(
   const setConfirmation = vi.fn<Options["setConfirmation"]>();
   const setStatus = vi.fn<Options["setStatus"]>();
   const closeAppTab = vi.fn<Options["closeAppTab"]>();
-  const selectCreatedWindow = vi.fn<Options["selectCreatedWindow"]>();
+  const commitCreatedSession = vi.fn<Options["commitCreatedSession"]>();
+  const commitCreatedWindow = vi.fn<Options["commitCreatedWindow"]>();
   const setAppState = vi.fn();
+  const setTextPrompt = vi.fn<Options["setTextPrompt"]>();
   let call: ((commandId: CommandId, target?: CommandTarget) => Promise<void>) | undefined;
 
   function Harness() {
@@ -82,11 +84,11 @@ async function run(
       beginDeferredNavigation: () => 7, canMutate: true, closeAppTab, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
       currentHostProfileId: "local", focusDirection: vi.fn(), generation: 8,
       hostScope, isHostScopeCurrent: () => true, jumpToUnreadAgent: vi.fn(),
-      requestHostProfileDelete: vi.fn(), rowCommands: [], selectCreatedSession: vi.fn(),
-      selectCreatedWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
+      requestHostProfileDelete: vi.fn(), rowCommands: [], commitCreatedSession,
+      commitCreatedWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
       selectWorkspaceByIndex: vi.fn(), serverIdentity: "server-a", setAppState,
       setConfirmation, setPaletteOpen: vi.fn(), setSettingsOpen: vi.fn(),
-      setShortcutEditorOpen: vi.fn(), setStatus, setTextPrompt: vi.fn(),
+      setShortcutEditorOpen: vi.fn(), setStatus, setTextPrompt,
       setWorkspaceSwitcherOpen: vi.fn(), snapshot, stepFocusHistory: vi.fn(), windows: [window],
       ...overrides,
       performAction,
@@ -99,10 +101,27 @@ async function run(
   await act(async () => { renderer = create(<Harness />); });
   await act(async () => { await call!(commandId, target); });
   await act(async () => renderer.unmount());
-  return { closeAppTab, performAction, setConfirmation, setStatus, selectCreatedWindow, setAppState };
+  return { closeAppTab, performAction, setConfirmation, setStatus, commitCreatedSession, commitCreatedWindow, setAppState, setTextPrompt };
 }
 
 describe("shell commands", () => {
+  it("creates and commits a workspace with one tmux request", async () => {
+    const result = await run("session.new", {
+      result: { sessionId: "$9", topologyGeneration: 9 },
+    });
+    const prompt = result.setTextPrompt.mock.calls[0]?.[0];
+    expect(prompt).not.toBeTypeOf("function");
+    if (prompt && typeof prompt !== "function") {
+      await act(async () => {
+        prompt.submit("work");
+        await Promise.resolve();
+      });
+    }
+    expect(result.performAction).toHaveBeenCalledTimes(1);
+    expect(result.performAction).toHaveBeenCalledWith({ kind: "createSession", name: "work" });
+    expect(result.commitCreatedSession).toHaveBeenCalledWith("$9", 9, 7);
+  });
+
   it.each([
     [undefined, "ambient", ["$ambient", "@ambient", "tab-ambient", "%ambient"]],
     [target({ kind: "session", id: "$1" }), "session", ["$1", undefined, undefined, undefined]],
@@ -146,25 +165,20 @@ describe("shell commands", () => {
   });
 
   it("selects the terminal tab ⌘T just created", async () => {
-    // The host creates the window detached, so tmux's active window does not
-    // move; the app mirrors that flag on every snapshot, so without an explicit
-    // selection the new tab appears and the focus stays behind.
-    const { performAction, selectCreatedWindow } = await run("window.new", {
+    const { performAction, commitCreatedWindow } = await run("window.new", {
       result: { windowId: "@9", topologyGeneration: 9 },
     });
     expect(performAction).toHaveBeenCalledWith({ kind: "createWindow", sessionId: "$1" });
-    // The generation the *create* returned, not the one in scope: the create
-    // moved the topology, and a selection sent against the older number is
-    // rejected as stale and only lands on a retry.
-    expect(selectCreatedWindow).toHaveBeenCalledWith("$1", "@9", 9, 7);
+    expect(commitCreatedWindow).toHaveBeenCalledWith("$1", "@9", 9, 7);
+    expect(performAction).toHaveBeenCalledTimes(1);
   });
 
   it("does not steal focus into a window created on a host the user has left", async () => {
-    const { selectCreatedWindow } = await run("window.new", {
+    const { commitCreatedWindow } = await run("window.new", {
       isHostScopeCurrent: () => false,
       result: { windowId: "@9", topologyGeneration: 9 },
     });
-    expect(selectCreatedWindow).not.toHaveBeenCalled();
+    expect(commitCreatedWindow).not.toHaveBeenCalled();
   });
 
   it("closes a terminal tab and a pane without a dialog, still telling the host it was confirmed", async () => {
