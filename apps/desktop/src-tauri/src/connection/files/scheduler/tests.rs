@@ -1,6 +1,9 @@
 use super::*;
 use crate::connection::TerminalClient;
 
+#[path = "tests/admission.rs"]
+mod admission;
+
 fn live_binding(epoch: u64) -> BulkBinding {
     let client = Arc::new(TerminalClient::new(None));
     client.ready.store(true, Ordering::Release);
@@ -74,6 +77,245 @@ fn queued_cancellation_removes_the_job_immediately() {
         Some("cancel-me")
     );
     assert_eq!(queue, ["active-next", "tail"]);
+}
+
+#[test]
+fn injected_queue_full_has_no_event_cancellation_or_owned_guard() {
+    use super::super::{
+        download_manager::DownloadCollisionPolicy,
+        local_destination::{DestinationReservations, ReservedDestination},
+    };
+
+    struct AdmissionGuard(Arc<AtomicU32>);
+    impl Drop for AdmissionGuard {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let _serial = engine_test_lock();
+    let id = format!("injected-full-{}", uuid::Uuid::new_v4());
+    let queued = Arc::new(AtomicU32::new(0));
+    let started = Arc::new(AtomicU32::new(0));
+    let terminal = Arc::new(AtomicU32::new(0));
+    let released = Arc::new(AtomicU32::new(0));
+    let guard = AdmissionGuard(Arc::clone(&released));
+    let root = std::env::temp_dir().join(format!("full-lease-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let reservations = Arc::new(DestinationReservations::default());
+    let destination = ReservedDestination::reserve(
+        &root.join("result.bin"),
+        DownloadCollisionPolicy::Fail,
+        Arc::clone(&reservations),
+    )
+    .unwrap();
+    inject_queue_full_once();
+    let error = enqueue_transfer_with_queued(
+        id.clone(),
+        live_binding(91),
+        Arc::new(CancelState::new()),
+        {
+            let queued = Arc::clone(&queued);
+            move || {
+                queued.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            }
+        },
+        {
+            let started = Arc::clone(&started);
+            move || {
+                started.fetch_add(1, Ordering::AcqRel);
+            }
+        },
+        move || {
+            let _guard = guard;
+            let _destination = destination;
+            Ok(())
+        },
+        {
+            let terminal = Arc::clone(&terminal);
+            move |_, _| {
+                terminal.fetch_add(1, Ordering::AcqRel);
+            }
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("queue is full"));
+    assert_eq!(queued.load(Ordering::Acquire), 0);
+    assert_eq!(started.load(Ordering::Acquire), 0);
+    assert_eq!(terminal.load(Ordering::Acquire), 0);
+    assert_eq!(released.load(Ordering::Acquire), 1);
+    assert!(cancel_transfer(&id).is_err());
+    assert_eq!(acceptance_engine_counts(), (0, 0));
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    let replacement = ReservedDestination::reserve(
+        &root.join("result.bin"),
+        DownloadCollisionPolicy::Fail,
+        reservations,
+    )
+    .unwrap();
+    drop(replacement);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn admitted_queued_transition_precedes_running_and_terminal() {
+    let _serial = engine_test_lock();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    enqueue_transfer_with_queued(
+        format!("ordered-admission-{}", uuid::Uuid::new_v4()),
+        live_binding(92),
+        Arc::new(CancelState::new()),
+        {
+            let events = Arc::clone(&events);
+            move || {
+                events.lock().unwrap().push("queued");
+                Ok(())
+            }
+        },
+        {
+            let events = Arc::clone(&events);
+            move || events.lock().unwrap().push("running")
+        },
+        || Ok(()),
+        {
+            let events = Arc::clone(&events);
+            move |result, _| {
+                events.lock().unwrap().push("terminal");
+                finished_tx.send(result).unwrap();
+            }
+        },
+    )
+    .unwrap();
+    assert!(
+        finished_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(*events.lock().unwrap(), ["queued", "running", "terminal"]);
+}
+
+#[test]
+fn worker_spawn_failure_rolls_back_and_terminalizes_exactly_once() {
+    let _serial = engine_test_lock();
+    let id = format!("spawn-failure-{}", uuid::Uuid::new_v4());
+    let started = Arc::new(AtomicU32::new(0));
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    inject_worker_spawn_failure_once();
+    enqueue_transfer_with_queued(
+        id.clone(),
+        live_binding(93),
+        Arc::new(CancelState::new()),
+        || Ok(()),
+        {
+            let started = Arc::clone(&started);
+            move || {
+                started.fetch_add(1, Ordering::AcqRel);
+            }
+        },
+        || panic!("work must not run when its worker cannot be spawned"),
+        move |result, reason| finished_tx.send((result, reason)).unwrap(),
+    )
+    .unwrap();
+    let (result, reason) = finished_rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .unwrap();
+    let failure = result.unwrap_err();
+    assert!(failure.error.contains("injected worker spawn failure"));
+    assert_eq!(failure.outcome, TransferOutcome::NotPublished);
+    assert_eq!(failure.cleanup_status, CleanupStatus::NotNeeded);
+    assert_eq!(reason, CancelReason::None);
+    assert_eq!(started.load(Ordering::Acquire), 0);
+    assert!(finished_rx.try_recv().is_err());
+    assert!(cancel_transfer(&id).is_err());
+    assert_eq!(acceptance_engine_counts(), (0, 0));
+}
+
+#[test]
+fn queued_cancellation_releases_owned_destination_lease() {
+    use super::super::{
+        download_manager::DownloadCollisionPolicy,
+        local_destination::{DestinationReservations, ReservedDestination},
+    };
+
+    let _serial = engine_test_lock();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (blocker_tx, blocker_rx) = std::sync::mpsc::channel();
+    for index in 0..2 {
+        let gate = Arc::clone(&gate);
+        let blocker_tx = blocker_tx.clone();
+        enqueue_transfer(
+            format!("lease-blocker-{index}-{}", uuid::Uuid::new_v4()),
+            live_binding(94 + index),
+            Arc::new(CancelState::new()),
+            || {},
+            move || {
+                let mut released = gate.0.lock().unwrap();
+                while !*released {
+                    released = gate.1.wait(released).unwrap();
+                }
+                Ok(())
+            },
+            move |result, _| blocker_tx.send(result).unwrap(),
+        )
+        .unwrap();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while acceptance_engine_counts().0 != 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(acceptance_engine_counts(), (2, 0));
+
+    let root = std::env::temp_dir().join(format!("cancelled-lease-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let reservations = Arc::new(DestinationReservations::default());
+    let destination = ReservedDestination::reserve(
+        &root.join("result.bin"),
+        DownloadCollisionPolicy::Fail,
+        Arc::clone(&reservations),
+    )
+    .unwrap();
+    let id = format!("cancelled-lease-job-{}", uuid::Uuid::new_v4());
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    enqueue_transfer(
+        id.clone(),
+        live_binding(96),
+        Arc::new(CancelState::new()),
+        || {},
+        move || {
+            let _destination = destination;
+            panic!("queued destination owner must not run after cancellation")
+        },
+        move |result, _| finished_tx.send(result).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cancel_transfer(&id).unwrap().phase, TransferPhase::Queued);
+    assert!(
+        finished_rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap()
+            .is_err()
+    );
+    ReservedDestination::reserve(
+        &root.join("result.bin"),
+        DownloadCollisionPolicy::Fail,
+        Arc::clone(&reservations),
+    )
+    .unwrap();
+
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    for _ in 0..2 {
+        assert!(
+            blocker_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+                .is_ok()
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

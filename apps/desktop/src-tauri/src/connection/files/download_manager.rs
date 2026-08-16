@@ -18,9 +18,9 @@ use uuid::Uuid;
 
 use super::bulk_pool::BulkLease;
 use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
-use super::local_destination::PreparedDestination;
+use super::local_destination::{DestinationReservations, PreparedDestination, ReservedDestination};
 use super::scheduler::{
-    BulkBinding, CancelState, DeadlineGuard, cancel_transfer, enqueue_transfer,
+    BulkBinding, CancelState, DeadlineGuard, cancel_transfer, enqueue_transfer_with_queued,
 };
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
@@ -29,7 +29,7 @@ use super::transfer_event::{
 use super::{BULK_CHUNK_BYTES, parse_required_u64};
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DownloadCollisionPolicy {
     Fail,
@@ -37,27 +37,22 @@ pub enum DownloadCollisionPolicy {
     Rename,
 }
 
-#[derive(Clone)]
 struct DownloadJob {
     transfer_id: String,
     connection: ConnectionSpec,
     root: String,
     root_token: String,
     source: String,
-    destination: PathBuf,
     folder: bool,
-    collision: DownloadCollisionPolicy,
+    destination: Arc<ReservedDestination>,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
     channel: Channel<Value>,
     published: Arc<PathRegistry>,
-    reserved: Arc<PathRegistry>,
 }
 
-/// A bounded, FIFO set of absolute paths. Two of these carry the download
-/// manager's whole memory of this session; neither may grow without limit
-/// under a user who downloads all day, and in both the oldest entry is the one
-/// whose toast and transfer row are furthest gone.
+/// A bounded, FIFO set of absolute paths published by this session. The oldest
+/// entry is the one whose toast and transfer row are furthest gone.
 #[derive(Default)]
 pub struct PathRegistry {
     paths: Mutex<VecDeque<PathBuf>>,
@@ -77,12 +72,6 @@ impl PathRegistry {
             paths.pop_front();
         }
         paths.push_back(path);
-    }
-
-    pub(super) fn release(&self, path: &Path) {
-        if let Ok(mut paths) = self.paths.lock() {
-            paths.retain(|candidate| candidate != path);
-        }
     }
 
     pub(super) fn contains(&self, path: &Path) -> bool {
@@ -119,7 +108,7 @@ pub struct DownloadManager {
     /// cancelling the save panel reserves nothing, and typing the same name
     /// into two panels is caught, because the reservation is made where the
     /// name is committed rather than where it is proposed.
-    reserved: Arc<PathRegistry>,
+    reserved: Arc<DestinationReservations>,
 }
 
 impl DownloadManager {
@@ -169,25 +158,25 @@ pub fn start_download(
     )?;
     let transfer_id = Uuid::new_v4().to_string();
     let cancellation = Arc::new(CancelState::new());
-    let job = DownloadJob {
+    let destination = archive_destination(PathBuf::from(destination), folder);
+    let destination = Arc::new(ReservedDestination::reserve(
+        &destination,
+        collision,
+        Arc::clone(&transfers.reserved),
+    )?);
+    let job = Arc::new(DownloadJob {
         transfer_id: transfer_id.clone(),
         connection,
         root,
         root_token,
         source,
-        destination: archive_destination(PathBuf::from(destination), folder),
         folder,
-        collision,
+        destination,
         binding,
         cancellation: Arc::clone(&cancellation),
         channel: on_event,
         published: Arc::clone(&transfers.published),
-        reserved: Arc::clone(&transfers.reserved),
-    };
-    // Held until this job finishes, so a second download of the same file is
-    // offered a different name while this one is still only a `.partial`.
-    transfers.reserved.record(job.destination.clone());
-    emit_download_state(&job, TransferState::Queued, json!({}));
+    });
     enqueue(job)?;
     Ok(transfer_id)
 }
@@ -218,7 +207,7 @@ pub fn suggest_download_destination(
     let name = super::download_naming::suggest_non_colliding_name(
         &directory,
         OsStr::new(file_name.as_str()),
-        |candidate| transfers.reserved.contains(candidate),
+        |candidate| transfers.reserved.contains_display_path(candidate),
     )?;
     directory
         .join(name)
@@ -236,16 +225,18 @@ pub fn cancel_download(transfer_id: String) -> Result<(), String> {
 /// needs, including its own handle on the published-downloads registry. As a
 /// `&self` method that ignored `self` it invited the next reader to reach for
 /// the manager's state from a call site that has a throwaway one.
-fn enqueue(job: DownloadJob) -> Result<(), String> {
+fn enqueue(job: Arc<DownloadJob>) -> Result<(), String> {
     let id = job.transfer_id.clone();
     let binding = job.binding.clone();
     let cancellation = Arc::clone(&job.cancellation);
-    let started_job = job.clone();
-    let work_job = job.clone();
-    enqueue_transfer(
+    let admitted_job = Arc::clone(&job);
+    let started_job = Arc::clone(&job);
+    let work_job = Arc::clone(&job);
+    enqueue_transfer_with_queued(
         id,
         binding,
         cancellation,
+        move || send_download_state(&admitted_job, TransferState::Queued, json!({})),
         move || emit_download_state(&started_job, TransferState::Running, json!({})),
         move || run_download(&work_job),
         move |result, _reason| finish_download_job(&job, result),
@@ -264,34 +255,33 @@ pub(super) fn enqueue_acceptance_download(
     channel: Channel<Value>,
 ) -> Result<String, String> {
     let transfer_id = Uuid::new_v4().to_string();
-    let job = DownloadJob {
+    let reservations = Arc::new(DestinationReservations::default());
+    let destination = Arc::new(ReservedDestination::reserve(
+        &destination,
+        DownloadCollisionPolicy::Fail,
+        reservations,
+    )?);
+    let job = Arc::new(DownloadJob {
         transfer_id: transfer_id.clone(),
         connection,
         root,
         root_token,
         source,
-        destination,
         folder: false,
-        collision: DownloadCollisionPolicy::Fail,
+        destination,
         binding,
         cancellation: Arc::new(CancelState::new()),
         channel,
-        // Its own registries, dropped with this call: an acceptance download is
+        // Its own publication registry, dropped with this call: an acceptance download is
         // never handed to the UI, so nothing will ever ask to open it and
         // nothing is competing for its name.
         published: Arc::default(),
-        reserved: Arc::default(),
-    };
-    emit_download_state(&job, TransferState::Queued, json!({}));
+    });
     enqueue(job)?;
     Ok(transfer_id)
 }
 
 fn finish_download_job(job: &DownloadJob, result: TransferResult) {
-    // Every path out of a download passes here, so this is where the name goes
-    // back into circulation — a reservation that outlived its transfer would
-    // push every later download of the same file onto a "(1)" it did not need.
-    job.reserved.release(&job.destination);
     let Err(failure) = result else { return };
     let state = if job.cancellation.reason() == super::scheduler::CancelReason::User
         && failure.outcome == TransferOutcome::NotPublished
@@ -313,18 +303,28 @@ fn finish_download_job(job: &DownloadJob, result: TransferResult) {
 }
 
 fn emit_download_state(job: &DownloadJob, state: TransferState, extra: Value) {
+    let _ = send_download_state(job, state, extra);
+}
+
+fn send_download_state(
+    job: &DownloadJob,
+    state: TransferState,
+    extra: Value,
+) -> Result<(), String> {
     let value = TransferEvent::new(&job.transfer_id, &job.binding, state)
         .fields(extra)
         .value();
-    let _ = job.channel.send(value);
+    job.channel
+        .send(value)
+        .map_err(|error| format!("could not deliver download state: {error}"))
 }
 
 fn run_download(job: &DownloadJob) -> TransferResult {
     job.binding.validate()?;
-    // Resolve and retain the destination directory before the host allocates a
-    // transfer. All later create, cleanup and publication operations use this
-    // descriptor, so a parent rename/symlink swap cannot redirect them.
-    let destination = PreparedDestination::open(&job.destination, job.collision)?;
+    // Admission already resolved and retained the destination directory. All
+    // create, cleanup and publication operations use this descriptor, so a
+    // parent rename/symlink swap cannot redirect them.
+    let destination = PreparedDestination::prepare(Arc::clone(&job.destination))?;
     let _deadline = job.cancellation.arm_inactivity_deadline();
     let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
@@ -646,31 +646,6 @@ mod tests {
 #[cfg(test)]
 mod registry_tests {
     use super::*;
-
-    #[test]
-    fn a_reservation_lasts_exactly_as_long_as_its_transfer() {
-        let registry = PathRegistry::default();
-        let destination = PathBuf::from("/Users/test/Downloads/report.pdf");
-
-        // While a transfer holds the name, the suggestion walk must step past
-        // it even though nothing is on disk under it yet.
-        assert!(!registry.contains(&destination));
-        registry.record(destination.clone());
-        assert!(registry.contains(&destination));
-
-        // And it must come back afterwards, or every later download of the
-        // same file is pushed onto a "(1)" it never needed.
-        registry.release(&destination);
-        assert!(!registry.contains(&destination));
-        // Releasing something that was never held is not an error.
-        registry.release(&destination);
-
-        // Recording twice holds one entry, so one release is enough.
-        registry.record(destination.clone());
-        registry.record(destination.clone());
-        registry.release(&destination);
-        assert!(!registry.contains(&destination));
-    }
 
     #[test]
     fn the_registry_is_bounded_and_evicts_oldest_first() {
