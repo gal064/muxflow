@@ -1,18 +1,5 @@
 use super::*;
 
-pub(crate) fn handles(operation: v1::Operation) -> bool {
-    matches!(
-        operation,
-        v1::Operation::GitStatus
-            | v1::Operation::WatchGit
-            | v1::Operation::UnwatchGit
-            | v1::Operation::GitDiff
-            | v1::Operation::PrepareGitDiscard
-            | v1::Operation::GitMutation
-            | v1::Operation::GitCommit
-    )
-}
-
 pub(super) struct GitDispatchContext<'a> {
     pub(super) control_tx: &'a mpsc::Sender<SequencerControl>,
     pub(super) event_tx: &'a mpsc::Sender<SequencerControl>,

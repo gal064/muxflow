@@ -3,7 +3,7 @@ use super::*;
 pub(crate) async fn handle_request(
     request_id: u64,
     request: v1::Request,
-    read_only: bool,
+    policy: super::operation_policy::OperationPolicy,
     cancellation: Arc<AtomicBool>,
     context: RequestContext,
 ) {
@@ -44,10 +44,12 @@ pub(crate) async fn handle_request(
         pending.lock().unwrap().remove(&request_id);
         return;
     }
-    let operation = v1::Operation::try_from(request.operation).unwrap_or_default();
+    use super::operation_policy::{Handler, OperationValue};
+
+    let operation = policy.known_operation();
     if matches!(
         operation,
-        v1::Operation::FullSnapshot | v1::Operation::Subscribe | v1::Operation::Resync
+        Some(v1::Operation::FullSnapshot | v1::Operation::Subscribe | v1::Operation::Resync)
     ) && !matches!(request.scope.as_str(), "" | "full" | "topology")
     {
         send_response(
@@ -62,161 +64,100 @@ pub(crate) async fn handle_request(
         pending.lock().unwrap().remove(&request_id);
         return;
     }
-    let is_mutation = matches!(
-        operation,
-        v1::Operation::AttachTerminal
-            | v1::Operation::SelectTerminalSession
-            | v1::Operation::TerminalInput
-            | v1::Operation::ResizeTerminal
-            | v1::Operation::TmuxAction
-            | v1::Operation::SetTerminalVisibility
-            | v1::Operation::RequestTerminalSeed
-            | v1::Operation::WatchDirectory
-            | v1::Operation::UnwatchDirectory
-            | v1::Operation::FileMutation
-            | v1::Operation::WriteFile
-            | v1::Operation::StartDownload
-            | v1::Operation::ReadDownloadChunk
-            | v1::Operation::CancelDownload
-            | v1::Operation::BeginFileWrite
-            | v1::Operation::WriteFileChunk
-            | v1::Operation::CommitFileWrite
-            | v1::Operation::CancelFileWrite
-            | v1::Operation::PrepareTerminalUpload
-            | v1::Operation::WriteTerminalUploadChunk
-            | v1::Operation::CommitTerminalUpload
-            | v1::Operation::CancelTerminalUpload
-            | v1::Operation::WatchGit
-            | v1::Operation::UnwatchGit
-            | v1::Operation::PrepareGitDiscard
-            | v1::Operation::GitMutation
-            | v1::Operation::GitCommit
-            | v1::Operation::AgentAction
-            | v1::Operation::AgentMarkSeen
-            | v1::Operation::AgentHookIngest
-            | v1::Operation::AgentHookManagement
-    );
-    if read_only && is_mutation {
-        send_response(
-            control_tx,
-            request_id,
-            response_error(
-                "helper_incompatible",
-                "host is read-only until the helper is upgraded",
-            ),
-        )
-        .await;
-        pending.lock().unwrap().remove(&request_id);
-        return;
-    }
-    if !bulk_connection && file_ops::requires_bulk_connection(operation) {
-        send_response(
-            control_tx,
-            request_id,
-            response_error(
-                "bulk_connection_required",
-                "file bodies are allowed only on an independent bulk connection",
-            ),
-        )
-        .await;
-        pending.lock().unwrap().remove(&request_id);
-        return;
-    }
+    match (policy.handler, operation) {
+        (Handler::Filesystem, Some(operation)) => {
+            super::filesystem_dispatch::handle(
+                request_id,
+                operation,
+                request,
+                Arc::clone(&cancellation),
+                super::filesystem_dispatch::FileDispatchContext {
+                    control_tx,
+                    event_tx,
+                    pending,
+                    files,
+                    bulk_connection,
+                },
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
 
-    if super::filesystem_dispatch::handles(operation) {
-        super::filesystem_dispatch::handle(
-            request_id,
-            operation,
-            request,
-            Arc::clone(&cancellation),
-            super::filesystem_dispatch::FileDispatchContext {
+        (Handler::Git, Some(operation)) => {
+            super::git_dispatch::handle(
+                request_id,
+                operation,
+                request,
+                Arc::clone(&cancellation),
+                super::git_dispatch::GitDispatchContext {
+                    control_tx,
+                    event_tx,
+                    git,
+                    connection_epoch,
+                    closed: &closed,
+                },
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
+        (Handler::Agent, Some(operation)) => {
+            super::agent_dispatch::handle(
+                request_id,
+                operation,
+                request,
                 control_tx,
-                event_tx,
-                pending,
-                files,
-                bulk_connection,
-            },
-        )
-        .await;
-        pending.lock().unwrap().remove(&request_id);
-        return;
-    }
-
-    if super::git_dispatch::handles(operation) {
-        super::git_dispatch::handle(
-            request_id,
-            operation,
-            request,
-            Arc::clone(&cancellation),
-            super::git_dispatch::GitDispatchContext {
-                control_tx,
-                event_tx,
-                git,
-                connection_epoch,
-                closed: &closed,
-            },
-        )
-        .await;
-        pending.lock().unwrap().remove(&request_id);
-        return;
-    }
-
-    if super::agent_dispatch::handles(operation) {
-        super::agent_dispatch::handle(
-            request_id,
-            operation,
-            request,
-            control_tx,
-            generation,
-            topology_baseline,
-            &cancellation,
-        )
-        .await;
-        pending.lock().unwrap().remove(&request_id);
-        return;
-    }
-
-    if operation == v1::Operation::ResolveActiveRoot {
-        super::active_root_dispatch::handle(
-            request_id,
-            request,
-            Arc::clone(&cancellation),
-            super::active_root_dispatch::ActiveRootContext {
-                control_tx,
-                event_tx,
                 generation,
-                pending,
-                topology_lock,
-                files,
-            },
-        )
-        .await;
-        pending.lock().unwrap().remove(&request_id);
-        return;
-    }
-
-    if operation == v1::Operation::TmuxAction {
-        super::tmux_action_dispatch::handle(
-            request_id,
-            request,
-            super::tmux_action_dispatch::TmuxActionContext {
-                control_tx,
-                event_tx,
-                generation,
-                overflowed,
-                pending,
-                terminal,
-                topology_lock,
                 topology_baseline,
-            },
-        )
-        .await;
-        pending.lock().unwrap().remove(&request_id);
-        return;
-    }
+                &cancellation,
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
 
-    match operation {
-        v1::Operation::FullSnapshot | v1::Operation::Resync => {
+        (Handler::ActiveRoot, Some(v1::Operation::ResolveActiveRoot)) => {
+            super::active_root_dispatch::handle(
+                request_id,
+                request,
+                Arc::clone(&cancellation),
+                super::active_root_dispatch::ActiveRootContext {
+                    control_tx,
+                    event_tx,
+                    generation,
+                    pending,
+                    topology_lock,
+                    files,
+                },
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
+        (Handler::TmuxAction, Some(v1::Operation::TmuxAction)) => {
+            super::tmux_action_dispatch::handle(
+                request_id,
+                request,
+                super::tmux_action_dispatch::TmuxActionContext {
+                    control_tx,
+                    event_tx,
+                    generation,
+                    overflowed,
+                    pending,
+                    terminal,
+                    topology_lock,
+                    topology_baseline,
+                },
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
+        (Handler::Snapshot, Some(v1::Operation::FullSnapshot | v1::Operation::Resync)) => {
             spawn_snapshot_request(SnapshotRequest {
                 request_id,
                 subscribe_after: false,
@@ -233,7 +174,7 @@ pub(crate) async fn handle_request(
             });
             return;
         }
-        v1::Operation::Subscribe => {
+        (Handler::Snapshot, Some(v1::Operation::Subscribe)) => {
             spawn_snapshot_request(SnapshotRequest {
                 request_id,
                 subscribe_after: true,
@@ -250,7 +191,7 @@ pub(crate) async fn handle_request(
             });
             return;
         }
-        v1::Operation::AttachTerminal => {
+        (Handler::Terminal, Some(v1::Operation::AttachTerminal)) => {
             let mut result = terminal.lock().unwrap().attach(
                 &request.session_id,
                 &request.pane_ids,
@@ -279,7 +220,7 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
-        v1::Operation::SelectTerminalSession => {
+        (Handler::Terminal, Some(v1::Operation::SelectTerminalSession)) => {
             // Handled exactly like `ResizeTerminal` below, because on the path
             // that matters it *is* one: a client becoming visible for the first
             // time is given a size, and that is the same `refresh-client -C`
@@ -316,7 +257,7 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
-        v1::Operation::TerminalInput => {
+        (Handler::Terminal, Some(v1::Operation::TerminalInput)) => {
             // Enqueue and answer; do not wait for tmux to accept the bytes.
             //
             // Enqueueing is ordered and cannot block, so keystroke order is
@@ -362,7 +303,7 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
-        v1::Operation::ResizeTerminal => {
+        (Handler::Terminal, Some(v1::Operation::ResizeTerminal)) => {
             let mut result = {
                 let mut terminal = terminal.lock().unwrap();
                 terminal
@@ -390,7 +331,7 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
-        v1::Operation::SetTerminalVisibility => {
+        (Handler::Terminal, Some(v1::Operation::SetTerminalVisibility)) => {
             let result = terminal.lock().unwrap().set_visibility(
                 &request.scope,
                 VisibilityChange {
@@ -414,7 +355,7 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
-        v1::Operation::RequestTerminalSeed => {
+        (Handler::Terminal, Some(v1::Operation::RequestTerminalSeed)) => {
             let result = terminal.lock().unwrap().request_seed(&request.scope);
             send_response(
                 control_tx,
@@ -426,7 +367,7 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
-        v1::Operation::TestDelay if testing_enabled() => {
+        (Handler::Test, Some(v1::Operation::TestDelay)) if testing_enabled() => {
             let sender = control_tx.clone();
             let pending = Arc::clone(pending);
             tokio::spawn(async move {
@@ -446,7 +387,7 @@ pub(crate) async fn handle_request(
             });
             return;
         }
-        v1::Operation::TestInjectGap if testing_enabled() => {
+        (Handler::Test, Some(v1::Operation::TestInjectGap)) if testing_enabled() => {
             let _ = control_tx
                 .send(SequencerControl::InjectGap(v1::HostEvent {
                     kind: v1::EventKind::TopologyDirty.into(),
@@ -457,7 +398,7 @@ pub(crate) async fn handle_request(
                 .await;
             send_response(control_tx, request_id, response_ok()).await;
         }
-        v1::Operation::TestOverflow if testing_enabled() => {
+        (Handler::Test, Some(v1::Operation::TestOverflow)) if testing_enabled() => {
             for index in 0..(EVENT_QUEUE * 8) {
                 emit_event(
                     event_tx,
@@ -472,14 +413,24 @@ pub(crate) async fn handle_request(
             }
             send_response(control_tx, request_id, response_ok()).await;
         }
-        _ => {
+        (Handler::Unsupported | Handler::Test, _) => {
+            let message = match policy.operation {
+                OperationValue::Unknown(raw) => {
+                    format!("operation number {raw} is not recognized by this host")
+                }
+                OperationValue::Known(_) => "operation is not supported".to_owned(),
+            };
             send_response(
                 control_tx,
                 request_id,
-                response_error("unsupported_operation", "operation is not supported"),
+                response_error("unsupported_operation", &message),
             )
             .await;
         }
+        (Handler::Daemon, _) => {
+            unreachable!("daemon shutdown is handled before request registration")
+        }
+        _ => unreachable!("operation policy handler does not match its generated operation"),
     }
     pending.lock().unwrap().remove(&request_id);
 }

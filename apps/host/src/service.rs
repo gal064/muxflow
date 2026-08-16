@@ -213,9 +213,23 @@ pub async fn serve_with_shutdown(
                     .await;
                     continue;
                 }
-                if v1::Operation::try_from(request.operation).unwrap_or_default()
-                    == v1::Operation::ShutdownDaemon
+                let policy =
+                    requests::operation_policy::OperationPolicy::for_raw(request.operation);
+                if let Some(error) = policy.admission_error(read_only, client_hello.bulk_connection)
                 {
+                    send_response(
+                        &control_tx,
+                        frame.request_id,
+                        response_error(error.code(), error.message()),
+                    )
+                    .await;
+                    continue;
+                }
+                // Daemon shutdown intentionally remains a pre-dispatch exception: this endpoint
+                // owns the shutdown sender, and acknowledging it must not register cancellable
+                // work that can outlive the connection. Its mutation policy is still documented
+                // and exhaustively tested with every other generated operation.
+                if policy.handler == requests::operation_policy::Handler::Daemon {
                     if let Some(shutdown) = shutdown.clone() {
                         send_response(&control_tx, frame.request_id, response_ok()).await;
                         tokio::spawn(async move {
@@ -264,13 +278,12 @@ pub async fn serve_with_shutdown(
                 if closed.load(Ordering::Acquire) {
                     cancellation.store(true, Ordering::Release);
                 }
-                let operation = v1::Operation::try_from(request.operation).unwrap_or_default();
-                let detached_work = requests::file_ops::runs_off_control_loop(operation)
-                    || requests::git_dispatch::handles(operation);
+                let detached_work =
+                    policy.scheduling == requests::operation_policy::Scheduling::Detached;
                 let work = handle_request(
                     frame.request_id,
                     request,
-                    read_only,
+                    policy,
                     Arc::clone(&cancellation),
                     RequestContext {
                         control_tx: control_tx.clone(),

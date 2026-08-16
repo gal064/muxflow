@@ -159,8 +159,11 @@ pub fn read_frame_sync(reader: &mut impl Read) -> Result<Option<v1::Envelope>, F
     Ok(Some(v1::Envelope::decode(body.as_slice())?))
 }
 
-/// Incremental bounded decoder used by cancellable synchronous IPC clients.
-/// It never allocates beyond one maximum-sized frame plus its length prefix.
+/// Incremental decoder used by cancellable synchronous IPC clients.
+///
+/// The bound applies to each advertised frame body. A read may legitimately
+/// contain a complete maximum-sized frame followed by part or all of later
+/// frames, so the aggregate buffered byte count is not itself a frame length.
 #[derive(Default)]
 pub struct FrameAccumulator {
     bytes: Vec<u8>,
@@ -168,11 +171,6 @@ pub struct FrameAccumulator {
 
 impl FrameAccumulator {
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), FrameError> {
-        if self.bytes.len().saturating_add(chunk.len()) > MAX_FRAME_BYTES + 4 {
-            return Err(FrameError::TooLarge(
-                self.bytes.len().saturating_add(chunk.len()),
-            ));
-        }
         self.bytes.extend_from_slice(chunk);
         Ok(())
     }
@@ -294,5 +292,57 @@ mod publication_tests {
             oversized.next_frame(),
             Err(FrameError::TooLarge(_))
         ));
+    }
+
+    #[test]
+    fn incremental_decoder_accepts_a_maximum_frame_followed_by_more_frames() {
+        let mut maximum = envelope(
+            1,
+            0,
+            v1::envelope::Payload::Request(v1::Request {
+                operation: v1::Operation::TerminalInput.into(),
+                data: vec![0; MAX_FRAME_BYTES - 64],
+                ..Default::default()
+            }),
+        );
+        let current = maximum.encoded_len();
+        let v1::envelope::Payload::Request(request) = maximum.payload.as_mut().unwrap() else {
+            unreachable!()
+        };
+        request
+            .data
+            .resize(request.data.len() + (MAX_FRAME_BYTES - current), 0);
+        assert_eq!(maximum.encoded_len(), MAX_FRAME_BYTES);
+
+        let second = envelope(
+            2,
+            0,
+            v1::envelope::Payload::Cancel(v1::Cancel {
+                target_request_id: 1,
+            }),
+        );
+        let third = envelope(
+            3,
+            0,
+            v1::envelope::Payload::Cancel(v1::Cancel {
+                target_request_id: 2,
+            }),
+        );
+        let second_frame = encode_frame(&second).unwrap();
+        let split = 1;
+        let mut first_read = encode_frame(&maximum).unwrap();
+        first_read.extend_from_slice(&second_frame[..split]);
+
+        let mut decoder = FrameAccumulator::default();
+        decoder.push(&first_read).unwrap();
+        assert_eq!(decoder.next_frame().unwrap().unwrap().request_id, 1);
+        assert!(decoder.next_frame().unwrap().is_none());
+
+        let mut next_read = second_frame[split..].to_vec();
+        next_read.extend_from_slice(&encode_frame(&third).unwrap());
+        decoder.push(&next_read).unwrap();
+        assert_eq!(decoder.next_frame().unwrap().unwrap().request_id, 2);
+        assert_eq!(decoder.next_frame().unwrap().unwrap().request_id, 3);
+        assert!(decoder.next_frame().unwrap().is_none());
     }
 }
