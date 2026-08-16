@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::BTreeSet,
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -8,25 +8,21 @@ use std::{
 use anyhow::{Context, bail};
 use tmux_agent_protocol::v1;
 
-use super::{
-    broadcast_control_event,
-    snapshot::{discover_authoritative, server_identity},
-};
+use super::{broadcast_control_event, snapshot::server_identity};
 
 pub(crate) mod adapters;
 mod fallback;
 mod hooks;
 mod identity;
+mod ingest;
 mod process;
 mod reconcile;
 mod screen;
 mod snapshot;
 mod store;
 pub(crate) use hooks::HookManager;
+pub(crate) use ingest::HookIngestFailure;
 use store::{StoredAgent, StoredRoute, StoredState};
-
-const MAX_HOOK_BYTES: usize = 256 * 1024;
-const MAX_DEDUPE_IDS: usize = 512;
 
 /// How long a Working agent may go without a single lifecycle event before the
 /// daemon stops claiming to know what it is doing.
@@ -177,250 +173,6 @@ impl AgentRuntime {
             .unwrap()
             .retain_panes(live_panes.iter().copied());
         Ok(())
-    }
-
-    pub(crate) fn ingest_hook(&self, event: &v1::AgentHookEvent) -> anyhow::Result<v1::AgentEvent> {
-        let identity = server_identity();
-        let topology = discover_authoritative()
-            .ok()
-            .filter(|(_, discovered_identity)| discovered_identity == &identity)
-            .map(|(topology, _)| topology);
-        self.ingest_hook_with_context(event, &identity, topology.as_ref())
-    }
-
-    fn ingest_hook_with_context(
-        &self,
-        event: &v1::AgentHookEvent,
-        active_server_identity: &str,
-        topology: Option<&tmux_control::TmuxSnapshot>,
-    ) -> anyhow::Result<v1::AgentEvent> {
-        if event.payload_json.len() > MAX_HOOK_BYTES {
-            bail!("hook payload exceeds the {MAX_HOOK_BYTES}-byte limit");
-        }
-        if event.source_event_id.is_empty() {
-            bail!("hook source_event_id is required");
-        }
-        validate_pane_id(&event.pane_id)?;
-        let adapter = if event.adapter_id.is_empty() {
-            adapters::adapter(v1::AgentAdapterKind::try_from(event.adapter).unwrap_or_default())
-        } else {
-            adapters::by_id(&event.adapter_id)
-        }
-        .context("supported agent adapter is required")?;
-        let adapter_id = adapter.kind();
-        let payload: serde_json::Value =
-            serde_json::from_slice(&event.payload_json).context("parse hook JSON")?;
-        let parsed = adapter.parse_hook(&payload).map_err(anyhow::Error::msg)?;
-        let observed_now = now_millis();
-        let occurred_at = if event.occurred_at_unix_millis > 0 {
-            event.occurred_at_unix_millis
-        } else {
-            observed_now
-        };
-        let native_session_id = if event.native_session_id.is_empty() {
-            parsed.native_session_id
-        } else {
-            event.native_session_id.clone()
-        };
-        let origin_matches = event.origin_server_identity == active_server_identity;
-        let route = identity::hook_route(
-            origin_matches.then_some(topology).flatten(),
-            active_server_identity,
-            &event.pane_id,
-        );
-        let mut state = self.state.lock().unwrap();
-        let original = state.clone();
-        let route_verified = origin_matches && !route.pane_id.is_empty();
-        let agent_id = if route_verified && native_session_id.is_empty() {
-            identity::manual_agent_id(adapter_id, active_server_identity, &event.pane_id)
-        } else if route_verified {
-            identity::native_agent_id(adapter_id, active_server_identity, &native_session_id)
-        } else {
-            identity::unmapped_hook_agent_id(
-                adapter_id,
-                &event.origin_server_identity,
-                &event.pane_id,
-                &native_session_id,
-            )
-        };
-        let candidates = identity::hook_candidates(
-            &state,
-            adapter_id,
-            active_server_identity,
-            &native_session_id,
-            &route,
-            &agent_id,
-            route_verified,
-        );
-        let pane_record_id = candidates.pane;
-        let native_record_id = candidates.native;
-        let previous_id = native_record_id.clone().or(pane_record_id.clone());
-        for candidate in [native_record_id.as_ref(), pane_record_id.as_ref()]
-            .into_iter()
-            .flatten()
-        {
-            if state.agents[candidate]
-                .source_event_ids
-                .contains(&event.source_event_id)
-            {
-                bail!("duplicate hook source_event_id");
-            }
-        }
-        let latest_sequence = [native_record_id.as_ref(), pane_record_id.as_ref()]
-            .into_iter()
-            .flatten()
-            .filter_map(|id| state.agents.get(id))
-            .map(|record| record.latest_source_generation)
-            .max()
-            .unwrap_or_default();
-        if event.source_sequence_authoritative {
-            if event.source_generation == 0 {
-                bail!("authoritative hook source sequence must be nonzero");
-            }
-            if event.source_generation <= latest_sequence {
-                bail!("hook source sequence is older or already applied");
-            }
-        }
-        let previous = previous_id
-            .as_ref()
-            .and_then(|id| state.agents.get(id))
-            .cloned();
-        let mut source_ids = VecDeque::new();
-        for candidate in [native_record_id.as_ref(), pane_record_id.as_ref()]
-            .into_iter()
-            .flatten()
-            .filter_map(|id| state.agents.get(id))
-        {
-            for id in &candidate.source_event_ids {
-                if !source_ids.contains(id) {
-                    source_ids.push_back(id.clone());
-                }
-            }
-        }
-        let mut retired_agent_ids = Vec::new();
-        for old_id in [native_record_id, pane_record_id].into_iter().flatten() {
-            if old_id != agent_id && state.agents.remove(&old_id).is_some() {
-                retired_agent_ids.push(old_id);
-            }
-        }
-        state.generation = state.generation.saturating_add(1);
-        let generation = state.generation;
-        let previous_lifecycle = previous
-            .as_ref()
-            .and_then(|record| v1::AgentLifecycleState::try_from(record.lifecycle).ok())
-            .unwrap_or(v1::AgentLifecycleState::Unknown);
-        let attention = previous
-            .as_ref()
-            .map_or(0, |record| record.attention_generation);
-        let terminal_late = previous.as_ref().is_some_and(|record| record.hook_terminal)
-            && !matches!(
-                parsed.event_name.as_str(),
-                "SessionStart" | "UserPromptSubmit"
-            );
-        let lifecycle = if terminal_late {
-            previous_lifecycle
-        } else {
-            parsed.lifecycle
-        };
-        let hook_terminal = if matches!(
-            parsed.event_name.as_str(),
-            "SessionStart" | "UserPromptSubmit"
-        ) {
-            false
-        } else if matches!(parsed.event_name.as_str(), "Stop" | "StopFailure")
-            && parsed.lifecycle == v1::AgentLifecycleState::Idle
-        {
-            true
-        } else {
-            previous.as_ref().is_some_and(|record| record.hook_terminal)
-        };
-        let attention_transition = lifecycle == v1::AgentLifecycleState::Blocked
-            && previous_lifecycle != v1::AgentLifecycleState::Blocked
-            || previous_lifecycle == v1::AgentLifecycleState::Working
-                && lifecycle == v1::AgentLifecycleState::Idle;
-        let attention_generation = if attention_transition {
-            attention.saturating_add(1)
-        } else {
-            attention
-        };
-        let resolved_seen_block = previous_lifecycle == v1::AgentLifecycleState::Blocked
-            && lifecycle == v1::AgentLifecycleState::Idle
-            && previous.as_ref().is_some_and(|record| {
-                record.attention_kind == "blocked"
-                    && record.seen_generation >= record.attention_generation
-            });
-        let attention_kind = if attention_transition {
-            if lifecycle == v1::AgentLifecycleState::Blocked {
-                "blocked".into()
-            } else {
-                "completed".into()
-            }
-        } else if resolved_seen_block {
-            String::new()
-        } else {
-            previous
-                .as_ref()
-                .map(|record| record.attention_kind.clone())
-                .unwrap_or_default()
-        };
-        source_ids.push_back(event.source_event_id.clone());
-        while source_ids.len() > MAX_DEDUPE_IDS {
-            source_ids.pop_front();
-        }
-        let latest_source_generation = if event.source_sequence_authoritative {
-            event.source_generation
-        } else {
-            latest_sequence
-        };
-        let record = StoredAgent {
-            agent_id: agent_id.clone(),
-            adapter: adapter.legacy_kind() as i32,
-            adapter_id: adapter.id().into(),
-            native_session_id,
-            display_name: previous
-                .as_ref()
-                .map(|record| record.display_name.clone())
-                .unwrap_or_else(|| adapter.display_name().into()),
-            route,
-            lifecycle: lifecycle as i32,
-            authority: v1::AgentAuthority::Hook as i32,
-            state_generation: generation,
-            attention_generation,
-            attention_kind,
-            seen_generation: previous.as_ref().map_or(0, |record| record.seen_generation),
-            updated_at_unix_millis: occurred_at,
-            hook_authority_expires_at_unix_millis: observed_now
-                .saturating_add(parsed.authority_millis),
-            detected_manually: previous
-                .as_ref()
-                .is_some_and(|record| record.detected_manually),
-            source_event_ids: source_ids,
-            latest_source_generation,
-            present: true,
-            hook_terminal,
-            lifecycle_observed_at_unix_millis: observed_now,
-        };
-        state.agents.insert(agent_id, record.clone());
-        if let Err(error) = self.persist_locked(&state) {
-            *state = original;
-            return Err(error);
-        }
-        let reason = if lifecycle == v1::AgentLifecycleState::Blocked {
-            "blocked"
-        } else if previous_lifecycle == v1::AgentLifecycleState::Working
-            && lifecycle == v1::AgentLifecycleState::Idle
-        {
-            "completed"
-        } else {
-            "state_changed"
-        };
-        Ok(v1::AgentEvent {
-            agent: Some(snapshot::record(&record)),
-            generation,
-            notify: attention_transition,
-            reason: reason.into(),
-            retired_agent_ids,
-        })
     }
 
     pub(super) fn mark_seen(
@@ -739,7 +491,10 @@ mod tests {
         assert_eq!(record.attention_generation, 1);
         assert_eq!(record.attention_kind, "completed");
         assert_eq!(record.seen_generation, 0);
-        assert!(runtime.ingest_hook(&event("e2", 2, "Stop")).is_err());
+        assert!(matches!(
+            runtime.ingest_hook(&event("e2", 2, "Stop")),
+            Err(HookIngestFailure::Duplicate)
+        ));
         assert!(
             runtime
                 .ingest_hook(&event("older-sequence", 1, "Stop"))
@@ -823,15 +578,14 @@ mod tests {
         drop(state);
 
         let runtime = failing();
-        assert!(
-            runtime
-                .ingest_hook_with_context(
-                    &event("transaction-hook", 0, "PermissionRequest"),
-                    "server-a",
-                    Some(&topology_snapshot),
-                )
-                .is_err()
-        );
+        assert!(matches!(
+            runtime.ingest_hook_with_context(
+                &event("transaction-hook", 0, "PermissionRequest"),
+                "server-a",
+                Some(&topology_snapshot),
+            ),
+            Err(HookIngestFailure::Retryable(_))
+        ));
         assert_eq!(
             runtime.state.lock().unwrap().generation,
             baseline_state.generation
@@ -1626,16 +1380,19 @@ mod tests {
             .unwrap();
         }
         let mut replayed = Vec::new();
-        assert_eq!(
-            fallback::consume(&dir, |event| {
-                replayed.push(event.source_event_id.clone());
-                runtime
-                    .ingest_hook_with_context(&event, "server-a", Some(&topology))
-                    .is_ok()
-            })
-            .unwrap(),
-            2
-        );
+        let report = fallback::consume(&dir, |event| {
+            replayed.push(event.source_event_id.clone());
+            match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
+                Ok(_) => fallback::HookReplayDisposition::Applied,
+                Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
+                    fallback::HookReplayDisposition::Discard
+                }
+                Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retain,
+            }
+        })
+        .unwrap();
+        assert_eq!(report.applied, 2);
+        assert_eq!(report.retained, 0);
         assert_eq!(replayed, ["UserPromptSubmit", "PermissionRequest"]);
         let record = &runtime.snapshot_for("server-a").agents[0];
         assert_eq!(record.lifecycle, v1::AgentLifecycleState::Blocked as i32);
@@ -1692,16 +1449,195 @@ mod tests {
         )
         .unwrap();
         let mut seen = Vec::new();
-        assert_eq!(
-            fallback::consume(&dir, |event| {
-                seen.push(event.source_event_id);
-                true
-            })
-            .unwrap(),
-            1
-        );
+        let report = fallback::consume(&dir, |event| {
+            seen.push(event.source_event_id);
+            fallback::HookReplayDisposition::Applied
+        })
+        .unwrap();
+        assert_eq!(report.applied, 1);
+        assert_eq!(report.retained, 0);
         assert_eq!(seen, ["valid"]);
         assert!(fs::read_dir(&dir).unwrap().next().is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn retryable_fallback_replay_stays_queued_until_a_later_disposition() {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase14-fallback-retain-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hook-fallback-codex-7-00000000000000000001-a.pb");
+        let later = dir.join("hook-fallback-codex-7-00000000000000000002-b.pb");
+        fs::write(
+            &path,
+            event("retryable", 0, "PermissionRequest").encode_to_vec(),
+        )
+        .unwrap();
+        fs::write(&later, event("later", 0, "Stop").encode_to_vec()).unwrap();
+
+        let mut attempts = 0;
+        let retained = fallback::consume(&dir, |_| {
+            attempts += 1;
+            fallback::HookReplayDisposition::Retain
+        })
+        .unwrap();
+        assert_eq!(retained.applied, 0);
+        assert_eq!(retained.retained, 2);
+        assert_eq!(
+            attempts, 1,
+            "later events must not overtake a retained event"
+        );
+        assert!(path.exists(), "retryable replay must remain durable");
+        assert!(later.exists(), "later replay must remain ordered behind it");
+
+        let discarded =
+            fallback::consume(&dir, |_| fallback::HookReplayDisposition::Discard).unwrap();
+        assert_eq!(discarded.applied, 0);
+        assert_eq!(discarded.retained, 0);
+        assert!(!path.exists(), "a permanent/duplicate disposition is final");
+        assert!(!later.exists(), "later permanent input is also discarded");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recovered_mailbox_applies_before_the_next_live_event_without_a_restart() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase14-live-recovery-{}", uuid::Uuid::new_v4()));
+        let state_parent = root.join("state");
+        let mailbox = root.join("mailbox");
+        fs::create_dir_all(&mailbox).unwrap();
+        fs::write(&state_parent, b"blocks persistence").unwrap();
+        let runtime = AgentRuntime::isolated(state_parent.join("agents.json"));
+        let topology = topology("codex");
+        let retained = event("retained-a", 0, "PermissionRequest");
+        assert!(matches!(
+            runtime.ingest_hook_with_context(&retained, "server-a", Some(&topology)),
+            Err(HookIngestFailure::Retryable(_))
+        ));
+        let queued = mailbox.join("hook-fallback-codex-7-00000000000000000001-a.pb");
+        fs::write(&queued, retained.encode_to_vec()).unwrap();
+
+        fs::remove_file(&state_parent).unwrap();
+        fs::create_dir_all(&state_parent).unwrap();
+        let live = event("live-b", 0, "Stop");
+        let live_event = runtime
+            .ingest_after_replay_with_context(&live, "server-a", Some(&topology), || {
+                let report = fallback::consume(&mailbox, |event| {
+                    match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
+                        Ok(_) => fallback::HookReplayDisposition::Applied,
+                        Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
+                            fallback::HookReplayDisposition::Discard
+                        }
+                        Err(HookIngestFailure::Retryable(_)) => {
+                            fallback::HookReplayDisposition::Retain
+                        }
+                    }
+                })?;
+                if report.retained > 0 {
+                    anyhow::bail!("mailbox is still retained");
+                }
+                Ok(report.applied)
+            })
+            .unwrap();
+
+        assert!(!queued.exists());
+        let record = live_event.agent.unwrap();
+        assert_eq!(record.lifecycle, v1::AgentLifecycleState::Idle as i32);
+        let stored = &runtime.state.lock().unwrap().agents[&record.agent_id];
+        assert_eq!(
+            stored.source_event_ids.iter().cloned().collect::<Vec<_>>(),
+            ["retained-a", "live-b"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_mailbox_sweep_rejects_live_input_after_partial_progress() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase14-incomplete-sweep-{}", uuid::Uuid::new_v4()));
+        let mailbox = root.join("mailbox");
+        let failed_root = root.join("failed-root");
+        fs::create_dir_all(&mailbox).unwrap();
+        fs::write(&failed_root, b"not a directory").unwrap();
+        let runtime = AgentRuntime::isolated(root.join("state/agents.json"));
+        let topology = topology("codex");
+        let queued = mailbox.join("hook-fallback-codex-7-00000000000000000001-a.pb");
+        fs::write(
+            &queued,
+            event("replayed-a", 0, "UserPromptSubmit").encode_to_vec(),
+        )
+        .unwrap();
+
+        let roots = [mailbox, failed_root];
+        let live = event("live-b", 0, "Stop");
+        let result =
+            runtime.ingest_after_replay_with_context(&live, "server-a", Some(&topology), || {
+                fallback::consume_roots(&roots, |event| {
+                    match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
+                        Ok(_) => fallback::HookReplayDisposition::Applied,
+                        Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
+                            fallback::HookReplayDisposition::Discard
+                        }
+                        Err(HookIngestFailure::Retryable(_)) => {
+                            fallback::HookReplayDisposition::Retain
+                        }
+                    }
+                })
+            });
+
+        assert!(matches!(result, Err(HookIngestFailure::Retryable(_))));
+        assert!(
+            !queued.exists(),
+            "successfully replayed input is acknowledged"
+        );
+        let state = runtime.state.lock().unwrap();
+        let stored = state.agents.values().next().unwrap();
+        assert_eq!(
+            stored.source_event_ids.iter().cloned().collect::<Vec<_>>(),
+            ["replayed-a"],
+            "live input must wait until every mailbox root was inspected"
+        );
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lost_ack_replay_discards_duplicate_without_republishing_or_advancing_state() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase14-lost-ack-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let runtime = AgentRuntime::isolated(root.join("state/agents.json"));
+        let topology = topology("codex");
+        let applied = event("ack-lost", 0, "PermissionRequest");
+        runtime
+            .ingest_hook_with_context(&applied, "server-a", Some(&topology))
+            .unwrap();
+        let generation = runtime.state.lock().unwrap().generation;
+        let queued = root.join("hook-fallback-codex-7-00000000000000000001-a.pb");
+        fs::write(&queued, applied.encode_to_vec()).unwrap();
+
+        let report = fallback::consume(&root, |event| {
+            match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
+                Ok(_) => fallback::HookReplayDisposition::Applied,
+                Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
+                    fallback::HookReplayDisposition::Discard
+                }
+                Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retain,
+            }
+        })
+        .unwrap();
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.retained, 0);
+        assert_eq!(runtime.state.lock().unwrap().generation, generation);
+        assert!(!queued.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

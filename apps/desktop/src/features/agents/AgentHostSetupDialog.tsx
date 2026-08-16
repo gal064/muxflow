@@ -6,7 +6,7 @@ import type { AgentAdapterDescriptor } from "./types";
 interface AgentHostSetupDialogProps {
   hostLabel: string;
   adapters: readonly AgentAdapterDescriptor[];
-  applying: boolean;
+  activity?: "install" | "review";
   error?: string;
   onDecline(): void;
   onAccept(): void;
@@ -30,7 +30,8 @@ interface AgentHostSetupDialogProps {
 export function AgentHostSetupDialog(props: AgentHostSetupDialogProps) {
   const titleId = useId();
   const detailId = useId();
-  const dialog = useModalDialog<HTMLElement>(() => { if (!props.applying) props.onDecline(); });
+  const busy = props.activity !== undefined;
+  const dialog = useModalDialog<HTMLElement>(() => { if (!busy) props.onDecline(); });
   return <div className="modal-backdrop host-setup-backdrop" role="presentation">
     <section aria-describedby={detailId} aria-labelledby={titleId} aria-modal="true" className="host-setup" ref={dialog} role="alertdialog">
       <header>
@@ -57,10 +58,10 @@ export function AgentHostSetupDialog(props: AgentHostSetupDialogProps) {
         {props.error && <SurfaceError className="dialog-error" detail={props.error} />}
       </div>
       <footer>
-        <button disabled={props.applying} onClick={props.onDecline} type="button">Not now</button>
-        <button disabled={props.applying} onClick={props.onReview} type="button">Review exact changes…</button>
-        <button className="primary" disabled={props.applying} onClick={props.onAccept} type="button">
-          {props.applying ? "Setting up…" : "Set up this host"}
+        <button disabled={busy} onClick={props.onDecline} type="button">Not now</button>
+        <button disabled={busy} onClick={props.onReview} type="button">{props.activity === "review" ? "Loading review…" : "Review exact changes…"}</button>
+        <button className="primary" disabled={busy} onClick={props.onAccept} type="button">
+          {props.activity === "install" ? "Setting up…" : "Set up this host"}
         </button>
       </footer>
     </section>

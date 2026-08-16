@@ -342,6 +342,118 @@ describe("the one-time set-up prompt", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("keeps the captured host setup visible until its asynchronous review loads", async () => {
+    let resolveReview!: (value: AgentHookReview) => void;
+    const pending = new Promise<AgentHookReview>((resolve) => { resolveReview = resolve; });
+    const reviewHooks = vi.fn(() => pending);
+    const setup = harness({ reviewHooks });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    const reviewButton = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => node.children[0] === "Review exact changes…")!;
+
+    await act(async () => reviewButton.props.onClick());
+    expect(JSON.stringify(renderer.toJSON())).toContain("Loading review…");
+    expect(JSON.stringify(renderer.toJSON())).toContain("/home/user/.claude-code/settings.json");
+    expect(setup.current.open).toBe(true);
+    expect(setup.calls.openReview).not.toHaveBeenCalled();
+
+    // Neither a host switch nor a replacement adapter snapshot is allowed to
+    // rewrite the question that is already on screen while the review loads.
+    await act(async () => renderer.update(<setup.Harness
+      adapters={[adapter("codex", "notWired")]}
+      hostIdentity="local client-2 1"
+      hostProfileId="local"
+    />));
+    const loaded = review("claude-code");
+    await act(async () => resolveReview(loaded));
+    expect(reviewHooks).toHaveBeenCalledWith("claude-code", "install", "ssh-omarchy client-1 1");
+    expect(setup.calls.openReview).toHaveBeenCalledWith(loaded, {
+      profileId: "ssh-omarchy",
+      identity: "ssh-omarchy client-1 1",
+    });
+    expect(setup.current.open).toBe(false);
+    await act(async () => renderer.unmount());
+  });
+
+  it("keeps a failed review request retryable in the setup dialog", async () => {
+    const loaded = review("claude-code");
+    const reviewHooks = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary host review failure"))
+      .mockResolvedValueOnce(loaded);
+    const setup = harness({ reviewHooks });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    let reviewButton = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => node.children[0] === "Review exact changes…")!;
+
+    await act(async () => reviewButton.props.onClick());
+    expect(JSON.stringify(renderer.toJSON())).toContain("temporary host review failure");
+    expect(setup.current.open).toBe(true);
+    expect(setup.calls.openReview).not.toHaveBeenCalled();
+
+    reviewButton = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => node.children[0] === "Review exact changes…")!;
+    await act(async () => reviewButton.props.onClick());
+    expect(reviewHooks).toHaveBeenCalledTimes(2);
+    expect(setup.calls.openReview).toHaveBeenCalledWith(loaded, {
+      profileId: "ssh-omarchy",
+      identity: "ssh-omarchy client-1 1",
+    });
+    await act(async () => renderer.unmount());
+  });
+
+  it("ignores an old review resolution after disconnect and preserves the replacement host prompt", async () => {
+    let resolveReview!: (value: AgentHookReview) => void;
+    const reviewHooks = vi.fn(() => new Promise<AgentHookReview>((resolve) => { resolveReview = resolve; }));
+    const setup = harness({ reviewHooks });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    const reviewButton = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => node.children[0] === "Review exact changes…")!;
+    await act(async () => reviewButton.props.onClick());
+
+    await act(async () => renderer.update(<setup.Harness connected={false} />));
+    await act(async () => renderer.update(<setup.Harness
+      adapters={[adapter("codex", "notWired")]}
+      hostIdentity="local client-2 1"
+      hostLabel="local"
+      hostProfileId="local"
+    />));
+    expect(JSON.stringify(renderer.toJSON())).toContain("/home/user/.codex/settings.json");
+    await act(async () => resolveReview(review("claude-code")));
+    expect(setup.calls.openReview).not.toHaveBeenCalled();
+    expect(JSON.stringify(renderer.toJSON())).toContain("Set up agent status on ");
+    expect(JSON.stringify(renderer.toJSON())).toContain("local");
+    expect(JSON.stringify(renderer.toJSON())).toContain("/home/user/.codex/settings.json");
+    await act(async () => renderer.unmount());
+  });
+
+  it("ignores an old review rejection after disconnect instead of failing the replacement prompt", async () => {
+    let rejectReview!: (cause: Error) => void;
+    const reviewHooks = vi.fn(() => new Promise<AgentHookReview>((_resolve, reject) => { rejectReview = reject; }));
+    const setup = harness({ reviewHooks });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    const reviewButton = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => node.children[0] === "Review exact changes…")!;
+    await act(async () => reviewButton.props.onClick());
+
+    await act(async () => renderer.update(<setup.Harness connected={false} />));
+    await act(async () => renderer.update(<setup.Harness
+      adapters={[adapter("codex", "notWired")]}
+      hostIdentity="local client-2 1"
+      hostLabel="local"
+      hostProfileId="local"
+    />));
+    await act(async () => rejectReview(new Error("old host stopped answering")));
+    const html = JSON.stringify(renderer.toJSON());
+    expect(html).not.toContain("old host stopped answering");
+    expect(html).toContain("/home/user/.codex/settings.json");
+    expect(html).toContain("Review exact changes…");
+    await act(async () => renderer.unmount());
+  });
+
   it("writes nothing on a disconnected host, whatever it last answered", async () => {
     // A migration is still a write. `hostIdentity` absent means there is no
     // connection to bind consent to, so there is nothing to migrate against.
