@@ -42,6 +42,13 @@ export interface ReconciledTmuxActionOptions {
   waitForNewerScope?: ScopeWaiter;
 }
 
+export class TmuxActionScopeChangedError extends Error {
+  constructor() {
+    super("authoritative connection changed while the tmux action was in flight");
+    this.name = "TmuxActionScopeChangedError";
+  }
+}
+
 async function waitForNewerActionScope(
   attempted: HostScopeToken,
   current: () => HostScopeToken,
@@ -83,7 +90,9 @@ export async function requestReconciledTmuxAction({
 
   for (let retry = 0; ; retry += 1) {
     try {
-      return await request(clientId, action, precondition);
+      const result = await request(clientId, action, precondition);
+      if (!sameHostConnection(attemptedScope, currentScope())) throw new TmuxActionScopeChangedError();
+      return result;
     } catch (error) {
       const mayRetry = retry < ACTION_RECONCILE_RETRIES
         && !capturedPrecondition

@@ -18,9 +18,8 @@ import { setTerminalScreenReaderMode } from "../features/terminal/accessibilityP
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
-import { abandonPanePaintSpan, abandonPanePaintSpansForScope, openPanePaintSpan, targetPanePaintSpan, type PanePaintSpan } from "../perf/probe";
-import { requestTmuxAction, type TmuxAction } from "../features/tmux/actions";
-import { requestReconciledTmuxAction } from "../features/tmux/actionReconciliation";
+import { abandonPanePaintSpansForScope } from "../perf/probe";
+import type { TmuxAction } from "../features/tmux/actions";
 import { useAgentWorkflow } from "../features/agents/AgentHookWorkflow";
 import { TauriAgentClient } from "../features/agents/api";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
@@ -28,7 +27,7 @@ import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../feature
 import { emitTestNotification, notificationPermissionStatus } from "../features/agents/notifications";
 import { agentHostIdentity } from "../features/agents/types";
 import { useAgentHostSetup } from "../features/agents/useAgentHostSetup";
-import { useAgentNotificationActivation, type PaneSurfaceResult } from "../features/agents/useAgentNotificationActivation";
+import { useAgentNotificationActivation } from "../features/agents/useAgentNotificationActivation";
 import { useAgentRuntime } from "../features/agents/useAgentRuntime";
 import { keyForScope, keyForTransferConnection, TauriFileWorkspaceClient } from "../features/files/api";
 import { ExplorerTree } from "../features/files/ExplorerTree";
@@ -55,19 +54,15 @@ import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import { clampedAgentsRatio, sidebarWidthForWindow, SIDEBAR_MIN_WIDTH, type HostSetupDecision, type ShellState } from "../features/shell/types";
 import {
   combineWorkspaceTabs,
-  discardServerAppState,
+  closeAppTab,
   mountedTerminalPanes,
   openFileTab,
   openGitDiffTab,
   pinAppTab,
-  reconcileWorkspaceIdentity,
-  recoverableAppTabCount,
-  recoverAppTabsFromPreviousServer,
   relocateFileTabs,
   selectAppTab,
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
-  shellNavigationMode,
   type CombinedTab,
 } from "../features/shell/model";
 import { useContextMenusOpen } from "../ui/ContextMenu";
@@ -78,10 +73,12 @@ import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
 import type { ConnectionSpec, HostProfile, Pane, PersistedProfiles } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
-import { requestActiveWindow } from "./windowSelection";
 import { useAppConnectionController } from "./useAppConnectionController";
+import { useAppRecoveryController } from "./useAppRecoveryController";
 import { useClientResize } from "./useClientResize";
 import { useVisibleTerminalSession } from "./useVisibleTerminalSession";
+import { commitScopedAppTabClose, reportAnnouncedPaneResult, useShellNavigation } from "./useShellNavigation";
+import { useTmuxActionPerformer } from "./useTmuxActionPerformer";
 import { windowCellSize } from "../features/terminal/clientSize";
 import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
 import { AppDialogLayer } from "./AppDialogLayer";
@@ -89,19 +86,6 @@ import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
 
 const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then((module) => ({ default: module.AppTabSurface })));
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
-
-/**
- * Actions whose perceived completion is a pane painting. Phase 12 budgets these
- * as "action to interactive pane", so the instrumentation spans have to start
- * at the action and end at the paint rather than at the tmux ack.
- */
-const INTERACTION_SPAN_BY_ACTION: Partial<Record<TmuxAction["kind"], PanePaintSpan>> = {
-  createSession: "create.workspace",
-  createWindow: "create.tab",
-  selectWindow: "window.switch",
-  splitPaneDown: "pane.split",
-  splitPaneRight: "pane.split",
-};
 
 /** Below this the sidebar overlays the terminal instead of taking space. */
 const COMPACT_VIEWPORT_QUERY = "(max-width: 880px)";
@@ -155,8 +139,6 @@ export function App() {
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
-  const [appRecoveryDiscardConfirmation, setAppRecoveryDiscardConfirmation] = useState(false);
-  const [pendingAppRecovery, setPendingAppRecovery] = useState<{ hostProfileId: string; previousServerIdentity: string; currentServerIdentity: string; count: number; scope: HostScopeToken }>();
   const [completedDownload, setCompletedDownload] = useState<DownloadCompletion & { noticeId?: number }>();
   const downloadPickerOpen = useRef(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
@@ -177,7 +159,6 @@ export function App() {
   const terminalTransferClient = useMemo(() => new TauriTerminalTransferClient(), []);
   const terminalTransferRegistry = useTerminalTransferRegistry();
   const latency = useHostLatency();
-
   useEffect(() => dispatchHelper({ type: "reset" }), [currentHelperConnectionKey]);
   // Renderers read this once, when they are created; changing it must not tear
   // down live terminals, so the setting says panes pick it up as they appear.
@@ -210,7 +191,6 @@ export function App() {
   // A new bridge is a new link; the last one's measured round-trip describes
   // nothing about it.
   useEffect(() => { resetHostLatency(); }, [clientId]);
-
   // Width is observed, never saved. What a narrow window does to the rails is
   // decided at render time by `effectiveRails`; writing it into the preferences
   // meant one narrow moment overwrote the user's arrangement permanently.
@@ -231,24 +211,14 @@ export function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  const lastReconciledIdentity = useRef<{ hostProfileId: string; serverIdentity?: string } | undefined>(undefined);
-  useEffect(() => {
-    const previous = lastReconciledIdentity.current;
-    setAppState((current) => {
-      if (previous?.serverIdentity && hostState.serverIdentity
-        && previous.hostProfileId === currentHostProfileId
-        && previous.serverIdentity !== hostState.serverIdentity) {
-        const count = recoverableAppTabCount(current, currentHostProfileId, previous.serverIdentity, snapshot.sessions);
-        if (count > 0) setPendingAppRecovery({ hostProfileId: currentHostProfileId, previousServerIdentity: previous.serverIdentity, currentServerIdentity: hostState.serverIdentity, count, scope: currentHostScope });
-      }
-      return reconcileWorkspaceIdentity(current, currentHostProfileId, hostState.serverIdentity, snapshot.sessions);
-    });
-    lastReconciledIdentity.current = { hostProfileId: currentHostProfileId, serverIdentity: hostState.serverIdentity };
-  }, [currentHostProfileId, hostState.serverIdentity, snapshot.sessions]);
-
-  useEffect(() => {
-    if (pendingAppRecovery && !sameHostScope(pendingAppRecovery.scope, currentHostScope)) setPendingAppRecovery(undefined);
-  }, [currentHostScope.connectionEpoch, currentHostScope.connectionKey, currentHostScope.generation, currentHostScope.hostProfileId, currentHostScope.serverIdentity, pendingAppRecovery]);
+  const appRecovery = useAppRecoveryController({
+    appState,
+    currentHostProfileId,
+    currentScope: currentHostScope,
+    serverIdentity: hostState.serverIdentity,
+    sessions: snapshot.sessions,
+    setAppState,
+  });
 
   const {
     activePane, activeSession, activeWindow, fileScope, panes, selectedAppTab,
@@ -258,6 +228,8 @@ export function App() {
     currentHostProfileId, fileClient, generation: hostState.generation, gitClient,
     serverIdentity: hostState.serverIdentity, snapshot, terminalEpoch, windows,
   });
+  const selectedAppTabRef = useRef(selectedAppTab);
+  selectedAppTabRef.current = selectedAppTab;
   /** Where the files controller and the git controller meet; the rule itself is `ignoredPathsFromStatus`. */
   const ignoredPaths = useMemo(() => ignoredPathsFromStatus(workspaceGit.status), [workspaceGit.status]);
 
@@ -268,90 +240,38 @@ export function App() {
     if (reconciled.active !== activeDownloadStatus) setActiveDownloadStatus(reconciled.active);
     if (reconciled.completion) setCompletedDownload(reconciled.completion);
   }, [activeDownloadStatus, status, workspaceFiles.transfers]);
-  const performAction = useCallback(async (
-    action: TmuxAction,
-    capturedPrecondition?: { serverIdentity: string; generation: number },
-  ) => {
-    if (!clientId || !hostState.canMutate || !hostState.serverIdentity) {
-      setStatus("This action is unavailable until the authoritative connection is live.");
-      return undefined;
-    }
-    // The user's wait for a create or a split ends when a pane paints, not when
-    // tmux acks; the pane that paints closes this span (see TerminalPane).
-    const paneSpan = INTERACTION_SPAN_BY_ACTION[action.kind];
-    const paneSpanToken = paneSpan ? openPanePaintSpan(paneSpan, clientId) : undefined;
-    try {
-      const result = await requestReconciledTmuxAction({
-        clientId,
-        action,
-        capturedPrecondition,
-        initialScope: hostScopeRef.current,
-        currentScope: () => hostScopeRef.current,
-      });
-      if (paneSpan) targetPanePaintSpan(paneSpanToken, result.paneId);
-      setStatus("Waiting for authoritative tmux state…");
-      return result;
-    } catch (error) {
-      abandonPanePaintSpan(paneSpanToken);
-      setStatus(String(error));
-      return undefined;
-    }
-  }, [clientId, hostState.canMutate, hostState.generation, hostState.serverIdentity]);
+  const performAction = useTmuxActionPerformer({
+    canMutate: hostState.canMutate,
+    clientId,
+    generation: hostState.generation,
+    hostScopeRef,
+    serverIdentity: hostState.serverIdentity,
+    setStatus,
+  });
   useEffect(() => () => abandonPanePaintSpansForScope(clientId), [clientId]);
 
-  const surfacePaneDestination = useCallback(async (target: Pane, source: string, successMessage?: string): Promise<PaneSurfaceResult> => {
+  const setNavigationAppTab = useCallback((sessionId: string, appTabId: string | undefined) => {
     const scope = hostScopeRef.current;
-    const session = snapshotRef.current.sessions.find((item) => item.id === target.sessionId);
-    if (!session || !clientId || !hostState.canMutate || !hostState.serverIdentity) {
-      const error = new Error(`${source} destination is no longer available.`);
-      setStatus(error.message);
-      return { ok: false, error };
-    }
-    try {
-      // `focusPane` is `select-pane`, which selects a pane *within* its window
-      // and leaves the session's active window untouched. The app then derives
-      // its active tab from tmux's own `window_active` flag via
-      // `resolveActiveWindowId`, so a destination in a non-active window landed
-      // on the right workspace and the wrong terminal — the exact case a
-      // notification exists for (M10-E061). Select the window first when it is
-      // not already active, chaining the generation the first action returns so
-      // the second is not rejected as stale.
-      let generation = hostState.generation;
-      const targetWindowIsActive = snapshotRef.current.windows.some(
-        (item) => item.id === target.windowId && item.active,
-      );
-      if (!targetWindowIsActive) {
-        const selected = await requestTmuxAction(clientId, { kind: "selectWindow", sessionId: target.sessionId, windowId: target.windowId }, {
-          serverIdentity: hostState.serverIdentity,
-          generation,
-        });
-        generation = selected.topologyGeneration;
-      }
-      await requestTmuxAction(clientId, { kind: "focusPane", sessionId: target.sessionId, windowId: target.windowId, paneId: target.id }, {
-        serverIdentity: hostState.serverIdentity,
-        generation,
-      });
-    } catch (error) {
-      setStatus(String(error));
-      return { ok: false, error };
-    }
-    // `sameHostConnection`, not `sameHostScope`. The guard exists to catch the
-    // connection being replaced underneath a focus request — a profile switch,
-    // a reconnect, a different tmux server. `sameHostScope` also compares the
-    // topology generation, and the two actions just performed *always* bump it,
-    // so that comparison could never hold: tmux moved to the agent's pane and
-    // the app then refused to follow it, leaving the sidebar and the terminal
-    // pointing at different workspaces. Measured against the real server: the
-    // click selected window 5 / pane %120 while the app stayed on the previous
-    // workspace.
-    if (!sameHostConnection(scope, hostScopeRef.current)) return { ok: false, error: new Error("authoritative connection changed while focusing") };
-    setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, session, undefined));
-    setActiveSessionId(target.sessionId);
-    setActiveWindowId(target.windowId);
-    setStatus(successMessage ? `${successMessage} Focus request accepted.` : `${source} focus request accepted for ${target.sessionId}/${target.windowId}/${target.id}.`);
-    window.requestAnimationFrame(() => controllers.current.get(target.id)?.focus());
-    return { ok: true };
-  }, [clientId, currentHostProfileId, hostState.canMutate, hostState.generation, hostState.serverIdentity, setAppState]);
+    const session = snapshotRef.current.sessions.find((item) => item.id === sessionId);
+    if (!session || !scope.serverIdentity) return;
+    setAppState((current) => selectAppTab(current, scope.hostProfileId, scope.serverIdentity!, session, appTabId));
+  }, [setAppState]);
+  const shellNavigation = useShellNavigation({
+    activeSessionId,
+    activeWindowId,
+    canMutate: hostState.canMutate,
+    currentScope: currentHostScope,
+    focusPaneController: (paneId) => controllers.current.get(paneId)?.focus(),
+    performAction,
+    sessions: snapshot.sessions,
+    setActiveSessionId,
+    setActiveWindowId,
+    setAppTab: setNavigationAppTab,
+    setStatus,
+    windows: snapshot.windows,
+  });
+  const surfacePaneDestination = useCallback((pane: Pane, source: string, successMessage?: string) =>
+    shellNavigation.selectPane(pane, { kind: "announce", source, successMessage }), [shellNavigation]);
 
   // `clientHostProfileId === currentHostProfileId` is not redundant: the profile
   // id follows the connection spec immediately and the client follows it an
@@ -507,11 +427,17 @@ export function App() {
       ? `${currentHostProfileId}\0${hostState.serverIdentity}\0${activeSession.id}`
       : undefined;
     const previous = identityKey ? lastAuthoritativeWindow.current.get(identityKey) : undefined;
-    if (shouldSurfaceAuthoritativeTerminal(Boolean(selectedAppTab), activeSession?.id, previous, activeSession?.id, authoritative) && activeSession) {
+    const preserveAppTab = activeSession
+      ? shellNavigation.observeAuthoritativeWindow(activeSession.id, authoritative, hostState.generation)
+      : false;
+    if (!preserveAppTab
+      && shouldSurfaceAuthoritativeTerminal(Boolean(selectedAppTab), activeSession?.id, previous, activeSession?.id, authoritative)
+      && activeSession) {
       setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, undefined));
     }
     if (identityKey && authoritative) lastAuthoritativeWindow.current.set(identityKey, authoritative);
-  }, [activeSession, currentHostProfileId, hostState.serverIdentity, selectedAppTab, windows]);
+  }, [activeSession, currentHostProfileId, hostState.generation, hostState.serverIdentity,
+    selectedAppTab, shellNavigation.observeAuthoritativeWindow, windows]);
 
   // Focus history follows where the app actually ended up, whatever moved it —
   // a click, a shortcut, an agent notification, or tmux itself. Except when
@@ -531,32 +457,17 @@ export function App() {
   const focusDirection = useCallback((direction: PaneDirection) => {
     if (!activePane) return;
     const target = adjacentPane(panes, activePane, direction);
-    if (target) void performAction({ kind: "focusPane", paneId: target.id, windowId: target.windowId, sessionId: target.sessionId });
-  }, [activePane, panes, performAction]);
+    if (target) void shellNavigation.selectPane(target, { kind: "silent" });
+  }, [activePane, panes, shellNavigation]);
 
   const selectSession = useCallback((sessionId: string) => {
     notificationActivation.clearNotificationFocusGuard();
-    if (sessionId === activeSessionId) return;
-    if (shellNavigationMode(hostState.canMutate) === "cached") {
-      setActiveSessionId(sessionId);
-      setStatus("Viewing the last known workspace. Writes remain frozen.");
-      return;
-    }
-    void performAction({ kind: "selectSession", sessionId }).then((accepted) => {
-      if (accepted) setActiveSessionId(sessionId);
-    });
-  }, [activeSessionId, hostState.canMutate, notificationActivation, performAction]);
-
+    shellNavigation.selectSession(sessionId);
+  }, [notificationActivation, shellNavigation]);
   const selectWindow = useCallback((windowId: string) => {
     notificationActivation.clearNotificationFocusGuard();
-    if (activeSession && hostState.serverIdentity) setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, undefined));
-    if (shellNavigationMode(hostState.canMutate) === "cached") {
-      setActiveWindowId(windowId);
-      setStatus("Viewing the last known terminal tab. Writes remain frozen.");
-      return;
-    }
-    void requestActiveWindow(windows, activeWindowId, windowId, performAction, setActiveWindowId);
-  }, [activeSession, activeWindowId, currentHostProfileId, hostState.canMutate, hostState.serverIdentity, notificationActivation, performAction, setAppState, windows]);
+    shellNavigation.selectWindow(windowId);
+  }, [notificationActivation, shellNavigation]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     if (tab.kind === "terminal") selectWindow(tab.id);
@@ -565,24 +476,39 @@ export function App() {
     // notice is the channel's only reader and it has classified "Opened …" as
     // routine since it was written.
     else if (activeSession && hostState.serverIdentity) {
-      setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, tab.id));
+      shellNavigation.selectAppTab(activeSession.id, activeWindowId, tab.id);
     }
-  }, [activeSession, currentHostProfileId, hostState.serverIdentity, selectWindow, setAppState]);
+  }, [activeSession, activeWindowId, hostState.serverIdentity, selectWindow, shellNavigation]);
 
-  const selectAgentRow = useCallback((row: AgentListRow) => {
+  const selectAgentRow = useCallback((row: AgentListRow, scope = hostScopeRef.current) => {
     notificationActivation.clearNotificationFocusGuard();
+    if (!sameHostConnection(scope, hostScopeRef.current)) return;
     if (!row.agent.paneId) return setStatus(`Agent ${row.agent.displayName} has no exact pane match; navigation is unavailable.`);
     const destination = resolveTerminalDestination(snapshot.panes, row.agent.paneId);
     if (destination.kind === "unavailable") return setStatus(`Agent destination ${row.agent.displayName} is no longer available: ${destination.reason}.`);
-    void surfacePaneDestination(destination.pane, `Agent ${row.agent.displayName}`);
+    void surfacePaneDestination(destination.pane, `Agent ${row.agent.displayName}`)
+      .then((result) => reportAnnouncedPaneResult(result, setStatus));
   }, [notificationActivation, snapshot.panes, surfacePaneDestination]);
 
   // What the Explorer, Git and the agents list currently offer for the row the
   // user last pointed at — the palette's only way to name a row.
   const rowCommands = useRowCommands();
   const { commandContext, runCommand } = useShellCommands({
-    activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
+    activePane, activeSession, activeWindow, appState, beginDeferredNavigation: shellNavigation.beginDeferredNavigation, canMutate: hostState.canMutate,
 
+    closeAppTab: (tab, scope) => {
+      const commit = () => setAppState((current) => closeAppTab(current, currentHostProfileId, tab.id));
+      commitScopedAppTabClose({
+        activeWindowId,
+        commit,
+        currentScope: hostScopeRef.current,
+        revealTerminal: shellNavigation.revealLocalTerminal,
+        scope,
+        selectedAppTabId: selectedAppTabRef.current?.id,
+        tabId: tab.id,
+        tabSessionId: tab.sessionId,
+      });
+    },
     combinedTabs, controllers, currentHostProfileId, deletableHostProfile: deletableProfile,
     focusDirection, generation: hostState.generation, hostScope: currentHostScope,
     isHostScopeCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
@@ -592,31 +518,16 @@ export function App() {
       selectAgentRow(target);
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
-    selectCreatedSession: (sessionId) => { setActiveSessionId(sessionId); setActiveWindowId(undefined); },
-    // Deliberately not `requestActiveWindow`: that one looks the window up in
-    // the current snapshot first, and a window one round trip old is not in it
-    // yet. A real `select-window` is also what makes the *next* snapshot agree
+    selectCreatedSession: shellNavigation.selectCreatedSession,
+    // This window is one round trip old and is not in the current snapshot yet.
+    // A real `select-window` is also what makes the *next* snapshot agree
     // — the app mirrors tmux's active flag, so anything only set locally here
     // would be overwritten the moment the snapshot arrived. The generation is
     // chained from the create for the same reason `surfacePaneDestination`
     // chains its own: the create already moved the topology.
-    selectCreatedWindow: (sessionId, windowId, generation) => {
+    selectCreatedWindow: (sessionId, windowId, generation, reservedIntent) => {
       notificationActivation.clearNotificationFocusGuard();
-      const scope = hostScopeRef.current;
-      const identity = hostState.serverIdentity;
-      if (!identity) return;
-      void performAction({ kind: "selectWindow", sessionId, windowId }, { serverIdentity: identity, generation })
-        .then((accepted) => {
-          // Re-checked after the round trip, not only before it: the guard is
-          // there to catch the connection being replaced mid-flight, which is
-          // precisely what can happen while this is in the air.
-          if (!accepted || !sameHostConnection(scope, hostScopeRef.current)) return;
-          // `snapshotRef`, not the render's `snapshot`: the workspace may have
-          // been renamed or closed while this was outstanding.
-          const session = snapshotRef.current.sessions.find((item) => item.id === sessionId);
-          if (session) setAppState((current) => selectAppTab(current, currentHostProfileId, identity, session, undefined));
-          setActiveWindowId(windowId);
-        });
+      shellNavigation.selectCreatedWindow(sessionId, windowId, generation, reservedIntent);
     },
     selectRelativeTab: (direction) => {
       const index = combinedTabs.findIndex((tab) => tab.key === activeCombinedTabKey);
@@ -658,7 +569,7 @@ export function App() {
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
     || Boolean(confirmation) || Boolean(textPrompt)
-    || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecoveryDiscardConfirmation
+    || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecovery.modalOpen
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
   useEffect(() => {
@@ -726,24 +637,22 @@ export function App() {
     };
   };
 
-  const closeCombinedTab = (tab: CombinedTab) => {
-    void runCommand("window.close", { kind: tab.kind === "app" ? "appTab" : "terminalTab", id: tab.id });
+  const closeCombinedTab = (tab: CombinedTab, scope: HostScopeToken) => {
+    void runCommand("window.close", { kind: tab.kind === "app" ? "appTab" : "terminalTab", id: tab.id, scope });
   };
 
   const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {
     if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || entry.kind === "directory"
       || (entry.kind === "symlink" && entry.targetKind !== "file")) return;
     const kind = /\.md(?:own)?$/i.test(entry.name) ? "markdown" as const : "file" as const;
-    setAppState((current) => openFileTab(
-      current,
-      currentHostProfileId,
-      hostState.serverIdentity!,
-      activeSession,
-      entry.path,
-      kind,
-      workspaceFiles.root!,
-      options,
-    ));
+    const session = activeSession;
+    const serverIdentity = hostState.serverIdentity;
+    const root = workspaceFiles.root;
+    shellNavigation.selectLocalAppTab(session.id, activeWindowId, `file:${root.token}:${entry.path}`, () => {
+      setAppState((current) => openFileTab(
+        current, currentHostProfileId, serverIdentity, session, entry.path, kind, root, options,
+      ));
+    });
   };
 
   /** A preview tab stops being disposable the moment the user commits to it. */
@@ -823,10 +732,11 @@ export function App() {
     }, downloadRoot);
   };
 
-  const moveCombinedTab = (tab: CombinedTab, direction: "left" | "right") => {
+  const moveCombinedTab = (tab: CombinedTab, direction: "left" | "right", scope: HostScopeToken) => {
     void runCommand(direction === "left" ? "window.moveLeft" : "window.moveRight", {
       kind: tab.kind === "app" ? "appTab" : "terminalTab",
       id: tab.id,
+      scope,
     });
   };
 
@@ -959,6 +869,7 @@ export function App() {
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}
         canMutate={hostState.canMutate}
+        commandScope={currentHostScope}
         hookNotice={agentHostSetup.notice}
         hostLabel={hostLabel}
         latencyMs={latency?.milliseconds}
@@ -969,18 +880,26 @@ export function App() {
         width={sidebarWidth}
         onLaunchAgent={agentWorkflow.launch}
         onOpenSettings={() => setSettingsOpen(true)}
-        onRenameAgent={(agent) => setTextPrompt({
-          title: "Rename agent",
-          label: "Agent name",
-          initialValue: agent.displayName,
-          submit: (name) => { setTextPrompt(undefined); agentWorkflow.rename(agent, name); },
-        })}
-        onResumeAgent={agentWorkflow.resume}
+        onRenameAgent={(agent, scope) => {
+          if (!sameHostConnection(scope, hostScopeRef.current)) return;
+          setTextPrompt({
+            title: "Rename agent",
+            label: "Agent name",
+            initialValue: agent.displayName,
+            submit: (name) => {
+              setTextPrompt(undefined);
+              if (sameHostConnection(scope, hostScopeRef.current)) agentWorkflow.rename(agent, name);
+            },
+          });
+        }}
+        onResumeAgent={(agent, placement, scope) => {
+          if (sameHostConnection(scope, hostScopeRef.current)) agentWorkflow.resume(agent, placement);
+        }}
         onReviewHooks={agentWorkflow.reviewHooks}
         onSelectAgent={selectAgentRow}
         onSelectWorkspace={selectSession}
         onSortMode={(mode) => updateShell({ agentSort: mode })}
-        onWorkspaceCommand={(session, commandId) => void runCommand(commandId, { kind: "session", id: session.id })}
+        onWorkspaceCommand={(session, commandId, scope) => void runCommand(commandId, { kind: "session", id: session.id, scope })}
         phase={hostState.phase}
         rows={sidebarRows}
         stateGlyphs={appState.shell.agentStateGlyphs}
@@ -991,11 +910,12 @@ export function App() {
           activeKey={activeCombinedTabKey}
           canMutate={hostState.canMutate && Boolean(activeSession)}
           canSplit={hostState.canMutate && Boolean(activePane) && !selectedAppTab}
+          commandScope={currentHostScope}
           onClose={closeCombinedTab}
           onMove={moveCombinedTab}
           onNewTerminal={() => void runCommand("window.new")}
           onPin={(tab) => pinOpenTab(tab.id)}
-          onRenameTerminal={(tab) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id })}
+          onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
           onSelect={selectCombinedTab}
       stateGlyphs={appState.shell.agentStateGlyphs}
           onSplit={() => void runCommand("pane.splitRight")}
@@ -1035,6 +955,7 @@ export function App() {
             beginDividerDrag={beginDividerDrag}
             clientId={clientId}
             controllers={controllers}
+            focusPane={(pane) => { void shellNavigation.selectPane(pane, { kind: "silent" }); }}
             onMeasurements={onMeasurements}
             grid={grid}
             handleInput={handleInput}
@@ -1080,16 +1001,18 @@ export function App() {
           onMessage={setStatus}
           onOpenDiff={(entry, target) => {
             if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
-            setAppState((current) => openGitDiffTab(
-              current,
-              currentHostProfileId,
-              hostState.serverIdentity!,
-              activeSession,
-              entry,
-              target,
-              workspaceGit.status!,
-              workspaceFiles.root!,
-            ));
+            const session = activeSession;
+            const serverIdentity = hostState.serverIdentity;
+            const root = workspaceFiles.root;
+            const gitStatus = workspaceGit.status;
+            shellNavigation.selectLocalAppTab(
+              session.id,
+              activeWindowId,
+              `git:${gitStatus.repository.id}:${target}:${entry.path}`,
+              () => setAppState((current) => openGitDiffTab(
+                current, currentHostProfileId, serverIdentity, session, entry, target, gitStatus, root,
+              )),
+            );
           }}
           onRefresh={() => void workspaceGit.refresh()}
           onStatus={workspaceGit.accept}
@@ -1126,11 +1049,7 @@ export function App() {
     </div>}
     {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}
     {appStateRecovery && <div className="toast" role="alert"><strong>Saved shell state is write-frozen</strong><span>{appStateRecovery}</span><button onClick={() => setAppStateResetConfirmation(true)} type="button">Reset saved shell state…</button></div>}
-    {pendingAppRecovery && <div className="toast" role="status"><strong>App tabs found from the replaced tmux server</strong><span>{pendingAppRecovery.count} tab{pendingAppRecovery.count === 1 ? "" : "s"} can be rebound by unique workspace name. Terminal and pane identities are never reused.</span><div><button onClick={() => {
-      if (!sameHostScope(pendingAppRecovery.scope, hostScopeRef.current)) return setPendingAppRecovery(undefined);
-      setAppState((current) => recoverAppTabsFromPreviousServer(current, pendingAppRecovery.hostProfileId, pendingAppRecovery.previousServerIdentity, pendingAppRecovery.currentServerIdentity, snapshot.sessions));
-      setPendingAppRecovery(undefined);
-    }} type="button">Restore app tabs</button><button onClick={() => setAppRecoveryDiscardConfirmation(true)} type="button">Discard old tabs…</button></div></div>}
+    {appRecovery.offer && <div className="toast" role="status"><strong>App tabs found from the replaced tmux server</strong><span>{appRecovery.offer.count} tab{appRecovery.offer.count === 1 ? "" : "s"} can be rebound by unique workspace name. Terminal and pane identities are never reused.</span><div><button onClick={appRecovery.restore} type="button">Restore app tabs</button><button onClick={appRecovery.requestDiscard} type="button">Discard old tabs…</button></div></div>}
 
     <TerminalTransferHistory client={terminalTransferClient} onError={(error) => setStatus(String(error))} registry={terminalTransferRegistry} />
     {agentWorkflow.dialog}
@@ -1175,19 +1094,14 @@ export function App() {
       stateGlyphs={appState.shell.agentStateGlyphs}
     />}
     <AppDialogLayer
-      appRecoveryDiscard={appRecoveryDiscardConfirmation ? pendingAppRecovery : undefined}
+      appRecoveryDiscard={appRecovery.dialog}
       appStateResetConfirmation={appStateResetConfirmation}
       commandContext={commandContext}
       confirmation={confirmation}
       helperState={helperState}
       hostDelete={hostDeleteConfirmation}
-      onAppRecoveryDiscardCancel={() => setAppRecoveryDiscardConfirmation(false)}
-      onAppRecoveryDiscardConfirm={() => {
-        if (!pendingAppRecovery) return;
-        setAppState((current) => discardServerAppState(current, pendingAppRecovery.hostProfileId, pendingAppRecovery.previousServerIdentity));
-        setAppRecoveryDiscardConfirmation(false);
-        setPendingAppRecovery(undefined);
-      }}
+      onAppRecoveryDiscardCancel={appRecovery.cancelDiscard}
+      onAppRecoveryDiscardConfirm={appRecovery.confirmDiscard}
       onAppStateResetCancel={() => setAppStateResetConfirmation(false)}
       onAppStateResetConfirm={() => {
         setAppStateResetConfirmation(false);

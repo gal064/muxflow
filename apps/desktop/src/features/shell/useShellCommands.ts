@@ -8,9 +8,9 @@ import { nextSortMode } from "../agents/agentsList";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
 import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
 import { relativeWindowReorderAction } from "../../app/windowSelection";
-import { closeAppTab, reorderAppTab, type CombinedTab } from "./model";
+import { reorderAppTab, type CombinedTab } from "./model";
 import type { AppOwnedTab, PersistedAppState } from "./types";
-import type { HostScopeToken } from "./hostScope";
+import { sameHostConnection, type HostScopeToken } from "./hostScope";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { shellAfterSidebarCommand } from "./responsiveShell";
 
@@ -24,7 +24,9 @@ interface ShellCommandOptions {
   activeSession?: Session;
   activeWindow?: TmuxWindow;
   appState: PersistedAppState;
+  beginDeferredNavigation(): number;
   canMutate: boolean;
+  closeAppTab(tab: AppOwnedTab, scope: HostScopeToken): void;
   combinedTabs: readonly CombinedTab[];
   /** The saved host Settings has picked, when it is one that can be deleted. */
   deletableHostProfile?: HostProfile;
@@ -41,7 +43,7 @@ interface ShellCommandOptions {
   /** Live subscription to what the row surfaces currently offer. */
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
-  selectCreatedSession(sessionId: string): void;
+  selectCreatedSession(sessionId: string, reservedIntent: number): void;
   /**
    * Land on the terminal tab ⌘T just made. The host creates it detached, so
    * tmux's active window does not move and the app — which mirrors that flag
@@ -52,7 +54,7 @@ interface ShellCommandOptions {
    * the next snapshot, so a selection sent against the older number is
    * rejected as stale and only lands on a retry.
    */
-  selectCreatedWindow(sessionId: string, windowId: string, generation: number): void;
+  selectCreatedWindow(sessionId: string, windowId: string, generation: number, reservedIntent: number): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
   setConfirmation: Dispatch<SetStateAction<PendingTmuxConfirmation | undefined>>;
@@ -72,6 +74,78 @@ interface ShellCommandOptions {
   /** ⌘⇧U. */
   jumpToUnreadAgent(): void;
   stepFocusHistory(direction: "back" | "forward"): void;
+}
+
+type CommandTargetInputs = Pick<ShellCommandOptions,
+  "activePane" | "activeSession" | "activeWindow" | "appState" | "currentHostProfileId" | "hostScope" | "selectedAppTab" | "snapshot" | "windows"
+>;
+
+export type ResolvedCommandTarget =
+  | {
+    kind: "ambient";
+    appTab?: AppOwnedTab;
+    pane?: Pane;
+    session?: Session;
+    window?: TmuxWindow;
+    windows: readonly TmuxWindow[];
+  }
+  | { kind: "session"; value?: Session }
+  | { kind: "terminalTab"; value?: TmuxWindow; windows: readonly TmuxWindow[] }
+  | { kind: "appTab"; value?: AppOwnedTab }
+  | { kind: "pane"; value?: Pane };
+
+/**
+ * Resolve a command subject without mixing an explicit surface with whatever
+ * happens to be selected behind it. Context menus and tab close buttons pass a
+ * target; a missing/stale explicit ID therefore resolves to no subject instead
+ * of falling through to the active workspace, tab, app tab, or pane.
+ */
+export function resolveCommandTarget(
+  inputs: CommandTargetInputs,
+  target?: CommandTarget,
+): ResolvedCommandTarget {
+  if (!target) {
+    return {
+      kind: "ambient",
+      session: inputs.activeSession,
+      window: inputs.activeWindow,
+      appTab: inputs.selectedAppTab,
+      pane: inputs.activePane,
+      windows: inputs.windows,
+    };
+  }
+  const scopeCurrent = sameHostConnection(target.scope, inputs.hostScope);
+  switch (target.kind) {
+    case "session":
+      return {
+        kind: target.kind,
+        value: scopeCurrent ? inputs.snapshot.sessions.find((session) => session.id === target.id) : undefined,
+      };
+    case "terminalTab": {
+      const targetWindow = scopeCurrent
+        ? inputs.snapshot.windows.find((window) => window.id === target.id)
+        : undefined;
+      return {
+        kind: target.kind,
+        value: targetWindow,
+        windows: targetWindow
+          ? inputs.snapshot.windows.filter((window) => window.sessionId === targetWindow.sessionId).sort((left, right) => left.index - right.index)
+          : [],
+      };
+    }
+    case "appTab":
+      return {
+        kind: target.kind,
+        value: scopeCurrent ? inputs.appState.appTabs.find((tab) => tab.id === target.id
+          && tab.hostProfileId === inputs.currentHostProfileId
+          && tab.serverIdentity === target.scope.serverIdentity) : undefined,
+      };
+    case "pane":
+      return {
+        kind: target.kind,
+        value: scopeCurrent ? inputs.snapshot.panes.find((pane) => pane.id === target.id) : undefined,
+      };
+  }
 }
 
 /**
@@ -122,32 +196,32 @@ export function useShellCommands(options: ShellCommandOptions): {
       if (!outcome.ran) options.setStatus(`${definition.title.replace(/…$/, "")} is unavailable: nothing is selected in that panel any more.`);
       return;
     }
-    const targetSession = target?.kind === "session"
-      ? options.snapshot.sessions.find((session) => session.id === target.id)
-      : options.activeSession;
-    const targetWindow = target?.kind === "terminalTab"
-      ? options.snapshot.windows.find((window) => window.id === target.id)
-      : options.activeWindow;
-    const targetAppTab = target?.kind === "appTab"
-      ? options.appState.appTabs.find((tab) => tab.id === target.id && tab.hostProfileId === options.currentHostProfileId)
-      : options.selectedAppTab;
-    const targetPane = target?.kind === "pane"
-      ? options.snapshot.panes.find((pane) => pane.id === target.id)
-      : options.activePane;
-    const targetWindows = targetWindow
-      ? options.snapshot.windows.filter((window) => window.sessionId === targetWindow.sessionId).sort((left, right) => left.index - right.index)
-      : options.windows;
+    const resolvedTarget = resolveCommandTarget(options, target);
+    const targetSession = resolvedTarget.kind === "session" ? resolvedTarget.value
+      : resolvedTarget.kind === "ambient" ? resolvedTarget.session : undefined;
+    const targetWindow = resolvedTarget.kind === "terminalTab" ? resolvedTarget.value
+      : resolvedTarget.kind === "ambient" ? resolvedTarget.window : undefined;
+    const targetAppTab = resolvedTarget.kind === "appTab" ? resolvedTarget.value
+      : resolvedTarget.kind === "ambient" ? resolvedTarget.appTab : undefined;
+    const targetPane = resolvedTarget.kind === "pane" ? resolvedTarget.value
+      : resolvedTarget.kind === "ambient" ? resolvedTarget.pane : undefined;
+    const targetWindows = resolvedTarget.kind === "terminalTab" || resolvedTarget.kind === "ambient"
+      ? resolvedTarget.windows : [];
     if (commandId === "window.close" && targetAppTab) {
+      const closeScope = target?.scope ?? options.hostScope;
       try {
         await editorFlushRegistry.flushAll();
       } catch (error) {
-        options.setStatus(`Could not close ${targetAppTab.title} because its editor did not save: ${String(error)}`);
+        if (options.isHostScopeCurrent(closeScope)) {
+          options.setStatus(`Could not close ${targetAppTab.title} because its editor did not save: ${String(error)}`);
+        }
         return;
       }
       // No toast: the tab is gone from the strip, which is the whole message.
       // Status is for what the user cannot see or must act on — the failure
       // branch above is exactly that, and stays.
-      options.setAppState((current) => closeAppTab(current, options.currentHostProfileId, targetAppTab.id));
+      if (!options.isHostScopeCurrent(closeScope)) return;
+      options.closeAppTab(targetAppTab, closeScope);
       return;
     }
     if (definition.destructive) {
@@ -205,8 +279,9 @@ export function useShellCommands(options: ShellCommandOptions): {
         options.setTextPrompt({ title: "New workspace", label: "Workspace name", submit: (name) => {
           options.setTextPrompt(undefined);
           if (!options.isHostScopeCurrent(scope)) return options.setStatus("Workspace creation was cancelled because its host scope changed.");
+          const reservedIntent = options.beginDeferredNavigation();
           void options.performAction({ kind: "createSession", name }).then((result) => {
-            if (result?.sessionId && options.isHostScopeCurrent(scope)) options.selectCreatedSession(result.sessionId);
+            if (result?.sessionId && options.isHostScopeCurrent(scope)) options.selectCreatedSession(result.sessionId, reservedIntent);
           });
         } });
         return;
@@ -234,9 +309,10 @@ export function useShellCommands(options: ShellCommandOptions): {
         // only if the app is still pointed at the host that created it.
         const scope = options.hostScope;
         const sessionId = targetSession.id;
+        const reservedIntent = options.beginDeferredNavigation();
         void options.performAction({ kind: "createWindow", sessionId }).then((result) => {
           if (result?.windowId && options.isHostScopeCurrent(scope)) {
-            options.selectCreatedWindow(sessionId, result.windowId, result.topologyGeneration);
+            options.selectCreatedWindow(sessionId, result.windowId, result.topologyGeneration, reservedIntent);
           }
         });
         return;
@@ -270,7 +346,12 @@ export function useShellCommands(options: ShellCommandOptions): {
         "pane.resizeLeft": "resizePaneLeft", "pane.resizeRight": "resizePaneRight",
         "pane.resizeUp": "resizePaneUp", "pane.resizeDown": "resizePaneDown",
       } as const)[commandId], paneId: targetPane.id, resizeCells: 2 }); return;
-      case "pane.zoom": if (targetPane) await options.performAction({ kind: "zoomPane", paneId: targetPane.id, windowId: targetPane.windowId, zoomed: !targetWindow?.zoomed }); return;
+      case "pane.zoom": if (targetPane) await options.performAction({
+        kind: "zoomPane",
+        paneId: targetPane.id,
+        windowId: targetPane.windowId,
+        zoomed: !options.snapshot.windows.find((item) => item.id === targetPane.windowId)?.zoomed,
+      }); return;
       case "terminal.copy": await options.controllers.current.get(targetPane?.id ?? "")?.copy(); return;
       case "terminal.paste": await options.controllers.current.get(targetPane?.id ?? "")?.paste(); return;
       case "terminal.search": options.controllers.current.get(targetPane?.id ?? "")?.showSearch(); return;

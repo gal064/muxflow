@@ -65,4 +65,19 @@ describe("requestReconciledTmuxAction", () => {
     })).rejects.toThrow("stale topology");
     expect(request).toHaveBeenCalledTimes(3);
   });
+
+  it.each([
+    { hostProfileId: "replacement" },
+    { connectionKey: "ssh:replacement" },
+    { connectionEpoch: 8 },
+    { serverIdentity: "server-b" },
+  ])("rejects a successful completion from a replaced scope %o", async (replacement) => {
+    await expect(requestReconciledTmuxAction({
+      clientId: "client",
+      action: { kind: "selectSession", sessionId: "$1" },
+      initialScope: scope(3),
+      currentScope: () => ({ ...scope(4), ...replacement }),
+      request: vi.fn(async () => ({ topologyGeneration: 4 })),
+    })).rejects.toThrow("connection changed");
+  });
 });

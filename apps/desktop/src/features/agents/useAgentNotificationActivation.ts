@@ -3,14 +3,10 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { HostProfile, Pane, TmuxSnapshot } from "../../app/types";
 import { notificationTopology, paneForResolvedNotification, type NotificationPaneRoute, type ResolvedNotificationRoute } from "../../app/paneRouting";
+import type { PaneSurfaceResult } from "../../app/useShellNavigation";
 import type { AgentClient } from "./api";
 import { acknowledgeNotificationActivation } from "./notifications";
 import type { AgentRequestScope } from "./types";
-
-export interface PaneSurfaceResult {
-  ok: boolean;
-  error?: unknown;
-}
 
 interface ActivationOptions {
   agentClient: AgentClient;
@@ -127,6 +123,9 @@ export function useAgentNotificationActivation(options: ActivationOptions) {
           "Notification",
         );
         if (!surfaced.ok) {
+          // A newer manual destination owns the shell now. Do not overwrite it
+          // with a stale failure notice or acknowledge a pane we did not show.
+          if (surfaced.error instanceof Error && surfaced.error.name === "ShellNavigationSupersededError") return false;
           if (!retryUsed && isStaleFocusError(surfaced.error)) {
             queueForFreshConnection(payload, true);
             latest.setStatus("Notification topology changed while focusing; refreshing once before resolving the exact destination…");
