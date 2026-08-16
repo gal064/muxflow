@@ -309,24 +309,36 @@ describe("binary terminal IPC", () => {
     });
   });
 
-  it("does not acknowledge a frame whose synchronous hub admission throws", async () => {
+  it("keeps cumulative ownership exact when an unexpected synchronous admission throws", async () => {
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === "start_terminal") return "client-rejected-frame";
       return undefined;
     });
     await startTerminal("", [], { mode: "local" }, (event) => {
-      if (event.kind === "output") throw new Error("injected hub admission failure");
+      if (event.kind === "output" && event.sequence === 1) {
+        throw new Error("injected hub admission failure");
+      }
     });
-    channels[0].onmessage?.(frame(10, "terminal", 0, u64(7)));
+    const epoch = frame(10, "terminal", 0, u64(7));
+    const rejected = frame(2, "%1", 1, Uint8Array.from([...u64(1), 120]));
+    const later = frame(2, "%1", 2, Uint8Array.from([...u64(2), 121]));
+    channels[0].onmessage?.(epoch);
     await vi.waitFor(() => {
       expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "acknowledge_terminal_delivery")).toBe(true);
     });
     expect(() => channels[0].onmessage?.(
-      frame(2, "%1", 1, Uint8Array.from([...u64(1), 120])),
+      rejected,
     )).toThrow("hub admission failure");
-    await Promise.resolve();
-    const calls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "acknowledge_terminal_delivery");
-    expect(calls.at(-1)?.[1]).toMatchObject({ cumulativeFrameCount: 1 });
+    channels[0].onmessage?.(later);
+    await vi.waitFor(() => {
+      const calls = vi.mocked(invoke).mock.calls.filter(
+        ([command]) => command === "acknowledge_terminal_delivery",
+      );
+      expect(calls.at(-1)?.[1]).toMatchObject({
+        cumulativeFrameCount: 3,
+        cumulativeByteLength: epoch.byteLength + rejected.byteLength + later.byteLength,
+      });
+    });
   });
 
   it("keeps the next cumulative boundary exact after a pane listener throws", async () => {

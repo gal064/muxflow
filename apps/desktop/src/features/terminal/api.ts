@@ -574,9 +574,17 @@ export async function startTerminal(
     recordPerfCounter("desktop.hostEvents");
     const event = decodeTerminalEvent(frame);
     if (event.kind === "generationEpoch") delivery.beginEpoch(event.epoch);
-    onEvent(event);
-    acknowledgements.record(frame.byteLength);
-    delivery.record(frame.byteLength);
+    // Decoding is the ownership boundary: once a complete wire frame becomes
+    // a typed event, native and host credit must eventually be released even
+    // if an application observer rejects the event. A callback failure may be
+    // surfaced (and the app's hub turns observer failures into reconnects),
+    // but it cannot punch an ordinal hole that a later cumulative ACK crosses.
+    try {
+      onEvent(event);
+    } finally {
+      acknowledgements.record(frame.byteLength);
+      delivery.record(frame.byteLength);
+    }
   };
   try {
     const startRequest = {

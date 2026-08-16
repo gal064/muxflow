@@ -82,6 +82,7 @@ export class TerminalEventHub {
     readonly onSeedRequired?: (paneId: string, reason: string) => void,
     limits: TerminalEventHubLimits = {},
     readonly measurements?: OperationRecorder,
+    readonly onObserverFailure?: (message: string) => void,
   ) {
     this.#maxPaneBytes = limits.maxPaneBytes ?? DEFAULT_MAX_PANE_BYTES;
     this.#maxTotalBytes = limits.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
@@ -104,11 +105,21 @@ export class TerminalEventHub {
       this.#generationEpoch = event.epoch;
       this.#clearPaneState();
     }
-    if (event.kind !== "generationEpoch" || epochChanged) beforeDelivery?.();
+    if (event.kind !== "generationEpoch" || epochChanged) {
+      try {
+        beforeDelivery?.();
+      } catch (error) {
+        this.#reportObserverFailure("application delivery observer", error);
+      }
+    }
     if (epochChanged && event.kind === "generationEpoch") {
       for (const listener of this.#epochListeners) {
         this.measurements?.add("terminal.hub.epochDeliveries");
-        listener(event);
+        try {
+          listener(event);
+        } catch (error) {
+          this.#reportObserverFailure("terminal epoch observer", error);
+        }
       }
     }
     if (event.kind === "generationEpoch") return admission;
@@ -129,7 +140,7 @@ export class TerminalEventHub {
           && event.serializedSnapshot.byteLength + event.rawTail.byteLength === 0);
       if (cannotRepairDebt) {
         if (requiresConservativeSeed && !hadEvictedSeedDebt && !alreadyAwaiting) {
-          this.onSeedRequired?.(event.paneId, "frontend pane recovery debt outlived the metadata LRU");
+          this.#requestSeed(event.paneId, "frontend pane recovery debt outlived the metadata LRU");
         }
         return admission;
       }
@@ -237,7 +248,7 @@ export class TerminalEventHub {
         pane.conflictReseedRequested = false;
         this.#retainDormantPane(paneId, pane);
         if (!alreadyAwaiting) {
-          this.onSeedRequired?.(paneId, "terminal pane consumer rejected backlog replay");
+          this.#requestSeed(paneId, "terminal pane consumer rejected backlog replay");
         }
         throw error;
       }
@@ -446,7 +457,7 @@ export class TerminalEventHub {
     const alreadyAwaiting = pane.awaitingSeed;
     pane.awaitingSeed = true;
     this.#deleteBacklog(pane);
-    if (!alreadyAwaiting) this.onSeedRequired?.(paneId, reason);
+    if (!alreadyAwaiting) this.#requestSeed(paneId, reason);
   }
 
   #touchPane(paneId: string): PaneStreamState {
@@ -475,7 +486,7 @@ export class TerminalEventHub {
         const alreadyAwaiting = evicted.awaitingSeed;
         this.#deleteBacklog(evicted);
         this.#rememberEvictedSeedDebt(oldest);
-        if (!alreadyAwaiting) this.onSeedRequired?.(oldest, "frontend pane metadata LRU capacity was exceeded");
+        if (!alreadyAwaiting) this.#requestSeed(oldest, "frontend pane metadata LRU capacity was exceeded");
       }
     }
   }
@@ -527,7 +538,28 @@ export class TerminalEventHub {
   #requestConflictReseed(paneId: string, pane: PaneStreamState): void {
     if (pane.conflictReseedRequested) return;
     pane.conflictReseedRequested = true;
-    this.onSeedRequired?.(paneId, "stale or conflicting terminal visibility handoff");
+    this.#requestSeed(paneId, "stale or conflicting terminal visibility handoff");
+  }
+
+  #requestSeed(paneId: string, reason: string): void {
+    try {
+      this.onSeedRequired?.(paneId, reason);
+    } catch (error) {
+      this.#reportObserverFailure("terminal seed-request observer", error);
+    }
+  }
+
+  #reportObserverFailure(context: string, error: unknown): void {
+    this.measurements?.add("terminal.hub.observerFailures");
+    const message = `${context} failed after terminal event ownership transfer: ${String(error)}`;
+    try {
+      this.onObserverFailure?.(message);
+    } catch {
+      // This callback is the last-resort diagnostic/reconnect boundary. It is
+      // intentionally contained as well: no observer may escape and create a
+      // cumulative delivery hole after the hub owns a decoded frame.
+      this.measurements?.add("terminal.hub.observerFailureHandlerFailures");
+    }
   }
 }
 

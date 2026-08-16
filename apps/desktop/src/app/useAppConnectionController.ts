@@ -82,14 +82,23 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   };
   const hostScopeRef = useRef(currentHostScope);
   hostScopeRef.current = currentHostScope;
-  const hub = useMemo(() => new TerminalEventHub((paneId, reason) => {
-    terminalStateCache.delete(paneId);
-    const currentClientId = clientIdRef.current;
-    if (!currentClientId) return;
-    void requestTerminalSeed(currentClientId, paneId).catch((error) => {
-      setStatus(`${reason}; seed request failed: ${String(error)}`);
-    });
-  }), [setStatus]);
+  const hub = useMemo(() => new TerminalEventHub(
+    (paneId, reason) => {
+      terminalStateCache.delete(paneId);
+      const currentClientId = clientIdRef.current;
+      if (!currentClientId) return;
+      void requestTerminalSeed(currentClientId, paneId).catch((error) => {
+        setStatus(`${reason}; seed request failed: ${String(error)}`);
+      });
+    },
+    {},
+    undefined,
+    (message) => {
+      setConnectionDetail(message);
+      setStatus(message);
+      setConnectionEpoch((value) => value + 1);
+    },
+  ), [setStatus]);
 
   useDesktopResumeRecovery(() => {
     if (!profilesHydrated) return;

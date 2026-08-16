@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    process::{Child, ChildStdin, Stdio},
+    process::{Child, ChildStdin},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -20,8 +20,6 @@ use tmux_control::{
 use tokio::sync::mpsc;
 
 use super::SequencerControl;
-use super::snapshot::tmux_command;
-
 mod flow_control;
 use flow_control::{FlowControl, resume_command, take_injected_rejection};
 mod input;
@@ -35,6 +33,10 @@ mod seed;
 #[cfg(test)]
 use seed::{build_seed, parse_capture_metadata};
 use seed::{build_seed_with_metadata, capture_metadata};
+mod startup;
+use startup::{join_workers, stop_process};
+mod attachment_startup;
+use attachment_startup::AttachmentRuntime;
 
 /// Cells a control client may be resized to on either axis. See
 /// [`TerminalAttachment::resize`]; the desktop refuses the same range before it
@@ -49,6 +51,7 @@ pub(super) struct TerminalAttachment {
     stopped: Arc<AtomicBool>,
     stream_tx: std_mpsc::Sender<StreamControl>,
     flow: Arc<FlowControl>,
+    workers: Vec<std::thread::JoinHandle<()>>,
     /// The last size tmux was told for *this* client, so it is not told again.
     ///
     /// `refresh-client -C` is not free — the omarchy lane measured 3 identical
@@ -69,95 +72,6 @@ pub(super) struct VisibilityChange {
 }
 
 impl TerminalAttachment {
-    pub(super) fn start(
-        session_id: &str,
-        pane_ids: &[String],
-        event_tx: mpsc::Sender<SequencerControl>,
-        overflowed: Arc<AtomicBool>,
-        resources: Arc<Mutex<PaneResourceStore>>,
-        terminal_generation: Arc<AtomicU64>,
-        output_credit: Arc<OutputCredit>,
-    ) -> anyhow::Result<Self> {
-        validate_tmux_id(session_id, '$')?;
-        if pane_ids.is_empty() {
-            bail!("cannot attach without panes");
-        }
-        for pane_id in pane_ids {
-            validate_tmux_id(pane_id, '%')?;
-        }
-
-        let mut child = tmux_command()
-            .args([
-                // `-CC` asks tmux to disable terminal echo and performs a
-                // tcgetattr probe on current tmux releases; a daemon pipe has
-                // no controlling TTY. `-C` is the byte-identical control
-                // protocol mode that works over local and SSH stdio.
-                "-C",
-                "attach-session",
-                "-f",
-                "pause-after=5,ignore-size",
-                "-t",
-                session_id,
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("start tmux control client")?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("tmux control stdout unavailable")?;
-        let stdin = child
-            .stdin
-            .take()
-            .context("tmux control stdin unavailable")?;
-        let stdin = Arc::new(Mutex::new(stdin));
-        {
-            let mut writer = stdin.lock().unwrap();
-            for pane_id in pane_ids {
-                queue_capture(&mut *writer, pane_id)?;
-            }
-            writer.flush()?;
-        }
-
-        let stopped = Arc::new(AtomicBool::new(false));
-        let (stream_tx, stream_rx) = std_mpsc::channel();
-        let reader_stopped = Arc::clone(&stopped);
-        let reader_stop_signal = Arc::clone(&stopped);
-        let reader_panes = pane_ids.to_vec();
-        let flow = Arc::new(FlowControl::default());
-        let reader_flow = Arc::clone(&flow);
-        let reader_writer = spawn_control_writer(session_id, Arc::clone(&stdin))?;
-        std::thread::Builder::new()
-            .name(format!("host-tmux-control-{session_id}"))
-            .spawn(move || {
-                read_control_stream(ControlStreamReader {
-                    stdout,
-                    writer: reader_writer,
-                    pane_ids: reader_panes,
-                    event_tx,
-                    overflowed,
-                    resources,
-                    terminal_generation,
-                    stopped: reader_stop_signal,
-                    controls: stream_rx,
-                    flow: reader_flow,
-                    output_credit,
-                });
-                reader_stopped.store(true, Ordering::Release);
-            })?;
-        Ok(Self {
-            pane_ids: pane_ids.iter().cloned().collect(),
-            stdin,
-            child: Arc::new(Mutex::new(child)),
-            stopped,
-            stream_tx,
-            flow,
-            last_size: None,
-        })
-    }
-
     /// Resizes the control client, which resizes the *user's* windows.
     ///
     /// `refresh-client -C` is obeyed by tmux for every client that participates
@@ -274,11 +188,14 @@ impl TerminalAttachment {
     }
 
     pub(super) fn stop(&mut self) {
-        self.stopped.store(true, Ordering::Release);
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        stop_process(&self.stopped, &self.child);
+    }
+}
+
+impl Drop for TerminalAttachment {
+    fn drop(&mut self) {
+        self.stop();
+        join_workers(&mut self.workers);
     }
 }
 
@@ -356,6 +273,11 @@ pub(super) struct TerminalClients {
     generation: Arc<AtomicU64>,
     input: Option<PersistentInputClient>,
     output_credit: Arc<OutputCredit>,
+    /// Serializes the resource transition that decides whether bytes are
+    /// visible with admission of the resulting ordered terminal event. It is
+    /// deliberately separate from `resources`: credit/channel waits hold this
+    /// fence, never the pane-resource store lock.
+    emission_order: Arc<Mutex<()>>,
 }
 
 impl TerminalClients {
@@ -372,6 +294,7 @@ impl TerminalClients {
             generation: Arc::new(AtomicU64::new(0)),
             input: None,
             output_credit,
+            emission_order: Arc::new(Mutex::new(())),
         }
     }
 
@@ -429,11 +352,14 @@ impl TerminalClients {
         let mut attachment = match TerminalAttachment::start(
             session_id,
             pane_ids,
-            event_tx.clone(),
-            Arc::clone(&overflowed),
-            Arc::clone(&self.resources),
-            Arc::clone(&self.generation),
-            Arc::clone(&self.output_credit),
+            AttachmentRuntime {
+                event_tx: event_tx.clone(),
+                overflowed: Arc::clone(&overflowed),
+                resources: Arc::clone(&self.resources),
+                terminal_generation: Arc::clone(&self.generation),
+                output_credit: Arc::clone(&self.output_credit),
+                emission_order: Arc::clone(&self.emission_order),
+            },
         ) {
             Ok(attachment) => attachment,
             Err(error) => {
@@ -654,6 +580,13 @@ impl TerminalClients {
             serialized_snapshot,
             checkpoint,
         } = change;
+        // Whichever operation owns this fence performs both its resource
+        // transition and ordered event admission before a later visible output
+        // may observe the new state. Credit can block here without holding the
+        // PaneResourceStore, so hide/reveal cleanup remains independently
+        // lockable while output cannot overtake its recovery event.
+        let emission_order = Arc::clone(&self.emission_order);
+        let _emission = emission_order.lock().unwrap();
         validate_tmux_id(pane_id, '%')?;
         if !self
             .clients
@@ -687,10 +620,16 @@ impl TerminalClients {
                 .len()
                 .saturating_add(resource.raw_tail.len()),
         );
-        let reservation = self
-            .output_credit
-            .reserve(charge)
-            .map_err(anyhow::Error::msg)?;
+        let reservation = match self.output_credit.reserve(charge) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                self.resources.lock().unwrap().require_seed(
+                    pane_id,
+                    "visibility recovery could not reserve ordered delivery credit",
+                );
+                return Err(anyhow::Error::msg(error));
+            }
+        };
         let event = v1::HostEvent {
             kind: v1::EventKind::PaneResource.into(),
             scope: pane_id.into(),
@@ -720,9 +659,14 @@ impl TerminalClients {
             .is_err()
         {
             overflowed.store(true, Ordering::Release);
+            self.resources.lock().unwrap().require_seed(
+                pane_id,
+                "visibility recovery could not enter the ordered event sequencer",
+            );
             bail!("terminal event sequencer is closed");
         }
         reservation.commit();
+        drop(_emission);
         if visible && requires_seed {
             self.request_seed(pane_id)?;
         }
@@ -862,34 +806,6 @@ pub(super) struct ControlWrite {
     pub(super) delay: Option<Duration>,
 }
 
-/// Serialises reader-requested writes onto a thread that is allowed to block.
-///
-/// This is deliberately its own unbounded lane rather than a slot on the input
-/// queue. A `refresh-client -A <pane>:continue` is the only thing that ever
-/// resumes a pane tmux paused for flow control, so dropping one stalls that
-/// pane forever — it cannot share a bound with keystrokes, whose backpressure
-/// policy is to refuse. Unbounded is safe because every producer is already
-/// rate-limited: tmux pauses a pane at most once per flow-control episode, a
-/// discarded seed needs another few megabytes of output before it can recur,
-/// and a parse error resnapshots once.
-pub(super) fn spawn_control_writer(
-    session_id: &str,
-    stdin: Arc<Mutex<ChildStdin>>,
-) -> anyhow::Result<std_mpsc::Sender<ControlWrite>> {
-    let (sender, receiver) = std_mpsc::channel::<ControlWrite>();
-    std::thread::Builder::new()
-        .name(format!("host-tmux-writer-{session_id}"))
-        .spawn(move || {
-            while let Ok(write) = receiver.recv() {
-                if let Some(delay) = write.delay {
-                    std::thread::sleep(delay);
-                }
-                let _ = write_capture_request_resuming(&stdin, &write.pane_id, write.resume_first);
-            }
-        })?;
-    Ok(sender)
-}
-
 /// Writes one pane's capture marker and capture command under a single lock
 /// hold, upholding [`queue_capture`]'s adjacency invariant, and resuming a pane
 /// tmux paused first. The resume and the capture share the lock hold so no
@@ -947,6 +863,8 @@ fn capture_command(pane_id: &str) -> String {
 
 mod correlation;
 mod stream;
+#[cfg(test)]
+use stream::TestOutputEmission;
 #[cfg(test)]
 use stream::{CommandBlock, PaneSeedState, PendingCaptureMetadata, StreamState};
 use stream::{ControlStreamReader, StreamControl, read_control_stream};

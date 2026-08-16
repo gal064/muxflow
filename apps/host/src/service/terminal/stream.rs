@@ -73,6 +73,7 @@ pub(super) struct ControlStreamReader {
     pub(super) controls: std_mpsc::Receiver<StreamControl>,
     pub(super) flow: Arc<super::FlowControl>,
     pub(super) output_credit: Arc<OutputCredit>,
+    pub(super) emission_order: Arc<Mutex<()>>,
 }
 
 pub(super) enum StreamControl {
@@ -97,6 +98,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         controls,
         flow,
         output_credit,
+        emission_order,
     } = context;
     let mut reader = BufReader::new(stdout);
     let mut parser = ControlParser::default();
@@ -111,6 +113,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         terminal_generation: &terminal_generation,
         stopped: &stopped,
         output_credit: &output_credit,
+        emission_order: &emission_order,
     };
     loop {
         match reader.read(&mut buffer) {
@@ -291,6 +294,7 @@ struct StreamRuntime<'a> {
     terminal_generation: &'a Arc<AtomicU64>,
     stopped: &'a AtomicBool,
     output_credit: &'a OutputCredit,
+    emission_order: &'a Arc<Mutex<()>>,
 }
 
 impl StreamState {
@@ -327,58 +331,45 @@ impl StreamState {
             terminal_generation,
             stopped,
             output_credit,
+            emission_order,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             return;
         }
         match record {
-            ControlRecord::Output { pane_id, data } => {
-                let output_generation = terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
-                match self.pane_states.get_mut(&pane_id) {
-                    Some(PaneSeedState::Pending {
-                        buffered,
-                        buffered_bytes,
-                        overflowed: replay_overflowed,
-                    }) => {
-                        if buffered_bytes.saturating_add(data.len()) > 4 * 1024 * 1024 {
-                            buffered.clear();
-                            *buffered_bytes = 0;
-                            *replay_overflowed = true;
-                            emit_resnapshot(
-                                sender,
-                                overflowed,
-                                &pane_id,
-                                format!("screen replay buffer overflow for {pane_id}"),
-                            );
-                        } else {
-                            *buffered_bytes += data.len();
-                            buffered.push((output_generation, data));
-                        }
-                    }
-                    _ => {
-                        let visible = with_active_resources(resources, stopped, |resources| {
-                            resources.record_output(&pane_id, &data, output_generation)
-                                == OutputDisposition::Visible
-                        })
-                        .unwrap_or(false);
-                        // Never wait for the connection writer while owning
-                        // pane-resource state. A slow desktop must not prevent
-                        // visibility changes, recovery, or cleanup from taking
-                        // that same lock.
-                        if visible {
-                            emit_terminal(
-                                sender,
-                                overflowed,
-                                v1::EventKind::TerminalOutput,
-                                pane_id,
-                                data,
-                                output_generation,
-                                output_credit,
-                            );
-                        }
+            ControlRecord::Output { pane_id, data } => match self.pane_states.get_mut(&pane_id) {
+                Some(PaneSeedState::Pending {
+                    buffered,
+                    buffered_bytes,
+                    overflowed: replay_overflowed,
+                }) => {
+                    let output_generation = terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    if buffered_bytes.saturating_add(data.len()) > 4 * 1024 * 1024 {
+                        buffered.clear();
+                        *buffered_bytes = 0;
+                        *replay_overflowed = true;
+                        emit_resnapshot(
+                            sender,
+                            overflowed,
+                            &pane_id,
+                            format!("screen replay buffer overflow for {pane_id}"),
+                        );
+                    } else {
+                        *buffered_bytes += data.len();
+                        buffered.push((output_generation, data));
                     }
                 }
-            }
+                _ => OutputEmission {
+                    sender,
+                    overflowed,
+                    resources,
+                    terminal_generation,
+                    stopped,
+                    output_credit,
+                    emission_order,
+                }
+                .record(pane_id, data),
+            },
             ControlRecord::Begin { tag, .. } => {
                 if !matches!(self.command_block, CommandBlock::None) {
                     let scope = self.active_scope();
@@ -431,6 +422,7 @@ impl StreamState {
                     terminal_generation,
                     stopped,
                     output_credit,
+                    emission_order,
                 },
             ),
             ControlRecord::Error { tag, arguments } => {
@@ -622,6 +614,7 @@ impl StreamState {
             terminal_generation,
             stopped,
             output_credit,
+            emission_order,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             self.command_block = CommandBlock::None;
@@ -731,6 +724,7 @@ impl StreamState {
                                 } else {
                                     let replay =
                                         seeder.complete(seed_build.bytes, capture_boundary);
+                                    let _emission = emission_order.lock().unwrap();
                                     let seed_generation =
                                         terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
                                     let seed = replay.seed;
@@ -770,7 +764,9 @@ impl StreamState {
                                             output_credit,
                                         );
                                     }
+                                    drop(_emission);
                                     for output in replay_outputs {
+                                        let _emission = emission_order.lock().unwrap();
                                         // Buffered sequence numbers establish
                                         // capture inclusion only. Rebase
                                         // replay delivery after the seed so a
@@ -943,8 +939,12 @@ mod stream_recovery;
 
 #[path = "stream_helpers.rs"]
 mod stream_helpers;
+#[cfg(test)]
+pub(in crate::service::terminal) use stream_helpers::OutputEmission as TestOutputEmission;
 pub(super) use stream_helpers::with_active_resources;
-use stream_helpers::{emit_resnapshot, emit_terminal, is_topology_notification, notification_pane};
+use stream_helpers::{
+    OutputEmission, emit_resnapshot, emit_terminal, is_topology_notification, notification_pane,
+};
 
 #[cfg(test)]
 #[path = "stream_tests.rs"]

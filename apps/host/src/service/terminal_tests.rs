@@ -1,5 +1,266 @@
 use super::*;
 
+fn long_lived_attachment_command() -> std::process::Command {
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "exec sleep 30", "terminal-attachment-startup-fixture"]);
+    command
+}
+
+fn start_long_lived_attachment(
+    event_tx: mpsc::Sender<SequencerControl>,
+    resources: Arc<Mutex<PaneResourceStore>>,
+    generation: Arc<AtomicU64>,
+    output_credit: Arc<OutputCredit>,
+    emission_order: Arc<Mutex<()>>,
+) -> anyhow::Result<TerminalAttachment> {
+    TerminalAttachment::start_with_command(
+        "$1",
+        &["%1".into()],
+        AttachmentRuntime {
+            event_tx,
+            overflowed: Arc::new(AtomicBool::new(false)),
+            resources,
+            terminal_generation: generation,
+            output_credit,
+            emission_order,
+        },
+        long_lived_attachment_command(),
+    )
+}
+
+#[test]
+fn every_attachment_worker_spawn_failure_reaps_the_child_and_allows_retry() {
+    use super::startup::{assert_last_startup_child_reaped, with_worker_spawn_failure};
+
+    for stage in [1, 2] {
+        let (events, _receiver) = mpsc::channel(8);
+        let result = with_worker_spawn_failure(stage, || {
+            start_long_lived_attachment(
+                events,
+                Arc::new(Mutex::new(PaneResourceStore::with_total_limit(
+                    4, 1024, 4096,
+                ))),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(OutputCredit::negotiated(false)),
+                Arc::new(Mutex::new(())),
+            )
+        });
+        assert!(result.is_err(), "worker stage {stage} unexpectedly started");
+        assert_last_startup_child_reaped();
+    }
+
+    let (events, _receiver) = mpsc::channel(8);
+    let mut retry = start_long_lived_attachment(
+        events,
+        Arc::new(Mutex::new(PaneResourceStore::with_total_limit(
+            4, 1024, 4096,
+        ))),
+        Arc::new(AtomicU64::new(0)),
+        Arc::new(OutputCredit::negotiated(false)),
+        Arc::new(Mutex::new(())),
+    )
+    .unwrap();
+    retry.stop();
+}
+
+#[test]
+fn blocked_reveal_recovery_is_admitted_before_concurrent_visible_output() {
+    let output_credit = Arc::new(OutputCredit::negotiated(true));
+    output_credit
+        .reserve(OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize))
+        .unwrap()
+        .commit();
+    let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+    let pane_id = "%1".to_owned();
+    let session_id = "$1".to_owned();
+    let generation = Arc::clone(&clients.generation);
+    generation.store(1, Ordering::Release);
+    {
+        let mut resources = clients.resources.lock().unwrap();
+        resources.set_visible(&pane_id, true, 0);
+        resources
+            .hide_with_checkpoint(
+                &pane_id,
+                vec![b'S'],
+                VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 0,
+                },
+                1,
+            )
+            .unwrap();
+    }
+    let (events, mut receiver) = mpsc::channel(8);
+    let attachment = start_long_lived_attachment(
+        events.clone(),
+        Arc::clone(&clients.resources),
+        Arc::clone(&clients.generation),
+        Arc::clone(&output_credit),
+        Arc::clone(&clients.emission_order),
+    )
+    .unwrap();
+    clients.clients.insert(session_id, attachment);
+
+    let resources = Arc::clone(&clients.resources);
+    let emission_order = Arc::clone(&clients.emission_order);
+    let stopped = Arc::new(AtomicBool::new(false));
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let shared = Arc::new(Mutex::new(clients));
+    let reveal_clients = Arc::clone(&shared);
+    let reveal_events = events.clone();
+    let reveal_overflowed = Arc::clone(&overflowed);
+    let reveal = std::thread::spawn(move || {
+        reveal_clients.lock().unwrap().set_visibility(
+            "%1",
+            VisibilityChange {
+                visible: true,
+                serialized_snapshot: Vec::new(),
+                checkpoint: VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 1,
+                },
+            },
+            &reveal_events,
+            &reveal_overflowed,
+        )
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        if resources
+            .lock()
+            .unwrap()
+            .get("%1")
+            .is_some_and(|resource| resource.state == StoredResourceState::Visible)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reveal never reached credit wait"
+        );
+        std::thread::yield_now();
+    }
+
+    let output_events = events.clone();
+    let output_overflowed = Arc::clone(&overflowed);
+    let output_resources = Arc::clone(&resources);
+    let output_generation = Arc::clone(&generation);
+    let output_credit_clone = Arc::clone(&output_credit);
+    let output = std::thread::spawn(move || {
+        TestOutputEmission {
+            sender: &output_events,
+            overflowed: &output_overflowed,
+            resources: &output_resources,
+            terminal_generation: &output_generation,
+            stopped: &stopped,
+            output_credit: &output_credit_clone,
+            emission_order: &emission_order,
+        }
+        .record("%1".into(), vec![b'O']);
+    });
+    assert!(
+        receiver.try_recv().is_err(),
+        "output overtook blocked recovery"
+    );
+    output_credit
+        .acknowledge(OutputCharge {
+            bytes: OUTPUT_WINDOW_BYTES,
+            records: 1,
+        })
+        .unwrap();
+    reveal.join().unwrap().unwrap();
+    output.join().unwrap();
+
+    let SequencerControl::OrderedEvent(recovery) = receiver.blocking_recv().unwrap() else {
+        panic!("reveal did not emit ordered recovery");
+    };
+    let SequencerControl::OrderedEvent(output) = receiver.blocking_recv().unwrap() else {
+        panic!("visible output was not ordered after recovery");
+    };
+    assert_eq!(
+        v1::EventKind::try_from(recovery.kind).unwrap(),
+        v1::EventKind::PaneResource
+    );
+    assert_eq!(
+        recovery.pane_resource.unwrap().serialized_snapshot,
+        vec![b'S']
+    );
+    assert_eq!(
+        v1::EventKind::try_from(output.kind).unwrap(),
+        v1::EventKind::TerminalOutput
+    );
+    assert_eq!(output.terminal.unwrap().data, vec![b'O']);
+    assert!(
+        receiver.try_recv().is_err(),
+        "recovery/output was emitted more than once"
+    );
+    drop(shared);
+}
+
+#[test]
+fn failed_visibility_admission_invalidates_the_speculative_transition() {
+    for close_credit in [true, false] {
+        let output_credit = Arc::new(OutputCredit::negotiated(close_credit));
+        let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+        clients.generation.store(1, Ordering::Release);
+        clients.resources.lock().unwrap().ensure("%1", true, 0);
+        clients
+            .resources
+            .lock()
+            .unwrap()
+            .hide_with_checkpoint(
+                "%1",
+                vec![b'S'],
+                VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 0,
+                },
+                1,
+            )
+            .unwrap();
+        let (events, receiver) = mpsc::channel(1);
+        let attachment = start_long_lived_attachment(
+            events.clone(),
+            Arc::clone(&clients.resources),
+            Arc::clone(&clients.generation),
+            Arc::clone(&output_credit),
+            Arc::clone(&clients.emission_order),
+        )
+        .unwrap();
+        clients.clients.insert("$1".into(), attachment);
+        if close_credit {
+            output_credit.close();
+        } else {
+            drop(receiver);
+        }
+
+        assert!(
+            clients
+                .set_visibility(
+                    "%1",
+                    VisibilityChange {
+                        visible: true,
+                        serialized_snapshot: Vec::new(),
+                        checkpoint: VisibilityCheckpoint {
+                            epoch: 1,
+                            generation: 1,
+                        },
+                    },
+                    &events,
+                    &AtomicBool::new(false),
+                )
+                .is_err()
+        );
+        let resources = clients.resources.lock().unwrap();
+        let resource = resources.get("%1").unwrap();
+        assert_eq!(resource.state, StoredResourceState::Released);
+        assert!(resource.requires_seed);
+        assert!(resource.serialized_snapshot.is_empty());
+        assert!(resource.raw_tail.is_empty());
+    }
+}
+
 #[test]
 fn fresh_server_has_a_vacuous_input_fence_for_create_session_bootstrap() {
     let mut clients = TerminalClients::new(Arc::new(OutputCredit::negotiated(false)));

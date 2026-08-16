@@ -212,7 +212,7 @@ pub fn run() {
             notification_permission_status,
             connection::start_terminal,
             connection::stop_terminal,
-            connection::acknowledge_terminal_delivery,
+            connection::delivery_ack::acknowledge_terminal_delivery,
             perf_log::bridge::finalize_bridge_measurement,
             perf_log::bridge::bridge_final_totals,
             connection::send_terminal_input,

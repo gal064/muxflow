@@ -145,11 +145,16 @@ impl DeliveryWindow {
             let release_frames = cumulative_frames - open.acknowledged_frames_total;
             let mut released_wire = 0_u64;
             let mut released_host = HostCharge::default();
-            for _ in 0..release_frames {
-                let frame = open
-                    .frames
-                    .pop_front()
-                    .ok_or("desktop delivery ledger lost an admitted frame")?;
+            let release_count = usize::try_from(release_frames)
+                .map_err(|_| "desktop delivery acknowledgement frame count overflow")?;
+            if release_count > open.frames.len() {
+                return Err("desktop delivery ledger lost an admitted frame".into());
+            }
+            // Validate the complete cumulative prefix before mutating the
+            // deque. A malformed/stale JS boundary must leave the exact ledger
+            // retryable (or available for fail-closed reconnect), never pop a
+            // debit and then discover that its byte boundary was wrong.
+            for frame in open.frames.iter().take(release_count) {
                 if !frame.committed {
                     return Err(
                         "desktop delivery acknowledgement crossed a provisional frame".into(),
@@ -168,6 +173,7 @@ impl DeliveryWindow {
                     "desktop delivery acknowledgement crossed a wire-frame boundary".into(),
                 );
             }
+            open.frames.drain(..release_count);
             open.acknowledged_frames_total = cumulative_frames;
             open.acknowledged_wire_bytes_total = cumulative_wire_bytes;
             open.retained_wire_bytes = open.retained_wire_bytes.saturating_sub(released_wire);
@@ -276,6 +282,36 @@ mod tests {
         );
         assert!(window.acknowledge(7, 2, 124).is_err());
         assert_eq!(window.acknowledge(8, 2, 125).unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_boundary_does_not_consume_the_prefix_needed_by_the_correct_ack() {
+        let window = DeliveryWindow::new(13);
+        window
+            .reserve(100, HostCharge::terminal(80))
+            .unwrap()
+            .commit()
+            .unwrap();
+        window
+            .reserve(25, HostCharge::terminal(20))
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert!(window.acknowledge(13, 1, 99).is_err());
+        assert_eq!(
+            window.acknowledge(13, 1, 100).unwrap(),
+            Some(HostCharge {
+                bytes: 80,
+                records: 1,
+            })
+        );
+        assert_eq!(
+            window.acknowledge(13, 2, 125).unwrap(),
+            Some(HostCharge {
+                bytes: 100,
+                records: 2,
+            })
+        );
     }
 
     #[test]
