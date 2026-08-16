@@ -50,6 +50,21 @@ export class DirectoryListingCache {
     }
   }
 
+  /**
+   * Drops a deleted directory and everything beneath it.
+   *
+   * Without this, a directory removed and later recreated at the same path
+   * would paint the contents it had in a previous life: the key — connection,
+   * root capability, path — is unchanged, and the cache exists precisely to
+   * paint before revalidation.
+   */
+  invalidateSubtree(clientId: string, rootToken: string, path: string): void {
+    const removed = identity({ clientId, rootToken, directory: path });
+    for (const key of [...this.#entries.keys()]) {
+      if (key === removed || key.startsWith(`${removed}/`)) this.#entries.delete(key);
+    }
+  }
+
   /** Drops everything that is not the exact live connection and root. */
   invalidateOtherRoots(clientId: string, rootToken: string): void {
     const prefix = `${clientId}\u0000${rootToken}\u0000`;

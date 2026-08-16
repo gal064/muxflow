@@ -257,6 +257,74 @@ describe("useWorkspaceFiles", () => {
     vi.useRealTimers();
   });
 
+  /**
+   * The Phase 14 wide Explorer lane, as a request ledger rather than a timing.
+   *
+   * 4,096 entries is the size at which a list-per-event or a watch rebuild is
+   * unmistakable, so the counts here are the evidence that expanding, changing,
+   * revisiting, and collapsing cost exactly the round trips they should.
+   */
+  it("holds the Phase 14 wide Explorer lane to one watch per directory and no list at all", async () => {
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const wide = Array.from({ length: 4_096 }, (_, index) => entry(`/repo/wide/file-${index}`));
+    const directories = new Map([
+      ["/repo", [entry("/repo/wide", { directory: true })]],
+      ["/repo/wide", wide],
+    ]);
+    const fixture = watchingClient(directories, root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    const rootWatches = fixture.acquired.length;
+
+    await act(async () => { current?.toggleDirectory("/repo/wide"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    const expandWatches = fixture.acquired.length - rootWatches;
+    const expandedRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+
+    // One external create inside the 4,096-entry directory. The fake host
+    // learns about it too, so a later revalidation agrees with the patch
+    // rather than silently undoing it.
+    directories.set("/repo/wide", [...wide, entry("/repo/wide/appeared", { generation: "2" })]);
+    await act(async () => {
+      fixture.publish({
+        kind: "fileChanged", rootToken: "root", path: "/repo/wide/appeared",
+        generation: "2", entry: entry("/repo/wide/appeared", { generation: "2" }),
+      });
+      await Promise.resolve();
+    });
+    const afterChangeRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+
+    await act(async () => { current?.toggleDirectory("/repo/wide"); await Promise.resolve(); });
+    const collapseReleases = fixture.released.length;
+    await act(async () => { current?.toggleDirectory("/repo/wide"); });
+    const cachedRevisitRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+    await act(async () => { await Promise.resolve(); });
+
+    expect(rootWatches).toBe(1);
+    expect(expandWatches).toBe(1);
+    expect(expandedRows).toBe(4_096);
+    expect(afterChangeRows).toBe(4_097);
+    expect(collapseReleases).toBe(1);
+    expect(cachedRevisitRows).toBe(4_097);
+    expect(fixture.listed).toEqual([]);
+    console.log(`PHASE14_METRIC ${JSON.stringify({
+      lane: "explorerWideWatchTraffic",
+      entries: 4_096,
+      rootWatchRequests: rootWatches,
+      expandWatchRequests: expandWatches,
+      directoryListRequests: fixture.listed.length,
+      collapseWatchReleases: collapseReleases,
+      expandedRows,
+      externalChangeRows: afterChangeRows,
+      cachedRevisitRows,
+      cachedRevisitPaintedBeforeRevalidation: cachedRevisitRows === afterChangeRows,
+    })}`);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("retains an ongoing connection-owned download across pane/session/root switch through published completion", async () => {
     const root = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
     const listeners: Array<(event: WorkspaceEvent) => void> = [];

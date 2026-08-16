@@ -365,3 +365,67 @@ async fn native_watch_delete_events_keep_absolute_metadata_for_root_and_nested_p
     assert!(observed);
     fs::remove_dir_all(root).unwrap();
 }
+
+/// The bootstrap a watch returns *is* the directory's authoritative listing.
+///
+/// This is what lets one expansion cost one round trip: a caller that also
+/// issued a list would be paying a second remote enumeration for an answer it
+/// was already being handed.
+#[test]
+fn a_watch_bootstrap_is_the_directorys_full_authoritative_listing() {
+    let (root, service) = fixture();
+    fs::create_dir(root.join("src")).unwrap();
+    for name in ["a.txt", "b.txt"] {
+        fs::write(root.join(name), name).unwrap();
+    }
+    let listed = service
+        .list_directory(root.to_str().unwrap(), "", "list")
+        .unwrap();
+    let bootstrap = service
+        .watch_directory(root.to_str().unwrap(), "", "watch")
+        .unwrap();
+    assert!(bootstrap.authoritative);
+    assert!(bootstrap.complete);
+    assert_eq!(bootstrap.next_page_token, "");
+    assert_eq!(
+        bootstrap
+            .entries
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.kind, entry.generation))
+            .collect::<Vec<_>>(),
+        listed
+            .entries
+            .iter()
+            .map(|entry| (entry.name.clone(), entry.kind, entry.generation))
+            .collect::<Vec<_>>(),
+        "a bootstrap that is not the listing would force a second read"
+    );
+    service.unwatch_directory("watch").unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Collapsing one directory releases one watch and leaves every other one
+/// registered, so a tree with many open folders does not rebuild its watches.
+#[test]
+fn releasing_one_watch_leaves_every_other_registration_untouched() {
+    let (root, service) = fixture();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::create_dir(root.join("docs")).unwrap();
+    for (path, id) in [("", "root"), ("src", "src"), ("docs", "docs")] {
+        service
+            .watch_directory(root.to_str().unwrap(), path, id)
+            .unwrap();
+    }
+    assert_eq!(service.watches.lock().unwrap().len(), 3);
+    service.unwatch_directory("src").unwrap();
+    let remaining = service.watches.lock().unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.contains_key("root"));
+    assert!(remaining.contains_key("docs"));
+    drop(remaining);
+    // Releasing something that was never held is not an error, so a duplicate
+    // teardown cannot take a live watch with it.
+    service.unwatch_directory("src").unwrap();
+    assert_eq!(service.watches.lock().unwrap().len(), 2);
+    fs::remove_dir_all(root).unwrap();
+}
