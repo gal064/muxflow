@@ -22,6 +22,23 @@ interface PaneBacklog {
   byteLength: number;
 }
 
+interface ContentFingerprint {
+  length: number;
+  hashA: number;
+  hashB: number;
+}
+
+interface PaneResourceFingerprint {
+  state: Extract<PaneEvent, { kind: "paneResource" }>["state"];
+  requiresSeed: boolean;
+  generation: number;
+  snapshotGeneration: number;
+  tailThroughGeneration: number;
+  recoveryReason: ContentFingerprint;
+  serializedSnapshot: ContentFingerprint;
+  rawTail: ContentFingerprint;
+}
+
 export interface TerminalEventHubLimits {
   maxPaneBytes?: number;
   maxTotalBytes?: number;
@@ -44,7 +61,7 @@ export class TerminalEventHub {
   readonly #paneListeners = new Map<string, Set<PaneListener>>();
   readonly #backlogs = new Map<string, PaneBacklog>();
   readonly #lastGeneration = new Map<string, number>();
-  readonly #lastPaneResource = new Map<string, Extract<PaneEvent, { kind: "paneResource" }>>();
+  readonly #lastPaneResource = new Map<string, PaneResourceFingerprint>();
   readonly #renderedGeneration = new Map<string, number>();
   readonly #awaitingSeed = new Set<string>();
   readonly #conflictReseedRequested = new Set<string>();
@@ -76,14 +93,15 @@ export class TerminalEventHub {
     if (event.kind === "seed" || event.kind === "output") {
       this.measurements?.add("terminal.hub.payloadBytes", event.data.byteLength);
     }
+    const epochChanged = event.kind === "generationEpoch" && event.epoch !== this.#generationEpoch;
     const admission = this.#admitSequence(event);
     if (admission.kind === "stale" || admission.kind === "gap") return admission;
-    if (event.kind === "generationEpoch" && event.epoch !== this.#generationEpoch) {
+    if (epochChanged && event.kind === "generationEpoch") {
       this.#generationEpoch = event.epoch;
       this.#clearPaneState();
     }
-    beforeDelivery?.();
-    if (event.kind === "generationEpoch") {
+    if (event.kind !== "generationEpoch" || epochChanged) beforeDelivery?.();
+    if (epochChanged && event.kind === "generationEpoch") {
       for (const listener of this.#epochListeners) {
         this.measurements?.add("terminal.hub.epochDeliveries");
         listener(event);
@@ -94,24 +112,28 @@ export class TerminalEventHub {
     this.#touchTrackedPane(event.paneId);
     if (event.kind !== "seedDiagnostic") {
       const lastGeneration = this.#lastGeneration.get(event.paneId) ?? -1;
-      if (event.kind === "paneResource" && event.generation <= lastGeneration) {
-        const previous = this.#lastPaneResource.get(event.paneId);
-        if (event.generation < lastGeneration || !previous || !samePaneResource(previous, event)) {
-          this.#requestConflictReseed(event.paneId);
+      if (event.kind === "paneResource") {
+        const resourceFingerprint = fingerprintPaneResource(event);
+        if (event.generation <= lastGeneration) {
+          const previous = this.#lastPaneResource.get(event.paneId);
+          if (event.generation < lastGeneration || !previous || !samePaneResource(previous, resourceFingerprint)) {
+            this.#requestConflictReseed(event.paneId);
+          }
+          return admission;
         }
-        return admission;
-      }
-      if (event.generation <= lastGeneration) {
+        this.#lastGeneration.set(event.paneId, event.generation);
+        this.#lastPaneResource.set(event.paneId, resourceFingerprint);
+      } else if (event.generation <= lastGeneration) {
         // A seed is authoritative content, not an increment: dropping one
         // because its generation looks stale leaves the pane waiting for a
         // screen that has already been sent and will not be sent again
         // (P12-U003.3). Ask for one that this hub can accept instead.
         if (event.kind === "seed") this.#requestConflictReseed(event.paneId);
         return admission;
+      } else {
+        this.#lastGeneration.set(event.paneId, event.generation);
+        this.#lastPaneResource.delete(event.paneId);
       }
-      this.#lastGeneration.set(event.paneId, event.generation);
-      if (event.kind === "paneResource") this.#lastPaneResource.set(event.paneId, event);
-      else this.#lastPaneResource.delete(event.paneId);
       if (event.kind === "paneResource" && event.requiresSeed) {
         this.#awaitingSeed.add(event.paneId);
         this.#deleteBacklog(event.paneId);
@@ -362,7 +384,7 @@ export class TerminalEventHub {
 
   #admitSequence(event: TerminalEvent): TerminalEventAdmission {
     if (event.sequence === 0) {
-      if (event.kind === "generationEpoch") {
+      if (event.kind === "generationEpoch" && event.epoch !== this.#generationEpoch) {
         this.#lastSequence = 0;
         this.#sequenceFrozen = false;
       }
@@ -391,19 +413,41 @@ export class TerminalEventHub {
   }
 }
 
-function samePaneResource(
-  left: Extract<PaneEvent, { kind: "paneResource" }>,
-  right: Extract<PaneEvent, { kind: "paneResource" }>,
-): boolean {
+function samePaneResource(left: PaneResourceFingerprint, right: PaneResourceFingerprint): boolean {
   return left.state === right.state
     && left.requiresSeed === right.requiresSeed
-    && left.recoveryReason === right.recoveryReason
+    && left.generation === right.generation
     && left.snapshotGeneration === right.snapshotGeneration
     && left.tailThroughGeneration === right.tailThroughGeneration
-    && equalBytes(left.serializedSnapshot, right.serializedSnapshot)
-    && equalBytes(left.rawTail, right.rawTail);
+    && sameContent(left.recoveryReason, right.recoveryReason)
+    && sameContent(left.serializedSnapshot, right.serializedSnapshot)
+    && sameContent(left.rawTail, right.rawTail);
 }
 
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
+function fingerprintPaneResource(event: Extract<PaneEvent, { kind: "paneResource" }>): PaneResourceFingerprint {
+  return {
+    state: event.state,
+    requiresSeed: event.requiresSeed,
+    generation: event.generation,
+    snapshotGeneration: event.snapshotGeneration,
+    tailThroughGeneration: event.tailThroughGeneration,
+    recoveryReason: fingerprint(event.recoveryReason.length, (index) => event.recoveryReason.charCodeAt(index)),
+    serializedSnapshot: fingerprint(event.serializedSnapshot.byteLength, (index) => event.serializedSnapshot[index]),
+    rawTail: fingerprint(event.rawTail.byteLength, (index) => event.rawTail[index]),
+  };
+}
+
+function fingerprint(length: number, unitAt: (index: number) => number): ContentFingerprint {
+  let hashA = 0x811c9dc5;
+  let hashB = 0x9e3779b9;
+  for (let index = 0; index < length; index += 1) {
+    const unit = unitAt(index);
+    hashA = Math.imul(hashA ^ unit, 0x01000193);
+    hashB ^= unit + 0x9e3779b9 + (hashB << 6) + (hashB >>> 2);
+  }
+  return { length, hashA: hashA >>> 0, hashB: hashB >>> 0 };
+}
+
+function sameContent(left: ContentFingerprint, right: ContentFingerprint): boolean {
+  return left.length === right.length && left.hashA === right.hashA && left.hashB === right.hashB;
 }

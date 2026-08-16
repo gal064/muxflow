@@ -3,6 +3,7 @@ import { copyTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
 
 type FrameRequest = (callback: FrameRequestCallback) => number;
 type FrameCancel = (handle: number) => void;
+interface QueuedWrite { bytes: Uint8Array; onRendered?: () => void }
 
 function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
   if (pieces.length === 1) return pieces[0];
@@ -17,7 +18,7 @@ function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
 
 /** A byte-preserving queue bounded across both JS and xterm's async parser. */
 export class TerminalWriteScheduler {
-  readonly #queue: Array<{ bytes: Uint8Array; onRendered?: () => void }> = [];
+  readonly #queue: Array<QueuedWrite | undefined> = [];
   #queueHead = 0;
   #frame?: number;
   #disposed = false;
@@ -102,6 +103,15 @@ export class TerminalWriteScheduler {
     return this.#overflowed;
   }
 
+  /** Live backing bytes still strongly referenced by queue slots. */
+  get retainedQueueByteLength(): number {
+    let retained = 0;
+    for (let index = 0; index < this.#queue.length; index += 1) {
+      retained += this.#queue[index]?.bytes.byteLength ?? 0;
+    }
+    return retained;
+  }
+
   #acceptEmpty(onRendered?: () => void): boolean {
     if (this.#disposed || !this.#accepting || this.#overflowed) return false;
     onRendered?.();
@@ -175,10 +185,15 @@ export class TerminalWriteScheduler {
     let length = 0;
     while (length < this.maxBytesPerFrame && this.#queueLength() > 0) {
       const first = this.#queue[this.#queueHead];
+      if (!first) throw new Error("terminal scheduler queue invariant violated");
       const take = Math.min(first.bytes.byteLength, this.maxBytesPerFrame - length);
       pieces.push(first.bytes.subarray(0, take));
       length += take;
       if (take === first.bytes.byteLength) {
+        // Release byte buffers and callback closures as soon as the slot is
+        // consumed. Accounting drops them after xterm completes; keeping dead
+        // slots until compaction would let actual retention exceed the cap.
+        this.#queue[this.#queueHead] = undefined;
         this.#queueHead += 1;
         this.measurements?.add("terminal.scheduler.dequeueOperations");
         if (first.onRendered) rendered.push(first.onRendered);

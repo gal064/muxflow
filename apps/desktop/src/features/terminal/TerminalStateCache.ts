@@ -31,7 +31,8 @@ export class TerminalStateCache {
     prepared: PreparedTerminalSnapshot,
     checkpoint?: { terminalEpoch: number; outputGeneration: number },
   ): void {
-    const { serialized, originalByteLength: byteLength } = prepared;
+    const { serialized } = prepared;
+    const byteLength = prepared.data.byteLength;
     if (!prepared.retained || !serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
       this.delete(paneId);
       return;

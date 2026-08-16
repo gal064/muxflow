@@ -276,6 +276,21 @@ describe("TerminalWriteScheduler", () => {
     expect(rendered).toEqual(Array.from({ length: 131 }, (_, index) => index));
     expect(measurements.snapshot().counters["terminal.scheduler.queueCompactions"]).toBeGreaterThan(0);
   });
+
+  it("releases consumed buffers below the queue compaction threshold", () => {
+    const completions: Array<() => void> = [];
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      () => 1,
+      () => undefined,
+    );
+    scheduler.enqueue(Uint8Array.of(1));
+    scheduler.enqueue(Uint8Array.of(2, 3));
+    expect(scheduler.retainedQueueByteLength).toBe(2);
+    completions.shift()!();
+    expect(scheduler.pendingBytes).toBe(2);
+    expect(scheduler.retainedQueueByteLength).toBe(2);
+  });
 });
 
 describe("Phase 14 terminal operation fixture", () => {
