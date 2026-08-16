@@ -283,6 +283,7 @@ struct EngineJob {
     id: String,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
+    admitted: bool,
     started: Box<dyn FnOnce() + Send>,
     work: Box<dyn FnOnce() -> TransferResult + Send>,
     finished: Box<dyn FnOnce(TransferResult, CancelReason) + Send>,
@@ -321,10 +322,37 @@ pub(super) fn engine_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg(test)]
 pub(super) fn enqueue_transfer(
     id: String,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
+    started: impl FnOnce() + Send + 'static,
+    work: impl FnOnce() -> TransferResult + Send + 'static,
+    finished: impl FnOnce(TransferResult, CancelReason) + Send + 'static,
+) -> Result<(), String> {
+    enqueue_transfer_with_queued(
+        id,
+        binding,
+        cancellation,
+        || Ok(()),
+        started,
+        work,
+        finished,
+    )
+}
+
+/// Atomically admits a transfer and publishes its queued transition.
+///
+/// `queued` runs only after the job and its cancellation state have been
+/// inserted, and before dispatch can make the job running. Captured RAII guards
+/// are therefore dropped normally on every admission error without leaving a
+/// renderer event or scheduler entry behind.
+pub(super) fn enqueue_transfer_with_queued(
+    id: String,
+    binding: BulkBinding,
+    cancellation: Arc<CancelState>,
+    queued: impl FnOnce() -> Result<(), String> + Send + 'static,
     started: impl FnOnce() + Send + 'static,
     work: impl FnOnce() -> TransferResult + Send + 'static,
     finished: impl FnOnce(TransferResult, CancelReason) + Send + 'static,
@@ -336,11 +364,16 @@ pub(super) fn enqueue_transfer(
     let engine = transfer_engine();
     {
         let mut state = engine.state.lock().unwrap();
+        #[cfg(test)]
+        if INJECT_QUEUE_FULL.swap(false, Ordering::AcqRel) {
+            crate::perf_log::record_transfer_admission(false);
+            return Err("bulk transfer queue is full".into());
+        }
         if state.queue.len() >= MAX_QUEUED_TRANSFERS {
             crate::perf_log::record_transfer_admission(false);
             return Err("bulk transfer queue is full".into());
         }
-        if state.cancellations.contains_key(&id) {
+        if state.cancellations.contains_key(&id) || state.queue.iter().any(|job| job.id == id) {
             crate::perf_log::record_transfer_admission(false);
             return Err("bulk transfer ID is already queued or active".into());
         }
@@ -351,10 +384,54 @@ pub(super) fn enqueue_transfer(
             id: id.clone(),
             binding: binding.clone(),
             cancellation: Arc::clone(&cancellation),
+            admitted: false,
             started: Box::new(started),
             work: Box::new(work),
             finished: Box::new(finished),
         });
+    }
+    // Event delivery is deliberately outside the engine lock. The FIFO head's
+    // admission barrier prevents every dispatcher from starting it (or later
+    // work) until queued has returned, without letting a slow channel stall
+    // cancellation and engine inspection.
+    let queued_error = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(queued)) {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(panic) => Some(format!(
+            "bulk transfer queued event panicked: {}",
+            panic_message(panic)
+        )),
+    };
+    if let Some(error) = queued_error {
+        {
+            let mut state = engine.state.lock().unwrap();
+            let rejected = take_queued_job(&mut state.queue, |job| job.id == id);
+            if rejected.is_some() {
+                state.cancellations.remove(&id);
+                cancellation.mark_finished();
+            }
+            crate::perf_log::record_transfer_state(state.active, state.queue.len());
+        }
+        crate::perf_log::record_transfer_admission(false);
+        // A later admission may have observed this pending FIFO head and
+        // returned without starting. Removing the head must retrigger it.
+        engine.dispatch();
+        return Err(format!(
+            "bulk transfer queued event could not be delivered: {error}"
+        ));
+    }
+    {
+        let mut state = engine.state.lock().unwrap();
+        // Pending jobs cannot be removed by cancellation and their binding
+        // monitor does not exist until after this commit. A missing entry is
+        // therefore an internal scheduler invariant violation, not a
+        // recoverable post-event rejection (which would create a UI ghost).
+        let pending = state
+            .queue
+            .iter_mut()
+            .find(|job| job.id == id)
+            .expect("pending admission remains queued until commit");
+        pending.admitted = true;
         crate::perf_log::record_transfer_admission(true);
         crate::perf_log::record_transfer_state(state.active, state.queue.len());
     }
@@ -367,7 +444,7 @@ pub(super) fn cancel_transfer(id: &str) -> Result<CancelResponse, String> {
     let engine = transfer_engine();
     let queued = {
         let mut state = engine.state.lock().unwrap();
-        let queued = take_queued_job(&mut state.queue, |job| job.id == id);
+        let queued = take_queued_job(&mut state.queue, |job| job.id == id && job.admitted);
         if queued.is_some() {
             state.cancellations.remove(id);
             crate::perf_log::record_transfer_state(state.active, state.queue.len());
@@ -376,8 +453,8 @@ pub(super) fn cancel_transfer(id: &str) -> Result<CancelResponse, String> {
     };
     if let Some(job) = queued {
         job.cancellation.cancel();
-        job.cancellation.mark_finished();
-        (job.finished)(
+        terminalize_queued(
+            job,
             Err(failure_for_cancel(
                 CancelReason::User,
                 TransferPhase::Queued,
@@ -385,7 +462,6 @@ pub(super) fn cancel_transfer(id: &str) -> Result<CancelResponse, String> {
             )),
             CancelReason::User,
         );
-        crate::perf_log::record_transfer_outcome();
         engine.dispatch();
         return Ok(CancelResponse {
             disposition: CancelDisposition::CancelRequested,
@@ -418,15 +494,18 @@ impl TransferEngine {
                 if state.active >= 2 {
                     return;
                 }
+                if state.queue.front().is_some_and(|job| !job.admitted) {
+                    return;
+                }
                 let Some(job) = state.queue.pop_front() else {
                     return;
                 };
                 if job.cancellation.is_cancelled() {
                     state.cancellations.remove(&job.id);
-                    job.cancellation.mark_finished();
                     drop(state);
                     let reason = job.cancellation.reason();
-                    (job.finished)(
+                    terminalize_queued(
+                        job,
                         Err(failure_for_cancel(
                             reason,
                             TransferPhase::Queued,
@@ -441,18 +520,40 @@ impl TransferEngine {
                 job
             };
             let engine = Arc::clone(self);
-            std::thread::Builder::new()
-                .name(format!("bulk-transfer-{}", job.id))
-                .spawn(move || {
-                    let EngineJob {
-                        id,
-                        binding,
-                        cancellation,
-                        started,
-                        work,
-                        finished,
-                    } = job;
-                    let result = match acquire_bulk_permit(&cancellation) {
+            // `Builder::spawn` consumes its closure even when the OS refuses
+            // the thread. Keep the job in a shared one-shot handoff so that the
+            // rejecting path can still terminalize it and release its guards.
+            let handoff = Arc::new(Mutex::new(Some(job)));
+            let worker_handoff = Arc::clone(&handoff);
+            let worker_name = {
+                let handoff = handoff.lock().unwrap();
+                format!(
+                    "bulk-transfer-{}",
+                    handoff.as_ref().expect("worker handoff contains job").id
+                )
+            };
+            let spawn = spawn_worker(worker_name, move || {
+                let job = worker_handoff
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("bulk worker owns its one-shot job");
+                let EngineJob {
+                    id,
+                    binding,
+                    cancellation,
+                    admitted: _,
+                    started,
+                    work,
+                    finished,
+                } = job;
+                let _active = ActiveJobGuard {
+                    engine: Arc::clone(&engine),
+                    id: id.clone(),
+                    cancellation: Arc::clone(&cancellation),
+                };
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match acquire_bulk_permit(&cancellation) {
                         Ok(_permit) => match binding.validate() {
                             Ok(()) => {
                                 cancellation.mark_running();
@@ -470,31 +571,65 @@ impl TransferEngine {
                             cancellation.phase(),
                             error,
                         )),
-                    };
-                    let reason = cancellation.reason();
-                    cancellation.mark_finished();
-                    finished(result, reason);
-                    crate::perf_log::record_transfer_outcome();
-                    engine.complete(&id);
-                })
-                .expect("failed to start bounded bulk-transfer worker");
+                    }
+                }))
+                .unwrap_or_else(|panic| Err(failure_for_panic(&cancellation, panic)));
+                let reason = cancellation.reason();
+                cancellation.mark_finished();
+                // Restore scheduler ownership before crossing the untrusted
+                // renderer callback boundary. A slow or wedged receiver must
+                // not hold a transfer lane or strand later queued work.
+                drop(_active);
+                engine.dispatch();
+                invoke_finished(finished, result, reason);
+                crate::perf_log::record_transfer_outcome();
+            });
+            if let Err(error) = spawn {
+                let job = handoff
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("failed spawn returns the unclaimed job");
+                self.worker_spawn_failed(job, error);
+            }
         }
     }
 
-    fn complete(self: &Arc<Self>, id: &str) {
+    fn worker_spawn_failed(&self, job: EngineJob, error: std::io::Error) {
         {
             let mut state = self.state.lock().unwrap();
-            state.active = state.active.saturating_sub(1);
-            state.cancellations.remove(id);
+            assert!(state.active > 0, "active transfer accounting underflow");
+            state.active -= 1;
+            state.cancellations.remove(&job.id);
             crate::perf_log::record_transfer_state(state.active, state.queue.len());
         }
-        self.dispatch();
+        job.cancellation.mark_finished();
+        invoke_finished(
+            job.finished,
+            Err(TransferFailure::new(
+                TransferOutcome::NotPublished,
+                TransferFailureKind::Transfer,
+                CleanupStatus::NotNeeded,
+                format!("could not start bulk transfer worker: {error}"),
+                None,
+            )),
+            job.cancellation.reason(),
+        );
+        crate::perf_log::record_transfer_outcome();
+    }
+
+    fn release_active(&self, id: &str) {
+        let mut state = self.state.lock().unwrap();
+        assert!(state.active > 0, "active transfer accounting underflow");
+        state.active -= 1;
+        state.cancellations.remove(id);
+        crate::perf_log::record_transfer_state(state.active, state.queue.len());
     }
 
     fn cancel_stale(self: &Arc<Self>, id: &str, message: String) {
         let queued = {
             let mut state = self.state.lock().unwrap();
-            let queued = take_queued_job(&mut state.queue, |job| job.id == id);
+            let queued = take_queued_job(&mut state.queue, |job| job.id == id && job.admitted);
             if queued.is_some() {
                 state.cancellations.remove(id);
                 crate::perf_log::record_transfer_state(state.active, state.queue.len());
@@ -503,8 +638,8 @@ impl TransferEngine {
         };
         if let Some(job) = queued {
             job.cancellation.cancel_stale_binding();
-            job.cancellation.mark_finished();
-            (job.finished)(
+            terminalize_queued(
+                job,
                 Err(failure_for_cancel(
                     CancelReason::StaleBinding,
                     TransferPhase::Queued,
@@ -512,13 +647,102 @@ impl TransferEngine {
                 )),
                 CancelReason::StaleBinding,
             );
-            crate::perf_log::record_transfer_outcome();
             self.dispatch();
         } else if let Some(cancellation) = self.state.lock().unwrap().cancellations.get(id).cloned()
         {
             cancellation.cancel_stale_binding();
         }
     }
+}
+
+fn terminalize_queued(job: EngineJob, result: TransferResult, reason: CancelReason) {
+    job.cancellation.mark_finished();
+    invoke_finished(job.finished, result, reason);
+    crate::perf_log::record_transfer_outcome();
+}
+
+fn invoke_finished(
+    finished: Box<dyn FnOnce(TransferResult, CancelReason) + Send>,
+    result: TransferResult,
+    reason: CancelReason,
+) {
+    // A renderer/channel callback is outside the scheduler's trust boundary.
+    // Its panic must never strand a lane or prevent the dispatcher advancing.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        finished(result, reason);
+    }));
+}
+
+struct ActiveJobGuard {
+    engine: Arc<TransferEngine>,
+    id: String,
+    cancellation: Arc<CancelState>,
+}
+
+impl Drop for ActiveJobGuard {
+    fn drop(&mut self) {
+        self.cancellation.mark_finished();
+        self.engine.release_active(&self.id);
+    }
+}
+
+fn failure_for_panic(
+    cancellation: &CancelState,
+    panic: Box<dyn std::any::Any + Send>,
+) -> TransferFailure {
+    let phase = cancellation.phase();
+    let outcome = if phase == TransferPhase::Verifying {
+        TransferOutcome::Unknown
+    } else {
+        TransferOutcome::NotPublished
+    };
+    TransferFailure::new(
+        outcome,
+        if outcome == TransferOutcome::Unknown {
+            TransferFailureKind::OutcomeUnknown
+        } else {
+            TransferFailureKind::Transfer
+        },
+        CleanupStatus::ConnectionClosed,
+        format!("bulk transfer worker panicked: {}", panic_message(panic)),
+        Some("bulk worker stopped before cleanup could be confirmed".into()),
+    )
+}
+
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".into()
+    }
+}
+
+fn spawn_worker(
+    name: String,
+    work: impl FnOnce() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if INJECT_WORKER_SPAWN_FAILURE.swap(false, Ordering::AcqRel) {
+        return Err(std::io::Error::other("injected worker spawn failure"));
+    }
+    std::thread::Builder::new().name(name).spawn(work)
+}
+
+#[cfg(test)]
+static INJECT_QUEUE_FULL: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static INJECT_WORKER_SPAWN_FAILURE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+fn inject_queue_full_once() {
+    INJECT_QUEUE_FULL.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+fn inject_worker_spawn_failure_once() {
+    INJECT_WORKER_SPAWN_FAILURE.store(true, Ordering::Release);
 }
 
 fn failure_for_cancel(
@@ -552,17 +776,23 @@ fn spawn_binding_monitor(
     cancellation: Arc<CancelState>,
 ) {
     let engine = Arc::downgrade(engine);
-    std::thread::spawn(move || {
-        while !cancellation.finished.load(Ordering::Acquire) {
-            if let Err(error) = binding.validate() {
-                if let Some(engine) = engine.upgrade() {
-                    engine.cancel_stale(&id, error);
+    // Monitoring is a best-effort accelerator; every worker validates its
+    // binding authoritatively before work. Failing to create this helper must
+    // not panic after admission or prevent the transfer worker from producing
+    // its one terminal outcome.
+    let _ = std::thread::Builder::new()
+        .name(format!("bulk-binding-monitor-{id}"))
+        .spawn(move || {
+            while !cancellation.finished.load(Ordering::Acquire) {
+                if let Err(error) = binding.validate() {
+                    if let Some(engine) = engine.upgrade() {
+                        engine.cancel_stale(&id, error);
+                    }
+                    return;
                 }
-                return;
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-    });
+        });
 }
 
 pub(super) fn acquire_bulk_permit(cancellation: &CancelState) -> Result<BulkPermit, String> {

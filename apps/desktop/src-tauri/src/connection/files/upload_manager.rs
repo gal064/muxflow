@@ -17,7 +17,7 @@ use super::bulk_pool::BulkLease;
 use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
 use super::cleanup::CleanupReport;
 use super::clipboard_staging::lock_owned_source as lock_owned_clipboard_source;
-use super::scheduler::{BulkBinding, CancelState, cancel_transfer, enqueue_transfer};
+use super::scheduler::{BulkBinding, CancelState, cancel_transfer, enqueue_transfer_with_queued};
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
     TransferResult, TransferState,
@@ -247,23 +247,33 @@ pub fn stage_clipboard_png(request: tauri::ipc::Request<'_>) -> Result<Value, St
 
 impl UploadManager {
     fn enqueue_preflight(&self, job: UploadPreflightJob) -> Result<(), String> {
-        let queued = TransferEvent::new(&job.transfer_id, &job.binding, TransferState::Queued)
-            .fields(json!({
-                "sourcePath": job.source_path,
-                "name": job.destination_name,
-                "sizeBytes": job.source_identity.size.to_string(),
-            }))
-            .value();
-        let _ = job.channel.send(queued);
         let id = job.transfer_id.clone();
         let binding = job.binding.clone();
         let cancellation = Arc::clone(&job.cancellation);
+        let admitted = job.clone();
         let started = job.clone();
         let work = job.clone();
-        enqueue_transfer(
+        enqueue_transfer_with_queued(
             id,
             binding,
             cancellation,
+            move || {
+                let queued = TransferEvent::new(
+                    &admitted.transfer_id,
+                    &admitted.binding,
+                    TransferState::Queued,
+                )
+                .fields(json!({
+                    "sourcePath": admitted.source_path,
+                    "name": admitted.destination_name,
+                    "sizeBytes": admitted.source_identity.size.to_string(),
+                }))
+                .value();
+                admitted
+                    .channel
+                    .send(queued)
+                    .map_err(|error| format!("could not deliver upload preflight state: {error}"))
+            },
             move || {
                 let event = TransferEvent::new(
                     &started.transfer_id,
@@ -325,16 +335,17 @@ impl UploadManager {
     }
 
     fn enqueue(&self, job: UploadJob) -> Result<(), String> {
-        emit(&job, TransferState::Queued, json!({}));
         let id = job.transfer_id.clone();
         let binding = job.binding.clone();
         let cancellation = Arc::clone(&job.cancellation);
+        let admitted_job = job.clone();
         let started_job = job.clone();
         let work_job = job.clone();
-        enqueue_transfer(
+        enqueue_transfer_with_queued(
             id,
             binding,
             cancellation,
+            move || send_upload_state(&admitted_job, TransferState::Queued, json!({})),
             move || emit(&started_job, TransferState::Running, json!({})),
             move || run_upload(&work_job),
             move |result, _reason| finish_upload_job(&job, result),
@@ -922,10 +933,16 @@ fn upload_fields(job: &UploadJob, extra: Value) -> Value {
 }
 
 fn emit(job: &UploadJob, state: TransferState, extra: Value) {
+    let _ = send_upload_state(job, state, extra);
+}
+
+fn send_upload_state(job: &UploadJob, state: TransferState, extra: Value) -> Result<(), String> {
     let value = TransferEvent::new(&job.transfer_id, &job.binding, state)
         .fields(upload_fields(job, extra))
         .value();
-    let _ = job.channel.send(value);
+    job.channel
+        .send(value)
+        .map_err(|error| format!("could not deliver upload state: {error}"))
 }
 
 #[cfg(test)]

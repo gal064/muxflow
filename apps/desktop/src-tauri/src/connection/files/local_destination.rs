@@ -3,26 +3,27 @@ use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     os::unix::{
-        ffi::{OsStrExt, OsStringExt},
+        ffi::OsStrExt,
         fs::MetadataExt,
         io::{AsRawFd, FromRawFd},
     },
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
 use tmux_agent_protocol::{PublicationOutcome, PublishFailure, PublishResult, Published};
 use uuid::Uuid;
 
-use super::download_manager::DownloadCollisionPolicy;
+use super::{
+    destination_lease::{DestinationLease, FileIdentity, InspectedDestination, reserve_name},
+    download_manager::DownloadCollisionPolicy,
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct FileIdentity {
-    device: u64,
-    inode: u64,
-}
+pub(super) use super::destination_lease::DestinationReservations;
 
 pub(super) struct PreparedDestination {
+    _reservation: Arc<ReservedDestination>,
     directory: File,
     directory_path: PathBuf,
     directory_identity: FileIdentity,
@@ -32,6 +33,17 @@ pub(super) struct PreparedDestination {
     transaction_name: CString,
     overwrite_identity: Option<FileIdentity>,
     collision: DownloadCollisionPolicy,
+}
+
+pub(super) struct ReservedDestination {
+    directory: File,
+    directory_path: PathBuf,
+    directory_identity: FileIdentity,
+    final_name: CString,
+    final_display: PathBuf,
+    overwrite_identity: Option<FileIdentity>,
+    collision: DownloadCollisionPolicy,
+    _lease: DestinationLease,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +91,12 @@ impl Drop for LocalJournalHandle {
     }
 }
 
-impl PreparedDestination {
-    pub(super) fn open(path: &Path, collision: DownloadCollisionPolicy) -> Result<Self, String> {
+impl ReservedDestination {
+    pub(super) fn reserve(
+        path: &Path,
+        collision: DownloadCollisionPolicy,
+        reservations: Arc<DestinationReservations>,
+    ) -> Result<Self, String> {
         if !path.is_absolute() {
             return Err("download destination path must be absolute".into());
         }
@@ -105,7 +121,6 @@ impl PreparedDestination {
         }
         // SAFETY: fd was freshly returned by open and is uniquely owned.
         let directory = unsafe { File::from_raw_fd(fd) };
-        recover_local_transactions(&directory)?;
         let metadata = directory.metadata().map_err(|error| error.to_string())?;
         let directory_identity = FileIdentity {
             device: metadata.dev(),
@@ -114,8 +129,65 @@ impl PreparedDestination {
         let requested = path
             .file_name()
             .ok_or("download destination has no basename")?;
-        let (final_name, overwrite_identity) = choose_name(&directory, requested, collision)?;
-        let final_display = directory_path.join(std::ffi::OsStr::from_bytes(final_name.as_bytes()));
+        let reserved = reserve_name(
+            &reservations,
+            &directory,
+            directory_identity,
+            &directory_path,
+            requested,
+            collision,
+            |candidate| {
+                let candidate = c_string(candidate, "destination basename")?;
+                Ok(
+                    metadata_at(&directory, &candidate)?.map(|entry| InspectedDestination {
+                        identity: entry.identity,
+                        regular: entry.regular,
+                    }),
+                )
+            },
+        )?;
+        let final_display =
+            directory_path.join(std::ffi::OsStr::from_bytes(reserved.final_name.as_bytes()));
+        Ok(Self {
+            directory,
+            directory_path,
+            directory_identity,
+            final_name: reserved.final_name,
+            final_display,
+            overwrite_identity: reserved.overwrite_identity,
+            collision,
+            _lease: reserved.lease,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn final_path(&self) -> &Path {
+        &self.final_display
+    }
+
+    #[cfg(test)]
+    fn release_as(&self, owner: Uuid) {
+        self._lease.release_as(owner);
+    }
+}
+
+impl PreparedDestination {
+    #[cfg(test)]
+    pub(super) fn open(path: &Path, collision: DownloadCollisionPolicy) -> Result<Self, String> {
+        let reserved = Arc::new(ReservedDestination::reserve(
+            path,
+            collision,
+            Arc::default(),
+        )?);
+        Self::prepare(reserved)
+    }
+
+    pub(super) fn prepare(reserved: Arc<ReservedDestination>) -> Result<Self, String> {
+        let directory = reserved
+            .directory
+            .try_clone()
+            .map_err(|error| error.to_string())?;
+        recover_local_transactions(&directory)?;
         let transaction_id = Uuid::new_v4();
         let partial_name = CString::new(format!(".tmux-agent-download-{transaction_id}.partial"))
             .expect("UUID partial name contains no NUL");
@@ -124,15 +196,16 @@ impl PreparedDestination {
         ))
         .expect("UUID transaction name contains no NUL");
         let prepared = Self {
+            _reservation: Arc::clone(&reserved),
             directory,
-            directory_path,
-            directory_identity,
-            final_name,
-            final_display,
+            directory_path: reserved.directory_path.clone(),
+            directory_identity: reserved.directory_identity,
+            final_name: reserved.final_name.clone(),
+            final_display: reserved.final_display.clone(),
             partial_name,
             transaction_name,
-            overwrite_identity,
-            collision,
+            overwrite_identity: reserved.overwrite_identity,
+            collision: reserved.collision,
         };
         prepared.probe_writable()?;
         Ok(prepared)
@@ -712,44 +785,6 @@ fn unknown(message: String) -> PublishFailure {
     PublishFailure {
         outcome: PublicationOutcome::Unknown,
         message,
-    }
-}
-
-fn choose_name(
-    directory: &File,
-    requested: &OsStr,
-    collision: DownloadCollisionPolicy,
-) -> Result<(CString, Option<FileIdentity>), String> {
-    let name_max = super::download_naming::directory_name_max(directory)?;
-    if requested.as_bytes().len() > name_max {
-        return Err("destination basename exceeds filesystem NAME_MAX".into());
-    }
-    let requested = c_string(requested, "destination basename")?;
-    let existing = metadata_at(directory, &requested)?;
-    match (collision, existing) {
-        (_, None) => Ok((requested, None)),
-        (DownloadCollisionPolicy::Fail, Some(_)) => Err("destination already exists".into()),
-        (DownloadCollisionPolicy::OverwriteConfirmed, Some(metadata)) if metadata.regular => {
-            Ok((requested, Some(metadata.identity)))
-        }
-        (DownloadCollisionPolicy::OverwriteConfirmed, Some(_)) => {
-            Err("overwrite destination must be a regular file".into())
-        }
-        (DownloadCollisionPolicy::Rename, Some(_)) => {
-            let taken = |candidate: &OsStr| {
-                let candidate = CString::new(candidate.as_bytes())
-                    .map_err(|_| "candidate contains a NUL byte")?;
-                Ok(metadata_at(directory, &candidate)?.is_some())
-            };
-            let chosen = super::download_naming::first_free_name(
-                OsStr::from_bytes(requested.as_bytes()),
-                name_max,
-                taken,
-            )?;
-            let chosen = CString::new(chosen.into_vec())
-                .map_err(|_| "destination basename contains a NUL byte")?;
-            Ok((chosen, None))
-        }
     }
 }
 
