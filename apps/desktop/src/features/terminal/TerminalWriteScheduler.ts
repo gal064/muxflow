@@ -118,7 +118,7 @@ export class TerminalWriteScheduler {
 
   #acceptEmpty(onRendered?: () => void): boolean {
     if (this.#disposed || !this.#accepting || this.#overflowed) return false;
-    onRendered?.();
+    if (onRendered) this.#notifyRendered([onRendered]);
     return true;
   }
 
@@ -129,7 +129,7 @@ export class TerminalWriteScheduler {
     const attemptedBytes = retainedBytes + backingByteLength;
     this.#dropQueued();
     this.#overflowed = true;
-    this.onOverflow?.(attemptedBytes);
+    this.#notifyOverflow(attemptedBytes);
     return false;
   }
 
@@ -143,7 +143,7 @@ export class TerminalWriteScheduler {
     this.#queuedBackingBytes += backingByteLength;
     this.measurements?.highWater?.("terminal.scheduler.pendingBytes", this.#pendingBytes);
     this.measurements?.highWater?.("terminal.scheduler.queueDepth", this.#queueLength());
-    this.onPendingBytes?.(this.#pendingBytes);
+    this.#notifyPendingBytes();
     this.#schedule();
   }
 
@@ -157,7 +157,7 @@ export class TerminalWriteScheduler {
     this.#pendingBytes = this.#inFlightBytes;
     if (this.#frame !== undefined) this.cancelFrame(this.#frame);
     this.#frame = undefined;
-    this.onPendingBytes?.(this.#pendingBytes);
+    this.#notifyPendingBytes();
   }
 
   #queueLength(): number {
@@ -235,9 +235,9 @@ export class TerminalWriteScheduler {
       this.#pendingBytes -= this.#inFlightBytes;
       this.#inFlightBytes = 0;
       this.#inFlightBackingBytes = 0;
-      this.onPendingBytes?.(this.#pendingBytes);
+      this.#notifyPendingBytes();
       if (succeeded) {
-        for (const onRendered of rendered) onRendered();
+        this.#notifyRendered(rendered);
         this.measurements?.add("terminal.scheduler.callbacksInvoked", rendered.length);
       }
       this.#resolveDrainWaiters();
@@ -256,8 +256,8 @@ export class TerminalWriteScheduler {
       settle(false);
       this.#dropQueued();
       this.#overflowed = true;
-      this.onOverflow?.(failedPendingBytes);
       this.#resolveDrainWaiters();
+      this.#notifyOverflow(failedPendingBytes);
     }
   }
 
@@ -281,5 +281,35 @@ export class TerminalWriteScheduler {
     if (this.#pendingBytes !== 0) return;
     for (const resolve of this.#drainWaiters) resolve();
     this.#drainWaiters.clear();
+  }
+
+  #notifyPendingBytes(): void {
+    if (!this.onPendingBytes) return;
+    try {
+      this.onPendingBytes(this.#pendingBytes);
+    } catch {
+      this.measurements?.add("terminal.scheduler.observerErrors");
+    }
+  }
+
+  #notifyOverflow(pendingBytes: number): void {
+    if (!this.onOverflow) return;
+    try {
+      this.onOverflow(pendingBytes);
+    } catch {
+      this.measurements?.add("terminal.scheduler.observerErrors");
+    }
+  }
+
+  #notifyRendered(callbacks: Array<() => void>): void {
+    for (const callback of callbacks) {
+      try {
+        callback();
+      } catch {
+        // One pane notification must not strand the queue or prevent sibling
+        // callbacks from observing bytes xterm successfully applied.
+        this.measurements?.add("terminal.scheduler.observerErrors");
+      }
+    }
   }
 }

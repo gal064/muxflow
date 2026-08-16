@@ -356,4 +356,39 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(received).toEqual([]);
     expect(requests).toEqual(["%1", "%2", "%3", "%1"]);
   });
+
+  it("clamps a zero metadata capacity before it can truncate a pane backlog", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub((paneId) => requests.push(paneId), { maxTrackedPanes: 0 });
+    hub.publish(output(1, 1, "%1"));
+    hub.publish(output(2, 2, "%1"));
+    const received: TerminalEvent[] = [];
+    hub.subscribePane("%1", (event) => received.push(event));
+    expect(received).toEqual([output(1, 1, "%1"), output(2, 2, "%1")]);
+    expect(requests).toEqual([]);
+    expect(hub.trackedPaneCount).toBe(1);
+  });
+
+  it.each([
+    ["seed", seed(4, 3, "%1")],
+    ["recovery material", resource(4, 3, { paneId: "%1" })],
+    ["host-owned seed request", resource(4, 3, {
+      paneId: "%1", requiresSeed: true, recoveryReason: "host recovery pending",
+      serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array(),
+    })],
+    ["diagnostic preceding a seed", { kind: "seedDiagnostic", paneId: "%1", message: "partial metadata", sequence: 4 } as TerminalEvent],
+  ])("does not issue a redundant conservative request for an untracked %s", (_name, repairEvent) => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub(
+      (paneId) => requests.push(paneId),
+      { maxTrackedPanes: 1, maxBufferedPanes: 3 },
+    );
+    hub.publish(output(1, 1, "%1"));
+    hub.publish(output(2, 1, "%2"));
+    hub.publish(output(3, 1, "%3"));
+    hub.publish(repairEvent);
+    // %1's original request remains authoritative; touching %1 evicts %3,
+    // but the repairing/host-owned event must not request %1 a second time.
+    expect(requests.filter((paneId) => paneId === "%1")).toEqual(["%1"]);
+  });
 });
