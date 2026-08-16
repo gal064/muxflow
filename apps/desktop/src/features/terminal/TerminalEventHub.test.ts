@@ -1,23 +1,31 @@
 import { describe, expect, it } from "vitest";
 import { TerminalEventHub } from "./TerminalEventHub";
 import type { TerminalEvent } from "./api";
+import { copyTerminalBytes } from "./TerminalBytes";
 
 const output = (sequence: number, generation: number, paneId = "%1", data = Uint8Array.of(generation)): TerminalEvent => ({
-  kind: "output", paneId, generation, data, sequence,
+  kind: "output", paneId, generation, data: copyTerminalBytes(data), sequence,
 });
 const seed = (sequence: number, generation: number, paneId = "%1", data = Uint8Array.of(generation)): TerminalEvent => ({
-  kind: "seed", paneId, generation, data, sequence,
+  kind: "seed", paneId, generation, data: copyTerminalBytes(data), sequence,
 });
+type Resource = Extract<TerminalEvent, { kind: "paneResource" }>;
+type ResourceOverrides = Partial<Omit<Resource, "serializedSnapshot" | "rawTail">> & {
+  serializedSnapshot?: Uint8Array;
+  rawTail?: Uint8Array;
+};
 const resource = (
   sequence: number,
   generation: number,
-  overrides: Partial<Extract<TerminalEvent, { kind: "paneResource" }>> = {},
-): TerminalEvent => ({
-  kind: "paneResource", paneId: "%1", state: "hiddenBuffered", requiresSeed: false,
-  recoveryReason: "", generation, snapshotGeneration: Math.max(0, generation - 1), tailThroughGeneration: generation,
-  serializedSnapshot: Uint8Array.of(generation),
-  rawTail: Uint8Array.of(generation + 10), sequence, ...overrides,
-});
+  overrides: ResourceOverrides = {},
+): TerminalEvent => {
+  const { serializedSnapshot = Uint8Array.of(generation), rawTail = Uint8Array.of(generation + 10), ...metadata } = overrides;
+  return {
+    kind: "paneResource", paneId: "%1", state: "hiddenBuffered", requiresSeed: false,
+    recoveryReason: "", generation, snapshotGeneration: Math.max(0, generation - 1), tailThroughGeneration: generation,
+    serializedSnapshot: copyTerminalBytes(serializedSnapshot), rawTail: copyTerminalBytes(rawTail), sequence, ...metadata,
+  };
+};
 
 describe("TerminalEventHub hidden-pane buffering", () => {
   it("replays byte-exact hidden output when a pane becomes visible", () => {
@@ -141,6 +149,16 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(hub.retainedPaneCount).toBe(0);
   });
 
+  it("accounts the exact backing allocations retained for hidden output", () => {
+    const hub = new TerminalEventHub();
+    hub.publish(output(1, 1, "%7", Uint8Array.of(1, 2, 3)));
+    hub.publish(output(2, 2, "%7", Uint8Array.of(4, 5, 6, 7)));
+    expect(hub.retainedByteLength).toBe(7);
+    const received: Array<Extract<TerminalEvent, { kind: "output" }>> = [];
+    hub.subscribePane("%7", (event) => { if (event.kind === "output") received.push(event); });
+    expect(received.reduce((total, event) => total + event.data.buffer.byteLength, 0)).toBe(7);
+  });
+
   it("replaces a consumed hidden recovery checkpoint instead of replaying its stale raw tail", () => {
     const hub = new TerminalEventHub();
     hub.publish(resource(1, 1));
@@ -191,11 +209,10 @@ describe("TerminalEventHub hidden-pane buffering", () => {
   it("admits a sequence-zero agent snapshot paired with an authoritative topology snapshot", () => {
     const hub = new TerminalEventHub();
     const received: TerminalEvent[] = [];
-    hub.subscribe((event) => received.push(event));
     const topology = { kind: "snapshot", snapshot: { sessions: [], windows: [], panes: [] }, generation: 7, serverIdentity: "server", authoritative: true, sequence: 12 } as TerminalEvent;
     const agents = { kind: "agentService", scope: "snapshot", snapshot: { generation: "7", acceptedGeneration: "7", agents: [], authoritative: true, notificationWatermark: "7", connectionEpoch: "41" }, sequence: 0 } as TerminalEvent;
-    expect(hub.publish(topology)).toEqual({ kind: "accepted" });
-    expect(hub.publish(agents)).toEqual({ kind: "local" });
+    expect(hub.publish(topology, () => received.push(topology))).toEqual({ kind: "accepted" });
+    expect(hub.publish(agents, () => received.push(agents))).toEqual({ kind: "local" });
     expect(received).toEqual([topology, agents]);
     expect(hub.lastSequence).toBe(12);
   });

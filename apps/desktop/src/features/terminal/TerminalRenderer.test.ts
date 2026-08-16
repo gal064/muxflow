@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { restoreDecision, TerminalWriteScheduler, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
+import { restoreDecision, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
+import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan, reconcilePaneGrid } from "./TerminalPane";
 import type { Pane } from "../../app/types";
 import { OperationCounters } from "../../perf/operations";
 import { TerminalEventHub } from "./TerminalEventHub";
 import { decodeTerminalEvent } from "./api";
+import { copyTerminalBytes } from "./TerminalBytes";
 
 function wireOutputFrame(sequence: number, generation: number, data: Uint8Array): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(21 + data.byteLength);
@@ -220,14 +222,28 @@ describe("TerminalWriteScheduler", () => {
     const event = decodeTerminalEvent(wire.buffer);
     expect(event.kind).toBe("output");
     if (event.kind !== "output") throw new Error("expected output fixture");
-    // Decode borrows the exclusively delivered channel frame; scheduling is
-    // the single copy that owns it for asynchronous xterm consumption.
-    expect(event.data.buffer).toBe(wire.buffer);
-    scheduler.enqueue(event.data);
+    // Decode is the one transport ownership copy; the scheduler transfers that
+    // exclusive allocation without copying it again.
+    expect(event.data.buffer).not.toBe(wire.buffer);
+    expect(event.data.buffer.byteLength).toBe(event.data.byteLength);
     wire.fill(9, 21);
+    scheduler.enqueueOwned(event.data);
     expect([...written[0]]).toEqual([1, 2, 3]);
     completions.shift()!();
     expect(scheduler.pendingBytes).toBe(0);
+  });
+
+  it("copies a borrowed scheduler input before its caller can mutate it", () => {
+    const written: Uint8Array[] = [];
+    const scheduler = new TerminalWriteScheduler(
+      (chunk) => written.push(chunk),
+      () => 1,
+      () => undefined,
+    );
+    const borrowed = Uint8Array.of(1, 2, 3);
+    scheduler.enqueue(borrowed);
+    borrowed.fill(9);
+    expect([...written[0]]).toEqual([1, 2, 3]);
   });
 
   it("compacts a long consumed prefix without changing byte or callback order", () => {
@@ -263,6 +279,15 @@ describe("TerminalWriteScheduler", () => {
 });
 
 describe("Phase 14 terminal operation fixture", () => {
+  // Captured from the identical deterministic fixture on b082f66. Copy totals
+  // include both the decoder's compact payload ownership and the legacy
+  // scheduler/backlog copying; operations include queue work and array moves.
+  const baseline = {
+    64: { decoderCopiedBytes: 512, schedulerCopiedBytes: 960, arrayMoveOperations: 28, queueOperations: 16, callbacks: 8, xtermWrites: 2 },
+    1024: { decoderCopiedBytes: 8192, schedulerCopiedBytes: 15_360, arrayMoveOperations: 28, queueOperations: 16, callbacks: 8, xtermWrites: 2 },
+    65536: { decoderCopiedBytes: 524_288, schedulerCopiedBytes: 983_040, arrayMoveOperations: 28, queueOperations: 16, callbacks: 8, xtermWrites: 3 },
+  } as const;
+
   it("reports exact event, fanout, copy, queue, callback and frame counts by chunk size", () => {
     for (const chunkBytes of [64, 1024, 64 * 1024]) {
       const measurements = new OperationCounters();
@@ -289,7 +314,7 @@ describe("Phase 14 terminal operation fixture", () => {
         hub.publish(decodeTerminalEvent(wire.buffer, measurements));
       }
       hub.subscribePane("%1", (event) => {
-        if (event.kind === "output") scheduler.enqueue(event.data, () => { callbacks += 1; });
+        if (event.kind === "output") scheduler.enqueueOwned(event.data, () => { callbacks += 1; });
       });
       let ticks = 0;
       while (scheduler.pendingBytes > 0 && ticks < 100) {
@@ -308,15 +333,20 @@ describe("Phase 14 terminal operation fixture", () => {
       const snapshot = measurements.snapshot();
       expect(snapshot.counters["terminal.hub.events"]).toBe(8);
       expect(snapshot.counters["terminal.decoder.frames"]).toBe(8);
-      expect(snapshot.counters["terminal.decoder.copiedBytes"]).toBe(0);
+      expect(snapshot.counters["terminal.decoder.copiedBytes"]).toBe(chunkBytes * 8);
       expect(snapshot.counters["terminal.scheduler.enqueueOperations"]).toBe(8);
       expect(snapshot.counters["terminal.scheduler.dequeueOperations"]).toBe(8);
       expect(snapshot.counters["terminal.scheduler.callbacksInvoked"]).toBe(8);
-      const copyProxyBytes = snapshot.counters["terminal.scheduler.copiedBytes"];
-      const baselineCopyProxyBytes = copyProxyBytes + snapshot.counters["terminal.hub.payloadBytes"];
+      const reference = baseline[chunkBytes as keyof typeof baseline];
+      expect(reference).toBeDefined();
+      const copyProxyBytes = snapshot.counters["terminal.decoder.copiedBytes"]
+        + (snapshot.counters["terminal.scheduler.copiedBytes"] ?? 0);
+      const baselineCopyProxyBytes = reference.decoderCopiedBytes + reference.schedulerCopiedBytes;
       const operationProxy = snapshot.counters["terminal.scheduler.enqueueOperations"]
         + snapshot.counters["terminal.scheduler.dequeueOperations"];
-      const baselineOperationProxy = operationProxy + 28;
+      const baselineOperationProxy = reference.queueOperations + reference.arrayMoveOperations;
+      expect(snapshot.counters["terminal.scheduler.callbacksInvoked"]).toBe(reference.callbacks);
+      expect(snapshot.counters["terminal.scheduler.xtermWrites"]).toBe(reference.xtermWrites);
       expect(copyProxyBytes / baselineCopyProxyBytes).toBeLessThanOrEqual(0.7);
       expect(operationProxy / baselineOperationProxy).toBeLessThanOrEqual(0.7);
       console.log(`PHASE14_METRIC ${JSON.stringify({
@@ -607,8 +637,8 @@ describe("pane resource recovery", () => {
   const resource = {
     kind: "paneResource", paneId: "%1", state: "hiddenBuffered", requiresSeed: false,
     recoveryReason: "", generation: 2, snapshotGeneration: 1, tailThroughGeneration: 2,
-    serializedSnapshot: new TextEncoder().encode("screen λ"),
-    rawTail: Uint8Array.of(27, 91, 109),
+    serializedSnapshot: copyTerminalBytes(new TextEncoder().encode("screen λ")),
+    rawTail: copyTerminalBytes(Uint8Array.of(27, 91, 109)),
     sequence: 2,
   } as const;
 
@@ -622,6 +652,6 @@ describe("pane resource recovery", () => {
   it("awaits a seed for released or malformed recovery state", () => {
     expect(paneRecoveryPlan({ ...resource, state: "released", requiresSeed: true, recoveryReason: "evicted" }))
       .toEqual({ kind: "awaitSeed", reason: "evicted" });
-    expect(paneRecoveryPlan({ ...resource, serializedSnapshot: Uint8Array.of(0xff) }).kind).toBe("awaitSeed");
+    expect(paneRecoveryPlan({ ...resource, serializedSnapshot: copyTerminalBytes(Uint8Array.of(0xff)) }).kind).toBe("awaitSeed");
   });
 });

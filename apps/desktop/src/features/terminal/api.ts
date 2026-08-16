@@ -5,6 +5,7 @@ import type { WireFileEvent } from "../files/api";
 import type { WireGitEvent } from "../git/api";
 import type { WireAgentEvent, WireAgentSnapshot } from "../agents/api";
 import type { OperationRecorder } from "../../perf/operations";
+import { copyTerminalBytes, ownTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
 
 interface SequencedTerminalEvent {
   sequence: number;
@@ -12,8 +13,8 @@ interface SequencedTerminalEvent {
 
 export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "generationEpoch"; epoch: number }
-  | { kind: "seed"; paneId: string; generation: number; data: Uint8Array }
-  | { kind: "output"; paneId: string; generation: number; data: Uint8Array }
+  | { kind: "seed"; paneId: string; generation: number; data: OwnedTerminalBytes }
+  | { kind: "output"; paneId: string; generation: number; data: OwnedTerminalBytes }
   | { kind: "seedDiagnostic"; paneId: string; message: string }
   | { kind: "flowStalled"; paneId: string; message: string }
   | { kind: "topologyDirty"; name: string }
@@ -30,8 +31,8 @@ export type TerminalEvent = SequencedTerminalEvent & (
       generation: number;
       snapshotGeneration: number;
       tailThroughGeneration: number;
-      serializedSnapshot: Uint8Array;
-      rawTail: Uint8Array;
+      serializedSnapshot: OwnedTerminalBytes;
+      rawTail: OwnedTerminalBytes;
     }
   | { kind: "snapshot"; snapshot: TmuxSnapshot; generation: number; serverIdentity: string; authoritative: boolean }
   | { kind: "fileService"; scope: string; event: WireFileEvent }
@@ -46,8 +47,12 @@ export const MAX_HOST_TERMINAL_INPUT_BYTES = 1024 * 1024;
 const COMMON_HEADER_BYTES = 11;
 const PANE_RESOURCE_HEADER_BYTES = 38;
 
+declare const preparedTerminalSnapshot: unique symbol;
+
 export interface PreparedTerminalSnapshot {
-  data: Uint8Array;
+  readonly [preparedTerminalSnapshot]: true;
+  serialized: string;
+  data: OwnedTerminalBytes;
   originalByteLength: number;
   retained: boolean;
 }
@@ -63,16 +68,23 @@ export function prepareTerminalSnapshot(
 ): PreparedTerminalSnapshot {
   const encoded = encoder.encode(serialized);
   if (encoded.byteLength > maxBytes) {
-    return { data: new Uint8Array(), originalByteLength: encoded.byteLength, retained: false };
+    return {
+      serialized,
+      data: ownTerminalBytes(new Uint8Array()),
+      originalByteLength: encoded.byteLength,
+      retained: false,
+    } as PreparedTerminalSnapshot;
   }
-  return { data: encoded, originalByteLength: encoded.byteLength, retained: true };
+  return {
+    serialized,
+    data: ownTerminalBytes(encoded),
+    originalByteLength: encoded.byteLength,
+    retained: true,
+  } as PreparedTerminalSnapshot;
 }
 
 export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: OperationRecorder): TerminalEvent {
   measurements?.add("terminal.decoder.frames");
-  // The decoder only creates views into its exclusively received frame. This
-  // explicit zero keeps the Phase 14 ownership counter visible in snapshots.
-  measurements?.add("terminal.decoder.copiedBytes", 0);
   const frame = new Uint8Array(buffer);
   if (frame.length < COMMON_HEADER_BYTES) throw new Error("terminal frame is shorter than its common header");
   const labelLength = (frame[1] << 8) | frame[2];
@@ -89,8 +101,8 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
   const data = frame.subarray(payloadOffset);
 
   switch (frame[0]) {
-    case 1: return decodeTerminalBytes("seed", label, sequence, data);
-    case 2: return decodeTerminalBytes("output", label, sequence, data);
+    case 1: return decodeTerminalBytes("seed", label, sequence, data, measurements);
+    case 2: return decodeTerminalBytes("output", label, sequence, data, measurements);
     case 3:
       requireHostSequence(sequence, "topology dirty");
       requireEmptyPayload(data, "topology dirty");
@@ -132,7 +144,7 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       requireHostSequence(sequence, "protocol progress");
       if (label !== "protocol" || data.byteLength !== 0) throw new Error("protocol progress frame is malformed");
       return { kind: "protocolProgress", sequence };
-    case 9: return decodePaneResource(label, sequence, data);
+    case 9: return decodePaneResource(label, sequence, data, measurements);
     case 10: {
       requireLocalSequence(sequence, "terminal generation epoch");
       if (label !== "terminal") throw new Error("terminal generation epoch has an invalid label");
@@ -189,7 +201,12 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
   }
 }
 
-function decodePaneResource(paneId: string, sequence: number, payload: Uint8Array): TerminalEvent {
+function decodePaneResource(
+  paneId: string,
+  sequence: number,
+  payload: Uint8Array,
+  measurements?: OperationRecorder,
+): TerminalEvent {
   requireHostSequence(sequence, "pane resource");
   requirePaneId(paneId, "pane resource");
   if (payload.byteLength < PANE_RESOURCE_HEADER_BYTES) throw new Error("pane resource payload is truncated");
@@ -217,6 +234,9 @@ function decodePaneResource(paneId: string, sequence: number, payload: Uint8Arra
   } catch {
     throw new Error("pane resource recovery reason is not valid UTF-8");
   }
+  const serializedSnapshot = copyTerminalBytes(payload.subarray(reasonEnd, snapshotEnd));
+  const rawTail = copyTerminalBytes(payload.subarray(snapshotEnd));
+  measurements?.add("terminal.decoder.copiedBytes", serializedSnapshot.byteLength + rawTail.byteLength);
   return {
     kind: "paneResource",
     paneId,
@@ -226,11 +246,8 @@ function decodePaneResource(paneId: string, sequence: number, payload: Uint8Arra
     generation,
     snapshotGeneration,
     tailThroughGeneration,
-    // The channel hands this decoder an exclusive ArrayBuffer. Retain views of
-    // it here; TerminalWriteScheduler is the one explicit ownership-copy
-    // boundary before asynchronous xterm parsing.
-    serializedSnapshot: payload.subarray(reasonEnd, snapshotEnd),
-    rawTail: payload.subarray(snapshotEnd),
+    serializedSnapshot,
+    rawTail,
     sequence,
   };
 }
@@ -240,12 +257,15 @@ function decodeTerminalBytes(
   paneId: string,
   sequence: number,
   payload: Uint8Array,
+  measurements?: OperationRecorder,
 ): TerminalEvent {
   requireHostSequence(sequence, kind);
   requirePaneId(paneId, kind);
   if (payload.byteLength < 8) throw new Error(`${kind} frame omitted terminal generation`);
   const generation = decodeSafeU64(payload.subarray(0, 8), `${kind} generation`);
-  return { kind, paneId, generation, data: payload.subarray(8), sequence };
+  const data = copyTerminalBytes(payload.subarray(8));
+  measurements?.add("terminal.decoder.copiedBytes", data.byteLength);
+  return { kind, paneId, generation, data, sequence };
 }
 
 function decodeSafeU64(bytes: Uint8Array, label: string): number {

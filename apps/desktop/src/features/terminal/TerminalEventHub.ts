@@ -1,10 +1,10 @@
 import type { TerminalEvent } from "./api";
 import type { OperationRecorder } from "../../perf/operations";
 
-type Listener = (event: TerminalEvent) => void;
 type EpochEvent = Extract<TerminalEvent, { kind: "generationEpoch" }>;
 type EpochListener = (event: EpochEvent) => void;
 type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" }>;
+type PaneListener = (event: PaneEvent) => void;
 
 const DEFAULT_MAX_PANE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
@@ -19,7 +19,6 @@ interface PaneBacklogEntry {
 
 interface PaneBacklog {
   entries: PaneBacklogEntry[];
-  head: number;
   byteLength: number;
 }
 
@@ -41,9 +40,8 @@ export type TerminalEventAdmission =
  * insertion order is the hidden-pane LRU; subscribing consumes that entry.
  */
 export class TerminalEventHub {
-  readonly #listeners = new Set<Listener>();
   readonly #epochListeners = new Set<EpochListener>();
-  readonly #paneListeners = new Map<string, Set<Listener>>();
+  readonly #paneListeners = new Map<string, Set<PaneListener>>();
   readonly #backlogs = new Map<string, PaneBacklog>();
   readonly #lastGeneration = new Map<string, number>();
   readonly #lastPaneResource = new Map<string, Extract<PaneEvent, { kind: "paneResource" }>>();
@@ -90,10 +88,6 @@ export class TerminalEventHub {
         this.measurements?.add("terminal.hub.epochDeliveries");
         listener(event);
       }
-    }
-    for (const listener of this.#listeners) {
-      this.measurements?.add("terminal.hub.fanoutDeliveries");
-      listener(event);
     }
     if (event.kind === "generationEpoch") return admission;
     if (event.kind !== "seed" && event.kind !== "output" && event.kind !== "paneResource" && event.kind !== "seedDiagnostic") return admission;
@@ -149,11 +143,6 @@ export class TerminalEventHub {
     return admission;
   }
 
-  subscribe(listener: Listener): () => void {
-    this.#listeners.add(listener);
-    return () => this.#listeners.delete(listener);
-  }
-
   /**
    * Subscribes to admitted connection-epoch frames without joining the global
    * event fanout. Mounted panes use this lane so ordinary output is routed only
@@ -164,20 +153,18 @@ export class TerminalEventHub {
     return () => this.#epochListeners.delete(listener);
   }
 
-  subscribePane(paneId: string, listener: Listener): () => void {
-    const listeners = this.#paneListeners.get(paneId) ?? new Set<Listener>();
+  subscribePane(paneId: string, listener: PaneListener): () => void {
+    const listeners = this.#paneListeners.get(paneId) ?? new Set<PaneListener>();
     listeners.add(listener);
     this.#paneListeners.set(paneId, listeners);
     const backlog = this.#backlogs.get(paneId);
     if (backlog) {
       this.#deleteBacklog(paneId);
-      let delivered = 0;
-      while (backlog.head < backlog.entries.length) {
+      for (const entry of backlog.entries) {
         this.measurements?.add("terminal.hub.fanoutDeliveries");
-        listener(backlog.entries[backlog.head++].event);
-        delivered += 1;
+        listener(entry.event);
       }
-      this.measurements?.add("terminal.hub.backlogDequeues", delivered);
+      this.measurements?.add("terminal.hub.backlogDequeues", backlog.entries.length);
     }
     return () => {
       listeners.delete(listener);
@@ -256,7 +243,7 @@ export class TerminalEventHub {
     this.measurements?.add("terminal.hub.backlogEnqueues");
     // Detach before mutating so aggregate accounting always describes the
     // bytes actually retained in the map, including overflow/reseed paths.
-    const current = this.#takeBacklog(event.paneId) ?? { entries: [], head: 0, byteLength: 0 };
+    const current = this.#takeBacklog(event.paneId) ?? { entries: [], byteLength: 0 };
     if (event.kind === "seed") {
       this.#replaceBacklog(current, event, event.data.byteLength);
     } else if (event.kind === "paneResource") {
@@ -274,7 +261,7 @@ export class TerminalEventHub {
       this.#appendBacklog(current, event, event.data.byteLength);
     }
 
-    if (current.byteLength > this.#maxPaneBytes || this.#backlogLength(current) > this.#maxPaneEvents) {
+    if (current.byteLength > this.#maxPaneBytes || current.entries.length > this.#maxPaneEvents) {
       const limit = this.#maxPaneBytes === DEFAULT_MAX_PANE_BYTES ? "8 MiB" : `${this.#maxPaneBytes} bytes`;
       this.#requireSeed(
         event.paneId,
@@ -294,15 +281,14 @@ export class TerminalEventHub {
   }
 
   #replaceBacklog(backlog: PaneBacklog, event: PaneEvent, byteLength: number): void {
-    backlog.head = backlog.entries.length;
+    backlog.entries.length = 0;
     backlog.byteLength = 0;
-    this.#compactBacklog(backlog);
     this.#appendBacklog(backlog, event, byteLength);
   }
 
   #removeBacklogKind(backlog: PaneBacklog, kind: PaneEvent["kind"]): void {
     let write = 0;
-    for (let read = backlog.head; read < backlog.entries.length; read += 1) {
+    for (let read = 0; read < backlog.entries.length; read += 1) {
       const entry = backlog.entries[read];
       if (entry.event.kind === kind) {
         backlog.byteLength -= entry.byteLength;
@@ -311,27 +297,6 @@ export class TerminalEventHub {
       }
     }
     backlog.entries.length = write;
-    backlog.head = 0;
-  }
-
-  #compactBacklog(backlog: PaneBacklog): void {
-    if (backlog.head === 0) return;
-    if (backlog.head === backlog.entries.length) {
-      backlog.entries.length = 0;
-      backlog.head = 0;
-      return;
-    }
-    // Replacement events advance the head in O(1). Compact only after enough
-    // dead entries accrue, keeping retained array capacity bounded.
-    if (backlog.head < 64 || backlog.head * 2 < backlog.entries.length) return;
-    backlog.entries.copyWithin(0, backlog.head);
-    backlog.entries.length -= backlog.head;
-    backlog.head = 0;
-    this.measurements?.add("terminal.hub.backlogCompactions");
-  }
-
-  #backlogLength(backlog: PaneBacklog): number {
-    return backlog.entries.length - backlog.head;
   }
 
   #setBacklog(paneId: string, backlog: PaneBacklog): void {

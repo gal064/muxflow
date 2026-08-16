@@ -13,7 +13,8 @@ import {
   type TerminalMeasurements,
   type TerminalSize,
 } from "./cellMetrics";
-import type { OperationRecorder } from "../../perf/operations";
+import type { OwnedTerminalBytes } from "./TerminalBytes";
+import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
@@ -52,7 +53,7 @@ export type GridOutcome =
 
 export interface TerminalRenderer {
   open(element: HTMLElement): void;
-  seed(bytes: Uint8Array, onRendered?: () => void, generation?: number): void;
+  seed(bytes: OwnedTerminalBytes, onRendered?: () => void, generation?: number): void;
   /**
    * Replaces the screen with a cached or host-owned snapshot, unless doing so
    * would erase newer output or stand in for a seed the pane owes the host.
@@ -65,7 +66,7 @@ export interface TerminalRenderer {
     generation?: number,
     throughGeneration?: number,
   ): boolean;
-  write(bytes: Uint8Array, onRendered?: () => void, generation?: number): void;
+  write(bytes: OwnedTerminalBytes, onRendered?: () => void, generation?: number): void;
   /** Measures the CSS box in cells. Does not resize the terminal. */
   measure(): TerminalSize | undefined;
   /**
@@ -92,9 +93,6 @@ export interface TerminalRenderer {
   disposeGpuRenderer(): void;
   dispose(): void;
 }
-
-type FrameRequest = (callback: FrameRequestCallback) => number;
-type FrameCancel = (handle: number) => void;
 
 /** xterm's default-feeling scroll animation, used while the pane is keeping up. */
 const SMOOTH_SCROLL_DURATION_MS = 80;
@@ -129,261 +127,6 @@ export function restoreDecision(
     };
   }
   return { kind: "apply" };
-}
-
-function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
-  if (pieces.length === 1) return pieces[0];
-  const joined = new Uint8Array(length);
-  let offset = 0;
-  for (const piece of pieces) {
-    joined.set(piece, offset);
-    offset += piece.byteLength;
-  }
-  return joined;
-}
-
-/** A byte-preserving queue bounded across both JS and xterm's async parser. */
-export class TerminalWriteScheduler {
-  readonly #queue: Array<{ bytes: Uint8Array; onRendered?: () => void }> = [];
-  #queueHead = 0;
-  #frame?: number;
-  #disposed = false;
-  #pendingBytes = 0;
-  #inFlightBytes = 0;
-  #overflowed = false;
-  #accepting = true;
-  #immediateWriteUsed = false;
-  #immediateResetFrame?: number;
-  readonly #drainWaiters = new Set<() => void>();
-
-  constructor(
-    readonly writeChunk: (chunk: Uint8Array, done: () => void) => void,
-    readonly requestFrame: FrameRequest = (callback) => window.requestAnimationFrame(callback),
-    readonly cancelFrame: FrameCancel = (handle) => window.cancelAnimationFrame(handle),
-    readonly maxBytesPerFrame = 256 * 1024,
-    readonly maxPendingBytes = 8 * 1024 * 1024,
-    readonly onPendingBytes?: (bytes: number) => void,
-    readonly onOverflow?: (pendingBytes: number) => void,
-    readonly measurements?: OperationRecorder,
-  ) {}
-
-  enqueue(bytes: Uint8Array, onRendered?: () => void): boolean {
-    if (this.#disposed || !this.#accepting || this.#overflowed) return false;
-    if (bytes.byteLength === 0) {
-      onRendered?.();
-      return true;
-    }
-    if (this.#pendingBytes + bytes.byteLength > this.maxPendingBytes) {
-      const attemptedBytes = this.#pendingBytes + bytes.byteLength;
-      this.#dropQueued();
-      this.#overflowed = true;
-      this.onOverflow?.(attemptedBytes);
-      return false;
-    }
-    const owned = bytes.slice();
-    this.measurements?.add("terminal.scheduler.copiedBytes", bytes.byteLength);
-    return this.#enqueueOwned(owned, onRendered);
-  }
-
-  replace(bytes: Uint8Array, recoverOverflow = true, onRendered?: () => void): void {
-    if (this.#disposed || (this.#overflowed && !recoverOverflow)) return;
-    this.#dropQueued();
-    this.#overflowed = false;
-    const resetAndBytes = new Uint8Array(bytes.byteLength + 2);
-    resetAndBytes.set([0x1b, 0x63]);
-    resetAndBytes.set(bytes, 2);
-    if (this.#enqueueOwned(resetAndBytes, onRendered)) {
-      this.measurements?.add("terminal.scheduler.copiedBytes", bytes.byteLength);
-    }
-  }
-
-  clear(): void {
-    this.#dropQueued();
-    this.#overflowed = false;
-  }
-
-  #dropQueued(): void {
-    this.#queue.length = 0;
-    this.#queueHead = 0;
-    this.#pendingBytes = this.#inFlightBytes;
-    if (this.#frame !== undefined) this.cancelFrame(this.#frame);
-    this.#frame = undefined;
-    this.onPendingBytes?.(this.#pendingBytes);
-  }
-
-  dispose(): void {
-    this.clear();
-    this.#disposed = true;
-    this.#accepting = false;
-    if (this.#immediateResetFrame !== undefined) this.cancelFrame(this.#immediateResetFrame);
-    this.#immediateResetFrame = undefined;
-    // Bytes already inside xterm's parser are unrecoverable once the terminal
-    // is disposed: nothing will call their completion. Anyone awaiting the
-    // drain has to be released anyway, or the next reveal of this pane — which
-    // waits on that promise — never happens.
-    this.#pendingBytes = 0;
-    this.#inFlightBytes = 0;
-    this.#resolveDrainWaiters();
-  }
-
-  /** Stop admitting writes and resolve only after queued and in-flight bytes reach xterm. */
-  sealAndDrain(): Promise<void> {
-    this.#accepting = false;
-    if (this.#pendingBytes === 0) return Promise.resolve();
-    return new Promise((resolve) => this.#drainWaiters.add(resolve));
-  }
-
-  get pendingBytes(): number {
-    return this.#pendingBytes;
-  }
-
-  get overflowed(): boolean {
-    return this.#overflowed;
-  }
-
-  /** Queues a freshly allocated buffer whose ownership already belongs here. */
-  #enqueueOwned(bytes: Uint8Array, onRendered?: () => void): boolean {
-    if (this.#disposed || !this.#accepting || this.#overflowed) return false;
-    if (bytes.byteLength === 0) {
-      onRendered?.();
-      return true;
-    }
-    if (this.#pendingBytes + bytes.byteLength > this.maxPendingBytes) {
-      const attemptedBytes = this.#pendingBytes + bytes.byteLength;
-      this.#dropQueued();
-      this.#overflowed = true;
-      this.onOverflow?.(attemptedBytes);
-      return false;
-    }
-    this.measurements?.add("terminal.scheduler.enqueueOperations");
-    this.measurements?.add("terminal.scheduler.inputBytes", bytes.byteLength);
-    if (onRendered) this.measurements?.add("terminal.scheduler.callbacksQueued");
-    this.#queue.push({ bytes, onRendered });
-    this.#pendingBytes += bytes.byteLength;
-    this.measurements?.highWater?.("terminal.scheduler.pendingBytes", this.#pendingBytes);
-    this.measurements?.highWater?.("terminal.scheduler.queueDepth", this.#queueLength());
-    this.onPendingBytes?.(this.#pendingBytes);
-    this.#schedule();
-    return true;
-  }
-
-  #queueLength(): number {
-    return this.#queue.length - this.#queueHead;
-  }
-
-  #schedule(): void {
-    if (this.#disposed || this.#inFlightBytes || this.#frame !== undefined || this.#queueLength() === 0) return;
-    // Idle fast path. An echoed keystroke is a few bytes arriving into an empty
-    // queue, and waiting for the next animation frame quantises it by up to a
-    // whole frame — on a 60 Hz display that is most of the local keystroke
-    // budget spent doing nothing. At most one write per frame skips the wait,
-    // so a flood still gets frame-paced exactly as before.
-    if (this.#queueLength() === 1 && !this.#immediateWriteUsed) {
-      this.#immediateWriteUsed = true;
-      this.#armImmediateWriteReset();
-      this.#flush();
-      return;
-    }
-    this.#frame = this.requestFrame(() => this.#flush());
-    this.measurements?.add("terminal.scheduler.framesRequested");
-  }
-
-  #armImmediateWriteReset(): void {
-    if (this.#immediateResetFrame !== undefined) return;
-    this.#immediateResetFrame = this.requestFrame(() => {
-      this.#immediateResetFrame = undefined;
-      this.#immediateWriteUsed = false;
-      this.#schedule();
-    });
-    this.measurements?.add("terminal.scheduler.framesRequested");
-  }
-
-  /**
-   * Hands xterm one frame's worth of bytes: as many queued events as the byte
-   * budget covers, coalesced into a single write.
-   *
-   * Draining one *event* per frame was the renderer half of P12-U002. tmux
-   * splits an agent-TUI repaint across many output records, so a repaint cost a
-   * frame per record: 23 frames for a 4 KiB 24-record repaint, counted
-   * deterministically against an injected frame clock in
-   * `TerminalRenderer.test.ts` (a modelled frame count, not a wall-clock
-   * measurement) — and the keystroke echo queued behind it waited for all.
-   * The budget is bytes, so a flood is paced exactly as before, and coalescing
-   * keeps the "one write outstanding in xterm at a time" bound that the pending
-   * accounting, the overflow bound and the drain all rest on.
-   */
-  #flush(): void {
-    this.#frame = undefined;
-    if (this.#disposed || this.#inFlightBytes || this.#queueLength() === 0) return;
-    this.measurements?.add("terminal.scheduler.framesFlushed");
-    const pieces: Uint8Array[] = [];
-    const rendered: Array<() => void> = [];
-    let length = 0;
-    while (length < this.maxBytesPerFrame && this.#queueLength() > 0) {
-      const first = this.#queue[this.#queueHead];
-      const take = Math.min(first.bytes.byteLength, this.maxBytesPerFrame - length);
-      pieces.push(first.bytes.subarray(0, take));
-      length += take;
-      if (take === first.bytes.byteLength) {
-        this.#queueHead += 1;
-        this.measurements?.add("terminal.scheduler.dequeueOperations");
-        // A partially written event has not reached xterm yet, so its
-        // completion belongs to the frame that finishes it.
-        if (first.onRendered) rendered.push(first.onRendered);
-      } else {
-        first.bytes = first.bytes.subarray(take);
-      }
-    }
-    this.#compactQueue();
-    const chunk = joinChunks(pieces, length);
-    if (pieces.length > 1) this.measurements?.add("terminal.scheduler.copiedBytes", length);
-    this.#inFlightBytes = length;
-    let completed = false;
-    const done = () => {
-      if (completed) return;
-      completed = true;
-      this.#pendingBytes -= this.#inFlightBytes;
-      this.#inFlightBytes = 0;
-      this.onPendingBytes?.(this.#pendingBytes);
-      for (const onRendered of rendered) onRendered();
-      this.measurements?.add("terminal.scheduler.callbacksInvoked", rendered.length);
-      this.#resolveDrainWaiters();
-      this.#schedule();
-    };
-    try {
-      this.measurements?.add("terminal.scheduler.xtermWrites");
-      this.measurements?.add("terminal.scheduler.xtermWriteBytes", chunk.byteLength);
-      this.writeChunk(chunk, done);
-    } catch {
-      done();
-      this.#dropQueued();
-      this.#overflowed = true;
-      this.onOverflow?.(this.#pendingBytes);
-    }
-  }
-
-  #compactQueue(): void {
-    if (this.#queueHead === 0) return;
-    if (this.#queueHead === this.#queue.length) {
-      this.#queue.length = 0;
-      this.#queueHead = 0;
-      return;
-    }
-    // Keep dequeue O(1), occasionally moving only live entry references once
-    // enough dead prefix has accumulated.
-    if (this.#queueHead < 64 || this.#queueHead * 2 < this.#queue.length) return;
-    this.#queue.copyWithin(0, this.#queueHead);
-    this.#queue.length -= this.#queueHead;
-    this.#queueHead = 0;
-    this.measurements?.add("terminal.scheduler.queueCompactions");
-  }
-
-
-  #resolveDrainWaiters(): void {
-    if (this.#pendingBytes !== 0) return;
-    for (const resolve of this.#drainWaiters) resolve();
-    this.#drainWaiters.clear();
-  }
 }
 
 export class XtermRenderer implements TerminalRenderer {
@@ -535,7 +278,7 @@ export class XtermRenderer implements TerminalRenderer {
     this.#disposables.push({ dispose: () => query?.removeEventListener("change", onChange) });
   }
 
-  seed(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
+  seed(bytes: OwnedTerminalBytes, onRendered?: () => void, generation = 0): void {
     this.#newOutput = false;
     // A seed is the whole screen, so it also re-bases the applied-generation
     // watermark. Without that reset, a seed from a new terminal epoch — whose
@@ -568,9 +311,9 @@ export class XtermRenderer implements TerminalRenderer {
     return true;
   }
 
-  write(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
+  write(bytes: OwnedTerminalBytes, onRendered?: () => void, generation = 0): void {
     if (!this.#atBottom()) this.#newOutput = true;
-    if (!this.#scheduler.enqueue(bytes, this.#enqueued(generation, onRendered)) && this.#scheduler.overflowed) {
+    if (!this.#scheduler.enqueueOwned(bytes, this.#enqueued(generation, onRendered)) && this.#scheduler.overflowed) {
       // Only an overflow refusal means bytes were lost. The scheduler also
       // refuses when it is disposed or sealed for the hide drain, and asking
       // for a seed then would be recovery for a pane that is going away.

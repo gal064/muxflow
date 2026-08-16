@@ -14,6 +14,7 @@ import {
 import { terminalStateCache } from "./TerminalStateCache";
 import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./PaneRevealState";
 import { prepareTerminalSnapshot, requestTerminalSeed, setTerminalVisibility } from "./api";
+import { ownTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
 import { TerminalTransferSurface, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
 import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
@@ -147,7 +148,7 @@ export function TerminalPane({
   const rendererEpochRef = useRef<number | undefined>(undefined);
   const lastRevealKeyRef = useRef<string | undefined>(undefined);
   const revealStateRef = useRef<PaneRevealState>({ ready: false, hasLocalState: false });
-  const deferredOutputRef = useRef<Array<{ data: Uint8Array; generation: number; terminalEpoch?: number }>>([]);
+  const deferredOutputRef = useRef<Array<{ data: OwnedTerminalBytes; generation: number; terminalEpoch?: number }>>([]);
   const deferredOutputBytesRef = useRef(0);
   const seedDiagnosticForNextSeedRef = useRef(false);
   const [rendererDiagnostic, setRendererDiagnostic] = useState<string>();
@@ -281,7 +282,6 @@ export function TerminalPane({
     const unsubscribeInput = renderer.onInput((input) => inputRef.current(pane.id, input));
     const unsubscribeViewport = renderer.onViewportChange(setViewport);
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
-      if (!("paneId" in event)) return;
       const transition = reducePaneReveal(revealStateRef.current, event);
       revealStateRef.current = transition.state;
       const effect = transition.effect;
@@ -312,7 +312,7 @@ export function TerminalPane({
       } else if (effect.kind === "awaitSeed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
-        renderer.seed(new Uint8Array());
+        renderer.seed(ownTerminalBytes(new Uint8Array()));
         setRendererDiagnostic(`${effect.reason}; waiting for a fresh terminal seed…`);
         if (effect.requestSeed) requestFreshSeed(effect.reason);
       } else if (effect.kind === "restore") {
@@ -409,7 +409,7 @@ export function TerminalPane({
             : { ...currentCheckpoint, outputGeneration: 0 };
           const prepared = prepareTerminalSnapshot(drained.serialized);
           if (snapshotMatchesEpoch) {
-            terminalStateCache.set(pane.id, drained.serialized, checkpoint, prepared.originalByteLength);
+            terminalStateCache.set(pane.id, prepared, checkpoint);
           }
           else terminalStateCache.delete(pane.id);
           if (!prepared.retained && snapshotMatchesEpoch) {
