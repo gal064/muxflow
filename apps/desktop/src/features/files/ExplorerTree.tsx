@@ -3,11 +3,10 @@ import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
-import { Icon } from "../../ui/Icon";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { DownloadIntent } from "./downloadFlow";
 import { DownloadTransfers } from "./DownloadTransfers";
-import { fileIcon } from "./fileIcons";
+import { ExplorerEntryRow, ExplorerMoreRow, type ExplorerRowActions } from "./ExplorerRow";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
 import { recordPerfHighWater } from "../../perf/probe";
 
@@ -88,6 +87,20 @@ export function ExplorerTree(props: Props) {
   // ignored files showing with no visible reason and no way to put them back.
   useEffect(() => { setPending(undefined); setShowIgnored(false); }, [props.root?.token, props.scopeIdentity]);
 
+  // One stable object for every row, backed by a ref that render keeps current.
+  // Rebuilding these on each render would defeat the row memo boundary
+  // entirely: the props would differ every time even when the row did not.
+  const liveRowActions = useRef<ExplorerRowActions>(undefined as unknown as ExplorerRowActions);
+  const rowActionsRef = useMemo<ExplorerRowActions>(() => ({
+    toggle: (path) => liveRowActions.current.toggle(path),
+    open: (entry, options) => liveRowActions.current.open(entry, options),
+    focus: (index) => liveRowActions.current.focus(index),
+    contextMenu: (entry, anchor, index) => liveRowActions.current.contextMenu(entry, anchor, index),
+    keyDown: (event, index, depth, entry) => liveRowActions.current.keyDown(event, index, depth, entry),
+    loadMore: (directory) => liveRowActions.current.loadMore(directory),
+    moreKeyDown: (event, index) => liveRowActions.current.moreKeyDown(event, index),
+  }), []);
+
   const focusRow = (index: number) => {
     const next = Math.max(0, Math.min(rows.length - 1, index));
     setFocusIndex(next);
@@ -128,6 +141,21 @@ export function ExplorerTree(props: Props) {
       // pressing Enter is as deliberate as a double-click.
       if (entry.expandable) props.onToggle(entry.path); else props.onOpen(entry, { preview: false });
     }
+  };
+
+  liveRowActions.current = {
+    toggle: (path) => props.onToggle(path),
+    open: (entry, options) => props.onOpen(entry, options),
+    focus: (index) => setFocusIndex(index),
+    contextMenu: (entry, anchor, index) => {
+      focusRow(index);
+      setMenu({ ...(entry ? { entry } : {}), anchor });
+    },
+    keyDown: (event, index, depth, entry) => navigateEntry(event as KeyboardEvent<HTMLDivElement>, index, depth, entry),
+    loadMore: (directory) => props.onLoadMore(directory),
+    moreKeyDown: (event, index) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
+    },
   };
 
   const begin = (action: PendingAction["action"], entry?: FileEntry) => {
@@ -253,33 +281,25 @@ export function ExplorerTree(props: Props) {
       ref={treeRef}
       role="tree"
     >
-      {renderedRows.map((row, index) => {
-        if (row.kind === "more") return <button aria-level={row.depth + 1} className="load-more-files" data-tree-index={index} disabled={props.loading.has(row.directory)} key={`more:${row.directory}`} onClick={() => props.onLoadMore(row.directory)} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => {
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
-        }} role="treeitem" style={{ marginLeft: `${8 + row.depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1} type="button">Load more…</button>;
-        const { entry, depth } = row;
-        const isOpen = props.expanded.has(entry.path);
-        const icon = fileIcon(entry, isOpen);
-        return <div aria-expanded={entry.expandable ? isOpen : undefined} aria-level={depth + 1} aria-selected={index === focusIndex} className="file-row" data-tree-index={index} key={entry.path} onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry, { preview: true }); }} onDoubleClick={(event) => {
-          // The row's indent strip is outside the button but inside the row,
-          // so without this a file reached by clicking its padding could be
-          // previewed forever and never pinned.
-          if (event.target === event.currentTarget && !entry.expandable) props.onOpen(entry, { preview: false });
-        }} onContextMenu={(event) => {
-          event.preventDefault();
-          focusRow(index);
-          setMenu({ entry, anchor: { x: event.clientX, y: event.clientY } });
-        }} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => navigateEntry(event, index, depth, entry)} onPointerDown={() => setFocusIndex(index)} role="treeitem" style={{ paddingLeft: `${8 + depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1}>
-          {/* The click of a double-click fires first and opens the preview;
-              the second click then pins that same tab, which is exactly the
-              VS Code behaviour and needs no click-delay timer. */}
-          <button className="file-main" onClick={() => entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry, { preview: true })} onDoubleClick={() => { if (!entry.expandable) props.onOpen(entry, { preview: false }); }} tabIndex={-1} type="button">
-            <span className="file-twisty">{entry.expandable ? <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={11} /> : null}</span>
-            <span className={`file-icon ${entry.kind}`} style={{ color: icon.color }}><Icon name={icon.icon} size={14} /></span>
-            <span title={entryTooltip(entry)}>{entry.name}</span>
-          </button>
-        </div>;
-      })}
+      {renderedRows.map((row, index) => row.kind === "more"
+        ? <ExplorerMoreRow
+          actions={rowActionsRef}
+          depth={row.depth}
+          directory={row.directory}
+          disabled={props.loading.has(row.directory)}
+          focused={index === focusIndex}
+          index={index}
+          key={`more:${row.directory}`}
+        />
+        : <ExplorerEntryRow
+          actions={rowActionsRef}
+          depth={row.depth}
+          entry={row.entry}
+          focused={index === focusIndex}
+          index={index}
+          key={row.entry.path}
+          open={props.expanded.has(row.entry.path)}
+        />)}
       {/* Only until this directory has answered once — "we have no listing yet",
           not "we have no rows", so a directory that is genuinely empty does not
           swap between these two lines every time it is re-read either.
@@ -376,10 +396,3 @@ function labelForAction(action: PendingAction["action"]): string {
   return ({ newFile: "Create file", newDirectory: "Create folder", rename: "Rename", move: "Move", duplicate: "Duplicate", delete: "Delete" } as const)[action];
 }
 
-function entryTooltip(entry: FileEntry): string {
-  const modified = Number(entry.modifiedMillis);
-  const lines = [entry.path, `${entry.kind} · ${entry.sizeBytes} bytes`];
-  if (Number.isFinite(modified) && modified > 0) lines.push(`Modified ${new Date(modified).toLocaleString()}`);
-  if (entry.symlinkTarget) lines.push(`Symlink → ${entry.symlinkTarget}`);
-  return lines.join("\n");
-}

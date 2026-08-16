@@ -1,8 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { keyForScope, keyForTransferConnection, sameRoot } from "./api";
 import { measurePerfOutcome, recordPerfCounter } from "../../perf/probe";
 import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
 import { isTerminalTransferState, mergeCanonicalTransfer } from "../transfers/transferState";
+import { DirectoryListingCache } from "./directoryCache";
+import {
+  appendPage,
+  isRecoveryReason,
+  parentPath,
+  patchEntry,
+  reachableWatchTargets,
+  removeEntry,
+  type RecoveryReason,
+} from "./listingModel";
+import { DirectoryWatchLeases } from "./watchLeases";
 import type {
   ActiveRoot,
   DirectoryListing,
@@ -30,21 +41,24 @@ const EXTERNAL_CHANGE_PAINT = ["explorer.externalChangeToPaint"] as const;
 type DirectoryLoadResult = "applied" | "stale" | "failed";
 
 /**
- * How often the workspace root is re-resolved when nothing has changed. Every
- * event that *can* be pushed already re-resolves it immediately; this only
- * covers `cd` inside the current pane, which tmux does not announce.
+ * How often the active root is re-checked when nothing has announced a change,
+ * and only while this window is in the foreground.
+ *
+ * Every event that *can* be pushed already re-resolves it immediately; this
+ * covers `cd` inside the current pane, which tmux does not announce. It is a
+ * backstop rather than a pipeline: a hidden window checks nothing at all, and
+ * the host answers an unchanged root from the caller's own capability without a
+ * second authoritative discovery or a broadcast payload.
  */
-export const ACTIVE_ROOT_POLL_MS = 2_000;
+export const ACTIVE_ROOT_BACKSTOP_MS = 15_000;
 
 /**
- * How long one directory's filesystem events are gathered before it is re-read.
+ * How long one directory's *recovery* is deferred before it is re-read.
  *
- * Every event used to re-read immediately, so a directory an agent is writing
- * into was re-listed once per write — over SSH that is a round trip per write,
- * all of them asking the same question. The window is a throttle rather than a
- * debounce (it starts at the first event of a burst and is not pushed back by
- * later ones), because a directory under continuous change must still refresh
- * on a bounded schedule rather than only once the writing stops.
+ * Only events a cached listing could not answer reach this. Precise events with
+ * a mapped entry patch the listing in place and cost no request at all, so this
+ * window now throttles genuine gaps — overflow, an incomplete page, an entry
+ * the host could not map — rather than ordinary file writes.
  */
 export const DIRECTORY_REFRESH_COALESCE_MS = 150;
 
@@ -63,12 +77,51 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const scopeEpoch = useRef(0);
   const rootProbeSerial = useRef(0);
   const directorySerial = useRef(new Map<string, number>());
+  const listAborts = useRef(new Map<string, AbortController>());
   const refreshTimers = useRef(new Map<string, { timer: ReturnType<typeof setTimeout>; paint: PaintTicket }>());
   const paintGenerations = useRef(new Map<string, number>());
+  /** Expansions whose paint is owed by a watch bootstrap that has not landed. */
+  const pendingExpandPaints = useRef(new Map<string, { paint: PaintTicket; generation: number }>());
+  const cache = useRef(new DirectoryListingCache());
+  const leases = useRef(new DirectoryWatchLeases());
   const scopeKey = scope ? keyForScope(scope) : "";
   const transferConnectionKey = scope ? keyForTransferConnection(scope) : "";
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
+
+  /** Stops bounded remote work for reads nothing will read any more. */
+  const abortListing = useCallback((predicate: (path: string) => boolean) => {
+    for (const [path, controller] of [...listAborts.current]) {
+      if (!predicate(path)) continue;
+      listAborts.current.delete(path);
+      controller.abort();
+    }
+  }, []);
+
+  /**
+   * Installs an authoritative listing for one directory.
+   *
+   * The one place a listing enters the tree, so caching, loading state, and the
+   * root-token guard cannot drift apart between the watch bootstrap, an
+   * authoritative rescan, and a recovery list.
+   */
+  const applyListing = useCallback((root: ActiveRoot, directory: string, listing: DirectoryListing) => {
+    const activeScope = scopeRef.current;
+    if (!activeScope || listing.rootToken !== root.token) return;
+    cache.current.set({ clientId: activeScope.clientId, rootToken: root.token, directory }, listing);
+    setState((current) => {
+      if (!sameRoot(current.root, root) || listing.rootToken !== root.token) return current;
+      // Only directories the tree is actually showing. A snapshot that races a
+      // collapse, or a recovery list whose directory was deleted underneath it,
+      // must not put rows back into a tree that no longer reaches them.
+      if (!current.expanded.has(directory)) return current;
+      const listings = new Map(current.listings);
+      listings.set(directory, listing);
+      const loading = new Set(current.loading);
+      loading.delete(directory);
+      return { ...current, listings, loading };
+    });
+  }, []);
 
   /**
    * Reads one directory, against the root the caller was authorised for.
@@ -85,22 +138,19 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const loadDirectory = useCallback(async (
     root: ActiveRoot,
     path: string,
-    force = false,
     append = false,
   ): Promise<DirectoryLoadResult> => {
     const activeScope = scopeRef.current;
     if (!activeScope || keyForScope(activeScope) !== scopeKey) return "stale";
     if (!sameRoot(stateRef.current.root, root)) return "stale";
     const previous = stateRef.current.listings.get(path);
-    if (!force && !append && previous) {
-      recordPerfCounter("explorer.cacheHits");
-      return "applied";
-    }
-    recordPerfCounter("explorer.cacheMisses");
     if (append && (!previous?.nextPageToken || previous.complete)) return "stale";
     const epoch = scopeEpoch.current;
     const serial = (directorySerial.current.get(path) ?? 0) + 1;
     directorySerial.current.set(path, serial);
+    const controller = new AbortController();
+    listAborts.current.get(path)?.abort();
+    listAborts.current.set(path, controller);
     setState((current) => ({ ...current, loading: new Set(current.loading).add(path), error: undefined }));
     try {
       // What a directory read costs on this link, when `ADE_PERF_LOG` is set and
@@ -108,36 +158,32 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       // visible when this number is large, and until now nothing measured it.
       const listing = await measurePerfOutcome(
         append ? "files.listDirectory.page" : "files.listDirectory",
-        () => client.listDirectory(activeScope, root, path, append ? previous?.nextPageToken : undefined),
+        () => client.listDirectory(activeScope, root, path, {
+          ...(append && previous?.nextPageToken ? { pageToken: previous.nextPageToken } : {}),
+          signal: controller.signal,
+        }),
       );
+      if (listAborts.current.get(path) === controller) listAborts.current.delete(path);
       if (epoch !== scopeEpoch.current || directorySerial.current.get(path) !== serial || keyForScope(activeScope) !== scopeKey) return "stale";
       if (!sameRoot(stateRef.current.root, root) || listing.rootToken !== root.token) return "stale";
-      setState((current) => {
-        if (!sameRoot(current.root, root) || listing.rootToken !== root.token) return current;
-        const listings = new Map(current.listings);
-        listings.set(path, append && previous ? {
-          ...listing,
-          entries: mergeEntries(previous.entries, listing.entries),
-          overflowRecovery: previous.overflowRecovery || listing.overflowRecovery,
-        } : listing);
-        const loading = new Set(current.loading);
-        loading.delete(path);
-        return { ...current, listings, loading };
-      });
+      applyListing(root, path, append && previous ? appendPage(previous, listing) : listing);
       return "applied";
     } catch (error) {
+      if (listAborts.current.get(path) === controller) listAborts.current.delete(path);
+      const aborted = controller.signal.aborted;
       setState((current) => {
         const loading = new Set(current.loading);
         loading.delete(path);
-        return sameRoot(current.root, root) ? { ...current, loading, error: String(error) } : current;
+        if (!sameRoot(current.root, root)) return current;
+        return aborted ? { ...current, loading } : { ...current, loading, error: String(error) };
       });
-      return "failed";
+      return aborted ? "stale" : "failed";
     }
-  }, [client, scopeKey]);
+  }, [applyListing, client, scopeKey]);
 
   /**
-   * Re-reads a directory that filesystem events say has changed, at most once
-   * per `DIRECTORY_REFRESH_COALESCE_MS`.
+   * Re-reads a directory whose cached listing could not answer an event, at
+   * most once per `DIRECTORY_REFRESH_COALESCE_MS`.
    *
    * The timer is started by the first event of a burst and deliberately not
    * pushed back by the ones behind it: a directory an agent is writing into
@@ -146,16 +192,17 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
    * The root token the event arrived under is carried through the wait and
    * re-checked on the far side. Before there was a wait, the caller's "is this
    * event for the root we are showing?" test and the request it authorised were
-   * the same instant; a delay puts a root change between them — the active root
-   * is re-resolved every two seconds, and an agent's `cd` moves it — and without
-   * this the timer would list a path from the old root against the new one. The
+   * the same instant; a delay puts a root change between them, and without this
+   * the timer would list a path from the old root against the new one. The
    * completion guards cannot catch that, because they compare against the root
    * the request was issued with, which is the new one.
    */
-  const coalesceRefresh = useCallback((root: ActiveRoot, path: string) => {
+  const coalesceRecovery = useCallback((root: ActiveRoot, path: string, reason: RecoveryReason) => {
     const timers = refreshTimers.current;
     const key = `${root.token}\0${path}`;
     if (timers.has(key)) return;
+    recordPerfCounter("explorer.recoveryLists");
+    recordPerfCounter(`explorer.recovery.${reason}`);
     const paint = createPaintTicket(EXTERNAL_CHANGE_PAINT, scopeEpoch.current);
     const timer = setTimeout(() => {
       timers.delete(key);
@@ -163,7 +210,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
         paint.abandon();
         return;
       }
-      void loadDirectory(root, path, true).then((result) => {
+      void loadDirectory(root, path).then((result) => {
         if (result !== "applied") {
           paint.abandon();
           return;
@@ -175,6 +222,30 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     }, DIRECTORY_REFRESH_COALESCE_MS);
     timers.set(key, { timer, paint });
   }, [loadDirectory]);
+
+  /**
+   * Applies one precise change to the cached listing that owns it.
+   *
+   * A patch is measured, deliberate, and free: one remote file write moves one
+   * row. Only an event a complete listing genuinely cannot represent falls
+   * through to a recovery list.
+   */
+  const applyPrecise = useCallback((
+    root: ActiveRoot,
+    directory: string,
+    patched: DirectoryListing | RecoveryReason,
+  ) => {
+    if (isRecoveryReason(patched)) {
+      coalesceRecovery(root, directory, patched);
+      return;
+    }
+    recordPerfCounter("explorer.listingPatches");
+    const paint = createPaintTicket(EXTERNAL_CHANGE_PAINT, scopeEpoch.current);
+    applyListing(root, directory, patched);
+    paint.afterPaint((ticket) => ticket.lifecycleGeneration === scopeEpoch.current
+      && sameRoot(stateRef.current.root, root)
+      && stateRef.current.expanded.has(directory));
+  }, [applyListing, coalesceRecovery]);
 
   const applyEvent = useCallback((event: WorkspaceEvent) => {
     const current = stateRef.current;
@@ -191,17 +262,32 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       setState((value) => ({ ...value, transfers: upsertTransfer(value.transfers, event.transfer) }));
       return;
     }
-    if (!current.root || event.rootToken !== current.root.token) return;
-    if (event.kind === "directoryChanged") {
-      coalesceRefresh(current.root, event.directory);
-    } else if (event.kind === "fileChanged" || event.kind === "fileDeleted") {
-      coalesceRefresh(current.root, parentPath(event.path));
+    const root = current.root;
+    if (!root || event.rootToken !== root.token) return;
+    if (event.kind === "directorySnapshot") {
+      // Authoritative: the host re-listed and this *is* the directory now.
+      recordPerfCounter("explorer.authoritativeSnapshots");
+      applyListing(root, event.listing.directory, event.listing);
+      return;
     }
-  }, [coalesceRefresh]);
+    const directory = parentPath(event.path);
+    if (event.kind === "fileChanged") {
+      applyPrecise(root, directory, event.entry
+        ? patchEntry(current.listings.get(directory), event.entry)
+        : "unmappable");
+      return;
+    }
+    // A deleted directory takes its whole cached subtree with it.
+    setState((value) => pruneSubtree(value, event.path));
+    abortListing((path) => path === event.path || path.startsWith(`${event.path}/`));
+    applyPrecise(root, directory, removeEntry(current.listings.get(directory), event.path));
+  }, [abortListing, applyListing, applyPrecise, transferConnectionKey]);
 
   useEffect(() => {
     scopeEpoch.current += 1;
+    abortListing(() => true);
     if (!scope) {
+      cache.current.clear();
       setState((current) => ({
         scopeKey: "", transferConnectionKey: "", listings: new Map(), expanded: new Set(), loading: new Set(),
         requestedReads: 0,
@@ -239,7 +325,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
           rootPaint.abandon();
           return;
         }
-        const root = await client.resolveActiveRoot(activeScope);
+        const known = stateRef.current.root?.token;
+        const root = await client.resolveActiveRoot(activeScope, known ? { knownRootToken: known } : {});
         if (disposed || epoch !== scopeEpoch.current || probe !== rootProbeSerial.current) {
           rootPaint.abandon();
           return;
@@ -248,14 +335,19 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
           rootPaint.abandon();
           return;
         }
+        // A replaced root invalidates every path, listing, and content the
+        // previous one authorised: the same path under a new capability is a
+        // different file.
+        abortListing(() => true);
+        cache.current.invalidateOtherRoots(activeScope.clientId, root.token);
         setState((current) => ({
-            ...current,
-            scopeKey,
-            root,
-            listings: new Map(),
-            expanded: new Set([root.path]),
-            loading: new Set(),
-            error: undefined,
+          ...current,
+          scopeKey,
+          root,
+          listings: new Map(),
+          expanded: new Set([root.path]),
+          loading: new Set(),
+          error: undefined,
         }));
         rootPaint.afterPaint((ticket) => !disposed
           && ticket.lifecycleGeneration === scopeEpoch.current
@@ -269,17 +361,22 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       }
     };
     void resolve();
-    // A backstop, not the primary path. Pane and window changes already rebuild
+    // A foreground backstop, not a pipeline. Pane and window changes rebuild
     // this scope and re-resolve immediately, so the only thing left for a timer
-    // to catch is the user running `cd` inside the pane they are already in —
-    // for which tmux emits no notification at all, so nothing can push it.
-    // At 350 ms this was a host round trip three times a second forever, which
-    // over SSH is three round trips a second on an idle connection.
-    const poll = window.setInterval(() => { void resolve(); }, ACTIVE_ROOT_POLL_MS);
+    // to catch is `cd` inside the pane the user is already in — for which tmux
+    // emits no notification at all. A hidden window checks nothing, and a
+    // window that becomes visible checks once on the transition rather than
+    // waiting out the interval.
+    const foreground = () => typeof document === "undefined" || document.visibilityState === "visible";
+    const backstop = window.setInterval(() => { if (foreground()) void resolve(); }, ACTIVE_ROOT_BACKSTOP_MS);
+    const onVisibility = () => { if (foreground()) void resolve(); };
+    document?.addEventListener?.("visibilitychange", onVisibility);
     return () => {
       disposed = true;
       scopeEpoch.current += 1;
-      window.clearInterval(poll);
+      window.clearInterval(backstop);
+      document?.removeEventListener?.("visibilitychange", onVisibility);
+      abortListing(() => true);
       // A refresh still waiting out its window belongs to the scope that is
       // going away; letting it fire would read a directory for a pane the user
       // has already left.
@@ -291,34 +388,45 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       paintGenerations.current.clear();
       unsubscribe?.();
     };
-  }, [applyEvent, client, scopeKey]);
+    // `scope` is deliberately not a dependency: `scopeKey` is its exact
+    // identity, and an unmemoized caller object would otherwise tear this
+    // subscription down and rebuild it on every render.
+  }, [abortListing, applyEvent, client, scopeKey, transferConnectionKey]);
 
+  // The watch set belongs to one connection and one root capability. Its
+  // cleanup runs before the next sync below, so a replaced root releases every
+  // watch it held before the replacement acquires anything.
+  const rootToken = state.root?.token;
   useEffect(() => {
-    if (state.root && !state.listings.has(state.root.path)) void loadDirectory(state.root, state.root.path);
-  }, [loadDirectory, state.listings, state.root]);
+    const held = leases.current;
+    return () => held.releaseAll();
+  }, [rootToken, scopeKey]);
 
+  /**
+   * Exactly the directories the tree can currently reach, and therefore exactly
+   * the watches it should hold. The watch bootstrap is the directory's listing,
+   * so an expansion pays one round trip rather than a list and a watch.
+   */
+  const watchTargets = useMemo(
+    () => state.root ? reachableWatchTargets(state.root.path, state.listings, state.expanded) : [],
+    [state.expanded, state.listings, state.root],
+  );
+  // NUL cannot appear in a path, so this is an exact identity for the set,
+  // and it keeps the sync below from re-running when nothing about which
+  // directories are open actually moved.
+  const watchTargetKey = watchTargets.join("\u0000");
   useEffect(() => {
     const activeScope = scopeRef.current;
-    if (!activeScope || !state.root) return;
-    let disposed = false;
-    let releases: (() => void)[] = [];
-    void Promise.allSettled([...state.expanded].map((directory) => client.acquireDirectoryWatch(activeScope, state.root!, directory))).then((results) => {
-      const next = results.filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<FileWorkspaceClient["acquireDirectoryWatch"]>>> => result.status === "fulfilled").map((result) => result.value);
-      if (disposed) next.forEach((lease) => lease.release());
-      else {
-        releases = next.map((lease) => lease.release);
-        setState((current) => {
-          if (!sameRoot(current.root, state.root)) return current;
-          const listings = new Map(current.listings);
-          for (const lease of next) if (lease.snapshot.rootToken === state.root!.token) listings.set(lease.snapshot.directory, lease.snapshot);
-          return { ...current, listings };
-        });
-        const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
-        if (failure) setState((current) => sameRoot(current.root, state.root) ? { ...current, error: String(failure.reason) } : current);
-      }
+    const root = stateRef.current.root;
+    if (!activeScope || !root) return;
+    leases.current.sync(watchTargetKey ? watchTargetKey.split("\u0000") : [], {
+      acquire: (directory) => client.acquireDirectoryWatch(activeScope, root, directory),
+      onBootstrap: (directory, listing) => applyListing(root, directory, listing),
+      onError: (directory, error) => setState((current) => sameRoot(current.root, root)
+        ? { ...current, loading: withoutPath(current.loading, directory), error: String(error) }
+        : current),
     });
-    return () => { disposed = true; releases.forEach((release) => release()); };
-  }, [client, scopeKey, state.expanded, state.root]);
+  }, [applyListing, client, scopeKey, watchTargetKey]);
 
   const toggleDirectory = useCallback((path: string) => {
     const expanding = !stateRef.current.expanded.has(path);
@@ -327,25 +435,58 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const paint = expanding ? createPaintTicket(
       ["explorer.expandToPaint", "workflow.explorer.directoryExpandPaint"], generation,
     ) : undefined;
+    const root = stateRef.current.root;
+    const activeScope = scopeRef.current;
+    // A valid cached revisit paints now; the watch bootstrap revalidates it.
+    let painted = stateRef.current.listings.has(path);
+    if (expanding && root && activeScope && !painted) {
+      const cached = cache.current.get({ clientId: activeScope.clientId, rootToken: root.token, directory: path });
+      if (cached) {
+        recordPerfCounter("explorer.cacheHits");
+        painted = true;
+        applyListing(root, path, cached);
+      } else {
+        recordPerfCounter("explorer.cacheMisses");
+      }
+    }
     setState((current) => {
       const expanded = new Set(current.expanded);
       if (expanded.has(path)) expanded.delete(path);
       else expanded.add(path);
-      return { ...current, expanded };
+      const loading = new Set(current.loading);
+      if (!expanded.has(path)) loading.delete(path);
+      else if (!current.listings.has(path) && !painted) loading.add(path);
+      return { ...current, expanded, loading };
     });
-    const root = stateRef.current.root;
-    const schedulePaint = () => paint?.afterPaint((ticket) =>
-      ticket.lifecycleGeneration === paintGenerations.current.get(path)
-      && sameRoot(stateRef.current.root, root)
-      && stateRef.current.expanded.has(path));
-    if (root && !stateRef.current.listings.has(path)) {
-      void loadDirectory(root, path).then((result) => {
-        if (result === "applied") schedulePaint();
-        else paint?.abandon();
-      });
+    if (!expanding) {
+      // Collapsing stops the work its rows were asking for. The watch itself is
+      // released by the sync effect, which is one unwatch for this directory.
+      abortListing((candidate) => candidate === path || candidate.startsWith(`${path}/`));
     }
-    else schedulePaint();
-  }, [loadDirectory]);
+    if (painted || !expanding) {
+      paint?.afterPaint((ticket) => ticket.lifecycleGeneration === paintGenerations.current.get(path)
+        && sameRoot(stateRef.current.root, root)
+        && stateRef.current.expanded.has(path));
+      return;
+    }
+    // Nothing local to paint: the watch bootstrap this expansion triggers is
+    // the listing, so the paint ticket resolves when that arrives.
+    if (paint) pendingExpandPaints.current.set(path, { paint, generation });
+  }, [abortListing, applyListing]);
+
+  useEffect(() => {
+    for (const [path, pending] of [...pendingExpandPaints.current]) {
+      if (!state.expanded.has(path) || paintGenerations.current.get(path) !== pending.generation) {
+        pendingExpandPaints.current.delete(path);
+        pending.paint.abandon();
+        continue;
+      }
+      if (!state.listings.has(path)) continue;
+      pendingExpandPaints.current.delete(path);
+      pending.paint.afterPaint((ticket) => ticket.lifecycleGeneration === paintGenerations.current.get(path)
+        && stateRef.current.expanded.has(path));
+    }
+  }, [state.expanded, state.listings]);
 
   /**
    * A read a person asked for, which is the one kind that owes them an answer.
@@ -362,7 +503,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const target = directory ?? root?.path;
     if (!root || !target) return;
     setState((current) => ({ ...current, requestedReads: current.requestedReads + 1 }));
-    void loadDirectory(root, target, true).finally(() => {
+    void loadDirectory(root, target).finally(() => {
       setState((current) => ({ ...current, requestedReads: Math.max(0, current.requestedReads - 1) }));
     });
   }, [loadDirectory]);
@@ -374,7 +515,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
 
   const loadMore = useCallback((directory: string) => {
     const root = stateRef.current.root;
-    if (root) void loadDirectory(root, directory, false, true);
+    if (root) void loadDirectory(root, directory, true);
   }, [loadDirectory]);
 
   // Effects run after paint. Mask the prior pane synchronously on the render
@@ -391,6 +532,26 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       : state.transfers.map(staleTransferOnScopeReplacement),
   };
   return { ...visible, toggleDirectory, refresh, recordTransfer, loadMore };
+}
+
+function withoutPath(paths: ReadonlySet<string>, path: string): Set<string> {
+  const next = new Set(paths);
+  next.delete(path);
+  return next;
+}
+
+/** Drops a deleted directory and everything the tree cached beneath it. */
+function pruneSubtree(state: WorkspaceFilesState, path: string): WorkspaceFilesState {
+  const prefix = `${path}/`;
+  const covered = (candidate: string) => candidate === path || candidate.startsWith(prefix);
+  if (![...state.listings.keys()].some(covered) && ![...state.expanded].some(covered)) return state;
+  const listings = new Map(state.listings);
+  const expanded = new Set(state.expanded);
+  const loading = new Set(state.loading);
+  for (const key of [...listings.keys()]) if (covered(key)) listings.delete(key);
+  for (const key of [...expanded]) if (covered(key)) expanded.delete(key);
+  for (const key of [...loading]) if (covered(key)) loading.delete(key);
+  return { ...state, listings, expanded, loading };
 }
 
 function staleTransferOnScopeReplacement(transfer: TransferStatus): TransferStatus {
@@ -410,15 +571,4 @@ function upsertTransfer(transfers: readonly TransferStatus[], next: TransferStat
   const copy = [...transfers];
   copy[index] = mergeCanonicalTransfer(copy[index], next);
   return copy;
-}
-
-function mergeEntries(previous: readonly DirectoryListing["entries"][number][], next: readonly DirectoryListing["entries"][number][]) {
-  const byPath = new Map(previous.map((entry) => [entry.path, entry]));
-  for (const entry of next) byPath.set(entry.path, entry);
-  return [...byPath.values()];
-}
-
-function parentPath(path: string): string {
-  const index = path.lastIndexOf("/");
-  return index <= 0 ? "/" : path.slice(0, index);
 }

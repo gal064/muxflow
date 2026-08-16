@@ -92,6 +92,16 @@ pub(super) async fn handle(
         bulk_connection,
     } = context;
     match operation {
+        v1::Operation::OpenFileStream => {
+            super::file_stream_dispatch::handle(
+                request_id,
+                request,
+                Arc::clone(&cancellation),
+                control_tx,
+                files,
+            )
+            .await;
+        }
         v1::Operation::ListDirectory | v1::Operation::WatchDirectory => {
             let Some(file) = request.file else {
                 send_response(
@@ -121,6 +131,7 @@ pub(super) async fn handle(
             let watch_id = file.watch_id.clone();
             let page_token = file.page_token.clone();
             let page_size = file.page_size;
+            let listing_cancellation = Arc::clone(&cancellation);
             let result = tokio::task::spawn_blocking(move || {
                 if watch {
                     service.watch_directory_authorized(&root, &root_token, &path, &watch_id)
@@ -132,6 +143,7 @@ pub(super) async fn handle(
                         &watch_id,
                         &page_token,
                         page_size,
+                        &listing_cancellation,
                     )
                 }
             })
@@ -140,7 +152,17 @@ pub(super) async fn handle(
                 Ok(Ok(snapshot)) => {
                     file_response(&file.operation_id, |value| value.directory = Some(snapshot))
                 }
-                Ok(Err(error)) => response_error("directory_rejected", &error.to_string()),
+                Ok(Err(error)) => {
+                    let message = error.to_string();
+                    let code = if message.starts_with("cancelled") {
+                        "cancelled"
+                    } else if message.starts_with("stale_page_token") {
+                        "stale_page_token"
+                    } else {
+                        "directory_rejected"
+                    };
+                    response_error(code, &message)
+                }
                 Err(error) => response_error("directory_task_failed", &error.to_string()),
             };
             send_response(control_tx, request_id, response).await;

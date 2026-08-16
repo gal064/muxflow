@@ -1,34 +1,7 @@
+use super::watch_fallback::{
+    FALLBACK_TICK, FallbackTurn, advance_target_async, native_retry_due, record_native_retry,
+};
 use super::*;
-
-const FALLBACK_SCAN_INTERVAL: Duration = Duration::from_millis(25);
-pub(super) const FALLBACK_SCAN_ENTRY_BUDGET: usize = 2_048;
-const FALLBACK_SCAN_TIME_BUDGET: Duration = Duration::from_millis(8);
-const FALLBACK_AUTHORITATIVE_CYCLES: u64 = 16;
-
-pub(super) struct FallbackScan {
-    iterator: Option<fs::ReadDir>,
-    accumulator: u64,
-    last_completed: u64,
-    completed_cycles: u64,
-}
-
-impl FallbackScan {
-    pub(super) fn new(initial: u64) -> Self {
-        Self {
-            iterator: None,
-            accumulator: 0,
-            last_completed: initial,
-            completed_cycles: 0,
-        }
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) struct FallbackShard {
-    pub(super) processed: usize,
-    pub(super) completed: bool,
-    pub(super) emit_authoritative: bool,
-}
 
 #[derive(Clone)]
 pub(super) struct Watch {
@@ -37,7 +10,9 @@ pub(super) struct Watch {
     pub(super) path: String,
     pub(super) target: PathBuf,
     pub(super) target_directory: Arc<File>,
-    pub(super) fallback_scan: Arc<Mutex<FallbackScan>>,
+    /// This exact target's fallback state. Only a target the native watcher
+    /// refused ever polls; every healthy watch stays idle.
+    pub(super) fallback: Arc<Mutex<FallbackTarget>>,
 }
 
 impl FileService {
@@ -71,14 +46,14 @@ impl FileService {
             }
             let _ = native_tx.try_send(());
         });
+        self.spawn_polling_fallback(Arc::clone(&closed), sender.clone(), Arc::clone(&overflowed));
         let Ok(watcher) = watcher else {
+            // No native watcher at all: every registration below fails closed
+            // onto this connection's per-target fallback.
             overflowed.store(true, Ordering::Release);
-            self.polling_fallback.store(true, Ordering::Release);
-            self.spawn_polling_fallback(closed, sender, overflowed);
             return;
         };
         *self.native_watcher.lock().unwrap() = Some(watcher);
-        self.spawn_polling_fallback(Arc::clone(&closed), sender.clone(), Arc::clone(&overflowed));
         let service = Arc::clone(self);
         tokio::spawn(async move {
             while !closed.load(Ordering::Acquire) {
@@ -98,13 +73,7 @@ impl FileService {
                         Ok(event)
                     })
                     .collect();
-                let watches: Vec<_> = service
-                    .watches
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|(id, watch)| (id.clone(), watch.clone()))
-                    .collect();
+                let watches = service.watch_entries();
                 let all_rescan = native_rescan.swap(false, Ordering::AcqRel);
                 for (watch_id, watch) in watches
                     .into_iter()
@@ -116,50 +85,104 @@ impl FileService {
                         }
                         continue;
                     }
-                    let path = watch.path.clone();
-                    let listing_watch_id = watch_id.clone();
-                    let root = Arc::clone(&watch.root);
-                    let listed = tokio::task::spawn_blocking(move || {
-                        list_directory_impl(&root, &path, &listing_watch_id, 0, "", 0)
-                    })
-                    .await;
-                    let Ok(Ok(mut snapshot)) = listed else {
-                        continue;
-                    };
-                    let changed =
-                        service
-                            .watches
-                            .lock()
-                            .unwrap()
-                            .get(&watch_id)
-                            .is_some_and(|current| {
-                                current.root_token == watch.root_token && current.path == watch.path
-                            });
-                    if changed {
-                        snapshot.generation = service.next_generation();
-                        snapshot.overflowed = all_rescan;
-                        snapshot.authoritative = true;
-                        emit_event(
+                    service
+                        .publish_authoritative_listing(
+                            &watch_id,
+                            &watch,
+                            true,
                             &sender,
                             &overflowed,
-                            v1::HostEvent {
-                                kind: v1::EventKind::DirectorySnapshot.into(),
-                                scope: watch_id.clone(),
-                                file: Some(v1::FileServiceEvent {
-                                    directory: Some(snapshot),
-                                    root_token: watch.root_token.clone(),
-                                    watch_id: watch_id.clone(),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            },
-                        );
-                    }
+                        )
+                        .await;
                 }
             }
         });
     }
 
+    fn watch_entries(&self) -> Vec<(String, Watch)> {
+        self.watches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, watch)| (id.clone(), watch.clone()))
+            .collect()
+    }
+
+    /// Whether the registration this exact watch holds is still current.
+    fn watch_is_current(&self, watch_id: &str, watch: &Watch) -> bool {
+        self.watches
+            .lock()
+            .unwrap()
+            .get(watch_id)
+            .is_some_and(|current| {
+                current.root_token == watch.root_token
+                    && current.path == watch.path
+                    && Arc::ptr_eq(&current.fallback, &watch.fallback)
+            })
+    }
+
+    /// Re-lists a watched directory and publishes it as an authoritative
+    /// snapshot the desktop replaces its cached listing from.
+    async fn publish_authoritative_listing(
+        self: &Arc<Self>,
+        watch_id: &str,
+        watch: &Watch,
+        overflow_recovery: bool,
+        sender: &mpsc::Sender<SequencerControl>,
+        overflowed: &Arc<AtomicBool>,
+    ) {
+        let root = Arc::clone(&watch.root);
+        let path = watch.path.clone();
+        let listing_id = watch_id.to_owned();
+        let generation = self.next_generation();
+        let listed = tokio::task::spawn_blocking({
+            let service = Arc::clone(self);
+            move || {
+                service.list_directory_snapshot(
+                    &root,
+                    &path,
+                    &listing_id,
+                    generation,
+                    "",
+                    0,
+                    &NEVER_CANCELLED,
+                )
+            }
+        })
+        .await;
+        let Ok(Ok(mut snapshot)) = listed else {
+            return;
+        };
+        if !self.watch_is_current(watch_id, watch) {
+            return;
+        }
+        snapshot.overflowed = snapshot.overflowed || overflow_recovery;
+        snapshot.authoritative = true;
+        emit_event(
+            sender,
+            overflowed,
+            v1::HostEvent {
+                kind: v1::EventKind::DirectorySnapshot.into(),
+                scope: watch_id.to_owned(),
+                file: Some(v1::FileServiceEvent {
+                    directory: Some(snapshot),
+                    root_token: watch.root_token.clone(),
+                    watch_id: watch_id.to_owned(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Polls only the targets the native watcher refused.
+    ///
+    /// The set of such targets is derived from the watch registry on every
+    /// turn rather than counted alongside it, so registration, replacement,
+    /// and release can never leave the poller believing in work that does not
+    /// exist. While the set is empty the task parks on
+    /// [`FileService::fallback_signal`]; the bounded park is only so a closed
+    /// connection's task observes `closed` and exits.
     fn spawn_polling_fallback(
         self: &Arc<Self>,
         closed: Arc<AtomicBool>,
@@ -169,64 +192,55 @@ impl FileService {
         let service = Arc::clone(self);
         tokio::spawn(async move {
             while !closed.load(Ordering::Acquire) {
-                sleep(FALLBACK_SCAN_INTERVAL).await;
-                if !service.polling_fallback.load(Ordering::Acquire) {
+                let pending = service.fallback_watches();
+                if pending.is_empty() {
+                    tokio::select! {
+                        _ = service.fallback_signal.notified() => {}
+                        _ = sleep(IDLE_PARK) => {}
+                    }
                     continue;
                 }
-                let watches: Vec<_> = service
-                    .watches
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|(id, watch)| (id.clone(), watch.clone()))
-                    .collect();
-                for (id, watch) in watches {
-                    let stable_target = descriptor_path(watch.target_directory.as_raw_fd());
-                    let scan = Arc::clone(&watch.fallback_scan);
-                    let scanned = scan_fallback_shard_async(stable_target, scan).await;
-                    let Ok(shard) = scanned else { continue };
-                    if !shard.emit_authoritative {
-                        continue;
-                    }
-                    let root = Arc::clone(&watch.root);
-                    let path = watch.path.clone();
-                    let listing_id = id.clone();
-                    let listed = tokio::task::spawn_blocking(move || {
-                        list_directory_impl(&root, &path, &listing_id, 0, "", 0)
-                    })
-                    .await;
-                    if let Ok(Ok(mut snapshot)) = listed {
-                        let current = service.watches.lock().unwrap().get(&id).cloned();
-                        let still_current = current.is_some_and(|current| {
-                            current.root_token == watch.root_token
-                                && current.path == watch.path
-                                && Arc::ptr_eq(&current.fallback_scan, &watch.fallback_scan)
-                        });
-                        if !still_current {
+                sleep(FALLBACK_TICK).await;
+                for (id, watch) in pending {
+                    let now = Instant::now();
+                    if native_retry_due(&watch.fallback, now) {
+                        let restored = service.retry_native_registration(&watch);
+                        record_native_retry(&watch.fallback, restored);
+                        if restored {
                             continue;
                         }
-                        snapshot.generation = service.next_generation();
-                        snapshot.overflowed = true;
-                        snapshot.authoritative = true;
-                        emit_event(
-                            &sender,
-                            &overflowed,
-                            v1::HostEvent {
-                                kind: v1::EventKind::DirectorySnapshot.into(),
-                                scope: id.clone(),
-                                file: Some(v1::FileServiceEvent {
-                                    directory: Some(snapshot),
-                                    root_token: watch.root_token.clone(),
-                                    watch_id: id.clone(),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            },
-                        );
+                    }
+                    let stable_target = descriptor_path(watch.target_directory.as_raw_fd());
+                    let turn =
+                        advance_target_async(stable_target, Arc::clone(&watch.fallback), now).await;
+                    if turn
+                        .as_ref()
+                        .is_ok_and(|turn| *turn == FallbackTurn::Changed)
+                    {
+                        service
+                            .publish_authoritative_listing(&id, &watch, true, &sender, &overflowed)
+                            .await;
                     }
                 }
             }
         });
+    }
+
+    /// Exactly the watches whose native registration failed.
+    fn fallback_watches(&self) -> Vec<(String, Watch)> {
+        self.watch_entries()
+            .into_iter()
+            .filter(|(_, watch)| !watch.fallback.lock().unwrap().is_native())
+            .collect()
+    }
+
+    fn retry_native_registration(&self, watch: &Watch) -> bool {
+        let mut watcher = self.native_watcher.lock().unwrap();
+        watcher.as_mut().is_some_and(|watcher| {
+            watcher
+                .watch(&watch.target, RecursiveMode::NonRecursive)
+                .is_ok()
+        })
     }
 
     #[cfg(test)]
@@ -252,6 +266,7 @@ impl FileService {
         let (target, target_directory) = resolve_watch_directory(&root, path)?;
         let path_value = target.to_string_lossy().into_owned();
         let stable_target = descriptor_path(target_directory.as_raw_fd());
+        let fingerprint = watch_fingerprint(&stable_target)?;
         let mut watches = self.watches.lock().unwrap();
         if !watches.contains_key(watch_id) && watches.len() >= MAX_WATCHES {
             bail!("watch limit of {MAX_WATCHES} directories reached");
@@ -259,13 +274,17 @@ impl FileService {
         // Arm the native watch before publishing the snapshot. Any event that
         // races insertion is still represented by the subsequent listing;
         // every event after insertion is queued for a resnapshot.
-        if let Some(watcher) = self.native_watcher.lock().unwrap().as_mut() {
-            if watcher.watch(&target, RecursiveMode::NonRecursive).is_err() {
-                self.polling_fallback.store(true, Ordering::Release);
-            }
+        let native = self
+            .native_watcher
+            .lock()
+            .unwrap()
+            .as_mut()
+            .is_some_and(|watcher| watcher.watch(&target, RecursiveMode::NonRecursive).is_ok());
+        let fallback = Arc::new(Mutex::new(if native {
+            FallbackTarget::native(fingerprint)
         } else {
-            self.polling_fallback.store(true, Ordering::Release);
-        }
+            FallbackTarget::polling(fingerprint)
+        }));
         let previous = watches.insert(
             watch_id.to_owned(),
             Watch {
@@ -274,33 +293,32 @@ impl FileService {
                 path: path_value,
                 target: target.clone(),
                 target_directory: Arc::new(target_directory),
-                fallback_scan: Arc::new(Mutex::new(FallbackScan::new(watch_fingerprint(
-                    &stable_target,
-                )?))),
+                fallback,
             },
         );
         drop(watches);
-        let mut watcher_guard = self.native_watcher.lock().unwrap();
-        if let Some(watcher) = watcher_guard.as_mut()
-            && let Some(previous) = previous.as_ref()
-            && previous.target != target
-            && !self
-                .watches
-                .lock()
-                .unwrap()
-                .values()
-                .any(|watch| watch.target == previous.target)
-        {
-            let _ = watcher.unwatch(&previous.target);
+        if !native {
+            self.fallback_signal.notify_one();
         }
-        drop(watcher_guard);
-        match list_directory_impl(&root, path, watch_id, self.next_generation(), "", 0) {
+        if let Some(previous) = previous.as_ref() {
+            self.retire_replaced_target(previous, &target);
+        }
+        match self.list_directory_snapshot(
+            &root,
+            path,
+            watch_id,
+            self.next_generation(),
+            "",
+            0,
+            &NEVER_CANCELLED,
+        ) {
             Ok(snapshot) => Ok(snapshot),
             Err(error) => {
                 let _ = self.unwatch_directory(watch_id);
                 if let Some(previous) = previous {
-                    if let Some(watcher) = self.native_watcher.lock().unwrap().as_mut() {
-                        let _ = watcher.watch(&previous.target, RecursiveMode::NonRecursive);
+                    if !self.retry_native_registration(&previous) {
+                        previous.fallback.lock().unwrap().degrade_to_polling();
+                        self.fallback_signal.notify_one();
                     }
                     self.watches
                         .lock()
@@ -312,18 +330,39 @@ impl FileService {
         }
     }
 
+    /// Drops the native registration of a target this watch ID no longer holds
+    /// and no other watch covers.
+    fn retire_replaced_target(&self, previous: &Watch, replacement: &Path) {
+        if previous.target == replacement {
+            return;
+        }
+        let still_watched = self
+            .watches
+            .lock()
+            .unwrap()
+            .values()
+            .any(|watch| watch.target == previous.target);
+        if still_watched {
+            return;
+        }
+        if let Some(watcher) = self.native_watcher.lock().unwrap().as_mut() {
+            let _ = watcher.unwatch(&previous.target);
+        }
+    }
+
     pub(crate) fn unwatch_directory(&self, watch_id: &str) -> anyhow::Result<()> {
         validate_token("watch ID", watch_id)?;
         let removed = self.watches.lock().unwrap().remove(watch_id);
-        if let Some(removed) = removed
-            && !self
-                .watches
-                .lock()
-                .unwrap()
-                .values()
-                .any(|watch| watch.target == removed.target)
-            && let Some(watcher) = self.native_watcher.lock().unwrap().as_mut()
-        {
+        let Some(removed) = removed else {
+            return Ok(());
+        };
+        let still_watched = self
+            .watches
+            .lock()
+            .unwrap()
+            .values()
+            .any(|watch| watch.target == removed.target);
+        if !still_watched && let Some(watcher) = self.native_watcher.lock().unwrap().as_mut() {
             let _ = watcher.unwatch(&removed.target);
         }
         Ok(())
@@ -409,98 +448,4 @@ pub(super) fn precise_file_events(
             }
         })
         .collect()
-}
-
-fn scan_fallback_shard(
-    stable_target: &Path,
-    state: &Mutex<FallbackScan>,
-) -> anyhow::Result<FallbackShard> {
-    scan_fallback_shard_with_limits(
-        stable_target,
-        state,
-        FALLBACK_SCAN_ENTRY_BUDGET,
-        FALLBACK_SCAN_TIME_BUDGET,
-    )
-}
-
-pub(super) async fn scan_fallback_shard_async(
-    stable_target: PathBuf,
-    state: Arc<Mutex<FallbackScan>>,
-) -> anyhow::Result<FallbackShard> {
-    tokio::task::spawn_blocking(move || scan_fallback_shard(&stable_target, &state))
-        .await
-        .context("fallback filesystem scan worker stopped")?
-}
-
-pub(super) fn scan_fallback_shard_with_limits(
-    stable_target: &Path,
-    state: &Mutex<FallbackScan>,
-    entry_budget: usize,
-    time_budget: Duration,
-) -> anyhow::Result<FallbackShard> {
-    let mut state = state.lock().unwrap();
-    if state.iterator.is_none() {
-        state.accumulator = metadata_generation(&fs::metadata(stable_target)?);
-        state.iterator = Some(fs::read_dir(stable_target)?);
-    }
-
-    let iterator = state
-        .iterator
-        .as_mut()
-        .expect("fallback iterator initialized");
-    let (additions, processed, completed) =
-        fold_fingerprint_records(entry_budget, time_budget, || {
-            loop {
-                let Some(entry) = iterator.next() else {
-                    return Ok(None);
-                };
-                let entry = entry?;
-                match fs::symlink_metadata(entry.path()) {
-                    // `None` is a hidden entry, not the end of the directory:
-                    // keep walking rather than reporting the shard complete.
-                    Ok(metadata) => match watch_entry_fingerprint(&entry.file_name(), &metadata) {
-                        Some(value) => return Ok(Some(value)),
-                        None => continue,
-                    },
-                    Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        })?;
-    state.accumulator = state.accumulator.wrapping_add(additions);
-
-    let mut emit_authoritative = false;
-    if completed {
-        let fingerprint = state.accumulator;
-        state.completed_cycles += 1;
-        emit_authoritative = fingerprint != state.last_completed
-            || state
-                .completed_cycles
-                .is_multiple_of(FALLBACK_AUTHORITATIVE_CYCLES);
-        state.last_completed = fingerprint;
-        state.iterator = None;
-    }
-    Ok(FallbackShard {
-        processed,
-        completed,
-        emit_authoritative,
-    })
-}
-
-pub(super) fn fold_fingerprint_records(
-    entry_budget: usize,
-    time_budget: Duration,
-    mut next: impl FnMut() -> anyhow::Result<Option<u64>>,
-) -> anyhow::Result<(u64, usize, bool)> {
-    let started = Instant::now();
-    let mut accumulator = 0_u64;
-    let mut processed = 0;
-    while processed < entry_budget && (processed == 0 || started.elapsed() < time_budget) {
-        let Some(record) = next()? else {
-            return Ok((accumulator, processed, true));
-        };
-        accumulator = accumulator.wrapping_add(record);
-        processed += 1;
-    }
-    Ok((accumulator, processed, false))
 }

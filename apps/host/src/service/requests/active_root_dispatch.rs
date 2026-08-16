@@ -73,6 +73,29 @@ pub(super) async fn handle(
                         })
                         .await;
                         match resolved {
+                            // A backstop probe that confirms the caller's own
+                            // root is the common case, and it must not cost a
+                            // second authoritative discovery. The answer is the
+                            // identity the caller already holds, so a pane that
+                            // moved during resolution can only mean the *next*
+                            // probe answers differently — never that this one
+                            // published a root nobody asked about.
+                            Ok(Ok((root, git_worktree)))
+                                if !file.known_root_token.is_empty()
+                                    && root_token(&root)
+                                        .is_ok_and(|token| token == file.known_root_token) =>
+                            {
+                                Ok(v1::ActiveRoot {
+                                    pane_id,
+                                    root_generation: files
+                                        .root_generation_for(&file.known_root_token),
+                                    root_token: file.known_root_token.clone(),
+                                    root,
+                                    git_worktree,
+                                    server_identity: identity,
+                                    topology_generation: known_generation,
+                                })
+                            }
                             Ok(Ok((root, git_worktree))) => {
                                 let (second, fresh_generation) = {
                                     let (_guard, fresh_generation) =
@@ -98,7 +121,7 @@ pub(super) async fn handle(
                                             git_worktree,
                                             server_identity: identity,
                                             topology_generation: fresh_generation,
-                                            root_generation: files.next_root_generation(),
+                                            root_generation: files.root_generation_for(&token),
                                             root_token: token,
                                         })
                                     }
@@ -125,24 +148,32 @@ pub(super) async fn handle(
             };
             match result {
                 Ok(active_root) => {
-                    let _ = event_tx
-                        .send(SequencerControl::OrderedEvent(v1::HostEvent {
-                            kind: v1::EventKind::ActiveRoot.into(),
-                            scope: active_root.pane_id.clone(),
-                            file: Some(v1::FileServiceEvent {
-                                operation_id: file.operation_id.clone(),
-                                active_root: Some(active_root.clone()),
-                                root_token: active_root.root_token.clone(),
+                    let unchanged = active_root.root_token == file.known_root_token;
+                    // An unchanged root is news to nobody. Broadcasting it
+                    // anyway made every backstop probe a connection-wide
+                    // ActiveRoot payload, which is exactly the periodic traffic
+                    // the backstop exists to avoid.
+                    if !unchanged {
+                        let _ = event_tx
+                            .send(SequencerControl::OrderedEvent(v1::HostEvent {
+                                kind: v1::EventKind::ActiveRoot.into(),
+                                scope: active_root.pane_id.clone(),
+                                file: Some(v1::FileServiceEvent {
+                                    operation_id: file.operation_id.clone(),
+                                    active_root: Some(active_root.clone()),
+                                    root_token: active_root.root_token.clone(),
+                                    ..Default::default()
+                                }),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
-                        }))
-                        .await;
+                            }))
+                            .await;
+                    }
                     send_snapshot_response(
                         control_tx,
                         request_id,
                         file_response(&file.operation_id, |response| {
-                            response.active_root = Some(active_root)
+                            response.root_unchanged = unchanged;
+                            response.active_root = Some(active_root);
                         }),
                     )
                     .await;

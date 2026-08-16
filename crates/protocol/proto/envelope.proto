@@ -21,6 +21,10 @@ message Envelope {
     TerminalBytes terminal_bytes = 17;
     TransferChunk transfer_chunk = 18;
     TerminalOutputAck terminal_output_ack = 19;
+    // One frame of an OpenFileStream body. Carried on the request's own id so
+    // the bulk client can bind header, chunks, and terminal response to the
+    // exact request without a second control exchange.
+    FileStreamFrame file_stream = 20;
   }
 }
 
@@ -120,6 +124,12 @@ enum Operation {
   // client participates in sizing and nothing else, and paying an attach for
   // that reseeds every pane of the session on every switch.
   OPERATION_SELECT_TERMINAL_SESSION = 43;
+  // One descriptor-bound editor open. The host classifies once from the
+  // descriptor it will stream from, emits exactly one FileStreamFrame header,
+  // then streams bounded body frames until its terminal response. It replaces
+  // the ReadFile + StartDownload + per-chunk ReadDownloadChunk staircase, so a
+  // warm open costs one round trip plus transfer time.
+  OPERATION_OPEN_FILE_STREAM = 44;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -425,6 +435,38 @@ message FileServiceRequest {
   string source_name = 25;
   bool large_upload_confirmed = 26;
   bool image_png = 27;
+  // The root capability the caller already holds. ResolveActiveRoot answers an
+  // unchanged root without a second authoritative discovery, without minting a
+  // new root generation, and without broadcasting a duplicate ActiveRoot event.
+  string known_root_token = 28;
+}
+
+// One frame of an OpenFileStream body.
+//
+// Exactly one header frame precedes any body frame, and the request's terminal
+// Response follows the last body frame. Splitting the header out keeps the
+// renderer able to classify, size, and paint its shell while bytes are still
+// arriving, without a second request.
+message FileStreamFrame {
+  string operation_id = 1;
+  FileStreamHeader header = 2;
+  // Byte position of `data` within the streamed content.
+  uint64 offset = 3;
+  bytes data = 4;
+  bool eof = 5;
+  // BLAKE3 of the complete streamed content; set only on the eof frame.
+  string blake3 = 6;
+}
+
+message FileStreamHeader {
+  FileMetadata metadata = 1;
+  FileContentKind content_kind = 2;
+  // Generation of the exact descriptor the body is streamed from.
+  uint64 generation = 3;
+  uint64 total_bytes = 4;
+  // False when policy answers with classification only: binary, over the text
+  // limit, or an image beyond the preview limit. No body frame follows.
+  bool content_streaming = 5;
 }
 
 message FileMetadata {
@@ -509,6 +551,10 @@ message FileServiceResponse {
   DownloadDescriptor download = 7;
   bool deleted = 8;
   UploadDescriptor upload = 9;
+  // True when ResolveActiveRoot proved the caller's known_root_token still
+  // describes the active pane's root. The active_root payload repeats the
+  // caller's own identity and no ActiveRoot event was broadcast.
+  bool root_unchanged = 10;
 }
 
 message FileServiceEvent {

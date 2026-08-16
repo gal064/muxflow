@@ -173,7 +173,7 @@ impl<'a> BulkProtocolClient<'a> {
         &mut self,
         request: v1::Request,
     ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, None, None)
+        self.request_classified_inner(request, None, None, None)
     }
 
     pub(super) fn request_with_deadline(
@@ -181,7 +181,7 @@ impl<'a> BulkProtocolClient<'a> {
         request: v1::Request,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request, None, Some(deadline))
+        self.request_classified_inner(request, None, Some(deadline), None)
             .map_err(|error| error.to_string())
     }
 
@@ -190,7 +190,7 @@ impl<'a> BulkProtocolClient<'a> {
         request: v1::Request,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, None, Some(deadline))
+        self.request_classified_inner(request, None, Some(deadline), None)
     }
 
     pub(super) fn request_cancellable(
@@ -199,7 +199,7 @@ impl<'a> BulkProtocolClient<'a> {
         cancellation: &CancelState,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request, Some(cancellation), Some(deadline))
+        self.request_classified_inner(request, Some(cancellation), Some(deadline), None)
             .map_err(|error| error.to_string())
     }
 
@@ -209,7 +209,24 @@ impl<'a> BulkProtocolClient<'a> {
         cancellation: &CancelState,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, Some(cancellation), Some(deadline))
+        self.request_classified_inner(request, Some(cancellation), Some(deadline), None)
+    }
+
+    /// Issues one request whose answer is a stream of body frames followed by
+    /// exactly one terminal response.
+    ///
+    /// The body frames carry the request's own id, so this is one exchange on
+    /// one bridge: the bridge is only handed back after the terminal response,
+    /// and a body observer that refuses a frame poisons it exactly like any
+    /// other partial exchange.
+    pub(super) fn stream_cancellable(
+        &mut self,
+        request: v1::Request,
+        cancellation: &CancelState,
+        deadline: &DeadlineGuard,
+        on_frame: &mut dyn FnMut(v1::FileStreamFrame) -> Result<(), String>,
+    ) -> Result<v1::Response, RequestFailure> {
+        self.request_classified_inner(request, Some(cancellation), Some(deadline), Some(on_frame))
     }
 
     /// Every request goes through here, so this is the one place that knows
@@ -222,9 +239,10 @@ impl<'a> BulkProtocolClient<'a> {
         request: v1::Request,
         cancellation: Option<&CancelState>,
         deadline: Option<&DeadlineGuard>,
+        on_frame: Option<&mut dyn FnMut(v1::FileStreamFrame) -> Result<(), String>>,
     ) -> Result<v1::Response, RequestFailure> {
         let request_id = self.take_request_id();
-        let outcome = self.request_framed(request_id, request, cancellation, deadline);
+        let outcome = self.request_framed(request_id, request, cancellation, deadline, on_frame);
         if matches!(
             outcome,
             Err(RequestFailure::Transport(_) | RequestFailure::Cancelled)
@@ -240,6 +258,7 @@ impl<'a> BulkProtocolClient<'a> {
         request: v1::Request,
         cancellation: Option<&CancelState>,
         deadline: Option<&DeadlineGuard>,
+        mut on_frame: Option<&mut dyn FnMut(v1::FileStreamFrame) -> Result<(), String>>,
     ) -> Result<v1::Response, RequestFailure> {
         self.write_envelope_cancellable(
             &envelope(request_id, 0, Payload::Request(request)),
@@ -267,8 +286,19 @@ impl<'a> BulkProtocolClient<'a> {
                 if frame.request_id != request_id {
                     continue;
                 }
-                let Some(Payload::Response(response)) = frame.payload else {
-                    continue;
+                let response = match frame.payload {
+                    Some(Payload::FileStream(stream)) => {
+                        let Some(observer) = on_frame.as_deref_mut() else {
+                            return Err(RequestFailure::Transport(
+                                "bulk bridge streamed a body for a request that asked for none"
+                                    .into(),
+                            ));
+                        };
+                        observer(stream).map_err(RequestFailure::Transport)?;
+                        continue;
+                    }
+                    Some(Payload::Response(response)) => response,
+                    _ => continue,
                 };
                 return if response.ok {
                     Ok(response)

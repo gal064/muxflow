@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tauri::{
     State,
@@ -23,13 +22,6 @@ use super::transfer_event::{
 use super::{BULK_CHUNK_BYTES, parse_optional_u64, parse_required_u64};
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum FileReadPurpose {
-    Text,
-    ImagePreview,
-}
-
 #[derive(Clone)]
 struct FileReadJob {
     transfer_id: String,
@@ -37,7 +29,6 @@ struct FileReadJob {
     root: String,
     root_token: String,
     path: String,
-    purpose: FileReadPurpose,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
     channel: Channel<InvokeResponseBody>,
@@ -107,7 +98,6 @@ pub fn start_file_read(
     root: String,
     root_token: String,
     path: String,
-    purpose: FileReadPurpose,
     on_event: Channel<InvokeResponseBody>,
     profiles: State<'_, ProfileStore>,
     clients: State<'_, TerminalClients>,
@@ -129,7 +119,6 @@ pub fn start_file_read(
         root,
         root_token,
         path,
-        purpose,
         binding,
         cancellation,
         channel: on_event,
@@ -269,6 +258,14 @@ fn send_file_job_state(job: &FileIoJob, kind: u8, state: TransferState) -> Resul
     )
 }
 
+/// Opens one file over exactly one bulk request.
+///
+/// The staircase this replaces asked three different questions — stat, bulk
+/// preflight, then one request per mebibyte — so a warm 10 MiB open cost twelve
+/// round trips on the remote link and each answer could describe a different
+/// version of the file. Here the host classifies and streams from one
+/// descriptor, so the cost is one round trip plus transfer time and the
+/// metadata, generation, and bytes provably belong together.
 fn run_file_read(job: &FileReadJob) -> Result<(), String> {
     job.binding.validate()?;
     let _deadline = job.cancellation.arm_inactivity_deadline();
@@ -276,167 +273,166 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
         BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &_deadline)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
-    let metadata_response = protocol.request_cancellable(
-        v1::Request {
-            operation: v1::Operation::ReadFile.into(),
-            file: Some(v1::FileServiceRequest {
-                operation_id: job.transfer_id.clone(),
-                root: job.root.clone(),
-                root_token: job.root_token.clone(),
-                path: job.path.clone(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        &job.cancellation,
-        &_deadline,
-    )?;
-    _deadline.touch();
-    let content = metadata_response
-        .file
-        .and_then(|file| file.content)
-        .ok_or("file metadata response omitted content classification")?;
-    let metadata = content
-        .metadata
-        .ok_or("file metadata response omitted metadata")?;
-    let kind = v1::FileContentKind::try_from(content.kind).unwrap_or_default();
-    let eligible = match job.purpose {
-        FileReadPurpose::Text => {
-            kind == v1::FileContentKind::Text && metadata.size <= 10 * 1024 * 1024
-        }
-        FileReadPurpose::ImagePreview => {
-            kind == v1::FileContentKind::Image && metadata.image_preview_eligible
-        }
-    };
-    emit_scoped_file_json(
-        &job.channel,
-        &job.transfer_id,
-        &job.binding,
-        1,
-        TransferState::Running,
-        json!({
-            "eventKind": "metadata",
-            "purpose": match job.purpose { FileReadPurpose::Text => "text", FileReadPurpose::ImagePreview => "imagePreview" },
-            "metadata": metadata_json(&metadata),
-            "contentKind": content_kind_name(kind),
-        }),
-    );
-    if !eligible {
-        emit_scoped_file_json(
-            &job.channel,
-            &job.transfer_id,
-            &job.binding,
-            3,
-            TransferState::Completed,
-            json!({
-                "outcome": TransferOutcome::Published,
-                "cleanupStatus": CleanupStatus::NotNeeded,
-                "metadataOnly": true,
-                "metadata": metadata_json(&metadata),
-                "contentKind": content_kind_name(kind),
-            }),
-        );
-        return Ok(());
-    }
-    let started = protocol.request_cancellable(
-        v1::Request {
-            operation: v1::Operation::StartDownload.into(),
-            file: Some(v1::FileServiceRequest {
-                operation_id: job.transfer_id.clone(),
-                root: job.root.clone(),
-                root_token: job.root_token.clone(),
-                path: job.path.clone(),
-                transfer_id: job.transfer_id.clone(),
-                file_generation: metadata.generation,
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-        &job.cancellation,
-        &_deadline,
-    )?;
-    _deadline.touch();
-    let descriptor = started
-        .file
-        .and_then(|file| file.download)
-        .ok_or("bulk file read omitted descriptor")?;
-    if descriptor.total_bytes != metadata.size
-        || descriptor.file_generation != metadata.generation
-        || !descriptor.total_known
-    {
-        return Err("file version changed between metadata and bulk preflight".into());
-    }
-    let mut offset = 0_u64;
-    let mut hasher = blake3::Hasher::new();
-    loop {
-        if job.cancellation.is_cancelled() {
-            let _ = protocol.cancel_download(&job.transfer_id);
-            return Err("file read cancelled".into());
-        }
-        let response = protocol.request_cancellable(
+    let mut state = FileReadStream::new(job);
+    let response = protocol
+        .stream_cancellable(
             v1::Request {
-                operation: v1::Operation::ReadDownloadChunk.into(),
+                operation: v1::Operation::OpenFileStream.into(),
                 file: Some(v1::FileServiceRequest {
                     operation_id: job.transfer_id.clone(),
-                    transfer_id: job.transfer_id.clone(),
-                    offset,
-                    chunk_bytes: BULK_CHUNK_BYTES,
+                    root: job.root.clone(),
+                    root_token: job.root_token.clone(),
+                    path: job.path.clone(),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
             &job.cancellation,
             &_deadline,
-        )?;
-        _deadline.touch();
-        let chunk = response
-            .file
-            .and_then(|file| file.transfer_chunk)
-            .ok_or("bulk file read omitted chunk")?;
-        if chunk.offset != offset || chunk.total_bytes != descriptor.total_bytes {
-            return Err("bulk file read accounting changed".into());
+            &mut |frame| state.accept(frame),
+        )
+        .map_err(|error| error.to_string())?;
+    _deadline.touch();
+    let content = response
+        .file
+        .and_then(|file| file.content)
+        .ok_or("file open response omitted its content classification")?;
+    state.finish(&content)
+}
+
+/// The renderer-facing side of one `OpenFileStream` exchange.
+///
+/// It exists so the frame observer stays a state machine with one owner rather
+/// than a pile of captured mutable locals: exactly one header, strictly ordered
+/// body frames, and a terminal response that has to agree with both.
+struct FileReadStream<'a> {
+    job: &'a FileReadJob,
+    header: Option<v1::FileStreamHeader>,
+    offset: u64,
+    hasher: blake3::Hasher,
+    completed: bool,
+}
+
+impl<'a> FileReadStream<'a> {
+    fn new(job: &'a FileReadJob) -> Self {
+        Self {
+            job,
+            header: None,
+            offset: 0,
+            hasher: blake3::Hasher::new(),
+            completed: false,
         }
-        hasher.update(&chunk.data);
-        emit_file_chunk(&job.channel, offset, &chunk.data);
-        offset = offset
-            .checked_add(chunk.data.len() as u64)
-            .ok_or("bulk file read byte counter overflow")?;
+    }
+
+    fn accept(&mut self, frame: v1::FileStreamFrame) -> Result<(), String> {
+        if let Some(header) = frame.header {
+            if self.header.is_some() {
+                return Err("file open stream repeated its header".into());
+            }
+            let metadata = header
+                .metadata
+                .clone()
+                .ok_or("file open stream header omitted metadata")?;
+            let kind = v1::FileContentKind::try_from(header.content_kind).unwrap_or_default();
+            emit_scoped_file_json(
+                &self.job.channel,
+                &self.job.transfer_id,
+                &self.job.binding,
+                1,
+                TransferState::Running,
+                json!({
+                    "eventKind": "metadata",
+                    "metadata": metadata_json(&metadata),
+                    "contentKind": content_kind_name(kind),
+                    "totalBytes": header.total_bytes.to_string(),
+                }),
+            );
+            self.header = Some(header);
+            return Ok(());
+        }
+        let header = self
+            .header
+            .as_ref()
+            .ok_or("file open stream sent a body before its header")?;
+        if !header.content_streaming {
+            return Err("file open stream sent a body it declared it would not send".into());
+        }
+        if self.completed {
+            return Err("file open stream continued past its own end".into());
+        }
+        if frame.offset != self.offset {
+            return Err("file open stream chunks arrived out of sequence".into());
+        }
+        self.hasher.update(&frame.data);
+        if !frame.data.is_empty() {
+            emit_file_chunk(&self.job.channel, self.offset, &frame.data);
+        }
+        self.offset = self
+            .offset
+            .checked_add(frame.data.len() as u64)
+            .ok_or("file open byte counter overflow")?;
+        if self.offset > header.total_bytes {
+            return Err("file open stream exceeded its declared byte count".into());
+        }
         emit_scoped_file_json(
-            &job.channel,
-            &job.transfer_id,
-            &job.binding,
+            &self.job.channel,
+            &self.job.transfer_id,
+            &self.job.binding,
             1,
             TransferState::Running,
             json!({
-                "transferredBytes": offset.to_string(),
-                "totalBytes": descriptor.total_bytes.to_string(),
+                "transferredBytes": self.offset.to_string(),
+                "totalBytes": header.total_bytes.to_string(),
             }),
         );
-        if chunk.eof {
-            let digest = hasher.finalize().to_hex().to_string();
-            if offset != descriptor.total_bytes || chunk.blake3 != digest {
-                return Err("bulk file read byte/BLAKE3 verification failed".into());
+        if frame.eof {
+            if self.offset != header.total_bytes
+                || frame.blake3 != self.hasher.finalize().to_hex().to_string()
+            {
+                return Err("file open byte/BLAKE3 verification failed".into());
             }
-            emit_scoped_file_json(
-                &job.channel,
-                &job.transfer_id,
-                &job.binding,
-                3,
-                TransferState::Completed,
-                json!({
-                    "outcome": TransferOutcome::Published,
-                    "cleanupStatus": CleanupStatus::NotNeeded,
-                    "metadataOnly": false,
-                    "transferredBytes": offset.to_string(),
-                    "totalBytes": descriptor.total_bytes.to_string(),
-                    "generation": metadata.generation.to_string(),
-                    "blake3": digest,
-                }),
-            );
-            break;
+            self.completed = true;
         }
+        Ok(())
     }
-    Ok(())
+
+    /// Publishes the terminal renderer event, after checking that the response
+    /// describes the same file the header and body did.
+    fn finish(self, content: &v1::FileContent) -> Result<(), String> {
+        let header = self
+            .header
+            .ok_or("file open response arrived without a header")?;
+        let metadata = header
+            .metadata
+            .clone()
+            .ok_or("file open stream header omitted metadata")?;
+        if content.generation != header.generation || content.kind != header.content_kind {
+            return Err("file open response disagreed with its own stream header".into());
+        }
+        if header.content_streaming && !self.completed {
+            return Err("file open stream ended before its declared content".into());
+        }
+        emit_scoped_file_json(
+            &self.job.channel,
+            &self.job.transfer_id,
+            &self.job.binding,
+            3,
+            TransferState::Completed,
+            json!({
+                "outcome": TransferOutcome::Published,
+                "cleanupStatus": CleanupStatus::NotNeeded,
+                "metadataOnly": !header.content_streaming,
+                "metadata": metadata_json(&metadata),
+                "contentKind": content_kind_name(
+                    v1::FileContentKind::try_from(header.content_kind).unwrap_or_default(),
+                ),
+                "transferredBytes": self.offset.to_string(),
+                "totalBytes": header.total_bytes.to_string(),
+                "generation": header.generation.to_string(),
+            }),
+        );
+        Ok(())
+    }
 }
 
 fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
@@ -660,14 +656,4 @@ fn emit_file_chunk(channel: &Channel<InvokeResponseBody>, offset: u64, data: &[u
     frame.extend_from_slice(&offset.to_be_bytes());
     frame.extend_from_slice(data);
     let _ = channel.send(InvokeResponseBody::Raw(frame));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn file_read_purpose_uses_expected_frontend_spelling() {
-        assert!(matches!(FileReadPurpose::Text, FileReadPurpose::Text));
-    }
 }
