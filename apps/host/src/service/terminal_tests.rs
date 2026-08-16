@@ -1,5 +1,13 @@
 use super::*;
 
+#[test]
+fn fresh_server_has_a_vacuous_input_fence_for_create_session_bootstrap() {
+    let mut clients = TerminalClients::new(Arc::new(OutputCredit::negotiated(false)));
+    assert!(clients.clients.is_empty());
+    assert!(clients.input.is_none());
+    clients.flush_input().unwrap();
+}
+
 /// The bound is a blast radius, not the fix for P12-U006: the sizes that
 /// actually damaged the user's windows (108x298, 108x314) are *inside* it,
 /// and what stops those is the desktop no longer deriving the client size

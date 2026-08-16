@@ -179,12 +179,16 @@ export class TerminalEventHub {
       this.measurements?.add("terminal.hub.fanoutDeliveries");
       try {
         listener(event);
-      } catch (error) {
+      } catch {
         // Admission advances the pane generation before delivery. If the sole
         // renderer rejects that transfer, the hub can no longer prove which
         // prefix reached xterm, so incremental traffic must wait for a seed.
+        // This is nevertheless a completed hub admission: rethrowing would
+        // omit the wire frame from JS's cumulative delivery boundary while a
+        // later frame could still be admitted in the same epoch. Consume this
+        // frame after converting the pane to seed debt so native credit keeps
+        // its exact ordinal/byte ownership.
         this.#requireSeed(event.paneId, "terminal pane consumer rejected an admitted event");
-        throw error;
       }
       return admission;
     }

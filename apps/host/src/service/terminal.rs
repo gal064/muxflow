@@ -560,10 +560,15 @@ impl TerminalClients {
     }
 
     pub(super) fn flush_input(&mut self) -> anyhow::Result<()> {
-        self.input
-            .as_ref()
-            .context("persistent terminal input client is not attached")?
-            .fence()
+        match self.input.as_ref() {
+            Some(input) => input.fence(),
+            // Before the first CreateSession there are no accepted pane
+            // inputs to fence and no session to which a sidecar could attach.
+            // This exact empty topology is the bootstrap identity; an absent
+            // sidecar with any attached output client remains fail-closed.
+            None if self.clients.is_empty() => Ok(()),
+            None => bail!("persistent terminal input client is not attached"),
+        }
     }
 
     pub(super) fn resize(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {

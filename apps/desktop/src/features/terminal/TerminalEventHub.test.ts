@@ -284,7 +284,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
   it("does not retain a detached active resource when its renderer throws", () => {
     const hub = new TerminalEventHub();
     hub.subscribePane("%1", () => { throw new Error("injected renderer failure"); });
-    expect(() => hub.publish(resource(1, 2))).toThrow("injected renderer failure");
+    expect(() => hub.publish(resource(1, 2))).not.toThrow();
     expect(hub.retainedByteLength).toBe(0);
     expect(hub.retainedPaneCount).toBe(0);
   });
@@ -297,7 +297,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
       received.push(event);
       if (event.kind === "output") throw new Error("renderer rejected output");
     });
-    expect(() => hub.publish(output(1, 1))).toThrow("renderer rejected output");
+    expect(() => hub.publish(output(1, 1))).not.toThrow();
     expect(hub.publish(output(2, 2))).toEqual({ kind: "accepted" });
     expect(received).toEqual([output(1, 1)]);
     expect(requests).toEqual(["%1"]);
