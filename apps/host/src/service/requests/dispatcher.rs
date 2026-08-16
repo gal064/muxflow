@@ -17,6 +17,7 @@ pub(crate) async fn handle_request(
         terminal,
         topology_lock,
         topology_baseline,
+        topology_signal,
         files,
         git,
         bulk_connection,
@@ -32,6 +33,7 @@ pub(crate) async fn handle_request(
     let terminal = &terminal;
     let topology_lock = &topology_lock;
     let topology_baseline = &topology_baseline;
+    let topology_signal = &topology_signal;
     let files = &files;
     let git = &git;
     if closed.load(Ordering::Acquire) || cancellation.load(Ordering::Acquire) {
@@ -208,6 +210,7 @@ pub(crate) async fn handle_request(
                 terminal,
                 topology_lock,
                 topology_baseline,
+                topology_signal,
             },
         )
         .await;

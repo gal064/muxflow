@@ -118,6 +118,9 @@ pub(super) enum SequencerControl {
     },
     OrderedEvent(v1::HostEvent),
     InjectGap(v1::HostEvent),
+    /// Internal FIFO barrier. The connection writer resolves it after every
+    /// earlier topology-dirty event has advanced `TopologySignal`.
+    TopologyEpochBarrier(std::sync::mpsc::SyncSender<u64>),
 }
 
 #[derive(Default)]
@@ -146,6 +149,9 @@ impl ProtocolSequencer {
             SequencerControl::InjectGap(event) => {
                 self.sequence = self.sequence.saturating_add(2);
                 envelope(0, self.sequence, Payload::Event(event))
+            }
+            SequencerControl::TopologyEpochBarrier(_) => {
+                unreachable!("the connection writer consumes topology epoch barriers")
             }
         }
     }

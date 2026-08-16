@@ -40,6 +40,7 @@ pub(super) struct RequestContext {
     pub(super) terminal: Arc<Mutex<TerminalClients>>,
     pub(super) topology_lock: Arc<tokio::sync::Mutex<()>>,
     pub(super) topology_baseline: Arc<Mutex<Option<(tmux_control::TmuxSnapshot, String)>>>,
+    pub(super) topology_signal: super::topology::TopologySignal,
     pub(super) files: Arc<FileService>,
     pub(super) git: Arc<super::git::GitService>,
     pub(super) bulk_connection: bool,

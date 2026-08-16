@@ -119,14 +119,85 @@ pub struct PaneResourceMeasurements {
     pub evictions: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+struct LruLinks {
+    older: Option<String>,
+    newer: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct Lru {
+    links: HashMap<String, LruLinks>,
+    oldest: Option<String>,
+    newest: Option<String>,
+}
+
+impl Lru {
+    fn touch(&mut self, pane_id: &str) {
+        self.detach(pane_id);
+        let older = self.newest.take();
+        if let Some(older_id) = older.as_ref() {
+            self.links
+                .get_mut(older_id)
+                .expect("LRU tail has links")
+                .newer = Some(pane_id.to_owned());
+        } else {
+            self.oldest = Some(pane_id.to_owned());
+        }
+        self.links
+            .insert(pane_id.to_owned(), LruLinks { older, newer: None });
+        self.newest = Some(pane_id.to_owned());
+    }
+
+    fn detach(&mut self, pane_id: &str) {
+        let Some(links) = self.links.remove(pane_id) else {
+            return;
+        };
+        if let Some(older) = links.older.as_ref() {
+            self.links
+                .get_mut(older)
+                .expect("LRU predecessor has links")
+                .newer = links.newer.clone();
+        } else {
+            self.oldest.clone_from(&links.newer);
+        }
+        if let Some(newer) = links.newer.as_ref() {
+            self.links
+                .get_mut(newer)
+                .expect("LRU successor has links")
+                .older = links.older.clone();
+        } else {
+            self.newest.clone_from(&links.older);
+        }
+    }
+
+    fn pop_oldest(&mut self) -> Option<String> {
+        let pane_id = self.oldest.clone()?;
+        self.detach(&pane_id);
+        Some(pane_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AccountedState {
+    bytes: usize,
+    journal_bytes: usize,
+    retained: bool,
+}
+
 /// Bounded host-side recovery material for panes whose renderer is hidden or
 /// disposed. Terminal bytes remain opaque and are never decoded here.
 #[derive(Debug)]
 pub struct PaneResourceStore {
     resources: HashMap<String, PaneResource>,
     output_journals: HashMap<String, VecDeque<BufferedOutput>>,
+    output_journal_bytes: HashMap<String, usize>,
     handoff_checkpoints: HashMap<String, VisibilityCheckpoint>,
-    resource_lru: VecDeque<String>,
+    retained_lru: Lru,
+    byte_lru: Lru,
+    retained_bytes: usize,
+    retained_panes: usize,
+    journal_bytes: usize,
     max_hidden_panes: usize,
     max_resource_bytes: usize,
     max_total_bytes: usize,
@@ -150,8 +221,13 @@ impl PaneResourceStore {
         Self {
             resources: HashMap::new(),
             output_journals: HashMap::new(),
+            output_journal_bytes: HashMap::new(),
             handoff_checkpoints: HashMap::new(),
-            resource_lru: VecDeque::new(),
+            retained_lru: Lru::default(),
+            byte_lru: Lru::default(),
+            retained_bytes: 0,
+            retained_panes: 0,
+            journal_bytes: 0,
             max_hidden_panes,
             max_resource_bytes,
             max_total_bytes,
@@ -178,6 +254,7 @@ impl PaneResourceStore {
         if self.resources.contains_key(pane_id) {
             return;
         }
+        let before = self.accounted_state(pane_id);
         self.resources.insert(
             pane_id.to_owned(),
             PaneResource {
@@ -195,7 +272,7 @@ impl PaneResourceStore {
                 recovery_reason: String::new(),
             },
         );
-        self.touch_resource(pane_id);
+        self.refresh_accounting(pane_id, before);
         self.enforce_limits();
     }
 
@@ -203,6 +280,7 @@ impl PaneResourceStore {
     /// renderer handoff uses `hide_with_checkpoint`.
     pub fn set_visible(&mut self, pane_id: &str, visible: bool, generation: u64) {
         self.ensure(pane_id, visible, generation);
+        let before = self.accounted_state(pane_id);
         if visible {
             if let Some(resource) = self.resources.get_mut(pane_id) {
                 resource.state = PaneResourceState::Visible;
@@ -212,6 +290,7 @@ impl PaneResourceStore {
             }
             self.handoff_checkpoints.remove(pane_id);
             self.output_journals.remove(pane_id);
+            self.output_journal_bytes.remove(pane_id);
         } else if let Some(resource) = self.resources.get_mut(pane_id) {
             if resource.state != PaneResourceState::Released {
                 resource.state = PaneResourceState::HiddenBuffered;
@@ -220,7 +299,7 @@ impl PaneResourceStore {
             }
             resource.generation = generation;
         }
-        self.touch_resource(pane_id);
+        self.refresh_accounting(pane_id, before);
         self.enforce_limits();
     }
 
@@ -260,7 +339,12 @@ impl PaneResourceStore {
             );
         }
 
-        let mut tail = Vec::new();
+        let before = self.accounted_state(pane_id);
+        let journal_bytes = self
+            .output_journal_bytes
+            .remove(pane_id)
+            .unwrap_or_default();
+        let mut tail = Vec::with_capacity(journal_bytes);
         let mut tail_through_generation = checkpoint.generation;
         if let Some(journal) = self.output_journals.remove(pane_id) {
             for output in journal {
@@ -288,7 +372,7 @@ impl PaneResourceStore {
         }
         self.handoff_checkpoints
             .insert(pane_id.to_owned(), checkpoint);
-        self.touch_resource(pane_id);
+        self.refresh_accounting(pane_id, before);
         self.enforce_limits();
         Ok(self
             .resources
@@ -299,6 +383,7 @@ impl PaneResourceStore {
 
     /// Makes a pane renderer-owned and consumes host recovery bytes once.
     pub fn reveal(&mut self, pane_id: &str, generation: u64) -> Option<PaneResource> {
+        let before = self.accounted_state(pane_id);
         let resource = self.resources.get_mut(pane_id)?;
         if resource.state == PaneResourceState::Visible {
             resource.generation = generation;
@@ -313,20 +398,30 @@ impl PaneResourceStore {
                 recovery_reason: resource.recovery_reason.clone(),
             });
         }
-        let recovery = resource.clone();
+        let recovery = PaneResource {
+            state: resource.state,
+            serialized_snapshot: std::mem::take(&mut resource.serialized_snapshot),
+            raw_tail: std::mem::take(&mut resource.raw_tail),
+            generation: resource.generation,
+            snapshot_generation: resource.snapshot_generation,
+            tail_through_generation: resource.tail_through_generation,
+            requires_seed: resource.requires_seed,
+            recovery_reason: resource.recovery_reason.clone(),
+        };
         resource.state = PaneResourceState::Visible;
-        resource.serialized_snapshot.clear();
-        resource.raw_tail.clear();
         resource.generation = generation;
         self.output_journals.remove(pane_id);
+        self.output_journal_bytes.remove(pane_id);
         self.handoff_checkpoints.remove(pane_id);
-        self.touch_resource(pane_id);
+        self.refresh_accounting(pane_id, before);
         Some(recovery)
     }
 
     pub fn snapshot(&mut self, pane_id: &str, snapshot: Vec<u8>, generation: u64) {
         self.ensure(pane_id, false, generation);
+        let before = self.accounted_state(pane_id);
         self.output_journals.remove(pane_id);
+        self.output_journal_bytes.remove(pane_id);
         let resource = self.resources.get_mut(pane_id).expect("resource ensured");
         if snapshot.len() > self.max_resource_bytes {
             release(
@@ -342,7 +437,7 @@ impl PaneResourceStore {
             resource.recovery_reason.clear();
         }
         resource.generation = generation;
-        self.touch_resource(pane_id);
+        self.refresh_accounting(pane_id, before);
         self.enforce_limits();
     }
 
@@ -358,6 +453,7 @@ impl PaneResourceStore {
         let state = self.resources.get(pane_id).expect("resource ensured").state;
         match state {
             PaneResourceState::Visible => {
+                let before = self.accounted_state(pane_id);
                 self.output_journals
                     .entry(pane_id.to_owned())
                     .or_default()
@@ -365,11 +461,15 @@ impl PaneResourceStore {
                         sequence: generation,
                         bytes: bytes.to_vec(),
                     });
+                *self
+                    .output_journal_bytes
+                    .entry(pane_id.to_owned())
+                    .or_default() += bytes.len();
                 if let Some(resource) = self.resources.get_mut(pane_id) {
                     resource.generation = generation;
                     resource.tail_through_generation = generation;
                 }
-                self.touch_resource(pane_id);
+                self.refresh_accounting(pane_id, before);
                 self.enforce_limits();
                 OutputDisposition::Visible
             }
@@ -408,6 +508,7 @@ impl PaneResourceStore {
             measurements.append_operations += 1;
             measurements.appended_bytes = measurements.appended_bytes.saturating_add(bytes.len());
         }
+        let before = self.accounted_state(pane_id);
         let resource = self.resources.get_mut(pane_id).expect("resource ensured");
         if resource
             .serialized_snapshot
@@ -422,7 +523,7 @@ impl PaneResourceStore {
             resource.tail_through_generation = generation;
         }
         resource.generation = generation;
-        self.touch_resource(pane_id);
+        self.refresh_accounting(pane_id, before);
         self.enforce_limits();
     }
 
@@ -436,87 +537,119 @@ impl PaneResourceStore {
             .is_none_or(|resource| resource.state != PaneResourceState::Visible)
     }
 
-    pub fn retained_bytes(&mut self) -> usize {
-        if let Some(measurements) = &mut self.measurements {
-            measurements.full_accounting_scans += 1;
-            measurements.accounting_entries_visited = measurements
-                .accounting_entries_visited
-                .saturating_add(self.resources.len())
-                .saturating_add(
-                    self.output_journals
-                        .values()
-                        .map(VecDeque::len)
-                        .sum::<usize>(),
-                );
-        }
-        let resources = self.resources.values().fold(0_usize, |total, resource| {
-            total
-                .saturating_add(resource.serialized_snapshot.len())
-                .saturating_add(resource.raw_tail.len())
-        });
-        self.output_journals
-            .values()
-            .fold(resources, |total, journal| {
-                journal.iter().fold(total, |total, output| {
-                    total.saturating_add(output.bytes.len())
-                })
-            })
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    pub fn journal_bytes(&self) -> usize {
+        self.journal_bytes
     }
 
     pub fn take_recovery(&mut self, pane_id: &str) -> Option<PaneResource> {
+        let before = self.accounted_state(pane_id);
         let resource = self.resources.get_mut(pane_id)?;
-        let recovery = resource.clone();
-        resource.serialized_snapshot.clear();
-        resource.raw_tail.clear();
+        let recovery = PaneResource {
+            state: resource.state,
+            serialized_snapshot: std::mem::take(&mut resource.serialized_snapshot),
+            raw_tail: std::mem::take(&mut resource.raw_tail),
+            generation: resource.generation,
+            snapshot_generation: resource.snapshot_generation,
+            tail_through_generation: resource.tail_through_generation,
+            requires_seed: resource.requires_seed,
+            recovery_reason: resource.recovery_reason.clone(),
+        };
+        self.refresh_accounting(pane_id, before);
         Some(recovery)
     }
 
     pub fn remove(&mut self, pane_id: &str) {
-        if let Some(measurements) = &mut self.measurements {
-            measurements.lru_retain_operations += 1;
-            measurements.lru_entries_visited = measurements
-                .lru_entries_visited
-                .saturating_add(self.resource_lru.len());
-        }
-        self.resource_lru.retain(|value| value != pane_id);
+        let before = self.accounted_state(pane_id);
         self.output_journals.remove(pane_id);
+        self.output_journal_bytes.remove(pane_id);
         self.handoff_checkpoints.remove(pane_id);
         self.resources.remove(pane_id);
+        self.refresh_accounting(pane_id, before);
     }
 
-    fn touch_resource(&mut self, pane_id: &str) {
+    fn pop_eviction_candidate(&mut self, over_bytes: bool) -> Option<String> {
+        let pane_id = if over_bytes {
+            self.byte_lru.pop_oldest()
+        } else {
+            self.retained_lru.pop_oldest()
+        }?;
         if let Some(measurements) = &mut self.measurements {
-            measurements.lru_retain_operations += 1;
-            measurements.lru_entries_visited = measurements
-                .lru_entries_visited
-                .saturating_add(self.resource_lru.len());
+            measurements.lru_pops += 1;
         }
-        self.resource_lru.retain(|value| value != pane_id);
-        self.resource_lru.push_back(pane_id.to_owned());
+        Some(pane_id)
     }
 
-    fn retained_panes(&mut self) -> usize {
-        if let Some(measurements) = &mut self.measurements {
-            measurements.full_accounting_scans += 1;
-            measurements.accounting_entries_visited = measurements
-                .accounting_entries_visited
-                .saturating_add(self.resources.len());
-        }
-        self.resources
-            .iter()
-            .filter(|(pane_id, resource)| {
+    fn accounted_state(&self, pane_id: &str) -> AccountedState {
+        let resource = self.resources.get(pane_id);
+        let resource_bytes = resource.map_or(0, |resource| {
+            resource
+                .serialized_snapshot
+                .len()
+                .saturating_add(resource.raw_tail.len())
+        });
+        let journal_bytes = self
+            .output_journal_bytes
+            .get(pane_id)
+            .copied()
+            .unwrap_or_default();
+        let has_journal = self
+            .output_journals
+            .get(pane_id)
+            .is_some_and(|journal| !journal.is_empty());
+        AccountedState {
+            bytes: resource_bytes.saturating_add(journal_bytes),
+            journal_bytes,
+            retained: resource.is_some_and(|resource| {
                 resource.state == PaneResourceState::HiddenBuffered
-                    || !resource.serialized_snapshot.is_empty()
-                    || !resource.raw_tail.is_empty()
-                    || self
-                        .output_journals
-                        .get(*pane_id)
-                        .is_some_and(|journal| !journal.is_empty())
-            })
-            .count()
+                    || resource_bytes != 0
+                    || has_journal
+            }),
+        }
     }
 
-    pub fn retained_panes_for_measurement(&mut self) -> usize {
+    fn refresh_accounting(&mut self, pane_id: &str, before: AccountedState) {
+        let after = self.accounted_state(pane_id);
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_sub(before.bytes)
+            .expect("pane retained byte accounting underflow")
+            .saturating_add(after.bytes);
+        self.journal_bytes = self
+            .journal_bytes
+            .checked_sub(before.journal_bytes)
+            .expect("pane journal byte accounting underflow")
+            .saturating_add(after.journal_bytes);
+        match (before.retained, after.retained) {
+            (false, true) => self.retained_panes = self.retained_panes.saturating_add(1),
+            (true, false) => {
+                self.retained_panes = self
+                    .retained_panes
+                    .checked_sub(1)
+                    .expect("pane retained count accounting underflow");
+            }
+            _ => {}
+        }
+        if after.retained {
+            self.retained_lru.touch(pane_id);
+        } else {
+            self.retained_lru.detach(pane_id);
+        }
+        if after.bytes != 0 {
+            self.byte_lru.touch(pane_id);
+        } else {
+            self.byte_lru.detach(pane_id);
+        }
+    }
+
+    fn retained_panes(&self) -> usize {
+        self.retained_panes
+    }
+
+    pub fn retained_panes_for_measurement(&self) -> usize {
         self.retained_panes()
     }
 
@@ -525,27 +658,12 @@ impl PaneResourceStore {
             || self.retained_bytes() > self.max_total_bytes
         {
             let over_bytes = self.retained_bytes() > self.max_total_bytes;
-            let over_panes = self.retained_panes() > self.max_hidden_panes;
-            let Some(pane_id) = self.resource_lru.pop_front() else {
+            let Some(pane_id) = self.pop_eviction_candidate(over_bytes) else {
                 break;
             };
-            if let Some(measurements) = &mut self.measurements {
-                measurements.lru_pops += 1;
-            }
-            let has_bytes = self.resources.get(&pane_id).is_some_and(|resource| {
-                !resource.serialized_snapshot.is_empty() || !resource.raw_tail.is_empty()
-            }) || self
-                .output_journals
-                .get(&pane_id)
-                .is_some_and(|journal| !journal.is_empty());
-            let hidden = self
-                .resources
-                .get(&pane_id)
-                .is_some_and(|resource| resource.state == PaneResourceState::HiddenBuffered);
-            if !has_bytes && !(over_panes && hidden) {
-                continue;
-            }
+            let before = self.accounted_state(&pane_id);
             self.output_journals.remove(&pane_id);
+            self.output_journal_bytes.remove(&pane_id);
             if let Some(resource) = self.resources.get_mut(&pane_id) {
                 if let Some(measurements) = &mut self.measurements {
                     measurements.evictions += 1;
@@ -564,6 +682,7 @@ impl PaneResourceStore {
                     release(resource, reason);
                 }
             }
+            self.refresh_accounting(&pane_id, before);
         }
     }
 }
@@ -821,84 +940,8 @@ mod tests {
         );
         assert!(store.is_hidden("%99"));
     }
-
-    #[test]
-    #[ignore = "Phase 14 opt-in operation-count fixture"]
-    fn phase14_pane_resource_scaling_and_reveal_parity() {
-        for pane_count in [32_usize, 256, 1_024] {
-            let chunks_per_pane = 8_usize;
-            let chunk = vec![b'x'; 64];
-            let mut store = PaneResourceStore::with_measurements(
-                pane_count + 1,
-                4 * 1024 * 1024,
-                128 * 1024 * 1024,
-            );
-            for pane in 0..pane_count {
-                let pane_id = format!("%{pane}");
-                store.set_visible(&pane_id, false, 1);
-                store.snapshot(&pane_id, format!("screen-{pane}").into_bytes(), 2);
-                for generation in 0..chunks_per_pane {
-                    store.append(&pane_id, &chunk, generation as u64 + 3);
-                }
-            }
-            let expected_bytes = (0..pane_count)
-                .map(|pane| format!("screen-{pane}").len() + chunks_per_pane * chunk.len())
-                .sum::<usize>();
-            let retained_bytes = store.retained_bytes();
-            let retained_panes = store.retained_panes_for_measurement();
-            assert_eq!(retained_bytes, expected_bytes);
-            assert_eq!(retained_panes, pane_count);
-            let recovery = store.reveal(&format!("%{}", pane_count - 1), 99).unwrap();
-            assert_eq!(
-                recovery.serialized_snapshot,
-                format!("screen-{}", pane_count - 1).as_bytes()
-            );
-            assert_eq!(recovery.raw_tail, vec![b'x'; chunks_per_pane * chunk.len()]);
-            let measurements = store.measurements().unwrap();
-            println!(
-                "PHASE14_METRIC {}",
-                serde_json::json!({
-                    "lane": "paneResource",
-                    "paneCount": pane_count,
-                    "chunksPerPane": chunks_per_pane,
-                    "retainedBytes": retained_bytes,
-                    "retainedPanes": retained_panes,
-                    "fullAccountingScans": measurements.full_accounting_scans,
-                    "accountingEntriesVisited": measurements.accounting_entries_visited,
-                    "lruRetainOperations": measurements.lru_retain_operations,
-                    "lruEntriesVisited": measurements.lru_entries_visited,
-                    "lruPops": measurements.lru_pops,
-                    "appendOperations": measurements.append_operations,
-                    "appendedBytes": measurements.appended_bytes,
-                    "evictions": measurements.evictions,
-                    "revealParity": true,
-                })
-            );
-        }
-
-        let mut eviction_store = PaneResourceStore::with_measurements(1, 1_024, 4_096);
-        eviction_store.snapshot("%old", vec![b'a'; 64], 1);
-        eviction_store.snapshot("%new", vec![b'b'; 64], 2);
-        assert_eq!(
-            eviction_store.get("%old").unwrap().state,
-            PaneResourceState::Released
-        );
-        assert_eq!(
-            eviction_store.get("%new").unwrap().state,
-            PaneResourceState::HiddenBuffered
-        );
-        let measurements = eviction_store.measurements().unwrap();
-        assert_eq!(measurements.evictions, 1);
-        assert_eq!(measurements.lru_pops, 1);
-        println!(
-            "PHASE14_METRIC {}",
-            serde_json::json!({
-                "lane": "paneResourceEviction",
-                "evictions": measurements.evictions,
-                "lruPops": measurements.lru_pops,
-                "oldPaneReleased": true,
-                "newPaneRetained": true,
-            })
-        );
-    }
 }
+
+#[cfg(test)]
+#[path = "replay_phase14_tests.rs"]
+mod phase14_tests;
