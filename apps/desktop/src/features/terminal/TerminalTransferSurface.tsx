@@ -1,4 +1,4 @@
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWebview, type DragDropEvent as DragDropPayload } from "@tauri-apps/api/webview";
 import { useEffect, useId, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode, type RefObject } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import type { TerminalTransferClient, TerminalTransferProgress, TerminalTransferScope, UploadCollisionPolicy, UploadPreflight } from "./terminalTransfers";
@@ -13,7 +13,8 @@ import {
   uploadInOriginalOrder,
   validateAgentImagePath,
 } from "./terminalTransfers";
-import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
+import { canCancelTransfer, isTerminalTransferState, transferStateLabel } from "../transfers/transferState";
+import { SurfaceError } from "../../ui/SurfaceError";
 import { useTerminalTransferRegistry, type TerminalTransferRegistry } from "./terminalTransferRegistry";
 
 interface PendingReview {
@@ -26,17 +27,38 @@ interface PendingReview {
 interface ActiveBatch {
   readonly scope: TerminalTransferScope;
   readonly abortController: AbortController;
+  /**
+   * Every transfer this batch has been told about. Dismissing a delivered
+   * result is scoped to these, so a paste cannot clear the record an *earlier*
+   * batch left behind when its own paste was refused.
+   */
+  readonly transferIds: Set<string>;
 }
 
 export interface TerminalTransferSurfaceController {
   pasteClipboard(): Promise<boolean>;
 }
 
-export function pointIsInside(element: Pick<HTMLElement, "getBoundingClientRect">, physical: { x: number; y: number }, scale: number): boolean {
+/**
+ * Whether a Tauri drag-drop point lands on this element.
+ *
+ * Tauri types the point as a `PhysicalPosition`, and it is one on Windows. On
+ * the two platforms this app ships it is not: wry takes the macOS point from
+ * `NSDraggingInfo.draggingLocation` against `NSView.frame`, both AppKit points,
+ * and the GTK one from `drag-motion`/`drag-drop` widget coordinates. Both are
+ * logical — the same units `getBoundingClientRect` reports.
+ *
+ * Dividing by `devicePixelRatio` therefore halved every drop coordinate on a
+ * Retina display, so the hit test rejected the drop and nothing was uploaded:
+ * on a split, a right-hand pane needed a cursor position outside the window to
+ * pass, and could never be dropped onto at all.
+ */
+export function pointIsInside(
+  element: Pick<HTMLElement, "getBoundingClientRect">,
+  point: { x: number; y: number },
+): boolean {
   const rect = element.getBoundingClientRect();
-  const x = physical.x / Math.max(scale, 1);
-  const y = physical.y / Math.max(scale, 1);
-  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
 }
 
 export function basename(path: string): string {
@@ -121,6 +143,7 @@ export function TerminalTransferSurface({
   };
 
   const updateProgress = (batch: ActiveBatch, progress: TerminalTransferProgress) => {
+    batch.transferIds.add(progress.id);
     transferRegistry.record(batch.scope, progress);
   };
 
@@ -129,11 +152,6 @@ export function TerminalTransferSurface({
     reviewResolve.current = resolve;
     setReview(pending);
   });
-
-  const dismissSuccessfulPreflights = () => {
-    const batch = activeBatchRef.current;
-    if (batch) transferRegistry.dismissSuccessfulPreflights(batch.scope);
-  };
 
   const startRemoteBatch = async (batch: ActiveBatch, items: UploadPreflight[], imagePng: boolean) => {
     assertCurrentBatch(batch);
@@ -170,6 +188,9 @@ export function TerminalTransferSurface({
     onPaste(imagePng
       ? destinations.map(validateAgentImagePath).join(" ")
       : joinShellEscapedPaths(destinations));
+    // Delivered: the paths are in the pane. Only now, and only for a batch that
+    // reached this line — a completion whose paste was refused stays visible.
+    transferRegistry.dismissDelivered(batch.scope, [...batch.transferIds]);
   };
 
   const acceptPaths = async (paths: readonly string[], imagePng = false) => {
@@ -180,6 +201,7 @@ export function TerminalTransferSurface({
     const batch: ActiveBatch = {
       scope: { ...scope },
       abortController: new AbortController(),
+      transferIds: new Set(),
     };
     activeBatchRef.current = batch;
     setError(undefined);
@@ -202,7 +224,9 @@ export function TerminalTransferSurface({
         }, (progress) => updateProgress(batch, progress), batch.abortController.signal));
         assertCurrentBatch(batch);
       }
-      dismissSuccessfulPreflights();
+      // The preflights have become uploads; their completions are no longer
+      // what the list should be showing.
+      transferRegistry.dismissDelivered(batch.scope, [...batch.transferIds]);
       await startRemoteBatch(batch, items, imagePng);
     } catch (reason) {
       if (!batchIsCurrent(batch)) throw new DOMException("Terminal transfer scope changed.", "AbortError");
@@ -222,6 +246,7 @@ export function TerminalTransferSurface({
     const batch: ActiveBatch = {
       scope: { ...scope },
       abortController: new AbortController(),
+      transferIds: new Set(),
     };
     activeBatchRef.current = batch;
     setError(undefined);
@@ -238,7 +263,7 @@ export function TerminalTransferSurface({
         collision: "rename", largeUploadConfirmed: true, imagePng: true,
       }, (progress) => updateProgress(batch, progress), batch.abortController.signal);
       assertCurrentBatch(batch);
-      dismissSuccessfulPreflights();
+      transferRegistry.dismissDelivered(batch.scope, [...batch.transferIds]);
       await startRemoteBatch(batch, [item], true);
     } catch (reason) {
       if (!batchIsCurrent(batch)) throw new DOMException("Terminal transfer scope changed.", "AbortError");
@@ -258,6 +283,7 @@ export function TerminalTransferSurface({
     const batch: ActiveBatch = {
       scope: { ...scope },
       abortController: new AbortController(),
+      transferIds: new Set(),
     };
     activeBatchRef.current = batch;
     setError(undefined);
@@ -270,7 +296,7 @@ export function TerminalTransferSurface({
         collision: "rename", largeUploadConfirmed: true, imagePng: true,
       }, (progress) => updateProgress(batch, progress), batch.abortController.signal);
       assertCurrentBatch(batch);
-      dismissSuccessfulPreflights();
+      transferRegistry.dismissDelivered(batch.scope, [...batch.transferIds]);
       await startRemoteBatch(batch, [item], true);
     } catch (reason) {
       if (!batchIsCurrent(batch)) throw new DOMException("Terminal transfer scope changed.", "AbortError");
@@ -283,25 +309,46 @@ export function TerminalTransferSurface({
     }
   };
 
+  // Read through a ref by the one long-lived listener below, and replaced after
+  // every commit. The handler closes over `scope` and `acceptPaths`, both new
+  // objects on every render, so making it the effect's dependency tore down four
+  // Tauri listeners and re-registered four more — over IPC, with a gap in which
+  // nothing was listening — on every render of every pane. `useHostLatency`
+  // ticks every five seconds, so that ran continuously. Assigned in an effect
+  // rather than during render: a render React discards must not leave a handler
+  // behind that closes over state it threw away.
+  const nativeDragDropRef = useRef<{
+    handle(payload: DragDropPayload): void;
+    fail(reason: unknown): void;
+  }>({ handle: () => undefined, fail: () => undefined });
+  const handleNativeDragDrop = (payload: DragDropPayload) => {
+    if (!target.current) return;
+    if (payload.type === "leave") return setDragging(false);
+    // `enter` fires once, when the cursor crosses the *window*, so a drag that
+    // begins over one pane and ends over another would light up the pane it
+    // entered and leave the pane it landed on dark. Every position the drag
+    // reports is re-tested, so the highlight follows the cursor.
+    const inside = pointIsInside(target.current, payload.position);
+    if (payload.type === "enter" || payload.type === "over") return setDragging(inside);
+    setDragging(false);
+    if (inside) void acceptPaths(payload.paths).catch(fail);
+  };
+  useEffect(() => {
+    nativeDragDropRef.current = { handle: handleNativeDragDrop, fail };
+  });
+
   useEffect(() => {
     if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void getCurrentWebview().onDragDropEvent((event) => {
-      if (disposed || !target.current) return;
-      const payload = event.payload;
-      if (payload.type === "leave") return setDragging(false);
-      if (payload.type === "over") return;
-      const inside = pointIsInside(target.current, payload.position, window.devicePixelRatio || 1);
-      if (payload.type === "enter") return setDragging(inside);
-      setDragging(false);
-      if (inside) void acceptPaths(payload.paths).catch(fail);
+      if (!disposed) nativeDragDropRef.current.handle(event.payload);
     }).then((release) => {
       if (disposed) release();
       else unlisten = release;
-    }).catch(fail);
+    }).catch((reason) => nativeDragDropRef.current.fail(reason));
     return () => { disposed = true; unlisten?.(); };
-  }, [scope, target]);
+  }, [target]);
 
   const onPasteCapture = (event: ClipboardEvent<HTMLElement>) => {
     const copiedFiles = event.clipboardData.getData("x-special/gnome-copied-files");
@@ -322,6 +369,7 @@ export function TerminalTransferSurface({
     if (image) {
       event.preventDefault();
       void acceptImage(image).catch(fail);
+      return;
     }
   };
 
@@ -329,43 +377,55 @@ export function TerminalTransferSurface({
     if (!onController) return;
     const controller: TerminalTransferSurfaceController = {
       pasteClipboard: async () => {
-        if (client.readNativeClipboard) {
-          const native = await client.readNativeClipboard();
-          if (native?.kind === "files") {
-            await acceptPaths(parseFileUriList(native.uris.join("\n")));
+        try {
+          if (client.readNativeClipboard) {
+            const native = await client.readNativeClipboard();
+            if (native?.kind === "files") {
+              await acceptPaths(parseFileUriList(native.uris.join("\n")));
+              return true;
+            }
+            if (native?.kind === "image") {
+              await acceptStagedImage(native.staged);
+              return true;
+            }
+            // WebKit refuses `navigator.clipboard` reads for content the page
+            // did not write itself, so without this rung pasting from another
+            // application silently did nothing (M10-E054).
+            if (native?.kind === "text") {
+              onPaste(native.text);
+              return true;
+            }
+          }
+          if (!navigator.clipboard?.read) return false;
+          let items: ClipboardItems;
+          try { items = await navigator.clipboard.read(); } catch { return false; }
+          const paths: string[] = [];
+          for (const item of items) {
+            const uriType = item.types.includes("x-special/gnome-copied-files")
+              ? "x-special/gnome-copied-files"
+              : item.types.includes("text/uri-list") ? "text/uri-list" : undefined;
+            if (uriType) {
+              const value = await (await item.getType(uriType)).text();
+              paths.push(...(uriType === "x-special/gnome-copied-files" ? parseCopiedFileList(value) : parseFileUriList(value)));
+            }
+          }
+          if (paths.length) {
+            await acceptPaths(paths);
             return true;
           }
-          if (native?.kind === "image") {
-            await acceptStagedImage(native.staged);
+          const imageItems = items.flatMap((item) => {
+            const type = supportedClipboardImageType(item.types);
+            return type ? [{ item, type }] : [];
+          });
+          if (imageItems.length === 1) {
+            await acceptImage(await imageItems[0].item.getType(imageItems[0].type));
             return true;
           }
-        }
-        if (!navigator.clipboard?.read) return false;
-        let items: ClipboardItems;
-        try { items = await navigator.clipboard.read(); } catch { return false; }
-        const paths: string[] = [];
-        for (const item of items) {
-          const uriType = item.types.includes("x-special/gnome-copied-files")
-            ? "x-special/gnome-copied-files"
-            : item.types.includes("text/uri-list") ? "text/uri-list" : undefined;
-          if (uriType) {
-            const value = await (await item.getType(uriType)).text();
-            paths.push(...(uriType === "x-special/gnome-copied-files" ? parseCopiedFileList(value) : parseFileUriList(value)));
-          }
-        }
-        if (paths.length) {
-          await acceptPaths(paths);
+          return false;
+        } catch (reason) {
+          fail(reason);
           return true;
         }
-        const imageItems = items.flatMap((item) => {
-          const type = supportedClipboardImageType(item.types);
-          return type ? [{ item, type }] : [];
-        });
-        if (imageItems.length === 1) {
-          await acceptImage(await imageItems[0].item.getType(imageItems[0].type));
-          return true;
-        }
-        return false;
       },
     };
     onController(controller);
@@ -402,7 +462,9 @@ export function TerminalTransferSurface({
     {children}
     {dragging && <div className="terminal-drop-hint" role="status">Drop files to paste paths</div>}
     {!registry && <TerminalTransferHistory client={client} onError={fail} registry={transferRegistry} />}
-    {error && <div className="terminal-transfer-error" role="alert">{error}</div>}
+    {/* Dismissible, because nothing else clears it: it survives until the next
+        transfer starts, and a failed paste is not followed by one. */}
+    {error && <SurfaceError className="terminal-transfer-error" detail={error} onDismiss={() => setError(undefined)} />}
     {review && <UploadReviewDialog pending={review} onChoose={(policy) => {
       const resolve = reviewResolve.current;
       reviewResolve.current = undefined;
@@ -470,6 +532,16 @@ export function TerminalTransferHistory({ registry, client, onError }: {
         {canCancelTransfer(transfer.state) && <button aria-label={`Cancel upload ${transfer.name}`} onClick={() => void client.cancel(transfer.id).then((disposition) => {
           if (disposition.disposition === "awaitingAuthoritativeOutcome") registry.markVerifying(record.key);
         }).catch((reason) => onError?.(reason))} type="button">Cancel</button>}
+        {/* A finished record is one a delivered success would already have
+            removed, so what is left here is a failure, a cancellation or an
+            unknown outcome — every one of them the user's to close. The same
+            predicate the registry uses, so the button cannot appear on a
+            record `dismiss` would refuse. */}
+        {isTerminalTransferState(transfer.state) && <button
+          aria-label={`Dismiss upload ${transfer.name}`}
+          onClick={() => registry.dismiss(record.key)}
+          type="button"
+        >Dismiss</button>}
         {transfer.state === "verifying" && <small className="transfer-finalizing" role="status">Commit in progress; awaiting the authoritative backend outcome.</small>}
         {transfer.failureKind === "staleScope" && <em role="alert">Upload stopped because the connection scope changed.</em>}
         {transfer.failureKind === "timeout" && <em role="alert">Upload timed out before an authoritative result arrived.</em>}

@@ -89,6 +89,34 @@ describe("app-scoped terminal transfer registry", () => {
     expect(JSON.stringify(view.renderer.toJSON())).toContain("old-server");
   });
 
+  it("leaves no notice behind once a delivered upload's path is in the pane", async () => {
+    // The user's own words: "I don't need a notification at all — I can see it
+    // when the thing is pasted." A completed card used to sit in the corner of
+    // the window for the rest of the session, with no control to close it.
+    const view = await verifyingHarness();
+    await act(async () => {
+      view.report({ id: "transfer", sourcePath: "/tmp/image", name: "image", state: "completed", outcome: "published", completedBytes: "12", totalBytes: "12", destination: "/remote/image", digest: "verified", cleanupStatus: "removed" });
+      view.resolve({ id: "transfer", destination: "/remote/image", digest: "verified" });
+      await Promise.resolve(); await Promise.resolve();
+    });
+    expect(view.onPaste).toHaveBeenCalledWith("'/remote/image'");
+    expect(view.renderer.root.findAllByProps({ "aria-label": "Upload image: Completed" })).toHaveLength(0);
+    // And the whole panel goes with the last record, rather than lingering empty.
+    expect(view.renderer.root.findAllByProps({ "aria-label": "Terminal uploads" })).toHaveLength(0);
+  });
+
+  it("lets the user close a failure, which nothing else clears", async () => {
+    const view = await verifyingHarness();
+    await act(async () => {
+      view.report({ id: "transfer", sourcePath: "/tmp/image", name: "image", state: "failed", outcome: "notPublished", failureKind: "transfer", completedBytes: "6", error: "the link dropped" });
+      view.reject(new Error("the link dropped"));
+      await Promise.resolve(); await Promise.resolve();
+    });
+    const dismiss = view.renderer.root.findByProps({ "aria-label": "Dismiss upload image" });
+    await act(async () => { dismiss.props.onClick(); });
+    expect(view.renderer.root.findAllByProps({ "aria-label": "Terminal uploads" })).toHaveLength(0);
+  });
+
   it("retains an unknown old-scope result after the initiating surface unmounts", async () => {
     const view = await verifyingHarness();
     await act(async () => { view.renderer.update(<Harness client={view.client} onPaste={view.onPaste} scope={originalScope} showSurface={false} />); });

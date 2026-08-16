@@ -357,6 +357,12 @@ pub(super) fn precise_file_events(
         .filter_map(|event| event.as_ref().ok())
         .flat_map(|event| event.paths.iter())
         .filter(|path| *path == &watch.target || path.parent() == Some(watch.target.as_path()))
+        // An entry no listing reports must not wake the explorer either. On
+        // macOS every folder Finder has ever opened gains a `.DS_Store` that is
+        // rewritten behind the user's back, and each rewrite would otherwise
+        // become a `FileChanged` the desktop answers with a full re-list of the
+        // directory — for an entry the re-list then filters out.
+        .filter(|path| !path.file_name().is_some_and(is_always_hidden))
     {
         let Ok(relative) = path.strip_prefix(root) else {
             continue;
@@ -450,9 +456,12 @@ pub(super) fn scan_fallback_shard_with_limits(
                 };
                 let entry = entry?;
                 match fs::symlink_metadata(entry.path()) {
-                    Ok(metadata) => {
-                        return Ok(Some(watch_entry_fingerprint(&entry.file_name(), &metadata)));
-                    }
+                    // `None` is a hidden entry, not the end of the directory:
+                    // keep walking rather than reporting the shard complete.
+                    Ok(metadata) => match watch_entry_fingerprint(&entry.file_name(), &metadata) {
+                        Some(value) => return Ok(Some(value)),
+                        None => continue,
+                    },
                     Err(error) if error.kind() == ErrorKind::NotFound => continue,
                     Err(error) => return Err(error.into()),
                 }

@@ -46,10 +46,12 @@ fn status_models_initial_raw_ignored_mode_symlink_binary_and_rename_delete() {
     fixture.git(&["add", "."]);
     fixture.git(&["commit", "-qm", "base"]);
     fixture.write("ignored-one", b"ignored");
+    #[cfg(target_os = "linux")]
+    let raw = b"raw-\xff".to_vec();
+    #[cfg(target_os = "macos")]
+    let raw = "raw-é".as_bytes().to_vec();
     fs::write(
-        fixture
-            .root
-            .join(std::ffi::OsString::from_vec(b"raw-\xff".to_vec())),
+        fixture.root.join(std::ffi::OsString::from_vec(raw.clone())),
         b"raw",
     )
     .unwrap();
@@ -62,7 +64,7 @@ fn status_models_initial_raw_ignored_mode_symlink_binary_and_rename_delete() {
     fixture.git(&["mv", "binary", "renamed"]);
     fs::remove_file(fixture.root.join("renamed")).unwrap();
     let status = GitService::new().status(&fixture.request()).unwrap();
-    assert!(status.entries.iter().any(|entry| entry.path == b"raw-\xff"));
+    assert!(status.entries.iter().any(|entry| entry.path == raw));
     assert!(status.entries.iter().any(|entry| entry.ignored));
     assert!(
         status
@@ -338,7 +340,10 @@ async fn descriptor_pinned_untracked_diff_generates_an_applicable_repo_relative_
     fixture.write("base", b"base\n");
     fixture.git(&["add", "base"]);
     fixture.git(&["commit", "-qm", "base"]);
+    #[cfg(target_os = "linux")]
     let raw = b"new\n\xff".to_vec();
+    #[cfg(target_os = "macos")]
+    let raw = "new\né".as_bytes().to_vec();
     fs::write(
         fixture.root.join(std::ffi::OsString::from_vec(raw.clone())),
         b"first\nsecond\n",

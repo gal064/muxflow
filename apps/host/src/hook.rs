@@ -31,20 +31,261 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
     if !value.is_object() {
         bail!("hook payload must be a JSON object");
     }
-    let pane_id = std::env::var("TMUX_PANE").context("TMUX_PANE is unavailable")?;
-    validate_pane_id(&pane_id)?;
+    let Some(pane_id) = pane_for_hook(std::env::var_os("TMUX_PANE"))? else {
+        return Ok(());
+    };
     let origin_server_identity =
         crate::service::snapshot::inherited_server_identity().unwrap_or_default();
     let now = now_millis();
     let event = build_event(adapter, payload, &pane_id, &origin_server_identity, now)?;
-    let socket = crate::paths::default_socket_path();
-    match send(&socket, &event).await {
-        Ok(()) => Ok(()),
-        Err(error) if is_connection_error(&error) => {
-            persist_latest_fallback(&event)?;
-            Ok(())
+    deliver(&crate::paths::runtime_dir_candidates(), &event).await
+}
+
+/// Hand the event to whichever daemon is actually running.
+///
+/// The candidate list exists because "the runtime directory" is not a property
+/// of the machine but of the environment a process happened to inherit, and a
+/// hook inherits a different one from the daemon (see `paths::record_runtime_dir`).
+/// Only a connection error moves on to the next candidate: a daemon that
+/// answered and then rejected the event is the daemon, and retrying the same
+/// event against another directory would either duplicate it or hide the
+/// rejection.
+async fn deliver(
+    candidates: &[std::path::PathBuf],
+    event: &v1::AgentHookEvent,
+) -> anyhow::Result<()> {
+    for runtime in candidates {
+        let socket = runtime.join("host.sock");
+        if !socket.exists() {
+            continue;
         }
-        Err(error) => Err(error),
+        match send(&socket, event).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_connection_error(&error) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    persist_latest_fallback(&crate::paths::fallback_runtime_dir(candidates), event)
+}
+
+/// `hook status|install|uninstall` — the same merge-only installer the desktop
+/// drives, reachable without a UI.
+///
+/// This exists so the installer can be exercised against a fixture copied from
+/// a real machine's configuration: `--home` relocates every adapter's file and
+/// `--settings-path` relocates one adapter's, which is what keeps QA off a real
+/// `~/.claude` while still testing the real merge.
+pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
+    let options = Options::parse(&arguments);
+    let home = options.home.clone().map(std::path::PathBuf::from);
+    let settings_path = options.settings_path.clone().map(std::path::PathBuf::from);
+    let adapter_id = options.adapter.clone();
+    let selected = adapter_id
+        .as_deref()
+        .map(|id| crate::service::agents::adapters::by_id(id).context("unsupported hook adapter"))
+        .transpose()?;
+    let config_override = match (settings_path, selected) {
+        (Some(path), Some(adapter)) => Some((adapter.id(), path)),
+        (Some(_), None) => {
+            bail!("--settings-path names one adapter's configuration and requires --adapter")
+        }
+        (None, _) => None,
+    };
+    let manager = crate::service::agents::HookManager::with_overrides(home, config_override)?;
+    let action = match verb {
+        "status" => None,
+        "install" => Some(v1::HookManagementAction::Install),
+        "uninstall" => Some(v1::HookManagementAction::Uninstall),
+        _ => bail!("usage: tmux-ide-host hook <ingest|status|install|uninstall>"),
+    };
+    // Consent, for the one caller that has no user interface to ask through.
+    //
+    // The desktop will not write a host's agent configuration without a
+    // recorded answer for that host; this command had no notion of consent at
+    // all, so anything that could run it — a script, an agent, a paste from a
+    // README — rewrote the operator's real `~/.claude` and `~/.codex` silently.
+    // `--yes` is what makes the answer explicit and, in a shell history, a
+    // record.
+    //
+    // The question is which files this run would write, never which flags it
+    // carries: `--home "$HOME"` and `--settings-path ~/.claude/settings.json`
+    // are both redirections and both land on exactly the files an unredirected
+    // run would. So the paths are compared against the ones this operator's own
+    // environment resolves, which is also what leaves every fixture lane — all
+    // of which redirect somewhere else — needing no answer.
+    if action.is_some() && !options.confirmed {
+        // `?`, never a default. A gate that permits when it cannot work out
+        // what it is protecting is not a gate.
+        let mine = crate::service::agents::HookManager::with_overrides(None, None)
+            .context("resolve your own agent configuration to confirm this would not change it")?
+            .wiring()
+            .into_iter()
+            .map(|(_, entry)| entry.config_path)
+            .collect::<std::collections::HashSet<_>>();
+        if let Some((_, entry)) = manager
+            .wiring()
+            .into_iter()
+            .find(|(_, entry)| mine.contains(&entry.config_path))
+        {
+            bail!(
+                "hook {verb} would change your own agent configuration at {}. \
+                 Re-run with --yes to confirm, or point --home/--settings-path at a copy.",
+                entry.config_path.display()
+            );
+        }
+    }
+    let mut report = Vec::new();
+    let mut failed = false;
+    if let Some(action) = action {
+        for (adapter, entry) in manager.wiring() {
+            // The two verbs ask opposite questions and had been sharing one
+            // predicate. Install asks "would this act here" — `invites_setup`,
+            // which excludes an agent that is not on the host, because
+            // installing there creates a configuration directory and file for
+            // a tool the user does not use. Uninstall asks "do we own anything
+            // here", and a `Wired` adapter answers no to the first and yes to
+            // the second: unscoped `hook uninstall` removed nothing at all and
+            // reported that the agents were not installed.
+            //
+            // `--adapter` overrides absence, since an operator naming an
+            // adapter has said something the probe cannot. Nothing overrides an
+            // unreadable configuration: writing over what nobody could parse is
+            // how unrelated hooks get lost.
+            let explicit = adapter_id.as_deref() == Some(entry.adapter_id);
+            let acts_here = match action {
+                v1::HookManagementAction::Uninstall => {
+                    entry.state == v1::AgentHookWiring::Wired
+                        || entry.state == v1::AgentHookWiring::Partial
+                }
+                _ => entry.state.invites_setup(),
+            };
+            let skip = if adapter_id.is_some() && !explicit {
+                Some("not selected")
+            } else if entry.state == v1::AgentHookWiring::Unavailable {
+                Some("configuration could not be read")
+            } else if !acts_here && !explicit {
+                Some(match action {
+                    v1::HookManagementAction::Uninstall => "nothing of ours is installed here",
+                    _ => "agent is not installed here",
+                })
+            } else {
+                None
+            };
+            if let Some(reason) = skip {
+                report.push(serde_json::json!({
+                    "adapterId": entry.adapter_id,
+                    "configPath": entry.config_path,
+                    "skipped": reason,
+                }));
+                continue;
+            }
+            // Every adapter is reported even when an earlier one failed: a
+            // merge-only installer whose pitch is "you can see exactly what
+            // changed" must not exit silently having already written a file.
+            match apply_one(&manager, adapter.legacy_kind(), action) {
+                Ok(value) => report.push(value),
+                Err(error) => {
+                    failed = true;
+                    report.push(serde_json::json!({
+                        "adapterId": entry.adapter_id,
+                        "configPath": entry.config_path,
+                        "error": error.to_string(),
+                    }));
+                }
+            }
+        }
+    }
+    // Re-read: what the wiring is *after* whatever just happened is the
+    // useful answer, and the observation above was only a plan.
+    let wiring: Vec<_> = manager
+        .wiring()
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .filter(|entry| {
+            adapter_id
+                .as_deref()
+                .is_none_or(|id| id == entry.adapter_id)
+        })
+        .map(|entry| {
+            serde_json::json!({
+                "adapterId": entry.adapter_id,
+                "configPath": entry.config_path,
+                "wiring": entry.state.label(),
+                "detail": entry.detail,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::json!({
+            "action": verb,
+            "applied": report,
+            "adapters": wiring,
+        })
+    );
+    if failed {
+        bail!("one or more adapters could not be updated; see the reported result");
+    }
+    Ok(())
+}
+
+fn apply_one(
+    manager: &crate::service::agents::HookManager,
+    adapter: v1::AgentAdapterKind,
+    action: v1::HookManagementAction,
+) -> anyhow::Result<serde_json::Value> {
+    let review = manager.review(adapter, action)?;
+    // `already_current` is the installer's own idempotence answer, so a second
+    // run reports "unchanged" rather than rewriting a file and claiming it did
+    // something.
+    let changed = !review.already_current;
+    if changed {
+        manager.apply(adapter, action, &review.confirmation_token)?;
+    }
+    Ok(serde_json::json!({
+        "adapterId": review.adapter_id,
+        "configPath": review.config_path,
+        "backupPath": review.backup_path,
+        "changed": changed,
+    }))
+}
+
+/// Everything this command reads from its arguments, parsed once.
+///
+/// One traversal, because there were two and they disagreed. A `windows(2)`
+/// search matches a flag anywhere, including where it is another flag's value;
+/// a positional walk does not. With both models present, `--adapter --home /x`
+/// meant different things to the code that decides *where* to write and the
+/// code that decides *whether* it may — on the one command that writes the
+/// user's configuration files.
+#[derive(Default)]
+struct Options {
+    adapter: Option<String>,
+    home: Option<String>,
+    settings_path: Option<String>,
+    confirmed: bool,
+}
+
+impl Options {
+    fn parse(arguments: &[String]) -> Self {
+        let mut options = Self::default();
+        let mut rest = arguments.iter();
+        while let Some(argument) = rest.next() {
+            let field = match argument.as_str() {
+                "--adapter" => &mut options.adapter,
+                "--home" => &mut options.home,
+                "--settings-path" => &mut options.settings_path,
+                "--yes" => {
+                    options.confirmed = true;
+                    continue;
+                }
+                _ => continue,
+            };
+            // A flag whose value is missing stays unset rather than swallowing
+            // the next flag, and the value is never re-read as one.
+            *field = rest.next().cloned();
+        }
+        options
     }
 }
 
@@ -171,16 +412,44 @@ async fn send(socket: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<()> {
     }
 }
 
-fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
-    let runtime = crate::paths::default_runtime_dir();
-    crate::paths::prepare_runtime_dir(&runtime)?;
+/// Events a stopped daemon could not be told about, kept in order.
+///
+/// This used to be one file per pane, overwritten by each event, and that
+/// discarded exactly the sequence the daemon needs. A turn that starts and then
+/// blocks while the daemon is down left only the block behind — and the
+/// daemon's own rule that a late tool event may not revive a finished turn then
+/// correctly ignored it, because the prompt that opened the new turn had been
+/// overwritten. The user closed the app mid-turn, the agent asked for
+/// permission, and the app came back showing the *previous* turn's result.
+///
+/// Bounded rather than unbounded: a mailbox that nothing ever drains must not
+/// grow without limit, so the oldest events are dropped once a pane has this
+/// many waiting. Dropping the oldest keeps the tail, which is the part that
+/// describes where the agent ended up.
+const MAX_FALLBACK_PER_PANE: usize = 32;
+
+fn persist_latest_fallback(runtime: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<()> {
+    crate::paths::prepare_runtime_dir(runtime)?;
     let pane = event.pane_id.trim_start_matches('%');
     let adapter = crate::service::agents::adapters::adapter(
         v1::AgentAdapterKind::try_from(event.adapter).unwrap_or_default(),
     )
     .context("unsupported hook adapter")?
     .id();
-    let path = runtime.join(format!("hook-fallback-{adapter}-{pane}.pb"));
+    let prefix = format!("hook-fallback-{adapter}-{pane}-");
+    prune_fallbacks(runtime, &prefix);
+    // Fixed-width nanoseconds first, so the file name sorts chronologically and
+    // the daemon can replay the sequence without opening anything; the random
+    // suffix separates two hooks that fired in the same nanosecond, which are
+    // concurrent and have no order to preserve anyway.
+    let path = runtime.join(format!(
+        "{prefix}{:020}-{}.pb",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        uuid::Uuid::new_v4().simple()
+    ));
     let temporary = runtime.join(format!(".hook-fallback-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> anyhow::Result<()> {
         let mut file = OpenOptions::new()
@@ -191,7 +460,7 @@ fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
         file.write_all(&event.encode_to_vec())?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        fs::File::open(&runtime)?.sync_all()?;
+        fs::File::open(runtime)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
@@ -200,15 +469,66 @@ fn persist_latest_fallback(event: &v1::AgentHookEvent) -> anyhow::Result<()> {
     result
 }
 
+/// Drop the oldest waiting events for this pane once the mailbox is full.
+///
+/// Best effort by design: a mailbox that cannot be pruned is not a reason to
+/// lose the event that is being written now.
+fn prune_fallbacks(runtime: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(runtime) else {
+        return;
+    };
+    let mut existing: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_owned();
+            (name.starts_with(prefix) && name.ends_with(".pb")).then(|| (name, entry.path()))
+        })
+        .collect();
+    if existing.len() < MAX_FALLBACK_PER_PANE {
+        return;
+    }
+    existing.sort_by(|left, right| left.0.cmp(&right.0));
+    for (_, path) in existing
+        .iter()
+        .take(existing.len() + 1 - MAX_FALLBACK_PER_PANE)
+    {
+        let _ = fs::remove_file(path);
+    }
+}
+
 fn parse_adapter(arguments: &[String]) -> anyhow::Result<v1::AgentAdapterKind> {
-    let value = arguments
-        .windows(2)
-        .find(|pair| pair[0] == "--adapter")
-        .map(|pair| pair[1].as_str())
+    let value = Options::parse(arguments)
+        .adapter
         .context("hook ingest requires --adapter codex|claude-code")?;
-    crate::service::agents::adapters::by_id(value)
+    crate::service::agents::adapters::by_id(&value)
         .map(|adapter| adapter.legacy_kind())
         .ok_or_else(|| anyhow::anyhow!("unsupported hook adapter"))
+}
+
+/// Which pane this hook belongs to, or `None` when it belongs to no pane.
+///
+/// The managed hook line is installed once, into the agent's own configuration,
+/// and that configuration follows the user everywhere the agent runs — including
+/// a plain terminal with no tmux server in sight. There is legitimately nothing
+/// to ingest there, and treating it as an error surfaced
+/// `UserPromptSubmit hook error … TMUX_PANE is unavailable` on *every* prompt of
+/// every such session.
+///
+/// Absent is the no-tmux case and is silent. Present-but-malformed is not: a
+/// value that exists and is not a pane id means something in the environment
+/// claims to be tmux and is wrong, which the operator has to be told about. That
+/// includes a value that is not UTF-8 at all, which is why the caller passes
+/// `var_os` — `var` reports it as absent and would have swallowed exactly the
+/// misconfiguration this distinction exists to catch.
+fn pane_for_hook(value: Option<std::ffi::OsString>) -> anyhow::Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let pane_id = value
+        .to_str()
+        .context("TMUX_PANE is not valid UTF-8 and cannot be a tmux pane ID")?;
+    validate_pane_id(pane_id)?;
+    Ok(Some(pane_id.to_owned()))
 }
 
 fn validate_pane_id(value: &str) -> anyhow::Result<()> {
@@ -268,6 +588,26 @@ mod tests {
         assert!(parse_adapter(&["--adapter".into(), "other".into()]).is_err());
         assert!(validate_pane_id("%12").is_ok());
         assert!(validate_pane_id("%12;bad").is_err());
+    }
+
+    /// Running the agent outside tmux is not a misconfiguration and must not
+    /// look like one; running it with a broken `TMUX_PANE` still must.
+    #[test]
+    fn a_session_outside_tmux_has_no_pane_and_is_not_an_error() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        assert_eq!(pane_for_hook(None).unwrap(), None);
+        assert_eq!(
+            pane_for_hook(Some("%12".into())).unwrap(),
+            Some("%12".to_owned())
+        );
+        for malformed in ["", "%", "12", "%12;bad", "%1 2"] {
+            assert!(
+                pane_for_hook(Some(malformed.into())).is_err(),
+                "a present but malformed TMUX_PANE ({malformed:?}) must still fail loudly"
+            );
+        }
+        assert!(pane_for_hook(Some(OsString::from_vec(vec![0xff, 0xfe]))).is_err());
     }
 
     #[test]

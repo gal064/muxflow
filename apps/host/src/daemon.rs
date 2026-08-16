@@ -28,6 +28,7 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
     let runtime = socket_path
         .parent()
         .context("daemon socket has no parent directory")?;
+    paths::check_socket_path_length(&socket_path)?;
     paths::prepare_runtime_dir(runtime)?;
 
     if socket_path.exists() {
@@ -58,7 +59,18 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
             return Err(error).context("initialize private runtime diagnostics");
         }
     };
+    // Before anything reads it: this process's state belongs beside its
+    // socket, not beside whatever its environment would have resolved.
+    paths::adopt_runtime_dir(runtime);
     diagnostics.install_process_recorder();
+    // Published before the first connection is accepted, so a hook that fires
+    // the instant an agent starts can already find this directory rather than
+    // the one its own environment would have derived (M13-E003). Non-fatal: a
+    // daemon that cannot write the pointer still serves every client that
+    // resolves the same directory it did, which is the common case.
+    if let Err(error) = paths::record_runtime_dir(runtime) {
+        eprintln!("could not record the runtime directory for hooks: {error}");
+    }
     let metadata_path = runtime.join("daemon.json");
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let process_start_time = process_start_time(std::process::id())?;
@@ -297,6 +309,7 @@ fn remove_stale_endpoint(socket_path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn process_start_time(pid: u32) -> anyhow::Result<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let (_, tail) = stat
@@ -307,6 +320,37 @@ fn process_start_time(pid: u32) -> anyhow::Result<u64> {
         .context("process stat omitted start time")?
         .parse()
         .context("invalid process start time")
+}
+
+#[cfg(target_os = "macos")]
+fn process_start_time(pid: u32) -> anyhow::Result<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let expected = std::mem::size_of::<libc::proc_bsdinfo>();
+    let expected_i32 = i32::try_from(expected).context("proc_bsdinfo size exceeds i32")?;
+    // SAFETY: `info` points to `expected` writable bytes and the requested
+    // flavor returns `proc_bsdinfo` for the exact process ID.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            i32::try_from(pid).context("process ID exceeds Darwin pid_t")?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            expected_i32,
+        )
+    };
+    if written != expected_i32 {
+        return Err(std::io::Error::last_os_error()).context("inspect Darwin process start time");
+    }
+    let info = unsafe { info.assume_init() };
+    info.pbi_start_tvsec
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(info.pbi_start_tvusec))
+        .context("Darwin process start time overflow")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_start_time(_pid: u32) -> anyhow::Result<u64> {
+    bail!("process start-time identity is unsupported on this platform")
 }
 
 #[cfg(test)]

@@ -30,6 +30,20 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   const [activeSessionId, setActiveSessionId] = useState<string>();
   const [activeWindowId, setActiveWindowId] = useState<string>();
   const [clientId, setClientId] = useState<string>();
+  /**
+   * Which host profile `clientId` was established for.
+   *
+   * `currentHostProfileId` is derived from the *pending* connection spec, and
+   * the bridge is torn down by an effect, so a render that changes the
+   * connection commits with the new profile id and the previous connection's
+   * live client. Anything that acts on "the current host" in that window acts
+   * on two different machines at once — M13-E004 is what that costs when the
+   * act is writing an agent's configuration file. Recorded here, at the one
+   * moment both facts are known together, so the mismatch is detectable
+   * instead of depending on every caller remembering to reset host state
+   * first.
+   */
+  const [clientHostProfileId, setClientHostProfileId] = useState<string>();
   const clientIdRef = useRef<string | undefined>(undefined);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [terminalEpoch, setTerminalEpoch] = useState(0);
@@ -39,11 +53,23 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   const [sshTarget, setSshTarget] = useState("");
   const [sshConfigPath, setSshConfigPath] = useState("");
   const [profiles, setProfiles] = useState<HostProfile[]>([]);
+  /**
+   * The saved host the *picker* is showing, which is not the one the app is
+   * connected to.
+   *
+   * The picker used to derive its value by matching each saved profile against
+   * the live `connection`, so choosing a different host filled the form in and
+   * then snapped the control straight back to the connected one — the selection
+   * was invisible until Connect made it the connection. Selecting is its own
+   * state; Connect is what turns it into a connection. Empty means "current
+   * values": either nothing is chosen, or the form has been edited away from
+   * whatever was.
+   */
+  const [selectedProfileId, setSelectedProfileId] = useState("");
   const [profilesHydrated, setProfilesHydrated] = useState(false);
   const [profileRecovery, setProfileRecovery] = useState<PersistedProfiles["recovery"]>();
   const [connectionDetail, setConnectionDetail] = useState("");
   const [appFocused, setAppFocused] = useState(() => typeof document === "undefined" || document.hasFocus());
-  const resizeTimer = useRef<number | undefined>(undefined);
   const frontendResyncActive = useRef(false);
   const serverIdentityRef = useRef<string | undefined>(undefined);
   const currentHostProfileId = hostProfileId(connection);
@@ -103,6 +129,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
         : selected.connection;
       setConnection(selectedConnection);
       setConnectionMode(selected.connection.mode);
+      setSelectedProfileId(selected.id);
       if (selected.connection.mode === "ssh") {
         setSshTarget(selected.connection.target);
         setSshConfigPath(selected.connection.configPath ?? "");
@@ -132,6 +159,17 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
           setTerminalEpoch(event.epoch);
         } else if (event.kind === "topologyDirty") {
           setStatus("Topology changed; reconciling…");
+        } else if (event.kind === "flowStalled") {
+          // Deliberately not "recovering it". The host has asked for a seed, so
+          // the pane repaints — but that seed no longer carries a resume, and
+          // it cannot: the host has established that this pane's resume is
+          // refused, and attaching another is what made the recovery re-trigger
+          // itself. So the screen comes back and the *stream* may not, and a
+          // message promising recovery would be the second time this defect
+          // told the user something untrue. The pane id stays out of it too;
+          // `%7` names nothing anyone can see.
+          terminalStateCache.delete(event.paneId);
+          setStatus("A terminal stopped receiving live output; its last screen was restored.");
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
           setConnectionDetail(detail);
@@ -181,15 +219,16 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
       else {
         clientIdRef.current = id;
         setClientId(id);
+        setClientHostProfileId(hostProfileId(connection));
       }
     }).catch((error) => { if (!disposed) setStatus(String(error)); });
 
     return () => {
       disposed = true;
-      window.clearTimeout(resizeTimer.current);
       if (clientIdRef.current === startedClient) clientIdRef.current = undefined;
       dispatchHost({ type: "connection", phase: "disconnected" });
       setClientId(undefined);
+      setClientHostProfileId(undefined);
       terminalEpochRef.current = 0;
       setTerminalEpoch(0);
       if (startedClient) void stopTerminal(startedClient);
@@ -197,12 +236,12 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   }, [bridgeKey, profilesHydrated]);
 
   return {
-    activeSessionId, activeWindowId, appFocused, clientId, clientIdRef, connection,
+    activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
-    profiles, profilesHydrated, resizeTimer, setActiveSessionId, setActiveWindowId,
+    profiles, profilesHydrated, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
-    setProfileRecovery, setProfiles, setSshConfigPath, setSshTarget, snapshot,
-    snapshotRef, sshConfigPath, sshTarget, terminalEpoch, terminalEpochRef, windows,
+    setProfileRecovery, setProfiles, setSelectedProfileId, setSshConfigPath, setSshTarget,
+    snapshot, snapshotRef, sshConfigPath, sshTarget, terminalEpoch, terminalEpochRef, windows,
   };
 }

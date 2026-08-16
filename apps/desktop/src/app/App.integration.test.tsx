@@ -1,3 +1,6 @@
+// @vitest-environment jsdom
+// A real DOM, because the shell's dialogs and menus move focus and read
+// `document.activeElement`; a hand-built `window` stub cannot answer that.
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultAppState } from "../features/shell/types";
@@ -29,14 +32,9 @@ describe("App orchestration", () => {
     closeRequestedMock.mockClear();
     Object.assign(globalThis, {
       IS_REACT_ACT_ENVIRONMENT: true,
-      localStorage: { getItem: () => null, setItem: () => undefined },
-      window: {
-        addEventListener: () => undefined,
-        clearTimeout,
-        removeEventListener: () => undefined,
-        requestAnimationFrame: (callback: FrameRequestCallback) => { callback(0); return 1; },
-        setTimeout,
-      },
+      // jsdom ships neither of these, and the shell measures the terminal
+      // surface with one and never resizes the window in this test.
+      ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
     });
   });
 
@@ -81,6 +79,12 @@ describe("App orchestration", () => {
     await act(async () => { renderer = create(<App />); });
     expect(invokeMock.mock.calls.filter(([command]) => command === "start_terminal")).toHaveLength(1);
 
+    // Connection settings are no longer docked in the shell; the sidebar's host
+    // row — the app's one resting connection indicator — is what opens them.
+    const hostRow = renderer!.root.findAllByType("button")
+      .find((button) => String(button.props["aria-label"] ?? "").startsWith("Host "));
+    expect(hostRow).toBeDefined();
+    await act(async () => { hostRow!.props.onClick(); });
     const connect = renderer!.root.findAllByType("button")
       .find((button) => button.props.children === "Connect");
     expect(connect).toBeDefined();

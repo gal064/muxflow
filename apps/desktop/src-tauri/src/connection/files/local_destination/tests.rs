@@ -126,16 +126,6 @@ fn recovery_ignores_untrusted_journals_and_never_deletes_outside_leaf() {
 }
 
 #[test]
-fn rename_suffix_respects_name_max_and_utf8_boundaries() {
-    let requested = format!("{}.tar.gz", "界".repeat(81));
-    let requested = OsStr::new(&requested);
-    let candidate = renamed_name_bytes(requested, 1, 255).unwrap();
-    assert!(candidate.len() <= 255);
-    let candidate = std::str::from_utf8(&candidate).unwrap();
-    assert!(candidate.ends_with(" (1).gz"));
-}
-
-#[test]
 fn parent_namespace_swap_fails_closed_and_cleans_original_directory() {
     let root = std::env::temp_dir().join(format!("ade-dl-parent-swap-{}", Uuid::new_v4()));
     let parent = root.join("destination");

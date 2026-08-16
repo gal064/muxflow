@@ -15,7 +15,7 @@ use tmux_agent_protocol::{
 use uuid::Uuid;
 
 use super::event_frame::encode_event_with_sequence;
-use super::transport::spawn_bridge;
+use super::transport::{BridgeStderr, spawn_bridge, with_bridge_diagnostic};
 use super::{
     ConnectionSpec, InitialHostState, TerminalClient, TerminalEvent, mark_input_reconnected,
     send_event, snapshot_from_proto, validate_tmux_id,
@@ -73,10 +73,26 @@ pub(super) fn supervise_bridge(
             },
         );
         attempt = attempt.saturating_add(1);
-        let delay = 200_u64.saturating_mul(2_u64.pow(attempt.min(5)))
-            + reconnect_jitter(&client_id, attempt);
-        thread::sleep(Duration::from_millis(delay));
+        thread::sleep(Duration::from_millis(reconnect_delay_millis(
+            &client_id, attempt,
+        )));
     }
+}
+
+/// Backs off from 400 ms to a one-minute ceiling.
+///
+/// The early attempts are unchanged, because the common case is a blip that
+/// clears in a second and the user should not notice it. The ceiling used to be
+/// 6.4 s, which means a machine that is asleep, off the network, or away for an
+/// afternoon reconnects roughly ten times a minute forever; a minute is long
+/// enough to stop being a cost and short enough that a returning laptop comes
+/// back promptly.
+pub(super) fn reconnect_delay_millis(client_id: &str, attempt: u32) -> u64 {
+    const CEILING_MILLIS: u64 = 60_000;
+    // Saturating arithmetic is what bounds a long outage: the doubling runs
+    // away to u64::MAX and the ceiling below is what the caller actually sleeps.
+    let backoff = 200_u64.saturating_mul(2_u64.saturating_pow(attempt));
+    backoff.min(CEILING_MILLIS) + reconnect_jitter(client_id, attempt)
 }
 
 pub(super) fn reconnect_jitter(client_id: &str, attempt: u32) -> u64 {
@@ -101,10 +117,12 @@ fn run_bridge_once(
         .stdout
         .take()
         .ok_or("host bridge stdout unavailable")?;
+    let diagnostic = bridge.stderr.take().map(BridgeStderr::capture);
     let mut reader = BufReader::new(stdout);
     let terminal_epoch = ((Uuid::new_v4().as_u128() as u64) & ((1_u64 << 53) - 1)).max(1);
     let (hello, initial, negotiated_writable) =
-        handshake_and_snapshot(&mut stdin, &mut reader, terminal_epoch)?;
+        handshake_and_snapshot(&mut stdin, &mut reader, terminal_epoch)
+            .map_err(|error| with_bridge_diagnostic(error, diagnostic.as_ref()))?;
     // Terminal generations are scoped to one helper protocol connection.  Tell
     // the renderer to discard same-server generation watermarks before any seed
     // or output from the new connection is delivered.
@@ -282,6 +300,7 @@ fn handshake_and_snapshot(
             response.error_code, response.display_message
         ));
     }
+    let accepted_sequence = response.accepted_sequence;
     let snapshot = response
         .snapshot
         .ok_or("subscribe response omitted snapshot")?;
@@ -297,12 +316,24 @@ fn handshake_and_snapshot(
         Some(InitialHostState {
             snapshot: snapshot_from_proto(snapshot),
             agent_snapshot,
-            accepted_sequence: response.accepted_sequence,
+            accepted_sequence,
             generation,
-            buffered_events: buffered,
+            // A snapshot barrier already incorporates every ordered event at
+            // or below its accepted sequence. Replaying an event that happened
+            // to reach stdout before the response would make the bridge treat
+            // that already-accepted sequence as a gap and reconnect. This race
+            // is common while the first tmux controls are being attached.
+            buffered_events: buffered
+                .into_iter()
+                .filter(|frame| event_follows_snapshot_barrier(frame, accepted_sequence))
+                .collect(),
         }),
         true,
     ))
+}
+
+fn event_follows_snapshot_barrier(frame: &v1::Envelope, accepted_sequence: u64) -> bool {
+    matches!(&frame.payload, Some(Payload::Event(_))) && frame.sequence > accepted_sequence
 }
 
 pub(super) fn handshake_allows_snapshot(envelope_major: u32, hello: &v1::ServerHello) -> bool {
@@ -547,6 +578,29 @@ fn process_event(
                 ));
             }
         }
+        // `TerminalFlowPaused` is deliberately absent. It is the start of a
+        // flow-control episode the host resumes and re-captures by itself, and
+        // a second recovery raced in from here would only re-photograph a pane
+        // that is already being re-photographed. What reaches the renderer is
+        // the case the host could not fix.
+        v1::EventKind::TerminalFlowStalled => {
+            if let Some(pane_id) = scoped_terminal_recovery(&event.scope) {
+                send_protocol_event(
+                    channel,
+                    event_sequence,
+                    TerminalEvent::FlowStalled {
+                        pane_id: pane_id.clone(),
+                        message: event.detail,
+                    },
+                )?;
+                // The seed is the recovery, not the notice: `request_seed`
+                // carries the resume for a pane the host knows is paused, so
+                // this is what actually takes it out of tmux's flow control.
+                scoped_seed = Some(pane_id);
+            } else {
+                return Err(format!("host reported a stalled pane: {}", event.detail));
+            }
+        }
         v1::EventKind::TerminalSeedDiagnostic => {
             send_protocol_event(
                 channel,
@@ -711,4 +765,23 @@ pub(super) fn validate_event_sequence(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(sequence: u64) -> v1::Envelope {
+        envelope(0, sequence, Payload::Event(v1::HostEvent::default()))
+    }
+
+    #[test]
+    fn initial_snapshot_barrier_supersedes_events_already_in_its_sequence() {
+        assert!(!event_follows_snapshot_barrier(&event(40), 41));
+        assert!(!event_follows_snapshot_barrier(&event(41), 41));
+        assert!(event_follows_snapshot_barrier(&event(42), 41));
+
+        let response = envelope(9, 0, Payload::Response(v1::Response::default()));
+        assert!(!event_follows_snapshot_barrier(&response, 41));
+    }
 }

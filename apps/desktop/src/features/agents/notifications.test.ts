@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { acknowledgeNotificationActivation, decideAgentNotification, emitNativeAgentNotification } from "./notifications";
+import {
+  acknowledgeNotificationActivation, decideAgentNotification, emitNativeAgentNotification,
+  emitTestNotification, notificationPermissionStatus,
+} from "./notifications";
 import { agent } from "./testFixtures";
 import { agentGeneration } from "./generation";
 
@@ -57,6 +60,38 @@ describe("agent native notification policy", () => {
     expect(invokeMock).toHaveBeenCalledWith("emit_agent_notification", expect.objectContaining({
       notification: expect.objectContaining({ requestAction: false, body: expect.stringContaining("Unmapped") }),
     }));
+  });
+
+  it("tells the OS to show what it decided the user cannot already see", async () => {
+    // The delegate used to answer this itself, and answered "never while the
+    // app is frontmost" — so a blocked agent in another workspace succeeded
+    // invisibly. Focus is this side's fact, so this side sends the answer.
+    const decision = decideAgentNotification(
+      agent(),
+      agent({ lifecycle: "blocked", attentionGeneration: 4, lifecycleGeneration: 4 }),
+      { focus: { ...focus, appFocused: true, paneId: "%other" }, replayed: false },
+    );
+    expect(decision).toMatchObject({ kind: "emit", notification: { presentInForeground: true } });
+    if (decision.kind !== "emit") return;
+    invokeMock.mockResolvedValueOnce({ id: 3, actionable: true });
+    await emitNativeAgentNotification(decision.notification);
+    expect(invokeMock).toHaveBeenCalledWith("emit_agent_notification", expect.objectContaining({
+      notification: expect.objectContaining({ presentInForeground: true }),
+    }));
+  });
+
+  it("reads the permission and posts a test notification through their own commands", async () => {
+    invokeMock.mockResolvedValueOnce("notDetermined");
+    await expect(notificationPermissionStatus()).resolves.toBe("notDetermined");
+    expect(invokeMock).toHaveBeenLastCalledWith("notification_permission_status");
+    invokeMock.mockResolvedValueOnce({ id: 1, actionable: false });
+    await expect(emitTestNotification()).resolves.toEqual({ id: 1, actionable: false });
+    expect(invokeMock).toHaveBeenLastCalledWith("emit_test_notification");
+    // Three platform backends write that vocabulary independently. A word this
+    // side has no sentence for would render an empty status line, so it is
+    // checked on the way in rather than asserted.
+    invokeMock.mockResolvedValueOnce("ephemeral");
+    await expect(notificationPermissionStatus()).resolves.toBe("unsupported");
   });
 
   it("acknowledges only the clicked agent and stale generation, not a newer pane peer", async () => {

@@ -9,7 +9,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::{
-    ConnectionSpec, acquire_control_master, ensure_control_master, host_helper_path,
+    ConnectionSpec, ControlLane, acquire_control_master, ensure_control_master, host_helper_path,
     ssh_profile_control_socket, validate_ssh_target,
 };
 
@@ -96,7 +96,12 @@ fn install_remote_helper_inner(
     let artifact = helper_artifact_for_arch(remote_arch)?;
     let digest = sha256_file(&artifact)?;
     let control_socket = ssh_profile_control_socket(&profile_id, &target, config_path.as_deref())?;
-    ensure_control_master(&target, config_path.as_deref(), &control_socket)?;
+    ensure_control_master(
+        &target,
+        config_path.as_deref(),
+        &control_socket,
+        ControlLane::Interactive,
+    )?;
     let mut command = Command::new(host_helper_path()?);
     command
         .args(["helper", "install", &target, "--artifact"])
@@ -129,7 +134,12 @@ fn run_remote_probe(
 ) -> Result<serde_json::Value, String> {
     validate_ssh_target(target)?;
     let control_socket = ssh_profile_control_socket(profile_id, target, config_path)?;
-    ensure_control_master(target, config_path, &control_socket)?;
+    ensure_control_master(
+        target,
+        config_path,
+        &control_socket,
+        ControlLane::Interactive,
+    )?;
     let mut command = Command::new(host_helper_path()?);
     command.args(["helper", "probe", target]);
     command.arg("--control-socket").arg(&control_socket);
@@ -153,14 +163,22 @@ fn helper_artifact_for_arch(architecture: &str) -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os(variable) {
         return Ok(path.into());
     }
-    if architecture == normalize_architecture(std::env::consts::ARCH) {
+    // A native desktop helper is reusable only when the desktop itself is a
+    // Linux ELF. A same-architecture macOS helper is Mach-O and must never be
+    // uploaded to a Linux host.
+    if cfg!(target_os = "linux") && architecture == normalize_architecture(std::env::consts::ARCH) {
         return host_helper_path();
     }
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
     if let Some(parent) = current.parent() {
-        let packaged = parent.join(format!("tmux-ide-host-{architecture}"));
-        if packaged.is_file() {
-            return Ok(packaged);
+        let filename = format!("tmux-ide-host-linux-{architecture}");
+        for packaged in [
+            parent.join(&filename),
+            parent.join("../Resources").join(&filename),
+        ] {
+            if packaged.is_file() {
+                return Ok(packaged);
+            }
         }
     }
     Err(format!(

@@ -173,10 +173,19 @@ describe("binary terminal IPC", () => {
       "client-1", "%7", false, Uint8Array.from([0, 255, 27]),
       { terminalEpoch: 17, outputGeneration: 42 },
     );
-    expect(invoke).toHaveBeenCalledWith("set_terminal_visibility", {
-      clientId: "client-1", paneId: "%7", visible: false,
-      serializedSnapshot: [0, 255, 27], terminalEpoch: 17, outputGeneration: 42,
-    });
+    // One raw framed body, not a JSON array of numbers: a hide carries up to
+    // 4 MiB of serialized screen on the thread that has to paint the new tab.
+    const [command, payload] = vi.mocked(invoke).mock.calls.at(-1)!;
+    expect(command).toBe("set_terminal_visibility");
+    const frame = payload as unknown as Uint8Array;
+    expect(frame).toBeInstanceOf(Uint8Array);
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    expect(new TextDecoder().decode(frame.subarray(2, 10))).toBe("client-1");
+    expect(new TextDecoder().decode(frame.subarray(12, 14))).toBe("%7");
+    expect(frame[14]).toBe(0);
+    expect(view.getBigUint64(15, false)).toBe(17n);
+    expect(view.getBigUint64(23, false)).toBe(42n);
+    expect([...frame.subarray(31)]).toEqual([0, 255, 27]);
   });
 
   it("requests one scoped seed for bounded or conflicting recovery", async () => {
@@ -195,6 +204,21 @@ describe("binary terminal IPC", () => {
     expect(invoke).toHaveBeenCalledTimes(1);
   }, 15_000);
 
+  it("sends binary terminal input as one raw framed body, not a JSON number array", async () => {
+    vi.mocked(invoke).mockClear();
+    await sendBinaryInput("client-1", "%7", Uint8Array.of(0x00, 0x1b, 0xff));
+    const [command, payload] = vi.mocked(invoke).mock.calls[0];
+    expect(command).toBe("send_terminal_input_bytes");
+    expect(payload).toBeInstanceOf(Uint8Array);
+    const frame = payload as unknown as Uint8Array;
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    expect(view.getUint16(0, false)).toBe("client-1".length);
+    expect(new TextDecoder().decode(frame.subarray(2, 10))).toBe("client-1");
+    expect(view.getUint16(10, false)).toBe(2);
+    expect(new TextDecoder().decode(frame.subarray(12, 14))).toBe("%7");
+    expect([...frame.subarray(14)]).toEqual([0x00, 0x1b, 0xff]);
+  });
+
   it("decodes a nonzero safe big-endian terminal generation epoch", () => {
     expect(decodeTerminalEvent(frame(10, "terminal", 0, u64(0x001f_ffff_ffff_fffen)))).toEqual({
       kind: "generationEpoch", epoch: 0x001f_ffff_ffff_fffe, sequence: 0,
@@ -209,6 +233,14 @@ describe("binary terminal IPC", () => {
     });
     expect(() => decodeTerminalEvent(frame(11, "pane-7", 1, Uint8Array.of(65)))).toThrow("pane label");
     expect(() => decodeTerminalEvent(frame(11, "%7", 1, Uint8Array.of(0xff)))).toThrow("UTF-8");
+  });
+
+  it("decodes a pane-scoped flow stall and rejects malformed values", () => {
+    expect(decodeTerminalEvent(frame(15, "%7", 21, textEncoder.encode("tmux rejected the resume λ")))).toEqual({
+      kind: "flowStalled", paneId: "%7", message: "tmux rejected the resume λ", sequence: 21,
+    });
+    expect(() => decodeTerminalEvent(frame(15, "terminal", 1, Uint8Array.of(65)))).toThrow("pane label");
+    expect(() => decodeTerminalEvent(frame(15, "%7", 1, Uint8Array.of(0xff)))).toThrow("UTF-8");
   });
 
   it("keeps one initially-empty bridge lifecycle stable across session and topology UI changes", () => {

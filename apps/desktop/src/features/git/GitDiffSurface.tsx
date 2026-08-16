@@ -3,8 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
+import { SurfaceError } from "../../ui/SurfaceError";
+import { attachEditorLayout } from "../files/editorLayout";
 import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot, GitWorkspaceClient, GitWorkspaceEvent } from "./types";
-import "../files/monaco";
+import { ADE_MONACO_THEME } from "../files/monaco";
 
 interface Props {
   tab: AppOwnedTab;
@@ -19,6 +21,8 @@ interface Props {
 type PendingDiscard = { kind: "discardFile" | "discardHunk"; hunkIndex?: number; diff: GitDiff; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
 
 export function GitDiffSurface(props: Props) {
+  const detachLayout = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => () => { detachLayout.current?.(); detachLayout.current = undefined; }, []);
   const [diff, setDiff] = useState<GitDiff>();
   const [status, setStatus] = useState<GitStatusSnapshot>();
   const [loading, setLoading] = useState(true);
@@ -38,20 +42,35 @@ export function GitDiffSurface(props: Props) {
   const originalPathIdentity = props.tab.gitOriginalPath;
   const target = props.tab.gitTarget;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (clearStale = false) => {
     if (!props.scope || !root || !repositoryId || !pathIdentity || !target) return;
     const current = ++serial.current;
     abort.current?.abort();
     const controller = new AbortController();
     abort.current = controller;
     setLoading(true);
+    if (clearStale) {
+      setDiff(undefined);
+      setStatus(undefined);
+      setError(undefined);
+    }
     try {
       const nextStatus = await props.client.status(props.scope, root, controller.signal);
       if (nextStatus.repository.id !== repositoryId) throw new Error("This diff belongs to a different repository. Return to its workspace or close the tab.");
+      const nextEntry = nextStatus.entries.find((entry) => entry.path === pathIdentity);
+      if (!nextEntry || (target === "staged" ? nextEntry.indexKind === "none" : nextEntry.worktreeKind === "none")) {
+        if (current !== serial.current || controller.signal.aborted) return;
+        loadedGeneration.current = nextStatus.generation;
+        setStatus(nextStatus);
+        setDiff(undefined);
+        setError(undefined);
+        props.onStatus(nextStatus);
+        return;
+      }
       const nextDiff = await props.client.diff(props.scope, root, repositoryId, pathIdentity, originalPathIdentity, target, nextStatus.generation, controller.signal);
       if (current !== serial.current || controller.signal.aborted) return;
       if (watchedGeneration.current && BigInt(watchedGeneration.current) > BigInt(nextStatus.generation)) {
-        void load();
+        void load(clearStale);
         return;
       }
       if (!watchedGeneration.current || BigInt(nextStatus.generation) > BigInt(watchedGeneration.current)) watchedGeneration.current = nextStatus.generation;
@@ -139,7 +158,7 @@ export function GitDiffSurface(props: Props) {
       const result = await props.client.mutate(props.scope, root, repositoryId, request);
       reportResult(result, props.onMessage);
       if (result.status) props.onStatus(result.status);
-      await load();
+      await load(true);
     } catch (cause) { setError(String(cause)); }
     finally { setBusy(false); }
   };
@@ -161,7 +180,7 @@ export function GitDiffSurface(props: Props) {
       const result = await props.client.mutate(props.scope, root, repositoryId, { ...request, confirmationToken: token });
       reportResult(result, props.onMessage);
       if (result.status) props.onStatus(result.status);
-      await load();
+      await load(true);
     } catch (cause) { setError(String(cause)); }
     finally { setBusy(false); }
   };
@@ -170,7 +189,7 @@ export function GitDiffSurface(props: Props) {
   if (!repositoryId || !pathIdentity || !target) return <GitDiffEmpty title={props.tab.title} detail="This saved Git tab is missing its repository identity." />;
   if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" />;
   if (error && !diff) return <GitDiffEmpty title={props.tab.title} detail={error} retry={() => void load()} />;
-  if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail="Git diff is unavailable." retry={() => void load()} />;
+  if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${target} changes.`} retry={() => void load()} />;
 
   const text = decodeTextDiff(diff);
   const currentEntry = status.entries.find((entry) => entry.path === diff.path);
@@ -182,26 +201,31 @@ export function GitDiffSurface(props: Props) {
     <header className="editor-toolbar git-diff-toolbar">
       <span className={`git-target ${diff.target}`}>{diff.target}</span>
       <code title={diff.displayPath}>{diff.displayPath}</code>
-      <button disabled={busy} onClick={() => void load()} type="button">Refresh</button>
+      <button disabled={busy} onClick={() => void load(true)} type="button">Refresh</button>
       {diff.target === "unstaged" && <button disabled={busy || !canMutate} onClick={() => void mutate("stageFile")} type="button">Stage file</button>}
       {diff.target === "staged" && <button disabled={busy || !canMutate} onClick={() => void mutate("unstageFile")} type="button">Unstage file</button>}
       <button className="danger" disabled={busy || !canMutate} onClick={() => setPendingDiscard({ kind: "discardFile", diff, status, rootToken: root.token, connectionEpoch: props.scope!.terminalEpoch })} type="button">Discard file…</button>
     </header>
-    {mutationBlock && <div className="git-diff-error" role="note">{mutationBlock}</div>}
-    {error && <div className="git-diff-error" role="alert">{error}</div>}
-    {diff.binary || !text ? <GitDiffEmpty title={diff.displayPath} detail={diff.binary ? "Binary changes cannot be displayed or edited as text." : "This diff contains non-UTF-8 content and is shown safely as binary."} />
-      : diff.tooLarge ? <GitDiffEmpty title={diff.displayPath} detail="This diff is too large for the editor. File-level Git actions remain available." />
-        : <DiffEditor
-          keepCurrentModifiedModel
-          keepCurrentOriginalModel
-          language={languageForPath(diff.displayPath)}
-          modified={text.modified}
-          modifiedModelPath={modelUri(props.tab, "modified")}
-          options={{ automaticLayout: true, enableSplitViewResizing: true, minimap: { enabled: false }, originalEditable: false, readOnly: true, renderSideBySide: true, scrollBeyondLastLine: false }}
-          original={text.original}
-          originalModelPath={modelUri(props.tab, "original")}
-          theme="vs-dark"
-        />}
+    <div className="git-diff-errors">
+      {mutationBlock && <div className="git-diff-error" role="note">{mutationBlock}</div>}
+      {error && <SurfaceError className="git-diff-error" detail={error} />}
+    </div>
+    <div className="git-diff-content">
+      {diff.binary || !text ? <GitDiffEmpty title={diff.displayPath} detail={diff.binary ? "Binary changes cannot be displayed or edited as text." : "This diff contains non-UTF-8 content and is shown safely as binary."} />
+        : diff.tooLarge ? <GitDiffEmpty title={diff.displayPath} detail="This diff is too large for the editor. File-level Git actions remain available." />
+          : <DiffEditor
+            keepCurrentModifiedModel
+            keepCurrentOriginalModel
+            language={languageForPath(diff.displayPath)}
+            modified={text.modified}
+            modifiedModelPath={modelUri(props.tab, "modified")}
+            onMount={(editor) => { detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor); }}
+            options={{ automaticLayout: true, enableSplitViewResizing: true, minimap: { enabled: false }, originalEditable: false, readOnly: true, renderSideBySide: true, scrollBeyondLastLine: false }}
+            original={text.original}
+            originalModelPath={modelUri(props.tab, "original")}
+            theme={ADE_MONACO_THEME}
+          />}
+    </div>
     {hunkActions && diff.hunkCount > 0 && <aside className="git-hunk-actions" aria-label="Complete hunk actions">
       {Array.from({ length: diff.hunkCount }, (_, hunkIndex) => <div key={hunkIndex}>
         <span>Hunk {hunkIndex + 1}</span>
@@ -212,6 +236,7 @@ export function GitDiffSurface(props: Props) {
     </aside>}
     {pendingDiscard && <ConfirmationDialog
       confirmLabel="Discard"
+      destructive
       detail={`Discard ${pendingDiscard.hunkIndex === undefined ? "all changes" : `hunk ${pendingDiscard.hunkIndex + 1}`} in ${pendingDiscard.diff.displayPath}? This cannot be undone by the app.`}
       onCancel={() => setPendingDiscard(undefined)}
       onConfirm={() => { const captured = pendingDiscard; setPendingDiscard(undefined); void confirmDiscard(captured); }}

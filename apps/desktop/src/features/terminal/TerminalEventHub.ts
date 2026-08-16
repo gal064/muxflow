@@ -79,7 +79,14 @@ export class TerminalEventHub {
         }
         return admission;
       }
-      if (event.generation <= lastGeneration) return admission;
+      if (event.generation <= lastGeneration) {
+        // A seed is authoritative content, not an increment: dropping one
+        // because its generation looks stale leaves the pane waiting for a
+        // screen that has already been sent and will not be sent again
+        // (P12-U003.3). Ask for one that this hub can accept instead.
+        if (event.kind === "seed") this.#requestConflictReseed(event.paneId);
+        return admission;
+      }
       this.#lastGeneration.set(event.paneId, event.generation);
       if (event.kind === "paneResource") this.#lastPaneResource.set(event.paneId, event);
       else this.#lastPaneResource.delete(event.paneId);

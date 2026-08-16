@@ -65,6 +65,7 @@ pub(crate) async fn handle_request(
     let is_mutation = matches!(
         operation,
         v1::Operation::AttachTerminal
+            | v1::Operation::SelectTerminalSession
             | v1::Operation::TerminalInput
             | v1::Operation::ResizeTerminal
             | v1::Operation::TmuxAction
@@ -278,20 +279,79 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
+        v1::Operation::SelectTerminalSession => {
+            // Handled exactly like `ResizeTerminal` below, because on the path
+            // that matters it *is* one: a client becoming visible for the first
+            // time is given a size, and that is the same `refresh-client -C`
+            // write. So it takes the same input barrier — a resize is ordered
+            // behind every queued keystroke, or the panes reflow underneath
+            // bytes the user typed before the switch — and the same
+            // reconciliation, or the topology baseline still describes the
+            // geometry from before the reflow and the next tmux action is
+            // refused as stale.
+            let mut result = {
+                let mut terminal = terminal.lock().unwrap();
+                terminal
+                    .flush_input()
+                    .and_then(|()| terminal.select_session(&request.session_id))
+            };
+            if result.is_ok() {
+                result = reconcile_internal_tmux_change(
+                    topology_lock,
+                    topology_baseline,
+                    generation,
+                    terminal,
+                    event_tx,
+                    overflowed,
+                )
+                .await;
+            }
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_selection_failed", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
         v1::Operation::TerminalInput => {
-            let queued = terminal
+            // Enqueue and answer; do not wait for tmux to accept the bytes.
+            //
+            // Enqueueing is ordered and cannot block, so keystroke order is
+            // still exactly the order they arrived in. Waiting here, by
+            // contrast, held the connection's read loop for the whole round
+            // trip: only one keystroke could be in flight at a time and nothing
+            // else on the connection — a snapshot, a tmux action, a resize —
+            // could be served while it was. The commit point callers actually
+            // depend on is the input barrier that every tmux action and resize
+            // already takes before it runs.
+            let result = terminal
                 .lock()
                 .unwrap()
                 .send_input(&request.scope, &request.data);
-            let result = match queued {
-                Ok(completion) => {
-                    match tokio::task::spawn_blocking(move || completion.wait()).await {
-                        Ok(result) => result,
-                        Err(error) => Err(anyhow::anyhow!("terminal input task failed: {error}")),
-                    }
-                }
-                Err(error) => Err(error),
-            };
+            // A malformed scope has no pane to recover, and an unscoped
+            // resnapshot event would escalate to a whole-connection reconnect.
+            if let Err(error) = &result
+                && super::super::terminal::validate_tmux_id(&request.scope, '%').is_ok()
+            {
+                // The desktop no longer awaits this response on the keystroke
+                // path, so the event stream is the only channel that still
+                // reaches the user. Scope the recovery to the pane: bytes the
+                // user typed did not reach it, so its screen no longer reflects
+                // what they think they sent.
+                emit_event(
+                    event_tx,
+                    overflowed,
+                    v1::HostEvent {
+                        kind: v1::EventKind::TerminalResnapshotRequired.into(),
+                        scope: request.scope.clone(),
+                        detail: format!("terminal input was not delivered: {error}"),
+                        ..Default::default()
+                    },
+                );
+            }
             send_response(
                 control_tx,
                 request_id,

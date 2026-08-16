@@ -49,8 +49,10 @@ pub struct AgentCommand {
     pub connection_epoch: String,
 }
 
+/// Async so an agent launch or hook review never freezes the WebView's main
+/// thread for the length of the host round trip.
 #[tauri::command]
-pub fn agent_request(
+pub async fn agent_request(
     client_id: String,
     command: AgentCommand,
     clients: State<'_, TerminalClients>,
@@ -70,7 +72,7 @@ pub fn agent_request(
     };
     let adapter_kind = legacy_adapter_kind(requested_adapter);
     let adapter_id = canonical_adapter_id(requested_adapter);
-    let response = client.request(v1::Request {
+    let request = v1::Request {
         operation: operation.into(),
         agent: Some(v1::AgentRequest {
             action: action.into(),
@@ -98,7 +100,10 @@ pub fn agent_request(
             ..Default::default()
         }),
         ..Default::default()
-    })?;
+    };
+    let response = tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("agent request task failed: {error}"))??;
     response
         .agent
         .as_ref()
@@ -145,6 +150,16 @@ fn operation_from_name(
         )),
         "hookUninstall" => Ok((
             Operation::AgentHookManagement,
+            Action::Unspecified,
+            Hook::Uninstall,
+        )),
+        "hostNaming" => Ok((
+            Operation::AgentHostNaming,
+            Action::Unspecified,
+            Hook::Install,
+        )),
+        "hostNamingRemove" => Ok((
+            Operation::AgentHostNaming,
             Action::Unspecified,
             Hook::Uninstall,
         )),
@@ -210,6 +225,7 @@ pub(crate) fn response_json(
         "paneId": value.pane_id,
         "acceptedGeneration": value.accepted_generation.to_string(),
         "connectionEpoch": connection_epoch.to_string(),
+        "hostNaming": value.host_naming,
     })
 }
 
@@ -294,7 +310,16 @@ fn adapter_descriptor_json(value: &v1::AgentAdapterDescriptor) -> Value {
         "supportsResume": value.supports_resume, "supportsHooks": value.supports_hooks,
         "supportsProcessDetection": value.supports_process_detection,
         "supportsScreenFallback": value.supports_screen_fallback,
-        "hookConfigPath": value.hook_config_path, "hookEvents": value.hook_events })
+        "hookConfigPath": value.hook_config_path, "hookEvents": value.hook_events,
+        "hookWiring": hook_wiring_name(value.hook_wiring),
+        "hookWiringDetail": value.hook_wiring_detail,
+        "hookSetupRecommended": value.hook_setup_recommended })
+}
+
+fn hook_wiring_name(value: i32) -> &'static str {
+    v1::AgentHookWiring::try_from(value)
+        .unwrap_or_default()
+        .label()
 }
 
 fn adapter_name(value: i32) -> &'static str {
@@ -354,6 +379,62 @@ mod tests {
         assert_eq!(json["route"]["hostProfileId"], "profile-1");
         let sideband = with_connection_epoch(json, (1_u64 << 53) + 3);
         assert_eq!(sideband["connectionEpoch"], ((1_u64 << 53) + 3).to_string());
+    }
+
+    /// Every field of the descriptor crosses the bridge.
+    ///
+    /// This is the only path a snapshot takes into the WebView, and it is
+    /// hand-written. `hook_setup_recommended` was added to the host, the
+    /// protocol and the TypeScript and omitted here — which silently turned
+    /// off the entire one-time setup flow, made the Settings entry and the
+    /// context-menu item unreachable, and made every un-wired host report that
+    /// its configuration could not be read. Seventy-seven green desktop tests
+    /// saw none of it, because they all build descriptors above this function.
+    #[test]
+    fn every_adapter_descriptor_field_crosses_the_bridge() {
+        let value = v1::AgentAdapterDescriptor {
+            adapter: v1::AgentAdapterKind::ClaudeCode.into(),
+            id: "claude-code".into(),
+            display_name: "Claude Code".into(),
+            supports_launch: true,
+            supports_resume: true,
+            supports_hooks: true,
+            supports_process_detection: true,
+            supports_screen_fallback: true,
+            hook_config_path: "/home/user/.claude/settings.json".into(),
+            hook_events: vec!["Stop".into()],
+            hook_wiring: v1::AgentHookWiring::Partial.into(),
+            hook_wiring_detail: String::new(),
+            hook_setup_recommended: true,
+        };
+        let json = adapter_descriptor_json(&value);
+        let mut carried: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        carried.sort_unstable();
+        assert_eq!(
+            carried,
+            [
+                "adapter",
+                "displayName",
+                "hookConfigPath",
+                "hookEvents",
+                "hookSetupRecommended",
+                "hookWiring",
+                "hookWiringDetail",
+                "id",
+                "supportsHooks",
+                "supportsLaunch",
+                "supportsProcessDetection",
+                "supportsResume",
+                "supportsScreenFallback",
+            ]
+        );
+        assert_eq!(json["hookWiring"], "partial");
+        assert_eq!(json["hookSetupRecommended"], true);
     }
 
     #[test]

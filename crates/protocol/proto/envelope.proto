@@ -97,6 +97,17 @@ enum Operation {
   OPERATION_COMMIT_TERMINAL_UPLOAD = 39;
   OPERATION_CANCEL_TERMINAL_UPLOAD = 40;
   OPERATION_RECONCILE_TERMINAL_UPLOAD = 41;
+  // Applies the recommended tmux window naming this app's "tabs are tmux
+  // windows" contract depends on. Consent-gated by the same one-time host
+  // prompt as hook installation, and re-asserted on every connect because it
+  // lives in the tmux server's memory rather than in a config file.
+  OPERATION_AGENT_HOST_NAMING = 42;
+  // Names the session the desktop is *showing*, which is the one tmux must
+  // size from. Distinct from ATTACH_TERMINAL, which also sets the control
+  // client's pane membership and reseeds it: a workspace switch changes which
+  // client participates in sizing and nothing else, and paying an attach for
+  // that reseeds every pane of the session on every switch.
+  OPERATION_SELECT_TERMINAL_SESSION = 43;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -168,6 +179,12 @@ enum EventKind {
   EVENT_KIND_TRANSFER_PROGRESS = 14;
   EVENT_KIND_GIT_STATUS = 15;
   EVENT_KIND_AGENT_STATE = 16;
+  // A pane tmux paused that the host could not get resumed. Distinct from
+  // TERMINAL_FLOW_PAUSED, which is the ordinary start of a flow-control
+  // episode the host recovers from by itself: this one says the recovery ran
+  // out of attempts and the pane is delivering nothing until something reseeds
+  // it.
+  EVENT_KIND_TERMINAL_FLOW_STALLED = 17;
 }
 
 message HostEvent {
@@ -703,6 +720,27 @@ enum HookManagementAction {
   HOOK_MANAGEMENT_ACTION_UNINSTALL = 3;
 }
 
+// Whether this host's agent configuration actually routes lifecycle events to
+// this application. Without it the desktop cannot tell "no agent is doing
+// anything" from "nothing here can ever report what an agent is doing".
+enum AgentHookWiring {
+  AGENT_HOOK_WIRING_UNSPECIFIED = 0;
+  // Every lifecycle event this adapter needs invokes the managed hook at the
+  // current owned version.
+  AGENT_HOOK_WIRING_WIRED = 1;
+  // Owned entries exist but do not cover every event at the current version,
+  // so some transitions can never arrive.
+  AGENT_HOOK_WIRING_PARTIAL = 2;
+  AGENT_HOOK_WIRING_NOT_WIRED = 3;
+  // The configuration could not be inspected; the wiring is unknown rather
+  // than absent, and the desktop must not offer to overwrite it blindly.
+  AGENT_HOOK_WIRING_UNAVAILABLE = 4;
+  // The agent itself is not on this host: no configuration and no executable.
+  // There is nothing to wire, and offering to create configuration for a tool
+  // the user does not have is worse than saying nothing.
+  AGENT_HOOK_WIRING_ABSENT = 5;
+}
+
 message AgentRoute {
   string host_profile_id = 1;
   string server_identity = 2;
@@ -729,6 +767,14 @@ message AgentAdapterDescriptor {
   bool supports_screen_fallback = 8;
   string hook_config_path = 9;
   repeated string hook_events = 10;
+  // Observed on the host at snapshot time, not a capability claim.
+  AgentHookWiring hook_wiring = 11;
+  // Why the wiring could not be inspected; empty in every other state.
+  string hook_wiring_detail = 12;
+  // Whether an install would act on this adapter. Decided by the host, which
+  // is what observed the wiring; the desktop had a second copy of the rule,
+  // in another language, and the two had already diverged.
+  bool hook_setup_recommended = 13;
 }
 
 message AgentRecord {
@@ -841,6 +887,10 @@ message AgentResponse {
   string window_id = 5;
   string pane_id = 6;
   uint64 accepted_generation = 7;
+  // "applied", "alreadyCurrent" or "userConfigured"; empty for every other
+  // operation. A tmux server that refused the command fails the request
+  // outright rather than returning a fourth value nobody branches on.
+  string host_naming = 8;
 }
 
 message AgentEvent {

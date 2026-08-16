@@ -76,18 +76,47 @@ pub(super) fn snapshot_from_identity(
     }
 }
 
+/// Discovers the tmux server's identity and whole topology in one client fork.
+///
+/// The previous shape paid five forks — identity, sessions, windows, panes,
+/// identity again — and compared the two identity probes to catch a server
+/// restart mid-discovery. Batching removes both costs at once: every record
+/// comes from a single tmux client, and a client is bound to one server for its
+/// whole life, so there is no interval in which the records could straddle two
+/// servers and nothing left for a second probe to detect.
 pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
-    let before = server_identity();
-    if before == "tmux:none" {
+    // Identity before the records, so a server that restarts *during* discovery
+    // is caught rather than pairing the old topology with the new server. This
+    // is a stat, not a fork: the five-fork before/after probe this replaces cost
+    // milliseconds, and this costs a syscall.
+    //
+    // The comparison is on device and inode alone. The identity *string* also
+    // carries the socket path, and the path derived from the environment here
+    // ("/tmp/...") and the one tmux reports below ("/private/tmp/...") name the
+    // same socket through different prefixes on macOS — comparing the strings
+    // reports a server restart on every single discovery.
+    let before = socket_identity_key(&tmux_socket_path(""));
+    let output = tmux_command()
+        .args(tmux_control::batched_discovery_args())
+        .output()
+        .context("run batched tmux discovery")?;
+    let discovery = tmux_control::parse_batched_discovery(
+        &output.stdout,
+        &output.stderr,
+        output.status.success(),
+    )
+    .map_err(|_| anyhow::anyhow!("tmux server is unavailable"))?;
+    let socket = tmux_socket_path(&discovery.socket_path);
+    let identity = socket_server_identity(&socket).unwrap_or_else(|_| "tmux:none".into());
+    if identity == "tmux:none" {
         bail!("tmux server is unavailable");
     }
-    let mut value = discover_host()?;
-    let after = server_identity();
-    if before != after {
+    let mut value = discovery.snapshot;
+    overlay_session_order(&mut value, &identity)?;
+    if before.is_some_and(|before| Some(before) != socket_identity_key(&socket)) {
         bail!("tmux server changed during snapshot discovery");
     }
-    overlay_session_order(&mut value, &after)?;
-    Ok((value, after))
+    Ok((value, identity))
 }
 
 pub(super) fn discover_authoritative() -> anyhow::Result<(TmuxSnapshot, String)> {
@@ -104,7 +133,7 @@ pub(super) fn reorder_session(
     target_index: u32,
 ) -> anyhow::Result<()> {
     let _guard = SESSION_ORDER_LOCK.lock().unwrap();
-    let path = crate::paths::default_runtime_dir().join("session-order.json");
+    let path = crate::paths::runtime_dir().join("session-order.json");
     let mut state = load_session_order(&path)?;
     let mut order: Vec<_> = snapshot
         .sessions
@@ -126,7 +155,7 @@ fn overlay_session_order_unlocked(
     snapshot: &mut TmuxSnapshot,
     server_identity: &str,
 ) -> anyhow::Result<()> {
-    let path = crate::paths::default_runtime_dir().join("session-order.json");
+    let path = crate::paths::runtime_dir().join("session-order.json");
     let mut state = load_session_order(&path)?;
     let Some(saved) = state.servers.get_mut(server_identity) else {
         for (order, session) in snapshot.sessions.iter_mut().enumerate() {
@@ -262,6 +291,18 @@ fn tmux_socket_path(formatted: &str) -> std::path::PathBuf {
     Path::new(&base).join(format!("tmux-{uid}")).join(name)
 }
 
+/// The socket's device and inode: what actually identifies a tmux server, with
+/// none of the path aliasing that the printable identity carries.
+fn socket_identity_key(socket: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+
+    let metadata = fs::metadata(socket).ok()?;
+    metadata
+        .file_type()
+        .is_socket()
+        .then(|| (metadata.dev(), metadata.ino()))
+}
+
 fn socket_server_identity(socket: &Path) -> anyhow::Result<String> {
     use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 
@@ -277,16 +318,6 @@ fn socket_server_identity(socket: &Path) -> anyhow::Result<String> {
         metadata.dev(),
         metadata.ino()
     ))
-}
-
-pub(super) fn discover_host() -> anyhow::Result<TmuxSnapshot> {
-    if let Some(name) = std::env::var_os("ADE_TMUX_SOCKET_NAME") {
-        Ok(tmux_control::discover_with_socket_name(
-            &name.to_string_lossy(),
-        )?)
-    } else {
-        Ok(tmux_control::discover()?)
-    }
 }
 
 pub(super) fn tmux_command() -> Command {
@@ -314,10 +345,12 @@ mod tests {
 
     #[test]
     fn server_identity_changes_when_the_same_path_gets_a_replacement_socket() {
-        let directory = std::env::current_dir()
-            .unwrap()
-            .join("tmp")
-            .join(format!("phase5-server-identity-{}", uuid::Uuid::new_v4()));
+        #[cfg(target_os = "macos")]
+        let temporary_root = Path::new("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let temporary_root = std::env::temp_dir();
+        let directory =
+            temporary_root.join(format!("phase5-server-identity-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("tmux.sock");
         let first_listener = UnixListener::bind(&socket).unwrap();

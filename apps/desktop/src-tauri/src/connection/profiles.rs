@@ -148,6 +148,30 @@ impl ProfileStore {
         *self.value.lock().unwrap() = next;
         Ok(())
     }
+
+    /// Removes a saved host, leaving the file valid whatever it pointed at.
+    ///
+    /// `normalize_and_validate` refuses an empty list and refuses a
+    /// `lastProfileId` naming a profile that is gone, so both are settled here
+    /// rather than discovered on the next launch — the corrupt-file recovery
+    /// path is for files this app did not write.
+    fn delete_profile_transactionally(&self, profile_id: &str) -> Result<(), String> {
+        let mut next = self.value.lock().unwrap().clone();
+        if !next.profiles.iter().any(|item| item.id == profile_id) {
+            return Err(format!("host profile {profile_id} does not exist"));
+        }
+        if next.profiles.len() == 1 {
+            return Err("the last host profile cannot be deleted".into());
+        }
+        next.profiles.retain(|item| item.id != profile_id);
+        if next.last_profile_id.as_deref() == Some(profile_id) {
+            next.last_profile_id = next.profiles.first().map(|profile| profile.id.clone());
+        }
+        normalize_and_validate(&mut next)?;
+        self.persist(&next)?;
+        *self.value.lock().unwrap() = next;
+        Ok(())
+    }
 }
 
 fn normalize_and_validate(value: &mut PersistedProfiles) -> Result<(), String> {
@@ -214,6 +238,18 @@ pub fn save_host_profile(
     store.save_profile_transactionally(profile)
 }
 
+#[tauri::command]
+pub fn delete_host_profile(
+    profile_id: String,
+    store: State<'_, ProfileStore>,
+) -> Result<serde_json::Value, String> {
+    validate_profile_id(&profile_id)?;
+    store.delete_profile_transactionally(&profile_id)?;
+    // The surviving list, so the caller re-renders from what was written rather
+    // than from its own guess at what a delete did.
+    list_host_profiles(store)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +310,48 @@ mod tests {
                     }
         }));
         drop(value);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_saved_host_rewrites_the_file_and_rehomes_the_last_profile() {
+        let root = std::env::temp_dir().join(format!("ade-profiles-{}", Uuid::new_v4()));
+        let path = root.join("profiles.json");
+        let store = ProfileStore::load(path.clone()).unwrap();
+        store
+            .save_profile_transactionally(HostProfile {
+                id: "ssh-omarchy".into(),
+                label: "omarchy".into(),
+                connection: ConnectionSpec::Ssh {
+                    profile_id: "ssh-omarchy".into(),
+                    target: "omarchy".into(),
+                    config_path: None,
+                },
+            })
+            .unwrap();
+
+        // The deleted profile was also the last one used, so the pointer has to
+        // move with it or the next launch reads a file it will call corrupt.
+        store.delete_profile_transactionally("ssh-omarchy").unwrap();
+        let reloaded = ProfileStore::load(path).unwrap();
+        let value = reloaded.value.lock().unwrap();
+        assert!(!value.profiles.iter().any(|item| item.id == "ssh-omarchy"));
+        assert_eq!(value.last_profile_id.as_deref(), Some("local"));
+        drop(value);
+
+        assert!(
+            store
+                .delete_profile_transactionally("ssh-omarchy")
+                .unwrap_err()
+                .contains("does not exist")
+        );
+        // Emptying the list would make the file itself invalid.
+        assert!(
+            store
+                .delete_profile_transactionally("local")
+                .unwrap_err()
+                .contains("last host profile")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

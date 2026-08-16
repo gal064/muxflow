@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { measureHostRoundTrip } from "../shell/hostLatency";
 
 export type TmuxActionKind =
   | "createSession" | "renameSession" | "reorderSession" | "selectSession" | "closeSession"
@@ -85,10 +86,13 @@ export function requestTmuxAction(
   action: TmuxAction,
   precondition: AuthoritativePrecondition,
 ): Promise<TmuxActionResult> {
-  return invoke<TmuxActionResult>("tmux_action", {
+  // Timed on the way past: this is a real host round-trip the app was making
+  // anyway, which is where the sidebar's latency readout comes from without
+  // adding a single request of its own.
+  return measureHostRoundTrip(invoke<TmuxActionResult>("tmux_action", {
     clientId,
     action: toWireTmuxAction(action, precondition),
-  });
+  }));
 }
 
 export function isDestructiveTmuxAction(action: TmuxAction): boolean {

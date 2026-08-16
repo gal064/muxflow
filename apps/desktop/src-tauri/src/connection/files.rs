@@ -7,10 +7,13 @@ use serde_json::Value;
 use tauri::State;
 use tmux_agent_protocol::v1;
 
+pub(crate) mod bulk_pool;
 mod bulk_protocol;
 mod cleanup;
 mod clipboard_staging;
 pub(crate) mod download_manager;
+mod download_naming;
+pub(crate) mod download_opener;
 mod local_destination;
 mod local_staging;
 #[cfg(test)]
@@ -69,8 +72,11 @@ pub struct FileCommand {
     pub page_size: u32,
 }
 
+/// Async so the host round trip never runs on the WebView's main thread: a
+/// blocking command freezes every other interaction — typing included — for the
+/// whole trip, which over SSH is an entire RTT.
 #[tauri::command]
-pub fn file_request(
+pub async fn file_request(
     client_id: String,
     command: FileCommand,
     clients: State<'_, TerminalClients>,
@@ -99,11 +105,15 @@ pub fn file_request(
         page_size: command.page_size,
         ..Default::default()
     };
-    let response = get_client(&clients, &client_id)?.request(v1::Request {
+    let client = get_client(&clients, &client_id)?;
+    let request = v1::Request {
         operation: operation.into(),
         file: Some(request),
         ..Default::default()
-    })?;
+    };
+    let response = tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("file request task failed: {error}"))??;
     let file = response.file.ok_or("host omitted file-service response")?;
     Ok(file_response_json(&file))
 }

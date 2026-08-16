@@ -7,6 +7,30 @@ import { useWorkspaceFiles } from "./useWorkspaceFiles";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+/** The hook's own constants, so the test moves with them rather than guessing. */
+const DIRECTORY_REFRESH_COALESCE_MS = 150;
+const ACTIVE_ROOT_POLL_MS = 2_000;
+
+/**
+ * Fake-timer clock that remembers where it is, so a test can place an event
+ * relative to the root poll's phase rather than guessing at it.
+ */
+function fakeClock() {
+  let elapsed = 0;
+  const advance = async (ms: number) => {
+    elapsed += ms;
+    await vi.advanceTimersByTimeAsync(ms);
+    await Promise.resolve();
+  };
+  return {
+    advance,
+    /** Runs out the coalescing window and lets React catch up. */
+    settle: () => advance(DIRECTORY_REFRESH_COALESCE_MS + 10),
+    /** Stops `lead` ms short of the next active-root poll. */
+    justBeforePoll: (lead: number) => advance(ACTIVE_ROOT_POLL_MS - (elapsed % ACTIVE_ROOT_POLL_MS) - lead),
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -40,21 +64,65 @@ describe("useWorkspaceFiles", () => {
   });
 
   it("refreshes the affected parent for precise native create/change/delete events", async () => {
+    vi.useFakeTimers();
+    const clock = fakeClock();
     const root = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
     let listener: ((event: WorkspaceEvent) => void) | undefined;
-    const listDirectory = vi.fn(async (_scope, active: ActiveRoot, directory: string) => ({ rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true }));
+    let activeRoot = root;
+    const listing = (active: ActiveRoot, directory: string) =>
+      ({ rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true });
+    const listDirectory = vi.fn(async (_scope, active: ActiveRoot, directory: string) => listing(active, directory));
     const client: FileWorkspaceClient = {
-      resolveActiveRoot: vi.fn(async () => root), listDirectory,
+      resolveActiveRoot: vi.fn(async () => activeRoot), listDirectory,
       acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], overflowRecovery: false, complete: true }, release: () => undefined })), openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
     };
     const scope: FileWorkspaceScope = { clientId: "c", hostProfileId: "local", serverIdentity: "s", generation: 1, terminalEpoch: 41, sessionId: "$1", paneId: "%1" };
-    function Harness() { useWorkspaceFiles(client, scope); return null; }
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, scope); return null; }
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
-    await act(async () => { listener?.({ kind: "fileChanged", rootToken: "root", path: "/repo/new.txt", generation: "2" }); await Promise.resolve(); });
-    expect(listDirectory.mock.calls.filter((call) => call[2] === "/repo").length).toBeGreaterThanOrEqual(2);
+    const reads = () => listDirectory.mock.calls.filter((call) => call[2] === "/repo").length;
+    const before = reads();
+    // A burst, as an agent writing into the workspace root produces. They are
+    // one directory's worth of news and must cost one re-read, not five: over
+    // SSH each one is a round trip, and each one used to replace the whole list.
+    await act(async () => {
+      for (let index = 0; index < 5; index += 1) {
+        listener?.({ kind: "fileChanged", rootToken: "root", path: `/repo/new-${index}.txt`, generation: "2" });
+      }
+      await Promise.resolve();
+    });
+    expect(reads(), "a burst re-read the directory before its window closed").toBe(before);
+    await act(async () => { await clock.settle(); });
+    expect(reads()).toBe(before + 1);
+    // And the window reopens, so a directory under continuous change still
+    // refreshes rather than being starved by the events behind it.
+    await act(async () => { listener?.({ kind: "fileChanged", rootToken: "root", path: "/repo/later.txt", generation: "3" }); await clock.settle(); });
+    expect(reads()).toBe(before + 2);
+    // The wait put a root change between the check that admitted the event and
+    // the request it authorised. An event for the root that has since been left
+    // must not be read against the root that replaced it — the completion guards
+    // cannot catch that one, because they compare against the root the request
+    // carried, which is the new one.
+    // Timed so the root actually moves *inside* the window rather than before
+    // it opens or after it shuts: sit just short of the root poll, raise the
+    // event, then let the poll land and only then let the window close.
+    await act(async () => { await clock.justBeforePoll(20); });
+    activeRoot = { token: "next", paneId: "%1", cwd: "/other", path: "/other", gitWorktree: true, revision: "2" };
+    await act(async () => {
+      listener?.({ kind: "fileChanged", rootToken: "root", path: "/repo/racing.txt", generation: "4" });
+      await clock.advance(25);
+    });
+    expect(current?.root?.token, "the fixture never moved the root inside the window").toBe("next");
+    await act(async () => { await clock.settle(); });
+    expect(current?.root?.token).toBe("next");
+    expect(
+      listDirectory.mock.calls.some((call) => call[2] === "/repo" && (call[1] as ActiveRoot).token === "next"),
+      "a path from the previous root was listed against the root that replaced it",
+    ).toBe(false);
     await act(async () => { renderer.unmount(); });
+    vi.useRealTimers();
   });
 
   it("retains an ongoing connection-owned download across pane/session/root switch through published completion", async () => {

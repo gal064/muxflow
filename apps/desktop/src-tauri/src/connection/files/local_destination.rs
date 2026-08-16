@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     os::unix::{
-        ffi::OsStrExt,
+        ffi::{OsStrExt, OsStringExt},
         fs::MetadataExt,
         io::{AsRawFd, FromRawFd},
     },
@@ -151,7 +151,8 @@ impl PreparedDestination {
         }
         // SAFETY: successful fstatvfs initialized the value.
         let stats = unsafe { stats.assume_init() };
-        let available = stats.f_bavail.saturating_mul(stats.f_frsize);
+        let available = u128::from(stats.f_bavail).saturating_mul(u128::from(stats.f_frsize));
+        let available = u64::try_from(available).unwrap_or(u64::MAX);
         if available < required {
             return Err(format!(
                 "insufficient destination space: need {required} bytes, have {available}"
@@ -517,11 +518,7 @@ fn rewrite_local_journal(
 }
 
 fn recover_local_transactions(directory: &File) -> Result<(), String> {
-    for entry in std::fs::read_dir(descriptor_path(directory.as_raw_fd()))
-        .map_err(|error| error.to_string())?
-    {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let name = entry.file_name();
+    for name in super::local_staging::directory_entry_names(directory)? {
         let text = name.to_string_lossy();
         let Some(id) = text
             .strip_prefix(".tmux-agent-download-transaction-")
@@ -704,16 +701,6 @@ fn validate_generated_uuid_leaf(name: &CString, prefix: &str, suffix: &str) -> R
         .map_err(|_| "owned download leaf has an invalid UUID".to_owned())
 }
 
-#[cfg(target_os = "linux")]
-fn descriptor_path(fd: i32) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{fd}"))
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn descriptor_path(fd: i32) -> PathBuf {
-    PathBuf::from(format!("/dev/fd/{fd}"))
-}
-
 fn not_published(message: String) -> PublishFailure {
     PublishFailure {
         outcome: PublicationOutcome::NotPublished,
@@ -733,7 +720,7 @@ fn choose_name(
     requested: &OsStr,
     collision: DownloadCollisionPolicy,
 ) -> Result<(CString, Option<FileIdentity>), String> {
-    let name_max = directory_name_max(directory)?;
+    let name_max = super::download_naming::directory_name_max(directory)?;
     if requested.as_bytes().len() > name_max {
         return Err("destination basename exceeds filesystem NAME_MAX".into());
     }
@@ -749,62 +736,21 @@ fn choose_name(
             Err("overwrite destination must be a regular file".into())
         }
         (DownloadCollisionPolicy::Rename, Some(_)) => {
-            let requested = OsStr::from_bytes(requested.as_bytes());
-            for index in 1..=10_000 {
-                let candidate = renamed_name_bytes(requested, index, name_max)?;
-                let candidate = CString::new(candidate)
-                    .map_err(|_| "destination basename contains a NUL byte")?;
-                if metadata_at(directory, &candidate)?.is_none() {
-                    return Ok((candidate, None));
-                }
-            }
-            Err("could not choose a non-colliding destination name".into())
+            let taken = |candidate: &OsStr| {
+                let candidate = CString::new(candidate.as_bytes())
+                    .map_err(|_| "candidate contains a NUL byte")?;
+                Ok(metadata_at(directory, &candidate)?.is_some())
+            };
+            let chosen = super::download_naming::first_free_name(
+                OsStr::from_bytes(requested.as_bytes()),
+                name_max,
+                taken,
+            )?;
+            let chosen = CString::new(chosen.into_vec())
+                .map_err(|_| "destination basename contains a NUL byte")?;
+            Ok((chosen, None))
         }
     }
-}
-
-fn directory_name_max(directory: &File) -> Result<usize, String> {
-    // SAFETY: the descriptor is a live O_DIRECTORY file descriptor.
-    let value = unsafe { libc::fpathconf(directory.as_raw_fd(), libc::_PC_NAME_MAX) };
-    if value <= 0 {
-        return Err("could not determine destination NAME_MAX".into());
-    }
-    usize::try_from(value).map_err(|_| "destination NAME_MAX is invalid".into())
-}
-
-fn renamed_name_bytes(requested: &OsStr, index: usize, name_max: usize) -> Result<Vec<u8>, String> {
-    let path = Path::new(requested);
-    let stem = path.file_stem().unwrap_or(requested).as_bytes();
-    let suffix = format!(" ({index})");
-    if suffix.len() >= name_max {
-        return Err("filesystem NAME_MAX is too small for collision suffix".into());
-    }
-    let extension = path
-        .extension()
-        .map(OsStr::as_bytes)
-        .filter(|value| suffix.len() + 2 + value.len() <= name_max);
-    let extension_bytes = extension.map_or(0, |value| value.len() + 1);
-    let budget = name_max - suffix.len() - extension_bytes;
-    let boundary = if let Ok(text) = std::str::from_utf8(stem) {
-        let mut boundary = text.len().min(budget);
-        while boundary > 0 && !text.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        boundary
-    } else {
-        stem.len().min(budget)
-    };
-    if boundary == 0 {
-        return Err("destination basename cannot fit collision suffix".into());
-    }
-    let mut candidate = stem[..boundary].to_vec();
-    candidate.extend_from_slice(suffix.as_bytes());
-    if let Some(extension) = extension {
-        candidate.push(b'.');
-        candidate.extend_from_slice(extension);
-    }
-    debug_assert!(candidate.len() <= name_max);
-    Ok(candidate)
 }
 
 struct EntryMetadata {
@@ -837,7 +783,8 @@ fn metadata_at(directory: &File, name: &CString) -> Result<Option<EntryMetadata>
     let stat = unsafe { stat.assume_init() };
     Ok(Some(EntryMetadata {
         identity: FileIdentity {
-            device: stat.st_dev,
+            device: u64::try_from(stat.st_dev)
+                .map_err(|_| "destination device identity is invalid".to_owned())?,
             inode: stat.st_ino,
         },
         regular: (stat.st_mode & libc::S_IFMT) == libc::S_IFREG,
@@ -872,11 +819,30 @@ fn rename_at(
             )
         }
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     let result = unsafe {
         if exclusive {
-            -1
+            libc::renameatx_np(
+                directory.as_raw_fd(),
+                source.as_ptr(),
+                directory.as_raw_fd(),
+                destination.as_ptr(),
+                libc::RENAME_EXCL,
+            )
         } else {
+            libc::renameat(
+                directory.as_raw_fd(),
+                source.as_ptr(),
+                directory.as_raw_fd(),
+                destination.as_ptr(),
+            )
+        }
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let result = if exclusive {
+        -1
+    } else {
+        unsafe {
             libc::renameat(
                 directory.as_raw_fd(),
                 source.as_ptr(),
@@ -921,7 +887,25 @@ fn exchange_at(directory: &File, left: &CString, right: &CString) -> Result<(), 
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn exchange_at(directory: &File, left: &CString, right: &CString) -> Result<(), String> {
+    let result = unsafe {
+        libc::renameatx_np(
+            directory.as_raw_fd(),
+            left.as_ptr(),
+            directory.as_raw_fd(),
+            right.as_ptr(),
+            libc::RENAME_SWAP,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error().to_string())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn exchange_at(_directory: &File, _left: &CString, _right: &CString) -> Result<(), String> {
     Err("transactional overwrite exchange is unavailable on this platform".into())
 }

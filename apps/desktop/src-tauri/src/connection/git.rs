@@ -45,8 +45,11 @@ pub struct GitCommand {
     pub watch_id: String,
 }
 
+/// Async so the host round trip never runs on the WebView's main thread. Git
+/// carries a five-minute timeout for hooks, so a blocking command here could
+/// freeze the entire UI for five minutes.
 #[tauri::command]
-pub fn git_request(
+pub async fn git_request(
     client_id: String,
     command: GitCommand,
     clients: State<'_, TerminalClients>,
@@ -91,14 +94,16 @@ pub fn git_request(
         commit_message: command.commit_message,
         watch_id: command.watch_id,
     };
-    let response = client.request_git(
-        v1::Request {
-            operation: operation.into(),
-            git: Some(request),
-            ..Default::default()
-        },
-        &operation_id,
-    )?;
+    let protocol_request = v1::Request {
+        operation: operation.into(),
+        git: Some(request),
+        ..Default::default()
+    };
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        client.request_git(protocol_request, &operation_id)
+    })
+    .await
+    .map_err(|error| format!("Git request task failed: {error}"))??;
     response
         .git
         .as_ref()

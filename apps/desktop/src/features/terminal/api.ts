@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { measurePerf } from "../../perf/probe";
 import type { ConnectionSpec, TmuxSnapshot } from "../../app/types";
 import type { WireFileEvent } from "../files/api";
 import type { WireGitEvent } from "../git/api";
@@ -13,6 +14,7 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "seed"; paneId: string; generation: number; data: Uint8Array }
   | { kind: "output"; paneId: string; generation: number; data: Uint8Array }
   | { kind: "seedDiagnostic"; paneId: string; message: string }
+  | { kind: "flowStalled"; paneId: string; message: string }
   | { kind: "topologyDirty"; name: string }
   | { kind: "error"; message: string }
   | { kind: "exit"; reason: string }
@@ -170,6 +172,14 @@ export function decodeTerminalEvent(buffer: ArrayBuffer): TerminalEvent {
         throw new Error("agent-service payload is not valid UTF-8 JSON");
       }
     }
+    case 15:
+      requireHostSequence(sequence, "terminal flow stall");
+      requirePaneId(label, "terminal flow stall");
+      try {
+        return { kind: "flowStalled", paneId: label, message: decoder.decode(data), sequence };
+      } catch {
+        throw new Error("terminal flow stall payload is not valid UTF-8");
+      }
     default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
   }
 }
@@ -274,12 +284,33 @@ export function stopTerminal(clientId: string): Promise<void> {
 export function sendInput(clientId: string, paneId: string, data: string): Promise<void> {
   const byteLength = encoder.encode(data).byteLength;
   if (byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(byteLength);
-  return invoke("send_terminal_input", { clientId, paneId, data });
+  return measurePerf("invoke.send_terminal_input", () => invoke("send_terminal_input", { clientId, paneId, data }));
 }
 
 export function sendBinaryInput(clientId: string, paneId: string, data: Uint8Array): Promise<void> {
   if (data.byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(data.byteLength);
-  return invoke("send_terminal_input_bytes", { clientId, paneId, data: Array.from(data) });
+  return measurePerf("invoke.send_terminal_input_bytes", () =>
+    invoke("send_terminal_input_bytes", encodeTerminalInputFrame(clientId, paneId, data)));
+}
+
+/**
+ * Frames binary input as a raw IPC body: `u16` client-id length, client id,
+ * `u16` pane-id length, pane id, payload. A `Uint8Array` inside a JSON argument
+ * object is serialised as a JSON array of numbers, which is roughly four
+ * characters of text per byte, stringified and re-parsed on the main thread.
+ */
+export function encodeTerminalInputFrame(clientId: string, paneId: string, data: Uint8Array): Uint8Array {
+  const client = encoder.encode(clientId);
+  const pane = encoder.encode(paneId);
+  const frame = new Uint8Array(4 + client.byteLength + pane.byteLength + data.byteLength);
+  const view = new DataView(frame.buffer);
+  view.setUint16(0, client.byteLength, false);
+  frame.set(client, 2);
+  const paneOffset = 2 + client.byteLength;
+  view.setUint16(paneOffset, pane.byteLength, false);
+  frame.set(pane, paneOffset + 2);
+  frame.set(data, paneOffset + 2 + pane.byteLength);
+  return frame;
 }
 
 function oversizedTerminalInput(byteLength: number): Promise<never> {
@@ -292,6 +323,16 @@ export function resizeClient(clientId: string, columns: number, rows: number): P
   return invoke("resize_terminal_client", { clientId, columns, rows });
 }
 
+/**
+ * Tells the host which workspace is on screen, so tmux sizes from that one's
+ * control client. `useVisibleTerminalSession.ts` is the only caller and owns
+ * why this exists and when it is sent.
+ */
+export function selectTerminalSession(clientId: string, sessionId: string): Promise<void> {
+  return measurePerf("invoke.select_terminal_session", () =>
+    invoke("select_terminal_session", { clientId, sessionId }));
+}
+
 export function setTerminalVisibility(
   clientId: string,
   paneId: string,
@@ -299,18 +340,47 @@ export function setTerminalVisibility(
   serializedSnapshot: Uint8Array,
   checkpoint: TerminalVisibilityCheckpoint,
 ): Promise<void> {
-  return invoke("set_terminal_visibility", {
-    clientId,
-    paneId,
-    visible,
-    serializedSnapshot: Array.from(serializedSnapshot),
-    terminalEpoch: checkpoint.terminalEpoch,
-    outputGeneration: checkpoint.outputGeneration,
-  });
+  return measurePerf(visible ? "invoke.set_terminal_visibility.reveal" : "invoke.set_terminal_visibility.hide", () =>
+    invoke("set_terminal_visibility",
+      encodeTerminalVisibilityFrame(clientId, paneId, visible, serializedSnapshot, checkpoint)));
+}
+
+/**
+ * Frames a visibility change as a raw IPC body: the input frame's header, then
+ * a visibility byte, the terminal epoch and the output cutoff as big-endian
+ * `u64`s, then the snapshot bytes.
+ *
+ * A hide carries the renderer's serialized screen, up to 4 MiB. As a JSON
+ * argument that becomes an array of numbers — around 15 MB of text to
+ * stringify here and re-parse on the other side, on the thread that is
+ * supposed to be painting the tab the user just switched to.
+ */
+export function encodeTerminalVisibilityFrame(
+  clientId: string,
+  paneId: string,
+  visible: boolean,
+  serializedSnapshot: Uint8Array,
+  checkpoint: TerminalVisibilityCheckpoint,
+): Uint8Array {
+  const client = encoder.encode(clientId);
+  const pane = encoder.encode(paneId);
+  const scalarsOffset = 4 + client.byteLength + pane.byteLength;
+  const frame = new Uint8Array(scalarsOffset + 17 + serializedSnapshot.byteLength);
+  const view = new DataView(frame.buffer);
+  view.setUint16(0, client.byteLength, false);
+  frame.set(client, 2);
+  const paneOffset = 2 + client.byteLength;
+  view.setUint16(paneOffset, pane.byteLength, false);
+  frame.set(pane, paneOffset + 2);
+  frame[scalarsOffset] = visible ? 1 : 0;
+  view.setBigUint64(scalarsOffset + 1, BigInt(checkpoint.terminalEpoch), false);
+  view.setBigUint64(scalarsOffset + 9, BigInt(checkpoint.outputGeneration), false);
+  frame.set(serializedSnapshot, scalarsOffset + 17);
+  return frame;
 }
 
 export function requestTerminalSeed(clientId: string, paneId: string): Promise<void> {
-  return invoke("request_terminal_seed", { clientId, paneId });
+  return measurePerf("invoke.request_terminal_seed", () => invoke("request_terminal_seed", { clientId, paneId }));
 }
 
 export function terminalBridgeKey(connection: ConnectionSpec, epoch: number): string {

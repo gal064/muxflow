@@ -12,6 +12,8 @@ use std::{
 };
 
 use phase0_core::NotificationRoute;
+
+use super::{TEST_BODY, TEST_TITLE};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use zbus::{blocking::Connection, proxy, zvariant::Value};
@@ -43,6 +45,7 @@ trait FreedesktopNotifications {
     fn notification_closed(&self, id: u32, reason: u32) -> zbus::Result<()>;
 }
 
+#[derive(Clone)]
 pub struct NativeNotifications {
     connection: Result<Connection, String>,
     routes: Arc<Mutex<PendingNotificationRoutes>>,
@@ -217,6 +220,44 @@ impl NativeNotifications {
         body: &str,
         route: NotificationRoute,
         request_action: bool,
+        // Freedesktop has no foreground-suppression hook: the daemon decides
+        // what a notification does while its client is focused, and there is
+        // no delegate to consult. The frontend's answer is accepted and
+        // ignored here so the command has one shape on every platform.
+        _present_in_foreground: bool,
+    ) -> Result<NotificationReceipt, String> {
+        self.post(title, body, request_action.then_some(route))
+    }
+
+    /// The one notification a person can ask for directly. No route: "did a
+    /// banner appear" is the whole question, and an Open button on it would
+    /// have nowhere to go.
+    pub fn send_test_notification(&self) -> Result<NotificationReceipt, String> {
+        self.post(TEST_TITLE, TEST_BODY, None)
+    }
+
+    /// Freedesktop has no per-app permission model — a notification daemon
+    /// either answers or there is nothing to deliver through.
+    pub fn authorization_status(&self) -> Result<String, String> {
+        let Ok(connection) = self.connection.as_ref() else {
+            return Ok("unsupported".into());
+        };
+        let reachable = FreedesktopNotificationsProxyBlocking::new(connection)
+            .and_then(|proxy| proxy.get_capabilities())
+            .is_ok();
+        Ok(if reachable {
+            "authorized"
+        } else {
+            "unsupported"
+        }
+        .into())
+    }
+
+    fn post(
+        &self,
+        title: &str,
+        body: &str,
+        route: Option<NotificationRoute>,
     ) -> Result<NotificationReceipt, String> {
         let connection = self.connection.as_ref().map_err(Clone::clone)?;
         let proxy = FreedesktopNotificationsProxyBlocking::new(connection)
@@ -225,7 +266,7 @@ impl NativeNotifications {
             .get_capabilities()
             .map_err(|error| error.to_string())?;
         let actionable = notification_actionable(
-            request_action,
+            route.is_some(),
             capabilities
                 .iter()
                 .any(|capability| capability == "actions"),
@@ -248,13 +289,14 @@ impl NativeNotifications {
                 15_000,
             )
             .map_err(|error| error.to_string())?;
-        let install = if actionable {
-            self.routes
-                .lock()
-                .unwrap()
-                .insert(id, route, Instant::now())
-        } else {
-            RouteInstall::Pending
+        let install = match route {
+            Some(route) if actionable => {
+                self.routes
+                    .lock()
+                    .unwrap()
+                    .insert(id, route, Instant::now())
+            }
+            _ => RouteInstall::Pending,
         };
         let action_policy = native_action_policy(actionable, &install);
         let id = if action_policy == NativeActionPolicy::ReplaceWithoutActions {

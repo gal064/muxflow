@@ -13,7 +13,7 @@ describe("authoritative window selection", () => {
   });
 
   it("renders a GUI-selected tab after tmux accepts selectWindow", async () => {
-    const performAction = vi.fn(async () => true);
+    const performAction = vi.fn(async () => ({ windowId: "@2", topologyGeneration: 2 }));
     const setActiveWindowId = vi.fn();
     await expect(requestActiveWindow(windows("@1"), "@1", "@2", performAction, setActiveWindowId)).resolves.toBe(true);
     expect(performAction).toHaveBeenCalledWith({ kind: "selectWindow", sessionId: "$1", windowId: "@2" });
@@ -22,7 +22,7 @@ describe("authoritative window selection", () => {
 
   it("does not change the rendered tab when disconnected/read-only gating rejects the mutation", async () => {
     const setActiveWindowId = vi.fn();
-    await expect(requestActiveWindow(windows("@1"), "@1", "@2", async () => false, setActiveWindowId)).resolves.toBe(false);
+    await expect(requestActiveWindow(windows("@1"), "@1", "@2", async () => undefined, setActiveWindowId)).resolves.toBe(false);
     expect(setActiveWindowId).not.toHaveBeenCalled();
   });
 

@@ -81,9 +81,15 @@ pub(crate) fn broadcast_control_event(event: v1::HostEvent) {
     });
     for sink in saturated {
         let pending = Arc::clone(&sink.overflow_pending);
+        // The most expensive event this host can send — it costs the client a
+        // full resnapshot — and it used to carry no reason at all, so a log
+        // full of them said only that something happened. Under a sustained
+        // flood on a real link this is the event that fires, and naming it is
+        // what turned P12-Q005 from "resyncs happen" into a measurement.
         let message = SequencerControl::InjectGap(v1::HostEvent {
             kind: v1::EventKind::ResyncRequired.into(),
             scope: "full".into(),
+            detail: "host event queue overflowed; the client could not drain events as fast as tmux produced them".into(),
             ..Default::default()
         });
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {

@@ -48,6 +48,16 @@ pub(super) enum TerminalEvent {
         pane_id: String,
         message: String,
     },
+    /// A pane tmux paused that the host could not get resumed.
+    ///
+    /// Not the ordinary `%pause`, which the host recovers from by itself and
+    /// which the renderer is deliberately never told about: this is the host
+    /// having run out of attempts, after which the pane delivers nothing until
+    /// something asks for a seed.
+    FlowStalled {
+        pane_id: String,
+        message: String,
+    },
     FileService {
         scope: String,
         payload: Vec<u8>,
@@ -132,6 +142,7 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
             (9, pane_id, payload)
         }
         TerminalEvent::SeedDiagnostic { pane_id, message } => (11, pane_id, message.into_bytes()),
+        TerminalEvent::FlowStalled { pane_id, message } => (15, pane_id, message.into_bytes()),
         TerminalEvent::FileService { scope, payload } => (12, scope, payload),
         TerminalEvent::GitService { scope, payload } => (13, scope, payload),
         TerminalEvent::AgentService { scope, payload } => (14, scope, payload),

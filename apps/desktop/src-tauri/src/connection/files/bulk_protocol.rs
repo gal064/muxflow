@@ -40,15 +40,34 @@ impl std::fmt::Display for RequestFailure {
 pub(super) struct BulkProtocolClient<'a> {
     stdin: &'a mut ChildStdin,
     reader: &'a mut BufReader<ChildStdout>,
-    decoder: FrameAccumulator,
+    /// Borrowed, not owned: a decoder can be holding bytes read past the last
+    /// response, and a bridge that outlives this client must keep them.
+    decoder: &'a mut FrameAccumulator,
+    /// The connection's request-id cursor.
+    ///
+    /// Ids belong to the *connection*, not to a job, and the response loop
+    /// *skips* frames whose id it is not waiting for rather than failing on
+    /// them — so an id reused by a later job on the same connection would be a
+    /// stale response silently accepted as the answer to a new request. Every
+    /// request therefore takes the next id from here and no caller chooses one,
+    /// which is the only arrangement in which that cannot happen.
+    next_id: &'a mut u64,
+    /// The bridge's reusability flag, cleared here rather than by any job: only
+    /// this type knows whether a request left the stream mid-frame.
+    clean: &'a mut bool,
 }
 
 impl<'a> BulkProtocolClient<'a> {
-    pub(super) fn connect(
-        stdin: &'a mut ChildStdin,
-        reader: &'a mut BufReader<ChildStdout>,
+    /// Performs the bulk handshake on a freshly spawned bridge.
+    ///
+    /// Separate from `resumed` because it happens once per *connection* rather
+    /// than once per job: a pooled bridge has already made this exchange, and
+    /// re-making it is one of the round trips pooling exists to stop paying.
+    pub(super) fn handshake(
+        stdin: &mut ChildStdin,
+        reader: &mut BufReader<ChildStdout>,
         binding: &BulkBinding,
-    ) -> Result<Self, String> {
+    ) -> Result<(), String> {
         write_frame_sync(
             stdin,
             &envelope(
@@ -98,71 +117,103 @@ impl<'a> BulkProtocolClient<'a> {
                 ));
             }
         }
-        Ok(Self {
-            stdin,
-            reader,
-            decoder: FrameAccumulator::default(),
-        })
+        Ok(())
     }
 
-    pub(super) fn request(
-        &mut self,
-        request_id: u64,
-        request: v1::Request,
-    ) -> Result<v1::Response, String> {
-        self.request_classified(request_id, request)
+    /// A client for one job on an already-handshaken bridge.
+    pub(super) fn resumed(
+        stdin: &'a mut ChildStdin,
+        reader: &'a mut BufReader<ChildStdout>,
+        decoder: &'a mut FrameAccumulator,
+        next_id: &'a mut u64,
+        clean: &'a mut bool,
+    ) -> Self {
+        Self {
+            stdin,
+            reader,
+            decoder,
+            next_id,
+            clean,
+        }
+    }
+
+    fn take_request_id(&mut self) -> u64 {
+        let id = *self.next_id;
+        *self.next_id = id.saturating_add(1);
+        id
+    }
+
+    pub(super) fn request(&mut self, request: v1::Request) -> Result<v1::Response, String> {
+        self.request_classified(request)
             .map_err(|error| error.to_string())
     }
 
     pub(super) fn request_classified(
         &mut self,
-        request_id: u64,
         request: v1::Request,
     ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request_id, request, None, None)
+        self.request_classified_inner(request, None, None)
     }
 
     pub(super) fn request_with_deadline(
         &mut self,
-        request_id: u64,
         request: v1::Request,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request_id, request, None, Some(deadline))
+        self.request_classified_inner(request, None, Some(deadline))
             .map_err(|error| error.to_string())
     }
 
     pub(super) fn request_classified_with_deadline(
         &mut self,
-        request_id: u64,
         request: v1::Request,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request_id, request, None, Some(deadline))
+        self.request_classified_inner(request, None, Some(deadline))
     }
 
     pub(super) fn request_cancellable(
         &mut self,
-        request_id: u64,
         request: v1::Request,
         cancellation: &CancelState,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request_id, request, Some(cancellation), Some(deadline))
+        self.request_classified_inner(request, Some(cancellation), Some(deadline))
             .map_err(|error| error.to_string())
     }
 
     pub(super) fn request_classified_cancellable(
         &mut self,
-        request_id: u64,
         request: v1::Request,
         cancellation: &CancelState,
         deadline: &DeadlineGuard,
     ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request_id, request, Some(cancellation), Some(deadline))
+        self.request_classified_inner(request, Some(cancellation), Some(deadline))
     }
 
+    /// Every request goes through here, so this is the one place that knows
+    /// whether the stream is still where the next request expects it. A remote
+    /// refusal is a complete response and leaves the bridge reusable; a
+    /// transport failure or a cancellation leaves a partial write or an
+    /// in-flight response behind, and the bridge must not be handed on.
     fn request_classified_inner(
+        &mut self,
+        request: v1::Request,
+        cancellation: Option<&CancelState>,
+        deadline: Option<&DeadlineGuard>,
+    ) -> Result<v1::Response, RequestFailure> {
+        let request_id = self.take_request_id();
+        let outcome = self.request_framed(request_id, request, cancellation, deadline);
+        if matches!(
+            outcome,
+            Err(RequestFailure::Transport(_) | RequestFailure::Cancelled)
+        ) {
+            *self.clean = false;
+        }
+        outcome
+    }
+
+    fn request_framed(
         &mut self,
         request_id: u64,
         request: v1::Request,
@@ -281,23 +332,16 @@ impl<'a> BulkProtocolClient<'a> {
             .map_err(|error| RequestFailure::Transport(error.to_string()))
     }
 
-    pub(super) fn cancel_download(
-        &mut self,
-        transfer_id: &str,
-        request_id: u64,
-    ) -> Result<(), String> {
-        self.request(
-            request_id,
-            v1::Request {
-                operation: v1::Operation::CancelDownload.into(),
-                file: Some(v1::FileServiceRequest {
-                    operation_id: transfer_id.into(),
-                    transfer_id: transfer_id.into(),
-                    ..Default::default()
-                }),
+    pub(super) fn cancel_download(&mut self, transfer_id: &str) -> Result<(), String> {
+        self.request(v1::Request {
+            operation: v1::Operation::CancelDownload.into(),
+            file: Some(v1::FileServiceRequest {
+                operation_id: transfer_id.into(),
+                transfer_id: transfer_id.into(),
                 ..Default::default()
-            },
-        )?;
+            }),
+            ..Default::default()
+        })?;
         Ok(())
     }
 
@@ -305,40 +349,29 @@ impl<'a> BulkProtocolClient<'a> {
         &mut self,
         operation_id: &str,
         transfer_id: &str,
-        request_id: u64,
     ) -> Result<(), String> {
-        self.request(
-            request_id,
-            v1::Request {
-                operation: v1::Operation::CancelFileWrite.into(),
-                file: Some(v1::FileServiceRequest {
-                    operation_id: operation_id.into(),
-                    transfer_id: transfer_id.into(),
-                    ..Default::default()
-                }),
+        self.request(v1::Request {
+            operation: v1::Operation::CancelFileWrite.into(),
+            file: Some(v1::FileServiceRequest {
+                operation_id: operation_id.into(),
+                transfer_id: transfer_id.into(),
                 ..Default::default()
-            },
-        )?;
+            }),
+            ..Default::default()
+        })?;
         Ok(())
     }
 
-    pub(super) fn cancel_terminal_upload(
-        &mut self,
-        transfer_id: &str,
-        request_id: u64,
-    ) -> Result<String, String> {
-        let response = self.request(
-            request_id,
-            v1::Request {
-                operation: v1::Operation::CancelTerminalUpload.into(),
-                file: Some(v1::FileServiceRequest {
-                    operation_id: transfer_id.into(),
-                    transfer_id: transfer_id.into(),
-                    ..Default::default()
-                }),
+    pub(super) fn cancel_terminal_upload(&mut self, transfer_id: &str) -> Result<String, String> {
+        let response = self.request(v1::Request {
+            operation: v1::Operation::CancelTerminalUpload.into(),
+            file: Some(v1::FileServiceRequest {
+                operation_id: transfer_id.into(),
+                transfer_id: transfer_id.into(),
                 ..Default::default()
-            },
-        )?;
+            }),
+            ..Default::default()
+        })?;
         Ok(response
             .file
             .and_then(|file| file.upload)
@@ -363,4 +396,105 @@ fn wait_ready(fd: i32, events: libc::c_short, timeout_ms: libc::c_int) -> Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs::File,
+        os::fd::{FromRawFd, OwnedFd},
+    };
+
+    /// A pipe, as the two halves a bridge's stdio is made of.
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0; 2];
+        // SAFETY: `pipe` writes two descriptors into an array of two.
+        let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(created, 0, "pipe: {}", std::io::Error::last_os_error());
+        // SAFETY: both descriptors are freshly created and owned by nothing else.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    fn answer(request_id: u64) -> Vec<u8> {
+        encode_frame(&envelope(
+            request_id,
+            0,
+            Payload::Response(v1::Response {
+                ok: true,
+                ..Default::default()
+            }),
+        ))
+        .expect("an encodable response")
+    }
+
+    /// Two jobs on one bridge, over a real pipe pair rather than a mock.
+    ///
+    /// The cursor lives on the *bridge* and each job builds a fresh client
+    /// around it (`BulkLease::client`), so a client that started counting from
+    /// its own zero would reuse ids the connection had already spent — and the
+    /// response loop skips frames it is not waiting for rather than failing on
+    /// them, so the reuse would surface as a stale response silently accepted as
+    /// the answer to a new request, not as an error.
+    #[test]
+    fn request_ids_carry_across_the_jobs_that_share_one_connection() {
+        let (request_read, request_write) = pipe();
+        let (response_read, response_write) = pipe();
+        // Both answers are queued before either question is asked: what is under
+        // test is the numbering, and a pipe buffer holds far more than this.
+        let mut answers = File::from(response_write);
+        answers
+            .write_all(&answer(2))
+            .expect("queue the first answer");
+        // A second answer to the *first* id, so a client that restarted its
+        // numbering would find one waiting and fail this test on the cursor
+        // rather than blocking on a response that never comes — which is the
+        // shape the bug has in production: a stale response, silently accepted.
+        // A client that does not restart skips this frame, as the loop must.
+        answers
+            .write_all(&answer(2))
+            .expect("queue the stale answer");
+        answers
+            .write_all(&answer(3))
+            .expect("queue the second answer");
+
+        // Each half becomes the stdio type that owns the corresponding end of a
+        // child's pipes, which is what the client under test takes.
+        let mut stdin = ChildStdin::from(request_write);
+        let mut reader = BufReader::new(ChildStdout::from(response_read));
+        let mut decoder = FrameAccumulator::default();
+        // What a freshly handshaken bridge starts at: 1 was the handshake's.
+        let mut next_id = 2_u64;
+        let mut clean = true;
+
+        for expected in [2_u64, 3] {
+            BulkProtocolClient::resumed(
+                &mut stdin,
+                &mut reader,
+                &mut decoder,
+                &mut next_id,
+                &mut clean,
+            )
+            .request(v1::Request::default())
+            .expect("the queued answer");
+            assert_eq!(next_id, expected + 1, "the cursor advanced past {expected}");
+        }
+        assert!(clean, "two complete exchanges leave the bridge reusable");
+
+        // And the ids reached the wire, rather than only being counted in here.
+        let mut questions = File::from(request_read);
+        let mut asked = Vec::new();
+        let mut sent = FrameAccumulator::default();
+        let mut bytes = [0_u8; 4096];
+        while asked.len() < 2 {
+            let count = questions.read(&mut bytes).expect("the requests written");
+            assert_ne!(count, 0, "the request stream ended early");
+            sent.push(&bytes[..count]).expect("decodable requests");
+            while let Some(frame) = sent.next_frame().expect("decodable requests") {
+                asked.push(frame.request_id);
+            }
+        }
+        assert_eq!(asked, vec![2, 3]);
+        assert!(asked[1] > asked[0], "ids never restart");
+    }
 }
