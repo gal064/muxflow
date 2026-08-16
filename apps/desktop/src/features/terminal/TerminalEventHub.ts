@@ -64,6 +64,7 @@ export class TerminalEventHub {
   readonly #lastPaneResource = new Map<string, PaneResourceFingerprint>();
   readonly #renderedGeneration = new Map<string, number>();
   readonly #awaitingSeed = new Set<string>();
+  readonly #evictedSeedDebt = new Map<string, true>();
   readonly #conflictReseedRequested = new Set<string>();
   readonly #trackedPaneLru = new Map<string, true>();
   readonly #maxPaneBytes: number;
@@ -75,6 +76,7 @@ export class TerminalEventHub {
   #generationEpoch?: number;
   #lastSequence = 0;
   #sequenceFrozen = false;
+  #unknownPanesRequireSeed = false;
 
   constructor(
     readonly onSeedRequired?: (paneId: string, reason: string) => void,
@@ -109,7 +111,26 @@ export class TerminalEventHub {
     }
     if (event.kind === "generationEpoch") return admission;
     if (event.kind !== "seed" && event.kind !== "output" && event.kind !== "paneResource" && event.kind !== "seedDiagnostic") return admission;
+    const wasTracked = this.#trackedPaneLru.has(event.paneId);
+    const hadEvictedSeedDebt = this.#evictedSeedDebt.delete(event.paneId);
+    const requiresConservativeSeed = !wasTracked && this.#unknownPanesRequireSeed;
     this.#touchTrackedPane(event.paneId);
+    if (hadEvictedSeedDebt || requiresConservativeSeed) {
+      const alreadyAwaiting = this.#awaitingSeed.has(event.paneId);
+      this.#awaitingSeed.add(event.paneId);
+      this.#deleteBacklog(event.paneId);
+      if (requiresConservativeSeed && !hadEvictedSeedDebt && !alreadyAwaiting) {
+        this.onSeedRequired?.(event.paneId, "frontend pane recovery debt outlived the metadata LRU");
+      }
+      // Neither incremental output nor an empty handoff can repair content
+      // discarded with an evicted hidden backlog. Do not let either advance
+      // the generation watermark ahead of the fresh seed we already owe.
+      if (event.kind === "output"
+        || (event.kind === "paneResource" && !event.requiresSeed
+          && event.serializedSnapshot.byteLength + event.rawTail.byteLength === 0)) {
+        return admission;
+      }
+    }
     if (event.kind !== "seedDiagnostic") {
       const lastGeneration = this.#lastGeneration.get(event.paneId) ?? -1;
       if (event.kind === "paneResource") {
@@ -200,6 +221,7 @@ export class TerminalEventHub {
     this.#lastPaneResource.delete(paneId);
     this.#renderedGeneration.delete(paneId);
     this.#awaitingSeed.delete(paneId);
+    this.#evictedSeedDebt.delete(paneId);
     this.#conflictReseedRequested.delete(paneId);
     this.#trackedPaneLru.delete(paneId);
   }
@@ -257,8 +279,10 @@ export class TerminalEventHub {
     this.#lastPaneResource.clear();
     this.#renderedGeneration.clear();
     this.#awaitingSeed.clear();
+    this.#evictedSeedDebt.clear();
     this.#conflictReseedRequested.clear();
     this.#trackedPaneLru.clear();
+    this.#unknownPanesRequireSeed = false;
   }
 
   #buffer(event: PaneEvent): void {
@@ -373,13 +397,31 @@ export class TerminalEventHub {
       this.#lastGeneration.delete(oldest);
       this.#lastPaneResource.delete(oldest);
       this.#renderedGeneration.delete(oldest);
-      if (this.#backlogs.has(oldest)) {
-        const alreadyAwaiting = this.#awaitingSeed.has(oldest);
+      const alreadyAwaiting = this.#awaitingSeed.has(oldest);
+      if (this.#backlogs.has(oldest) || alreadyAwaiting) {
         this.#deleteBacklog(oldest);
+        this.#awaitingSeed.delete(oldest);
+        this.#rememberEvictedSeedDebt(oldest);
         if (!alreadyAwaiting) this.onSeedRequired?.(oldest, "frontend pane metadata LRU capacity was exceeded");
       }
-      this.#awaitingSeed.delete(oldest);
       this.#conflictReseedRequested.delete(oldest);
+    }
+  }
+
+  #rememberEvictedSeedDebt(paneId: string): void {
+    if (this.#maxTrackedPanes <= 0) {
+      this.#unknownPanesRequireSeed = true;
+      return;
+    }
+    this.#evictedSeedDebt.delete(paneId);
+    this.#evictedSeedDebt.set(paneId, true);
+    while (this.#evictedSeedDebt.size > this.#maxTrackedPanes) {
+      const oldest = this.#evictedSeedDebt.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.#evictedSeedDebt.delete(oldest);
+      // A single bounded sentinel is sufficient once the exact tombstone is
+      // gone: any later untracked pane must establish itself with a seed.
+      this.#unknownPanesRequireSeed = true;
     }
   }
 

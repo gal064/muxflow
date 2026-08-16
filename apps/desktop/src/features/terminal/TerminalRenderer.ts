@@ -14,6 +14,7 @@ import {
   type TerminalSize,
 } from "./cellMetrics";
 import type { OwnedTerminalBytes } from "./TerminalBytes";
+import { TerminalGenerationWatermark } from "./TerminalGenerationWatermark";
 import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
@@ -137,17 +138,13 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #viewportListeners = new Set<(state: TerminalViewportState) => void>();
   readonly #disposables: IDisposable[] = [];
   readonly #scheduler: TerminalWriteScheduler;
+  readonly #generations = new TerminalGenerationWatermark();
   readonly #options: TerminalRendererOptions;
   /** CSS pixels the token asks one row to occupy. See `xtermLineHeight`. */
   readonly #rowPitch: number;
   #webgl?: WebglAddon;
   #newOutput = false;
   #lastViewport?: TerminalViewportState;
-  #lastAppliedGeneration = 0;
-  /// What this terminal has been *given*, which runs ahead of what it has
-  /// applied. A restore drops the queue, so admitting one has to be judged
-  /// against the queued bytes it would discard, not only the parsed ones.
-  #lastEnqueuedGeneration = 0;
   #seedRequested = false;
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
   #disposed = false;
@@ -285,8 +282,7 @@ export class XtermRenderer implements TerminalRenderer {
     // generations restart at 1 — would sit below a watermark the previous epoch
     // left behind, and every later restore and hide checkpoint would be
     // measured against a number from a stream that no longer exists.
-    this.#lastAppliedGeneration = 0;
-    this.#lastEnqueuedGeneration = 0;
+    this.#generations.resetAuthoritativeStream();
     // The seed is the recovery this pane may have asked for; the next refusal
     // is allowed to ask again.
     this.#seedRequested = false;
@@ -300,7 +296,7 @@ export class XtermRenderer implements TerminalRenderer {
     generation = 0,
     throughGeneration = generation,
   ): boolean {
-    const decision = restoreDecision(throughGeneration, this.#lastEnqueuedGeneration, this.#scheduler.overflowed);
+    const decision = restoreDecision(throughGeneration, this.#generations.enqueuedGeneration, this.#scheduler.overflowed);
     if (decision.kind === "reseed") {
       this.#requestSeed(decision.reason);
       return false;
@@ -434,7 +430,7 @@ export class XtermRenderer implements TerminalRenderer {
   drainAndSerialize(): Promise<DrainedTerminalSnapshot> {
     this.#drainPromise ??= this.#scheduler.sealAndDrain().then(() => ({
       serialized: this.serialize(),
-      outputGeneration: this.#lastAppliedGeneration,
+      outputGeneration: this.#generations.appliedGeneration,
     }));
     return this.#drainPromise;
   }
@@ -461,22 +457,7 @@ export class XtermRenderer implements TerminalRenderer {
   /// Records what the terminal was handed, and returns the completion that
   /// records what it applied.
   #enqueued(generation: number, onRendered?: () => void): () => void {
-    if (Number.isSafeInteger(generation) && generation > this.#lastEnqueuedGeneration) {
-      this.#lastEnqueuedGeneration = generation;
-    }
-    return this.#applied(generation, onRendered);
-  }
-
-  #applied(generation: number, onRendered?: () => void): () => void {
-    return () => {
-      // Monotonic: this is the cutoff the hide handoff hands the host, and a
-      // restore that rewound it made the next checkpoint claim bytes the host
-      // would then never resend.
-      if (Number.isSafeInteger(generation) && generation > this.#lastAppliedGeneration) {
-        this.#lastAppliedGeneration = generation;
-      }
-      onRendered?.();
-    };
+    return this.#generations.enqueued(generation, onRendered);
   }
 
   /**
