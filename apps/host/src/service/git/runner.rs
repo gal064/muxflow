@@ -348,6 +348,8 @@ fn git_output_inner(
         });
     }
     let mut child = command.spawn().context("failed to start Git")?;
+    let _phase14_process =
+        super::phase14_git_process_started(args.first().copied().unwrap_or(OsStr::new("")));
     let stdout = child.stdout.take().context("Git stdout unavailable")?;
     let stderr = child.stderr.take().context("Git stderr unavailable")?;
     let stdout_reader = std::thread::spawn(move || read_process_output(stdout));

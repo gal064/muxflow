@@ -7,6 +7,7 @@ import { SurfaceError } from "../../ui/SurfaceError";
 import { attachEditorLayout } from "../files/editorLayout";
 import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot, GitWorkspaceClient, GitWorkspaceEvent } from "./types";
 import { ADE_MONACO_THEME } from "../files/monaco";
+import { closePerfSpan, recordPerfMilestone } from "../../perf/probe";
 
 interface Props {
   tab: AppOwnedTab;
@@ -41,6 +42,9 @@ export function GitDiffSurface(props: Props) {
   const pathIdentity = props.tab.gitPath;
   const originalPathIdentity = props.tab.gitOriginalPath;
   const target = props.tab.gitTarget;
+  useEffect(() => {
+    if (diff) recordPerfMilestone("editor.monacoRequest");
+  }, [diff]);
 
   const load = useCallback(async (clearStale = false) => {
     if (!props.scope || !root || !repositoryId || !pathIdentity || !target) return;
@@ -219,7 +223,11 @@ export function GitDiffSurface(props: Props) {
             language={languageForPath(diff.displayPath)}
             modified={text.modified}
             modifiedModelPath={modelUri(props.tab, "modified")}
-            onMount={(editor) => { detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor); }}
+            onMount={(editor) => {
+              recordPerfMilestone("editor.paint");
+              closePerfSpan("workflow.git.diffPaint");
+              detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor);
+            }}
             options={{ automaticLayout: true, enableSplitViewResizing: true, minimap: { enabled: false }, originalEditable: false, readOnly: true, renderSideBySide: true, scrollBeyondLastLine: false }}
             original={text.original}
             originalModelPath={modelUri(props.tab, "original")}

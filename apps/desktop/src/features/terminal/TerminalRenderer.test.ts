@@ -5,6 +5,9 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { restoreDecision, TerminalWriteScheduler, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
 import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan, reconcilePaneGrid } from "./TerminalPane";
 import type { Pane } from "../../app/types";
+import { OperationCounters } from "../../perf/operations";
+import { TerminalEventHub } from "./TerminalEventHub";
+import type { TerminalEvent } from "./api";
 
 describe("TerminalWriteScheduler", () => {
   it("preserves byte order and respects the per-frame budget", () => {
@@ -193,6 +196,71 @@ describe("TerminalWriteScheduler", () => {
     expect(written.flat()).toEqual([1, 2, 3, 4, 0x1b, 0x63, 20, 21, 22]);
     expect(overflow).toEqual([11]);
     expect(scheduler.pendingBytes).toBe(0);
+  });
+});
+
+describe("Phase 14 terminal operation fixture", () => {
+  it("reports exact event, fanout, copy, queue, callback and frame counts by chunk size", () => {
+    for (const chunkBytes of [64, 1024, 64 * 1024]) {
+      const measurements = new OperationCounters();
+      const hub = new TerminalEventHub(undefined, {}, measurements);
+      const published: number[] = [];
+      hub.subscribe((event) => {
+        if (event.kind === "output") published.push(...event.data);
+      });
+      for (let index = 0; index < 8; index += 1) {
+        const data = new Uint8Array(chunkBytes).fill(index);
+        hub.publish({
+          kind: "output", paneId: "%1", generation: index + 1,
+          sequence: index + 1, data,
+        } satisfies TerminalEvent);
+      }
+      const backlog: number[] = [];
+      hub.subscribePane("%1", (event) => {
+        if (event.kind === "output") backlog.push(...event.data);
+      });
+
+      const frames: FrameRequestCallback[] = [];
+      const completions: Array<() => void> = [];
+      const output: Uint8Array[] = [];
+      let callbacks = 0;
+      const scheduler = new TerminalWriteScheduler(
+        (chunk, done) => { output.push(chunk.slice()); completions.push(done); },
+        (callback) => { frames.push(callback); return frames.length; },
+        () => undefined,
+        256 * 1024,
+        8 * 1024 * 1024,
+        undefined,
+        undefined,
+        measurements,
+      );
+      for (let index = 0; index < 8; index += 1) {
+        scheduler.enqueue(new Uint8Array(chunkBytes).fill(index), () => { callbacks += 1; });
+      }
+      let ticks = 0;
+      while (scheduler.pendingBytes > 0 && ticks < 100) {
+        while (completions.length) completions.shift()!();
+        for (const frame of frames.splice(0, frames.length)) frame(ticks * 16);
+        ticks += 1;
+      }
+      while (completions.length) completions.shift()!();
+      expect(scheduler.pendingBytes).toBe(0);
+      expect(callbacks).toBe(8);
+      const joined = new Uint8Array(output.reduce((total, chunk) => total + chunk.byteLength, 0));
+      let offset = 0;
+      for (const chunk of output) { joined.set(chunk, offset); offset += chunk.byteLength; }
+      expect(Array.from(joined)).toEqual(backlog);
+      expect(published).toEqual(backlog);
+      const snapshot = measurements.snapshot();
+      expect(snapshot.counters["terminal.hub.events"]).toBe(8);
+      expect(snapshot.counters["terminal.scheduler.enqueueOperations"]).toBe(8);
+      expect(snapshot.counters["terminal.scheduler.dequeueOperations"]).toBe(8);
+      expect(snapshot.counters["terminal.scheduler.callbacksInvoked"]).toBe(8);
+      console.log(`PHASE14_METRIC ${JSON.stringify({
+        lane: "terminalFrontend", chunkBytes, eventCount: 8,
+        byteExact: true, ...snapshot,
+      })}`);
+    }
   });
 });
 

@@ -785,7 +785,7 @@ fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
 }
 
 fn send_event(channel: &Channel<InvokeResponseBody>, event: TerminalEvent) {
-    let _ = channel.send(InvokeResponseBody::Raw(encode_event(event)));
+    let _ = crate::perf_log::send_bridge_frame(channel, encode_event(event));
 }
 
 fn validate_tmux_id(value: &str, prefix: char) -> Result<(), String> {

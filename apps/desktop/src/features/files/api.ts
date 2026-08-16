@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { measurePerf } from "../../perf/probe";
+import { measurePerf, recordPerfCounter, recordPerfHighWater, startPerfSpan } from "../../perf/probe";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES } from "./types";
 import type {
   ActiveRoot,
@@ -70,18 +70,23 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   }
 
   async listDirectory(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, pageToken = ""): Promise<DirectoryListing> {
+    recordPerfCounter("explorer.directoryListRequests");
     const response = await this.#request(scope, this.#rootCommand(root, {
       operation: "listDirectory", operationId: crypto.randomUUID(), path: directory, pageToken, pageSize: 4096,
     }));
     if (!response.directory) throw new Error("Host omitted the directory listing.");
+    recordPerfCounter("explorer.listPayloadEntries", response.directory.entries.length);
+    recordPerfCounter("explorer.listMappedPayloadBytes", encoder.encode(JSON.stringify(response.directory)).byteLength);
     return this.#directory(response.directory, root.token);
   }
 
   async acquireDirectoryWatch(scope: FileWorkspaceScope, root: ActiveRoot, directory: string): Promise<DirectoryWatchLease> {
+    recordPerfCounter("explorer.watchSubscribers");
     const key = watchKey(scope, root, directory);
     let record = this.#watches.get(key);
     if (record) record.count += 1;
     else {
+      recordPerfCounter("explorer.watchRequests");
       const watchId = crypto.randomUUID();
       const ready = this.#request(scope, this.#rootCommand(root, {
         operation: "watchDirectory", operationId: crypto.randomUUID(), path: directory, watchId,
@@ -91,6 +96,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       });
       record = { clientId: scope.clientId, count: 1, watchId, ready };
       this.#watches.set(key, record);
+      recordPerfHighWater("explorer.activeWatches", this.#watches.size);
       try { await ready; } catch (error) { if (this.#watches.get(key) === record) this.#watches.delete(key); throw error; }
     }
     const snapshot = await record.ready;
@@ -98,6 +104,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     const release = () => {
       if (released) return;
       released = true;
+      recordPerfCounter("explorer.watchReleases");
       const current = this.#watches.get(key);
       if (!current) return;
       current.count -= 1;
@@ -117,6 +124,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
    * the file lane — the one spawning an ssh process per open — had none.
    */
   openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile> {
+    recordPerfCounter("file.openRequests");
     return measurePerf("file.open", () => this.#openFile(scope, root, path, signal));
   }
 
@@ -238,10 +246,18 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   async #readFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, purpose: "text" | "imagePreview", signal?: AbortSignal): Promise<FileReadTransfer> {
     const chunks: Uint8Array[] = [];
     let expectedOffset = 0n;
+    const firstContent = startPerfSpan(`file.${purpose}.timeToFirstContent`);
+    let sawContent = false;
     const completed = await this.#fileIo("start_file_read", {
       clientId: scope.clientId, profileId: scope.hostProfileId, expectedServerIdentity: scope.serverIdentity,
       connectionEpoch: String(scope.terminalEpoch), root: root.path, rootToken: root.token, path, purpose,
     }, (offset, chunk) => {
+      if (!sawContent) {
+        sawContent = true;
+        firstContent();
+      }
+      recordPerfCounter("file.contentChunks");
+      recordPerfCounter("file.contentBytes", chunk.byteLength);
       if (offset !== expectedOffset) throw new Error("Bulk file chunks arrived out of sequence.");
       expectedOffset += BigInt(chunk.byteLength);
       const limit = purpose === "text" ? TEXT_FILE_LIMIT_BYTES : IMAGE_PREVIEW_LIMIT_BYTES;
@@ -272,6 +288,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       const abort = () => {
         if (settled) return;
         settled = true;
+        recordPerfCounter("file.ioCancellations");
         if (transferId) void invoke("cancel_file_io", { transferId }).catch(() => undefined);
         reject(new DOMException("File load was cancelled.", "AbortError"));
       };
@@ -317,6 +334,8 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   }
 
   async #request(scope: FileWorkspaceScope, command: Record<string, unknown>): Promise<WireResponse> {
+    recordPerfCounter("desktop.hostRequests");
+    recordPerfCounter("desktop.hostRequestBytes", encoder.encode(JSON.stringify(command)).byteLength);
     return invoke("file_request", { clientId: scope.clientId, command });
   }
 

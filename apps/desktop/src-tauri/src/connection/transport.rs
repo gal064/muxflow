@@ -54,6 +54,7 @@ pub(super) fn spawn_bridge(connection: &ConnectionSpec, _client_id: &str) -> Res
             target,
             config_path,
         } => {
+            crate::perf_log::record_remote_operation("interactiveBridgeSpawn");
             let socket = ssh_profile_control_socket(profile_id, target, config_path.as_deref())?;
             ensure_control_master(
                 target,
@@ -162,6 +163,7 @@ pub(crate) fn spawn_bulk_bridge(connection: &ConnectionSpec) -> Result<Child, St
             target,
             config_path,
         } => {
+            crate::perf_log::record_remote_operation("bulkBridgeSpawn");
             let mut command = ssh_base(config_path.as_deref());
             command.arg("-T");
             // Bulk traffic keeps its own TCP connection so a multi-gigabyte
@@ -402,8 +404,10 @@ pub(super) fn ensure_control_master(
     socket: &Path,
     lane: ControlLane,
 ) -> Result<(), String> {
+    crate::perf_log::record_remote_operation("controlMasterEnsure");
     validate_control_socket(socket)?;
     let mut masters = ssh_masters().lock().unwrap();
+    crate::perf_log::record_remote_operation("controlMasterCheck");
     let check = ssh_base(config_path)
         .arg("-S")
         .arg(socket)
@@ -413,6 +417,7 @@ pub(super) fn ensure_control_master(
         .stderr(Stdio::null())
         .status();
     if check.is_ok_and(|status| status.success()) {
+        crate::perf_log::record_remote_operation("controlMasterReuse");
         masters
             .entry(socket.to_owned())
             .or_insert_with(|| SshMaster {
@@ -427,6 +432,7 @@ pub(super) fn ensure_control_master(
         fs::remove_file(socket).map_err(|error| error.to_string())?;
     }
     let mut master = ssh_base(config_path);
+    crate::perf_log::record_remote_operation("controlMasterEstablishment");
     if lane == ControlLane::Interactive {
         apply_control_lane_options(&mut master);
     }

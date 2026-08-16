@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { enablePerfProbe, perfCounterSnapshot, perfHighWaterSnapshot, resetPerfProbe } from "../../perf/probe";
 import { TauriFileWorkspaceClient } from "./api";
 import type { ActiveRoot, FileWorkspaceScope, WorkspaceEvent } from "./types";
 
@@ -12,8 +13,46 @@ const scope: FileWorkspaceScope = { clientId: "client", hostProfileId: "local", 
 const root: ActiveRoot = { token: "token", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "9" };
 
 beforeEach(() => { invokeMock.mockReset(); channels.length = 0; });
+afterEach(() => resetPerfProbe());
 
 describe("TauriFileWorkspaceClient", () => {
+  it("accounts for Phase 14 directory list and shared-watch operations exactly", async () => {
+    enablePerfProbe(async () => undefined);
+    const directory = {
+      watchId: "watch", root: "/repo", path: "/repo", generation: "12", overflowed: false,
+      authoritative: true, nextPageToken: "", complete: true,
+      entries: [{ path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "1", mime: "text/plain", imagePreviewEligible: false }],
+    };
+    invokeMock
+      .mockResolvedValueOnce({ operationId: "list", directory })
+      .mockResolvedValueOnce({ operationId: "watch", directory })
+      .mockResolvedValueOnce({ operationId: "unwatch" });
+    const client = new TauriFileWorkspaceClient();
+    await client.listDirectory(scope, root, "/repo");
+    const [first, second] = await Promise.all([
+      client.acquireDirectoryWatch(scope, root, "/repo"),
+      client.acquireDirectoryWatch(scope, root, "/repo"),
+    ]);
+    first.release();
+    second.release();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
+    const counters = perfCounterSnapshot();
+    const highWater = perfHighWaterSnapshot();
+    expect(counters["explorer.directoryListRequests"]).toBe(1);
+    expect(counters["explorer.watchSubscribers"]).toBe(2);
+    expect(counters["explorer.watchRequests"]).toBe(1);
+    expect(counters["explorer.watchReleases"]).toBe(2);
+    expect(counters["explorer.listPayloadEntries"]).toBe(1);
+    expect(counters["desktop.hostRequests"]).toBe(3);
+    expect(highWater["explorer.activeWatches"]).toBe(1);
+    console.log(`PHASE14_METRIC ${JSON.stringify({
+      lane: "explorerListWatch", directoryListRequests: counters["explorer.directoryListRequests"],
+      watchSubscribers: counters["explorer.watchSubscribers"], watchRequests: counters["explorer.watchRequests"],
+      watchReleases: counters["explorer.watchReleases"], activeWatchHighWater: highWater["explorer.activeWatches"],
+      hostRequests: counters["desktop.hostRequests"], mappedPayloadBytes: counters["explorer.listMappedPayloadBytes"],
+    })}`);
+  });
+
   it("maps active roots and preserves decimal u64 metadata without numeric coercion", async () => {
     invokeMock.mockResolvedValueOnce({ operationId: "op", activeRoot: { paneId: "%1", root: "/repo", rootToken: "token", gitWorktree: true, serverIdentity: "server", topologyGeneration: "7", rootGeneration: "18446744073709551615" } });
     const client = new TauriFileWorkspaceClient();

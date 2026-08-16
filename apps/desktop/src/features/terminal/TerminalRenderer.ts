@@ -13,6 +13,7 @@ import {
   type TerminalMeasurements,
   type TerminalSize,
 } from "./cellMetrics";
+import type { OperationRecorder } from "../../perf/operations";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
@@ -162,6 +163,7 @@ export class TerminalWriteScheduler {
     readonly maxPendingBytes = 8 * 1024 * 1024,
     readonly onPendingBytes?: (bytes: number) => void,
     readonly onOverflow?: (pendingBytes: number) => void,
+    readonly measurements?: OperationRecorder,
   ) {}
 
   enqueue(bytes: Uint8Array, onRendered?: () => void): boolean {
@@ -177,8 +179,15 @@ export class TerminalWriteScheduler {
       this.onOverflow?.(attemptedBytes);
       return false;
     }
-    this.#queue.push({ bytes: bytes.slice(), onRendered });
+    this.measurements?.add("terminal.scheduler.enqueueOperations");
+    this.measurements?.add("terminal.scheduler.inputBytes", bytes.byteLength);
+    const owned = bytes.slice();
+    this.measurements?.add("terminal.scheduler.copiedBytes", bytes.byteLength);
+    if (onRendered) this.measurements?.add("terminal.scheduler.callbacksQueued");
+    this.#queue.push({ bytes: owned, onRendered });
     this.#pendingBytes += bytes.byteLength;
+    this.measurements?.highWater?.("terminal.scheduler.pendingBytes", this.#pendingBytes);
+    this.measurements?.highWater?.("terminal.scheduler.queueDepth", this.#queue.length);
     this.onPendingBytes?.(this.#pendingBytes);
     this.#schedule();
     return true;
@@ -251,6 +260,7 @@ export class TerminalWriteScheduler {
       return;
     }
     this.#frame = this.requestFrame(() => this.#flush());
+    this.measurements?.add("terminal.scheduler.framesRequested");
   }
 
   #armImmediateWriteReset(): void {
@@ -260,6 +270,7 @@ export class TerminalWriteScheduler {
       this.#immediateWriteUsed = false;
       this.#schedule();
     });
+    this.measurements?.add("terminal.scheduler.framesRequested");
   }
 
   /**
@@ -279,6 +290,7 @@ export class TerminalWriteScheduler {
   #flush(): void {
     this.#frame = undefined;
     if (this.#disposed || this.#inFlightBytes || this.#queue.length === 0) return;
+    this.measurements?.add("terminal.scheduler.framesFlushed");
     const pieces: Uint8Array[] = [];
     const rendered: Array<() => void> = [];
     let length = 0;
@@ -289,6 +301,7 @@ export class TerminalWriteScheduler {
       length += take;
       if (take === first.bytes.byteLength) {
         this.#queue.shift();
+        this.measurements?.add("terminal.scheduler.dequeueOperations");
         // A partially written event has not reached xterm yet, so its
         // completion belongs to the frame that finishes it.
         if (first.onRendered) rendered.push(first.onRendered);
@@ -297,6 +310,7 @@ export class TerminalWriteScheduler {
       }
     }
     const chunk = joinChunks(pieces, length);
+    if (pieces.length > 1) this.measurements?.add("terminal.scheduler.copiedBytes", length);
     this.#inFlightBytes = length;
     let completed = false;
     const done = () => {
@@ -306,10 +320,13 @@ export class TerminalWriteScheduler {
       this.#inFlightBytes = 0;
       this.onPendingBytes?.(this.#pendingBytes);
       for (const onRendered of rendered) onRendered();
+      this.measurements?.add("terminal.scheduler.callbacksInvoked", rendered.length);
       this.#resolveDrainWaiters();
       this.#schedule();
     };
     try {
+      this.measurements?.add("terminal.scheduler.xtermWrites");
+      this.measurements?.add("terminal.scheduler.xtermWriteBytes", chunk.byteLength);
       this.writeChunk(chunk, done);
     } catch {
       done();

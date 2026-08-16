@@ -10,6 +10,12 @@ pub(super) struct RepositoryWatcher {
     _metadata: GitMetadataCapability,
 }
 
+impl Drop for RepositoryWatcher {
+    fn drop(&mut self) {
+        phase14_git_watcher_dropped();
+    }
+}
+
 pub(super) enum WatchSignal {
     Changed,
     Failed,
@@ -35,13 +41,16 @@ impl GitService {
         if cancellation.load(Ordering::Acquire) {
             bail!("Git watch bootstrap cancelled");
         }
-        if let Some(previous) = self.watches.lock().unwrap().insert(
+        let previous = self.watches.lock().unwrap().insert(
             request.watch_id.clone(),
             GitWatch {
                 cancelled: Arc::clone(&cancellation),
             },
-        ) {
+        );
+        if let Some(previous) = previous {
             previous.cancelled.store(true, Ordering::Release);
+        } else {
+            phase14_git_subscribers(1);
         }
         let bootstrap = (|| {
             let root = capture_request_root(&request)?;
@@ -245,6 +254,7 @@ impl GitService {
             .is_some_and(|watch| Arc::ptr_eq(&watch.cancelled, cancellation))
         {
             watches.remove(watch_id);
+            phase14_git_subscribers(-1);
         }
     }
 
@@ -255,6 +265,7 @@ impl GitService {
             .unwrap()
             .remove(watch_id)
             .ok_or_else(|| anyhow::anyhow!("unknown Git watch ID"))?;
+        phase14_git_subscribers(-1);
         watch.cancelled.store(true, Ordering::Release);
         Ok(())
     }
@@ -294,6 +305,7 @@ pub(super) fn start_repository_watcher(
     if current.identity()? != root_identity {
         bail!("repository root changed while establishing Git watch");
     }
+    phase14_git_watcher_created();
     Ok((
         RepositoryWatcher {
             _watcher: watcher,
@@ -307,9 +319,12 @@ pub(super) fn start_repository_watcher(
 
 impl Drop for GitService {
     fn drop(&mut self) {
-        for (_, watch) in self.watches.get_mut().unwrap().drain() {
+        let watches = self.watches.get_mut().unwrap();
+        let count = watches.len();
+        for (_, watch) in watches.drain() {
             watch.cancelled.store(true, Ordering::Release);
         }
+        phase14_git_subscribers(-(count as isize));
     }
 }
 

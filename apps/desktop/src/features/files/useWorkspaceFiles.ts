@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { keyForScope, keyForTransferConnection, sameRoot } from "./api";
-import { measurePerf } from "../../perf/probe";
+import { measurePerf, openPerfSpan, recordPerfCounter } from "../../perf/probe";
 import { isTerminalTransferState, mergeCanonicalTransfer } from "../transfers/transferState";
 import type {
   ActiveRoot,
@@ -83,7 +83,11 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     if (!activeScope || keyForScope(activeScope) !== scopeKey) return;
     if (!sameRoot(stateRef.current.root, root)) return;
     const previous = stateRef.current.listings.get(path);
-    if (!force && !append && previous) return;
+    if (!force && !append && previous) {
+      recordPerfCounter("explorer.cacheHits");
+      return;
+    }
+    recordPerfCounter("explorer.cacheMisses");
     if (append && (!previous?.nextPageToken || previous.complete)) return;
     const epoch = scopeEpoch.current;
     const serial = (directorySerial.current.get(path) ?? 0) + 1;
@@ -162,8 +166,13 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       return;
     }
     if (!current.root || event.rootToken !== current.root.token) return;
-    if (event.kind === "directoryChanged") coalesceRefresh(current.root, event.directory);
-    else if (event.kind === "fileChanged" || event.kind === "fileDeleted") coalesceRefresh(current.root, parentPath(event.path));
+    if (event.kind === "directoryChanged") {
+      openPerfSpan("explorer.externalChangeToPaint");
+      coalesceRefresh(current.root, event.directory);
+    } else if (event.kind === "fileChanged" || event.kind === "fileDeleted") {
+      openPerfSpan("explorer.externalChangeToPaint");
+      coalesceRefresh(current.root, parentPath(event.path));
+    }
   }, [coalesceRefresh]);
 
   useEffect(() => {
@@ -199,6 +208,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       if (resolving) return;
       resolving = true;
       const probe = ++rootProbeSerial.current;
+      openPerfSpan("workflow.explorer.rootPaint");
       try {
         const activeScope = scopeRef.current;
         if (!activeScope || keyForScope(activeScope) !== scopeKey) return;
@@ -268,6 +278,10 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   }, [client, scopeKey, state.expanded, state.root]);
 
   const toggleDirectory = useCallback((path: string) => {
+    if (!stateRef.current.expanded.has(path)) {
+      openPerfSpan("explorer.expandToPaint");
+      openPerfSpan("workflow.explorer.directoryExpandPaint");
+    }
     setState((current) => {
       const expanded = new Set(current.expanded);
       if (expanded.has(path)) expanded.delete(path);

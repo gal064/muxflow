@@ -223,3 +223,62 @@ async fn watch_bootstrap_is_cancellable_and_holds_events_until_response_activati
     );
     assert!(service.unwatch("cancelled-bootstrap").is_err());
 }
+
+#[tokio::test]
+#[ignore = "Phase 14 opt-in 32-consumer measurement fixture"]
+async fn phase14_thirty_two_consumers_report_native_watchers_and_status_processes() {
+    let fixture = Fixture::new("phase14-32-consumers");
+    fixture.write("file", b"base\n");
+    fixture.git(&["add", "file"]);
+    fixture.git(&["commit", "-qm", "base"]);
+    let service = Arc::new(GitService::new());
+    let before = phase14_git_snapshot();
+    let closed = Arc::new(AtomicBool::new(false));
+    let mut receivers = Vec::new();
+    for consumer in 0..32 {
+        let mut request = fixture.request();
+        request.watch_id = format!("phase14-watch-{consumer}");
+        let (sender, receiver) = mpsc::channel(2);
+        service.watch(request, sender, Arc::clone(&closed)).unwrap();
+        receivers.push(receiver);
+    }
+    let active = phase14_git_snapshot();
+    assert_eq!(
+        active.native_watcher_creations - before.native_watcher_creations,
+        32
+    );
+    assert_eq!(active.native_watchers - before.native_watchers, 32);
+    assert_eq!(active.subscribers - before.subscribers, 32);
+    assert!(active.status_processes - before.status_processes >= 32);
+    println!(
+        "PHASE14_METRIC {}",
+        serde_json::json!({
+            "lane": "git32Consumers",
+            "consumers": 32,
+            "nativeWatcherCreations": active.native_watcher_creations - before.native_watcher_creations,
+            "nativeWatchers": active.native_watchers - before.native_watchers,
+            "subscriberHighWater": active.subscribers_high_water,
+            "gitProcesses": active.git_processes - before.git_processes,
+            "statusProcesses": active.status_processes - before.status_processes,
+            "diffProcesses": active.diff_processes - before.diff_processes,
+            "mutationProcesses": active.mutation_processes - before.mutation_processes,
+            "activeProcessHighWater": active.active_processes_high_water,
+        })
+    );
+    for consumer in 0..32 {
+        service
+            .unwatch(&format!("phase14-watch-{consumer}"))
+            .unwrap();
+    }
+    closed.store(true, Ordering::Release);
+    drop(receivers);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while phase14_git_snapshot().native_watchers > before.native_watchers
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let released = phase14_git_snapshot();
+    assert_eq!(released.subscribers, before.subscribers);
+    assert_eq!(released.native_watchers, before.native_watchers);
+}

@@ -9,6 +9,7 @@ import type { DownloadIntent } from "./downloadFlow";
 import { DownloadTransfers } from "./DownloadTransfers";
 import { fileIcon } from "./fileIcons";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
+import { closePerfSpan, recordPerfHighWater } from "../../perf/probe";
 
 interface Props {
   root?: ActiveRoot;
@@ -73,6 +74,13 @@ export function ExplorerTree(props: Props) {
   const rootName = props.root?.path.split("/").filter(Boolean).at(-1) ?? props.root?.path ?? "No active root";
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
+  useEffect(() => {
+    recordPerfHighWater("explorer.domRows", rows.length);
+    closePerfSpan("explorer.expandToPaint");
+    closePerfSpan("explorer.externalChangeToPaint");
+    closePerfSpan("workflow.explorer.rootPaint");
+    closePerfSpan("workflow.explorer.directoryExpandPaint");
+  }, [rows]);
   useEffect(() => setFocusIndex((current) => Math.min(current, Math.max(0, rows.length - 1))), [rows.length]);
   // A new root is a new repository, and the toggle is not offered when that
   // repository has nothing ignored — so a `true` carried across would leave

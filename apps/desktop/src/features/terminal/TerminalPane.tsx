@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { closePanePaintSpans } from "../../perf/probe";
+import { closePanePaintSpans, recordPerfMilestone } from "../../perf/probe";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import type { Pane } from "../../app/types";
 import type { TerminalEventHub } from "./TerminalEventHub";
@@ -242,6 +242,7 @@ export function TerminalPane({
     if (currentCached) {
       const cachedEpoch = currentCached.terminalEpoch;
       const restored = renderer.restore(currentCached.serialized, () => {
+        recordPerfMilestone("startup.terminalPaint");
         closePanePaintSpans();
         commitRendered(currentCached.outputGeneration, cachedEpoch, true);
       }, currentCached.outputGeneration);
@@ -290,6 +291,7 @@ export function TerminalPane({
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
         renderer.seed(effect.data, () => {
+          recordPerfMilestone("startup.terminalPaint");
           closePanePaintSpans();
           commitRendered(generation, eventEpoch, true);
         }, generation);
@@ -315,6 +317,7 @@ export function TerminalPane({
         if (effect.requestSeed) requestFreshSeed(effect.reason);
       } else if (effect.kind === "restore") {
         const markRecoveryRendered = () => {
+          recordPerfMilestone("startup.terminalPaint");
           closePanePaintSpans();
           commitRendered(effect.tailThroughGeneration, eventEpoch, true);
         };

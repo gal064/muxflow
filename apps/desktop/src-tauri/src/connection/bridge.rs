@@ -720,11 +720,7 @@ fn send_protocol_event(
     sequence: u64,
     event: TerminalEvent,
 ) -> Result<(), String> {
-    channel
-        .send(InvokeResponseBody::Raw(encode_event_with_sequence(
-            event, sequence,
-        )))
-        .map_err(|error| format!("desktop event channel closed: {error}"))
+    crate::perf_log::send_bridge_frame(channel, encode_event_with_sequence(event, sequence))
 }
 
 pub(super) fn scoped_terminal_recovery(scope: &str) -> Option<String> {
