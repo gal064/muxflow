@@ -793,40 +793,39 @@ impl StreamState {
                                     let seed = replay.seed;
                                     let replay_outputs = replay.replay;
                                     let diagnostics = seed_build.diagnostics;
-                                    let _ = with_active_resources(
-                                        resources,
-                                        stopped,
-                                        |resources| {
+                                    let visible =
+                                        with_active_resources(resources, stopped, |resources| {
                                             resources.snapshot(
                                                 &pane_id,
                                                 seed.clone(),
                                                 seed_generation,
                                             );
-                                            if !resources.is_hidden(&pane_id) {
-                                                if !diagnostics.is_empty() {
-                                                    emit_event(
-                                                        sender,
-                                                        overflowed,
-                                                        v1::HostEvent {
-                                                            kind: v1::EventKind::TerminalSeedDiagnostic
-                                                                .into(),
-                                                            scope: pane_id.clone(),
-                                                            detail: diagnostics.join("; "),
-                                                            ..Default::default()
-                                                        },
-                                                    );
-                                                }
-                                                emit_terminal(
-                                                    sender,
-                                                    overflowed,
-                                                    v1::EventKind::TerminalSeed,
-                                                    pane_id.clone(),
-                                                    seed,
-                                                    seed_generation,
-                                                );
-                                            }
-                                        },
-                                    );
+                                            !resources.is_hidden(&pane_id)
+                                        })
+                                        .unwrap_or(false);
+                                    if visible {
+                                        if !diagnostics.is_empty() {
+                                            emit_event(
+                                                sender,
+                                                overflowed,
+                                                v1::HostEvent {
+                                                    kind: v1::EventKind::TerminalSeedDiagnostic
+                                                        .into(),
+                                                    scope: pane_id.clone(),
+                                                    detail: diagnostics.join("; "),
+                                                    ..Default::default()
+                                                },
+                                            );
+                                        }
+                                        emit_terminal(
+                                            sender,
+                                            overflowed,
+                                            v1::EventKind::TerminalSeed,
+                                            pane_id.clone(),
+                                            seed,
+                                            seed_generation,
+                                        );
+                                    }
                                     for output in replay_outputs {
                                         // Buffered sequence numbers establish
                                         // capture inclusion only. Rebase
@@ -835,27 +834,28 @@ impl StreamState {
                                         // cannot discard required output.
                                         let replay_generation =
                                             terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
-                                        let _ = with_active_resources(
+                                        let visible = with_active_resources(
                                             resources,
                                             stopped,
                                             |resources| {
-                                                let disposition = resources.record_output(
+                                                resources.record_output(
                                                     &pane_id,
                                                     &output.bytes,
                                                     replay_generation,
-                                                );
-                                                if disposition == OutputDisposition::Visible {
-                                                    emit_terminal(
-                                                        sender,
-                                                        overflowed,
-                                                        v1::EventKind::TerminalOutput,
-                                                        pane_id.clone(),
-                                                        output.bytes,
-                                                        replay_generation,
-                                                    );
-                                                }
+                                                ) == OutputDisposition::Visible
                                             },
-                                        );
+                                        )
+                                        .unwrap_or(false);
+                                        if visible {
+                                            emit_terminal(
+                                                sender,
+                                                overflowed,
+                                                v1::EventKind::TerminalOutput,
+                                                pane_id.clone(),
+                                                output.bytes,
+                                                replay_generation,
+                                            );
+                                        }
                                     }
                                 }
                             } else {
