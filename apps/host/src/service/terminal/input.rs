@@ -2,6 +2,7 @@ use std::{
     io::Write,
     process::Stdio,
     sync::{Arc, Mutex, OnceLock, mpsc},
+    time::Duration,
 };
 
 use tmux_control::{HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
@@ -34,11 +35,15 @@ pub(super) enum InputDispatch {
 pub(super) fn run_input_dispatch<W: Write>(
     receiver: mpsc::Receiver<InputDispatch>,
     control_stdin: Arc<Mutex<W>>,
+    input_completion: mpsc::Receiver<Result<(), String>>,
     report_failure: impl Fn(&str, &str),
 ) {
     run_input_dispatch_with(receiver, move |pane_id, data| {
         if data.len() <= INBAND_INPUT_MAX_BYTES {
-            send_input_inband(&control_stdin, pane_id, data)
+            send_input_inband(&control_stdin, pane_id, data)?;
+            input_completion
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| format!("timed out waiting for tmux input completion: {error}"))?
         } else {
             // Ordering against the in-band path is preserved because this
             // dispatch thread is the only writer of input: the previous

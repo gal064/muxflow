@@ -130,6 +130,28 @@ describe("TerminalWriteScheduler", () => {
     expect(rendered).toEqual([3]);
   });
 
+  it("orders an empty record behind bytes already in xterm and includes it in drain", async () => {
+    const completions: Array<() => void> = [];
+    const rendered: number[] = [];
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      () => 1,
+      () => undefined,
+    );
+    scheduler.enqueue(Uint8Array.of(1), () => rendered.push(1));
+    scheduler.enqueue(new Uint8Array(), () => rendered.push(2));
+    let drained = false;
+    const drain = scheduler.sealAndDrain().then(() => { drained = true; });
+    expect(rendered).toEqual([]);
+    expect(drained).toBe(false);
+
+    completions.shift()!();
+    await drain;
+    expect(rendered).toEqual([1, 2]);
+    expect(drained).toBe(true);
+    expect(completions).toEqual([]);
+  });
+
   it("seals new writes and drains scheduled plus in-flight callbacks before resolving", async () => {
     const frames: FrameRequestCallback[] = [];
     const completions: Array<() => void> = [];

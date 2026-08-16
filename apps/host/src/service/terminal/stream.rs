@@ -71,6 +71,7 @@ pub(super) struct ControlStreamReader {
     pub(super) stopped: Arc<AtomicBool>,
     pub(super) controls: std_mpsc::Receiver<StreamControl>,
     pub(super) flow: Arc<super::FlowControl>,
+    pub(super) input_completion: std_mpsc::Sender<Result<(), String>>,
 }
 
 pub(super) enum StreamControl {
@@ -94,6 +95,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         stopped,
         controls,
         flow,
+        input_completion,
     } = context;
     let mut reader = BufReader::new(stdout);
     let mut parser = ControlParser::default();
@@ -118,6 +120,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                                 resources: &resources,
                                 terminal_generation: &terminal_generation,
                                 stopped: &stopped,
+                                input_completion: &input_completion,
                             },
                         ),
                         Err(error) => {
@@ -227,6 +230,7 @@ struct StreamRuntime<'a> {
     resources: &'a Arc<Mutex<PaneResourceStore>>,
     terminal_generation: &'a Arc<AtomicU64>,
     stopped: &'a AtomicBool,
+    input_completion: &'a std_mpsc::Sender<Result<(), String>>,
 }
 
 impl StreamState {
@@ -263,6 +267,7 @@ impl StreamState {
             resources,
             terminal_generation,
             stopped,
+            input_completion,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             return;
@@ -360,6 +365,7 @@ impl StreamState {
                     resources,
                     terminal_generation,
                     stopped,
+                    input_completion,
                 },
             ),
             ControlRecord::Error { tag, arguments } => {
@@ -389,13 +395,14 @@ impl StreamState {
                 // quoting four rows of it into an event that reaches the
                 // desktop and the logs would leak the pane, not explain the
                 // failure.
-                let (detail, rejected_resume) = match &self.command_block {
+                let (detail, rejected_resume, rejected_input) = match &self.command_block {
                     CommandBlock::Input { pane_id, lines, .. } => (
                         format!(
                             "terminal input for {pane_id} was rejected by tmux: {}",
                             error_reason(&arguments, lines)
                         ),
                         None,
+                        true,
                     ),
                     CommandBlock::Resume { pane_id, lines, .. } => (
                         format!(
@@ -403,9 +410,13 @@ impl StreamState {
                             error_reason(&arguments, lines)
                         ),
                         Some(pane_id.clone()),
+                        false,
                     ),
-                    _ => (arguments, None),
+                    _ => (arguments, None, false),
                 };
+                if rejected_input {
+                    let _ = input_completion.send(Err(detail.clone()));
+                }
                 // An error abandons whatever multi-block sequence was running,
                 // so every correlation slot has to be released too — otherwise
                 // the next unrelated block is mistaken for the missing half of
@@ -558,12 +569,24 @@ impl StreamState {
             resources,
             terminal_generation,
             stopped,
+            input_completion,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
+            if matches!(self.command_block, CommandBlock::Input { .. }) {
+                let _ = input_completion.send(Err(
+                    "terminal control stream stopped before input completed".into(),
+                ));
+            }
             self.command_block = CommandBlock::None;
             return;
         }
         if !self.active_tag_matches(end_tag) {
+            if matches!(self.command_block, CommandBlock::Input { .. }) {
+                let _ = input_completion.send(Err(format!(
+                    "terminal input completion tag mismatched {}",
+                    end_tag.number
+                )));
+            }
             let scope = self.active_scope();
             emit_resnapshot(
                 sender,
@@ -590,7 +613,10 @@ impl StreamState {
             // at all otherwise. The capture written with it is what actually
             // recovers the pane, because output produced while paused is
             // dropped rather than replayed.
-            CommandBlock::Input { .. } | CommandBlock::Resume { .. } => {}
+            CommandBlock::Input { .. } => {
+                let _ = input_completion.send(Ok(()));
+            }
+            CommandBlock::Resume { .. } => {}
             CommandBlock::CapturePrimary { pane_id, lines, .. } => {
                 // tmux emits one %begin/%end block per command separated by
                 // `;`: capture-pane and its following display-message metadata

@@ -20,18 +20,13 @@ import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSu
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import { abandonPanePaintSpansForScope } from "../perf/probe";
 import type { TmuxAction } from "../features/tmux/actions";
-import { useAgentWorkflow } from "../features/agents/AgentHookWorkflow";
 import { TauriAgentClient } from "../features/agents/api";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
 import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
 import { emitTestNotification, notificationPermissionStatus } from "../features/agents/notifications";
-import { agentHostIdentity } from "../features/agents/types";
-import { useAgentHostSetup } from "../features/agents/useAgentHostSetup";
-import { useAgentNotificationActivation } from "../features/agents/useAgentNotificationActivation";
-import { useAgentRuntime } from "../features/agents/useAgentRuntime";
 import { keyForScope, keyForTransferConnection, TauriFileWorkspaceClient } from "../features/files/api";
 import { ExplorerTree } from "../features/files/ExplorerTree";
-import { reconcileDownloadStatus, type ActiveDownloadStatus, type DownloadCompletion } from "../features/files/downloadStatus";
+import { reconcileDownloadStatus, type ActiveDownloadStatus } from "../features/files/downloadStatus";
 import { DownloadActions } from "../features/files/DownloadActions";
 import { chooseDownloadDestination, type DownloadIntent } from "../features/files/downloadFlow";
 import { ignoredPathsFromStatus } from "../features/files/ignoredPaths";
@@ -44,10 +39,8 @@ import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
 import { emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
 import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
-import { noticeDismissDelay, noticeForStatus, type StatusNotice } from "../features/shell/statusNotice";
-import { helperConnectionKey, helperUpgradeReducer, initialHelperUpgradeState, type HelperInstallReport, type RemoteHelperProbe } from "../features/shell/helperUpgrade";
-import { profileIdForSshConnection } from "../features/shell/hostProfiles";
-import { sameHostConnection, sameHostScope, type HostScopeToken } from "../features/shell/hostScope";
+import { helperConnectionKey, helperUpgradeReducer, initialHelperUpgradeState } from "../features/shell/helperUpgrade";
+import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 import { useShellCommands } from "../features/shell/useShellCommands";
 import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
@@ -71,7 +64,7 @@ import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
-import type { ConnectionSpec, HostProfile, Pane, PersistedProfiles } from "./types";
+import type { HostProfile, Pane } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
 import { useAppRecoveryController } from "./useAppRecoveryController";
@@ -83,15 +76,18 @@ import { windowCellSize } from "../features/terminal/clientSize";
 import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
 import { AppDialogLayer } from "./AppDialogLayer";
 import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
+import { useAppAgentController } from "./useAppAgentController";
+import { useAppShellChrome } from "./useAppShellChrome";
+import { useAppHostSettingsActions } from "./useAppHostSettingsActions";
 
 const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then((module) => ({ default: module.AppTabSurface })));
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
 
-/** Below this the sidebar overlays the terminal instead of taking space. */
-const COMPACT_VIEWPORT_QUERY = "(max-width: 880px)";
-
 export function App() {
   const [status, setStatus] = useState("Discovering local tmux…");
+  const {
+    compactViewport, completedDownload, notice, setCompletedDownload, setNotice, windowWidth,
+  } = useAppShellChrome(status);
   const [hostSessionSelection, setHostSessionSelection] = useState<{
     clientId: string;
     sessionId: string;
@@ -113,8 +109,6 @@ export function App() {
     snapshot, snapshotRef, sshConfigPath, sshTarget, terminalEpoch, windows,
   } = connectionController;
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus);
-  const [compactViewport, setCompactViewport] = useState(() => window.matchMedia?.(COMPACT_VIEWPORT_QUERY).matches ?? false);
-  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth || 1280);
   const [helperState, dispatchHelper] = useReducer(helperUpgradeReducer, initialHelperUpgradeState);
   const [profileResetConfirmation, setProfileResetConfirmation] = useState(false);
   const [hostDeleteConfirmation, setHostDeleteConfirmation] = useState<HostProfile>();
@@ -133,19 +127,10 @@ export function App() {
   const deletableProfile = profiles.length > 1
     ? profiles.find((profile) => profile.id === selectedProfileId)
     : undefined;
-  const deleteSelectedProfile = (profile: HostProfile) => {
-    void invoke<PersistedProfiles>("delete_host_profile", { profileId: profile.id }).then((saved) => {
-      // The store's surviving list, not a locally filtered guess at it.
-      setProfiles(saved.profiles);
-      setSelectedProfileId("");
-      setStatus(`Deleted the saved host ${profile.label}.`);
-    }).catch((error) => setStatus(`Could not delete the saved host ${profile.label}: ${String(error)}`));
-  };
   const [shortcutEditorOpen, setShortcutEditorOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
-  const [completedDownload, setCompletedDownload] = useState<DownloadCompletion & { noticeId?: number }>();
   const downloadPickerOpen = useRef(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
@@ -157,7 +142,6 @@ export function App() {
   // destination — which truncated the forward branch on every back-step across
   // workspaces.
   const historyStep = useRef(false);
-  const [notice, setNotice] = useState<StatusNotice>();
   const controllers = useRef(new Map<string, TerminalPaneController>());
   const platform = useMemo(() => currentPlatform(), []);
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
@@ -170,53 +154,9 @@ export function App() {
   // down live terminals, so the setting says panes pick it up as they appear.
   useEffect(() => setTerminalScreenReaderMode(appState.shell.terminalScreenReader), [appState.shell.terminalScreenReader]);
 
-  // Anything the app says that is not routine progress becomes a visible,
-  // dismissible notice. Without this the whole status channel — every refused
-  // action, every unreachable agent, the client-size refusal that is designed
-  // to be loud — reached only the screen-reader live region.
-  const noticeSequence = useRef(0);
-  useEffect(() => {
-    const next = noticeForStatus(status, (noticeSequence.current += 1));
-    setNotice(next);
-    // The completion's Open/reveal buttons belong to the notice announcing it
-    // and to no other. The message is matched once, here, at the moment the
-    // notice is minted — after which the two are joined by the notice's id, so
-    // nothing downstream re-derives the association from user-facing prose.
-    // (`noticeForStatus` trims, hence the trim.) Anything else drops the
-    // record rather than holding a finished download's destination for the
-    // rest of the session.
-    setCompletedDownload((current) => current && next && current.message.trim() === next.message
-      ? { ...current, noticeId: next.id }
-      : undefined);
-    if (!next) return;
-    const delay = noticeDismissDelay(next);
-    if (delay === undefined) return;
-    const timer = window.setTimeout(() => setNotice((current) => current?.id === next.id ? undefined : current), delay);
-    return () => window.clearTimeout(timer);
-  }, [status]);
   // A new bridge is a new link; the last one's measured round-trip describes
   // nothing about it.
   useEffect(() => { resetHostLatency(); }, [clientId]);
-  // Width is observed, never saved. What a narrow window does to the rails is
-  // decided at render time by `effectiveRails`; writing it into the preferences
-  // meant one narrow moment overwrote the user's arrangement permanently.
-  useEffect(() => {
-    if (!window.matchMedia) return;
-    const query = window.matchMedia(COMPACT_VIEWPORT_QUERY);
-    setCompactViewport(query.matches);
-    const handleChange = (event: MediaQueryListEvent) => setCompactViewport(event.matches);
-    query.addEventListener("change", handleChange);
-    return () => query.removeEventListener("change", handleChange);
-  }, []);
-
-  // The sidebar may be dragged wider, but never past a third of the window, so
-  // the terminal keeps its share when the window shrinks under a wide sidebar.
-  useEffect(() => {
-    const onResize = () => setWindowWidth(window.innerWidth || 1280);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-
   const appRecovery = useAppRecoveryController({
     appState,
     currentHostProfileId,
@@ -291,117 +231,77 @@ export function App() {
   const surfacePaneDestination = useCallback((pane: Pane, source: string, successMessage?: string) =>
     shellNavigation.selectPane(pane, { kind: "announce", source, successMessage }), [shellNavigation]);
 
-  // `clientHostProfileId === currentHostProfileId` is not redundant: the profile
-  // id follows the connection spec immediately and the client follows it an
-  // effect later, so a render that changes hosts commits with one host's name
-  // and another's live client. There is no scope during that window rather
-  // than a scope naming two machines — which is what let a write land on the
-  // host the user had not answered about (M13-E004).
-  const agentScope = useMemo(() => clientId && clientHostProfileId === currentHostProfileId
-    && hostState.serverIdentity && hostState.canMutate ? {
-    clientId,
-    hostProfileId: currentHostProfileId,
-    serverIdentity: hostState.serverIdentity,
-    topologyGeneration: hostState.generation,
-    connectionEpoch: terminalEpoch,
-  } : undefined, [clientHostProfileId, clientId, currentHostProfileId, hostState.canMutate, hostState.generation, hostState.serverIdentity, terminalEpoch]);
-  const notificationActivation = useAgentNotificationActivation({
-    agentClient,
-    agentScope,
-    connected: hostState.canMutate && Boolean(hostState.serverIdentity),
-    connectionEpoch: terminalEpoch,
-    currentHostProfileId,
-    focusedPaneId: activePane?.id,
-    profiles,
-    snapshot,
-    requestReconnect: () => setConnectionEpoch((value) => value + 1),
-    setStatus,
-    surfacePaneDestination,
-    switchHostProfile: (profile) => {
-      const targetConnection: ConnectionSpec = profile.connection.mode === "ssh"
-        ? { ...profile.connection, profileId: profile.connection.profileId || profile.id }
-        : profile.connection;
-      dispatchHost({ type: "reset" });
+  const {
+    confirmHelperInstall, connect, deleteSavedProfile: deleteSelectedProfile, probeHelper, selectProfile,
+    switchHostProfile: switchAgentHostProfile,
+  } = useAppHostSettingsActions({
+    clearActiveSelection: () => {
       setActiveSessionId(undefined);
       setActiveWindowId(undefined);
-      setConnection(targetConnection);
-      setConnectionMode(targetConnection.mode);
-      if (targetConnection.mode === "ssh") {
-        setSshTarget(targetConnection.target);
-        setSshConfigPath(targetConnection.configPath ?? "");
-      }
     },
+    connection,
+    connectionMode,
+    currentScope: currentHostScope,
+    dispatchHelper,
+    helperState,
+    profiles,
+    resetHost: () => dispatchHost({ type: "reset" }),
+    scopeIsCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
+    setConnection,
+    setConnectionDetail,
+    setConnectionEpoch,
+    setConnectionMode,
+    setProfiles,
+    setSelectedProfileId,
+    setSshConfigPath,
+    setSshTarget,
+    setStatus,
+    sshConfigPath,
+    sshTarget,
   });
-  const agentFocus = useMemo(() => ({
-    hostProfileId: currentHostProfileId,
-    serverIdentity: hostState.serverIdentity,
-    sessionId: activeSessionId,
-    windowId: activeWindowId,
-    paneId: activePane?.id,
-    appFocused,
-    terminalVisible: !selectedAppTab,
-    automaticSeen: notificationActivation.automaticSeen,
-  }), [activePane?.id, activeSessionId, activeWindowId, appFocused, currentHostProfileId, hostState.serverIdentity, notificationActivation.automaticSeen, selectedAppTab]);
-  const agentRuntime = useAgentRuntime({ client: agentClient, scope: agentScope, focus: agentFocus, soundPreferences: agentSounds, onStatus: setStatus });
 
-  // The host every consent-bearing hook request is bound to: the profile the
-  // decision is remembered under, and the connection it is checked against.
-  //
-  // `appStateRecovery` is part of it. A state file the app could not read is
-  // write-frozen until the user resets it, so an answer given in that mode
-  // reaches memory and nothing else — and a host whose answer cannot be kept is
-  // not a host anything here may write. Both doors out of the setup prompt run
-  // through this value, including the "Review exact changes…" one.
-  const agentHost = useMemo(() => {
-    const identity = agentHostIdentity(agentScope);
-    return agentScope && identity && appStateRecovery === undefined
-      ? { profileId: agentScope.hostProfileId, identity }
-      : undefined;
-  }, [agentScope, appStateRecovery]);
   const recordHostSetupDecision = useCallback((hostProfileId: string, decision: HostSetupDecision) => {
     setAppState((current) => ({
       ...current,
       hostSetup: { ...current.hostSetup, [hostProfileId]: decision },
     }));
   }, [setAppState]);
-  const agentWorkflow = useAgentWorkflow({
-    launchContext: activeSession && activeWindow && activePane && workspaceFiles.root
-      ? { sessionId: activeSession.id, windowId: activeWindow.id, paneId: activePane.id, root: workspaceFiles.root }
-      : undefined,
-    host: agentHost,
-    onHooksChanged: (action, hostProfileId, hostIdentity) => {
-      agentRuntime.refreshSnapshot();
-      // Installing through the exact-diff review *is* consent for this host,
-      // and removing is withdrawing it. Recording only one of the two left a
-      // user who took the review door with no decision at all: the one-time
-      // prompt could re-raise, and the tmux naming was never asserted.
-      //
-      // Against the host the review named, which is the host that was written.
-      recordHostSetupDecision(hostProfileId, action === "install" ? "accepted" : "declined");
-      if (action === "uninstall") {
-        void agentRuntime.removeHostNaming(hostIdentity).catch((cause) => setStatus(String(cause)));
-      }
-    },
-    onModalChange: setAgentModalOpen,
-    onStatus: setStatus,
-    runtime: agentRuntime,
-  });
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
-  const agentHostSetup = useAgentHostSetup({
-    adapters: agentRuntime.adapters,
-    applyHooks: agentRuntime.applyHooks,
-    applyHostNaming: agentRuntime.applyHostNaming,
-    connected: Boolean(agentScope),
+  const {
+    hostSetup: agentHostSetup,
+    notificationActivation,
+    runtime: agentRuntime,
+    scope: agentScope,
+    workflow: agentWorkflow,
+  } = useAppAgentController({
+    activePane,
+    activeRoot: workspaceFiles.root,
+    activeSession,
+    activeSessionId,
+    activeWindow,
+    activeWindowId,
+    agentClient,
+    appFocused,
+    clientHostProfileId,
+    clientId,
+    currentHostProfileId,
     decision: appState.hostSetup[currentHostProfileId],
     decisionsArePersistable: appStateRecovery === undefined,
-    hostIdentity: agentHost?.identity,
+    hostCanMutate: hostState.canMutate,
     hostLabel,
-    hostProfileId: currentHostProfileId,
-    onStatus: setStatus,
-    openReview: agentWorkflow.openHookReview,
+    profiles,
     recordDecision: recordHostSetupDecision,
-    refreshWiring: agentRuntime.refreshSnapshot,
-    reviewHooks: agentRuntime.reviewHooks,
+    requestReconnect: () => setConnectionEpoch((value) => value + 1),
+    selectedAppTab: Boolean(selectedAppTab),
+    serverIdentity: hostState.serverIdentity,
+    setAgentModalOpen,
+    setStatus,
+    snapshot,
+    soundPreferences: agentSounds,
+    surfacePaneDestination,
+    switchHostProfile: switchAgentHostProfile,
+    terminalEpoch,
+    topologyGeneration: hostState.generation,
   });
 
   const home = useMemo(() => inferHome(snapshot.panes.map((pane) => pane.currentPath)), [snapshot.panes]);
@@ -752,86 +652,6 @@ export function App() {
       id: tab.id,
       scope,
     });
-  };
-
-  const selectProfile = (profile: HostProfile | undefined) => {
-    setSelectedProfileId(profile?.id ?? "");
-    if (!profile) return;
-    setConnectionMode(profile.connection.mode);
-    if (profile.connection.mode === "ssh") {
-      setSshTarget(profile.connection.target);
-      setSshConfigPath(profile.connection.configPath ?? "");
-    }
-  };
-
-  const probeHelper = async () => {
-    if (connection.mode !== "ssh") return;
-    const scope = currentHostScope;
-    const connectionKey = helperConnectionKey(connection);
-    dispatchHelper({ type: "probe", connectionKey });
-    try {
-      const probe = await invoke<RemoteHelperProbe>("probe_remote_helper", { connection });
-      if (!sameHostScope(scope, hostScopeRef.current)) return;
-      dispatchHelper({ type: "probeSucceeded", connectionKey, probe });
-    } catch (error) {
-      if (!sameHostScope(scope, hostScopeRef.current)) return;
-      dispatchHelper({ type: "probeFailed", connectionKey, message: String(error) });
-    }
-  };
-
-  const confirmHelperInstall = async () => {
-    if (connection.mode !== "ssh" || helperState.phase !== "confirming"
-      || helperState.connectionKey !== helperConnectionKey(connection)) return;
-    const connectionKey = helperState.connectionKey;
-    const scope = currentHostScope;
-    dispatchHelper({ type: "upgrade" });
-    try {
-      const report = await invoke<HelperInstallReport>("install_remote_helper", {
-        connection,
-        allowUpgrade: helperState.probe.installed,
-      });
-      if (!sameHostScope(scope, hostScopeRef.current)) return;
-      if (!report.ok) {
-        dispatchHelper({ type: "upgradeFailed", connectionKey, message: report.message, rollback: report.rollback });
-        return;
-      }
-      dispatchHelper({ type: "upgradeSucceeded", connectionKey, message: report.message });
-      setConnectionDetail(`Remote helper ${helperState.probe.installed ? "upgraded" : "installed"}; reconnecting for a fresh authoritative snapshot.`);
-      setConnectionEpoch((value) => value + 1);
-    } catch (error) {
-      if (!sameHostScope(scope, hostScopeRef.current)) return;
-      dispatchHelper({ type: "upgradeFailed", connectionKey, message: String(error), rollback: "notNeeded" });
-    }
-  };
-
-  const connect = () => {
-    dispatchHost({ type: "reset" });
-    setActiveSessionId(undefined);
-    setActiveWindowId(undefined);
-    if (connectionMode === "local") {
-      const profile: HostProfile = { id: "local", label: "Local", connection: { mode: "local" } };
-      setConnection(profile.connection);
-      setSelectedProfileId(profile.id);
-      // An explicit Connect is also the user's retry control. The selected
-      // profile may already have updated `connection`, so changing that state
-      // alone is not guaranteed to reconstruct a stalled bridge.
-      setConnectionEpoch((value) => value + 1);
-      void invoke("save_host_profile", { profile });
-      setStatus("Discovering local tmux…");
-      return;
-    }
-    const target = sshTarget.trim();
-    if (!target) return setStatus("Enter an SSH host or config alias.");
-    const configPath = sshConfigPath.trim();
-    const profileId = profileIdForSshConnection(profiles, target, configPath);
-    const nextConnection: ConnectionSpec = { mode: "ssh", profileId, target, ...(configPath ? { configPath } : {}) };
-    const profile: HostProfile = { id: profileId, label: target, connection: nextConnection };
-    setConnection(nextConnection);
-    setConnectionEpoch((value) => value + 1);
-    setSelectedProfileId(profile.id);
-    setProfiles((current) => [...current.filter((item) => item.id !== profile.id), profile]);
-    void invoke("save_host_profile", { profile }).catch((error) => setStatus(String(error)));
-    setStatus(`Connecting to ${target}…`);
   };
 
   const updateShell = (update: Partial<ShellState>) =>

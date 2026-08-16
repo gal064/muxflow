@@ -49,7 +49,7 @@ export class TerminalWriteScheduler {
 
   /** Copies borrowed caller data once before it can outlive the call. */
   enqueue(bytes: Uint8Array, onRendered?: () => void): boolean {
-    if (bytes.byteLength === 0) return this.#acceptEmpty(onRendered);
+    if (bytes.byteLength === 0) return this.#commitEmpty(onRendered);
     if (!this.#admit(bytes.byteLength)) return false;
     const owned = copyTerminalBytes(bytes);
     this.measurements?.add("terminal.scheduler.copiedBytes", bytes.byteLength);
@@ -59,7 +59,7 @@ export class TerminalWriteScheduler {
 
   /** Transfers an already-exclusive buffer without another ownership copy. */
   enqueueOwned(bytes: OwnedTerminalBytes, onRendered?: () => void): boolean {
-    if (bytes.byteLength === 0) return this.#acceptEmpty(onRendered);
+    if (bytes.byteLength === 0) return this.#commitEmpty(onRendered);
     if (!this.#admit(bytes.buffer.byteLength)) return false;
     this.#commit(bytes, onRendered);
     return true;
@@ -99,7 +99,7 @@ export class TerminalWriteScheduler {
   /** Stop admitting writes and resolve only after queued and in-flight bytes reach xterm. */
   sealAndDrain(): Promise<void> {
     this.#accepting = false;
-    if (this.#pendingBytes === 0) return Promise.resolve();
+    if (this.#isDrained()) return Promise.resolve();
     return new Promise((resolve) => this.#drainWaiters.add(resolve));
   }
 
@@ -116,9 +116,12 @@ export class TerminalWriteScheduler {
     return this.#queuedBackingBytes;
   }
 
-  #acceptEmpty(onRendered?: () => void): boolean {
+  #commitEmpty(onRendered?: () => void): boolean {
     if (this.#disposed || !this.#accepting || this.#overflowed) return false;
-    if (onRendered) this.#notifyRendered([onRendered]);
+    // Empty output is still an ordered terminal record. Queue it as a
+    // zero-retention barrier so its generation callback cannot overtake bytes
+    // already inside xterm's asynchronous parser.
+    this.#commit(new Uint8Array(), onRendered);
     return true;
   }
 
@@ -166,6 +169,10 @@ export class TerminalWriteScheduler {
 
   #schedule(): void {
     if (this.#disposed || this.#inFlightBytes || this.#frame !== undefined || this.#queueLength() === 0) return;
+    if (this.#flushEmptyPrefix()) {
+      this.#schedule();
+      return;
+    }
     if (this.#queueLength() === 1 && !this.#immediateWriteUsed) {
       this.#immediateWriteUsed = true;
       this.#armImmediateWriteReset();
@@ -174,6 +181,27 @@ export class TerminalWriteScheduler {
     }
     this.#frame = this.requestFrame(() => this.#flush());
     this.measurements?.add("terminal.scheduler.framesRequested");
+  }
+
+  #flushEmptyPrefix(): boolean {
+    const rendered: Array<() => void> = [];
+    let consumed = 0;
+    while (this.#queueLength() > 0) {
+      const first = this.#queue[this.#queueHead];
+      if (!first) throw new Error("terminal scheduler queue invariant violated");
+      if (first.bytes.byteLength !== 0) break;
+      this.#queue[this.#queueHead] = undefined;
+      this.#queueHead += 1;
+      consumed += 1;
+      this.measurements?.add("terminal.scheduler.dequeueOperations");
+      if (first.onRendered) rendered.push(first.onRendered);
+    }
+    if (consumed === 0) return false;
+    this.#compactQueue();
+    this.#notifyRendered(rendered);
+    this.measurements?.add("terminal.scheduler.callbacksInvoked", rendered.length);
+    this.#resolveDrainWaiters();
+    return true;
   }
 
   #armImmediateWriteReset(): void {
@@ -222,6 +250,13 @@ export class TerminalWriteScheduler {
       }
     }
     this.#compactQueue();
+    if (length === 0) {
+      this.#notifyRendered(rendered);
+      this.measurements?.add("terminal.scheduler.callbacksInvoked", rendered.length);
+      this.#resolveDrainWaiters();
+      this.#schedule();
+      return;
+    }
     const chunk = joinChunks(pieces, length);
     if (pieces.length > 1) this.measurements?.add("terminal.scheduler.copiedBytes", length);
     this.#inFlightBytes = length;
@@ -278,9 +313,13 @@ export class TerminalWriteScheduler {
   }
 
   #resolveDrainWaiters(): void {
-    if (this.#pendingBytes !== 0) return;
+    if (!this.#isDrained()) return;
     for (const resolve of this.#drainWaiters) resolve();
     this.#drainWaiters.clear();
+  }
+
+  #isDrained(): boolean {
+    return this.#pendingBytes === 0 && this.#inFlightBytes === 0 && this.#queueLength() === 0;
   }
 
   #notifyPendingBytes(): void {

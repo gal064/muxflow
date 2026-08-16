@@ -13,6 +13,8 @@ struct Harness {
     resources: Arc<Mutex<PaneResourceStore>>,
     generation: Arc<AtomicU64>,
     stopped: AtomicBool,
+    input_completion_tx: std_mpsc::Sender<Result<(), String>>,
+    input_completions: std_mpsc::Receiver<Result<(), String>>,
 }
 
 impl Harness {
@@ -20,6 +22,7 @@ impl Harness {
         let flow = Arc::new(FlowControl::default());
         let (writer, writes) = std_mpsc::channel();
         let (sender, events) = mpsc::channel(64);
+        let (input_completion_tx, input_completions) = std_mpsc::channel();
         let state = StreamState::new(pane_ids, Arc::clone(&flow));
         (
             state,
@@ -35,6 +38,8 @@ impl Harness {
                 ))),
                 generation: Arc::new(AtomicU64::new(0)),
                 stopped: AtomicBool::new(false),
+                input_completion_tx,
+                input_completions,
             },
         )
     }
@@ -47,6 +52,7 @@ impl Harness {
             resources: &self.resources,
             terminal_generation: &self.generation,
             stopped: &self.stopped,
+            input_completion: &self.input_completion_tx,
         }
     }
 
@@ -314,6 +320,55 @@ fn an_in_band_input_block_is_correlated_to_the_pane_that_was_typed_into() {
 }
 
 #[test]
+fn an_in_band_input_completion_is_reported_only_after_tmux_ends_its_block() {
+    let (mut state, harness) = Harness::new(&["%1".into()]);
+    state.expected_input = Some("%1".into());
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    assert!(harness.input_completions.try_recv().is_err());
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    assert_eq!(harness.input_completions.try_recv().unwrap(), Ok(()));
+}
+
+#[test]
+fn a_rejected_in_band_input_reports_its_tmux_error_to_the_barrier_lane() {
+    let (mut state, harness) = Harness::new(&["%1".into()]);
+    state.expected_input = Some("%1".into());
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"can't find pane: %1".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::Error {
+            tag: TAG,
+            arguments: "1 7 1".into(),
+        },
+        harness.runtime(),
+    );
+    let error = harness.input_completions.try_recv().unwrap().unwrap_err();
+    assert!(error.contains("terminal input for %1 was rejected by tmux"));
+    assert!(error.contains("can't find pane"));
+}
+
+#[test]
 fn capture_marker_carries_pane_scope() {
     let mut block = CommandBlock::Unknown {
         tag: CommandTag {
@@ -392,6 +447,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
     )));
     let generation = Arc::new(AtomicU64::new(0));
     let (writer, _writes) = std_mpsc::channel();
+    let (input_completion, _input_completions) = std_mpsc::channel();
     let stopped = AtomicBool::new(false);
     state.finish_block(
         tag,
@@ -402,6 +458,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
             resources: &resources,
             terminal_generation: &generation,
             stopped: &stopped,
+            input_completion: &input_completion,
         },
     );
     assert!(matches!(state.command_block, CommandBlock::None));

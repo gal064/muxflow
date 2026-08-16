@@ -196,6 +196,12 @@ export class TerminalEventHub {
       this.measurements?.add("terminal.hub.fanoutDeliveries");
       try {
         listener(event);
+      } catch (error) {
+        // Admission advances the pane generation before delivery. If the sole
+        // renderer rejects that transfer, the hub can no longer prove which
+        // prefix reached xterm, so incremental traffic must wait for a seed.
+        this.#requireSeed(event.paneId, "terminal pane consumer rejected an admitted event");
+        throw error;
       } finally {
         // The payload allocation has moved to its one renderer. Retaining an
         // exact detached identity for every mounted pane would scale outside
@@ -234,9 +240,26 @@ export class TerminalEventHub {
     if (backlog) {
       this.#deleteBacklog(pane);
       this.#setPaneResourceIdentity(pane, undefined);
-      for (const entry of backlog.entries) {
-        this.measurements?.add("terminal.hub.fanoutDeliveries");
-        listener(entry.event);
+      try {
+        for (const entry of backlog.entries) {
+          this.measurements?.add("terminal.hub.fanoutDeliveries");
+          listener(entry.event);
+        }
+      } catch (error) {
+        // The caller never received an unsubscribe handle, and some prefix of
+        // the backlog may already have moved to the renderer. Roll ownership
+        // back before surfacing the exception and require one authoritative
+        // replacement instead of replaying an ambiguous suffix.
+        this.#paneListeners.delete(paneId);
+        this.#activePaneStates.delete(paneId);
+        const alreadyAwaiting = pane.awaitingSeed;
+        pane.awaitingSeed = true;
+        pane.conflictReseedRequested = false;
+        this.#retainDormantPane(paneId, pane);
+        if (!alreadyAwaiting) {
+          this.onSeedRequired?.(paneId, "terminal pane consumer rejected backlog replay");
+        }
+        throw error;
       }
       this.measurements?.add("terminal.hub.backlogDequeues", backlog.entries.length);
     }
