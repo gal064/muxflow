@@ -317,6 +317,7 @@ struct EngineJob {
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
     admitted: bool,
+    cancel_latched_during_admission: bool,
     started: Box<dyn FnOnce() + Send>,
     work: Box<dyn FnOnce() -> TransferResult + Send>,
     finished: Box<dyn FnOnce(TransferResult, CancelReason) + Send>,
@@ -352,6 +353,29 @@ pub(super) fn acceptance_engine_counts() -> (usize, usize) {
     let engine = transfer_engine();
     let state = engine.state.lock().unwrap();
     (state.active, state.queue.len())
+}
+
+#[cfg(test)]
+pub(super) fn wait_for_admission_cancellation_latch(id: &str) {
+    let engine = transfer_engine();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut state = engine.state.lock().unwrap();
+    loop {
+        if state
+            .queue
+            .iter()
+            .any(|job| job.id == id && job.cancel_latched_during_admission)
+        {
+            return;
+        }
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .expect("cancellation latched before test deadline");
+        (state, _) = engine
+            .admission_changed
+            .wait_timeout(state, remaining)
+            .unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -428,6 +452,7 @@ pub(super) fn enqueue_transfer_with_queued(
             binding: binding.clone(),
             cancellation: Arc::clone(&cancellation),
             admitted: false,
+            cancel_latched_during_admission: false,
             started: Box::new(started),
             work: Box::new(work),
             finished: Box::new(finished),
@@ -498,21 +523,28 @@ pub(super) fn cancel_transfer(id: &str) -> Result<CancelResponse, String> {
     // still fail and roll the whole job back. Latch cancellation immediately,
     // but do not return an observable acknowledgement until admission has
     // linearized to committed or rolled back.
-    {
-        let mut state = engine.state.lock().unwrap();
-        while let Some(pending) = state.queue.iter().find(|job| job.id == id && !job.admitted) {
-            pending.cancellation.cancel();
-            state = engine.admission_changed.wait(state).unwrap();
-        }
-    }
     let queued = {
         let mut state = engine.state.lock().unwrap();
-        let queued = take_queued_job(&mut state.queue, |job| job.id == id && job.admitted);
-        if queued.is_some() {
+        loop {
+            let Some(index) = state.queue.iter().position(|job| job.id == id) else {
+                break None;
+            };
+            if !state.queue[index].admitted {
+                let pending = &mut state.queue[index];
+                pending.cancel_latched_during_admission = true;
+                pending.cancellation.cancel();
+                engine.admission_changed.notify_all();
+                state = engine.admission_changed.wait(state).unwrap();
+                continue;
+            }
+            let queued = state
+                .queue
+                .remove(index)
+                .expect("located queued transfer remains present");
             state.cancellations.remove(id);
             crate::perf_log::record_transfer_state(state.active, state.queue.len());
+            break Some(queued);
         }
-        queued
     };
     if let Some(job) = queued {
         job.cancellation.cancel();
@@ -557,7 +589,11 @@ impl TransferEngine {
                 if state.active >= 2 {
                     return;
                 }
-                if state.queue.front().is_some_and(|job| !job.admitted) {
+                if state
+                    .queue
+                    .front()
+                    .is_some_and(|job| !job.admitted || job.cancel_latched_during_admission)
+                {
                     return;
                 }
                 let Some(job) = state.queue.pop_front() else {
@@ -624,6 +660,7 @@ impl TransferEngine {
                     binding,
                     cancellation,
                     admitted: _,
+                    cancel_latched_during_admission: _,
                     started,
                     work,
                     finished,
