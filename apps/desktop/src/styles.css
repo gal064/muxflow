@@ -245,10 +245,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    one wrapped paragraph. A clamped box would have let the second agent eat the
    third's line, which is the opposite of what listing three is for. */
 .workspace-activity {
+  --activity-dot: 8px; --activity-gap: 5px;
   display: flex; flex-direction: column; gap: 1px; min-width: 0;
   font-size: var(--type-secondary); line-height: 1.35; color: var(--chrome-dim);
 }
-.workspace-activity { --activity-dot: 8px; --activity-gap: 5px; }
 .workspace-activity-line { display: flex; align-items: center; gap: var(--activity-gap); min-width: 0; }
 .workspace-activity-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Indented to where the agent names above it start, since it stands in for

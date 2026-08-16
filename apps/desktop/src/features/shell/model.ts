@@ -290,7 +290,16 @@ export function pinAppTab(state: PersistedAppState, currentHostProfileId: string
   return { ...state, appTabs: state.appTabs.map((tab) => tab.id === target.id ? withoutPreview(tab) : tab) };
 }
 
-/** Absent, not `false` — the shape the persistence contract expects. */
+/**
+ * Absent, not `false` — the shape the persistence contract expects.
+ *
+ * Only within a session, though: `AppTabRecord.preview` is a plain
+ * `Option<bool>` with no `skip_serializing_if`, so a reload hands this field
+ * back as `null` for every pinned tab rather than dropping it. Every reader
+ * here coerces (`Boolean(tab.preview)`, truthiness, `!target?.preview`), so the
+ * three shapes behave alike — but the declared `boolean | undefined` is not the
+ * whole truth about a value that has been through the store.
+ */
 function withoutPreview(tab: AppOwnedTab): AppOwnedTab {
   const { preview: _preview, ...rest } = tab;
   return rest;

@@ -1114,8 +1114,13 @@ export function App() {
       {/* Only on the notice this exact download raised: matching the message
           means a later status replaces the buttons along with the text, so
           they can never end up offering a file the toast is not about. */}
-      {completedDownload?.noticeId === notice.id && <DownloadActions destination={completedDownload.destination} onResult={(error) => { if (error) setStatus(error); }} />}
-      <button aria-label="Dismiss" onClick={() => { setNotice(undefined); setCompletedDownload(undefined); }} type="button">Dismiss</button>
+      {/* One row, not three: `.toast` is a grid, so bare buttons each take a
+          line of their own. `.toast > div` is the existing row treatment the
+          sibling toasts below already use. */}
+      <div>
+        {completedDownload?.noticeId === notice.id && <DownloadActions destination={completedDownload.destination} onResult={(error) => { if (error) setStatus(error); }} />}
+        <button aria-label="Dismiss" onClick={() => { setNotice(undefined); setCompletedDownload(undefined); }} type="button">Dismiss</button>
+      </div>
     </div>}
     {profileRecovery && <div className="toast" role="alert"><strong>Saved host profiles were recovered</strong><span>{profileRecovery.error} The original was preserved at {profileRecovery.preservedPath}.</span><button onClick={() => setProfileResetConfirmation(true)} type="button">Confirm recovered defaults…</button></div>}
     {appStateRecovery && <div className="toast" role="alert"><strong>Saved shell state is write-frozen</strong><span>{appStateRecovery}</span><button onClick={() => setAppStateResetConfirmation(true)} type="button">Reset saved shell state…</button></div>}

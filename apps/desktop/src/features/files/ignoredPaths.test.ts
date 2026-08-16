@@ -51,6 +51,22 @@ describe("ignoredPathsFromStatus", () => {
     expect(ignoredPathsFromStatus(status({ entries: [entry("src/main.rs", false)] }))).toEqual(new Set());
   });
 
+  it("leaves the names the host decides about to the host", () => {
+    // `node_modules` is git-ignored in almost every JS repository, and the host
+    // deliberately shows it collapsed rather than hidden. Hiding it here would
+    // overturn that decision from the other side of the codebase — which is
+    // what this filter did when the two changes first met in a merge.
+    const snapshot = status({
+      entries: [
+        entry("node_modules", true),
+        entry("apps/desktop/node_modules", true),
+        entry("target", true),
+        entry(".DS_Store", true),
+      ],
+    });
+    expect(ignoredPathsFromStatus(snapshot)).toEqual(new Set(["/repo/target"]));
+  });
+
   it("never decodes the opaque path identity", () => {
     // `path` is base64 here purely to prove it is not what gets read: a
     // reconstruction from it would produce a name nothing on disk matches.

@@ -32,6 +32,10 @@ const ROUTINE = new Set([
 const ROUTINE_PREFIXES = [
   "Connecting to ",
   "Connection ",
+  // No producer today — Item 19 deleted the one `Opened …` call site, because
+  // the tab appearing is the message. Kept anyway, and tested: this is a
+  // classification of a message *class*, not a record of who emits it, and
+  // "the user can already see it" stays true of any future `Opened X`.
   "Opened ",
   "Viewing the last known ",
   "Renaming ",
