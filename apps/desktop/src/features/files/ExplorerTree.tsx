@@ -86,10 +86,13 @@ export function ExplorerTree(props: Props) {
   // rather than the logical model. Below the windowing threshold the two are
   // the same value and the tree behaves exactly as it always has.
   const renderedRows = rows.slice(window_.start, window_.end);
+  const renderedRowCount = renderedRows.length;
   useEffect(() => {
     recordPerfHighWater("explorer.logicalRows", rows.length);
-    recordPerfHighWater("explorer.renderedRows", renderedRows.length);
-  }, [renderedRows, rows.length]);
+    recordPerfHighWater("explorer.renderedRows", renderedRowCount);
+    // Counts, not the slice: the slice is a fresh array on every render, and
+    // depending on it would run this on every render for no new information.
+  }, [renderedRowCount, rows.length]);
   useEffect(() => setFocusIndex((current) => Math.min(current, Math.max(0, rows.length - 1))), [rows.length]);
   // A new root is a new repository, and the toggle is not offered when that
   // repository has nothing ignored — so a `true` carried across would leave
