@@ -107,6 +107,7 @@ pub const CAP_BULK_DOWNLOAD: u64 = 1 << 10;
 pub const CAP_GIT: u64 = 1 << 11;
 pub const CAP_AGENTS: u64 = 1 << 12;
 pub const CAP_TERMINAL_UPLOAD: u64 = 1 << 13;
+pub const CAP_TERMINAL_OUTPUT_CREDIT: u64 = 1 << 14;
 pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_ORDERED_EVENTS
     | CAP_CANCELLATION
@@ -120,7 +121,8 @@ pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_BULK_DOWNLOAD
     | CAP_GIT
     | CAP_AGENTS
-    | CAP_TERMINAL_UPLOAD;
+    | CAP_TERMINAL_UPLOAD
+    | CAP_TERMINAL_OUTPUT_CREDIT;
 
 #[derive(Debug, Error)]
 pub enum FrameError {

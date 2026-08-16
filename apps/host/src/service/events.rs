@@ -123,6 +123,74 @@ pub(super) enum SequencerControl {
     TopologyEpochBarrier(std::sync::mpsc::SyncSender<u64>),
 }
 
+const MAX_COALESCED_TERMINAL_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Combines only terminal-output records that are already adjacent in the one
+/// ordered connection FIFO.
+///
+/// A remote tmux pipe often yields a few KiB per read. Encoding every read as a
+/// separate protobuf frame lets a flood fill the record-count queue and puts
+/// later input responses hundreds of milliseconds behind bytes the writer
+/// could have sent together. This preserves byte order and the final generation
+/// while stopping at the first different event, response, pane, or size bound.
+pub(super) fn coalesce_adjacent_terminal_output(
+    mut message: SequencerControl,
+    receiver: &mut tokio::sync::mpsc::Receiver<SequencerControl>,
+) -> (SequencerControl, Option<SequencerControl>) {
+    let SequencerControl::OrderedEvent(first_event) = &mut message else {
+        return (message, None);
+    };
+    if !is_plain_terminal_output(first_event) {
+        return (message, None);
+    }
+    let Some(first_terminal) = first_event.terminal.as_mut() else {
+        return (message, None);
+    };
+    loop {
+        let next = match receiver.try_recv() {
+            Ok(next) => next,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return (message, None),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return (message, None),
+        };
+        let SequencerControl::OrderedEvent(next_event) = &next else {
+            return (message, Some(next));
+        };
+        let Some(next_terminal) = next_event.terminal.as_ref() else {
+            return (message, Some(next));
+        };
+        if !is_plain_terminal_output(next_event)
+            || next_event.scope != first_event.scope
+            || next_terminal.pane_id != first_terminal.pane_id
+            || first_terminal
+                .data
+                .len()
+                .saturating_add(next_terminal.data.len())
+                > MAX_COALESCED_TERMINAL_OUTPUT_BYTES
+        {
+            return (message, Some(next));
+        }
+        first_terminal.data.extend_from_slice(&next_terminal.data);
+        first_terminal.generation = next_terminal.generation;
+        first_event.terminal_delivery_bytes = first_event
+            .terminal_delivery_bytes
+            .saturating_add(next_event.terminal_delivery_bytes);
+        first_event.terminal_delivery_records = first_event
+            .terminal_delivery_records
+            .saturating_add(next_event.terminal_delivery_records);
+    }
+}
+
+fn is_plain_terminal_output(event: &v1::HostEvent) -> bool {
+    event.kind == v1::EventKind::TerminalOutput as i32
+        && event.terminal.is_some()
+        && event.detail.is_empty()
+        && event.snapshot.is_none()
+        && event.pane_resource.is_none()
+        && event.file.is_none()
+        && event.git.is_none()
+        && event.agent.is_none()
+}
+
 #[derive(Default)]
 pub(super) struct ProtocolSequencer {
     sequence: u64,
@@ -154,5 +222,169 @@ impl ProtocolSequencer {
                 unreachable!("the connection writer consumes topology epoch barriers")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod coalescing_tests {
+    use super::*;
+
+    fn output(pane_id: &str, scope: &str, generation: u64, data: Vec<u8>) -> SequencerControl {
+        SequencerControl::OrderedEvent(v1::HostEvent {
+            kind: v1::EventKind::TerminalOutput.into(),
+            scope: scope.into(),
+            terminal: Some(v1::TerminalBytes {
+                pane_id: pane_id.into(),
+                data,
+                generation,
+            }),
+            ..Default::default()
+        })
+    }
+
+    fn terminal(message: &SequencerControl) -> &v1::TerminalBytes {
+        let SequencerControl::OrderedEvent(event) = message else {
+            panic!("expected event")
+        };
+        event.terminal.as_ref().expect("terminal payload")
+    }
+
+    #[test]
+    fn same_pane_outputs_merge_exact_bytes_and_take_the_last_generation() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        sender
+            .try_send(output("%1", "terminal", 3, Vec::new()))
+            .unwrap();
+        sender
+            .try_send(output("%1", "terminal", 9, b"bc".to_vec()))
+            .unwrap();
+        let (merged, deferred) = coalesce_adjacent_terminal_output(
+            output("%1", "terminal", 1, b"a".to_vec()),
+            &mut receiver,
+        );
+        assert!(deferred.is_none());
+        assert_eq!(terminal(&merged).data, b"abc");
+        assert_eq!(terminal(&merged).generation, 9);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn other_pane_and_scope_boundaries_are_preserved_in_the_deferred_slot() {
+        let (_sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let (first, deferred) =
+            coalesce_adjacent_terminal_output(output("%1", "one", 1, b"a".to_vec()), &mut receiver);
+        assert_eq!(terminal(&first).data, b"a");
+        assert!(deferred.is_none());
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .try_send(output("%2", "one", 2, b"b".to_vec()))
+            .unwrap();
+        let (_, deferred) =
+            coalesce_adjacent_terminal_output(output("%1", "one", 1, b"a".to_vec()), &mut receiver);
+        assert_eq!(terminal(deferred.as_ref().unwrap()).pane_id, "%2");
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .try_send(output("%1", "two", 2, b"b".to_vec()))
+            .unwrap();
+        let (_, deferred) =
+            coalesce_adjacent_terminal_output(output("%1", "one", 1, b"a".to_vec()), &mut receiver);
+        assert_eq!(terminal(deferred.as_ref().unwrap()).data, b"b");
+    }
+
+    #[test]
+    fn a_response_boundary_is_never_crossed_or_lost() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .try_send(SequencerControl::Response {
+                request_id: 41,
+                response: v1::Response::default(),
+                snapshot_barrier: false,
+            })
+            .unwrap();
+        let (_, deferred) = coalesce_adjacent_terminal_output(
+            output("%1", "terminal", 1, b"a".to_vec()),
+            &mut receiver,
+        );
+        assert!(matches!(
+            deferred,
+            Some(SequencerControl::Response { request_id: 41, .. })
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn sixty_four_kib_is_an_exact_boundary_and_oversize_records_stay_atomic() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        sender.try_send(output("%1", "", 2, vec![2])).unwrap();
+        let (merged, deferred) = coalesce_adjacent_terminal_output(
+            output("%1", "", 1, vec![1; 64 * 1024 - 1]),
+            &mut receiver,
+        );
+        assert!(deferred.is_none());
+        assert_eq!(terminal(&merged).data.len(), 64 * 1024);
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        sender.try_send(output("%1", "", 2, vec![2])).unwrap();
+        let (first, deferred) = coalesce_adjacent_terminal_output(
+            output("%1", "", 1, vec![1; 64 * 1024]),
+            &mut receiver,
+        );
+        assert_eq!(terminal(&first).data.len(), 64 * 1024);
+        assert!(deferred.is_some());
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        sender.try_send(output("%1", "", 2, vec![2])).unwrap();
+        let (oversize, deferred) = coalesce_adjacent_terminal_output(
+            output("%1", "", 1, vec![1; 64 * 1024 + 1]),
+            &mut receiver,
+        );
+        assert_eq!(terminal(&oversize).data.len(), 64 * 1024 + 1);
+        assert!(deferred.is_some());
+    }
+
+    #[test]
+    fn detail_or_additional_payload_prevents_coalescing() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let mut decorated = output("%1", "terminal", 2, b"b".to_vec());
+        let SequencerControl::OrderedEvent(event) = &mut decorated else {
+            unreachable!()
+        };
+        event.detail = "diagnostic".into();
+        sender.try_send(decorated).unwrap();
+        let (_, deferred) = coalesce_adjacent_terminal_output(
+            output("%1", "terminal", 1, b"a".to_vec()),
+            &mut receiver,
+        );
+        assert!(deferred.is_some());
+    }
+
+    #[test]
+    fn coalescing_preserves_all_tiny_record_and_byte_credit() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
+        for generation in 2..=64 {
+            let mut next = output("%1", "terminal", generation, vec![b'x']);
+            let SequencerControl::OrderedEvent(event) = &mut next else {
+                unreachable!()
+            };
+            event.terminal_delivery_bytes = 1;
+            event.terminal_delivery_records = 1;
+            sender.try_send(next).unwrap();
+        }
+        let mut first = output("%1", "terminal", 1, vec![b'x']);
+        let SequencerControl::OrderedEvent(event) = &mut first else {
+            unreachable!()
+        };
+        event.terminal_delivery_bytes = 1;
+        event.terminal_delivery_records = 1;
+        let (merged, deferred) = coalesce_adjacent_terminal_output(first, &mut receiver);
+        assert!(deferred.is_none());
+        let SequencerControl::OrderedEvent(merged) = merged else {
+            unreachable!()
+        };
+        assert_eq!(merged.terminal.unwrap().data.len(), 64);
+        assert_eq!(merged.terminal_delivery_bytes, 64);
+        assert_eq!(merged.terminal_delivery_records, 64);
     }
 }

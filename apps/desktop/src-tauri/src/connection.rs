@@ -27,6 +27,8 @@ use tmux_control::MAX_INPUT_REQUEST_BYTES;
 
 mod event_frame;
 use event_frame::{TerminalEvent, encode_event};
+mod delivery_window;
+use delivery_window::{DeliveryWindow, HostCharge};
 mod dispatch;
 use dispatch::{
     ClientInputDispatch, ClientInputQueue, INPUT_BYTE_BUDGET, INPUT_MESSAGE_BUDGET, ResizeQueue,
@@ -102,6 +104,9 @@ struct TerminalClient {
     terminal_epoch: AtomicU64,
     server_identity: Mutex<String>,
     host_profile_id: Mutex<String>,
+    delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
+    delivery_ack_serialization: Mutex<()>,
+    pending_delivery_ack: Mutex<Option<(u64, HostCharge)>>,
 }
 
 struct InitialHostState {
@@ -130,6 +135,9 @@ impl TerminalClient {
             terminal_epoch: AtomicU64::new(0),
             server_identity: Mutex::new(String::new()),
             host_profile_id: Mutex::new(String::new()),
+            delivery_window: Arc::new(Mutex::new(None)),
+            delivery_ack_serialization: Mutex::new(()),
+            pending_delivery_ack: Mutex::new(None),
         }
     }
 
@@ -156,6 +164,10 @@ impl TerminalClient {
         self.stop_signal.stop();
         self.ready.store(false, Ordering::Release);
         self.resize_queue.stop();
+        if let Some(window) = self.delivery_window.lock().unwrap().take() {
+            window.close();
+        }
+        self.pending_delivery_ack.lock().unwrap().take();
         if let Some(writer) = self.writer.lock().unwrap().take() {
             writer.close();
         }
@@ -163,6 +175,20 @@ impl TerminalClient {
             let _ = sender.try_send(ClientInputDispatch::Stop);
         }
         self.fail_pending(pending_message);
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn reconnect_transport(&self) {
+        self.ready.store(false, Ordering::Release);
+        if let Some(window) = self.delivery_window.lock().unwrap().take() {
+            window.close();
+        }
+        if let Some(writer) = self.writer.lock().unwrap().take() {
+            writer.close();
+        }
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -452,7 +478,11 @@ pub fn start_terminal(
         ConnectionSpec::Ssh { profile_id, .. } => profile_id.clone(),
     };
     client.start_dispatchers(&client_id)?;
-    let event_channel = TerminalEventChannel::new(measurement_id, on_event);
+    let event_channel = TerminalEventChannel::new(
+        measurement_id,
+        on_event,
+        Arc::clone(&client.delivery_window),
+    );
     // Publish local progress before the supervisor can perform DNS, ProxyJump,
     // authentication, or any other network work.
     let _ = event_channel.send(encode_event(TerminalEvent::ConnectionState {
@@ -496,6 +526,63 @@ pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> 
         // connected to another host at the same time, and its warm bridges are
         // still reachable.
         files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn acknowledge_terminal_delivery(
+    client_id: String,
+    connection_epoch: u64,
+    cumulative_frame_count: u64,
+    cumulative_byte_length: u64,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let client = get_client(&clients, &client_id)?;
+    let _serialization = client.delivery_ack_serialization.lock().unwrap();
+    let window = client.delivery_window.lock().unwrap().clone();
+    let Some(window) = window else {
+        return Ok(());
+    };
+    let Some(host) = window.acknowledge(
+        connection_epoch,
+        cumulative_frame_count,
+        cumulative_byte_length,
+    )?
+    else {
+        return Ok(());
+    };
+    *client.pending_delivery_ack.lock().unwrap() = Some((connection_epoch, host));
+    flush_delivery_ack_serialized(&client).inspect_err(|_| client.reconnect_transport())
+}
+
+fn flush_delivery_ack(client: &TerminalClient) -> Result<(), String> {
+    let _serialization = client.delivery_ack_serialization.lock().unwrap();
+    flush_delivery_ack_serialized(client)
+}
+
+fn flush_delivery_ack_serialized(client: &TerminalClient) -> Result<(), String> {
+    let Some((epoch, host)) = *client.pending_delivery_ack.lock().unwrap() else {
+        return Ok(());
+    };
+    let Some(writer) = client.writer.lock().unwrap().clone() else {
+        return Ok(());
+    };
+    writer.write(
+        envelope(
+            0,
+            0,
+            Payload::TerminalOutputAck(v1::TerminalOutputAck {
+                connection_epoch: epoch,
+                cumulative_bytes: host.bytes,
+                cumulative_records: host.records,
+            }),
+        ),
+        Instant::now() + REQUEST_TIMEOUT,
+    )?;
+    let mut pending = client.pending_delivery_ack.lock().unwrap();
+    if *pending == Some((epoch, host)) {
+        *pending = None;
     }
     Ok(())
 }
@@ -804,18 +891,34 @@ fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
 pub(super) struct TerminalEventChannel {
     measurement: Arc<TerminalMeasurement>,
     channel: Channel<InvokeResponseBody>,
+    delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
 }
 
 impl TerminalEventChannel {
-    fn new(measurement_id: Uuid, channel: Channel<InvokeResponseBody>) -> Self {
+    fn new(
+        measurement_id: Uuid,
+        channel: Channel<InvokeResponseBody>,
+        delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
+    ) -> Self {
         Self {
             measurement: Arc::new(TerminalMeasurement(measurement_id)),
             channel,
+            delivery_window,
         }
     }
 
     fn send(&self, frame: Vec<u8>) -> Result<(), String> {
+        self.send_charged(frame, HostCharge::default())
+    }
+
+    fn send_charged(&self, frame: Vec<u8>, host: HostCharge) -> Result<(), String> {
+        let window = self.delivery_window.lock().unwrap().clone();
+        let reservation = window
+            .as_ref()
+            .map(|window| window.reserve(frame.len(), host))
+            .transpose()?;
         crate::perf_log::send_bridge_frame(self.measurement.0, &self.channel, frame)
+            .and_then(|()| reservation.map_or(Ok(()), |reservation| reservation.commit()))
     }
 }
 

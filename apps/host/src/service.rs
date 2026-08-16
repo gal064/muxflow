@@ -10,7 +10,8 @@ use std::{
 
 use anyhow::{Context, bail};
 use tmux_agent_protocol::{
-    FrameError, HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, envelope, read_frame,
+    CAP_TERMINAL_OUTPUT_CREDIT, FrameError, HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR,
+    envelope, read_frame,
     v1::{self, envelope::Payload},
     write_frame,
 };
@@ -30,6 +31,7 @@ mod git;
 use git::GitService;
 mod terminal;
 use terminal::TerminalClients;
+use terminal::{OUTPUT_WINDOW_BYTES, OUTPUT_WINDOW_RECORDS, OutputCharge, OutputCredit};
 mod tmux_actions;
 mod tmux_config;
 pub(crate) use tmux_config::{
@@ -106,6 +108,10 @@ pub async fn serve_with_shutdown(
     } else {
         String::new()
     };
+    let negotiated_capabilities = HOST_CAPABILITIES & client_hello.requested_capabilities;
+    let output_credit_enabled =
+        !client_hello.bulk_connection && negotiated_capabilities & CAP_TERMINAL_OUTPUT_CREDIT != 0;
+    let output_credit = Arc::new(OutputCredit::negotiated(output_credit_enabled));
     let mut server_hello = envelope(
         hello.request_id,
         0,
@@ -115,11 +121,21 @@ pub async fn serve_with_shutdown(
             architecture: std::env::consts::ARCH.into(),
             tmux_version: daemon_command_version(CommandVersion::Tmux),
             server_identity: current_server_identity,
-            capabilities: HOST_CAPABILITIES & client_hello.requested_capabilities,
+            capabilities: negotiated_capabilities,
             read_only,
             incompatibility,
             git_version: daemon_command_version(CommandVersion::Git),
             connection_epoch: client_hello.connection_epoch,
+            terminal_output_window_bytes: if output_credit_enabled {
+                OUTPUT_WINDOW_BYTES
+            } else {
+                0
+            },
+            terminal_output_window_records: if output_credit_enabled {
+                OUTPUT_WINDOW_RECORDS as u32
+            } else {
+                0
+            },
         }),
     );
     server_hello.protocol_major = host_protocol_major;
@@ -136,7 +152,18 @@ pub async fn serve_with_shutdown(
     let writer_closed = Arc::clone(&closed);
     let writer_task = tokio::spawn(async move {
         let mut sequencer = ProtocolSequencer::default();
-        while let Some(message) = control_rx.recv().await {
+        let mut pending_message = None;
+        loop {
+            let message = match pending_message.take() {
+                Some(message) => message,
+                None => match control_rx.recv().await {
+                    Some(message) => message,
+                    None => break,
+                },
+            };
+            let (message, pending) =
+                events::coalesce_adjacent_terminal_output(message, &mut control_rx);
+            pending_message = pending;
             if let SequencerControl::TopologyEpochBarrier(completion) = message {
                 let _ = completion.send(writer_topology_signal.current_epoch());
                 continue;
@@ -154,7 +181,7 @@ pub async fn serve_with_shutdown(
     let overflowed = Arc::new(AtomicBool::new(false));
     let subscribed = Arc::new(AtomicBool::new(false));
     let pending = Arc::new(Mutex::new(HashMap::<u64, Arc<AtomicBool>>::new()));
-    let terminal = Arc::new(Mutex::new(TerminalClients::new()));
+    let terminal = Arc::new(Mutex::new(TerminalClients::new(Arc::clone(&output_credit))));
     let topology_lock = Arc::new(tokio::sync::Mutex::new(()));
     let topology_baseline = Arc::new(Mutex::new(None::<(tmux_control::TmuxSnapshot, String)>));
     let files = Arc::new(FileService::new());
@@ -202,6 +229,23 @@ pub async fn serve_with_shutdown(
             continue;
         }
         match frame.payload {
+            Some(Payload::TerminalOutputAck(ack)) => {
+                if output_credit_enabled
+                    && ack.connection_epoch == client_hello.connection_epoch
+                    && output_credit
+                        .acknowledge(OutputCharge {
+                            bytes: ack.cumulative_bytes,
+                            records: ack.cumulative_records,
+                        })
+                        .is_err()
+                {
+                    read_error = Some(FrameError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid terminal delivery acknowledgement",
+                    )));
+                    break;
+                }
+            }
             Some(Payload::Cancel(cancel)) => {
                 if let Some(token) = pending.lock().unwrap().get(&cancel.target_request_id) {
                     token.store(true, Ordering::Release);
@@ -332,6 +376,7 @@ pub async fn serve_with_shutdown(
     }
 
     closed.store(true, Ordering::Release);
+    output_credit.close();
     for (_, token) in pending.lock().unwrap().drain() {
         token.store(true, Ordering::Release);
     }

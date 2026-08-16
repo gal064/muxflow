@@ -16,6 +16,7 @@ use tmux_control::{
 use tokio::sync::mpsc;
 
 use super::super::{SequencerControl, emit_event};
+use super::OutputCredit;
 use super::correlation::{
     MarkerBlock, classify_marker_block, error_reason, marker_pane, wants_error_line,
 };
@@ -71,10 +72,8 @@ pub(super) struct ControlStreamReader {
     pub(super) stopped: Arc<AtomicBool>,
     pub(super) controls: std_mpsc::Receiver<StreamControl>,
     pub(super) flow: Arc<super::FlowControl>,
-    pub(super) input_completion: std_mpsc::Sender<InputCompletion>,
+    pub(super) output_credit: Arc<OutputCredit>,
 }
-
-pub(super) type InputCompletion = (u64, Result<(), String>);
 
 pub(super) enum StreamControl {
     Membership {
@@ -97,7 +96,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         stopped,
         controls,
         flow,
-        input_completion,
+        output_credit,
     } = context;
     let mut reader = BufReader::new(stdout);
     let mut parser = ControlParser::default();
@@ -111,14 +110,14 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         resources: &resources,
         terminal_generation: &terminal_generation,
         stopped: &stopped,
-        input_completion: &input_completion,
+        output_credit: &output_credit,
     };
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(length) => {
                 while let Ok(control) = controls.try_recv() {
-                    state.apply_control(control, &input_completion);
+                    state.apply_control(control);
                 }
                 parser.push(&buffer[..length]);
                 while let Some(record) = parser.next_record() {
@@ -139,7 +138,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                                 state.handle(output, runtime());
                             }
                             emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
-                            state.resnapshot_all(&writer, &input_completion);
+                            state.resnapshot_all(&writer);
                         }
                     }
                 }
@@ -158,10 +157,6 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
     while let Some(Err(error)) = parser.next_record() {
         emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
     }
-    state.abort_pending_input(
-        &input_completion,
-        "terminal control stream ended before input completed",
-    );
     if !stopped.load(Ordering::Acquire) {
         state.emit_pane_scoped_recovery(
             &event_tx,
@@ -238,15 +233,6 @@ pub(super) enum CommandBlock {
         pane_id: Option<String>,
         lines: Vec<Vec<u8>>,
     },
-    /// One in-band `send-keys` request, correlated to the pane its marker
-    /// named. Input is fire-and-forget on the desktop side, so this block is
-    /// the only place a rejected keystroke can still be attributed.
-    Input {
-        tag: CommandTag,
-        input_id: u64,
-        pane_id: String,
-        lines: Vec<Vec<u8>>,
-    },
     /// One `refresh-client -A '%N:continue'`, correlated to the pane its marker
     /// named. A rejected resume leaves that pane paused forever, so it must be
     /// reported against the pane rather than the connection.
@@ -280,7 +266,6 @@ pub(super) enum CommandBlock {
 pub(super) struct StreamState {
     pub(super) pane_states: HashMap<String, PaneSeedState>,
     pub(super) expected_capture: Option<String>,
-    pub(super) expected_input: Option<(u64, String)>,
     pub(super) expected_resume: Option<String>,
     pub(super) pending_alternate: Option<(String, Vec<Vec<u8>>, u64)>,
     pub(super) pending_metadata: Option<PendingCaptureMetadata>,
@@ -305,7 +290,7 @@ struct StreamRuntime<'a> {
     resources: &'a Arc<Mutex<PaneResourceStore>>,
     terminal_generation: &'a Arc<AtomicU64>,
     stopped: &'a AtomicBool,
-    input_completion: &'a std_mpsc::Sender<InputCompletion>,
+    output_credit: &'a OutputCredit,
 }
 
 impl StreamState {
@@ -326,7 +311,6 @@ impl StreamState {
                 })
                 .collect(),
             expected_capture: None,
-            expected_input: None,
             expected_resume: None,
             pending_alternate: None,
             pending_metadata: None,
@@ -342,7 +326,7 @@ impl StreamState {
             resources,
             terminal_generation,
             stopped,
-            input_completion,
+            output_credit,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             return;
@@ -389,6 +373,7 @@ impl StreamState {
                                 pane_id,
                                 data,
                                 output_generation,
+                                output_credit,
                             );
                         }
                     }
@@ -406,10 +391,6 @@ impl StreamState {
                             tag.number
                         ),
                     );
-                    self.abort_pending_input(
-                        input_completion,
-                        "another tmux command began before terminal input completed",
-                    );
                 }
                 self.command_block = self.start_block(tag);
             }
@@ -425,7 +406,7 @@ impl StreamState {
                 // few of them is what makes the `%error` below readable. The
                 // bound keeps a misrouted block from growing a log detail
                 // without limit.
-                CommandBlock::Input { lines, .. } | CommandBlock::Resume { lines, .. } => {
+                CommandBlock::Resume { lines, .. } => {
                     if wants_error_line(lines.len()) {
                         lines.push(line);
                     }
@@ -449,7 +430,7 @@ impl StreamState {
                     resources,
                     terminal_generation,
                     stopped,
-                    input_completion,
+                    output_credit,
                 },
             ),
             ControlRecord::Error { tag, arguments } => {
@@ -479,45 +460,22 @@ impl StreamState {
                 // quoting four rows of it into an event that reaches the
                 // desktop and the logs would leak the pane, not explain the
                 // failure.
-                let (detail, rejected_resume, rejected_input) = match &self.command_block {
-                    CommandBlock::Input {
-                        input_id,
-                        pane_id,
-                        lines,
-                        ..
-                    } => (
-                        format!(
-                            "terminal input for {pane_id} was rejected by tmux: {}",
-                            error_reason(&arguments, lines)
-                        ),
-                        None,
-                        Some(*input_id),
-                    ),
+                let (detail, rejected_resume) = match &self.command_block {
                     CommandBlock::Resume { pane_id, lines, .. } => (
                         format!(
                             "tmux rejected the flow-control resume for {pane_id}: {}",
                             error_reason(&arguments, lines)
                         ),
                         Some(pane_id.clone()),
-                        None,
                     ),
-                    _ => (arguments, None, None),
+                    _ => (arguments, None),
                 };
-                if let Some(input_id) = rejected_input {
-                    let _ = input_completion.send((input_id, Err(detail.clone())));
-                } else {
-                    self.abort_pending_input(
-                        input_completion,
-                        "tmux rejected a command before terminal input completed",
-                    );
-                }
                 // An error abandons whatever multi-block sequence was running,
                 // so every correlation slot has to be released too — otherwise
                 // the next unrelated block is mistaken for the missing half of
                 // this one.
                 self.command_block = CommandBlock::None;
                 self.expected_capture = None;
-                self.expected_input = None;
                 self.expected_resume = None;
                 self.pending_alternate = None;
                 self.pending_metadata = None;
@@ -663,28 +621,13 @@ impl StreamState {
             resources,
             terminal_generation,
             stopped,
-            input_completion,
+            output_credit,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
-            if let CommandBlock::Input { input_id, .. } = &self.command_block {
-                let _ = input_completion.send((
-                    *input_id,
-                    Err("terminal control stream stopped before input completed".into()),
-                ));
-            }
             self.command_block = CommandBlock::None;
             return;
         }
         if !self.active_tag_matches(end_tag) {
-            if let CommandBlock::Input { input_id, .. } = &self.command_block {
-                let _ = input_completion.send((
-                    *input_id,
-                    Err(format!(
-                        "terminal input completion tag mismatched {}",
-                        end_tag.number
-                    )),
-                ));
-            }
             let scope = self.active_scope();
             emit_resnapshot(
                 sender,
@@ -698,9 +641,12 @@ impl StreamState {
         match std::mem::replace(&mut self.command_block, CommandBlock::None) {
             CommandBlock::Unknown { pane_id, lines, .. } => {
                 match classify_marker_block(pane_id, &lines) {
-                    MarkerBlock::Input { input_id, pane_id } => {
-                        self.expected_input = Some((input_id, pane_id));
-                    }
+                    MarkerBlock::Input { .. } => emit_resnapshot(
+                        sender,
+                        overflowed,
+                        "terminal",
+                        "input marker arrived on an output-only tmux client".into(),
+                    ),
                     MarkerBlock::Resume(pane_id) => self.expected_resume = Some(pane_id),
                     MarkerBlock::Capture(pane_id) => {
                         self.expected_capture =
@@ -713,9 +659,6 @@ impl StreamState {
             // at all otherwise. The capture written with it is what actually
             // recovers the pane, because output produced while paused is
             // dropped rather than replayed.
-            CommandBlock::Input { input_id, .. } => {
-                let _ = input_completion.send((input_id, Ok(())));
-            }
             CommandBlock::Resume { .. } => {}
             CommandBlock::CapturePrimary { pane_id, lines, .. } => {
                 // tmux emits one %begin/%end block per command separated by
@@ -824,6 +767,7 @@ impl StreamState {
                                             pane_id.clone(),
                                             seed,
                                             seed_generation,
+                                            output_credit,
                                         );
                                     }
                                     for output in replay_outputs {
@@ -854,6 +798,7 @@ impl StreamState {
                                                 pane_id.clone(),
                                                 output.bytes,
                                                 replay_generation,
+                                                output_credit,
                                             );
                                         }
                                     }
@@ -898,7 +843,6 @@ impl StreamState {
     fn active_tag_matches(&self, tag: CommandTag) -> bool {
         match &self.command_block {
             CommandBlock::Unknown { tag: active, .. }
-            | CommandBlock::Input { tag: active, .. }
             | CommandBlock::Resume { tag: active, .. }
             | CommandBlock::CapturePrimary { tag: active, .. }
             | CommandBlock::CaptureAlternate { tag: active, .. }
@@ -913,7 +857,6 @@ impl StreamState {
                 pane_id: Some(pane_id),
                 ..
             }
-            | CommandBlock::Input { pane_id, .. }
             | CommandBlock::Resume { pane_id, .. }
             | CommandBlock::CapturePrimary { pane_id, .. }
             | CommandBlock::CaptureAlternate { pane_id, .. }
@@ -926,13 +869,6 @@ impl StreamState {
         if let Some(pane_id) = self.expected_resume.take() {
             CommandBlock::Resume {
                 tag,
-                pane_id,
-                lines: Vec::new(),
-            }
-        } else if let Some((input_id, pane_id)) = self.expected_input.take() {
-            CommandBlock::Input {
-                tag,
-                input_id,
                 pane_id,
                 lines: Vec::new(),
             }

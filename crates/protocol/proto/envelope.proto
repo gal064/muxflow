@@ -20,6 +20,7 @@ message Envelope {
     Error error = 16;
     TerminalBytes terminal_bytes = 17;
     TransferChunk transfer_chunk = 18;
+    TerminalOutputAck terminal_output_ack = 19;
   }
 }
 
@@ -52,6 +53,17 @@ message ServerHello {
   string incompatibility = 8;
   string git_version = 9;
   uint64 connection_epoch = 10;
+  uint64 terminal_output_window_bytes = 11;
+  uint32 terminal_output_window_records = 12;
+}
+
+// Reverse-direction, one-way credit release. It is deliberately not a
+// Request: acknowledging renderer admission must never wait behind the output
+// whose admission it releases, and is valid on a negotiated read-only stream.
+message TerminalOutputAck {
+  uint64 connection_epoch = 1;
+  uint64 cumulative_bytes = 2;
+  uint64 cumulative_records = 3;
 }
 
 enum Operation {
@@ -205,6 +217,8 @@ message HostEvent {
   FileServiceEvent file = 7;
   GitEvent git = 8;
   AgentEvent agent = 9;
+  uint64 terminal_delivery_bytes = 10;
+  uint64 terminal_delivery_records = 11;
 }
 
 message Cancel {

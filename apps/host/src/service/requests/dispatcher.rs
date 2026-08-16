@@ -335,19 +335,30 @@ pub(crate) async fn handle_request(
             .await;
         }
         (Handler::Terminal, Some(v1::Operation::SetTerminalVisibility)) => {
-            let result = terminal.lock().unwrap().set_visibility(
-                &request.scope,
-                VisibilityChange {
-                    visible: request.visible,
-                    serialized_snapshot: request.data,
-                    checkpoint: tmux_control::VisibilityCheckpoint {
-                        epoch: request.terminal_epoch,
-                        generation: request.terminal_generation_cutoff,
+            let terminal = Arc::clone(terminal);
+            let event_tx = event_tx.clone();
+            let overflowed = Arc::clone(overflowed);
+            let result = tokio::task::spawn_blocking(move || {
+                terminal.lock().unwrap().set_visibility(
+                    &request.scope,
+                    VisibilityChange {
+                        visible: request.visible,
+                        serialized_snapshot: request.data,
+                        checkpoint: tmux_control::VisibilityCheckpoint {
+                            epoch: request.terminal_epoch,
+                            generation: request.terminal_generation_cutoff,
+                        },
                     },
-                },
-                event_tx,
-                overflowed,
-            );
+                    &event_tx,
+                    &overflowed,
+                )
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Err(anyhow::anyhow!(
+                    "terminal visibility worker failed: {error}"
+                ))
+            });
             send_response(
                 control_tx,
                 request_id,

@@ -1,7 +1,11 @@
 use std::{
     io::Write,
     process::Stdio,
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
@@ -9,7 +13,9 @@ use tmux_control::{HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
 use uuid::Uuid;
 
 use super::super::snapshot::tmux_command;
-use super::{queue_input, stream::InputCompletion, validate_tmux_id};
+use super::{queue_input, validate_tmux_id};
+
+pub(super) type InputCompletion = (u64, Result<(), String>);
 
 /// Largest payload written in band through the already-open control client.
 ///
@@ -41,9 +47,13 @@ pub(super) fn run_input_dispatch<W: Write>(
     receiver: mpsc::Receiver<InputDispatch>,
     control_stdin: Arc<Mutex<W>>,
     input_completion: mpsc::Receiver<InputCompletion>,
+    failed: Arc<AtomicBool>,
     report_failure: impl Fn(&str, &str),
 ) {
     run_input_dispatch_with(receiver, move |input_id, pane_id, data| {
+        if failed.load(Ordering::Acquire) {
+            return Err("persistent terminal input client stopped before dispatch".into());
+        }
         if data.len() <= INBAND_INPUT_MAX_BYTES {
             send_input_inband(&control_stdin, input_id, pane_id, data)?;
             wait_for_input_completion(&input_completion, input_id, INPUT_COMPLETION_TIMEOUT)
@@ -427,7 +437,13 @@ mod tests {
             .unwrap();
         let stdin = Arc::new(Mutex::new(Vec::<u8>::new()));
 
-        run_input_dispatch(receiver, stdin, completion_rx, |_, _| {});
+        run_input_dispatch(
+            receiver,
+            stdin,
+            completion_rx,
+            Arc::new(AtomicBool::new(false)),
+            |_, _| {},
+        );
 
         assert_eq!(
             barrier_rx.recv().unwrap(),
@@ -473,6 +489,73 @@ mod tests {
             assert_eq!(bytes, b"accepted");
             Ok(())
         });
+    }
+
+    #[test]
+    fn stopped_client_rejects_queued_input_without_writing_or_forking() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(InputDispatch::Bytes {
+                input_id: 1,
+                pane_id: "%1".into(),
+                data: b"must not replay".to_vec(),
+            })
+            .unwrap();
+        let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
+        sender.send(InputDispatch::Barrier(barrier_tx)).unwrap();
+        sender.send(InputDispatch::Stop).unwrap();
+        let stdin = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        run_input_dispatch(
+            receiver,
+            Arc::clone(&stdin),
+            mpsc::channel().1,
+            Arc::new(AtomicBool::new(true)),
+            |_, _| {},
+        );
+
+        assert!(stdin.lock().unwrap().is_empty());
+        assert_eq!(
+            barrier_rx.recv().unwrap(),
+            Err("persistent terminal input client stopped before dispatch".into())
+        );
+    }
+
+    #[test]
+    fn one_dispatch_fifo_orders_inputs_across_panes_before_the_fence() {
+        let (sender, receiver) = mpsc::channel();
+        for (input_id, pane_id, data) in [
+            (1, "%1", b"a".as_slice()),
+            (2, "%2", b"b".as_slice()),
+            (3, "%1", b"c".as_slice()),
+        ] {
+            sender
+                .send(InputDispatch::Bytes {
+                    input_id,
+                    pane_id: pane_id.into(),
+                    data: data.to_vec(),
+                })
+                .unwrap();
+        }
+        let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
+        sender.send(InputDispatch::Barrier(barrier_tx)).unwrap();
+        sender.send(InputDispatch::Stop).unwrap();
+        let mut observed = Vec::new();
+
+        run_input_dispatch_with(receiver, |input_id, pane_id, data| {
+            observed.push((input_id, pane_id.to_owned(), data.to_vec()));
+            Ok(())
+        });
+
+        assert_eq!(
+            observed,
+            [
+                (1, "%1".into(), b"a".to_vec()),
+                (2, "%2".into(), b"b".to_vec()),
+                (3, "%1".into(), b"c".to_vec()),
+            ]
+        );
+        assert_eq!(barrier_rx.recv().unwrap(), Ok(()));
     }
 
     #[test]

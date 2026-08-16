@@ -52,8 +52,7 @@ struct Harness {
     resources: Arc<Mutex<PaneResourceStore>>,
     generation: Arc<AtomicU64>,
     stopped: AtomicBool,
-    input_completion_tx: std_mpsc::Sender<InputCompletion>,
-    input_completions: std_mpsc::Receiver<InputCompletion>,
+    output_credit: Arc<super::OutputCredit>,
 }
 
 impl Harness {
@@ -61,7 +60,6 @@ impl Harness {
         let flow = Arc::new(FlowControl::default());
         let (writer, writes) = std_mpsc::channel();
         let (sender, events) = mpsc::channel(64);
-        let (input_completion_tx, input_completions) = std_mpsc::channel();
         let state = StreamState::new(pane_ids, Arc::clone(&flow));
         (
             state,
@@ -77,8 +75,7 @@ impl Harness {
                 ))),
                 generation: Arc::new(AtomicU64::new(0)),
                 stopped: AtomicBool::new(false),
-                input_completion_tx,
-                input_completions,
+                output_credit: Arc::new(super::OutputCredit::negotiated(false)),
             },
         )
     }
@@ -91,7 +88,7 @@ impl Harness {
             resources: &self.resources,
             terminal_generation: &self.generation,
             stopped: &self.stopped,
-            input_completion: &self.input_completion_tx,
+            output_credit: &self.output_credit,
         }
     }
 
@@ -291,12 +288,9 @@ fn losing_a_pane_forgets_that_it_was_paused() {
         harness.runtime(),
     );
     assert!(harness.flow.resume_before_capture("%1"));
-    state.apply_control(
-        StreamControl::Membership {
-            pane_ids: Vec::new(),
-        },
-        &harness.input_completion_tx,
-    );
+    state.apply_control(StreamControl::Membership {
+        pane_ids: Vec::new(),
+    });
     assert!(!harness.flow.resume_before_capture("%1"));
 }
 
@@ -319,7 +313,6 @@ fn a_pause_naming_nothing_valid_records_nothing() {
 
 #[test]
 fn pane_close_prunes_capture_state_without_disturbing_sibling() {
-    let (input_completion, _) = std_mpsc::channel();
     let mut state = StreamState::new(
         &["%1".into(), "%2".into()],
         Arc::new(crate::service::terminal::FlowControl::default()),
@@ -334,152 +327,13 @@ fn pane_close_prunes_capture_state_without_disturbing_sibling() {
         lines: vec![b"stale".to_vec()],
     };
     state.pending_alternate = Some(("%1".into(), Vec::new(), 1));
-    state.apply_control(
-        StreamControl::Membership {
-            pane_ids: vec!["%2".into()],
-        },
-        &input_completion,
-    );
+    state.apply_control(StreamControl::Membership {
+        pane_ids: vec!["%2".into()],
+    });
     assert!(!state.pane_states.contains_key("%1"));
     assert!(state.pane_states.contains_key("%2"));
     assert!(matches!(state.command_block, CommandBlock::None));
     assert!(state.pending_alternate.is_none());
-}
-
-#[test]
-fn an_in_band_input_block_is_correlated_to_the_pane_that_was_typed_into() {
-    // Input correlation is consumed by the block that follows its marker,
-    // so an error inside that block recovers only the pane typed into.
-    let mut state = StreamState::new(
-        &["%1".into(), "%2".into()],
-        Arc::new(crate::service::terminal::FlowControl::default()),
-    );
-    state.expected_input = Some((7, "%2".into()));
-    let block = state.start_block(CommandTag {
-        timestamp: 1,
-        number: 2,
-        flags: 1,
-    });
-    assert!(
-        matches!(block, CommandBlock::Input { input_id: 7, ref pane_id, .. } if pane_id == "%2")
-    );
-    state.command_block = block;
-    assert_eq!(state.active_scope(), "%2");
-}
-
-#[test]
-fn an_in_band_input_completion_is_reported_only_after_tmux_ends_its_block() {
-    let (mut state, harness) = Harness::new(&["%1".into()]);
-    state.expected_input = Some((8, "%1".into()));
-    state.handle(
-        ControlRecord::Begin {
-            tag: TAG,
-            arguments: String::new(),
-        },
-        harness.runtime(),
-    );
-    assert!(harness.input_completions.try_recv().is_err());
-    state.handle(
-        ControlRecord::End {
-            tag: TAG,
-            arguments: String::new(),
-        },
-        harness.runtime(),
-    );
-    assert_eq!(harness.input_completions.try_recv().unwrap(), (8, Ok(())));
-}
-
-#[test]
-fn a_rejected_in_band_input_reports_its_tmux_error_to_the_barrier_lane() {
-    let (mut state, harness) = Harness::new(&["%1".into()]);
-    state.expected_input = Some((9, "%1".into()));
-    state.handle(
-        ControlRecord::Begin {
-            tag: TAG,
-            arguments: String::new(),
-        },
-        harness.runtime(),
-    );
-    state.handle(
-        ControlRecord::CommandOutput(b"can't find pane: %1".to_vec()),
-        harness.runtime(),
-    );
-    state.handle(
-        ControlRecord::Error {
-            tag: TAG,
-            arguments: "1 7 1".into(),
-        },
-        harness.runtime(),
-    );
-    let (input_id, result) = harness.input_completions.try_recv().unwrap();
-    assert_eq!(input_id, 9);
-    let error = result.unwrap_err();
-    assert!(error.contains("terminal input for %1 was rejected by tmux"));
-    assert!(error.contains("can't find pane"));
-}
-
-#[test]
-fn overlapping_begin_aborts_the_exact_active_input_before_recovery() {
-    let (mut state, harness) = Harness::new(&["%1".into()]);
-    state.expected_input = Some((10, "%1".into()));
-    state.handle(
-        ControlRecord::Begin {
-            tag: TAG,
-            arguments: String::new(),
-        },
-        harness.runtime(),
-    );
-    state.handle(
-        ControlRecord::Begin {
-            tag: CommandTag {
-                number: TAG.number + 1,
-                ..TAG
-            },
-            arguments: String::new(),
-        },
-        harness.runtime(),
-    );
-
-    let (input_id, result) = harness.input_completions.try_recv().unwrap();
-    assert_eq!(input_id, 10);
-    assert!(result.unwrap_err().contains("another tmux command began"));
-    assert!(matches!(state.command_block, CommandBlock::Unknown { .. }));
-}
-
-#[test]
-fn membership_removal_aborts_a_marked_input_before_its_command_begins() {
-    let (mut state, harness) = Harness::new(&["%1".into()]);
-    state.expected_input = Some((11, "%1".into()));
-    state.apply_control(
-        StreamControl::Membership {
-            pane_ids: Vec::new(),
-        },
-        &harness.input_completion_tx,
-    );
-
-    let (input_id, result) = harness.input_completions.try_recv().unwrap();
-    assert_eq!(input_id, 11);
-    assert!(result.unwrap_err().contains("membership ended"));
-    assert!(state.expected_input.is_none());
-}
-
-#[test]
-fn parser_recovery_aborts_active_input_and_releases_its_correlation() {
-    let (mut state, harness) = Harness::new(&["%1".into()]);
-    state.expected_input = Some((12, "%1".into()));
-    state.handle(
-        ControlRecord::Begin {
-            tag: TAG,
-            arguments: String::new(),
-        },
-        harness.runtime(),
-    );
-    state.resnapshot_all(&harness.writer, &harness.input_completion_tx);
-
-    let (input_id, result) = harness.input_completions.try_recv().unwrap();
-    assert_eq!(input_id, 12);
-    assert!(result.unwrap_err().contains("parser recovery"));
-    assert!(matches!(state.command_block, CommandBlock::None));
 }
 
 #[test]
@@ -561,8 +415,8 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
     )));
     let generation = Arc::new(AtomicU64::new(0));
     let (writer, _writes) = std_mpsc::channel();
-    let (input_completion, _input_completions) = std_mpsc::channel();
     let stopped = AtomicBool::new(false);
+    let output_credit = super::OutputCredit::negotiated(false);
     state.finish_block(
         tag,
         StreamRuntime {
@@ -572,7 +426,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
             resources: &resources,
             terminal_generation: &generation,
             stopped: &stopped,
-            input_completion: &input_completion,
+            output_credit: &output_credit,
         },
     );
     assert!(matches!(state.command_block, CommandBlock::None));
@@ -594,6 +448,7 @@ fn terminal_output_waits_for_bounded_sequencer_capacity_without_marking_overflow
     let overflowed = Arc::new(AtomicBool::new(false));
     let thread_overflowed = Arc::clone(&overflowed);
     let emitted = std::thread::spawn(move || {
+        let output_credit = super::OutputCredit::negotiated(false);
         super::stream_helpers::emit_terminal(
             &sender,
             &thread_overflowed,
@@ -601,6 +456,7 @@ fn terminal_output_waits_for_bounded_sequencer_capacity_without_marking_overflow
             "%1".into(),
             b"exact".to_vec(),
             1,
+            &output_credit,
         );
     });
     std::thread::sleep(std::time::Duration::from_millis(10));

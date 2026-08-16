@@ -376,12 +376,80 @@ class BridgeAcknowledgements {
   }
 }
 
+/** Production flow credit, distinct from optional performance measurement. */
+class DeliveryAcknowledgements {
+  #clientId: string | undefined;
+  #connectionEpoch: number | undefined;
+  #cumulativeFrames = 0;
+  #cumulativeBytes = 0;
+  #submittedFrames = 0;
+  #submittedBytes = 0;
+  #inFlight: Promise<void> | undefined;
+  #closed = false;
+
+  attach(clientId: string): void {
+    this.#clientId = clientId;
+    this.#sendIfNeeded();
+  }
+
+  beginEpoch(epoch: number): void {
+    if (epoch === this.#connectionEpoch) return;
+    this.#connectionEpoch = epoch;
+    this.#cumulativeFrames = 0;
+    this.#cumulativeBytes = 0;
+    this.#submittedFrames = 0;
+    this.#submittedBytes = 0;
+  }
+
+  record(byteLength: number): void {
+    if (this.#closed || this.#connectionEpoch === undefined) return;
+    this.#cumulativeFrames += 1;
+    this.#cumulativeBytes += byteLength;
+    // One protocol frame may be the coalesced image of the host's entire
+    // 64-record credit window. Make every successfully admitted wire frame an
+    // event-driven release opportunity; the single in-flight promise folds a
+    // burst into its latest cumulative boundary without a timer.
+    this.#sendIfNeeded();
+  }
+
+  close(): void {
+    this.#closed = true;
+  }
+
+  #sendIfNeeded(): void {
+    if (this.#closed || this.#inFlight || !this.#clientId || this.#connectionEpoch === undefined) return;
+    if (this.#submittedFrames === this.#cumulativeFrames && this.#submittedBytes === this.#cumulativeBytes) return;
+    const boundary = {
+      clientId: this.#clientId,
+      connectionEpoch: this.#connectionEpoch,
+      cumulativeFrameCount: this.#cumulativeFrames,
+      cumulativeByteLength: this.#cumulativeBytes,
+    };
+    let delivered = false;
+    this.#inFlight = invoke<void>("acknowledge_terminal_delivery", boundary).then(() => {
+      delivered = true;
+      if (boundary.connectionEpoch !== this.#connectionEpoch) return;
+      this.#submittedFrames = boundary.cumulativeFrameCount;
+      this.#submittedBytes = boundary.cumulativeByteLength;
+    }).finally(() => {
+      this.#inFlight = undefined;
+      // A failed invoke forces the native bridge to reconnect. If that
+      // reconnect's generation event arrived while the old invoke was still
+      // settling, it is itself the event-driven wakeup for the fresh epoch.
+      // Never retry the failed boundary on the same epoch in a tight loop.
+      if (delivered || boundary.connectionEpoch !== this.#connectionEpoch) this.#sendIfNeeded();
+    });
+    void this.#inFlight.catch(() => undefined);
+  }
+}
+
 /** Shutdown remains bounded when WebView delivery loses an admitted callback. */
 export const FINAL_BRIDGE_DELIVERY_WAIT_MS = 1_000;
 export const FINAL_BRIDGE_SHUTDOWN_WAIT_MS = 2_000;
 const MEASUREMENT_INVOKE_WAIT_MS = 250;
 
 const bridgeAcknowledgements = new Map<string, BridgeAcknowledgements>();
+const deliveryAcknowledgements = new Map<string, DeliveryAcknowledgements>();
 
 interface BridgeFinalTotals {
   cumulativeFrameCount: number;
@@ -500,14 +568,15 @@ export async function startTerminal(
   const measurementEnabled = await perfProbeReady();
   const channel = new Channel<ArrayBuffer>();
   const acknowledgements = new BridgeAcknowledgements(measurementEnabled);
+  const delivery = new DeliveryAcknowledgements();
   channel.onmessage = (frame) => {
     recordPerfCounter("bridge.ingressBytes", frame.byteLength);
     recordPerfCounter("desktop.hostEvents");
-    try {
-      onEvent(decodeTerminalEvent(frame));
-    } finally {
-      acknowledgements.record(frame.byteLength);
-    }
+    const event = decodeTerminalEvent(frame);
+    if (event.kind === "generationEpoch") delivery.beginEpoch(event.epoch);
+    onEvent(event);
+    acknowledgements.record(frame.byteLength);
+    delivery.record(frame.byteLength);
   };
   try {
     const startRequest = {
@@ -520,8 +589,11 @@ export async function startTerminal(
       return value;
     });
     bridgeAcknowledgements.set(clientId, acknowledgements);
+    delivery.attach(clientId);
+    deliveryAcknowledgements.set(clientId, delivery);
     return clientId;
   } catch (error) {
+    delivery.close();
     await acknowledgements.close();
     throw error;
   }
@@ -529,6 +601,7 @@ export async function startTerminal(
 
 export async function stopTerminal(clientId: string): Promise<void> {
   const acknowledgements = bridgeAcknowledgements.get(clientId);
+  const delivery = deliveryAcknowledgements.get(clientId);
   let stopped = false;
   try {
     const boundary = { clientId };
@@ -538,6 +611,8 @@ export async function stopTerminal(clientId: string): Promise<void> {
     stopped = true;
   } finally {
     bridgeAcknowledgements.delete(clientId);
+    deliveryAcknowledgements.delete(clientId);
+    delivery?.close();
     await acknowledgements?.close(stopped);
   }
 }
