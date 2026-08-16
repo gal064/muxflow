@@ -77,6 +77,16 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(received).toEqual([]);
   });
 
+  it("enforces one ownership consumer for each pane", () => {
+    const hub = new TerminalEventHub();
+    const unsubscribe = hub.subscribePane("%1", () => undefined);
+    expect(() => hub.subscribePane("%1", () => undefined)).toThrow(
+      "terminal pane %1 already has an active consumer",
+    );
+    unsubscribe();
+    expect(() => hub.subscribePane("%1", () => undefined)).not.toThrow();
+  });
+
   it("drops hidden state and old generation watermarks at a new terminal epoch", () => {
     const hub = new TerminalEventHub();
     hub.publish({ kind: "generationEpoch", epoch: 1, sequence: 0 });
@@ -255,6 +265,19 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(hub.retainedByteLength).toBe(0);
     if (checkpoint.kind !== "paneResource") throw new Error("expected resource fixture");
     checkpoint.rawTail[0] = 99;
+    hub.publish({ ...checkpoint, sequence: 2 });
+    expect(requests).toEqual(["%1"]);
+  });
+
+  it("conservatively reseeds an oversized same-generation checkpoint", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub((paneId) => requests.push(paneId));
+    hub.subscribePane("%1", () => undefined);
+    const checkpoint = resource(1, 2, {
+      rawTail: new Uint8Array(256 * 1024 + 1),
+      serializedSnapshot: new Uint8Array(),
+    });
+    hub.publish(checkpoint);
     hub.publish({ ...checkpoint, sequence: 2 });
     expect(requests).toEqual(["%1"]);
   });

@@ -9,9 +9,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::{
-    ConnectionSpec, ControlLane, SshLease, acquire_control_master,
-    acquire_control_master_for_socket, host_helper_path, ssh_profile_control_socket,
-    validate_ssh_target,
+    ConnectionSpec, SshLease, acquire_control_master, acquire_control_master_for_socket,
+    host_helper_path, ssh_profile_control_socket, validate_ssh_target,
 };
 
 #[tauri::command]
@@ -130,12 +129,7 @@ fn run_remote_probe(
 ) -> Result<serde_json::Value, String> {
     validate_ssh_target(target)?;
     let control_socket = ssh_profile_control_socket(profile_id, target, config_path)?;
-    let lease = acquire_control_master_for_socket(
-        target,
-        config_path,
-        &control_socket,
-        ControlLane::Interactive,
-    )?;
+    let lease = acquire_control_master_for_socket(target, config_path, &control_socket, &|| false)?;
     run_remote_probe_with_lease(target, config_path, &lease)
 }
 

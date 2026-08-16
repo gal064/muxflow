@@ -14,9 +14,5 @@ pub(crate) use operations::{
     record_transfer_completion, record_transfer_state,
 };
 
-pub(crate) fn enabled() -> bool {
-    sink::configured_path().is_some()
-}
-
 #[cfg(test)]
 pub(crate) use operations::{reset_transfer_measurements, transfer_measurements_for_test};

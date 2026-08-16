@@ -33,15 +33,34 @@ struct MasterCoordination {
     changed: Condvar,
 }
 
-#[derive(Default)]
 struct SshMasterState {
-    closing: bool,
-    establishing: bool,
+    lifecycle: MasterLifecycle,
     generation: u64,
     leases: usize,
     idle_generation: u64,
-    needs_probe: bool,
-    process: Option<MasterProcess>,
+}
+
+impl Default for SshMasterState {
+    fn default() -> Self {
+        Self {
+            lifecycle: MasterLifecycle::Idle,
+            generation: 0,
+            leases: 0,
+            idle_generation: 0,
+        }
+    }
+}
+
+enum MasterLifecycle {
+    Idle,
+    Establishing,
+    Ready {
+        process: MasterProcess,
+        needs_probe: bool,
+    },
+    Closing {
+        in_flight: bool,
+    },
 }
 
 enum MasterProcess {
@@ -62,7 +81,13 @@ struct SocketIdentity {
 
 pub(in crate::connection) struct SshLease {
     master: SshMaster,
-    direct: bool,
+    route: LeaseRoute,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeaseRoute {
+    Multiplexed,
+    Direct,
 }
 
 impl SshLease {
@@ -75,7 +100,7 @@ impl SshLease {
         if self.master.target != target || self.master.config_path.as_deref() != config_path {
             return Err("SSH control-master lease does not match the requested profile".into());
         }
-        if self.direct {
+        if self.route == LeaseRoute::Direct {
             command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
         } else {
             command.arg("-S").arg(&self.master.socket);
@@ -85,14 +110,14 @@ impl SshLease {
 
     pub(in crate::connection) fn require_revalidation(&self) {
         let mut state = self.master.coordination.state.lock().unwrap();
-        if state.process.is_some() {
-            state.needs_probe = true;
+        if let MasterLifecycle::Ready { needs_probe, .. } = &mut state.lifecycle {
+            *needs_probe = true;
             self.master.coordination.changed.notify_all();
         }
     }
 
     pub(in crate::connection) fn control_socket(&self) -> Option<&Path> {
-        (!self.direct).then_some(self.master.socket.as_path())
+        (self.route == LeaseRoute::Multiplexed).then_some(self.master.socket.as_path())
     }
 }
 
@@ -133,182 +158,24 @@ pub(in crate::connection) fn acquire_control_master_cancellable(
         return Ok(None);
     };
     let socket = ssh_profile_control_socket(profile_id, target, config_path.as_deref())?;
-    let lease = ensure_control_master_entry(
-        target,
-        config_path.as_deref(),
-        &socket,
-        ControlLane::Interactive,
-        &cancelled,
-    )?;
+    let lease = ensure_control_master_entry(target, config_path.as_deref(), &socket, &cancelled)?;
     Ok(Some(lease))
 }
 
-// A Unix socket bind must fit `sockaddr_un::sun_path` including its terminator:
-// 104 bytes on Darwin, 108 on Linux. OpenSSH binds a temporary sibling first,
-// appending a dot and sixteen random characters before renaming it into place,
-// so the published path needs that much extra headroom.
-const CONTROL_SOCKET_PATH_BYTES: usize = if cfg!(target_os = "macos") { 104 } else { 108 };
-const CONTROL_SOCKET_TEMPORARY_BYTES: usize = 17;
-
-// Strict, because the bound counts the terminating NUL that must also fit.
-fn control_socket_binds(socket: &Path) -> bool {
-    socket.as_os_str().as_bytes().len() + CONTROL_SOCKET_TEMPORARY_BYTES < CONTROL_SOCKET_PATH_BYTES
-}
-
-// macOS gives every user a per-boot temporary directory roughly 49 bytes long,
-// which leaves no room for the control socket. Fall back to the same short,
-// uid-scoped root the helper already uses for its own runtime socket. The
-// directory is still created 0700 and rejected unless this user owns it, so a
-// pre-created path belonging to anyone else fails closed rather than downgrading.
-const SHORT_CONTROL_ROOT: &str = "/tmp";
-
-pub(in crate::connection) fn ssh_profile_control_socket(
-    profile_id: &str,
-    target: &str,
-    config_path: Option<&str>,
-) -> Result<PathBuf, String> {
-    ssh_profile_control_socket_for_lane(profile_id, target, config_path, ControlLane::Interactive)
-}
-
-pub(super) fn ssh_profile_control_socket_for_lane(
-    profile_id: &str,
-    target: &str,
-    config_path: Option<&str>,
-    lane: ControlLane,
-) -> Result<PathBuf, String> {
-    let preferred = std::env::temp_dir();
-    // A failure here is a real safety refusal, not a sizing problem, so it must
-    // propagate instead of silently relocating the socket.
-    let socket = ssh_profile_control_socket_in(&preferred, profile_id, target, config_path, lane)?;
-    if control_socket_binds(&socket) {
-        return Ok(socket);
-    }
-    if preferred != Path::new(SHORT_CONTROL_ROOT) {
-        let short = ssh_profile_control_socket_in(
-            Path::new(SHORT_CONTROL_ROOT),
-            profile_id,
-            target,
-            config_path,
-            lane,
-        )?;
-        if control_socket_binds(&short) {
-            return Ok(short);
-        }
-    }
-    Err(format!(
-        "SSH control socket path does not fit this platform's {CONTROL_SOCKET_PATH_BYTES}-byte \
-         limit: {}",
-        socket.display()
-    ))
-}
-
-fn ssh_profile_control_socket_in(
-    temporary_root: &Path,
-    profile_id: &str,
-    target: &str,
-    config_path: Option<&str>,
-    lane: ControlLane,
-) -> Result<PathBuf, String> {
-    validate_ssh_target(target)?;
-    let base = temporary_root.join(format!("tmux-agent-ide-{}", unsafe { libc::geteuid() }));
-    ensure_private_directory(&base)?;
-    let directory = base.join(process_socket_namespace());
-    ensure_private_directory(&directory)?;
-    let mut digest = Sha256::new();
-    digest.update(profile_id.as_bytes());
-    digest.update([0]);
-    digest.update(match lane {
-        ControlLane::Interactive => b"interactive".as_slice(),
-        ControlLane::Bulk => b"bulk".as_slice(),
-    });
-    digest.update([0]);
-    digest.update(target.as_bytes());
-    digest.update([0]);
-    if let Some(path) = config_path {
-        digest.update(path.as_bytes());
-    }
-    let key = format!("{:x}", digest.finalize());
-    Ok(directory.join(format!("profile-{}.sock", &key[..20])))
-}
-
-fn process_socket_namespace() -> &'static str {
-    static NAMESPACE: OnceLock<String> = OnceLock::new();
-    NAMESPACE.get_or_init(|| {
-        let nonce = Uuid::new_v4().simple().to_string();
-        format!("ssh-{}-{}", std::process::id(), &nonce[..8])
-    })
-}
-
-fn ensure_private_directory(directory: &Path) -> Result<(), String> {
-    match fs::DirBuilder::new().mode(0o700).create(directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.to_string()),
-    }
-    let metadata = fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
-    if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(
-            "SSH control directory must be an owned, private, non-symlink directory".into(),
-        );
-    }
-    if metadata.mode() & 0o077 != 0 {
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
-            .map_err(|error| error.to_string())?;
-        let secured = fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
-        if !secured.file_type().is_dir()
-            || secured.uid() != unsafe { libc::geteuid() }
-            || secured.mode() & 0o077 != 0
-        {
-            return Err(
-                "SSH control directory must be an owned, private, non-symlink directory".into(),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_control_socket(socket: &Path) -> Result<bool, String> {
-    validated_control_socket_identity(socket).map(|identity| identity.is_some())
-}
-
-fn validated_control_socket_identity(socket: &Path) -> Result<Option<SocketIdentity>, String> {
-    let metadata = match fs::symlink_metadata(socket) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-    if !metadata.file_type().is_socket()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err("refusing an unowned or unsafe SSH control-socket path".into());
-    }
-    Ok(Some(SocketIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    }))
-}
-
-/// Which multiplexed SSH connection a master serves.
-///
-/// The two lanes want opposite transport settings, and because these are
-/// properties of the master rather than of a multiplexed client, the choice has
-/// to be made here.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ControlLane {
-    /// Keystrokes, control frames and terminal output.
-    Interactive,
-    /// File bodies and transfers.
-    Bulk,
-}
+#[path = "control_master/socket.rs"]
+mod socket;
+pub(in crate::connection) use socket::ssh_profile_control_socket;
+#[cfg(test)]
+use socket::{control_socket_binds, ssh_profile_control_socket_in};
+use socket::{validate_control_socket, validated_control_socket_identity};
 
 pub(in crate::connection) fn acquire_control_master_for_socket(
     target: &str,
     config_path: Option<&str>,
     socket: &Path,
-    lane: ControlLane,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<SshLease, String> {
-    ensure_control_master_entry(target, config_path, socket, lane, &|| false)
+    ensure_control_master_entry(target, config_path, socket, cancelled)
 }
 
 fn master_entry(
@@ -336,13 +203,12 @@ fn ensure_control_master_entry(
     target: &str,
     config_path: Option<&str>,
     socket: &Path,
-    lane: ControlLane,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<SshLease, String> {
     crate::perf_log::record_remote_operation(
         crate::perf_log::RemoteOperation::ControlMasterEnsureAttempt,
     );
-    let result = ensure_control_master_entry_inner(target, config_path, socket, lane, cancelled);
+    let result = ensure_control_master_entry_inner(target, config_path, socket, cancelled);
     if result.is_err() {
         crate::perf_log::record_remote_operation(
             crate::perf_log::RemoteOperation::ControlMasterFailure,
@@ -355,7 +221,6 @@ fn ensure_control_master_entry_inner(
     target: &str,
     config_path: Option<&str>,
     socket: &Path,
-    lane: ControlLane,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<SshLease, String> {
     validate_control_socket(socket)?;
@@ -364,9 +229,11 @@ fn ensure_control_master_entry_inner(
     {
         let mut state = master_entry.coordination.state.lock().unwrap();
         match validated_control_socket_identity(socket) {
-            Ok(Some(_)) if state.process.is_none() => {
-                state.process = Some(MasterProcess::External);
-                state.needs_probe = true;
+            Ok(Some(_)) if matches!(state.lifecycle, MasterLifecycle::Idle) => {
+                state.lifecycle = MasterLifecycle::Ready {
+                    process: MasterProcess::External,
+                    needs_probe: true,
+                };
             }
             Ok(_) => {}
             Err(error) => {
@@ -379,14 +246,13 @@ fn ensure_control_master_entry_inner(
     // Only contenders for this exact socket wait here. The process-global map
     // lock has already been released, so a slow ProxyJump/authentication flow
     // for one profile cannot serialize another profile's subprocesses.
-    let outcome =
-        match coordinate_master(&master_entry, target, config_path, socket, lane, cancelled) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                release_control_master(&master_entry, Duration::from_secs(60));
-                return Err(error);
-            }
-        };
+    let outcome = match coordinate_master(&master_entry, target, config_path, socket, cancelled) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            release_control_master(&master_entry, Duration::from_secs(60));
+            return Err(error);
+        }
+    };
     if outcome.reused {
         crate::perf_log::record_remote_operation(
             crate::perf_log::RemoteOperation::ControlMasterReuseSuccess,
@@ -394,7 +260,11 @@ fn ensure_control_master_entry_inner(
     }
     Ok(SshLease {
         master: master_entry,
-        direct: outcome.direct,
+        route: if outcome.direct {
+            LeaseRoute::Direct
+        } else {
+            LeaseRoute::Multiplexed
+        },
     })
 }
 
@@ -403,7 +273,6 @@ fn coordinate_master(
     target: &str,
     config_path: Option<&str>,
     socket: &Path,
-    lane: ControlLane,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<CoordinationOutcome, String> {
     let control_cancelled = || cancelled() || master_is_closing(master);
@@ -442,7 +311,7 @@ fn coordinate_master(
             // sockets are therefore preserved but always bypassed directly.
             MasterProcess::External => external_master_liveness(socket),
         },
-        || establish_control_master(target, config_path, socket, lane, &control_cancelled),
+        || establish_control_master(target, config_path, socket, &control_cancelled),
     )?;
     if let Some(generation) = outcome.owned_generation {
         spawn_master_reaper(master.clone(), generation);
@@ -482,85 +351,103 @@ fn coordinate_master_state(
             return Err("SSH control-master establishment cancelled".into());
         }
         let mut state = master.coordination.state.lock().unwrap();
-        if state.closing {
-            return Err("SSH control masters are closing; retry connection setup".into());
-        }
-        if state.establishing {
-            let (next, _) = master
-                .coordination
-                .changed
-                .wait_timeout(state, Duration::from_millis(25))
-                .unwrap();
-            drop(next);
-            continue;
-        }
-        if let Some(mut process) = state.process.take() {
-            let needs_probe = state.needs_probe;
-            state.establishing = true;
-            master.coordination.changed.notify_all();
-            drop(state);
-            let live = is_live(&mut process, needs_probe);
-            let mut state = master.coordination.state.lock().unwrap();
-            if state.closing {
-                drop(state);
-                dispose_process(master, process);
-                finish_coordination(master);
+        let (mut process, needs_probe) = match &state.lifecycle {
+            MasterLifecycle::Closing { .. } => {
                 return Err("SSH control masters are closing; retry connection setup".into());
             }
-            match live {
-                Ok(MasterLiveness::Live) => {
-                    state.process = Some(process);
-                    state.needs_probe = false;
-                    state.establishing = false;
+            MasterLifecycle::Establishing => {
+                let (next, _) = master
+                    .coordination
+                    .changed
+                    .wait_timeout(state, Duration::from_millis(25))
+                    .unwrap();
+                drop(next);
+                continue;
+            }
+            MasterLifecycle::Idle => {
+                state.lifecycle = MasterLifecycle::Establishing;
+                drop(state);
+                break;
+            }
+            MasterLifecycle::Ready { .. } => {
+                let MasterLifecycle::Ready {
+                    process,
+                    needs_probe,
+                } = std::mem::replace(&mut state.lifecycle, MasterLifecycle::Establishing)
+                else {
+                    unreachable!("ready lifecycle was just matched")
+                };
+                (process, needs_probe)
+            }
+        };
+        master.coordination.changed.notify_all();
+        drop(state);
+        let live = is_live(&mut process, needs_probe);
+        let mut state = master.coordination.state.lock().unwrap();
+        if matches!(state.lifecycle, MasterLifecycle::Closing { .. }) {
+            drop(state);
+            dispose_process(master, process);
+            finish_closing(master);
+            return Err("SSH control masters are closing; retry connection setup".into());
+        }
+        match live {
+            Ok(MasterLiveness::Live) => {
+                state.lifecycle = MasterLifecycle::Ready {
+                    process,
+                    needs_probe: false,
+                };
+                master.coordination.changed.notify_all();
+                return Ok(CoordinationOutcome {
+                    reused: true,
+                    owned_generation: None,
+                    direct: false,
+                });
+            }
+            Ok(MasterLiveness::Replace) => {
+                state.generation = state.generation.wrapping_add(1);
+                drop(state);
+                dispose_process(master, process);
+                break;
+            }
+            Ok(MasterLiveness::ReclassifyExternal) => {
+                state.generation = state.generation.wrapping_add(1);
+                drop(state);
+                dispose_process(master, process);
+                let mut state = master.coordination.state.lock().unwrap();
+                if matches!(state.lifecycle, MasterLifecycle::Closing { .. }) {
+                    state.lifecycle = MasterLifecycle::Closing { in_flight: false };
                     master.coordination.changed.notify_all();
-                    return Ok(CoordinationOutcome {
-                        reused: true,
-                        owned_generation: None,
-                        direct: false,
-                    });
+                    return Err("SSH control masters are closing; retry connection setup".into());
                 }
-                Ok(MasterLiveness::Replace) => {
-                    state.needs_probe = false;
-                    state.generation = state.generation.wrapping_add(1);
-                    drop(state);
-                    dispose_process(master, process);
-                    break;
-                }
-                Ok(MasterLiveness::ReclassifyExternal) => {
-                    state.needs_probe = true;
-                    state.generation = state.generation.wrapping_add(1);
-                    drop(state);
-                    dispose_process(master, process);
-                    let mut state = master.coordination.state.lock().unwrap();
-                    state.process = Some(MasterProcess::External);
-                    state.establishing = false;
-                    master.coordination.changed.notify_all();
-                    drop(state);
-                    continue;
-                }
-                Ok(MasterLiveness::Direct) => {
-                    state.process = Some(process);
-                    state.needs_probe = true;
-                    state.establishing = false;
-                    master.coordination.changed.notify_all();
-                    return Ok(CoordinationOutcome {
-                        reused: false,
-                        owned_generation: None,
-                        direct: true,
-                    });
-                }
-                Err(error) => {
-                    state.process = Some(process);
-                    state.needs_probe = needs_probe;
-                    state.establishing = false;
-                    master.coordination.changed.notify_all();
-                    return Err(error);
-                }
+                state.lifecycle = MasterLifecycle::Ready {
+                    process: MasterProcess::External,
+                    needs_probe: true,
+                };
+                master.coordination.changed.notify_all();
+                drop(state);
+                continue;
+            }
+            Ok(MasterLiveness::Direct) => {
+                state.lifecycle = MasterLifecycle::Ready {
+                    process,
+                    needs_probe: true,
+                };
+                master.coordination.changed.notify_all();
+                return Ok(CoordinationOutcome {
+                    reused: false,
+                    owned_generation: None,
+                    direct: true,
+                });
+            }
+            Err(error) => {
+                state.lifecycle = MasterLifecycle::Ready {
+                    process,
+                    needs_probe,
+                };
+                master.coordination.changed.notify_all();
+                return Err(error);
             }
         }
-        state.establishing = true;
-        drop(state);
-        break;
     }
 
     // Authentication and ProxyJump may take seconds. The per-socket state
@@ -569,23 +456,29 @@ fn coordinate_master_state(
     // other sockets proceed independently.
     let established = establish();
     let mut state = master.coordination.state.lock().unwrap();
-    if state.closing {
+    if matches!(state.lifecycle, MasterLifecycle::Closing { .. }) {
         drop(state);
         if let Ok((process, _)) = established {
             dispose_process(master, process);
         }
-        let mut state = master.coordination.state.lock().unwrap();
-        state.establishing = false;
-        master.coordination.changed.notify_all();
+        finish_closing(master);
         return Err("SSH control masters are closing; retry connection setup".into());
     }
-    state.establishing = false;
-    master.coordination.changed.notify_all();
-    let (process, reused) = established?;
+    let (process, reused) = match established {
+        Ok(value) => value,
+        Err(error) => {
+            state.lifecycle = MasterLifecycle::Idle;
+            master.coordination.changed.notify_all();
+            return Err(error);
+        }
+    };
     state.generation = state.generation.wrapping_add(1);
     let generation = state.generation;
     let owned_generation = matches!(process, MasterProcess::Owned(_)).then_some(generation);
-    state.process = Some(process);
+    state.lifecycle = MasterLifecycle::Ready {
+        process,
+        needs_probe: false,
+    };
     master.coordination.changed.notify_all();
     Ok(CoordinationOutcome {
         reused,
@@ -596,17 +489,33 @@ fn coordinate_master_state(
 
 fn finish_coordination(master: &SshMaster) {
     let mut state = master.coordination.state.lock().unwrap();
-    state.establishing = false;
+    if matches!(state.lifecycle, MasterLifecycle::Establishing) {
+        state.lifecycle = MasterLifecycle::Idle;
+    }
+    master.coordination.changed.notify_all();
+}
+
+fn finish_closing(master: &SshMaster) {
+    let mut state = master.coordination.state.lock().unwrap();
+    if matches!(
+        state.lifecycle,
+        MasterLifecycle::Closing { in_flight: true }
+    ) {
+        state.lifecycle = MasterLifecycle::Closing { in_flight: false };
+    }
     master.coordination.changed.notify_all();
 }
 
 fn master_is_closing(master: &SshMaster) -> bool {
-    master.coordination.state.lock().unwrap().closing
+    matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Closing { .. }
+    )
 }
 
 fn reserve_control_master(master: &SshMaster) -> Result<(), String> {
     let mut state = master.coordination.state.lock().unwrap();
-    if state.closing {
+    if matches!(state.lifecycle, MasterLifecycle::Closing { .. }) {
         return Err("SSH control masters are closing; retry connection setup".into());
     }
     state.leases = state.leases.saturating_add(1);
@@ -619,7 +528,15 @@ fn release_control_master(master: &SshMaster, idle_timeout: Duration) {
     let idle_generation = {
         let mut state = master.coordination.state.lock().unwrap();
         state.leases = state.leases.saturating_sub(1);
-        if state.leases != 0 || !matches!(state.process, Some(MasterProcess::Owned(_))) {
+        if state.leases != 0
+            || !matches!(
+                state.lifecycle,
+                MasterLifecycle::Ready {
+                    process: MasterProcess::Owned(_),
+                    ..
+                }
+            )
+        {
             return;
         }
         state.idle_generation = state.idle_generation.wrapping_add(1);
@@ -636,20 +553,29 @@ fn release_control_master(master: &SshMaster, idle_timeout: Duration) {
                 .coordination
                 .changed
                 .wait_timeout_while(state, idle_timeout, |state| {
-                    !state.closing && state.leases == 0 && state.idle_generation == idle_generation
+                    !matches!(state.lifecycle, MasterLifecycle::Closing { .. })
+                        && state.leases == 0
+                        && state.idle_generation == idle_generation
                 })
                 .unwrap();
             if !wait.timed_out()
-                || state.closing
+                || matches!(state.lifecycle, MasterLifecycle::Closing { .. })
                 || state.leases != 0
                 || state.idle_generation != idle_generation
             {
                 return;
             }
-            let Some(process @ MasterProcess::Owned(_)) = state.process.take() else {
-                return;
+            let lifecycle = std::mem::replace(&mut state.lifecycle, MasterLifecycle::Establishing);
+            let process = match lifecycle {
+                MasterLifecycle::Ready {
+                    process: process @ MasterProcess::Owned(_),
+                    ..
+                } => process,
+                other => {
+                    state.lifecycle = other;
+                    return;
+                }
             };
-            state.establishing = true;
             state.generation = state.generation.wrapping_add(1);
             master.coordination.changed.notify_all();
             drop(state);
@@ -662,13 +588,10 @@ fn establish_control_master(
     target: &str,
     config_path: Option<&str>,
     socket: &Path,
-    lane: ControlLane,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(MasterProcess, bool), String> {
     let mut command = ssh_base(config_path);
-    if lane == ControlLane::Interactive {
-        apply_control_lane_options(&mut command);
-    }
+    apply_control_lane_options(&mut command);
     let mut child = command
         .args([
             "-M",
@@ -695,16 +618,32 @@ fn establish_control_master(
         }
         match validated_control_socket_identity(socket) {
             Ok(Some(socket_identity)) => {
-                crate::perf_log::record_remote_operation(
-                    crate::perf_log::RemoteOperation::ControlMasterEstablishmentSuccess,
-                );
-                return Ok((
-                    MasterProcess::Owned(OwnedMaster {
-                        child,
-                        socket_identity,
-                    }),
-                    false,
-                ));
+                // OpenSSH publishes the socket before the multiplex server is
+                // necessarily ready to accept a client. Returning at inode
+                // creation lets concurrent bridge launches miss the new
+                // master and open redundant TCP connections. The master is
+                // usable only after its own control command succeeds.
+                match check_control_master(target, config_path, socket, cancelled) {
+                    Ok(true) => {
+                        crate::perf_log::record_remote_operation(
+                            crate::perf_log::RemoteOperation::ControlMasterEstablishmentSuccess,
+                        );
+                        return Ok((
+                            MasterProcess::Owned(OwnedMaster {
+                                child,
+                                socket_identity,
+                            }),
+                            false,
+                        ));
+                    }
+                    Ok(false) | Err(ControlCommandError::TimedOut | ControlCommandError::Io(_)) => {
+                    }
+                    Err(ControlCommandError::Cancelled) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err("SSH control-master establishment cancelled".into());
+                    }
+                }
             }
             Ok(None) => {}
             Err(error) => {
@@ -819,15 +758,23 @@ fn spawn_master_reaper(master: SshMaster, generation: u64) {
         .spawn(move || {
             loop {
                 let state = master.coordination.state.lock().unwrap();
-                if state.closing || state.generation != generation {
+                if matches!(state.lifecycle, MasterLifecycle::Closing { .. })
+                    || state.generation != generation
+                {
                     return;
                 }
-                if state.establishing {
+                if matches!(state.lifecycle, MasterLifecycle::Establishing) {
                     let state = master.coordination.changed.wait(state).unwrap();
                     drop(state);
                     continue;
                 }
-                if !matches!(state.process, Some(MasterProcess::Owned(_))) {
+                if !matches!(
+                    state.lifecycle,
+                    MasterLifecycle::Ready {
+                        process: MasterProcess::Owned(_),
+                        ..
+                    }
+                ) {
                     return;
                 }
                 let (state, wait) = master
@@ -845,18 +792,22 @@ fn spawn_master_reaper(master: SshMaster, generation: u64) {
 
 fn reap_owned_master_if_finished(master: &SshMaster, generation: u64) -> bool {
     let mut state = master.coordination.state.lock().unwrap();
-    if state.closing || state.generation != generation {
+    if matches!(state.lifecycle, MasterLifecycle::Closing { .. }) || state.generation != generation
+    {
         return true;
     }
-    let (finished, socket_identity) = match state.process.as_mut() {
-        Some(MasterProcess::Owned(owned)) => (
+    let (finished, socket_identity) = match &mut state.lifecycle {
+        MasterLifecycle::Ready {
+            process: MasterProcess::Owned(owned),
+            ..
+        } => (
             owned.child.try_wait().is_ok_and(|status| status.is_some()),
             owned.socket_identity,
         ),
         _ => return true,
     };
     if finished {
-        state.process = None;
+        state.lifecycle = MasterLifecycle::Idle;
         state.generation = state.generation.wrapping_add(1);
         master.coordination.changed.notify_all();
         drop(state);
@@ -889,13 +840,23 @@ fn remove_owned_control_socket(master: &SshMaster, owned_identity: SocketIdentit
 fn close_master(master: &SshMaster) {
     let process = {
         let mut state = master.coordination.state.lock().unwrap();
-        state.closing = true;
+        let in_flight = matches!(state.lifecycle, MasterLifecycle::Establishing);
+        let lifecycle =
+            std::mem::replace(&mut state.lifecycle, MasterLifecycle::Closing { in_flight });
+        state.generation = state.generation.wrapping_add(1);
         master.coordination.changed.notify_all();
-        while state.establishing {
+        let process = match lifecycle {
+            MasterLifecycle::Ready { process, .. } => Some(process),
+            MasterLifecycle::Idle | MasterLifecycle::Establishing => None,
+            MasterLifecycle::Closing { .. } => return,
+        };
+        while matches!(
+            state.lifecycle,
+            MasterLifecycle::Closing { in_flight: true }
+        ) {
             state = master.coordination.changed.wait(state).unwrap();
         }
-        state.generation = state.generation.wrapping_add(1);
-        state.process.take()
+        process
     };
     if let Some(process) = process {
         dispose_process(master, process);

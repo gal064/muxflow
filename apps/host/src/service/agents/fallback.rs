@@ -12,12 +12,8 @@ use super::{AgentRuntime, HookIngestFailure, ingest::MAX_HOOK_BYTES, publish};
 
 static INGEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum HookReplayDisposition {
-    Applied,
-    Discard,
-    Retain,
-}
+#[cfg(test)]
+pub(super) type HookReplayDisposition = v1::HookIngestDisposition;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct HookReplayReport {
@@ -48,17 +44,17 @@ pub(crate) fn ingest() -> anyhow::Result<usize> {
         match AgentRuntime::global().ingest_hook(&event) {
             Ok(agent_event) => {
                 publish(agent_event);
-                HookReplayDisposition::Applied
+                v1::HookIngestDisposition::Applied
             }
             Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                HookReplayDisposition::Discard
+                v1::HookIngestDisposition::Discarded
             }
             Err(HookIngestFailure::Retryable(error)) => {
                 // The mailbox records only a safe counter at its caller;
                 // consume the internal cause here without logging paths or
                 // configuration details from the persistence failure.
                 drop(error);
-                HookReplayDisposition::Retain
+                v1::HookIngestDisposition::Retryable
             }
         }
     })
@@ -66,7 +62,7 @@ pub(crate) fn ingest() -> anyhow::Result<usize> {
 
 pub(super) fn consume_roots(
     runtime_dirs: &[PathBuf],
-    mut consume_event: impl FnMut(v1::AgentHookEvent) -> HookReplayDisposition,
+    mut consume_event: impl FnMut(v1::AgentHookEvent) -> v1::HookIngestDisposition,
 ) -> anyhow::Result<usize> {
     let mut applied = 0;
     for runtime in runtime_dirs {
@@ -84,7 +80,7 @@ pub(super) fn consume_roots(
 
 pub(super) fn consume(
     runtime_dir: &Path,
-    mut consume: impl FnMut(v1::AgentHookEvent) -> HookReplayDisposition,
+    mut consume: impl FnMut(v1::AgentHookEvent) -> v1::HookIngestDisposition,
 ) -> anyhow::Result<HookReplayReport> {
     let entries = match fs::read_dir(runtime_dir) {
         Ok(entries) => entries,
@@ -144,16 +140,16 @@ pub(super) fn consume(
             }
         };
         match consume(event) {
-            HookReplayDisposition::Applied => {
+            v1::HookIngestDisposition::Applied => {
                 report.applied += 1;
                 let _ = fs::remove_file(entry.path());
             }
-            HookReplayDisposition::Discard => {
+            v1::HookIngestDisposition::Discarded => {
                 // Duplicate and permanently invalid input are idempotent: they
                 // are acknowledged by deletion and never replayed forever.
                 let _ = fs::remove_file(entry.path());
             }
-            HookReplayDisposition::Retain => {
+            v1::HookIngestDisposition::Retryable | v1::HookIngestDisposition::Unspecified => {
                 // Stop the ordered replay here. This is conservative across
                 // independent panes, but it guarantees no later transition
                 // overtakes a retained one and the bounded mailbox keeps the

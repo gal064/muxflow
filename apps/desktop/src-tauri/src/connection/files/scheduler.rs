@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        Arc, Condvar, Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
     },
 };
@@ -276,8 +276,6 @@ impl Drop for ProcessBinding<'_> {
 /// build raw peers this way.
 #[cfg(test)]
 pub(super) struct BulkChild(pub(super) std::process::Child);
-pub(super) struct BulkPermit;
-static BULK_ACTIVE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
 
 struct EngineJob {
     id: String,
@@ -292,6 +290,7 @@ struct EngineJob {
 #[derive(Default)]
 struct EngineState {
     active: usize,
+    active_bindings: HashMap<String, BulkBinding>,
     queue: VecDeque<EngineJob>,
     cancellations: HashMap<String, Arc<CancelState>>,
 }
@@ -304,7 +303,11 @@ struct TransferEngine {
 static TRANSFER_ENGINE: OnceLock<Arc<TransferEngine>> = OnceLock::new();
 
 fn transfer_engine() -> Arc<TransferEngine> {
-    Arc::clone(TRANSFER_ENGINE.get_or_init(|| Arc::new(TransferEngine::default())))
+    Arc::clone(TRANSFER_ENGINE.get_or_init(|| {
+        let engine = Arc::new(TransferEngine::default());
+        spawn_engine_binding_monitor(&engine);
+        engine
+    }))
 }
 
 #[cfg(test)]
@@ -441,7 +444,6 @@ pub(super) fn enqueue_transfer_with_queued(
         crate::perf_log::record_transfer_admission(crate::perf_log::TransferAdmission::Accepted);
         crate::perf_log::record_transfer_state(state.active, state.queue.len());
     }
-    spawn_binding_monitor(&engine, id, binding, cancellation);
     engine.dispatch();
     Ok(())
 }
@@ -521,7 +523,24 @@ impl TransferEngine {
                     );
                     continue;
                 }
+                if let Err(error) = job.binding.validate() {
+                    state.cancellations.remove(&job.id);
+                    drop(state);
+                    terminalize_queued(
+                        job,
+                        Err(failure_for_cancel(
+                            CancelReason::StaleBinding,
+                            TransferPhase::Queued,
+                            error,
+                        )),
+                        CancelReason::StaleBinding,
+                    );
+                    continue;
+                }
                 state.active += 1;
+                state
+                    .active_bindings
+                    .insert(job.id.clone(), job.binding.clone());
                 crate::perf_log::record_transfer_state(state.active, state.queue.len());
                 job
             };
@@ -558,9 +577,9 @@ impl TransferEngine {
                     id: id.clone(),
                     cancellation: Arc::clone(&cancellation),
                 };
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match acquire_bulk_permit(&cancellation) {
-                        Ok(_permit) => match binding.validate() {
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match binding.validate() {
                             Ok(()) => {
                                 cancellation.mark_running();
                                 started();
@@ -571,15 +590,9 @@ impl TransferEngine {
                                 cancellation.phase(),
                                 error,
                             )),
-                        },
-                        Err(error) => Err(failure_for_cancel(
-                            cancellation.reason(),
-                            cancellation.phase(),
-                            error,
-                        )),
-                    }
-                }))
-                .unwrap_or_else(|panic| Err(failure_for_panic(&cancellation, panic)));
+                        }
+                    }))
+                    .unwrap_or_else(|panic| Err(failure_for_panic(&cancellation, panic)));
                 let reason = cancellation.reason();
                 cancellation.mark_finished();
                 // Restore scheduler ownership before crossing the untrusted
@@ -607,6 +620,7 @@ impl TransferEngine {
             let mut state = self.state.lock().unwrap();
             assert!(state.active > 0, "active transfer accounting underflow");
             state.active -= 1;
+            state.active_bindings.remove(&job.id);
             state.cancellations.remove(&job.id);
             crate::perf_log::record_transfer_state(state.active, state.queue.len());
         }
@@ -629,6 +643,7 @@ impl TransferEngine {
         let mut state = self.state.lock().unwrap();
         assert!(state.active > 0, "active transfer accounting underflow");
         state.active -= 1;
+        state.active_bindings.remove(id);
         state.cancellations.remove(id);
         crate::perf_log::record_transfer_state(state.active, state.queue.len());
     }
@@ -777,55 +792,34 @@ fn failure_for_cancel(
     TransferFailure::new(outcome, failure_kind, cleanup_status, error, cleanup_error)
 }
 
-fn spawn_binding_monitor(
-    engine: &Arc<TransferEngine>,
-    id: String,
-    binding: BulkBinding,
-    cancellation: Arc<CancelState>,
-) {
+fn spawn_engine_binding_monitor(engine: &Arc<TransferEngine>) {
     let engine = Arc::downgrade(engine);
-    // Monitoring is a best-effort accelerator; every worker validates its
-    // binding authoritatively before work. Failing to create this helper must
-    // not panic after admission or prevent the transfer worker from producing
-    // its one terminal outcome.
+    // One engine-owned watcher covers the at-most-two active bindings without
+    // creating one polling thread per job. Queued bindings are validated at
+    // their authoritative dequeue boundary instead of being polled.
     let _ = std::thread::Builder::new()
-        .name(format!("bulk-binding-monitor-{id}"))
+        .name("bulk-binding-monitor".into())
         .spawn(move || {
-            while !cancellation.finished.load(Ordering::Acquire) {
-                if let Err(error) = binding.validate() {
-                    if let Some(engine) = engine.upgrade() {
-                        engine.cancel_stale(&id, error);
-                    }
+            loop {
+                let Some(engine) = engine.upgrade() else {
                     return;
+                };
+                let stale = {
+                    let state = engine.state.lock().unwrap();
+                    state
+                        .active_bindings
+                        .iter()
+                        .filter_map(|(id, binding)| {
+                            binding.validate().err().map(|error| (id.clone(), error))
+                        })
+                        .collect::<Vec<_>>()
+                };
+                for (id, error) in stale {
+                    engine.cancel_stale(&id, error);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         });
-}
-
-pub(super) fn acquire_bulk_permit(cancellation: &CancelState) -> Result<BulkPermit, String> {
-    let (lock, changed) = BULK_ACTIVE.get_or_init(|| (Mutex::new(0), Condvar::new()));
-    let mut active = lock.lock().unwrap();
-    while *active >= 2 {
-        if cancellation.is_cancelled() {
-            return Err("bulk transfer cancelled while queued".into());
-        }
-        active = changed
-            .wait_timeout(active, std::time::Duration::from_millis(100))
-            .unwrap()
-            .0;
-    }
-    *active += 1;
-    Ok(BulkPermit)
-}
-
-impl Drop for BulkPermit {
-    fn drop(&mut self) {
-        let (lock, changed) = BULK_ACTIVE.get().expect("bulk permit registry exists");
-        let mut active = lock.lock().unwrap();
-        *active = active.saturating_sub(1);
-        changed.notify_one();
-    }
 }
 
 #[cfg(test)]

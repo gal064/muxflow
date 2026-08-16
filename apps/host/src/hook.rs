@@ -60,10 +60,10 @@ async fn deliver(
             continue;
         }
         match send(&socket, event).await {
-            Ok(DaemonHookDisposition::Applied | DaemonHookDisposition::Discarded) => {
+            Ok(v1::HookIngestDisposition::Applied | v1::HookIngestDisposition::Discarded) => {
                 return Ok(());
             }
-            Ok(DaemonHookDisposition::Retryable) => {
+            Ok(v1::HookIngestDisposition::Retryable | v1::HookIngestDisposition::Unspecified) => {
                 // The daemon answered, so do not probe another candidate and
                 // risk delivering twice. One rejection produces one durable
                 // mailbox entry for the daemon to replay later.
@@ -357,14 +357,10 @@ fn nonempty_json(value: &serde_json::Value) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DaemonHookDisposition {
-    Applied,
-    Discarded,
-    Retryable,
-}
-
-async fn send(socket: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<DaemonHookDisposition> {
+async fn send(
+    socket: &Path,
+    event: &v1::AgentHookEvent,
+) -> anyhow::Result<v1::HookIngestDisposition> {
     let mut stream = timeout(Duration::from_secs(1), UnixStream::connect(socket))
         .await
         .context("private daemon connection timed out")??;
@@ -420,16 +416,12 @@ async fn send(socket: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<Daemo
         let Some(v1::envelope::Payload::Response(response)) = frame.payload else {
             bail!("private daemon returned an invalid hook acknowledgement");
         };
-        if !response.ok {
-            if response.error_code == "hook_ingest_retryable" {
-                return Ok(DaemonHookDisposition::Retryable);
-            }
-            if response.error_code == "hook_ingest_discarded" {
-                return Ok(DaemonHookDisposition::Discarded);
-            }
-            bail!("private daemon rejected hook: {}", response.display_message);
+        let disposition = v1::HookIngestDisposition::try_from(response.hook_ingest_disposition)
+            .unwrap_or_default();
+        if disposition != v1::HookIngestDisposition::Unspecified {
+            return Ok(disposition);
         }
-        return Ok(DaemonHookDisposition::Applied);
+        bail!("private daemon omitted the typed hook-ingest disposition");
     }
 }
 
@@ -600,7 +592,10 @@ fn is_connection_error(error: &anyhow::Error) -> bool {
 mod tests {
     use super::*;
 
-    fn rejecting_daemon(runtime: &Path, error_code: &'static str) -> tokio::task::JoinHandle<()> {
+    fn rejecting_daemon(
+        runtime: &Path,
+        disposition: v1::HookIngestDisposition,
+    ) -> tokio::task::JoinHandle<()> {
         let listener = tokio::net::UnixListener::bind(runtime.join("host.sock")).unwrap();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -631,8 +626,8 @@ mod tests {
                     0,
                     v1::envelope::Payload::Response(v1::Response {
                         ok: false,
-                        error_code: error_code.into(),
                         display_message: "redacted injected rejection".into(),
+                        hook_ingest_disposition: disposition.into(),
                         ..Default::default()
                     }),
                 ),
@@ -721,12 +716,12 @@ mod tests {
 
     #[tokio::test]
     async fn retryable_live_rejection_writes_exactly_one_fallback_event() {
-        let runtime = std::env::current_dir()
-            .unwrap()
-            .join("tmp")
-            .join(format!("phase14-live-retry-{}", uuid::Uuid::new_v4()));
+        let runtime = std::env::temp_dir().join(format!(
+            "ade-hr-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
         fs::create_dir_all(&runtime).unwrap();
-        let server = rejecting_daemon(&runtime, "hook_ingest_retryable");
+        let server = rejecting_daemon(&runtime, v1::HookIngestDisposition::Retryable);
         let event = build_event(
             v1::AgentAdapterKind::Codex,
             br#"{"hook_event_name":"PermissionRequest","event_id":"retry-once"}"#.to_vec(),
@@ -751,7 +746,7 @@ mod tests {
             &uuid::Uuid::new_v4().simple().to_string()[..12]
         ));
         fs::create_dir_all(&runtime).unwrap();
-        let server = rejecting_daemon(&runtime, "hook_ingest_discarded");
+        let server = rejecting_daemon(&runtime, v1::HookIngestDisposition::Discarded);
         let event = build_event(
             v1::AgentAdapterKind::Codex,
             br#"{"hook_event_name":"PermissionRequest","event_id":"discard-once"}"#.to_vec(),

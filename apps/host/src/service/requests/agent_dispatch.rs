@@ -80,25 +80,22 @@ fn handle_inner(
                     response.agent = event.agent.clone();
                     publish(event);
                 }
-                Err(HookIngestFailure::Duplicate) => {
-                    return Ok(response_error(
-                        "hook_ingest_discarded",
-                        "hook event was already handled",
-                    ));
-                }
-                Err(HookIngestFailure::Permanent(error)) => {
-                    drop(error);
-                    return Ok(response_error(
-                        "hook_ingest_discarded",
-                        "hook event was permanently rejected",
-                    ));
-                }
-                Err(HookIngestFailure::Retryable(error)) => {
-                    drop(error);
-                    return Ok(response_error(
-                        "hook_ingest_retryable",
-                        "hook event could not be persisted; retry later",
-                    ));
+                Err(failure) => {
+                    let disposition = failure.disposition();
+                    let message = match failure {
+                        HookIngestFailure::Duplicate => "hook event was already handled",
+                        HookIngestFailure::Permanent(error) => {
+                            drop(error);
+                            "hook event was permanently rejected"
+                        }
+                        HookIngestFailure::Retryable(error) => {
+                            drop(error);
+                            "hook event could not be persisted; retry later"
+                        }
+                    };
+                    let mut response = response_error("agent_hook_ingest_rejected", message);
+                    response.hook_ingest_disposition = disposition.into();
+                    return Ok(response);
                 }
             }
         }
@@ -161,6 +158,11 @@ fn handle_inner(
     Ok(v1::Response {
         ok: true,
         agent: Some(response),
+        hook_ingest_disposition: if operation == v1::Operation::AgentHookIngest {
+            v1::HookIngestDisposition::Applied.into()
+        } else {
+            Default::default()
+        },
         ..Default::default()
     })
 }

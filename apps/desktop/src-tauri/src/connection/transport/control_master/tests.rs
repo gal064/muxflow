@@ -127,16 +127,19 @@ fn dropping_the_final_lease_keeps_the_master_warm_for_control_persist() {
     .unwrap();
     {
         let mut state = master.coordination.state.lock().unwrap();
-        state.process = Some(MasterProcess::External);
+        state.lifecycle = MasterLifecycle::Ready {
+            process: MasterProcess::External,
+            needs_probe: false,
+        };
         state.leases = 1;
     }
     drop(SshLease {
         master: master.clone(),
-        direct: false,
+        route: LeaseRoute::Multiplexed,
     });
     let state = master.coordination.state.lock().unwrap();
     assert!(
-        state.process.is_some(),
+        matches!(state.lifecycle, MasterLifecycle::Ready { .. }),
         "zero leases must not issue an eager exit"
     );
 }
@@ -153,21 +156,30 @@ fn owned_master_expires_after_the_zero_lease_warm_window() {
     {
         let mut state = master.coordination.state.lock().unwrap();
         state.leases = 1;
-        state.process = Some(MasterProcess::Owned(OwnedMaster {
-            child,
-            socket_identity,
-        }));
+        state.lifecycle = MasterLifecycle::Ready {
+            process: MasterProcess::Owned(OwnedMaster {
+                child,
+                socket_identity,
+            }),
+            needs_probe: false,
+        };
     }
 
     release_control_master(&master, Duration::from_millis(30));
 
     let deadline = Instant::now() + Duration::from_secs(1);
-    while (master.coordination.state.lock().unwrap().process.is_some() || socket.exists())
+    while (matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Ready { .. }
+    ) || socket.exists())
         && Instant::now() < deadline
     {
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(master.coordination.state.lock().unwrap().process.is_none());
+    assert!(matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Idle
+    ));
     assert!(!socket.exists());
 }
 
@@ -179,8 +191,10 @@ fn suspect_external_master_is_preserved_and_bypassed_directly() {
     let master = master_entry("suspect-external-host", None, &socket).unwrap();
     {
         let mut state = master.coordination.state.lock().unwrap();
-        state.process = Some(MasterProcess::External);
-        state.needs_probe = true;
+        state.lifecycle = MasterLifecycle::Ready {
+            process: MasterProcess::External,
+            needs_probe: true,
+        };
     }
 
     let outcome = coordinate_master_state(
@@ -196,12 +210,17 @@ fn suspect_external_master_is_preserved_and_bypassed_directly() {
 
     assert!(outcome.direct);
     let state = master.coordination.state.lock().unwrap();
-    assert!(matches!(state.process, Some(MasterProcess::External)));
-    assert!(state.needs_probe);
+    assert!(matches!(
+        state.lifecycle,
+        MasterLifecycle::Ready {
+            process: MasterProcess::External,
+            needs_probe: true,
+        }
+    ));
     drop(state);
     let lease = SshLease {
         master,
-        direct: true,
+        route: LeaseRoute::Direct,
     };
     let mut command = ssh_base(None);
     lease
@@ -290,9 +309,10 @@ fn shutdown_fences_an_already_admitted_establishment() {
     close_master(&master);
     assert!(worker.join().unwrap().is_err());
     let state = master.coordination.state.lock().unwrap();
-    assert!(state.closing);
-    assert!(!state.establishing);
-    assert!(state.process.is_none());
+    assert!(matches!(
+        state.lifecycle,
+        MasterLifecycle::Closing { in_flight: false }
+    ));
 }
 
 #[test]
@@ -301,7 +321,10 @@ fn shutdown_preserves_an_external_master_and_its_socket() {
     let socket = temporary.path().join("external.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let master = master_entry("external-host", Some("jump.conf"), &socket).unwrap();
-    master.coordination.state.lock().unwrap().process = Some(MasterProcess::External);
+    master.coordination.state.lock().unwrap().lifecycle = MasterLifecycle::Ready {
+        process: MasterProcess::External,
+        needs_probe: false,
+    };
 
     close_master(&master);
 
@@ -350,11 +373,13 @@ fn shutdown_cancels_a_check_on_a_nonresponsive_control_socket() {
     let child = Command::new("sh").args(["-c", "sleep 5"]).spawn().unwrap();
     {
         let mut state = master.coordination.state.lock().unwrap();
-        state.process = Some(MasterProcess::Owned(OwnedMaster {
-            child,
-            socket_identity,
-        }));
-        state.needs_probe = true;
+        state.lifecycle = MasterLifecycle::Ready {
+            process: MasterProcess::Owned(OwnedMaster {
+                child,
+                socket_identity,
+            }),
+            needs_probe: true,
+        };
     }
     let worker_master = master.clone();
     let worker_socket = socket.clone();
@@ -364,7 +389,6 @@ fn shutdown_cancels_a_check_on_a_nonresponsive_control_socket() {
             "unresponsive-host",
             None,
             &worker_socket,
-            ControlLane::Interactive,
             &|| false,
         )
     });
@@ -390,30 +414,28 @@ fn replacement_inode_is_reclassified_external_and_bypassed() {
     let owned_identity = validated_control_socket_identity(&socket).unwrap().unwrap();
     let master = master_entry("replacement-host", None, &socket).unwrap();
     let child = Command::new("sh").args(["-c", "sleep 5"]).spawn().unwrap();
-    master.coordination.state.lock().unwrap().process = Some(MasterProcess::Owned(OwnedMaster {
-        child,
-        socket_identity: owned_identity,
-    }));
+    master.coordination.state.lock().unwrap().lifecycle = MasterLifecycle::Ready {
+        process: MasterProcess::Owned(OwnedMaster {
+            child,
+            socket_identity: owned_identity,
+        }),
+        needs_probe: false,
+    };
     drop(first_listener);
     fs::remove_file(&socket).unwrap();
     let replacement_listener = UnixListener::bind(&socket).unwrap();
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
     let replacement_identity = validated_control_socket_identity(&socket).unwrap().unwrap();
 
-    let outcome = coordinate_master(
-        &master,
-        "replacement-host",
-        None,
-        &socket,
-        ControlLane::Interactive,
-        &|| false,
-    )
-    .unwrap();
+    let outcome = coordinate_master(&master, "replacement-host", None, &socket, &|| false).unwrap();
 
     assert!(outcome.direct);
     assert!(matches!(
-        master.coordination.state.lock().unwrap().process,
-        Some(MasterProcess::External)
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Ready {
+            process: MasterProcess::External,
+            ..
+        }
     ));
     assert_eq!(
         validated_control_socket_identity(&socket).unwrap(),
@@ -456,15 +478,21 @@ fn finished_owned_master_is_reaped_and_forgotten() {
     let generation = {
         let mut state = master.coordination.state.lock().unwrap();
         state.generation = 1;
-        state.process = Some(MasterProcess::Owned(OwnedMaster {
-            child,
-            socket_identity,
-        }));
+        state.lifecycle = MasterLifecycle::Ready {
+            process: MasterProcess::Owned(OwnedMaster {
+                child,
+                socket_identity,
+            }),
+            needs_probe: false,
+        };
         state.generation
     };
 
     assert!(reap_owned_master_if_finished(&master, generation));
-    assert!(master.coordination.state.lock().unwrap().process.is_none());
+    assert!(matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Idle
+    ));
 }
 
 #[test]
@@ -476,10 +504,13 @@ fn failed_owned_validation_terminates_child_and_removes_only_its_socket() {
     let socket_identity = validated_control_socket_identity(&socket).unwrap().unwrap();
     let master = master_entry("failed-owned-host", None, &socket).unwrap();
     let child = Command::new("sh").args(["-c", "sleep 5"]).spawn().unwrap();
-    master.coordination.state.lock().unwrap().process = Some(MasterProcess::Owned(OwnedMaster {
-        child,
-        socket_identity,
-    }));
+    master.coordination.state.lock().unwrap().lifecycle = MasterLifecycle::Ready {
+        process: MasterProcess::Owned(OwnedMaster {
+            child,
+            socket_identity,
+        }),
+        needs_probe: false,
+    };
 
     coordinate_master_state(
         &master,
@@ -507,10 +538,13 @@ fn reaper_waits_while_owned_master_validation_temporarily_moves_the_child() {
     let generation = {
         let mut state = master.coordination.state.lock().unwrap();
         state.generation = 1;
-        state.process = Some(MasterProcess::Owned(OwnedMaster {
-            child,
-            socket_identity,
-        }));
+        state.lifecycle = MasterLifecycle::Ready {
+            process: MasterProcess::Owned(OwnedMaster {
+                child,
+                socket_identity,
+            }),
+            needs_probe: false,
+        };
         state.generation
     };
     spawn_master_reaper(master.clone(), generation);
@@ -537,10 +571,17 @@ fn reaper_waits_while_owned_master_validation_temporarily_moves_the_child() {
     worker.join().unwrap().unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    while master.coordination.state.lock().unwrap().process.is_some() && Instant::now() < deadline {
+    while matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Ready { .. }
+    ) && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(master.coordination.state.lock().unwrap().process.is_none());
+    assert!(matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Idle
+    ));
     assert!(!socket.exists(), "reaper left the owned socket behind");
 }
 
@@ -553,10 +594,13 @@ fn owned_shutdown_does_not_unlink_a_replacement_socket_inode() {
     let owned_identity = validated_control_socket_identity(&socket).unwrap().unwrap();
     let master = master_entry("replaced-owned-host", None, &socket).unwrap();
     let child = Command::new("sh").args(["-c", "sleep 5"]).spawn().unwrap();
-    master.coordination.state.lock().unwrap().process = Some(MasterProcess::Owned(OwnedMaster {
-        child,
-        socket_identity: owned_identity,
-    }));
+    master.coordination.state.lock().unwrap().lifecycle = MasterLifecycle::Ready {
+        process: MasterProcess::Owned(OwnedMaster {
+            child,
+            socket_identity: owned_identity,
+        }),
+        needs_probe: false,
+    };
     drop(first_listener);
     fs::remove_file(&socket).unwrap();
     let replacement_listener = UnixListener::bind(&socket).unwrap();
@@ -621,14 +665,8 @@ fn process_namespaces_coexist_and_owner_exit_preserves_the_other_socket() {
         "owner did not publish its namespaced socket"
     );
     let owner_socket = PathBuf::from(fs::read_to_string(&ready).unwrap());
-    let adopter_socket = ssh_profile_control_socket_in(
-        temporary.path(),
-        "profile",
-        "same-host",
-        None,
-        ControlLane::Interactive,
-    )
-    .unwrap();
+    let adopter_socket =
+        ssh_profile_control_socket_in(temporary.path(), "profile", "same-host", None).unwrap();
     assert_ne!(owner_socket, adopter_socket);
     let adopter = UnixListener::bind(&adopter_socket).unwrap();
     fs::set_permissions(&adopter_socket, fs::Permissions::from_mode(0o600)).unwrap();
@@ -646,14 +684,7 @@ fn process_namespace_child_fixture() {
     };
     let root = PathBuf::from(root);
     let ready = PathBuf::from(std::env::var_os("ADE_TEST_NAMESPACE_READY").unwrap());
-    let socket = ssh_profile_control_socket_in(
-        &root,
-        "profile",
-        "same-host",
-        None,
-        ControlLane::Interactive,
-    )
-    .unwrap();
+    let socket = ssh_profile_control_socket_in(&root, "profile", "same-host", None).unwrap();
     let listener = UnixListener::bind(&socket).unwrap();
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
     fs::write(ready, socket.as_os_str().as_bytes()).unwrap();
@@ -673,28 +704,6 @@ fn control_socket_identity_is_profile_scoped() {
 }
 
 #[test]
-fn lane_identity_cannot_collide_with_a_profile_suffix() {
-    let temporary = tempfile::tempdir().unwrap();
-    let bulk = ssh_profile_control_socket_in(
-        temporary.path(),
-        "profile",
-        "same-host",
-        None,
-        ControlLane::Bulk,
-    )
-    .unwrap();
-    let interactive = ssh_profile_control_socket_in(
-        temporary.path(),
-        "profile-bulk",
-        "same-host",
-        None,
-        ControlLane::Interactive,
-    )
-    .unwrap();
-    assert_ne!(bulk, interactive);
-}
-
-#[test]
 fn control_socket_fits_the_platform_bind_limit_from_the_real_temporary_root() {
     let socket = ssh_profile_control_socket("profile-a", "same-host", None).unwrap();
     assert!(
@@ -711,14 +720,7 @@ fn control_socket_relocates_when_the_temporary_root_is_too_long() {
     // the control socket past the 104-byte Darwin bind limit.
     let deep = temporary.path().join("a".repeat(80));
     fs::create_dir(&deep).unwrap();
-    let direct = ssh_profile_control_socket_in(
-        &deep,
-        "profile-a",
-        "same-host",
-        None,
-        ControlLane::Interactive,
-    )
-    .unwrap();
+    let direct = ssh_profile_control_socket_in(&deep, "profile-a", "same-host", None).unwrap();
     assert!(!control_socket_binds(&direct));
     let resolved = ssh_profile_control_socket("profile-a", "same-host", None).unwrap();
     assert!(control_socket_binds(&resolved));
@@ -733,29 +735,11 @@ fn control_directory_rejects_symlink_and_repairs_owned_legacy_mode() {
     let foreign = temporary.path().join("foreign");
     fs::create_dir(&foreign).unwrap();
     std::os::unix::fs::symlink(&foreign, &uid_root).unwrap();
-    assert!(
-        ssh_profile_control_socket_in(
-            temporary.path(),
-            "p",
-            "host",
-            None,
-            ControlLane::Interactive,
-        )
-        .is_err()
-    );
+    assert!(ssh_profile_control_socket_in(temporary.path(), "p", "host", None,).is_err());
     fs::remove_file(&uid_root).unwrap();
     fs::create_dir(&uid_root).unwrap();
     fs::set_permissions(&uid_root, fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(
-        ssh_profile_control_socket_in(
-            temporary.path(),
-            "p",
-            "host",
-            None,
-            ControlLane::Interactive,
-        )
-        .is_ok()
-    );
+    assert!(ssh_profile_control_socket_in(temporary.path(), "p", "host", None,).is_ok());
     assert_eq!(
         fs::metadata(uid_root).unwrap().permissions().mode() & 0o777,
         0o700

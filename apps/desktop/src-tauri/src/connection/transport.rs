@@ -10,8 +10,7 @@ use std::{
 use super::ConnectionSpec;
 
 mod control_master;
-use control_master::ssh_profile_control_socket_for_lane;
-pub(crate) use control_master::{ControlLane, close_all_control_masters};
+pub(crate) use control_master::close_all_control_masters;
 pub(super) use control_master::{
     SshLease, acquire_control_master, acquire_control_master_cancellable,
     acquire_control_master_for_socket, ssh_profile_control_socket,
@@ -140,7 +139,8 @@ pub(super) fn with_bridge_diagnostic(error: String, stderr: Option<&BridgeStderr
 
 pub(crate) fn spawn_bulk_bridge(
     connection: &ConnectionSpec,
-) -> Result<(Child, Option<SshLease>), String> {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Child, String> {
     let measured = matches!(connection, ConnectionSpec::Ssh { .. });
     if measured {
         crate::perf_log::record_remote_operation(
@@ -149,50 +149,40 @@ pub(crate) fn spawn_bulk_bridge(
     }
     let result = (|| {
         connection.validate()?;
-        let (mut command, lease) = match connection {
+        let mut command = match connection {
             ConnectionSpec::Local => {
                 let mut command = Command::new(host_helper_path()?);
                 command.args(["bridge", "--stdio"]);
-                (command, None)
+                command
             }
             ConnectionSpec::Ssh {
-                profile_id,
                 target,
                 config_path,
+                ..
             } => {
                 let mut command = ssh_base(config_path.as_deref());
                 command.arg("-T");
-                // Bulk traffic keeps its own TCP connection so a multi-gigabyte
-                // transfer cannot head-of-line block a keystroke. That does not
-                // require a *fresh* connection per request, which is what this used
-                // to do: opening a 3 KB file paid a full TCP handshake, key
-                // exchange and authentication before a byte moved. A second
-                // persistent master gives the same isolation at no per-request
-                // cost, and a failure to establish it falls back to the previous
-                // one-off connection rather than failing the transfer.
-                let lease = match bulk_control_lease(profile_id, target, config_path.as_deref()) {
-                    Ok(lease) => {
-                        lease.configure(&mut command, target, config_path.as_deref())?;
-                        Some(lease)
-                    }
-                    Err(_) => {
-                        command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
-                        None
-                    }
-                };
+                // The pooled bridge process already owns a persistent bulk TCP
+                // connection. A second SSH control master adds another process
+                // and connection without improving reuse. Keep bulk isolated
+                // from the interactive master and let the bridge pool own it.
+                command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
                 command
                     .arg(target)
                     .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
-                (command, lease)
+                command
             }
         };
+        if cancelled() {
+            return Err("bulk bridge establishment cancelled".into());
+        }
         let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("failed to start independent bulk bridge: {error}"))?;
-        Ok((child, lease))
+        Ok(child)
     })();
     if measured {
         crate::perf_log::record_remote_operation(if result.is_ok() {
@@ -202,19 +192,6 @@ pub(crate) fn spawn_bulk_bridge(
         });
     }
     result
-}
-
-/// Resolves (creating if needed) the persistent master that carries bulk file
-/// I/O. It is a different socket from the control master on purpose: the point
-/// of the bulk lane is a separate TCP connection, not a separate handshake.
-fn bulk_control_lease(
-    profile_id: &str,
-    target: &str,
-    config_path: Option<&str>,
-) -> Result<SshLease, String> {
-    let socket =
-        ssh_profile_control_socket_for_lane(profile_id, target, config_path, ControlLane::Bulk)?;
-    acquire_control_master_for_socket(target, config_path, &socket, ControlLane::Bulk)
 }
 
 pub(super) fn host_helper_path() -> Result<PathBuf, String> {

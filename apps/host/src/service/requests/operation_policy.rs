@@ -7,19 +7,6 @@ pub(crate) enum OperationValue {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OperationFamily {
-    Protocol,
-    Terminal,
-    Tmux,
-    Filesystem,
-    Git,
-    Agent,
-    Daemon,
-    Test,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Access {
     ReadOnly,
     Mutation,
@@ -84,7 +71,6 @@ impl AdmissionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OperationPolicy {
     pub(crate) operation: OperationValue,
-    pub(crate) family: OperationFamily,
     pub(crate) access: Access,
     pub(crate) lane: Lane,
     pub(crate) scheduling: Scheduling,
@@ -96,7 +82,6 @@ impl OperationPolicy {
         let Ok(operation) = v1::Operation::try_from(raw) else {
             return Self {
                 operation: OperationValue::Unknown(raw),
-                family: OperationFamily::Unknown,
                 access: Access::ReadOnly,
                 lane: Lane::Either,
                 scheduling: Scheduling::Inline,
@@ -104,23 +89,20 @@ impl OperationPolicy {
             };
         };
 
-        let (family, access, lane, scheduling, handler) = match operation {
+        let (access, lane, scheduling, handler) = match operation {
             v1::Operation::Unspecified => (
-                OperationFamily::Protocol,
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Inline,
                 Handler::Unsupported,
             ),
             v1::Operation::FullSnapshot | v1::Operation::Subscribe | v1::Operation::Resync => (
-                OperationFamily::Protocol,
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Inline,
                 Handler::Snapshot,
             ),
             v1::Operation::ShutdownDaemon => (
-                OperationFamily::Daemon,
                 Access::Mutation,
                 Lane::Control,
                 Scheduling::Inline,
@@ -132,28 +114,24 @@ impl OperationPolicy {
             | v1::Operation::SetTerminalVisibility
             | v1::Operation::RequestTerminalSeed
             | v1::Operation::SelectTerminalSession => (
-                OperationFamily::Terminal,
                 Access::Mutation,
                 Lane::Control,
                 Scheduling::Inline,
                 Handler::Terminal,
             ),
             v1::Operation::TmuxAction => (
-                OperationFamily::Tmux,
                 Access::Mutation,
                 Lane::Control,
                 Scheduling::Inline,
                 Handler::TmuxAction,
             ),
             v1::Operation::ResolveActiveRoot => (
-                OperationFamily::Filesystem,
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Detached,
                 Handler::ActiveRoot,
             ),
             v1::Operation::ListDirectory | v1::Operation::ReadFile => (
-                OperationFamily::Filesystem,
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Detached,
@@ -163,7 +141,6 @@ impl OperationPolicy {
             | v1::Operation::UnwatchDirectory
             | v1::Operation::FileMutation
             | v1::Operation::WriteFile => (
-                OperationFamily::Filesystem,
                 Access::Mutation,
                 Lane::Control,
                 Scheduling::Detached,
@@ -180,21 +157,18 @@ impl OperationPolicy {
             | v1::Operation::WriteTerminalUploadChunk
             | v1::Operation::CommitTerminalUpload
             | v1::Operation::CancelTerminalUpload => (
-                OperationFamily::Filesystem,
                 Access::Mutation,
                 Lane::Bulk,
                 Scheduling::Inline,
                 Handler::Filesystem,
             ),
             v1::Operation::ReconcileTerminalUpload => (
-                OperationFamily::Filesystem,
                 Access::ReadOnly,
                 Lane::Bulk,
                 Scheduling::Inline,
                 Handler::Filesystem,
             ),
             v1::Operation::GitStatus | v1::Operation::GitDiff => (
-                OperationFamily::Git,
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Detached,
@@ -205,14 +179,12 @@ impl OperationPolicy {
             | v1::Operation::PrepareGitDiscard
             | v1::Operation::GitMutation
             | v1::Operation::GitCommit => (
-                OperationFamily::Git,
                 Access::Mutation,
                 Lane::Control,
                 Scheduling::Detached,
                 Handler::Git,
             ),
             v1::Operation::AgentSnapshot => (
-                OperationFamily::Agent,
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Inline,
@@ -223,7 +195,6 @@ impl OperationPolicy {
             | v1::Operation::AgentHookIngest
             | v1::Operation::AgentHookManagement
             | v1::Operation::AgentHostNaming => (
-                OperationFamily::Agent,
                 Access::Mutation,
                 Lane::Control,
                 Scheduling::Inline,
@@ -232,7 +203,6 @@ impl OperationPolicy {
             v1::Operation::TestDelay
             | v1::Operation::TestInjectGap
             | v1::Operation::TestOverflow => (
-                OperationFamily::Test,
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Inline,
@@ -242,7 +212,6 @@ impl OperationPolicy {
 
         Self {
             operation: OperationValue::Known(operation),
-            family,
             access,
             lane,
             scheduling,
@@ -287,7 +256,6 @@ mod tests {
 
     fn assert_policy(
         operation: v1::Operation,
-        family: OperationFamily,
         access: Access,
         lane: Lane,
         scheduling: Scheduling,
@@ -297,7 +265,6 @@ mod tests {
             OperationPolicy::for_raw(operation.into()),
             OperationPolicy {
                 operation: OperationValue::Known(operation),
-                family,
                 access,
                 lane,
                 scheduling,
@@ -316,61 +283,57 @@ mod tests {
             Snapshot as SH, Terminal as TH, Test as XH, TmuxAction as MH, Unsupported as UH,
         };
         use Lane::{Bulk as B, Control as C};
-        use OperationFamily::{
-            Agent as A, Daemon as D, Filesystem as F, Git as G, Protocol as P, Terminal as T,
-            Test as X, Tmux as Mx,
-        };
         use Scheduling::{Detached as Dd, Inline as I};
         use v1::Operation::*;
 
-        assert_policy(Unspecified, P, R, C, I, UH);
-        assert_policy(FullSnapshot, P, R, C, I, SH);
-        assert_policy(Subscribe, P, R, C, I, SH);
-        assert_policy(AttachTerminal, T, M, C, I, TH);
-        assert_policy(TerminalInput, T, M, C, I, TH);
-        assert_policy(ResizeTerminal, T, M, C, I, TH);
-        assert_policy(Resync, P, R, C, I, SH);
+        assert_policy(Unspecified, R, C, I, UH);
+        assert_policy(FullSnapshot, R, C, I, SH);
+        assert_policy(Subscribe, R, C, I, SH);
+        assert_policy(AttachTerminal, M, C, I, TH);
+        assert_policy(TerminalInput, M, C, I, TH);
+        assert_policy(ResizeTerminal, M, C, I, TH);
+        assert_policy(Resync, R, C, I, SH);
         // Shutdown is intercepted before request registration, but remains a mutation.
-        assert_policy(ShutdownDaemon, D, M, C, I, DH);
-        assert_policy(TmuxAction, Mx, M, C, I, MH);
-        assert_policy(SetTerminalVisibility, T, M, C, I, TH);
-        assert_policy(RequestTerminalSeed, T, M, C, I, TH);
-        assert_policy(ResolveActiveRoot, F, R, C, Dd, AR);
-        assert_policy(ListDirectory, F, R, C, Dd, FH);
-        assert_policy(WatchDirectory, F, M, C, Dd, FH);
-        assert_policy(UnwatchDirectory, F, M, C, Dd, FH);
-        assert_policy(FileMutation, F, M, C, Dd, FH);
-        assert_policy(ReadFile, F, R, C, Dd, FH);
-        assert_policy(WriteFile, F, M, C, Dd, FH);
-        assert_policy(StartDownload, F, M, B, I, FH);
-        assert_policy(ReadDownloadChunk, F, M, B, I, FH);
-        assert_policy(CancelDownload, F, M, B, I, FH);
-        assert_policy(BeginFileWrite, F, M, B, I, FH);
-        assert_policy(WriteFileChunk, F, M, B, I, FH);
-        assert_policy(CommitFileWrite, F, M, B, I, FH);
-        assert_policy(CancelFileWrite, F, M, B, I, FH);
-        assert_policy(GitStatus, G, R, C, Dd, GH);
-        assert_policy(WatchGit, G, M, C, Dd, GH);
-        assert_policy(UnwatchGit, G, M, C, Dd, GH);
-        assert_policy(GitDiff, G, R, C, Dd, GH);
-        assert_policy(PrepareGitDiscard, G, M, C, Dd, GH);
-        assert_policy(GitMutation, G, M, C, Dd, GH);
-        assert_policy(GitCommit, G, M, C, Dd, GH);
-        assert_policy(AgentSnapshot, A, R, C, I, AH);
-        assert_policy(AgentAction, A, M, C, I, AH);
-        assert_policy(AgentMarkSeen, A, M, C, I, AH);
-        assert_policy(AgentHookIngest, A, M, C, I, AH);
-        assert_policy(AgentHookManagement, A, M, C, I, AH);
-        assert_policy(PrepareTerminalUpload, F, M, B, I, FH);
-        assert_policy(WriteTerminalUploadChunk, F, M, B, I, FH);
-        assert_policy(CommitTerminalUpload, F, M, B, I, FH);
-        assert_policy(CancelTerminalUpload, F, M, B, I, FH);
-        assert_policy(ReconcileTerminalUpload, F, R, B, I, FH);
-        assert_policy(AgentHostNaming, A, M, C, I, AH);
-        assert_policy(SelectTerminalSession, T, M, C, I, TH);
-        assert_policy(TestDelay, X, R, C, I, XH);
-        assert_policy(TestInjectGap, X, R, C, I, XH);
-        assert_policy(TestOverflow, X, R, C, I, XH);
+        assert_policy(ShutdownDaemon, M, C, I, DH);
+        assert_policy(TmuxAction, M, C, I, MH);
+        assert_policy(SetTerminalVisibility, M, C, I, TH);
+        assert_policy(RequestTerminalSeed, M, C, I, TH);
+        assert_policy(ResolveActiveRoot, R, C, Dd, AR);
+        assert_policy(ListDirectory, R, C, Dd, FH);
+        assert_policy(WatchDirectory, M, C, Dd, FH);
+        assert_policy(UnwatchDirectory, M, C, Dd, FH);
+        assert_policy(FileMutation, M, C, Dd, FH);
+        assert_policy(ReadFile, R, C, Dd, FH);
+        assert_policy(WriteFile, M, C, Dd, FH);
+        assert_policy(StartDownload, M, B, I, FH);
+        assert_policy(ReadDownloadChunk, M, B, I, FH);
+        assert_policy(CancelDownload, M, B, I, FH);
+        assert_policy(BeginFileWrite, M, B, I, FH);
+        assert_policy(WriteFileChunk, M, B, I, FH);
+        assert_policy(CommitFileWrite, M, B, I, FH);
+        assert_policy(CancelFileWrite, M, B, I, FH);
+        assert_policy(GitStatus, R, C, Dd, GH);
+        assert_policy(WatchGit, M, C, Dd, GH);
+        assert_policy(UnwatchGit, M, C, Dd, GH);
+        assert_policy(GitDiff, R, C, Dd, GH);
+        assert_policy(PrepareGitDiscard, M, C, Dd, GH);
+        assert_policy(GitMutation, M, C, Dd, GH);
+        assert_policy(GitCommit, M, C, Dd, GH);
+        assert_policy(AgentSnapshot, R, C, I, AH);
+        assert_policy(AgentAction, M, C, I, AH);
+        assert_policy(AgentMarkSeen, M, C, I, AH);
+        assert_policy(AgentHookIngest, M, C, I, AH);
+        assert_policy(AgentHookManagement, M, C, I, AH);
+        assert_policy(PrepareTerminalUpload, M, B, I, FH);
+        assert_policy(WriteTerminalUploadChunk, M, B, I, FH);
+        assert_policy(CommitTerminalUpload, M, B, I, FH);
+        assert_policy(CancelTerminalUpload, M, B, I, FH);
+        assert_policy(ReconcileTerminalUpload, R, B, I, FH);
+        assert_policy(AgentHostNaming, M, C, I, AH);
+        assert_policy(SelectTerminalSession, M, C, I, TH);
+        assert_policy(TestDelay, R, C, I, XH);
+        assert_policy(TestInjectGap, R, C, I, XH);
+        assert_policy(TestOverflow, R, C, I, XH);
     }
 
     #[test]

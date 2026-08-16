@@ -143,6 +143,14 @@ message Response {
   AgentResponse agent = 9;
   PublicationOutcome publication_outcome = 10;
   bool cleanup_failed = 11;
+  HookIngestDisposition hook_ingest_disposition = 12;
+}
+
+enum HookIngestDisposition {
+  HOOK_INGEST_DISPOSITION_UNSPECIFIED = 0;
+  HOOK_INGEST_DISPOSITION_APPLIED = 1;
+  HOOK_INGEST_DISPOSITION_DISCARDED = 2;
+  HOOK_INGEST_DISPOSITION_RETRYABLE = 3;
 }
 
 enum PublicationOutcome {

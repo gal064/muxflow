@@ -20,6 +20,15 @@ pub(crate) enum HookIngestFailure {
     Retryable(anyhow::Error),
 }
 
+impl HookIngestFailure {
+    pub(crate) fn disposition(&self) -> v1::HookIngestDisposition {
+        match self {
+            Self::Duplicate | Self::Permanent(_) => v1::HookIngestDisposition::Discarded,
+            Self::Retryable(_) => v1::HookIngestDisposition::Retryable,
+        }
+    }
+}
+
 impl AgentRuntime {
     /// Older durable input always drains before a newer live hook is accepted.
     pub(crate) fn ingest_live_hook(&self, event: &v1::AgentHookEvent) -> HookIngestResult {
