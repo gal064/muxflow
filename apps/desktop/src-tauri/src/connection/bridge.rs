@@ -6,7 +6,8 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, envelope, read_frame_sync,
+    CAP_TERMINAL_OUTPUT_CREDIT, HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, envelope,
+    read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -68,6 +69,9 @@ pub(super) fn supervise_bridge(
             Err(error) => send_event(&channel, TerminalEvent::Error { message: error }),
         }
         client.ready.store(false, Ordering::Release);
+        if let Some(window) = client.delivery_window.lock().unwrap().take() {
+            window.close();
+        }
         if let Some(writer) = client.writer.lock().unwrap().take() {
             writer.close();
         }
@@ -173,6 +177,23 @@ fn run_bridge_once(
     // the renderer to discard same-server generation watermarks before any seed
     // or output from the new connection is delivered.
     super::files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
+    let credit_negotiated = hello.capabilities & CAP_TERMINAL_OUTPUT_CREDIT != 0;
+    if credit_negotiated
+        && (hello.terminal_output_window_bytes == 0 || hello.terminal_output_window_records == 0)
+    {
+        return Err("host negotiated terminal output credit without a bounded window".into());
+    }
+    if hello.terminal_output_window_bytes > super::delivery_window::NATIVE_DELIVERY_WINDOW_BYTES {
+        return Err("host terminal output window exceeds the native 2 MiB delivery bound".into());
+    }
+    let next_delivery = credit_negotiated.then(|| super::DeliveryWindow::new(terminal_epoch));
+    let previous = {
+        let mut delivery = client.delivery_window.lock().unwrap();
+        std::mem::replace(&mut *delivery, next_delivery)
+    };
+    if let Some(previous) = previous {
+        previous.close();
+    }
     client
         .terminal_epoch
         .store(terminal_epoch, Ordering::Release);
@@ -299,6 +320,7 @@ fn run_bridge_once(
         control_writer.close();
         return Err("terminal bridge stopped before becoming ready".into());
     }
+    super::flush_delivery_ack(client)?;
     *connected_at = Some(Instant::now());
     read_protocol_stream(
         reader,
@@ -608,6 +630,10 @@ fn process_event(
     let Some(Payload::Event(event)) = frame.payload else {
         return Ok((last_sequence, None));
     };
+    let delivery_charge = super::HostCharge {
+        bytes: event.terminal_delivery_bytes,
+        records: event.terminal_delivery_records,
+    };
     validate_event_sequence(last_sequence, frame.sequence)?;
     let event_sequence = frame.sequence;
     let mut scoped_seed = None;
@@ -719,7 +745,7 @@ fn process_event(
                     data: terminal.data,
                 }
             };
-            send_protocol_event(channel, event_sequence, value)?;
+            send_charged_protocol_event(channel, event_sequence, value, delivery_charge)?;
         }
         v1::EventKind::TerminalExit => send_protocol_event(
             channel,
@@ -739,7 +765,7 @@ fn process_event(
                 v1::PaneResourceState::Unspecified => "unspecified",
             }
             .into();
-            send_protocol_event(
+            send_charged_protocol_event(
                 channel,
                 event_sequence,
                 TerminalEvent::PaneResource {
@@ -753,6 +779,7 @@ fn process_event(
                     serialized_snapshot: resource.serialized_snapshot,
                     raw_tail: resource.raw_tail,
                 },
+                delivery_charge,
             )?;
         }
         v1::EventKind::ActiveRoot
@@ -811,7 +838,16 @@ fn send_protocol_event(
     sequence: u64,
     event: TerminalEvent,
 ) -> Result<(), String> {
-    channel.send(encode_event_with_sequence(event, sequence))
+    send_charged_protocol_event(channel, sequence, event, super::HostCharge::default())
+}
+
+fn send_charged_protocol_event(
+    channel: &TerminalEventChannel,
+    sequence: u64,
+    event: TerminalEvent,
+    charge: super::HostCharge,
+) -> Result<(), String> {
+    channel.send_charged(encode_event_with_sequence(event, sequence), charge)
 }
 
 pub(super) fn scoped_terminal_recovery(scope: &str) -> Option<String> {

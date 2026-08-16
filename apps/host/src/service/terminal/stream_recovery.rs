@@ -1,13 +1,9 @@
 use std::{collections::HashSet, sync::mpsc};
 
-use super::{CommandBlock, InputCompletion, PaneSeedState, StreamControl, StreamState};
+use super::{CommandBlock, PaneSeedState, StreamControl, StreamState};
 
 impl StreamState {
-    pub(in crate::service::terminal) fn apply_control(
-        &mut self,
-        control: StreamControl,
-        input_completion: &mpsc::Sender<InputCompletion>,
-    ) {
+    pub(in crate::service::terminal) fn apply_control(&mut self, control: StreamControl) {
         match control {
             StreamControl::Membership { pane_ids } => {
                 let desired: HashSet<_> = pane_ids.iter().map(String::as_str).collect();
@@ -21,16 +17,6 @@ impl StreamState {
                     self.pane_states.remove(&pane_id);
                     if self.expected_capture.as_deref() == Some(&pane_id) {
                         self.expected_capture = None;
-                    }
-                    if self
-                        .expected_input
-                        .as_ref()
-                        .is_some_and(|(_, expected_pane)| expected_pane == &pane_id)
-                    {
-                        self.abort_pending_input(
-                            input_completion,
-                            "terminal pane membership ended before input completed",
-                        );
                     }
                     if self.expected_resume.as_deref() == Some(&pane_id) {
                         self.expected_resume = None;
@@ -54,10 +40,6 @@ impl StreamState {
                         self.pending_metadata = None;
                     }
                     if self.active_scope() == pane_id {
-                        self.abort_pending_input(
-                            input_completion,
-                            "terminal pane membership ended before input completed",
-                        );
                         self.command_block = CommandBlock::None;
                     }
                 }
@@ -74,17 +56,8 @@ impl StreamState {
         }
     }
 
-    pub(super) fn resnapshot_all(
-        &mut self,
-        writer: &mpsc::Sender<super::super::ControlWrite>,
-        input_completion: &mpsc::Sender<InputCompletion>,
-    ) {
-        self.abort_pending_input(
-            input_completion,
-            "terminal parser recovery interrupted input completion",
-        );
+    pub(super) fn resnapshot_all(&mut self, writer: &mpsc::Sender<super::super::ControlWrite>) {
         self.expected_capture = None;
-        self.expected_input = None;
         self.expected_resume = None;
         self.pending_alternate = None;
         self.pending_metadata = None;
@@ -101,23 +74,5 @@ impl StreamState {
             // delivering again.
             super::request_capture(writer, pane_id, self.flow.resume_before_capture(pane_id));
         }
-    }
-
-    pub(super) fn abort_pending_input(
-        &mut self,
-        input_completion: &mpsc::Sender<InputCompletion>,
-        reason: &str,
-    ) {
-        let input_id = match &self.command_block {
-            CommandBlock::Input { input_id, .. } => Some(*input_id),
-            _ => self.expected_input.as_ref().map(|(input_id, _)| *input_id),
-        };
-        if let Some(input_id) = input_id {
-            let _ = input_completion.send((input_id, Err(reason.to_owned())));
-        }
-        if matches!(self.command_block, CommandBlock::Input { .. }) {
-            self.command_block = CommandBlock::None;
-        }
-        self.expected_input = None;
     }
 }

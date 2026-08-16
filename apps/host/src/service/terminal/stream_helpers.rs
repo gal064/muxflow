@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::terminal::OutputCharge;
 
 pub(in crate::service::terminal) fn with_active_resources<T>(
     resources: &Arc<Mutex<PaneResourceStore>>,
@@ -37,6 +38,7 @@ pub(super) fn emit_terminal(
     pane_id: String,
     data: Vec<u8>,
     generation: u64,
+    output_credit: &OutputCredit,
 ) {
     if matches!(
         kind,
@@ -53,6 +55,11 @@ pub(super) fn emit_terminal(
     // back to that reader; tmux can then apply its own pause/continue protocol.
     // A nonblocking send here turned a normal 100 ms / 100 Mbit bandwidth-delay
     // window into a full-connection resync as soon as 1,024 records accumulated.
+    let charge = OutputCharge::terminal(data.len());
+    let Ok(reservation) = output_credit.reserve(charge) else {
+        overflowed.store(true, Ordering::Release);
+        return;
+    };
     if sender
         .blocking_send(SequencerControl::OrderedEvent(v1::HostEvent {
             kind: kind.into(),
@@ -61,11 +68,15 @@ pub(super) fn emit_terminal(
                 data,
                 generation,
             }),
+            terminal_delivery_bytes: charge.bytes,
+            terminal_delivery_records: charge.records,
             ..Default::default()
         }))
         .is_err()
     {
         overflowed.store(true, Ordering::Release);
+    } else {
+        reservation.commit();
     }
 }
 

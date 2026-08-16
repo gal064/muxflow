@@ -15,18 +15,22 @@ use tmux_agent_protocol::v1;
 #[cfg(test)]
 use tmux_control::{CommandTag, ScreenSeeder};
 use tmux_control::{
-    MAX_INPUT_REQUEST_BYTES, PaneResourceState as StoredResourceState, PaneResourceStore,
-    VisibilityCheckpoint,
+    PaneResourceState as StoredResourceState, PaneResourceStore, VisibilityCheckpoint,
 };
 use tokio::sync::mpsc;
 
+use super::SequencerControl;
 use super::snapshot::tmux_command;
-use super::{SequencerControl, TERMINAL_INPUT_QUEUE, emit_event};
 
 mod flow_control;
 use flow_control::{FlowControl, resume_command, take_injected_rejection};
 mod input;
-use input::{InputDispatch, run_input_dispatch};
+mod input_client;
+use input_client::PersistentInputClient;
+mod output_credit;
+pub(super) use output_credit::{
+    OUTPUT_WINDOW_BYTES, OUTPUT_WINDOW_RECORDS, OutputCharge, OutputCredit,
+};
 mod seed;
 #[cfg(test)]
 use seed::{build_seed, parse_capture_metadata};
@@ -43,7 +47,6 @@ pub(super) struct TerminalAttachment {
     stdin: Arc<Mutex<ChildStdin>>,
     child: Arc<Mutex<Child>>,
     stopped: Arc<AtomicBool>,
-    input_tx: std_mpsc::SyncSender<InputDispatch>,
     stream_tx: std_mpsc::Sender<StreamControl>,
     flow: Arc<FlowControl>,
     /// The last size tmux was told for *this* client, so it is not told again.
@@ -57,7 +60,6 @@ pub(super) struct TerminalAttachment {
     /// it remembers one. So the carry-across is needed exactly once per client
     /// per size, and a workspace switched away from and back costs nothing.
     last_size: Option<(u32, u32)>,
-    next_input_id: u64,
 }
 
 pub(super) struct VisibilityChange {
@@ -74,6 +76,7 @@ impl TerminalAttachment {
         overflowed: Arc<AtomicBool>,
         resources: Arc<Mutex<PaneResourceStore>>,
         terminal_generation: Arc<AtomicU64>,
+        output_credit: Arc<OutputCredit>,
     ) -> anyhow::Result<Self> {
         validate_tmux_id(session_id, '$')?;
         if pane_ids.is_empty() {
@@ -119,36 +122,6 @@ impl TerminalAttachment {
         }
 
         let stopped = Arc::new(AtomicBool::new(false));
-        let (input_tx, input_rx) = std_mpsc::sync_channel(TERMINAL_INPUT_QUEUE);
-        let (input_completion_tx, input_completion_rx) = std_mpsc::channel();
-        let input_stdin = Arc::clone(&stdin);
-        // Input admission is fire-and-forget from the desktop. A later action
-        // barrier receives the first write failure, while the event stream
-        // immediately requests recovery because the user's screen no longer
-        // shows what they believe they typed.
-        let failure_tx = event_tx.clone();
-        let failure_overflowed = Arc::clone(&overflowed);
-        std::thread::Builder::new()
-            .name(format!("host-tmux-input-{session_id}"))
-            .spawn(move || {
-                run_input_dispatch(
-                    input_rx,
-                    input_stdin,
-                    input_completion_rx,
-                    |pane_id, error| {
-                        emit_event(
-                            &failure_tx,
-                            &failure_overflowed,
-                            v1::HostEvent {
-                                kind: v1::EventKind::TerminalResnapshotRequired.into(),
-                                scope: pane_id.to_owned(),
-                                detail: format!("terminal input was not written: {error}"),
-                                ..Default::default()
-                            },
-                        );
-                    },
-                )
-            })?;
         let (stream_tx, stream_rx) = std_mpsc::channel();
         let reader_stopped = Arc::clone(&stopped);
         let reader_stop_signal = Arc::clone(&stopped);
@@ -170,7 +143,7 @@ impl TerminalAttachment {
                     stopped: reader_stop_signal,
                     controls: stream_rx,
                     flow: reader_flow,
-                    input_completion: input_completion_tx,
+                    output_credit,
                 });
                 reader_stopped.store(true, Ordering::Release);
             })?;
@@ -179,62 +152,10 @@ impl TerminalAttachment {
             stdin,
             child: Arc::new(Mutex::new(child)),
             stopped,
-            input_tx,
             stream_tx,
             flow,
             last_size: None,
-            next_input_id: 0,
         })
-    }
-
-    /// Queues one input request. Returning `Ok` means the bytes are ordered
-    /// behind everything already queued for this client, not that tmux has
-    /// accepted them; the input barrier taken before every tmux action and
-    /// resize is the point at which that becomes true.
-    pub(super) fn send_input(&mut self, pane_id: &str, data: &[u8]) -> anyhow::Result<()> {
-        validate_tmux_id(pane_id, '%')?;
-        if self.stopped.load(Ordering::Acquire) {
-            bail!("terminal control stream is disconnected");
-        }
-        if data.len() > MAX_INPUT_REQUEST_BYTES {
-            bail!("terminal input request exceeds the 1 MiB atomic commit limit");
-        }
-        if data.is_empty() {
-            return Ok(());
-        }
-        self.next_input_id = self
-            .next_input_id
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("terminal input correlation sequence exhausted"))?;
-        self.input_tx
-            .try_send(InputDispatch::Bytes {
-                input_id: self.next_input_id,
-                pane_id: pane_id.to_owned(),
-                data: data.to_vec(),
-            })
-            .map_err(|error| match error {
-                std_mpsc::TrySendError::Full(_) => {
-                    crate::diagnostics::record_terminal_input_backpressure();
-                    anyhow::anyhow!(
-                        "terminal input queue is full; caller must retry instead of dropping bytes"
-                    )
-                }
-                std_mpsc::TrySendError::Disconnected(_) => {
-                    anyhow::anyhow!("terminal input dispatcher is disconnected")
-                }
-            })?;
-        Ok(())
-    }
-
-    fn flush_input(&mut self) -> anyhow::Result<()> {
-        let (sender, receiver) = std_mpsc::sync_channel(1);
-        self.input_tx
-            .send(InputDispatch::Barrier(sender))
-            .map_err(|_| anyhow::anyhow!("terminal input dispatcher is disconnected"))?;
-        receiver
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| anyhow::anyhow!("terminal input flush timed out"))?
-            .map_err(anyhow::Error::msg)
     }
 
     /// Resizes the control client, which resizes the *user's* windows.
@@ -354,7 +275,6 @@ impl TerminalAttachment {
 
     pub(super) fn stop(&mut self) {
         self.stopped.store(true, Ordering::Release);
-        let _ = self.input_tx.try_send(InputDispatch::Stop);
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
@@ -434,10 +354,12 @@ pub(super) struct TerminalClients {
     last_size: Option<(u32, u32)>,
     resources: Arc<Mutex<PaneResourceStore>>,
     generation: Arc<AtomicU64>,
+    input: Option<PersistentInputClient>,
+    output_credit: Arc<OutputCredit>,
 }
 
 impl TerminalClients {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(output_credit: Arc<OutputCredit>) -> Self {
         Self {
             clients: HashMap::new(),
             visible_session: None,
@@ -448,6 +370,8 @@ impl TerminalClients {
                 16 * 1024 * 1024,
             ))),
             generation: Arc::new(AtomicU64::new(0)),
+            input: None,
+            output_credit,
         }
     }
 
@@ -481,6 +405,7 @@ impl TerminalClients {
             register_mounted_panes(&mut resources, pane_ids, make_visible, generation);
         }
         if committed.is_some() {
+            self.ensure_input_client(session_id, &event_tx, &overflowed)?;
             let update = self
                 .clients
                 .get_mut(session_id)
@@ -501,13 +426,14 @@ impl TerminalClients {
             }
             return Ok(());
         }
-        let attachment = match TerminalAttachment::start(
+        let mut attachment = match TerminalAttachment::start(
             session_id,
             pane_ids,
-            event_tx,
-            overflowed,
+            event_tx.clone(),
+            Arc::clone(&overflowed),
             Arc::clone(&self.resources),
             Arc::clone(&self.generation),
+            Arc::clone(&self.output_credit),
         ) {
             Ok(attachment) => attachment,
             Err(error) => {
@@ -515,6 +441,11 @@ impl TerminalClients {
                 return Err(error);
             }
         };
+        if let Err(error) = self.ensure_input_client(session_id, &event_tx, &overflowed) {
+            attachment.stop();
+            remove_pane_resources(&mut self.resources.lock().unwrap(), newly_created.iter());
+            return Err(error);
+        }
         if let Some(old) = self.clients.get_mut(session_id) {
             // Stop establishes the reader's ownership fence. Every resource
             // mutation and its derived event publication hold this same lock,
@@ -535,6 +466,30 @@ impl TerminalClients {
             // nothing.
             self.size_visible_client(session_id)?;
         }
+        Ok(())
+    }
+
+    fn ensure_input_client(
+        &mut self,
+        session_id: &str,
+        event_tx: &mpsc::Sender<SequencerControl>,
+        overflowed: &Arc<AtomicBool>,
+    ) -> anyhow::Result<()> {
+        if self
+            .input
+            .as_ref()
+            .is_some_and(PersistentInputClient::is_ready)
+        {
+            return Ok(());
+        }
+        if let Some(mut failed) = self.input.take() {
+            failed.stop();
+        }
+        self.input = Some(PersistentInputClient::start(
+            session_id,
+            event_tx.clone(),
+            Arc::clone(overflowed),
+        )?);
         Ok(())
     }
 
@@ -597,15 +552,18 @@ impl TerminalClients {
         self.clients
             .values_mut()
             .find(|client| client.contains_pane(pane_id))
-            .context("pane has no attached session control client")?
+            .context("pane has no attached session control client")?;
+        self.input
+            .as_mut()
+            .context("persistent terminal input client is not attached")?
             .send_input(pane_id, data)
     }
 
     pub(super) fn flush_input(&mut self) -> anyhow::Result<()> {
-        for client in self.clients.values_mut() {
-            client.flush_input()?;
-        }
-        Ok(())
+        self.input
+            .as_ref()
+            .context("persistent terminal input client is not attached")?
+            .fence()
     }
 
     pub(super) fn resize(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {
@@ -718,32 +676,48 @@ impl TerminalClients {
         if visible {
             resource.state = StoredResourceState::Visible;
         }
-        emit_event(
-            sender,
-            overflowed,
-            v1::HostEvent {
-                kind: v1::EventKind::PaneResource.into(),
-                scope: pane_id.into(),
-                pane_resource: Some(v1::PaneResource {
-                    pane_id: pane_id.into(),
-                    state: match resource.state {
-                        StoredResourceState::Visible => v1::PaneResourceState::Visible.into(),
-                        StoredResourceState::HiddenBuffered => {
-                            v1::PaneResourceState::HiddenBuffered.into()
-                        }
-                        StoredResourceState::Released => v1::PaneResourceState::Released.into(),
-                    },
-                    serialized_snapshot: resource.serialized_snapshot,
-                    raw_tail: resource.raw_tail,
-                    generation: resource.generation,
-                    snapshot_generation: resource.snapshot_generation,
-                    tail_through_generation: resource.tail_through_generation,
-                    requires_seed: resource.requires_seed,
-                    recovery_reason: resource.recovery_reason,
-                }),
-                ..Default::default()
-            },
+        let charge = OutputCharge::terminal(
+            resource
+                .serialized_snapshot
+                .len()
+                .saturating_add(resource.raw_tail.len()),
         );
+        let reservation = self
+            .output_credit
+            .reserve(charge)
+            .map_err(anyhow::Error::msg)?;
+        let event = v1::HostEvent {
+            kind: v1::EventKind::PaneResource.into(),
+            scope: pane_id.into(),
+            pane_resource: Some(v1::PaneResource {
+                pane_id: pane_id.into(),
+                state: match resource.state {
+                    StoredResourceState::Visible => v1::PaneResourceState::Visible.into(),
+                    StoredResourceState::HiddenBuffered => {
+                        v1::PaneResourceState::HiddenBuffered.into()
+                    }
+                    StoredResourceState::Released => v1::PaneResourceState::Released.into(),
+                },
+                serialized_snapshot: resource.serialized_snapshot,
+                raw_tail: resource.raw_tail,
+                generation: resource.generation,
+                snapshot_generation: resource.snapshot_generation,
+                tail_through_generation: resource.tail_through_generation,
+                requires_seed: resource.requires_seed,
+                recovery_reason: resource.recovery_reason,
+            }),
+            terminal_delivery_bytes: charge.bytes,
+            terminal_delivery_records: charge.records,
+            ..Default::default()
+        };
+        if sender
+            .blocking_send(SequencerControl::OrderedEvent(event))
+            .is_err()
+        {
+            overflowed.store(true, Ordering::Release);
+            bail!("terminal event sequencer is closed");
+        }
+        reservation.commit();
         if visible && requires_seed {
             self.request_seed(pane_id)?;
         }
@@ -770,9 +744,18 @@ impl TerminalClients {
                 self.visible_session = None;
             }
         }
+        if self.clients.is_empty()
+            && let Some(mut input) = self.input.take()
+        {
+            input.stop();
+        }
     }
 
     pub(super) fn stop(&mut self) {
+        self.output_credit.close();
+        if let Some(mut input) = self.input.take() {
+            input.stop();
+        }
         for client in self.clients.values_mut() {
             client.stop();
         }

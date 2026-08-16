@@ -288,6 +288,76 @@ describe("binary terminal IPC", () => {
     expect(() => decodeTerminalEvent(frame(10, "terminal", 0, u64(BigInt(Number.MAX_SAFE_INTEGER) + 1n)))).toThrow("safe range");
   });
 
+  it("releases cumulative production delivery credit without a timer after hub admission", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "start_terminal") return "client-credit";
+      return undefined;
+    });
+    const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+    channels[0].onmessage?.(frame(10, "terminal", 0, u64(91)));
+    channels[0].onmessage?.(frame(2, "%1", 1, Uint8Array.from([...u64(1), 120])));
+    await vi.waitFor(() => {
+      const calls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "acknowledge_terminal_delivery");
+      expect(calls.at(-1)?.[1]).toMatchObject({
+        clientId,
+        connectionEpoch: 91,
+        cumulativeFrameCount: 2,
+        cumulativeByteLength: frame(10, "terminal", 0, u64(91)).byteLength
+          + frame(2, "%1", 1, Uint8Array.from([...u64(1), 120])).byteLength,
+      });
+    });
+  });
+
+  it("does not acknowledge a frame whose synchronous hub admission throws", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "start_terminal") return "client-rejected-frame";
+      return undefined;
+    });
+    await startTerminal("", [], { mode: "local" }, (event) => {
+      if (event.kind === "output") throw new Error("injected hub admission failure");
+    });
+    channels[0].onmessage?.(frame(10, "terminal", 0, u64(7)));
+    await vi.waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "acknowledge_terminal_delivery")).toBe(true);
+    });
+    expect(() => channels[0].onmessage?.(
+      frame(2, "%1", 1, Uint8Array.from([...u64(1), 120])),
+    )).toThrow("hub admission failure");
+    await Promise.resolve();
+    const calls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "acknowledge_terminal_delivery");
+    expect(calls.at(-1)?.[1]).toMatchObject({ cumulativeFrameCount: 1 });
+  });
+
+  it("uses a new epoch event to recover from an older in-flight acknowledgement failure", async () => {
+    let rejectOldAck: ((error: Error) => void) | undefined;
+    let acknowledgementCount = 0;
+    vi.mocked(invoke).mockImplementation((command) => {
+      if (command === "start_terminal") return Promise.resolve("client-credit-reconnect");
+      if (command === "acknowledge_terminal_delivery" && acknowledgementCount++ === 0) {
+        return new Promise<void>((_resolve, reject) => { rejectOldAck = reject; });
+      }
+      return Promise.resolve(undefined);
+    });
+    await startTerminal("", [], { mode: "local" }, () => undefined);
+    channels[0].onmessage?.(frame(10, "terminal", 0, u64(91)));
+    await vi.waitFor(() => expect(rejectOldAck).toBeTypeOf("function"));
+
+    channels[0].onmessage?.(frame(10, "terminal", 0, u64(92)));
+    channels[0].onmessage?.(frame(2, "%1", 1, Uint8Array.from([...u64(1), 120])));
+    rejectOldAck?.(new Error("old bridge writer closed"));
+
+    await vi.waitFor(() => {
+      const calls = vi.mocked(invoke).mock.calls.filter(
+        ([command]) => command === "acknowledge_terminal_delivery",
+      );
+      expect(calls.at(-1)?.[1]).toMatchObject({
+        clientId: "client-credit-reconnect",
+        connectionEpoch: 92,
+        cumulativeFrameCount: 2,
+      });
+    });
+  });
+
   it("decodes pane-scoped UTF-8 seed diagnostics and rejects malformed values", () => {
     expect(decodeTerminalEvent(frame(11, "%7", 14, textEncoder.encode("alternate metadata λ")))).toEqual({
       kind: "seedDiagnostic", paneId: "%7", message: "alternate metadata λ", sequence: 14,
