@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { useModalDialog } from "../../commands/useModalDialog";
@@ -50,6 +50,22 @@ interface Props {
   onLoadMore(path: string): void;
 }
 
+/**
+ * What a row's actions do before the first commit: nothing.
+ *
+ * A real object rather than a cast, because the ref is not optional — it is
+ * uninitialized for exactly one render, during which no event can reach a row.
+ */
+const INERT_ROW_ACTIONS: ExplorerRowActions = {
+  toggle: () => undefined,
+  open: () => undefined,
+  focus: () => undefined,
+  contextMenu: () => undefined,
+  keyDown: () => undefined,
+  loadMore: () => undefined,
+  moreKeyDown: () => undefined,
+};
+
 type PendingAction = { action: "newFile" | "newDirectory" | "rename" | "move" | "duplicate" | "delete"; rootToken: string; scopeIdentity: string; entry?: FileEntry };
 
 export function ExplorerTree(props: Props) {
@@ -99,10 +115,12 @@ export function ExplorerTree(props: Props) {
   // ignored files showing with no visible reason and no way to put them back.
   useEffect(() => { setPending(undefined); setShowIgnored(false); }, [props.root?.token, props.scopeIdentity]);
 
-  // One stable object for every row, backed by a ref that render keeps current.
-  // Rebuilding these on each render would defeat the row memo boundary
-  // entirely: the props would differ every time even when the row did not.
-  const liveRowActions = useRef<ExplorerRowActions>(undefined as unknown as ExplorerRowActions);
+  // One stable object for every row, forwarding to handlers a layout effect
+  // keeps current. Rebuilding the object on each render would defeat the row
+  // memo boundary entirely — the props would differ every time even when the
+  // row did not — and assigning the live handlers during render would publish
+  // closures over state a discarded render never committed.
+  const liveRowActions = useRef<ExplorerRowActions>(INERT_ROW_ACTIONS);
   const rowActionsRef = useMemo<ExplorerRowActions>(() => ({
     toggle: (path) => liveRowActions.current.toggle(path),
     open: (entry, options) => liveRowActions.current.open(entry, options),
@@ -168,7 +186,7 @@ export function ExplorerTree(props: Props) {
     }
   };
 
-  liveRowActions.current = {
+  const committedRowActions: ExplorerRowActions = {
     toggle: (path) => props.onToggle(path),
     open: (entry, options) => props.onOpen(entry, options),
     focus: (index) => setFocusIndex(index),
@@ -182,6 +200,7 @@ export function ExplorerTree(props: Props) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
     },
   };
+  useLayoutEffect(() => { liveRowActions.current = committedRowActions; });
 
   const begin = (action: PendingAction["action"], entry?: FileEntry) => {
     if (!props.root) return;

@@ -32,11 +32,33 @@ interface WorkspaceFilesState {
   loading: ReadonlySet<string>;
   /** Reads a person asked for and has not yet been answered. See `refresh`. */
   requestedReads: number;
+  /**
+   * Directories that owe a remote read, and what kind.
+   *
+   * Recorded in state rather than acted on inside the updater that discovered
+   * it: an updater must stay pure, and one directory named by twenty events in
+   * one batch owes exactly one read.
+   */
+  recoveries: ReadonlyMap<string, RecoveryAction>;
   transfers: readonly TransferStatus[];
   error?: string;
 }
 
+/**
+ * What a directory owes after an event its cached listing could not answer.
+ *
+ * `restorePages` exists because an authoritative rescan carries only the
+ * directory's first page: replacing a listing the user has paged further into
+ * would delete rows they can see, so the pages they had are fetched back.
+ */
+type RecoveryAction =
+  | { kind: "list"; reason: RecoveryReason }
+  | { kind: "restorePages"; entries: number };
+
 const EMPTY = new Map<string, DirectoryListing>();
+const NO_RECOVERIES: ReadonlyMap<string, RecoveryAction> = new Map();
+/** Pages one truncated listing may fetch back before it gives up. */
+const MAX_RESTORED_PAGES = 8;
 const EXTERNAL_CHANGE_PAINT = ["explorer.externalChangeToPaint"] as const;
 type DirectoryLoadResult = "applied" | "stale" | "failed";
 
@@ -70,6 +92,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     expanded: new Set(),
     loading: new Set(),
     requestedReads: 0,
+    recoveries: NO_RECOVERIES,
     transfers: [],
   });
   const stateRef = useRef(state);
@@ -106,20 +129,29 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
    * authoritative rescan, and a recovery list.
    */
   const applyListing = useCallback((root: ActiveRoot, directory: string, listing: DirectoryListing) => {
-    const activeScope = scopeRef.current;
-    if (!activeScope || listing.rootToken !== root.token) return;
-    cache.current.set({ clientId: activeScope.clientId, rootToken: root.token, directory }, listing);
+    if (listing.rootToken !== root.token) return;
     setState((current) => {
-      if (!sameRoot(current.root, root) || listing.rootToken !== root.token) return current;
+      if (!sameRoot(current.root, root)) return current;
       // Only directories the tree is actually showing. A snapshot that races a
       // collapse, or a recovery list whose directory was deleted underneath it,
       // must not put rows back into a tree that no longer reaches them.
       if (!current.expanded.has(directory)) return current;
+      const held = current.listings.get(directory);
+      // An authoritative rescan only ever carries the directory's first page.
+      // Replacing a listing the user has paged further into would delete rows
+      // they can see, so the pages are restored instead — the recovery queue
+      // below owns that, and until it runs the rows stay.
+      const truncated = held && !listing.complete && held.entries.length > listing.entries.length
+        ? held.entries.length
+        : undefined;
       const listings = new Map(current.listings);
       listings.set(directory, listing);
       const loading = new Set(current.loading);
       loading.delete(directory);
-      return { ...current, listings, loading };
+      const recoveries = truncated === undefined
+        ? current.recoveries
+        : new Map(current.recoveries).set(directory, { kind: "restorePages", entries: truncated } as const);
+      return { ...current, listings, loading, recoveries, error: undefined };
     });
   }, []);
 
@@ -226,26 +258,64 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   /**
    * Applies one precise change to the cached listing that owns it.
    *
-   * A patch is measured, deliberate, and free: one remote file write moves one
-   * row. Only an event a complete listing genuinely cannot represent falls
-   * through to a recovery list.
+   * The patch is computed *inside* the state updater, against whatever listing
+   * the tree actually holds at that moment. Computing it outside, from a ref
+   * refreshed only on render, meant two events for one directory delivered in
+   * the same batch both patched the same base and the second silently dropped
+   * the first's row — the host frame reader flushes a queue synchronously, so
+   * that batch is the ordinary case, not a rare one.
+   *
+   * A listing that cannot represent the change records a recovery reason in
+   * state rather than issuing a request from inside the updater, which keeps
+   * the updater pure and the decision exactly once per directory per batch.
    */
   const applyPrecise = useCallback((
     root: ActiveRoot,
     directory: string,
-    patched: DirectoryListing | RecoveryReason,
+    patch: (listing: DirectoryListing | undefined) => DirectoryListing | RecoveryReason,
   ) => {
-    if (isRecoveryReason(patched)) {
-      coalesceRecovery(root, directory, patched);
-      return;
-    }
-    recordPerfCounter("explorer.listingPatches");
     const paint = createPaintTicket(EXTERNAL_CHANGE_PAINT, scopeEpoch.current);
-    applyListing(root, directory, patched);
+    const before = stateRef.current.listings.get(directory);
+    setState((current) => {
+      if (!sameRoot(current.root, root)) return current;
+      // An event about a directory the tree is not showing is not a gap in
+      // anything: there is no listing to patch and none is owed. Recovering
+      // here would list directories the user cannot see, including the parent
+      // of the root itself for an event about the root.
+      if (!current.expanded.has(directory)) return current;
+      const patched = patch(current.listings.get(directory));
+      if (isRecoveryReason(patched)) {
+        if (current.recoveries.has(directory)) return current;
+        const recoveries = new Map(current.recoveries);
+        recoveries.set(directory, { kind: "list", reason: patched });
+        return { ...current, recoveries };
+      }
+      const listings = new Map(current.listings);
+      listings.set(directory, patched);
+      return { ...current, listings };
+    });
+    // Committed state decides whether anything actually moved, so a no-op
+    // patch neither publishes a paint measurement nor counts as one.
     paint.afterPaint((ticket) => ticket.lifecycleGeneration === scopeEpoch.current
       && sameRoot(stateRef.current.root, root)
-      && stateRef.current.expanded.has(directory));
-  }, [applyListing, coalesceRecovery]);
+      && stateRef.current.expanded.has(directory)
+      && stateRef.current.listings.get(directory) !== before,
+    () => recordPerfCounter("explorer.listingPatches"));
+  }, []);
+
+  /**
+   * Fetches back the pages an authoritative first-page rescan replaced.
+   *
+   * Bounded twice over: it stops as soon as the listing is at least as long as
+   * it was, and never asks for more than [`MAX_RESTORED_PAGES`] pages.
+   */
+  const restorePages = useCallback(async (root: ActiveRoot, directory: string, entries: number) => {
+    for (let page = 0; page < MAX_RESTORED_PAGES; page += 1) {
+      const held = stateRef.current.listings.get(directory);
+      if (!held || held.complete || held.entries.length >= entries) return;
+      if (await loadDirectory(root, directory, true) !== "applied") return;
+    }
+  }, [loadDirectory]);
 
   const applyEvent = useCallback((event: WorkspaceEvent) => {
     const current = stateRef.current;
@@ -272,9 +342,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     }
     const directory = parentPath(event.path);
     if (event.kind === "fileChanged") {
-      applyPrecise(root, directory, event.entry
-        ? patchEntry(current.listings.get(directory), event.entry)
-        : "unmappable");
+      const entry = event.entry;
+      applyPrecise(root, directory, (listing) => entry ? patchEntry(listing, entry) : "unmappable");
       return;
     }
     // A deleted directory takes its whole cached subtree with it, locally as
@@ -284,8 +353,23 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     if (activeScope) cache.current.invalidateSubtree(activeScope.clientId, root.token, event.path);
     setState((value) => pruneSubtree(value, event.path));
     abortListing((path) => path === event.path || path.startsWith(`${event.path}/`));
-    applyPrecise(root, directory, removeEntry(current.listings.get(directory), event.path));
+    applyPrecise(root, directory, (listing) => removeEntry(listing, event.path));
   }, [abortListing, applyListing, applyPrecise, transferConnectionKey]);
+
+  // Remote reads are issued here rather than from inside a state updater, so
+  // one directory owes at most one read however many events named it.
+  useEffect(() => {
+    if (state.recoveries.size === 0) return;
+    const root = state.root;
+    const pending = state.recoveries;
+    if (root) for (const [directory, action] of pending) {
+      if (action.kind === "list") coalesceRecovery(root, directory, action.reason);
+      else void restorePages(root, directory, action.entries);
+    }
+    setState((current) => current.recoveries === pending
+      ? { ...current, recoveries: NO_RECOVERIES }
+      : current);
+  }, [coalesceRecovery, restorePages, state.recoveries, state.root]);
 
   useEffect(() => {
     scopeEpoch.current += 1;
@@ -295,6 +379,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       setState((current) => ({
         scopeKey: "", transferConnectionKey: "", listings: new Map(), expanded: new Set(), loading: new Set(),
         requestedReads: 0,
+        recoveries: NO_RECOVERIES,
         transfers: current.transfers.map(staleTransferOnScopeReplacement),
       }));
       return;
@@ -306,6 +391,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       expanded: new Set(),
       loading: new Set(),
       requestedReads: 0,
+      recoveries: NO_RECOVERIES,
       transfers: !current.transferConnectionKey || current.transferConnectionKey === transferConnectionKey
         ? current.transfers
         : current.transfers.map(staleTransferOnScopeReplacement),
@@ -351,6 +437,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
           listings: new Map(),
           expanded: new Set([root.path]),
           loading: new Set(),
+          recoveries: NO_RECOVERIES,
           error: undefined,
         }));
         rootPaint.afterPaint((ticket) => !disposed
@@ -390,6 +477,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       }
       refreshTimers.current.clear();
       paintGenerations.current.clear();
+      for (const pending of pendingExpandPaints.current.values()) pending.paint.abandon();
+      pendingExpandPaints.current.clear();
       unsubscribe?.();
     };
     // `scope` is deliberately not a dependency: `scopeKey` is its exact
@@ -397,40 +486,74 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // subscription down and rebuild it on every render.
   }, [abortListing, applyEvent, client, scopeKey, transferConnectionKey]);
 
-  // The watch set belongs to one connection and one root capability. Its
-  // cleanup runs before the next sync below, so a replaced root releases every
-  // watch it held before the replacement acquires anything.
-  const rootToken = state.root?.token;
-  useEffect(() => {
-    const held = leases.current;
-    return () => held.releaseAll();
-  }, [rootToken, scopeKey]);
-
+  /**
+   * The connection and root capability the watch set belongs to.
+   *
+   * Read from the *masked* view rather than raw state: on the render where the
+   * scope changes, the reset has not been committed yet, and acquiring against
+   * the previous root under the new scope arms and immediately releases one
+   * watch per open directory on every pane switch.
+   */
+  const activeRoot = state.scopeKey === scopeKey ? state.root : undefined;
   /**
    * Exactly the directories the tree can currently reach, and therefore exactly
    * the watches it should hold. The watch bootstrap is the directory's listing,
    * so an expansion pays one round trip rather than a list and a watch.
    */
   const watchTargets = useMemo(
-    () => state.root ? reachableWatchTargets(state.root.path, state.listings, state.expanded) : [],
-    [state.expanded, state.listings, state.root],
+    () => activeRoot ? reachableWatchTargets(activeRoot.path, state.listings, state.expanded) : [],
+    [activeRoot, state.expanded, state.listings],
   );
-  // NUL cannot appear in a path, so this is an exact identity for the set,
-  // and it keeps the sync below from re-running when nothing about which
-  // directories are open actually moved.
-  const watchTargetKey = watchTargets.join("\u0000");
+  // NUL cannot appear in a path, so this is an exact identity for the whole
+  // lease set — connection, root capability, and directories. Every part is in
+  // the key deliberately: release and acquire must key on the same identity, or
+  // a root replaced at the same path releases every watch and re-acquires none.
+  const watchTargetKey = [scopeKey, activeRoot?.token ?? "", ...watchTargets].join("\u0000");
+  useEffect(() => {
+    const held = leases.current;
+    return () => held.releaseAll();
+  }, [activeRoot?.token, scopeKey]);
   useEffect(() => {
     const activeScope = scopeRef.current;
-    const root = stateRef.current.root;
-    if (!activeScope || !root) return;
-    leases.current.sync(watchTargetKey ? watchTargetKey.split("\u0000") : [], {
+    if (!activeScope || !activeRoot || keyForScope(activeScope) !== scopeKey) return;
+    const root = activeRoot;
+    leases.current.sync(watchTargets, {
       acquire: (directory) => client.acquireDirectoryWatch(activeScope, root, directory),
       onBootstrap: (directory, listing) => applyListing(root, directory, listing),
-      onError: (directory, error) => setState((current) => sameRoot(current.root, root)
-        ? { ...current, loading: withoutPath(current.loading, directory), error: String(error) }
-        : current),
+      // A watch we could not arm must not also mean a directory with no
+      // contents: the bootstrap is the listing, so without this one refused
+      // registration — the host's watch limit, an exhausted inotify budget —
+      // leaves that directory, or the whole tree, permanently empty.
+      onError: (directory, error) => {
+        recordPerfCounter("explorer.watchFallbackLists");
+        void loadDirectory(root, directory).then((result) => {
+          if (result !== "failed") return;
+          setState((current) => sameRoot(current.root, root)
+            ? { ...current, loading: withoutPath(current.loading, directory), error: String(error) }
+            : current);
+        });
+      },
     });
-  }, [applyListing, client, scopeKey, watchTargetKey]);
+    // `watchTargets` is derived from `watchTargetKey`, which is the exact
+    // identity of the set; depending on the array itself would re-sync on every
+    // render that rebuilt an identical list.
+  }, [activeRoot, applyListing, client, loadDirectory, scopeKey, watchTargetKey]);
+
+  /**
+   * One owner for what the cache holds.
+   *
+   * Mirroring committed state means a listing enters the cache by exactly the
+   * same rule however it arrived — bootstrap, authoritative rescan, precise
+   * patch, recovery list, or restored page — and `set` itself refuses anything
+   * incomplete or bound to another root.
+   */
+  useEffect(() => {
+    const activeScope = scopeRef.current;
+    if (!activeScope || !activeRoot) return;
+    for (const [directory, listing] of state.listings) {
+      cache.current.set({ clientId: activeScope.clientId, rootToken: activeRoot.token, directory }, listing);
+    }
+  }, [activeRoot, state.listings]);
 
   const toggleDirectory = useCallback((path: string) => {
     const expanding = !stateRef.current.expanded.has(path);
@@ -531,6 +654,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     expanded: new Set<string>(),
     loading: new Set<string>(),
     requestedReads: 0,
+    recoveries: NO_RECOVERIES,
     transfers: state.transferConnectionKey === transferConnectionKey
       ? state.transfers
       : state.transfers.map(staleTransferOnScopeReplacement),

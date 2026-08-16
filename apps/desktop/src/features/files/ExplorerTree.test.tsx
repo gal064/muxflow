@@ -112,6 +112,59 @@ describe("ExplorerTree", () => {
     }
   });
 
+  it("keeps roving focus, selection, and the row context menu on the row the keyboard reached", async () => {
+    // Every one of these handlers now crosses a memo boundary and a forwarding
+    // ref, so the interactions the plan names by name are asserted here rather
+    // than assumed to have survived the extraction.
+    const onToggle = vi.fn();
+    const withDirectory: DirectoryListing = {
+      ...listing,
+      entries: [...listing.entries, { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true }],
+    };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<ExplorerTree root={root} scopeIdentity="keys" listings={new Map([["/r", withDirectory]])}
+        expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+        onToggle={onToggle} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+        onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+    });
+    const row = (index: number) => renderer.root.findByProps({ "data-tree-index": index });
+    const selected = () => renderer.root.findAllByProps({ className: "file-row" })
+      .filter((candidate) => candidate.props["aria-selected"] === true)
+      .map((candidate) => candidate.props["data-tree-index"]);
+    const tabbable = () => renderer.root.findAllByProps({ className: "file-row" })
+      .filter((candidate) => candidate.props.tabIndex === 0)
+      .map((candidate) => candidate.props["data-tree-index"]);
+
+    expect(selected()).toEqual([0]);
+    expect(tabbable()).toEqual([0]);
+
+    // Roving focus: Down moves selection and the tab stop together.
+    await act(async () => { row(0).props.onKeyDown({ key: "ArrowDown", target: 1, currentTarget: 1, preventDefault: vi.fn() }); });
+    expect(selected()).toEqual([1]);
+    expect(tabbable()).toEqual([1]);
+    await act(async () => { row(1).props.onKeyDown({ key: "ArrowUp", target: 1, currentTarget: 1, preventDefault: vi.fn() }); });
+    expect(selected()).toEqual([0]);
+
+    // ArrowRight on a collapsed directory expands it rather than moving.
+    const directoryIndex = withDirectory.entries.length - 1;
+    await act(async () => { row(directoryIndex).props.onPointerDown(); });
+    expect(selected()).toEqual([directoryIndex]);
+    await act(async () => {
+      row(directoryIndex).props.onKeyDown({ key: "ArrowRight", target: 1, currentTarget: 1, preventDefault: vi.fn() });
+    });
+    expect(onToggle).toHaveBeenCalledWith("/r/src");
+
+    // The row context menu opens for the row it was raised on, and moves the
+    // tree's focus cursor there.
+    await act(async () => { row(1).props.onContextMenu({ preventDefault: vi.fn(), clientX: 4, clientY: 5 }); });
+    expect(selected()).toEqual([1]);
+    const menu = JSON.stringify(renderer.toJSON());
+    expect(menu).toContain("Actions for ignored.log");
+    expect(menu).toContain("Rename…");
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("shows dotfiles/ignored entries while protected and symlink directories stay collapsed", () => {
     const html = renderToStaticMarkup(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}
       onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
