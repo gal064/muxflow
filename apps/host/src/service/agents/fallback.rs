@@ -82,6 +82,10 @@ pub(super) fn consume(
     runtime_dir: &Path,
     mut consume: impl FnMut(v1::AgentHookEvent) -> v1::HookIngestDisposition,
 ) -> anyhow::Result<HookReplayReport> {
+    if !runtime_dir.exists() {
+        return Ok(HookReplayReport::default());
+    }
+    let _mailbox = crate::hook_mailbox::HookMailboxLock::acquire(runtime_dir)?;
     let entries = match fs::read_dir(runtime_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

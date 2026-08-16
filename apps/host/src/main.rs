@@ -15,6 +15,7 @@ mod bridge;
 mod daemon;
 mod diagnostics;
 mod hook;
+mod hook_mailbox;
 mod paths;
 #[cfg(debug_assertions)]
 mod phase1_client;

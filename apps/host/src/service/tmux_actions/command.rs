@@ -86,6 +86,30 @@ pub(super) fn run_for_id(
     Ok(id)
 }
 
+pub(super) fn run_for_ids(
+    mut command: std::process::Command,
+    prefixes: &[char],
+) -> anyhow::Result<Vec<String>> {
+    let output = command.output().context("run tmux action")?;
+    if !output.status.success() {
+        bail!(
+            "tmux rejected action: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let ids = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if ids.len() != prefixes.len() {
+        bail!("tmux action returned an incomplete identity tuple");
+    }
+    for (id, prefix) in ids.iter().zip(prefixes) {
+        validate_tmux_id(id, *prefix)?;
+    }
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

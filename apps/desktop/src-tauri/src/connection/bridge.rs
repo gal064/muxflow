@@ -1,6 +1,6 @@
 use std::{
     io::{BufReader, Read, Write},
-    process::{ChildStdin, ChildStdout},
+    process::ChildStdout,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
@@ -18,8 +18,9 @@ use super::transport::{
     with_bridge_diagnostic,
 };
 use super::{
-    ConnectionSpec, InitialHostState, TerminalClient, TerminalEvent, TerminalEventChannel,
-    mark_input_reconnected, send_event, snapshot_from_proto, validate_tmux_id,
+    ConnectionSpec, InitialHostState, REQUEST_TIMEOUT, TerminalClient, TerminalEvent,
+    TerminalEventChannel, mark_input_reconnected, send_event, snapshot_from_proto,
+    validate_tmux_id, writer::ControlWriterHandle,
 };
 
 pub(super) fn supervise_bridge(
@@ -67,7 +68,9 @@ pub(super) fn supervise_bridge(
             Err(error) => send_event(&channel, TerminalEvent::Error { message: error }),
         }
         client.ready.store(false, Ordering::Release);
-        client.stdin.lock().unwrap().take();
+        if let Some(writer) = client.writer.lock().unwrap().take() {
+            writer.close();
+        }
         client
             .fail_pending(
                 "host transport disconnected; commit outcome is unknown and the request will not replay",
@@ -276,8 +279,10 @@ fn run_bridge_once(
             }
         }
     }
+    let control_writer = ControlWriterHandle::start(stdin, &terminal_epoch.to_string())?;
+    let published_writer = control_writer.clone();
     let published = client.stop_signal.if_running(|| {
-        *client.stdin.lock().unwrap() = Some(stdin);
+        *client.writer.lock().unwrap() = Some(published_writer);
         if !read_only {
             mark_input_reconnected(client);
             client.ready.store(true, Ordering::Release);
@@ -291,6 +296,7 @@ fn run_bridge_once(
         }
     });
     if !published {
+        control_writer.close();
         return Err("terminal bridge stopped before becoming ready".into());
     }
     *connected_at = Some(Instant::now());
@@ -505,9 +511,16 @@ fn read_protocol_stream(
             Ok((next, scoped_seed)) => {
                 sequence = next;
                 if let Some(pane_id) = scoped_seed {
-                    let mut guard = client.stdin.lock().unwrap();
-                    let stdin = guard.as_mut().ok_or("host bridge is disconnected")?;
-                    write_scoped_seed_request(stdin, client, pane_id)?;
+                    let writer = client
+                        .writer
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or("host bridge is disconnected")?;
+                    writer.write(
+                        scoped_seed_request(client, pane_id),
+                        Instant::now() + REQUEST_TIMEOUT,
+                    )?;
                 }
             }
             Err(error) if error.starts_with("sequence gap") || error == "host requested resync" => {
@@ -519,11 +532,14 @@ fn read_protocol_stream(
                     },
                 );
                 let request_id = client.next_request_id.fetch_add(1, Ordering::AcqRel);
-                let mut guard = client.stdin.lock().unwrap();
-                let stdin = guard.as_mut().ok_or("host bridge is disconnected")?;
-                write_frame_sync(
-                    stdin,
-                    &envelope(
+                let writer = client
+                    .writer
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or("host bridge is disconnected")?;
+                writer.write(
+                    envelope(
                         request_id,
                         0,
                         Payload::Request(v1::Request {
@@ -532,9 +548,8 @@ fn read_protocol_stream(
                             ..Default::default()
                         }),
                     ),
-                )
-                .map_err(|write_error| write_error.to_string())?;
-                drop(guard);
+                    Instant::now() + REQUEST_TIMEOUT,
+                )?;
                 resync_request_id = Some(request_id);
             }
             Err(error) => return Err(error),
@@ -805,24 +820,24 @@ pub(super) fn scoped_terminal_recovery(scope: &str) -> Option<String> {
 }
 
 fn write_scoped_seed_request(
-    stdin: &mut ChildStdin,
+    stdin: &mut impl Write,
     client: &TerminalClient,
     pane_id: String,
 ) -> Result<(), String> {
-    let request_id = client.next_request_id.fetch_add(1, Ordering::AcqRel);
-    write_frame_sync(
-        stdin,
-        &envelope(
-            request_id,
-            0,
-            Payload::Request(v1::Request {
-                operation: v1::Operation::RequestTerminalSeed.into(),
-                scope: pane_id,
-                ..Default::default()
-            }),
-        ),
+    let request = scoped_seed_request(client, pane_id);
+    write_frame_sync(stdin, &request).map_err(|error| error.to_string())
+}
+
+fn scoped_seed_request(client: &TerminalClient, pane_id: String) -> v1::Envelope {
+    envelope(
+        client.next_request_id.fetch_add(1, Ordering::AcqRel),
+        0,
+        Payload::Request(v1::Request {
+            operation: v1::Operation::RequestTerminalSeed.into(),
+            scope: pane_id,
+            ..Default::default()
+        }),
     )
-    .map_err(|error| error.to_string())
 }
 
 pub(super) fn validate_event_sequence(

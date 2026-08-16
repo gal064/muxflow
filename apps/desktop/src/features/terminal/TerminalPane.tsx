@@ -15,7 +15,8 @@ import {
 import { terminalStateCache } from "./TerminalStateCache";
 import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./PaneRevealState";
 import { prepareTerminalSnapshot, requestTerminalSeed, setTerminalVisibility } from "./api";
-import { ownTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
+import { ownTerminalBytes } from "./TerminalBytes";
+import { DeferredTerminalOutputQueue } from "./DeferredTerminalOutputQueue";
 import { TerminalTransferSurface, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
 import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
@@ -149,8 +150,7 @@ export function TerminalPane({
   const rendererEpochRef = useRef<number | undefined>(undefined);
   const lastRevealKeyRef = useRef<string | undefined>(undefined);
   const revealStateRef = useRef<PaneRevealState>({ ready: false, hasLocalState: false });
-  const deferredOutputRef = useRef<Array<{ data: OwnedTerminalBytes; generation: number; terminalEpoch?: number }>>([]);
-  const deferredOutputBytesRef = useRef(0);
+  const deferredOutputRef = useRef(new DeferredTerminalOutputQueue());
   const seedDiagnosticForNextSeedRef = useRef(false);
   const [rendererDiagnostic, setRendererDiagnostic] = useState<string>();
   const [seedDiagnostic, setSeedDiagnostic] = useState<string>();
@@ -275,12 +275,10 @@ export function TerminalPane({
     revealStateRef.current = { ready: false, hasLocalState: Boolean(currentCached) };
 
     const clearDeferredOutput = () => {
-      deferredOutputRef.current = [];
-      deferredOutputBytesRef.current = 0;
+      deferredOutputRef.current.reset();
     };
     const flushDeferredOutput = (afterGeneration = -1) => {
-      const deferred = outputAfterRecovery(deferredOutputRef.current, afterGeneration);
-      clearDeferredOutput();
+      const deferred = outputAfterRecovery(deferredOutputRef.current.drain(), afterGeneration);
       for (const output of deferred) {
         renderer.write(
           output.data,
@@ -316,13 +314,14 @@ export function TerminalPane({
       } else if (effect.kind === "output") {
         renderer.write(effect.data, () => commitRendered(generation, eventEpoch), generation);
       } else if (effect.kind === "deferOutput") {
-        if (deferredOutputBytesRef.current + effect.data.byteLength > 1024 * 1024) {
-          clearDeferredOutput();
+        const admission = deferredOutputRef.current.enqueue({
+          data: effect.data,
+          generation,
+          terminalEpoch: eventEpoch,
+        });
+        if (admission === "overflow") {
           revealStateRef.current = { ready: false, hasLocalState: false };
-          requestFreshSeed("Output arrived before pane recovery exceeded 1 MiB");
-        } else {
-          deferredOutputRef.current.push({ data: effect.data, generation, terminalEpoch: eventEpoch });
-          deferredOutputBytesRef.current += effect.data.byteLength;
+          requestFreshSeed("Output arrived before pane recovery exceeded its byte or record budget");
         }
       } else if (effect.kind === "awaitSeed") {
         terminalStateCache.delete(pane.id);
@@ -514,8 +513,7 @@ export function TerminalPane({
     revealForCurrentEpoch();
     const unsubscribe = hub.subscribeEpoch(() => {
       terminalStateCache.delete(pane.id);
-      deferredOutputRef.current = [];
-      deferredOutputBytesRef.current = 0;
+      deferredOutputRef.current.reset();
       rendererEpochRef.current = undefined;
       revealStateRef.current = { ready: false, hasLocalState: false };
       revealForCurrentEpoch();

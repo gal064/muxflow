@@ -1,13 +1,13 @@
 use std::{
     collections::HashMap,
-    process::{Child, ChildStdin},
+    process::Child,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,6 @@ use tmux_agent_protocol::{HOST_CAPABILITIES, PROTOCOL_MAJOR};
 use tmux_agent_protocol::{
     envelope,
     v1::{self, envelope::Payload},
-    write_frame_sync,
 };
 use uuid::Uuid;
 
@@ -33,6 +32,8 @@ use dispatch::{
     ClientInputDispatch, ClientInputQueue, INPUT_BYTE_BUDGET, INPUT_MESSAGE_BUDGET, ResizeQueue,
     StopSignal, TerminalSize, run_client_input_dispatch, run_client_resize_dispatch,
 };
+mod writer;
+use writer::ControlWriterHandle;
 pub(crate) mod agent;
 pub(crate) mod files;
 pub(crate) mod git;
@@ -87,7 +88,7 @@ use transport::{
 
 struct TerminalClient {
     bulk_scope: Uuid,
-    stdin: Mutex<Option<ChildStdin>>,
+    writer: Mutex<Option<ControlWriterHandle>>,
     child: Mutex<Option<Child>>,
     stop_signal: StopSignal,
     ready: AtomicBool,
@@ -115,7 +116,7 @@ impl TerminalClient {
     fn new() -> Self {
         Self {
             bulk_scope: Uuid::new_v4(),
-            stdin: Mutex::new(None),
+            writer: Mutex::new(None),
             child: Mutex::new(None),
             stop_signal: StopSignal::default(),
             ready: AtomicBool::new(false),
@@ -155,7 +156,9 @@ impl TerminalClient {
         self.stop_signal.stop();
         self.ready.store(false, Ordering::Release);
         self.resize_queue.stop();
-        self.stdin.lock().unwrap().take();
+        if let Some(writer) = self.writer.lock().unwrap().take() {
+            writer.close();
+        }
         if let Some(sender) = self.input_queue.lock().unwrap().sender.take() {
             let _ = sender.try_send(ClientInputDispatch::Stop);
         }
@@ -281,15 +284,16 @@ impl TerminalClient {
             );
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
-        self.stdin
+        let writer = self
+            .writer
             .lock()
             .unwrap()
-            .as_mut()
-            .ok_or_else(|| "host bridge is disconnected".to_owned())
-            .and_then(|stdin| {
-                write_frame_sync(stdin, &envelope(request_id, 0, Payload::Request(request)))
-                    .map_err(|error| error.to_string())
-            })
+            .clone()
+            .ok_or_else(|| "host bridge is disconnected".to_owned())?;
+        writer.write(
+            envelope(request_id, 0, Payload::Request(request)),
+            Instant::now() + REQUEST_TIMEOUT,
+        )
     }
 
     fn request_git(
@@ -306,6 +310,7 @@ impl TerminalClient {
         timeout: Duration,
         git_operation_id: Option<String>,
     ) -> Result<v1::Response, String> {
+        let deadline = Instant::now() + timeout;
         if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
             // Coded like the host's own refusals, so the frontend can lead with
             // a sentence and keep this behind the disclosure (11.4.4). The
@@ -328,14 +333,13 @@ impl TerminalClient {
             operations.insert(operation_id.clone(), request_id);
         }
         let write_result = self
-            .stdin
+            .writer
             .lock()
             .unwrap()
-            .as_mut()
+            .clone()
             .ok_or_else(|| "host bridge is disconnected".to_owned())
-            .and_then(|stdin| {
-                write_frame_sync(stdin, &envelope(request_id, 0, Payload::Request(request)))
-                    .map_err(|error| error.to_string())
+            .and_then(|writer| {
+                writer.write(envelope(request_id, 0, Payload::Request(request)), deadline)
             });
         if let Err(error) = write_result {
             self.pending.lock().unwrap().remove(&request_id);
@@ -344,7 +348,8 @@ impl TerminalClient {
             }
             return Err(error);
         }
-        let result = match receiver.recv_timeout(timeout) {
+        let result = match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
             Ok(Ok(response)) if response.ok => Ok(response),
             Ok(Ok(response)) => Err(format!(
                 "{}: {}",
@@ -352,16 +357,16 @@ impl TerminalClient {
             )),
             Ok(Err(error)) => Err(error),
             Err(_) => {
-                if let Some(stdin) = self.stdin.lock().unwrap().as_mut() {
-                    let _ = write_frame_sync(
-                        stdin,
-                        &envelope(
+                if let Some(writer) = self.writer.lock().unwrap().clone() {
+                    let _ = writer.try_write(
+                        envelope(
                             self.next_request_id.fetch_add(1, Ordering::AcqRel),
                             0,
                             Payload::Cancel(v1::Cancel {
                                 target_request_id: request_id,
                             }),
                         ),
+                        Instant::now() + REQUEST_TIMEOUT,
                     );
                 }
                 self.pending.lock().unwrap().remove(&request_id);
@@ -385,19 +390,22 @@ impl TerminalClient {
             .get(operation_id)
             .copied()
             .ok_or_else(|| "unknown or completed Git operation ID".to_owned())?;
-        let mut stdin = self.stdin.lock().unwrap();
-        let stdin = stdin.as_mut().ok_or("host bridge is disconnected")?;
-        write_frame_sync(
-            stdin,
-            &envelope(
+        let writer = self
+            .writer
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("host bridge is disconnected")?;
+        writer.write(
+            envelope(
                 self.next_request_id.fetch_add(1, Ordering::AcqRel),
                 0,
                 Payload::Cancel(v1::Cancel {
                     target_request_id: request_id,
                 }),
             ),
+            Instant::now() + REQUEST_TIMEOUT,
         )
-        .map_err(|error| error.to_string())
     }
 
     fn fail_pending(&self, message: &str) {

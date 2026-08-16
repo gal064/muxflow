@@ -118,7 +118,11 @@ fn malformed_fallback_is_removed_and_does_not_stop_the_scan() {
     assert_eq!(report.applied, 1);
     assert_eq!(report.retained, 0);
     assert_eq!(seen, ["valid"]);
-    assert!(fs::read_dir(&dir).unwrap().next().is_none());
+    let remaining = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, [".hook-fallback-mailbox.lock"]);
     fs::remove_dir_all(dir).unwrap();
 }
 

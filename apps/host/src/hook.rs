@@ -69,11 +69,30 @@ async fn deliver(
                 // mailbox entry for the daemon to replay later.
                 return persist_latest_fallback(runtime, event);
             }
-            Err(error) if is_connection_error(&error) => continue,
-            Err(error) => return Err(error),
+            Err(HookDeliveryFailure::PreDelivery(error)) => {
+                drop(error);
+                continue;
+            }
+            Err(HookDeliveryFailure::Ambiguous(error)) => {
+                // The request may already have committed. Never probe another
+                // daemon after that boundary; persist beside the one that may
+                // have applied it and let source-ID dedupe reconcile replay.
+                drop(error);
+                return persist_latest_fallback(runtime, event);
+            }
         }
     }
     persist_latest_fallback(&crate::paths::fallback_runtime_dir(candidates), event)
+}
+
+#[derive(Debug)]
+enum HookDeliveryFailure {
+    /// No ingest request bytes were attempted; another runtime candidate is
+    /// still safe to try.
+    PreDelivery(anyhow::Error),
+    /// Request delivery began, so absence of an acknowledgement is not proof
+    /// that the daemon did not apply it.
+    Ambiguous(anyhow::Error),
 }
 
 /// `hook status|install|uninstall` — the same merge-only installer the desktop
@@ -360,7 +379,16 @@ fn nonempty_json(value: &serde_json::Value) -> bool {
 async fn send(
     socket: &Path,
     event: &v1::AgentHookEvent,
-) -> anyhow::Result<v1::HookIngestDisposition> {
+) -> Result<v1::HookIngestDisposition, HookDeliveryFailure> {
+    let mut stream = connect_and_handshake(socket)
+        .await
+        .map_err(HookDeliveryFailure::PreDelivery)?;
+    send_request_and_wait(&mut stream, event)
+        .await
+        .map_err(HookDeliveryFailure::Ambiguous)
+}
+
+async fn connect_and_handshake(socket: &Path) -> anyhow::Result<UnixStream> {
     let mut stream = timeout(Duration::from_secs(1), UnixStream::connect(socket))
         .await
         .context("private daemon connection timed out")??;
@@ -389,8 +417,15 @@ async fn send(
     if hello.read_only || hello.capabilities & tmux_agent_protocol::CAP_AGENTS == 0 {
         bail!("private daemon does not accept this hook protocol version");
     }
+    Ok(stream)
+}
+
+async fn send_request_and_wait(
+    stream: &mut UnixStream,
+    event: &v1::AgentHookEvent,
+) -> anyhow::Result<v1::HookIngestDisposition> {
     write_frame(
-        &mut stream,
+        stream,
         &envelope(
             2,
             0,
@@ -406,7 +441,7 @@ async fn send(
     )
     .await?;
     loop {
-        let frame = timeout(Duration::from_secs(2), read_frame(&mut stream))
+        let frame = timeout(Duration::from_secs(2), read_frame(stream))
             .await
             .context("hook acknowledgement timed out")??
             .context("private daemon closed before hook acknowledgement")?;
@@ -442,7 +477,7 @@ async fn send(
 const MAX_FALLBACK_PER_PANE: usize = 32;
 
 fn persist_latest_fallback(runtime: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<()> {
-    crate::paths::prepare_runtime_dir(runtime)?;
+    let _mailbox = crate::hook_mailbox::HookMailboxLock::acquire(runtime)?;
     let pane = event.pane_id.trim_start_matches('%');
     let adapter = crate::service::agents::adapters::adapter(
         v1::AgentAdapterKind::try_from(event.adapter).unwrap_or_default(),
@@ -569,23 +604,6 @@ fn now_millis() -> i64 {
         .as_millis()
         .try_into()
         .unwrap_or(i64::MAX)
-}
-
-fn is_connection_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<tokio::time::error::Elapsed>()
-            .is_some()
-            || cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-                matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound
-                        | std::io::ErrorKind::ConnectionRefused
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::BrokenPipe
-                )
-            })
-    })
 }
 
 #[cfg(test)]
@@ -761,6 +779,83 @@ mod tests {
             .unwrap();
         server.await.unwrap();
         assert_eq!(fallback_count(&runtime), 0);
+        fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ambiguous_ack_never_retries_a_second_daemon() {
+        let root = std::env::temp_dir().join(format!("ade-ha-{}", uuid::Uuid::new_v4()));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let first_listener = tokio::net::UnixListener::bind(first.join("host.sock")).unwrap();
+        let second_listener = tokio::net::UnixListener::bind(second.join("host.sock")).unwrap();
+        let first_server = tokio::spawn(async move {
+            let (mut stream, _) = first_listener.accept().await.unwrap();
+            let _hello = read_frame(&mut stream).await.unwrap().unwrap();
+            write_frame(
+                &mut stream,
+                &envelope(
+                    1,
+                    0,
+                    v1::envelope::Payload::ServerHello(v1::ServerHello {
+                        capabilities: tmux_agent_protocol::CAP_AGENTS,
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let request = read_frame(&mut stream).await.unwrap().unwrap();
+            assert_eq!(request.request_id, 2);
+            // Applied but acknowledgement lost.
+        });
+        let event = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"Stop","event_id":"ambiguous"}"#.to_vec(),
+            "%7",
+            "server-a",
+            7,
+        )
+        .unwrap();
+        deliver(&[first.clone(), second.clone()], &event)
+            .await
+            .unwrap();
+        first_server.await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), second_listener.accept())
+                .await
+                .is_err()
+        );
+        assert_eq!(fallback_count(&first), 1);
+        assert_eq!(fallback_count(&second), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_fallback_publishers_preserve_the_exact_per_pane_bound() {
+        let runtime = std::env::temp_dir().join(format!("ade-hb-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&runtime).unwrap();
+        let event = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"Stop","event_id":"bounded"}"#.to_vec(),
+            "%7",
+            "server-a",
+            7,
+        )
+        .unwrap();
+        let threads = (0..64)
+            .map(|_| {
+                let runtime = runtime.clone();
+                let event = event.clone();
+                std::thread::spawn(move || persist_latest_fallback(&runtime, &event).unwrap())
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(fallback_count(&runtime), MAX_FALLBACK_PER_PANE);
         fs::remove_dir_all(runtime).unwrap();
     }
 }

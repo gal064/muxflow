@@ -3,7 +3,7 @@ use tmux_agent_protocol::v1;
 
 use super::snapshot::{discover_consistent, reorder_session, server_identity, tmux_command};
 use super::terminal::validate_tmux_id;
-use command::{configure_new_window, configure_split, run, run_for_id, validate_name};
+use command::{configure_new_window, configure_split, run, run_for_id, run_for_ids, validate_name};
 
 mod command;
 
@@ -19,7 +19,10 @@ pub(super) fn execute(
     known_generation: u64,
     expected_snapshot: tmux_control::TmuxSnapshot,
     expected_identity: String,
-    before_post_discovery: impl FnOnce() -> Option<u64>,
+    before_post_discovery: impl FnOnce(
+        v1::TmuxActionKind,
+        &v1::TmuxActionResult,
+    ) -> anyhow::Result<Option<u64>>,
 ) -> anyhow::Result<ActionOutcome> {
     let kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
     // The dispatcher discovered this snapshot under the same topology lock
@@ -58,13 +61,15 @@ pub(super) fn execute(
     let mut command = tmux_command();
     match kind {
         v1::TmuxActionKind::CreateSession => {
-            command.args(["new-session", "-d", "-P", "-F", "#{session_id}"]);
+            command.args(["new-session", "-d", "-P", "-F", "#{session_id} #{pane_id}"]);
             if !action.name.is_empty() {
                 validate_name(&action.name)?;
                 command.args(["-s", &action.name]);
             }
             command.arg(command::APP_SHELL);
-            result.session_id = run_for_id(command, '$')?;
+            let ids = run_for_ids(command, &['$', '%'])?;
+            result.session_id = ids[0].clone();
+            result.pane_id = ids[1].clone();
         }
         v1::TmuxActionKind::RenameSession => {
             validate_name(&action.name)?;
@@ -184,12 +189,8 @@ pub(super) fn execute(
     // Drain the connection writer through all dirty notifications already
     // emitted by this command. The authoritative post-discovery that follows
     // therefore closes exactly those epochs; later dirtiness remains pending.
-    let (snapshot, server_identity, covered_dirty_epoch) = finalize_action(
-        kind,
-        before_post_discovery,
-        discover_consistent,
-        server_identity,
-    )?;
+    let covered_dirty_epoch = before_post_discovery(kind, &result)?;
+    let (snapshot, server_identity) = finalize_action(kind, discover_consistent, server_identity)?;
     if result.pane_id.is_empty() {
         result.pane_id = interaction_pane_id(kind, &postcondition_action, &result, &snapshot)
             .unwrap_or_default();
@@ -247,15 +248,13 @@ fn interaction_pane_id(
 
 fn finalize_action(
     kind: v1::TmuxActionKind,
-    before_post_discovery: impl FnOnce() -> Option<u64>,
     discover: impl FnOnce() -> anyhow::Result<(tmux_control::TmuxSnapshot, String)>,
     current_identity: impl FnOnce() -> String,
-) -> anyhow::Result<(tmux_control::TmuxSnapshot, String, Option<u64>)> {
+) -> anyhow::Result<(tmux_control::TmuxSnapshot, String)> {
     // Epoch capture only suppresses a duplicate reconciliation. A full or
     // stalled writer must not prevent the authoritative postcheck after tmux
     // has already accepted the mutation; simply leave the dirty notification
     // unacknowledged and let the actor reconcile it normally.
-    let covered_dirty_epoch = before_post_discovery();
     let (snapshot, identity) = normalize_post_action(kind, discover(), current_identity).map_err(
         |error| {
             anyhow::anyhow!(
@@ -263,7 +262,7 @@ fn finalize_action(
             )
         },
     )?;
-    Ok((snapshot, identity, covered_dirty_epoch))
+    Ok((snapshot, identity))
 }
 
 /// `discover_consistent` refuses when no tmux server is running, and every
