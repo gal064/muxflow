@@ -545,3 +545,36 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
         "a resume must not mark the pane live; its capture does that"
     );
 }
+
+#[test]
+fn terminal_output_waits_for_bounded_sequencer_capacity_without_marking_overflow() {
+    let (sender, mut receiver) = mpsc::channel(1);
+    sender
+        .try_send(SequencerControl::OrderedEvent(v1::HostEvent::default()))
+        .unwrap();
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let thread_overflowed = Arc::clone(&overflowed);
+    let emitted = std::thread::spawn(move || {
+        super::stream_helpers::emit_terminal(
+            &sender,
+            &thread_overflowed,
+            v1::EventKind::TerminalOutput,
+            "%1".into(),
+            b"exact".to_vec(),
+            1,
+        );
+    });
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    assert!(
+        !emitted.is_finished(),
+        "a full bounded queue must apply backpressure"
+    );
+
+    receiver.blocking_recv().unwrap();
+    emitted.join().unwrap();
+    assert!(!overflowed.load(Ordering::Acquire));
+    let SequencerControl::OrderedEvent(event) = receiver.blocking_recv().unwrap() else {
+        panic!("terminal output was not queued");
+    };
+    assert_eq!(event.terminal.unwrap().data, b"exact");
+}

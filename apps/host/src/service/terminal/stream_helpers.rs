@@ -48,10 +48,13 @@ pub(super) fn emit_terminal(
             kind == v1::EventKind::TerminalSeed,
         );
     }
-    emit_event(
-        sender,
-        overflowed,
-        v1::HostEvent {
+    // Terminal bytes are lossless and already arrive on the dedicated control
+    // reader thread. Let the bounded sequencer queue propagate socket pressure
+    // back to that reader; tmux can then apply its own pause/continue protocol.
+    // A nonblocking send here turned a normal 100 ms / 100 Mbit bandwidth-delay
+    // window into a full-connection resync as soon as 1,024 records accumulated.
+    if sender
+        .blocking_send(SequencerControl::OrderedEvent(v1::HostEvent {
             kind: kind.into(),
             terminal: Some(v1::TerminalBytes {
                 pane_id,
@@ -59,8 +62,11 @@ pub(super) fn emit_terminal(
                 generation,
             }),
             ..Default::default()
-        },
-    );
+        }))
+        .is_err()
+    {
+        overflowed.store(true, Ordering::Release);
+    }
 }
 
 /// The pane a `%pause`/`%continue` names, if it names a valid one.
