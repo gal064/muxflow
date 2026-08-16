@@ -60,7 +60,15 @@ async fn deliver(
             continue;
         }
         match send(&socket, event).await {
-            Ok(()) => return Ok(()),
+            Ok(DaemonHookDisposition::Applied | DaemonHookDisposition::Discarded) => {
+                return Ok(());
+            }
+            Ok(DaemonHookDisposition::Retryable) => {
+                // The daemon answered, so do not probe another candidate and
+                // risk delivering twice. One rejection produces one durable
+                // mailbox entry for the daemon to replay later.
+                return persist_latest_fallback(runtime, event);
+            }
             Err(error) if is_connection_error(&error) => continue,
             Err(error) => return Err(error),
         }
@@ -349,7 +357,14 @@ fn nonempty_json(value: &serde_json::Value) -> bool {
     }
 }
 
-async fn send(socket: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonHookDisposition {
+    Applied,
+    Discarded,
+    Retryable,
+}
+
+async fn send(socket: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<DaemonHookDisposition> {
     let mut stream = timeout(Duration::from_secs(1), UnixStream::connect(socket))
         .await
         .context("private daemon connection timed out")??;
@@ -406,9 +421,15 @@ async fn send(socket: &Path, event: &v1::AgentHookEvent) -> anyhow::Result<()> {
             bail!("private daemon returned an invalid hook acknowledgement");
         };
         if !response.ok {
+            if response.error_code == "hook_ingest_retryable" {
+                return Ok(DaemonHookDisposition::Retryable);
+            }
+            if response.error_code == "hook_ingest_discarded" {
+                return Ok(DaemonHookDisposition::Discarded);
+            }
             bail!("private daemon rejected hook: {}", response.display_message);
         }
-        return Ok(());
+        return Ok(DaemonHookDisposition::Applied);
     }
 }
 
@@ -579,6 +600,61 @@ fn is_connection_error(error: &anyhow::Error) -> bool {
 mod tests {
     use super::*;
 
+    fn rejecting_daemon(runtime: &Path, error_code: &'static str) -> tokio::task::JoinHandle<()> {
+        let listener = tokio::net::UnixListener::bind(runtime.join("host.sock")).unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let hello = read_frame(&mut stream).await.unwrap().unwrap();
+            assert!(matches!(
+                hello.payload,
+                Some(v1::envelope::Payload::ClientHello(_))
+            ));
+            write_frame(
+                &mut stream,
+                &envelope(
+                    1,
+                    0,
+                    v1::envelope::Payload::ServerHello(v1::ServerHello {
+                        capabilities: tmux_agent_protocol::CAP_AGENTS,
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let request = read_frame(&mut stream).await.unwrap().unwrap();
+            assert_eq!(request.request_id, 2);
+            write_frame(
+                &mut stream,
+                &envelope(
+                    2,
+                    0,
+                    v1::envelope::Payload::Response(v1::Response {
+                        ok: false,
+                        error_code: error_code.into(),
+                        display_message: "redacted injected rejection".into(),
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        })
+    }
+
+    fn fallback_count(runtime: &Path) -> usize {
+        fs::read_dir(runtime)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("hook-fallback-") && name.ends_with(".pb"))
+            })
+            .count()
+    }
+
     #[test]
     fn adapters_and_pane_identity_are_strict() {
         assert_eq!(
@@ -641,5 +717,55 @@ mod tests {
         assert!(!payload.contains("private"));
         assert!(!payload.contains("secret"));
         assert!(!payload.contains("prompt"));
+    }
+
+    #[tokio::test]
+    async fn retryable_live_rejection_writes_exactly_one_fallback_event() {
+        let runtime = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase14-live-retry-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&runtime).unwrap();
+        let server = rejecting_daemon(&runtime, "hook_ingest_retryable");
+        let event = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"PermissionRequest","event_id":"retry-once"}"#.to_vec(),
+            "%7",
+            "server-a",
+            7,
+        )
+        .unwrap();
+
+        deliver(std::slice::from_ref(&runtime), &event)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(fallback_count(&runtime), 1);
+        fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[tokio::test]
+    async fn permanent_live_rejection_is_discarded_without_a_fallback_event() {
+        let runtime = std::env::temp_dir().join(format!(
+            "ade-hd-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
+        fs::create_dir_all(&runtime).unwrap();
+        let server = rejecting_daemon(&runtime, "hook_ingest_discarded");
+        let event = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"PermissionRequest","event_id":"discard-once"}"#.to_vec(),
+            "%7",
+            "server-a",
+            7,
+        )
+        .unwrap();
+
+        deliver(std::slice::from_ref(&runtime), &event)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(fallback_count(&runtime), 0);
+        fs::remove_dir_all(runtime).unwrap();
     }
 }

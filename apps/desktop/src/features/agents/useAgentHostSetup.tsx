@@ -32,8 +32,8 @@ export interface AgentHostSetupOptions {
   /** Re-asks the host what its wiring is now, after a change to it. */
   refreshWiring(): void;
   onStatus(message: string): void;
-  /** Opens the existing exact-diff review for one adapter. */
-  openReview(adapter: string): void;
+  /** Opens the existing exact-diff dialog after this flow has loaded it. */
+  openReview(review: AgentHookReview, host: { profileId: string; identity: string }): void;
 }
 
 /**
@@ -90,10 +90,9 @@ export interface AgentHostSetup {
  * read: that is reported, not overwritten.
  */
 export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetup {
-  const [applying, setApplying] = useState(false);
-  const [error, setError] = useState<string>();
   const optionsRef = useRef(options);
   optionsRef.current = options;
+  const questionEpoch = useRef(0);
 
   // Keyed on `options.adapters` alone, which the store replaces only when a
   // snapshot arrives. It briefly also depended on which agents were running,
@@ -116,14 +115,21 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
    * the user reading one machine's paths and answering for another's.
    */
   const [asked, setAsked] = useState<{
+    id: number;
     host?: ConsentedHost;
     label: string;
     targets: readonly AgentAdapterDescriptor[];
+    activity?: "install" | "review";
+    error?: string;
   }>();
+  const updateQuestion = useCallback((id: number, update: Partial<Pick<NonNullable<typeof asked>, "activity" | "error">>) => {
+    setAsked((current) => current?.id === id ? { ...current, ...update } : current);
+  }, []);
   const offer = useCallback(() => {
     const current = optionsRef.current;
-    setError(undefined);
+    const id = ++questionEpoch.current;
     setAsked({
+      id,
       host: consentedHost(current),
       label: current.hostLabel,
       targets: hostHookWiring(current.adapters).setupTargets,
@@ -140,7 +146,10 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // A host that goes away takes its question with it, rather than leaving a
   // modal over a disconnected app that would act on the next host to connect.
   useEffect(() => {
-    if (!options.connected) setAsked(undefined);
+    if (!options.connected) {
+      questionEpoch.current += 1;
+      setAsked(undefined);
+    }
   }, [options.connected]);
 
   // Once per connection. The host's answer is idempotent, but reaching it is
@@ -176,10 +185,9 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
    * could widen the consent the user actually gave. Both are now arguments,
    * bound once, and checked again before every write.
    */
-  const install = useCallback((targets: readonly AgentAdapterDescriptor[], host: ConsentedHost) => {
+  const install = useCallback((targets: readonly AgentAdapterDescriptor[], host: ConsentedHost, questionId?: number) => {
     const current = optionsRef.current;
-    setApplying(true);
-    setError(undefined);
+    if (questionId !== undefined) updateQuestion(questionId, { activity: "install", error: undefined });
     // The record follows the write, always in that order and never without it.
     // Recording only after *every* adapter succeeded left a part-way failure
     // holding the worst of both: a configuration file changed on the host, and
@@ -208,7 +216,10 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       // Also for the nothing-to-do case: a host already current has been agreed
       // to, and asking again every launch is not "once".
       answer();
-      setAsked(undefined);
+      if (questionId !== undefined && questionEpoch.current === questionId) {
+        questionEpoch.current += 1;
+        setAsked(undefined);
+      }
       // Part of the same "set up this host" answer, and deliberately after it:
       // a tmux server that refuses the naming must not lose the hooks.
       assertNaming(host);
@@ -216,16 +227,16 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     }).catch((cause) => {
       // `false` even when an adapter was written: the answer is recorded, but
       // the thing the user asked for did not finish, and the dialog says so.
-      setError(String(cause));
+      if (questionId !== undefined) updateQuestion(questionId, { error: String(cause) });
       return false;
     }).finally(() => {
       // Unconditionally, including after a failure part-way through: an adapter
       // that was installed before the one that threw *is* wired now, and
       // leaving the dialog claiming otherwise is the lie this phase is about.
-      setApplying(false);
+      if (questionId !== undefined) updateQuestion(questionId, { activity: undefined });
       current.refreshWiring();
     });
-  }, [assertNaming]);
+  }, [assertNaming, updateQuestion]);
 
   // Consent is to keeping this host set up, not to one particular set of hook
   // events. The managed event set moves when a vendor adds an event worth
@@ -286,39 +297,62 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       // Two different refusals, and the difference matters to the person
       // reading it: one is a host that went away, the other is settings this
       // app could not read and therefore could not record an answer in.
-      setError(current.decisionsArePersistable
+      updateQuestion(question.id, { error: current.decisionsArePersistable
         ? "This host is no longer connected; nothing was changed."
-        : "Your saved settings could not be read, so this answer could not be recorded; nothing was changed.");
+        : "Your saved settings could not be read, so this answer could not be recorded; nothing was changed." });
       return;
     }
-    void install(question.targets, question.host).then((ok) => {
+    void install(question.targets, question.host, question.id).then((ok) => {
       if (ok) current.onStatus(`Agent status hooks installed on ${question.label}.`);
     });
-  }, [install]);
+  }, [install, updateQuestion]);
 
-  const decline = useCallback((host?: ConsentedHost) => {
+  const decline = useCallback((question: NonNullable<typeof asked>) => {
     // Unconditionally, including over an earlier "accepted": this prompt is
     // reachable from Settings, and someone who opens it there to say no is
     // changing their mind, not restating it. Against the host that was asked
     // about, so a "no" never lands on a host whose hooks are installed.
-    if (host) optionsRef.current.recordDecision(host.profileId, "declined");
+    if (question.host) optionsRef.current.recordDecision(question.host.profileId, "declined");
+    if (questionEpoch.current === question.id) questionEpoch.current += 1;
     setAsked(undefined);
   }, []);
+
+  const openReview = useCallback((question: NonNullable<typeof asked>) => {
+    const first = question.targets[0];
+    if (!first) return;
+    if (!question.host) {
+      updateQuestion(question.id, { error: optionsRef.current.decisionsArePersistable
+        ? "This host is no longer connected; the review could not be loaded."
+        : "Your saved settings could not be read, so this review could not be bound to a host." });
+      return;
+    }
+    // Keep the question mounted until the asynchronous review exists. The
+    // captured target and host are the consent surface; replacing either with
+    // the latest render while this request is in flight would make the diff an
+    // answer about a machine the user was never shown.
+    updateQuestion(question.id, { activity: "review", error: undefined });
+    void optionsRef.current.reviewHooks(first.id, "install", question.host.identity).then((review) => {
+      if (questionEpoch.current !== question.id) return;
+      optionsRef.current.openReview(review, question.host!);
+      questionEpoch.current += 1;
+      setAsked(undefined);
+    }).catch((cause) => {
+      // The prompt remains open and the same button becomes a retry. A status
+      // toast alone is not enough: it disappears and used to leave no path
+      // back to the review the user explicitly requested.
+      updateQuestion(question.id, { error: String(cause) });
+    }).finally(() => updateQuestion(question.id, { activity: undefined }));
+  }, [updateQuestion]);
 
   const dialog = asked
     ? <AgentHostSetupDialog
       adapters={asked.targets}
-      applying={applying}
-      error={error}
+      activity={asked.activity}
+      error={asked.error}
       hostLabel={asked.label}
       onAccept={() => accept(asked)}
-      onDecline={() => decline(asked.host)}
-      onReview={() => {
-        const first = asked.targets[0];
-        if (!first) return;
-        setAsked(undefined);
-        optionsRef.current.openReview(first.id);
-      }}
+      onDecline={() => decline(asked)}
+      onReview={() => openReview(asked)}
     />
     : null;
 
