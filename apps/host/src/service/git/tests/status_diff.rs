@@ -45,7 +45,12 @@ async fn status_models_initial_raw_ignored_mode_symlink_binary_and_rename_delete
         .status(&fixture.request(), None)
         .await
         .unwrap();
-    assert!(initial.repository.unwrap().initial);
+    let initial_repository = initial.repository.unwrap();
+    assert!(initial_repository.initial);
+    // Porcelain writes `(initial)` where an object id would go. That is a
+    // state, not an id, and must never reach the wire as one.
+    assert_eq!(initial_repository.head_oid, "");
+    assert!(!initial_repository.detached_head);
     fixture.write(".gitignore", b"ignored*\n");
     fixture.write("tracked", b"base\n");
     fixture.write("binary", b"a\0b");

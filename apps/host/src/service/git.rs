@@ -26,6 +26,21 @@ const MAX_GIT_DIAGNOSTIC: usize = 4 * 1024;
 const CONFIRMATION_TTL: Duration = Duration::from_secs(120);
 const MAX_CONFIRMATIONS: usize = 1024;
 
+/// How many times a diff re-reads when the repository changed under it.
+///
+/// A repository being written to continuously cannot produce a status and a
+/// diff describing the same state; saying so is better than returning a pair
+/// that does not agree.
+const DIFF_BRACKET_ATTEMPTS: usize = 3;
+
+/// Repositories one connection keeps discovered state for.
+///
+/// Each retains a worktree descriptor and two metadata descriptors, so a client
+/// that walks many roots must not accumulate them without limit. Watched
+/// repositories are never evicted; a watch is a consumer saying it still wants
+/// this one.
+const MAX_TRACKED_REPOSITORIES: usize = 8;
+
 mod command;
 use command::{command_state, truthful_command_result};
 mod content;
@@ -35,7 +50,7 @@ pub(in crate::service) use coordinator::SubscriberActivation;
 use coordinator::start_repository_watcher;
 use coordinator::{Freshness, RepositoryCapabilities, RepositoryCoordinator, RepositoryKey};
 mod diff;
-use diff::{DiffOptions, read_diff};
+use diff::{DiffAudience, read_diff};
 mod mutation;
 use mutation::{discard_file, mutate_hunk, unstage_file};
 #[cfg(test)]
@@ -54,7 +69,9 @@ use runner::{
     git_output_with_deadline, git_path_cancellable,
 };
 mod status;
-use status::{discover_repository, read_status_cancellable, validate_metadata_capability};
+use status::{
+    RepositoryIdentity, discover_repository, read_status_cancellable, validate_metadata_capability,
+};
 mod watch;
 
 static REPOSITORY_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
@@ -90,6 +107,8 @@ pub(super) struct GitService {
     confirmations: Mutex<HashMap<String, ConfirmationBinding>>,
     diff_body: Mutex<Option<content::CachedDiffBody>>,
     next_generation: Arc<AtomicU64>,
+    /// Monotonic clock for repository eviction order.
+    next_use: AtomicU64,
     /// This connection's generation, taken from its `ClientHello` rather than
     /// from any individual request.
     connection_epoch: u64,
@@ -106,10 +125,29 @@ impl GitService {
             confirmations: Mutex::new(HashMap::new()),
             diff_body: Mutex::new(None),
             next_generation: Arc::new(AtomicU64::new(0)),
+            next_use: AtomicU64::new(0),
             connection_epoch,
             closed,
             #[cfg(test)]
             observation: Arc::new(GitObservation::default()),
+        }
+    }
+
+    /// The live coordinator for a request, for tests that drive it directly.
+    #[cfg(test)]
+    pub(in crate::service::git) fn coordinator_for_test(
+        &self,
+        request: &v1::GitRequest,
+    ) -> Option<Arc<RepositoryCoordinator>> {
+        let key = RepositoryKey::for_connection(self.connection_epoch, request);
+        self.repositories.lock().unwrap().get(&key).map(Arc::clone)
+    }
+
+    /// Marks every established native watcher broken, as the platform would.
+    #[cfg(test)]
+    pub(in crate::service::git) fn fail_native_watcher_for_test(&self) {
+        for coordinator in self.repositories.lock().unwrap().values() {
+            coordinator.fail_native_watcher_for_test();
         }
     }
 
@@ -130,9 +168,10 @@ impl GitService {
     ) -> anyhow::Result<(Arc<RepositoryCoordinator>, Arc<RepositoryCapabilities>)> {
         ensure_server_identity(request)?;
         let key = RepositoryKey::for_connection(self.connection_epoch, request);
+        let use_order = self.next_use.fetch_add(1, Ordering::AcqRel);
         let coordinator = {
             let mut repositories = self.repositories.lock().unwrap();
-            Arc::clone(repositories.entry(key.clone()).or_insert_with(|| {
+            let coordinator = Arc::clone(repositories.entry(key.clone()).or_insert_with(|| {
                 Arc::new(RepositoryCoordinator::new(
                     key,
                     Arc::clone(&self.next_generation),
@@ -140,7 +179,10 @@ impl GitService {
                     #[cfg(test)]
                     Arc::clone(&self.observation),
                 ))
-            }))
+            }));
+            coordinator.touch(use_order);
+            evict_unwatched_repositories(&mut repositories);
+            coordinator
         };
         match coordinator.capabilities(request, cancellation).await {
             Ok(capabilities) => Ok((coordinator, capabilities)),
@@ -165,6 +207,13 @@ impl GitService {
         }
     }
 
+    /// An explicitly requested status.
+    ///
+    /// Every automatic refresh now arrives through the shared watch, so a
+    /// client asking for status is a person asking for it — usually because
+    /// something looked wrong. Answering that from the snapshot the watcher
+    /// last produced would remove the only recovery there is from a filesystem
+    /// watcher that silently missed an event.
     pub(in crate::service) async fn status(
         &self,
         request: &v1::GitRequest,
@@ -172,7 +221,7 @@ impl GitService {
     ) -> anyhow::Result<v1::GitStatusSnapshot> {
         let (coordinator, capabilities) = self.repository(request, cancellation.clone()).await?;
         let status = coordinator
-            .status(&capabilities, Freshness::Coalesced, cancellation)
+            .status(&capabilities, Freshness::Forced, cancellation)
             .await?;
         Ok((*status).clone())
     }
@@ -182,43 +231,56 @@ impl GitService {
     /// The desktop previously requested status and then diff, paying two round
     /// trips for one visible action. The status is carried here because the
     /// service already has it: for a watched repository it costs nothing.
+    ///
+    /// The pair is bracketed by the coordinator's change ticket rather than by
+    /// a second status pipeline. Nothing may have invalidated the repository
+    /// between taking the status and reading the diff, or the response would be
+    /// stating a status the diff was not read against.
     pub(in crate::service) async fn diff(
         &self,
         request: &v1::GitRequest,
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<(v1::GitDiff, v1::GitStatusSnapshot)> {
         require_repository_id(request)?;
-        if cancellation
-            .as_deref()
-            .is_some_and(|flag| flag.load(Ordering::Acquire))
-        {
-            bail!("Git diff cancelled");
-        }
         let (coordinator, capabilities) = self.repository(request, cancellation.clone()).await?;
-        let status = coordinator
-            .status(&capabilities, Freshness::Coalesced, cancellation.clone())
-            .await?;
-        if !status.authoritative || status.oversized {
-            bail!("Git status is not authoritative");
+        for _ in 0..DIFF_BRACKET_ATTEMPTS {
+            if cancellation
+                .as_deref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                bail!("Git diff cancelled");
+            }
+            let status = coordinator
+                .status(&capabilities, Freshness::Coalesced, cancellation.clone())
+                .await?;
+            if !status.authoritative || status.oversized {
+                bail!("Git status is not authoritative");
+            }
+            let before = coordinator.change_ticket();
+            let repository = status
+                .repository
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Git status omitted its repository identity"))?;
+            let work = request.clone();
+            let read_capabilities = Arc::clone(&capabilities);
+            let read_cancellation = cancellation.clone();
+            let read = tokio::task::spawn_blocking(move || {
+                let _guard = read_capabilities.metadata.install();
+                read_diff(
+                    &read_capabilities.stable_root(),
+                    repository,
+                    &work,
+                    DiffAudience::Client,
+                    read_cancellation.as_deref(),
+                )
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("Git diff task failed: {error}"))??;
+            if coordinator.change_ticket() == before {
+                return Ok((read, (*status).clone()));
+            }
         }
-        let repository = status
-            .repository
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Git status omitted its repository identity"))?;
-        let work = request.clone();
-        let read = tokio::task::spawn_blocking(move || {
-            let _guard = capabilities.metadata.install();
-            read_diff(
-                &capabilities.stable_root(),
-                repository,
-                &work,
-                DiffOptions::for_client(),
-                cancellation.as_deref(),
-            )
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("Git diff task failed: {error}"))??;
-        Ok((read, (*status).clone()))
+        bail!("stale Git status generation during diff")
     }
 
     /// The diff including its raw patch, which the client response omits.
@@ -239,7 +301,7 @@ impl GitService {
                 &capabilities.stable_root(),
                 repository,
                 &work,
-                DiffOptions::for_mutation(),
+                DiffAudience::Mutation,
                 None,
             )
         })
@@ -284,7 +346,7 @@ impl GitService {
         confirmations.insert(
             token.clone(),
             ConfirmationBinding {
-                repository_id: capabilities.repository.repository_id.clone(),
+                repository_id: capabilities.identity.repository_id.clone(),
                 root: request.root.clone(),
                 root_token: request.root_token.clone(),
                 server_identity: request.expected_server_identity.clone(),
@@ -322,7 +384,7 @@ impl GitService {
             .repository(&request, Some(Arc::clone(&cancellation)))
             .await?;
         let _mutation = coordinator.begin_mutation();
-        let _guard = repository_lock(&capabilities.repository.repository_id)
+        let _guard = repository_lock(&capabilities.identity.repository_id)
             .lock_owned()
             .await;
         if cancellation.load(Ordering::Acquire) {
@@ -392,13 +454,14 @@ impl GitService {
                 ),
                 v1::GitMutationKind::UnstageFile => unstage_file(
                     &root,
-                    &execution_repository,
+                    execution_repository.initial,
                     &mutation_request,
                     &execution_cancellation,
                 ),
                 v1::GitMutationKind::DiscardFile => discard_file(
                     &root,
-                    &execution_repository,
+                    &execution_capabilities.identity,
+                    execution_repository.initial,
                     &mutation_request,
                     &execution_cancellation,
                 ),
@@ -438,7 +501,7 @@ impl GitService {
             .repository(&request, Some(Arc::clone(&cancellation)))
             .await?;
         let _mutation = coordinator.begin_mutation();
-        let _guard = repository_lock(&capabilities.repository.repository_id)
+        let _guard = repository_lock(&capabilities.identity.repository_id)
             .lock_owned()
             .await;
         if cancellation.load(Ordering::Acquire) {
@@ -548,6 +611,25 @@ impl Drop for GitService {
             coordinator.drop_all_subscribers();
         }
         self.watches.get_mut().unwrap().clear();
+    }
+}
+
+/// Drops the least recently used repositories nobody is watching.
+fn evict_unwatched_repositories(
+    repositories: &mut HashMap<RepositoryKey, Arc<RepositoryCoordinator>>,
+) {
+    while repositories.len() > MAX_TRACKED_REPOSITORIES {
+        let Some(evicted) = repositories
+            .values()
+            .filter(|coordinator| coordinator.subscriber_count() == 0)
+            .min_by_key(|coordinator| coordinator.last_use())
+            .map(|coordinator| coordinator.key().clone())
+        else {
+            return;
+        };
+        if let Some(coordinator) = repositories.remove(&evicted) {
+            coordinator.stop_watcher();
+        }
     }
 }
 

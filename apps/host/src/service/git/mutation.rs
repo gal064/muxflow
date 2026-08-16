@@ -17,7 +17,7 @@ pub(super) fn mutate_hunk(
         root,
         repository.clone(),
         request,
-        DiffOptions::for_mutation(),
+        DiffAudience::Mutation,
         Some(cancellation),
     )?;
     if current.source_generation != request.expected_source_generation {
@@ -187,11 +187,11 @@ pub(crate) fn extract_hunk_patch(patch: &[u8], requested: u32) -> anyhow::Result
 
 pub(super) fn unstage_file(
     root: &str,
-    repository: &v1::GitRepository,
+    initial: bool,
     request: &v1::GitRequest,
     cancellation: &AtomicBool,
 ) -> anyhow::Result<GitOutput> {
-    if repository.initial {
+    if initial {
         git_path_cancellable(
             root,
             &[b"rm", b"--cached", b"--quiet"],
@@ -217,14 +217,15 @@ pub(super) fn unstage_file(
 
 pub(super) fn discard_file(
     root: &str,
-    repository: &v1::GitRepository,
+    identity: &RepositoryIdentity,
+    initial: bool,
     request: &v1::GitRequest,
     cancellation: &AtomicBool,
 ) -> anyhow::Result<GitOutput> {
     let target = v1::GitDiffTarget::try_from(request.diff_target).unwrap_or_default();
-    let current = read_status_cancellable(root, repository.clone(), Some(cancellation))?;
+    let current = read_status_cancellable(root, identity, Some(cancellation))?;
     if target == v1::GitDiffTarget::Staged {
-        if repository.initial {
+        if initial {
             let output = git_path_cancellable(
                 root,
                 &[b"rm", b"--cached", b"--quiet"],

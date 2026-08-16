@@ -42,12 +42,18 @@ pub(crate) mod agent;
 pub(crate) mod files;
 pub(crate) mod git;
 pub(crate) mod git_content;
+use git_content::GitContentRegistration;
 mod git_operations;
 use git_operations::GitOperations;
 pub(crate) mod tmux_action;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Deferred Git diff-body reads one connection may have outstanding. A diff
+/// surface cancels its previous read before starting another, so this is a
+/// bound on misbehaviour rather than on ordinary use.
+const MAX_GIT_CONTENT_READS: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "camelCase")]
@@ -103,6 +109,9 @@ pub(crate) struct TerminalClient {
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
     git_operations: Mutex<GitOperations>,
+    /// Deferred Git diff-body reads this connection owns, so replacing the
+    /// connection cancels them rather than leaving them streaming.
+    git_content_reads: Mutex<HashMap<String, Arc<files::scheduler::CancelState>>>,
     input_queue: Mutex<ClientInputQueue>,
     resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
@@ -134,6 +143,7 @@ impl TerminalClient {
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
             git_operations: Mutex::new(GitOperations::default()),
+            git_content_reads: Mutex::new(HashMap::new()),
             input_queue: Mutex::new(ClientInputQueue::default()),
             resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
@@ -421,6 +431,49 @@ impl TerminalClient {
         result
     }
 
+    /// One Git request on the control lane, for callers outside this module.
+    pub(crate) fn request_git_operation(
+        &self,
+        request: v1::Request,
+        operation_id: &str,
+    ) -> Result<v1::Response, String> {
+        self.request_git(request, operation_id)
+    }
+
+    /// Records a diff-body read so connection replacement can cancel it.
+    pub(crate) fn register_git_content_read(
+        self: &Arc<Self>,
+        read_id: &str,
+        cancellation: &Arc<files::scheduler::CancelState>,
+    ) -> Result<GitContentRegistration, String> {
+        let mut reads = self.git_content_reads.lock().unwrap();
+        if reads.len() >= MAX_GIT_CONTENT_READS {
+            return Err("too many Git diff content reads are in progress".into());
+        }
+        reads.insert(read_id.to_owned(), Arc::clone(cancellation));
+        Ok(GitContentRegistration::new(
+            Arc::clone(self),
+            read_id.to_owned(),
+        ))
+    }
+
+    pub(crate) fn release_git_content_read(&self, read_id: &str) {
+        self.git_content_reads.lock().unwrap().remove(read_id);
+    }
+
+    pub(crate) fn cancel_git_content_read(&self, read_id: &str) {
+        let cancellation = self.git_content_reads.lock().unwrap().get(read_id).cloned();
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+        }
+    }
+
+    fn cancel_all_git_content_reads(&self) {
+        for (_, cancellation) in self.git_content_reads.lock().unwrap().drain() {
+            cancellation.cancel();
+        }
+    }
+
     fn cancel_git(&self, operation_id: &str) -> Result<(), String> {
         // A renderer that aborts immediately can reach here before the request
         // it is cancelling has been written. Recording a tombstone makes that
@@ -449,6 +502,7 @@ impl TerminalClient {
 
     fn fail_pending(&self, message: &str) {
         self.git_operations.lock().unwrap().reset();
+        self.cancel_all_git_content_reads();
         for (_, sender) in self.pending.lock().unwrap().drain() {
             let _ = sender.send(Err(message.into()));
         }

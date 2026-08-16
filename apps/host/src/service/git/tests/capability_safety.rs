@@ -41,12 +41,16 @@ async fn stable_root_capability_survives_same_path_repository_replacement_and_id
         .unwrap()
         .repository_id
         .clone();
-    let old_metadata = GitMetadataCapability::capture(
-        &old_status.repository.as_ref().unwrap().git_dir,
-        &old_status.repository.as_ref().unwrap().common_dir,
+    let capability = WorktreeRoot::capture(fixture.root.to_str().unwrap()).unwrap();
+    let old_identity = discover_repository(
+        &capability.stable_path(),
+        fixture.root.to_str().unwrap(),
+        capability.identity().unwrap(),
+        None,
     )
     .unwrap();
-    let capability = WorktreeRoot::capture(fixture.root.to_str().unwrap()).unwrap();
+    let old_metadata =
+        GitMetadataCapability::capture(&old_identity.git_dir, &old_identity.common_dir).unwrap();
     let stable_root = capability.stable_path();
     let old_head = runner::git_output_cancellable(
         &stable_root,
@@ -80,7 +84,7 @@ async fn stable_root_capability_survives_same_path_repository_replacement_and_id
     .unwrap();
     assert_eq!(still_old.stdout, old_head);
     let capabilities = Arc::new(RepositoryCapabilities::for_test(
-        old_status.repository.clone().unwrap(),
+        old_identity,
         old_metadata,
         capability.try_clone().unwrap(),
     ));
@@ -89,6 +93,7 @@ async fn stable_root_capability_survives_same_path_repository_replacement_and_id
             &capabilities,
             &request.root,
             &request.root_token,
+            Arc::new(AtomicBool::new(false)),
             Arc::new(measurements::GitObservation::default()),
         )
         .is_err()
@@ -133,7 +138,17 @@ fn git_metadata_capability_prevents_same_path_dot_git_retarget_for_stage_and_com
         &metadata,
     )
     .unwrap();
-    let old_head = repository.head_oid;
+    let old_head = String::from_utf8(
+        runner::git_stdout_cancellable(
+            &stable_root,
+            &[OsStr::new("rev-parse"), OsStr::new("HEAD")],
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
     fixture.write("staged-after-swap", b"old repository only\n");
     fs::rename(fixture.root.join(".git"), fixture.root.join(".git-held")).unwrap();
     fixture.git(&["init", "-q"]);

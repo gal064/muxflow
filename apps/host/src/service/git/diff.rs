@@ -25,32 +25,30 @@ const MAX_SERIALIZED_DIFF_PAYLOAD: usize = 15 * 1024 * 1024;
 /// the independent bulk connection.
 pub(super) const INLINE_DIFF_BODY_LIMIT: usize = 256 * 1024;
 
-#[derive(Clone, Copy)]
-pub(super) struct DiffOptions {
-    /// Whether the caller needs the raw patch bytes.
-    ///
-    /// Hunk staging re-derives its patch here and needs them. The editor
-    /// renders `old_content`/`new_content` and never read the patch, so sending
-    /// it duplicated the whole file on the control lane for nothing.
-    pub(super) include_patch: bool,
-    /// Combined body size above which content is referenced, not inlined.
-    pub(super) inline_body_limit: usize,
+/// Who a diff is being read for.
+///
+/// The two audiences want opposite things, and they are never mixed: a hunk
+/// mutation needs the raw patch and cannot defer anything, while the editor
+/// needs content and never read the patch at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DiffAudience {
+    /// The desktop editor. No patch; large bodies are referenced for the bulk
+    /// lane rather than sent on the control lane.
+    Client,
+    /// A hunk mutation re-deriving its own patch, on the host, in process.
+    Mutation,
 }
 
-impl DiffOptions {
-    /// What a hunk mutation needs: the exact patch, and no bulk indirection.
-    pub(super) fn for_mutation() -> Self {
-        Self {
-            include_patch: true,
-            inline_body_limit: usize::MAX,
-        }
+impl DiffAudience {
+    fn includes_patch(self) -> bool {
+        self == Self::Mutation
     }
 
-    /// What the editor needs: content only, with large bodies deferred.
-    pub(super) fn for_client() -> Self {
-        Self {
-            include_patch: false,
-            inline_body_limit: INLINE_DIFF_BODY_LIMIT,
+    /// Combined old + new bytes that may still be inlined in the response.
+    fn inline_body_limit(self) -> usize {
+        match self {
+            Self::Client => INLINE_DIFF_BODY_LIMIT,
+            Self::Mutation => usize::MAX,
         }
     }
 }
@@ -59,7 +57,7 @@ pub(super) fn read_diff(
     root: &str,
     repository: v1::GitRepository,
     request: &v1::GitRequest,
-    options: DiffOptions,
+    audience: DiffAudience,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<v1::GitDiff> {
     validate_git_path(&request.path)?;
@@ -159,9 +157,9 @@ pub(super) fn read_diff(
             too_large: false,
         }
     } else {
-        read_diff_contents(root, &repository, request, target, cancellation)?
+        read_diff_contents(root, request, target, cancellation)?
     };
-    let inlined_patch = if options.include_patch {
+    let inlined_patch = if audience.includes_patch() {
         patch.len()
     } else {
         0
@@ -184,7 +182,7 @@ pub(super) fn read_diff(
         )?
         .ok_or_else(|| anyhow::anyhow!("Git diff exceeds the serialized frame budget"));
     }
-    let bodies = DiffBodies::place(contents.old, contents.new, options.inline_body_limit);
+    let bodies = DiffBodies::place(contents.old, contents.new, audience.inline_body_limit());
     Ok(v1::GitDiff {
         repository: Some(repository),
         target: target.into(),
@@ -195,7 +193,7 @@ pub(super) fn read_diff(
         new_content: bodies.new,
         old_content_ref: bodies.old_ref,
         new_content_ref: bodies.new_ref,
-        patch: if options.include_patch {
+        patch: if audience.includes_patch() {
             patch
         } else {
             Vec::new()
@@ -248,11 +246,13 @@ fn content_ref(side: v1::GitDiffContentSide, body: &[u8]) -> Option<v1::GitDiffC
     })
 }
 
-/// Re-reads one side of a diff for the bulk lane and proves it is the exact
-/// body the control response described.
+/// Re-reads one side of a diff for the bulk lane.
+///
+/// Deliberately the same `read_side` the inline read uses: if the two ever
+/// disagreed about where a side comes from, every deferred body would fail the
+/// digest check the control response bound it to.
 pub(super) fn read_diff_side(
     root: &str,
-    repository: &v1::GitRepository,
     request: &v1::GitRequest,
     side: v1::GitDiffContentSide,
     cancellation: Option<&AtomicBool>,
@@ -261,30 +261,40 @@ pub(super) fn read_diff_side(
     if target == v1::GitDiffTarget::Unspecified {
         bail!("diff target is required");
     }
+    if side == v1::GitDiffContentSide::Unspecified {
+        bail!("Git diff content side is required");
+    }
     validate_git_path(&request.path)?;
-    let body = match side {
-        v1::GitDiffContentSide::Old => {
-            let old_path = old_object_path(request, target);
-            if target == v1::GitDiffTarget::Staged {
-                if repository.initial {
-                    (Vec::new(), true)
-                } else {
-                    git_object(root, b"HEAD", old_path, cancellation)?
-                }
-            } else {
-                git_object(root, b":0", old_path, cancellation)?
-            }
+    Ok(read_side(root, request, target, side, cancellation)?.0)
+}
+
+/// Where one side of a diff comes from. The single source of that truth.
+///
+/// An unborn HEAD needs no special case: `git show HEAD:path` simply fails and
+/// reports the side missing, which is exactly what an initial repository means.
+fn read_side(
+    root: &str,
+    request: &v1::GitRequest,
+    target: v1::GitDiffTarget,
+    side: v1::GitDiffContentSide,
+    cancellation: Option<&AtomicBool>,
+) -> anyhow::Result<(Vec<u8>, bool)> {
+    match (side, target) {
+        (v1::GitDiffContentSide::Old, v1::GitDiffTarget::Staged) => git_object(
+            root,
+            b"HEAD",
+            old_object_path(request, target),
+            cancellation,
+        ),
+        (v1::GitDiffContentSide::Old, _) => {
+            git_object(root, b":0", old_object_path(request, target), cancellation)
         }
-        v1::GitDiffContentSide::New => {
-            if target == v1::GitDiffTarget::Staged {
-                git_object(root, b":0", &request.path, cancellation)?
-            } else {
-                worktree_content(root, &request.path)?
-            }
+        (v1::GitDiffContentSide::New, v1::GitDiffTarget::Staged) => {
+            git_object(root, b":0", &request.path, cancellation)
         }
-        v1::GitDiffContentSide::Unspecified => bail!("Git diff content side is required"),
-    };
-    Ok(body.0)
+        (v1::GitDiffContentSide::New, _) => worktree_content(root, &request.path),
+        (v1::GitDiffContentSide::Unspecified, _) => bail!("Git diff content side is required"),
+    }
 }
 
 fn rewrite_untracked_patch(generated: &[u8], path: &[u8], mode: u32) -> Vec<u8> {
@@ -352,11 +362,7 @@ fn bounded_diff_metadata(
 ) -> anyhow::Result<Option<v1::GitDiff>> {
     let old_path = old_object_path(request, target);
     let old_size = if target == v1::GitDiffTarget::Staged {
-        if repository.initial {
-            None
-        } else {
-            object_size(root, b"HEAD", old_path, cancellation)?
-        }
+        object_size(root, b"HEAD", old_path, cancellation)?
     } else {
         object_size(root, b":0", old_path, cancellation)?
     };
@@ -508,26 +514,24 @@ fn worktree_size(root: &str, path: &[u8]) -> anyhow::Result<Option<u64>> {
 
 fn read_diff_contents(
     root: &str,
-    repository: &v1::GitRepository,
     request: &v1::GitRequest,
     target: v1::GitDiffTarget,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<DiffContents> {
-    let old_path = old_object_path(request, target);
-    let (old, old_missing) = if target == v1::GitDiffTarget::Staged {
-        if repository.initial {
-            (Vec::new(), true)
-        } else {
-            git_object(root, b"HEAD", old_path, cancellation)?
-        }
-    } else {
-        git_object(root, b":0", old_path, cancellation)?
-    };
-    let (new, new_missing) = if target == v1::GitDiffTarget::Staged {
-        git_object(root, b":0", &request.path, cancellation)?
-    } else {
-        worktree_content(root, &request.path)?
-    };
+    let (old, old_missing) = read_side(
+        root,
+        request,
+        target,
+        v1::GitDiffContentSide::Old,
+        cancellation,
+    )?;
+    let (new, new_missing) = read_side(
+        root,
+        request,
+        target,
+        v1::GitDiffContentSide::New,
+        cancellation,
+    )?;
     let too_large = old.len() > MAX_DIFF_CONTENT || new.len() > MAX_DIFF_CONTENT;
     Ok(DiffContents {
         old: if too_large { Vec::new() } else { old },

@@ -46,8 +46,8 @@ describe("GitRepositoryStore", () => {
     reopened.release();
   });
 
-  it("coalesces identical diff requests and drops them when the status moves on", async () => {
-    const { client, calls, publish } = stubClient();
+  it("shares one request between simultaneous callers and re-reads afterwards", async () => {
+    const { client, calls } = stubClient();
     const store = new GitRepositoryStore(client);
     const handle = store.acquire(scope, root);
     await flush();
@@ -56,13 +56,36 @@ describe("GitRepositoryStore", () => {
     const [first, second] = await Promise.all([handle.diff(request), handle.diff(request)]);
     expect(calls.diff).toBe(1);
     expect(first).toBe(second);
-    await handle.diff(request);
-    expect(calls.diff).toBe(1);
 
-    publish(snapshot("2"));
-    await flush();
+    // A resolved diff is never replayed: the host is the authority on what a
+    // file currently looks like, so an explicit re-read must reach it.
     await handle.diff(request);
     expect(calls.diff).toBe(2);
+    handle.release();
+  });
+
+  it("cancels a diff only when every caller waiting on it has gone", async () => {
+    const { client, calls } = stubClient();
+    let observed: AbortSignal | undefined;
+    vi.mocked(client.diff).mockImplementation(async (_scope, _root, _id, _path, _original, _target, signal) => {
+      calls.diff += 1;
+      observed = signal;
+      return { diff: stubDiff(), status: snapshot("1") };
+    });
+    const store = new GitRepositoryStore(client);
+    const handle = store.acquire(scope, root);
+    await flush();
+
+    const request = { repositoryId: "repo", path: "YQ==", target: "unstaged" as const };
+    const leaving = new AbortController();
+    const staying = new AbortController();
+    const abandoned = handle.diff(request, leaving.signal);
+    const wanted = handle.diff(request, staying.signal);
+    expect(calls.diff).toBe(1);
+    leaving.abort();
+    expect(observed?.aborted).toBe(false);
+    await expect(wanted).resolves.toBeDefined();
+    await abandoned.catch(() => undefined);
     handle.release();
   });
 
@@ -83,6 +106,57 @@ describe("GitRepositoryStore", () => {
 
     handle.accept(snapshot("2"));
     expect(listener).toHaveBeenCalledTimes(1);
+    handle.release();
+  });
+
+  it("stops saying it is loading when an explicit refresh changed nothing", async () => {
+    const { client } = stubClient();
+    const store = new GitRepositoryStore(client);
+    const handle = store.acquire(scope, root);
+    await flush();
+    expect(handle.state().loading).toBe(false);
+
+    // The common case: the user presses refresh and the repository is exactly
+    // as it was. That is still an answer, and the panel must settle on it.
+    await handle.refresh();
+    await flush();
+    expect(handle.state().loading).toBe(false);
+    expect(handle.state().status?.generation).toBe("1");
+    handle.release();
+  });
+
+  it("clears a watch error as soon as any status comes back", async () => {
+    const { client, emit, publish } = stubClient();
+    const store = new GitRepositoryStore(client);
+    const handle = store.acquire(scope, root);
+    await flush();
+    emit({ kind: "error", rootToken: root.token, watchId: "watch", error: "transient failure" });
+    await flush();
+    expect(handle.state().error).toBe("transient failure");
+
+    // The identical snapshot, republished. Recovery is a transition even when
+    // the repository state is byte-identical.
+    publish(snapshot("1"));
+    await flush();
+    expect(handle.state().error).toBeUndefined();
+    handle.release();
+  });
+
+  it("reconciles a mutation's authoritative status without a second request", async () => {
+    const { client, calls } = stubClient();
+    vi.mocked(client.mutate).mockResolvedValue({
+      exitCode: 0, stdout: "", stderr: "", applied: true, refreshFailed: false, refreshError: "",
+      outcome: "applied", status: snapshot("2"),
+    });
+    const store = new GitRepositoryStore(client);
+    const handle = store.acquire(scope, root);
+    await flush();
+    await handle.mutate("repo", {
+      kind: "stageFile", path: "YQ==", target: "unstaged",
+      expectedStatusGeneration: "1", expectedSourceGeneration: "source-1",
+    });
+    expect(handle.state().status?.generation).toBe("2");
+    expect(calls.status).toBe(0);
     handle.release();
   });
 

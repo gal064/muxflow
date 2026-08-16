@@ -1,8 +1,10 @@
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import { recordPerfCounter, recordPerfHighWater } from "../../perf/probe";
 import type {
+  GitCommandResult,
   GitDiffResult,
   GitDiffTarget,
+  GitMutationRequest,
   GitStatusSnapshot,
   GitWatchLease,
   GitWorkspaceClient,
@@ -16,6 +18,9 @@ import type {
  * each of which cost the host a discovery, a native watcher and a status
  * pipeline. They share one here: the second consumer of a repository pays no
  * round trip at all, and sees the current status the moment it acquires.
+ *
+ * Mutations go through here too, so the authoritative status a command returns
+ * is reconciled once, in the one place that owns this repository's state.
  */
 export interface GitRepositoryState {
   status?: GitStatusSnapshot;
@@ -24,15 +29,20 @@ export interface GitRepositoryState {
 }
 
 export interface GitRepositoryHandle {
-  /** The current shared state; safe to read during render. */
+  /** The current shared state. A stable object between publications. */
   state(): GitRepositoryState;
   subscribe(listener: () => void): () => void;
-  /** Re-reads status through the shared entry, coalescing with any in flight. */
+  /** An explicit re-read. The host answers this one without its watch cache. */
   refresh(): Promise<void>;
-  /** Adopts an authoritative status the caller already has, e.g. a mutation's. */
+  /** Adopts an authoritative status the caller already has. */
   accept(status: GitStatusSnapshot): void;
-  /** The diff for one entry, reusing an identical in-flight or cached result. */
-  diff(request: GitDiffRequest): Promise<GitDiffResult>;
+  /** The diff for one entry, joining an identical request already in flight. */
+  diff(request: GitDiffRequest, signal?: AbortSignal): Promise<GitDiffResult>;
+  /** One mutation, whose returned authoritative status is reconciled here. */
+  mutate(repositoryId: string, request: GitMutationRequest): Promise<GitCommandResult>;
+  /** Mints the one-time host token a discard requires. */
+  prepareDiscard(repositoryId: string, request: GitMutationRequest): Promise<string>;
+  commit(repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult>;
   release(): void;
 }
 
@@ -43,21 +53,63 @@ export interface GitDiffRequest {
   target: GitDiffTarget;
 }
 
-/** Distinct results kept per repository. One per open diff tab plus headroom. */
-const MAX_CACHED_DIFFS = 16;
-
 /** Repositories whose last status is remembered after their last consumer. */
 const MAX_REMEMBERED_STATUSES = 8;
 
 /** Watch events held while a bootstrap response is still in flight. */
 const MAX_PENDING_EVENTS = 64;
 
+const NOT_OBSERVED: GitRepositoryState = { loading: true };
+
 function scopeKey(scope: FileWorkspaceScope, root: ActiveRoot): string {
   return [scope.clientId, scope.serverIdentity, scope.terminalEpoch, root.token, root.path].join("\0");
 }
 
-function diffKey(request: GitDiffRequest, generation: string): string {
-  return [request.repositoryId, request.path, request.originalPath ?? "", request.target, generation].join("\0");
+function diffKey(request: GitDiffRequest): string {
+  return [request.repositoryId, request.path, request.originalPath ?? "", request.target].join("\0");
+}
+
+/**
+ * One diff request that more than one caller may be waiting on.
+ *
+ * Joiners are counted rather than assumed, because cancellation belongs to the
+ * caller: a tab that closes must stop its own read — including the bulk body
+ * stream, which is why this exists at all — without cancelling a peer that is
+ * still waiting for the same bytes.
+ */
+class SharedDiffRequest {
+  readonly promise: Promise<GitDiffResult>;
+  readonly #controller = new AbortController();
+  #joiners = 0;
+
+  constructor(start: (signal: AbortSignal) => Promise<GitDiffResult>) {
+    this.promise = start(this.#controller.signal);
+    // Nothing else observes this promise, and an unobserved rejection is a
+    // console error the user cannot act on.
+    this.promise.catch(() => undefined);
+  }
+
+  join(signal: AbortSignal | undefined, onIdle: () => void): Promise<GitDiffResult> {
+    this.#joiners += 1;
+    let departed = false;
+    const depart = () => {
+      if (departed) return;
+      departed = true;
+      this.#joiners -= 1;
+      if (this.#joiners > 0) return;
+      this.#controller.abort();
+      onIdle();
+    };
+    signal?.addEventListener("abort", depart, { once: true });
+    return this.promise.finally(() => {
+      signal?.removeEventListener("abort", depart);
+      depart();
+    });
+  }
+
+  abandon(): void {
+    this.#controller.abort();
+  }
 }
 
 /**
@@ -69,10 +121,10 @@ class RepositoryEntry {
   readonly #scope: FileWorkspaceScope;
   readonly #root: ActiveRoot;
   readonly #listeners = new Set<() => void>();
-  readonly #diffs = new Map<string, Promise<GitDiffResult>>();
+  readonly #diffs = new Map<string, SharedDiffRequest>();
   readonly #onEmpty: () => void;
   #consumers = 0;
-  #state: GitRepositoryState = { loading: true };
+  #state: GitRepositoryState = NOT_OBSERVED;
   #lease: GitWatchLease | undefined;
   #stopEvents: (() => void) | undefined;
   #abort = new AbortController();
@@ -127,12 +179,19 @@ class RepositoryEntry {
   accept(status: GitStatusSnapshot): void {
     if (this.#disposed) return;
     const current = this.#state.status;
+    const settled = this.#state.loading || this.#state.error !== undefined;
     if (current && current.repository.id === status.repository.id) {
-      // Equal state is not a transition. Bailing here is what stops a mutation
-      // that already delivered its status in its response from re-rendering
-      // every row again when the shared watch echoes the same snapshot.
-      if (current.generation === status.generation && current.sourceGeneration === status.sourceGeneration) return;
-      if (BigInt(status.generation) < BigInt(current.generation)) return;
+      // Equal state is not a status transition. Bailing here is what stops a
+      // mutation that already delivered its status in its response from
+      // re-rendering every row when the shared watch echoes the same snapshot.
+      // Settling still has to happen: an identical snapshot is the normal
+      // answer to an explicit refresh, and it is also how an error clears.
+      const identical = current.generation === status.generation
+        && current.sourceGeneration === status.sourceGeneration;
+      if (identical || BigInt(status.generation) < BigInt(current.generation)) {
+        if (settled) this.#publish({ status: current, loading: false });
+        return;
+      }
     }
     this.#publish({ status, loading: false });
   }
@@ -143,53 +202,62 @@ class RepositoryEntry {
     this.#publish({ ...this.#state, loading: true, error: undefined });
     const inFlight = (async () => {
       try {
-        const status = await this.#client.status(this.#scope, this.#root, this.#abort.signal);
-        this.accept(status);
+        this.accept(await this.#client.status(this.#scope, this.#root, this.#abort.signal));
       } catch (cause) {
-        if (!this.#disposed && !this.#abort.signal.aborted) {
-          this.#publish({ ...this.#state, loading: false, error: String(cause) });
-        }
+        if (this.#disposed || this.#abort.signal.aborted) return;
+        this.#publish({ ...this.#state, loading: false, error: String(cause) });
       } finally {
         this.#refreshing = undefined;
+        // A refresh that changed nothing still has to stop saying it is
+        // loading; `accept` deliberately suppresses the state transition.
+        if (!this.#disposed && this.#state.loading) {
+          this.#publish({ ...this.#state, loading: false });
+        }
       }
     })();
     this.#refreshing = inFlight;
     return inFlight;
   }
 
-  diff(request: GitDiffRequest): Promise<GitDiffResult> {
-    const generation = this.#state.status?.generation ?? "0";
-    const key = diffKey(request, generation);
+  /**
+   * The diff for one entry.
+   *
+   * Only requests actually in flight are shared. A resolved diff is not cached:
+   * the host is the authority on what a file currently looks like, and an
+   * explicit refresh that answered from memory would be no refresh at all.
+   */
+  diff(request: GitDiffRequest, signal?: AbortSignal): Promise<GitDiffResult> {
+    if (this.#disposed) return Promise.reject(new Error("This repository is no longer observed."));
+    const key = diffKey(request);
     const existing = this.#diffs.get(key);
     if (existing) {
       recordPerfCounter("git.diffReuses");
-      return existing;
+      return existing.join(signal, () => this.#diffs.delete(key));
     }
-    const pending = this.#client
-      .diff(this.#scope, this.#root, request.repositoryId, request.path, request.originalPath, request.target, this.#abort.signal)
+    const shared = new SharedDiffRequest((requestSignal) => this.#client
+      .diff(this.#scope, this.#root, request.repositoryId, request.path, request.originalPath, request.target, requestSignal)
       .then((result) => {
         this.accept(result.status);
         return result;
-      })
-      .catch((cause) => {
-        // A failure is never cached: the next attempt must reach the host.
-        this.#diffs.delete(key);
-        throw cause;
-      });
-    this.#diffs.set(key, pending);
-    this.#evictStaleDiffs(generation);
-    return pending;
+      }));
+    this.#diffs.set(key, shared);
+    return shared.join(signal, () => this.#diffs.delete(key));
   }
 
-  #evictStaleDiffs(generation: string): void {
-    for (const key of [...this.#diffs.keys()]) {
-      if (!key.endsWith(`\0${generation}`)) this.#diffs.delete(key);
-    }
-    while (this.#diffs.size > MAX_CACHED_DIFFS) {
-      const oldest = this.#diffs.keys().next();
-      if (oldest.done) break;
-      this.#diffs.delete(oldest.value);
-    }
+  async mutate(repositoryId: string, request: GitMutationRequest): Promise<GitCommandResult> {
+    const result = await this.#client.mutate(this.#scope, this.#root, repositoryId, request);
+    if (result.status) this.accept(result.status);
+    return result;
+  }
+
+  prepareDiscard(repositoryId: string, request: GitMutationRequest): Promise<string> {
+    return this.#client.prepareDiscard(this.#scope, this.#root, repositoryId, request);
+  }
+
+  async commit(repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult> {
+    const result = await this.#client.commit(this.#scope, this.#root, repositoryId, expectedStatusGeneration, message);
+    if (result.status) this.accept(result.status);
+    return result;
   }
 
   #start(): void {
@@ -231,11 +299,12 @@ class RepositoryEntry {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#abort.abort();
+    for (const shared of this.#diffs.values()) shared.abandon();
+    this.#diffs.clear();
     this.#stopEvents?.();
     this.#stopEvents = undefined;
     this.#lease?.release();
     this.#lease = undefined;
-    this.#diffs.clear();
     this.#pending = [];
     this.#listeners.clear();
   }
@@ -256,7 +325,7 @@ class RepositoryEntry {
 export class GitRepositoryStore {
   readonly #client: GitWorkspaceClient;
   readonly #entries = new Map<string, RepositoryEntry>();
-  readonly #remembered = new Map<string, GitStatusSnapshot>();
+  readonly #remembered = new Map<string, GitRepositoryState>();
 
   constructor(client: GitWorkspaceClient) {
     this.#client = client;
@@ -269,7 +338,7 @@ export class GitRepositoryStore {
       recordPerfCounter("git.sharedRepositoryReuses");
     } else {
       recordPerfCounter("git.sharedRepositoryStarts");
-      entry = new RepositoryEntry(this.#client, scope, root, this.#remembered.get(key), () => {
+      entry = new RepositoryEntry(this.#client, scope, root, this.#remembered.get(key)?.status, () => {
         const status = this.#entries.get(key)?.lastStatus;
         this.#entries.delete(key);
         if (status) this.#remember(key, status);
@@ -284,7 +353,10 @@ export class GitRepositoryStore {
       subscribe: (listener) => owner.subscribe(listener),
       refresh: () => owner.refresh(),
       accept: (status) => owner.accept(status),
-      diff: (request) => owner.diff(request),
+      diff: (request, signal) => owner.diff(request, signal),
+      mutate: (repositoryId, request) => owner.mutate(repositoryId, request),
+      prepareDiscard: (repositoryId, request) => owner.prepareDiscard(repositoryId, request),
+      commit: (repositoryId, expectedStatusGeneration, message) => owner.commit(repositoryId, expectedStatusGeneration, message),
       release: () => {
         if (released) return;
         released = true;
@@ -298,19 +370,17 @@ export class GitRepositoryStore {
    *
    * Rendering may read this before an effect has run, so a consumer mounting
    * beside a live observation paints that repository's status on its first
-   * render instead of a spinner it does not need.
+   * render instead of a spinner it does not need. The returned object is stable
+   * between publications, which is what makes it safe as a store snapshot.
    */
-  peek(scope: FileWorkspaceScope, root: ActiveRoot): GitRepositoryState | undefined {
+  peek(scope: FileWorkspaceScope, root: ActiveRoot): GitRepositoryState {
     const key = scopeKey(scope, root);
-    const entry = this.#entries.get(key);
-    if (entry) return entry.state;
-    const remembered = this.#remembered.get(key);
-    return remembered ? { status: remembered, loading: true } : undefined;
+    return this.#entries.get(key)?.state ?? this.#remembered.get(key) ?? NOT_OBSERVED;
   }
 
   #remember(key: string, status: GitStatusSnapshot): void {
     this.#remembered.delete(key);
-    this.#remembered.set(key, status);
+    this.#remembered.set(key, { status, loading: true });
     while (this.#remembered.size > MAX_REMEMBERED_STATUSES) {
       const oldest = this.#remembered.keys().next();
       if (oldest.done) break;

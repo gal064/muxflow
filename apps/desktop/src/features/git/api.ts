@@ -43,6 +43,18 @@ export interface WireGitEvent { watchId?: string; rootToken: string; status?: Wi
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
+/**
+ * The host's own bounded diff limit. A body it describes as larger than this
+ * would not be one it could serve, so it is never allocated here.
+ */
+const MAX_DEFERRED_BODY_BYTES = 10 * 1024 * 1024;
+
+/** Frame kinds, matching `apps/desktop/src-tauri/src/connection/git_content.rs`. */
+const FRAME_CHUNK = 1;
+const FRAME_COMPLETE = 2;
+const SIDE_OLD = 1;
+const SIDE_NEW = 2;
+
 export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   readonly #listeners = new Set<(event: GitWorkspaceEvent) => void>();
 
@@ -127,14 +139,11 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   ): Promise<GitDiff> {
     if (!diff.oldContentRef && !diff.newContentRef) return diff;
     recordPerfCounter("git.diffBulkBodies", Number(Boolean(diff.oldContentRef)) + Number(Boolean(diff.newContentRef)));
-    const [oldContent, newContent] = await Promise.all([
-      diff.oldContentRef ? readDeferredBody(scope, root, diff, "old", diff.oldContentRef, signal) : Promise.resolve(undefined),
-      diff.newContentRef ? readDeferredBody(scope, root, diff, "new", diff.newContentRef, signal) : Promise.resolve(undefined),
-    ]);
+    const bodies = await readDeferredBodies(scope, root, diff, signal);
     return {
       ...diff,
-      ...(oldContent ? { oldContent } : {}),
-      ...(newContent ? { newContent } : {}),
+      ...(bodies.old ? { oldContent: bodies.old } : {}),
+      ...(bodies.new ? { newContent: bodies.new } : {}),
     };
   }
 
@@ -155,9 +164,8 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     if ((request.kind === "discardFile" || request.kind === "discardHunk") && !request.confirmationToken) {
       throw new Error("Discard requires confirmation.");
     }
-    // The host emits this exact rejection only while pre-command status is
-    // being established. Once Git starts, uncertainty is returned as a
-    // command outcome and must never pass through this retry path.
+    // A mutation is never replayed. Once Git has started, uncertainty is
+    // returned as a command outcome, not as a transport error.
     return measurePerfOutcome("workflow.git.mutationAck", () => this.#request(
       scope, root, mutationCommand("mutate", repositoryId, request), validateCommand, "git.mutation.request",
     ));
@@ -166,8 +174,7 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   async commit(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult> {
     recordPerfCounter("git.commitRequests");
     if (!message.trim()) throw new Error("Enter a commit message.");
-    // See mutate(): post-command outcomes are responses, never retryable
-    // superseded-status transport errors.
+    // See mutate(): a commit is sent exactly once.
     return measurePerfOutcome("workflow.git.mutationAck", () => this.#request(scope, root, {
       operation: "commit", operationId: crypto.randomUUID(), repositoryId, expectedStatusGeneration, commitMessage: message,
     }, validateCommand, "git.commit.request"));
@@ -404,38 +411,46 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("Git request was cancelled.", "AbortError");
 }
 
-/// Reads one withheld diff body over the bulk lane, in order, and proves the
-/// stream delivered exactly the described number of bytes.
-function readDeferredBody(
+/**
+ * Reads the diff bodies the control response withheld.
+ *
+ * One call for both sides, because they belong to one diff: the native lane
+ * reads them over a single bulk lease, and a failure on either side stops the
+ * other instead of leaving it streaming to nobody.
+ */
+function readDeferredBodies(
   scope: FileWorkspaceScope,
   root: ActiveRoot,
   diff: GitDiff,
-  side: "old" | "new",
-  ref: GitDiffContentRef,
   signal?: AbortSignal,
-): Promise<Uint8Array> {
-  return new Promise<Uint8Array>((resolve, reject) => {
-    const total = Number(ref.size);
-    const body = new Uint8Array(total);
-    let received = 0;
+): Promise<{ old?: Uint8Array; new?: Uint8Array }> {
+  return new Promise((resolve, reject) => {
+    const sides = new Map<number, { name: "old" | "new"; body: Uint8Array; received: number }>();
+    if (diff.oldContentRef) sides.set(SIDE_OLD, deferredSide("old", diff.oldContentRef));
+    if (diff.newContentRef) sides.set(SIDE_NEW, deferredSide("new", diff.newContentRef));
     let settled = false;
     let readId: string | undefined;
     const cancelRemote = () => {
       if (!readId) return;
-      void invoke("cancel_git_diff_content", { readId }).catch(() => undefined);
+      void invoke("cancel_git_diff_content", { clientId: scope.clientId, readId }).catch(() => undefined);
+    };
+    const finish = (outcome: () => void) => {
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      outcome();
     };
     const abort = () => {
       if (settled) return;
-      settled = true;
       recordPerfCounter("git.cancellations");
       cancelRemote();
-      reject(new DOMException("Git diff content read was cancelled.", "AbortError"));
+      finish(() => reject(new DOMException("Git diff content read was cancelled.", "AbortError")));
     };
     const fail = (message: string) => {
       if (settled) return;
-      settled = true;
-      signal?.removeEventListener("abort", abort);
-      reject(new Error(message));
+      // Whatever is left of the stream has nowhere to go; stop it at the host
+      // rather than paying for bytes nothing will read.
+      cancelRemote();
+      finish(() => reject(new Error(message)));
     };
     signal?.addEventListener("abort", abort, { once: true });
     const channel = new Channel<ArrayBuffer>();
@@ -443,42 +458,50 @@ function readDeferredBody(
       if (settled) return;
       const frame = new Uint8Array(raw instanceof ArrayBuffer ? raw : (raw as unknown as ArrayBuffer));
       if (frame.byteLength < 1) return fail("Host emitted an empty Git diff content frame.");
-      if (frame[0] === 1) {
-        if (frame.byteLength < 9) return fail("Host emitted an invalid Git diff content chunk.");
-        const offset = Number(new DataView(frame.buffer, frame.byteOffset + 1, 8).getBigUint64(0, false));
-        const data = frame.subarray(9);
-        if (offset !== received || offset + data.byteLength > total) {
+      if (frame[0] === FRAME_CHUNK) {
+        if (frame.byteLength < 10) return fail("Host emitted an invalid Git diff content chunk.");
+        const side = sides.get(frame[1]);
+        if (!side) return fail("Host emitted a Git diff content chunk for a side that was not requested.");
+        const offset = Number(new DataView(frame.buffer, frame.byteOffset + 2, 8).getBigUint64(0, false));
+        const data = frame.subarray(10);
+        if (offset !== side.received || offset + data.byteLength > side.body.byteLength) {
           return fail("Host emitted an out-of-order Git diff content chunk.");
         }
-        body.set(data, offset);
-        received += data.byteLength;
+        side.body.set(data, offset);
+        side.received += data.byteLength;
         return;
       }
-      if (frame[0] === 2) {
-        if (received !== total) return fail("Git diff content ended before the described body.");
-        settled = true;
-        signal?.removeEventListener("abort", abort);
+      if (frame[0] === FRAME_COMPLETE) {
+        const incomplete = [...sides.values()].some((side) => side.received !== side.body.byteLength);
+        if (incomplete) return fail("Git diff content ended before the described bodies.");
+        const bodies: { old?: Uint8Array; new?: Uint8Array } = {};
+        let total = 0;
+        for (const side of sides.values()) {
+          bodies[side.name] = side.body;
+          total += side.body.byteLength;
+        }
         recordPerfCounter("git.diffBulkBytes", total);
-        resolve(body);
+        finish(() => resolve(bodies));
         return;
       }
       fail(new TextDecoder().decode(frame.subarray(1)) || "Git diff content read failed.");
     };
     if (signal?.aborted) { abort(); return; }
     void measurePerfRequest("git.diffContent.request", "git", {
-      clientId: scope.clientId,
-      profileId: scope.hostProfileId,
-      expectedServerIdentity: scope.serverIdentity,
-      connectionEpoch: String(scope.terminalEpoch),
-      root: root.path,
-      rootToken: root.token,
-      repositoryId: diff.repository.id,
-      path: [...fromBase64(diff.path)],
-      originalPath: diff.originalPath ? [...fromBase64(diff.originalPath)] : [],
-      diffTarget: diff.target,
-      side,
-      contentDigest: ref.contentDigest,
-      size: ref.size,
+      command: {
+        clientId: scope.clientId,
+        profileId: scope.hostProfileId,
+        expectedServerIdentity: scope.serverIdentity,
+        connectionEpoch: String(scope.terminalEpoch),
+        root: root.path,
+        rootToken: root.token,
+        repositoryId: diff.repository.id,
+        path: [...fromBase64(diff.path)],
+        originalPath: diff.originalPath ? [...fromBase64(diff.originalPath)] : [],
+        diffTarget: diff.target,
+        ...(diff.oldContentRef ? { old: { contentDigest: diff.oldContentRef.contentDigest, size: diff.oldContentRef.size } } : {}),
+        ...(diff.newContentRef ? { new: { contentDigest: diff.newContentRef.contentDigest, size: diff.newContentRef.size } } : {}),
+      },
       onEvent: channel,
     }, (request) => invoke<string>("read_git_diff_content", request))
       .then((id) => {
@@ -487,6 +510,14 @@ function readDeferredBody(
       })
       .catch((cause) => fail(String(cause)));
   });
+}
+
+function deferredSide(name: "old" | "new", ref: GitDiffContentRef) {
+  const size = Number(ref.size);
+  if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_DEFERRED_BODY_BYTES) {
+    throw new Error("Host described a Git diff body outside the bounded diff limit.");
+  }
+  return { name, body: new Uint8Array(size), received: 0 };
 }
 
 function requireDecimalU64(value: string, label: string): void {

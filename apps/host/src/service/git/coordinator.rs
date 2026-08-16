@@ -55,7 +55,7 @@ impl RepositoryKey {
 /// for its worktree root. Recomputing these was five Git subprocesses per
 /// request; they are now discovered once and revalidated with `fstat`.
 pub(super) struct RepositoryCapabilities {
-    pub(super) repository: v1::GitRepository,
+    pub(super) identity: RepositoryIdentity,
     pub(super) metadata: GitMetadataCapability,
     root: WorktreeRoot,
 }
@@ -71,12 +71,12 @@ impl RepositoryCapabilities {
 
     #[cfg(test)]
     pub(in crate::service::git) fn for_test(
-        repository: v1::GitRepository,
+        identity: RepositoryIdentity,
         metadata: GitMetadataCapability,
         root: WorktreeRoot,
     ) -> Self {
         Self {
-            repository,
+            identity,
             metadata,
             root,
         }
@@ -88,12 +88,7 @@ impl RepositoryCapabilities {
     /// and both metadata directories' paths and `dev`/`ino`, so recomputing it
     /// from live `fstat` results is a complete revalidation with no subprocess.
     fn revalidate(&self, logical_root: &str, root_identity: (u64, u64)) -> anyhow::Result<()> {
-        validate_metadata_capability(
-            logical_root,
-            root_identity,
-            &self.repository,
-            &self.metadata,
-        )
+        validate_metadata_capability(logical_root, root_identity, &self.identity, &self.metadata)
     }
 }
 
@@ -104,6 +99,12 @@ pub(super) enum Freshness {
     /// observed the change ticket. Reads and watch refreshes use this, which is
     /// what collapses 32 simultaneous consumers into one Git status pipeline.
     Coalesced,
+    /// Invalidates first, so nothing already observed can satisfy the caller.
+    ///
+    /// This is what an explicit user refresh means: the whole point of pressing
+    /// it is to recover from a filesystem watcher that missed something, so it
+    /// must not be answered from what that watcher last reported.
+    Forced,
     /// Always runs its own pipeline. Mutation authority is never inherited.
     Exclusive,
 }
@@ -125,10 +126,18 @@ struct StatusIdentity {
     fingerprint: String,
 }
 
-#[derive(Default)]
-struct Publication {
-    source_generation: String,
-    error: String,
+/// What subscribers were last told.
+///
+/// One value rather than two fields, because "recovered from an error" is a
+/// transition: with a separate error string, a transient failure over an
+/// unchanged repository left the error latched and every later success
+/// suppressed as a duplicate.
+#[derive(Default, PartialEq, Eq)]
+enum Publication {
+    #[default]
+    Nothing,
+    Status(String),
+    Error(String),
 }
 
 pub(super) struct RepositoryCoordinator {
@@ -156,6 +165,13 @@ pub(super) struct RepositoryCoordinator {
     /// filesystem events do not start a second, redundant status pipeline.
     mutations: AtomicUsize,
     mutations_idle: tokio::sync::Notify,
+    /// Raised by the `notify` callback when the platform reports the watch is
+    /// broken. Owned here rather than by the observe task so that whoever
+    /// notices the failure and whoever acts on it are not the same code.
+    native_failed: Arc<AtomicBool>,
+    native_broken: tokio::sync::Notify,
+    /// When this repository was last addressed, for eviction order only.
+    last_use: AtomicU64,
     #[cfg(test)]
     observation: Arc<GitObservation>,
 }
@@ -182,6 +198,9 @@ impl RepositoryCoordinator {
             observing: AtomicBool::new(false),
             mutations: AtomicUsize::new(0),
             mutations_idle: tokio::sync::Notify::new(),
+            native_failed: Arc::new(AtomicBool::new(false)),
+            native_broken: tokio::sync::Notify::new(),
+            last_use: AtomicU64::new(0),
             #[cfg(test)]
             observation,
         }
@@ -189,6 +208,14 @@ impl RepositoryCoordinator {
 
     pub(super) fn key(&self) -> &RepositoryKey {
         &self.key
+    }
+
+    pub(super) fn touch(&self, use_order: u64) {
+        self.last_use.store(use_order, Ordering::Release);
+    }
+
+    pub(super) fn last_use(&self) -> u64 {
+        self.last_use.load(Ordering::Acquire)
     }
 
     /// The discovered repository identity, discovering it at most once.
@@ -229,22 +256,21 @@ impl RepositoryCoordinator {
         let discovered = tokio::task::spawn_blocking(move || {
             let root = WorktreeRoot::capture(&logical_root)?;
             root.validate_token(&logical_root, &root_token)?;
-            let repository = discover_repository(
+            let identity = discover_repository(
                 &root.stable_path(),
                 &logical_root,
                 root.identity()?,
                 cancellation.as_deref(),
             )?;
             if !expected_repository_id.is_empty()
-                && expected_repository_id != repository.repository_id
+                && expected_repository_id != identity.repository_id
             {
                 bail!("stale repository identity");
             }
-            let metadata =
-                GitMetadataCapability::capture(&repository.git_dir, &repository.common_dir)?;
-            validate_metadata_capability(&logical_root, root.identity()?, &repository, &metadata)?;
+            let metadata = GitMetadataCapability::capture(&identity.git_dir, &identity.common_dir)?;
+            validate_metadata_capability(&logical_root, root.identity()?, &identity, &metadata)?;
             Ok::<_, anyhow::Error>(RepositoryCapabilities {
-                repository,
+                identity,
                 metadata,
                 root,
             })
@@ -260,6 +286,12 @@ impl RepositoryCoordinator {
     /// point stop satisfying new readers.
     pub(super) fn invalidate(&self) -> u64 {
         self.change_ticket.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The change ticket this coordinator is currently at. A diff brackets its
+    /// read with this, so it can state which repository state it describes.
+    pub(super) fn change_ticket(&self) -> u64 {
+        self.change_ticket.load(Ordering::Acquire)
     }
 
     pub(super) fn cached_status(&self) -> Option<Arc<v1::GitStatusSnapshot>> {
@@ -278,14 +310,17 @@ impl RepositoryCoordinator {
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<Arc<v1::GitStatusSnapshot>> {
         let arrived = Instant::now();
+        if freshness == Freshness::Forced {
+            self.invalidate();
+        }
         let required = self.change_ticket.load(Ordering::Acquire);
-        if freshness == Freshness::Coalesced
+        if freshness != Freshness::Exclusive
             && let Some(cached) = self.satisfied_by_cache(required, arrived)
         {
             return Ok(cached);
         }
         let _pipeline = self.refresh.lock().await;
-        if freshness == Freshness::Coalesced
+        if freshness != Freshness::Exclusive
             && let Some(cached) = self.satisfied_by_cache(required, arrived)
         {
             return Ok(cached);
@@ -299,7 +334,7 @@ impl RepositoryCoordinator {
             let _guard = capabilities.metadata.install();
             read_status_cancellable(
                 &capabilities.stable_root(),
-                capabilities.repository.clone(),
+                &capabilities.identity,
                 cancellation.as_deref(),
             )
         })
@@ -369,13 +404,17 @@ impl RepositoryCoordinator {
         }
     }
 
-    async fn await_mutation_quiescence(&self) {
+    /// Waits until no mutation is running, or until observation is stopped.
+    async fn await_mutation_quiescence(&self, stopped: &AtomicBool) {
         loop {
             let notified = self.mutations_idle.notified();
-            if self.mutations.load(Ordering::Acquire) == 0 {
+            if self.mutations.load(Ordering::Acquire) == 0 || stopped.load(Ordering::Acquire) {
                 return;
             }
-            notified.await;
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
         }
     }
 }

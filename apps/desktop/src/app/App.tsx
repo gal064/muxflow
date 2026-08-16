@@ -708,10 +708,8 @@ export function App() {
           {selectedAppTab ? <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>{selectedAppTab.kind === "gitDiff" ? <GitDiffSurface
             activeRoot={workspaceFiles.root}
             canWrite={hostState.canMutate}
-            client={gitClient}
             repositories={gitRepositories}
             onMessage={setStatus}
-            onStatus={(next) => { if (workspaceFiles.root?.path === next.repository.worktreeRoot) workspaceGit.accept(next); }}
             scope={fileScope}
             tab={selectedAppTab}
             key={`${selectedAppTab.hostProfileId}\0${selectedAppTab.serverIdentity}\0${selectedAppTab.sessionId}\0${selectedAppTab.id}\0${selectedAppTab.gitRepositoryId}\0${selectedAppTab.gitPath}\0${selectedAppTab.gitTarget}`}
@@ -753,7 +751,6 @@ export function App() {
         canMutate={hostState.canMutate}
         fileClient={fileClient}
         fileScope={fileScope}
-        gitClient={gitClient}
         ignoredPaths={ignoredPaths}
         onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
         onGitDiff={(entry, target) => {
