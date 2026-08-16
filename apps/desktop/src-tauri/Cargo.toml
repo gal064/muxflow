@@ -25,10 +25,21 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.7.2"
 tmux-agent-protocol = { path = "../../../crates/protocol" }
 tmux-control = { path = "../../../crates/tmux-control" }
 uuid.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 clipboard-rs = "0.3.5"
 zbus = "5.19.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSBitmapImageRep", "NSImageRep", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL", "block2"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }

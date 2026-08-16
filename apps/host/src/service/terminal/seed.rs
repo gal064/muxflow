@@ -25,14 +25,14 @@ pub(super) struct CaptureMetadata {
 #[cfg(test)]
 pub(super) fn build_seed(
     pane_id: &str,
-    primary_lines: Vec<Vec<u8>>,
-    alternate_lines: Vec<Vec<u8>>,
+    visible_lines: Vec<Vec<u8>>,
+    saved_normal_lines: Vec<Vec<u8>>,
     metadata_lines: &[Vec<u8>],
 ) -> Option<SeedBuild> {
     let metadata = capture_metadata(metadata_lines, pane_id)?;
     Some(build_seed_with_metadata(
-        primary_lines,
-        alternate_lines,
+        visible_lines,
+        saved_normal_lines,
         metadata,
     ))
 }
@@ -47,20 +47,40 @@ pub(super) fn capture_metadata(
         .find_map(|line| parse_capture_metadata(line, pane_id))
 }
 
+/// Rebuilds one pane's screen from its two captures.
+///
+/// The two captures are not "primary and alternate": plain `capture-pane`
+/// returns whatever tmux is *displaying*, and `capture-pane -a` returns the
+/// saved **normal** grid that exists only while a pane is in the alternate
+/// screen (verified against tmux 3.7b). Painting them the other way round put
+/// an agent TUI's visible frame into the hidden normal buffer and the stale
+/// shell scrollback into the buffer the user sees — every seed of a
+/// claude/codex pane came up blank or stale until the program repainted
+/// (P12-U003, found by `tests/phase12/run-vt-parity.sh`).
 pub(super) fn build_seed_with_metadata(
-    primary_lines: Vec<Vec<u8>>,
-    alternate_lines: Vec<Vec<u8>>,
+    visible_lines: Vec<Vec<u8>>,
+    saved_normal_lines: Vec<Vec<u8>>,
     metadata: CaptureMetadata,
 ) -> SeedBuild {
+    let (normal_lines, alternate_lines) = if metadata.alternate_screen {
+        (&saved_normal_lines, Some(&visible_lines))
+    } else {
+        (&visible_lines, None)
+    };
     let mut seed = b"\x1b[2J\x1b[H".to_vec();
     // `capture-pane -J` returns logical lines by joining cells marked as soft
     // wrapped. Re-enable wrapping while repainting at the authoritative pane
     // width, then restore the child's current wrap mode below.
     set_private_mode(&mut seed, 7, true);
-    paint_capture(&mut seed, &primary_lines);
-    if metadata.alternate_screen {
+    paint_capture(&mut seed, normal_lines);
+    // `capture-pane -e` ends wherever the last cell's attributes left off, so
+    // without this the erases below run with that attribute still active and
+    // paint it into every cleared cell.
+    seed.extend_from_slice(b"\x1b[m");
+    if let Some(alternate_lines) = alternate_lines {
         seed.extend_from_slice(b"\x1b[?1049h\x1b[2J\x1b[H");
-        paint_capture(&mut seed, &alternate_lines);
+        paint_capture(&mut seed, alternate_lines);
+        seed.extend_from_slice(b"\x1b[m");
     }
     let mut diagnostics = Vec::new();
     if let Some(bracketed_paste) = metadata.bracketed_paste {
@@ -112,18 +132,6 @@ pub(super) fn build_seed_with_metadata(
     SeedBuild {
         bytes: seed,
         diagnostics,
-    }
-}
-
-pub(super) fn selected_capture_boundary(
-    metadata: CaptureMetadata,
-    primary_boundary: u64,
-    alternate_boundary: u64,
-) -> u64 {
-    if metadata.alternate_screen {
-        alternate_boundary
-    } else {
-        primary_boundary
     }
 }
 

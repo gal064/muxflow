@@ -146,6 +146,17 @@ describe("TauriTerminalTransferClient", () => {
     expect(invoke).toHaveBeenNthCalledWith(1, "read_native_terminal_clipboard");
   });
 
+  it("validates native clipboard text payloads", async () => {
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({ kind: "text", text: "echo copied elsewhere" })
+      .mockResolvedValueOnce({ kind: "text", text: "" })
+      .mockResolvedValueOnce({ kind: "text" });
+    const client = new TauriTerminalTransferClient();
+    await expect(client.readNativeClipboard()).resolves.toEqual({ kind: "text", text: "echo copied elsewhere" });
+    await expect(client.readNativeClipboard()).rejects.toThrow("invalid text");
+    await expect(client.readNativeClipboard()).rejects.toThrow("invalid text");
+  });
+
   it.each(["queued", "running"] as const)("preserves a canonical %s upload cancellation without synthesizing failure", async (initialState) => {
     vi.mocked(invoke).mockResolvedValue("transfer-1");
     const progress = vi.fn();

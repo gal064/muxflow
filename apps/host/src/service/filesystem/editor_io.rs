@@ -97,25 +97,20 @@ impl FileService {
         reject_root_target(root.logical_root(), &logical_target)?;
         let (logical_write_target, _) = root.regular_file_target(&logical_target, &target)?;
         let target_anchor = root.anchor(&logical_write_target)?;
-        let write_target = target_anchor.path();
         let metadata = target_anchor.open_file()?.metadata()?;
-        let parent = write_target.parent().context("file has no parent")?;
-        let temporary = parent.join(format!(".tmux-ide-save-{transfer_id}.partial"));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(metadata.permissions().mode() & 0o7777)
-            .open(&temporary)?;
+        let temporary = target_anchor.sibling(OsString::from(format!(
+            ".tmux-ide-save-{transfer_id}.partial"
+        )))?;
+        let file = temporary.create_file(metadata.permissions().mode() & 0o7777)?;
         self.uploads.lock().unwrap().insert(
             transfer_id.to_owned(),
             Upload {
                 file,
                 temporary,
-                target: write_target,
-                _target_anchor: target_anchor,
+                target: target_anchor,
                 root_token: root.token().to_owned(),
                 metadata_path: logical_target,
-                root_capability: root,
+                _root_capability: root,
                 offset: 0,
                 total,
                 hasher: blake3::Hasher::new(),
@@ -188,34 +183,30 @@ impl FileService {
         let actual_blake3 = upload.hasher.finalize().to_hex().to_string();
         if expected_blake3.is_empty() || actual_blake3 != expected_blake3 {
             let upload = uploads.remove(transfer_id).expect("upload exists");
-            let _ = fs::remove_file(upload.temporary);
+            let _ = upload.temporary.unlink(false);
             bail!("file-write BLAKE3 verification failed");
         }
         let mut upload = uploads.remove(transfer_id).expect("upload exists");
         let result = (|| -> anyhow::Result<(v1::FileMetadata, String)> {
             upload.file.flush()?;
             upload.file.sync_all()?;
-            let content = fs::read(&upload.temporary)?;
+            let mut content = Vec::new();
+            upload.temporary.open_file()?.read_to_end(&mut content)?;
             if content.len() as u64 != upload.total
                 || content.contains(&0)
                 || std::str::from_utf8(&content).is_err()
             {
                 bail!("editor writes require the declared valid UTF-8 text without NUL bytes");
             }
-            fs::set_permissions(&upload.temporary, upload.permissions)?;
-            let parent = upload.target.parent().context("file has no parent")?;
-            fs::rename(&upload.temporary, &upload.target)?;
-            File::open(parent)?.sync_all()?;
+            upload.file.set_permissions(upload.permissions)?;
+            upload.temporary.rename_to_replace(&upload.target)?;
+            upload.target.sync_parent()?;
             self.next_generation();
-            let metadata = metadata_for_anchored(
-                &upload.root_capability.stable_root(),
-                &upload.target,
-                &upload.metadata_path,
-            )?;
+            let metadata = mutation_metadata(&upload.target, &upload.metadata_path)?;
             Ok((metadata, upload.root_token.clone()))
         })();
         if result.is_err() {
-            let _ = fs::remove_file(&upload.temporary);
+            let _ = upload.temporary.unlink(false);
         }
         result
     }
@@ -223,7 +214,7 @@ impl FileService {
     pub(crate) fn cancel_file_write(&self, transfer_id: &str) -> anyhow::Result<()> {
         validate_transfer_id(transfer_id)?;
         if let Some(upload) = self.uploads.lock().unwrap().remove(transfer_id) {
-            let _ = fs::remove_file(upload.temporary);
+            let _ = upload.temporary.unlink(false);
         }
         Ok(())
     }

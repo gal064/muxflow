@@ -1,11 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { agentGeneration, zeroGeneration, type AgentGeneration } from "./generation";
 import { canonicalAdapterId } from "./adapterDefinitions";
+import { AGENT_HOOK_WIRINGS, AGENT_HOST_NAMING_OUTCOMES } from "./types";
 import type {
   AgentAdapterDescriptor,
   AgentAdapterId,
   AgentAuthority,
   AgentHookReview,
+  AgentHookWiring,
+  AgentHostNamingOutcome,
   AgentLaunchRequest,
   AgentLifecycle,
   AgentRecord,
@@ -57,6 +60,7 @@ export interface WireAgentSnapshot {
     adapter: string; id: string; displayName: string; supportsLaunch?: boolean; supportsResume?: boolean;
     supportsHooks?: boolean; supportsProcessDetection?: boolean; supportsScreenFallback?: boolean;
     hookConfigPath?: string; hookEvents?: string[];
+    hookWiring?: string; hookWiringDetail?: string; hookSetupRecommended?: boolean;
   }>;
 }
 
@@ -92,6 +96,7 @@ interface WireResponse {
   windowId?: string;
   paneId?: string;
   acceptedGeneration?: string | number;
+  hostNaming?: string;
 }
 
 export interface WireAgentEvent {
@@ -111,6 +116,7 @@ export interface AgentClient {
   markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void>;
   reviewHooks(scope: AgentRequestScope, adapter: AgentAdapterId, action?: "install" | "uninstall"): Promise<AgentHookReview>;
   applyHooks(scope: AgentRequestScope, review: AgentHookReview): Promise<void>;
+  applyHostNaming(scope: AgentRequestScope, action?: "install" | "uninstall"): Promise<AgentHostNamingOutcome>;
   publishWireEvent(scope: AgentRequestScope, event: WireAgentEvent): void;
   publishWireSnapshot(scope: AgentRequestScope, snapshot: WireAgentSnapshot): void;
   subscribe(listener: (event: AgentWireEvent) => void): () => void;
@@ -192,6 +198,12 @@ export class TauriAgentClient implements AgentClient {
       ...(plan.trustGuidance ? { trustGuidance: plan.trustGuidance } : {}),
       ...(plan.backupPath ? { backupPath: plan.backupPath } : {}),
     };
+  }
+
+  async applyHostNaming(scope: AgentRequestScope, action: "install" | "uninstall" = "install"): Promise<AgentHostNamingOutcome> {
+    const response = await this.#request(scope, { operation: action === "install" ? "hostNaming" : "hostNamingRemove" });
+    const known = AGENT_HOST_NAMING_OUTCOMES.find((outcome) => outcome === response.hostNaming);
+    return known ?? "unavailable";
   }
 
   async applyHooks(scope: AgentRequestScope, review: AgentHookReview): Promise<void> {
@@ -310,7 +322,21 @@ function mapAdapterDescriptor(value: NonNullable<WireAgentSnapshot["adapters"]>[
     supportsScreenFallback: Boolean(value.supportsScreenFallback),
     hookConfigPath: value.hookConfigPath ?? "", hookEvents: value.hookEvents ?? [],
     placements: value.supportsLaunch ? ["window", "split"] : [],
+    hookWiring: mapHookWiring(value.hookWiring),
+    hookWiringDetail: value.hookWiringDetail ?? "",
+    hookSetupRecommended: Boolean(value.hookSetupRecommended),
   };
+}
+
+/**
+ * An unrecognised value becomes `unspecified`, never a definite answer. A host
+ * that speaks a wiring state this build does not know has told us nothing, and
+ * guessing "not wired" would put an install prompt in front of the user for a
+ * configuration that may already be correct.
+ */
+function mapHookWiring(value: string | undefined): AgentHookWiring {
+  const known = AGENT_HOOK_WIRINGS.find((state) => state === value);
+  return known ?? "unspecified";
 }
 
 function mapLifecycle(value: string): AgentLifecycle {

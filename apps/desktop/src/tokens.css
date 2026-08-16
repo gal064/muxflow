@@ -1,0 +1,168 @@
+/*
+ * Phase 11 design tokens — the single source of truth for every color, metric,
+ * and type step in the app.
+ *
+ * The rule this file exists to enforce: nothing else in the desktop client
+ * writes a raw color literal. `styles.css` reads these variables, and
+ * `TerminalRenderer.ts` reads the terminal half of them out of the computed
+ * style of `:root`, so the chrome theme and the terminal theme cannot drift
+ * apart the way they did before this phase (two divergent palettes, ~150 hex
+ * literals).
+ *
+ * Values are authoritative, not approximate:
+ *  - terminal palette: `Ghostty Default Style Dark` verbatim, copied from
+ *    /Applications/Ghostty.app/Contents/Resources/ghostty/themes on this
+ *    machine, ANSI 0-15 included.
+ *  - chrome surfaces + accent + destructive: derived from that palette. Phase 11
+ *    took them from plan/phases-11-12.md's cmux table instead — a near-black
+ *    `#101114` ramp under a `#282c34` terminal — which put a hard seam down every
+ *    edge where chrome met a pane. The chrome now starts *at* the terminal
+ *    background and steps lighter, and the accent and the destructive colour are
+ *    Ghostty's own bright blue and red, so there is one scheme on screen rather
+ *    than two that merely coexist.
+ *  - metrics: cmux `sharedChromeBarHeight` (28), sidebar 240, right panel 300,
+ *    `PaneChromeSettings` / `PanelOverlayRingMetrics` rings.
+ */
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("./assets/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url("./assets/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: italic;
+  font-weight: 400;
+  font-display: block;
+  src: url("./assets/fonts/JetBrainsMono-Italic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: italic;
+  font-weight: 700;
+  font-display: block;
+  src: url("./assets/fonts/JetBrainsMono-BoldItalic.woff2") format("woff2");
+}
+
+:root {
+  /* ── Chrome surfaces ─────────────────────────────────────────────────── */
+  /* The base *is* the terminal background, and every other surface is a step
+     lighter than it. Note the direction: before this ramp, hairline/hover/
+     selected were all darker than the base, because the base was near-black and
+     there was nowhere else to go. */
+  --chrome-bg: #282c34;
+  --chrome-raised: #2c313a;
+  --chrome-hairline: #313640;
+  --chrome-border: #3e4451;
+  --chrome-hover: #2f343e;
+  --chrome-selected: #353b45;
+
+  /* ── Chrome ink ──────────────────────────────────────────────────────── */
+  --chrome-ink: #c4c8c6;
+  --chrome-ink-strong: #ffffff;
+  /* Dim and faint are lifted, because a lighter ground makes a grey quieter and
+     these two greys were already the quietest text in the app. Kept honest by
+     contrast rather than by eye: --chrome-dim carries 11.5px labels and clears
+     4.5:1 on the new ground (4.70:1, against 5.00:1 on the old one), and
+     --chrome-faint carries the 9.5-10.5px metadata that no ramp gets to AA and
+     is at least no worse than it was (2.60:1, against 2.47:1 before). */
+  --chrome-dim: #8f96a1;
+  --chrome-faint: #636b78;
+
+  /* ── The one accent, and the one destructive treatment ───────────────── */
+  /* Ghostty's bright blue and red (--term-12 / --term-1), so a selected row and
+     a terminal's own bright text are the same two colours.
+
+     `--accent-ink` is misnamed and worth reading carefully: it is the knockout
+     for every *filled* control, the destructive ones included (the danger
+     buttons, the destructive context-menu row, `.primary`), not only the accent
+     ones. It goes dark because the accent went light — white on #7aa6da is
+     2.53:1 and not text anyone reads, where the terminal background on it is
+     5.53:1, which is what Ghostty does with its own selection. The danger fills
+     come along: white on #cc6566 was 3.75:1 and dark on it is 3.74:1, so those
+     buttons change visibly and legibility does not. Splitting the two inks is
+     the honest fix and is a rename across a dozen rules in styles.css; it is
+     named here instead so the coupling is at least deliberate. */
+  --accent: #7aa6da;
+  --accent-ink: #282c34;
+  --accent-wash: #7aa6da1f;
+  --danger: #cc6566;
+  --danger-ink: #e79596;
+  --danger-wash: #cc656622;
+
+  /* Connection health. Green is reserved for "the link is up" and nothing
+     else; amber is the disconnected strip; red reuses --danger. */
+  --ok: #28c840;
+  --warn: #febc2e;
+
+  /* ── Terminal: Ghostty Default Style Dark, verbatim ──────────────────── */
+  --term-bg: #282c34;
+  --term-fg: #ffffff;
+  --term-cursor: #ffffff;
+  --term-cursor-text: #353a44;
+  --term-selection-bg: #ffffff;
+  --term-selection-fg: #282c34;
+  --term-0: #1d1f21;
+  --term-1: #cc6566;
+  --term-2: #b6bd68;
+  --term-3: #f0c674;
+  --term-4: #82a2be;
+  --term-5: #b294bb;
+  --term-6: #8abeb7;
+  --term-7: #c4c8c6;
+  --term-8: #666666;
+  --term-9: #d54e53;
+  --term-10: #b9ca4b;
+  --term-11: #e7c547;
+  --term-12: #7aa6da;
+  --term-13: #c397d8;
+  --term-14: #70c0b1;
+  --term-15: #eaeaea;
+
+  /* Agent state encoding (mock: yellow working, red blocked, teal done-unread,
+     hollow idle). Drawn from the terminal palette so the dots and the terminal
+     agree about what "warning" looks like. */
+  --state-working: var(--term-3);
+  --state-blocked: var(--term-1);
+  --state-done: var(--term-6);
+  --state-unknown: var(--chrome-dim);
+
+  /* ── Type ────────────────────────────────────────────────────────────── */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --type-row: 12.5px;
+  --type-secondary: 10.5px;
+  --type-meta: 10px;
+  --type-label: 9.5px;
+  --type-menu: 13px;
+  --weight-row: 600;
+  --tracking-label: 0.12em;
+  --term-font-size: 13px;
+  --term-line-height: 1.42;
+
+  /* ── Metrics ─────────────────────────────────────────────────────────── */
+  --bar-height: 28px;
+  --sidebar-width: 240px;
+  --panel-width: 300px;
+  --menu-row-height: 24px;
+  --palette-width: 560px;
+  --palette-row-height: 28px;
+  --radius-row: 7px;
+  --radius-control: 5px;
+  --radius-panel: 10px;
+  --focus-ring: 2px;
+  --attention-ring: 2.5px;
+  --attention-radius: 6px;
+  --attention-inset: 2px;
+
+  color-scheme: dark;
+}

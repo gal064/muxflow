@@ -31,6 +31,11 @@ use git::GitService;
 mod terminal;
 use terminal::TerminalClients;
 mod tmux_actions;
+mod tmux_config;
+pub(crate) use tmux_config::{
+    apply_recommended_naming as apply_recommended_tmux_naming,
+    remove_recommended_naming as remove_recommended_tmux_naming,
+};
 mod topology;
 #[cfg(test)]
 use terminal::validate_tmux_id;
@@ -43,7 +48,16 @@ use events::{
     ConnectionTaskGuard, ProtocolSequencer, SequencerControl, register_control_event_sink,
 };
 
-pub(crate) const EVENT_QUEUE: usize = 128;
+/// Depth of the ordered host-event queue.
+///
+/// Overflow here is not a dropped frame but a connection-wide resync: the
+/// desktop tears the bridge down and reseeds every pane. At 128 a burst of
+/// terminal output could reach that cliff during ordinary use, and it took a
+/// seed with it — a seed dropped by a full queue leaves the pane waiting for
+/// bytes that will never come. The depth is chosen against the reader's 64 KiB
+/// read size and tmux's own `pause-after` flow control, which bounds how far
+/// ahead of a slow consumer the queue can run.
+pub(crate) const EVENT_QUEUE: usize = 1024;
 pub(crate) const TERMINAL_INPUT_QUEUE: usize = 256;
 
 pub async fn serve_with_shutdown(
@@ -337,6 +351,33 @@ fn reconcile_terminal_clients(
     overflowed: &Arc<AtomicBool>,
 ) {
     let mut terminal = terminal.lock().unwrap();
+    reconcile_terminal_clients_locked(&mut terminal, snapshot, event_sender, overflowed);
+}
+
+fn reconcile_terminal_clients_if_open(
+    closed: &AtomicBool,
+    terminal: &Arc<Mutex<TerminalClients>>,
+    snapshot: &tmux_control::TmuxSnapshot,
+    event_sender: &mpsc::Sender<SequencerControl>,
+    overflowed: &Arc<AtomicBool>,
+) {
+    // Serialize the final connection-close check with attachment creation.
+    // Otherwise a topology discovery that started before EOF can attach a new
+    // tmux control client after `serve_with_shutdown` has already stopped and
+    // cleared the connection's existing clients.
+    let mut terminal = terminal.lock().unwrap();
+    if closed.load(Ordering::Acquire) {
+        return;
+    }
+    reconcile_terminal_clients_locked(&mut terminal, snapshot, event_sender, overflowed);
+}
+
+fn reconcile_terminal_clients_locked(
+    terminal: &mut TerminalClients,
+    snapshot: &tmux_control::TmuxSnapshot,
+    event_sender: &mpsc::Sender<SequencerControl>,
+    overflowed: &Arc<AtomicBool>,
+) {
     terminal.reconcile(snapshot);
     for session in &snapshot.sessions {
         let pane_ids: Vec<_> = snapshot

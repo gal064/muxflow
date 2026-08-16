@@ -1,7 +1,7 @@
 use super::path::{WorktreeRoot, descriptor_path};
 use super::runner::git_output_cancellable;
 use super::*;
-use std::os::unix::{ffi::OsStringExt, fs::MetadataExt, io::AsRawFd};
+use std::os::unix::{ffi::OsStringExt, io::AsRawFd};
 
 struct DiffContents {
     old: Vec<u8>,
@@ -66,7 +66,7 @@ pub(super) fn read_diff(
         let worktree = WorktreeRoot::capture(root)?;
         let entry = worktree.entry(&request.path)?;
         if let Some(metadata) = entry.metadata()? {
-            if metadata.file_type().is_symlink() {
+            if metadata.is_symlink() {
                 return bounded_diff_metadata(
                     root,
                     &repository,
@@ -321,7 +321,6 @@ fn update_object_identity(
 ) -> anyhow::Result<()> {
     let mut spec = prefix.to_vec();
     spec.push(b':');
-    spec.extend_from_slice(b"./");
     spec.extend_from_slice(path);
     let output = git_output_cancellable(
         root,
@@ -349,7 +348,6 @@ fn object_size(
 ) -> anyhow::Result<Option<u64>> {
     let mut spec = prefix.to_vec();
     spec.push(b':');
-    spec.extend_from_slice(b"./");
     spec.extend_from_slice(path);
     let output = git_output_cancellable(
         root,
@@ -427,7 +425,6 @@ fn git_object(
 ) -> anyhow::Result<(Vec<u8>, bool)> {
     let mut spec = prefix.to_vec();
     spec.push(b':');
-    spec.extend_from_slice(b"./");
     spec.extend_from_slice(path);
     let output = git_output_cancellable(
         root,

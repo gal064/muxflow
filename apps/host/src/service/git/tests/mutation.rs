@@ -348,7 +348,10 @@ async fn concurrent_repository_mutations_serialize_and_second_observes_stale_gen
 #[tokio::test]
 async fn raw_leading_dash_newline_non_utf8_path_is_safe_as_a_mutation_argument() {
     let fixture = Fixture::new("raw-mutation");
+    #[cfg(target_os = "linux")]
     let raw = b"-raw\n\xff".to_vec();
+    #[cfg(target_os = "macos")]
+    let raw = "-raw\né".as_bytes().to_vec();
     fs::write(
         fixture.root.join(std::ffi::OsString::from_vec(raw.clone())),
         b"raw\n",
@@ -579,6 +582,28 @@ async fn normal_hook_longer_than_desktop_default_timeout_completes_successfully(
     assert!(result.applied);
     assert!(!result.refresh_failed);
     assert!(started.elapsed() >= Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn commit_output_keeps_unicode_paths_human_readable() {
+    let fixture = Fixture::new("unicode-commit-output");
+    fixture.write("qa-日本語.txt", b"readable\n");
+    fixture.git(&["add", "qa-日本語.txt"]);
+    let service = Arc::new(GitService::new());
+    let status = service.status(&fixture.request()).unwrap();
+    let mut request = fixture.request();
+    request.repository_id = status.repository.unwrap().repository_id;
+    request.expected_status_generation = status.generation;
+    request.connection_epoch = 61;
+    request.commit_message = "unicode output".into();
+    let result = service
+        .commit(request, 61, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert!(result.applied);
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    assert!(stdout.contains("qa-日本語.txt"), "{stdout}");
+    assert!(!stdout.contains("\\346"), "{stdout}");
 }
 
 #[tokio::test]

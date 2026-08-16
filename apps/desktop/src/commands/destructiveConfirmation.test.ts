@@ -39,7 +39,7 @@ describe("destructive tmux confirmation identity", () => {
         value.commandId,
         value.title,
         value.label,
-        value.action,
+        { ...value.action, confirmed: true },
         { serverIdentity: "tmux:before", generation: 17 },
       );
 
@@ -58,8 +58,21 @@ describe("destructive tmux confirmation identity", () => {
       "window.moveLeft",
       "Move terminal tab left",
       "terminal tab “api”",
-      { kind: "reorderWindow", sessionId: "$1", windowId: "@2", targetWindowId: "@1", relativePosition: "before" },
+      { kind: "reorderWindow", sessionId: "$1", windowId: "@2", targetWindowId: "@1", relativePosition: "before", confirmed: true },
       { serverIdentity: "tmux:one", generation: 1 },
     )).toThrow("destructive");
+  });
+
+  it("refuses an action the caller has not already marked confirmed", () => {
+    // The flag has one owner now: the dispatch that decides whether a close
+    // asks first. This builder carrying its own stamp is what made a close
+    // without a dialog need a second place to set it.
+    expect(() => createTmuxConfirmation(
+      "window.close",
+      "Close terminal tab…",
+      "terminal tab “api”",
+      { kind: "closeWindow", sessionId: "$1", windowId: "@2" },
+      { serverIdentity: "tmux:one", generation: 1 },
+    )).toThrow("confirmed");
   });
 });

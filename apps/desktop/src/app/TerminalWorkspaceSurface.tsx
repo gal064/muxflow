@@ -4,11 +4,13 @@ import { resolveTerminalDestination } from "./paneRouting";
 import { renderedPaneStyle, type WindowGrid } from "../features/terminal/layout";
 import { TerminalPane, type TerminalPaneController } from "../features/terminal/TerminalPane";
 import type { TerminalEventHub } from "../features/terminal/TerminalEventHub";
-import type { TerminalInput, TerminalSize } from "../features/terminal/TerminalRenderer";
+import type { TerminalInput, TerminalMeasurements } from "../features/terminal/TerminalRenderer";
 import type { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import type { TerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import type { TerminalTransferConnectionScope } from "../features/terminal/terminalTransfers";
-import type { TmuxAction } from "../features/tmux/actions";
+import type { AgentAttentionRollup } from "../features/agents/types";
+import { needsAttention } from "../features/agents/agentsList";
+import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 
 type TerminalWorkspaceSurfaceProps = {
   activePane?: Pane;
@@ -18,23 +20,38 @@ type TerminalWorkspaceSurfaceProps = {
   grid: WindowGrid;
   hub: TerminalEventHub;
   mountedPanes: Pane[];
+  /** Per-pane agent state; a pane whose agent wants a human gets the ring. */
+  paneAttention?: ReadonlyMap<string, AgentAttentionRollup>;
   panes: Pane[];
   snapshot: TmuxSnapshot;
+  /** Receives the tiled surface element the tmux client size is measured from. */
+  surfaceRef: (element: HTMLElement | null) => void;
   terminalTransferClient: TauriTerminalTransferClient;
   terminalTransferRegistry: TerminalTransferRegistry;
   terminalTransferScope?: TerminalTransferConnectionScope;
   beginDividerDrag(event: PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical"): void;
   handleInput(paneId: string, input: TerminalInput): void;
-  handleResize(pane: Pane, size: TerminalSize): void;
-  performAction(action: TmuxAction): Promise<boolean>;
+  /** A terminal reported what it turns pixels into. */
+  onMeasurements(measurements: TerminalMeasurements): void;
+  performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
   setStatus(message: string): void;
 };
 
 export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
   const { activePane, activeWindow, grid } = props;
-  return <div className="terminal-window" aria-label={activeWindow ? `Terminal tab ${activeWindow.name}` : "Terminal"}>
-    {props.mountedPanes.map((pane) => <div className={pane.active ? "pane-frame active" : "pane-frame"} style={renderedPaneStyle(pane, grid, Boolean(activeWindow?.zoomed))} key={pane.id}>
-      <div className="pane-label">{pane.id} · {pane.currentCommand}</div>
+  return <div className="terminal-window" ref={props.surfaceRef} aria-label={activeWindow ? `Terminal tab ${activeWindow.name}` : "Terminal"}>
+    {props.mountedPanes.map((pane) => {
+      // The floating `%N · cmd` badge is gone: it overlapped the pane's own
+      // output, and the pane's identity is already in the tab strip and the
+      // accessible name. What remains drawn on a pane is state: 2px accent for
+      // focus, 2.5px for an agent that wants a human.
+      const attention = props.paneAttention?.get(pane.id)?.state;
+      const wantsAttention = attention !== undefined && attention !== "none" && needsAttention(attention);
+      return <div
+        className={`pane-frame${pane.active ? " active" : ""}${wantsAttention ? " attention" : ""}`}
+        key={pane.id}
+        style={renderedPaneStyle(pane, grid, Boolean(activeWindow?.zoomed))}
+      >
       <TerminalPane
         clientId={props.clientId}
         pane={pane}
@@ -43,7 +60,7 @@ export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
         onDiagnostic={props.setStatus}
         onFocus={(paneId) => { if (paneId !== activePane?.id) void props.performAction({ kind: "focusPane", paneId }); }}
         onInput={props.handleInput}
-        onResize={props.handleResize}
+        onMeasurements={props.onMeasurements}
         transferClient={props.terminalTransferClient}
         transferRegistry={props.terminalTransferRegistry}
         transferScope={props.terminalTransferScope}
@@ -80,7 +97,8 @@ export function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
         role="separator"
         tabIndex={0}
       />
-    </div>)}
-    {props.panes.length === 0 && <div className="empty">No tmux panes in this terminal window.</div>}
+    </div>;
+    })}
+    {props.panes.length === 0 && <p className="quiet-empty">No tmux panes in this terminal window.</p>}
   </div>;
 }

@@ -7,6 +7,18 @@ export type AgentDisplayState = AgentLifecycle | "done";
 export type AgentAuthority = "hook" | "process" | "screen";
 export type AgentPlacement = "window" | "split";
 
+/**
+ * What this host's configuration actually does with the adapter's lifecycle
+ * events, observed by the daemon rather than claimed by the adapter.
+ *
+ * `unavailable` is not `notWired`: a configuration nobody could read might be
+ * wired perfectly, and offering to write over it is how unrelated hooks get
+ * lost. `unspecified` is a host too old to answer.
+ */
+/** The states the host can report, once. `mapHookWiring` validates against it. */
+export const AGENT_HOOK_WIRINGS = ["wired", "partial", "notWired", "absent", "unavailable", "unspecified"] as const;
+export type AgentHookWiring = typeof AGENT_HOOK_WIRINGS[number];
+
 export interface AgentAdapterDescriptor {
   id: AgentAdapterId;
   displayName: string;
@@ -18,6 +30,15 @@ export interface AgentAdapterDescriptor {
   hookConfigPath: string;
   hookEvents: string[];
   placements: AgentPlacement[];
+  hookWiring: AgentHookWiring;
+  /** Why the wiring could not be read; empty in every other state. */
+  hookWiringDetail: string;
+  /**
+   * Whether the host says an install would act on this adapter. The host is
+   * what observed the wiring, so the host decides; the desktop used to keep a
+   * second copy of the rule and the two had already diverged.
+   */
+  hookSetupRecommended: boolean;
 }
 
 export interface AgentRoute {
@@ -146,12 +167,44 @@ export interface AgentHookReview {
   backupPath?: string;
 }
 
+/**
+ * What the host did with the recommended tmux window naming.
+ *
+ * Two of the three are successes. `alreadyCurrent` is this app's own hook,
+ * already covering every adapter it knows about. `userConfigured` is the
+ * user's own arrangement, kept — it may carry exemptions this app knows
+ * nothing about.
+ */
+export const AGENT_HOST_NAMING_OUTCOMES = ["applied", "alreadyCurrent", "userConfigured", "removed", "nothingToRemove"] as const;
+/** `unavailable` is this side's answer to a value the host did not give. */
+export type AgentHostNamingOutcome = typeof AGENT_HOST_NAMING_OUTCOMES[number] | "unavailable";
+
 export interface AgentRequestScope {
   clientId: string;
   hostProfileId: string;
   serverIdentity: string;
   topologyGeneration: number;
   connectionEpoch: number;
+}
+
+/**
+ * The host a consent answer belongs to, stable for as long as that host stays
+ * connected.
+ *
+ * M13-E004: nothing tied the three separate reads of "the current host" that a
+ * hook install performs — the decision the user answered for, the diff the host
+ * computed, and the connection the write went down. Each was resolved when it
+ * was reached, so a host switch anywhere in between let a host that had never
+ * been asked receive the write *and* the recorded "accepted". The persisted
+ * decision stays keyed on `hostProfileId`, which is what survives a
+ * reconnection; this is the narrower key that has to hold still for the
+ * duration of one install.
+ *
+ * `topologyGeneration` is deliberately excluded: it moves on every pane change
+ * and would make an install racing an unrelated split fail for nothing.
+ */
+export function agentHostIdentity(scope?: AgentRequestScope): string | undefined {
+  return scope && `${scope.hostProfileId}\0${scope.clientId}\0${scope.connectionEpoch}`;
 }
 
 export interface AgentSoundPreferences {
@@ -180,6 +233,11 @@ export interface AgentNativeNotification {
   route: AgentNotificationRoute;
   /** False for an unmapped record that must remain in-app-only attention. */
   requestAction: boolean;
+  /**
+   * Whether the OS should show this while the app is frontmost. Only this side
+   * knows which pane the user is looking at, so only this side can answer it.
+   */
+  presentInForeground: boolean;
 }
 
 export interface AgentNotificationInstrumentation {

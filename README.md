@@ -2,17 +2,22 @@
 
 A lightweight macOS/Linux desktop IDE that mirrors an existing tmux server. tmux remains authoritative for persistent sessions, windows, panes, and processes; the desktop adds graphical terminal, editor, Explorer, Git, transfer, and agent-attention surfaces.
 
-The current release candidate is Linux-only. It includes local or single-host
-SSH tmux mirroring, xterm.js terminals, Explorer/editor/Markdown, Git,
-Codex/Claude lifecycle attention, native notifications, and bounded local/remote
-transfers. macOS remains deliberately deferred; see the progress log for the
-few hardware-only Linux checks that could not be performed on the virtual X11
-release desktop.
+The release candidate supports Linux and an ad-hoc-signed internal Apple-Silicon
+macOS build. It includes local or single-host SSH tmux mirroring, xterm.js
+terminals, Explorer/editor/Markdown, Git, Codex/Claude lifecycle attention,
+native notifications, and bounded local/remote transfers. Intel Mac, signing,
+and notarization are not claimed for the internal macOS artifact.
+
+Phase 10 macOS implementation and its five-review cycle are complete; final
+physical QA is still pending, so Phase 10 is not yet release-approved. Resume
+from the [Phase 10 implementation-to-QA handoff](./tests/phase10/implementation-handoff.md)
+and [pending QA ledger](./tests/phase10/qa-macos-2026-08-12.md). Do not begin
+Phase 11 until that acceptance closes.
 
 ## Development
 
 Requirements: Rust 1.97.1, Node.js 24, pnpm 11, tmux 3.3+, and the
-[Tauri 2 Linux prerequisites](https://v2.tauri.app/start/prerequisites/).
+[Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```sh
 pnpm install
@@ -39,6 +44,24 @@ remote use, first install the packaged helper through the reviewed profile flow;
 the helper and agent hooks use SSH and a private Unix socket, not a TCP listener.
 Uninstall refuses while managed hooks remain and preserves tmux sessions and
 user configuration.
+
+## Internal macOS package
+
+The macOS build is currently Apple Silicon only and uses an ad-hoc code identity
+so native macOS services can identify the app. It has no Developer ID signature,
+Gatekeeper trust, or notarization claim. It
+packages a native Mach-O local helper plus separate Linux ELF helpers for ARM64
+and x86_64 SSH targets.
+
+```sh
+release/macos/build-package.sh
+release/macos/install.sh "$PWD/target/release/bundle/macos/tmux Agent IDE.app"
+open "$HOME/Applications/tmux Agent IDE.app"
+release/macos/uninstall.sh
+```
+
+The installer is rootless, verifies ownership before upgrades, rolls back a
+failed publication, and preserves tmux sessions and application configuration.
 
 Workspace names are tmux session names and terminal-tab names are tmux window
 names. Renaming either in the app updates tmux; renames made by another tmux

@@ -23,8 +23,12 @@ const STATE_FILE: &str = "diagnostics.json";
 const DEPENDENCY_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const DEPENDENCY_OUTPUT_LIMIT: usize = 512;
 
+/// Unknown fields are ignored on purpose, in both directions: a counter added
+/// later must load into an older helper — the install path can roll back to one
+/// — and rejecting the file there would zero every counter in it. `RuntimeState`
+/// keeps `deny_unknown_fields`, so a structurally wrong file is still refused.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct FlowCounters {
     connections_accepted: u64,
     connections_active: u64,
@@ -34,6 +38,10 @@ struct FlowCounters {
     hook_fallback_errors: u64,
     event_queue_overflows: u64,
     terminal_input_backpressure_rejections: u64,
+    /// Client resizes refused for being outside the sane cell bound. Defaulted
+    /// so a state file written before this counter existed still loads.
+    #[serde(default)]
+    terminal_client_resize_rejections: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -251,6 +259,107 @@ fn update_active_counter(update: impl FnOnce(&mut FlowCounters)) {
         .clone();
     if let Some(diagnostics) = diagnostics {
         diagnostics.update(|state| update(&mut state.counters));
+    }
+}
+
+/// Names a rejected client resize in the daemon log.
+///
+/// The size is the whole point: a rejection without it cannot be told apart
+/// from a transport failure afterwards, and the size is what identifies which
+/// side computed nonsense. Cell counts carry no terminal content, no path and
+/// no hostname, so this stays inside the privacy declaration above.
+pub fn record_rejected_client_resize(columns: u32, rows: u32) {
+    update_active_counter(|counters| {
+        counters.terminal_client_resize_rejections =
+            counters.terminal_client_resize_rejections.saturating_add(1);
+    });
+    write_rejected_client_resize_log(columns, rows);
+}
+
+fn write_rejected_client_resize_log(columns: u32, rows: u32) {
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "terminalClientResizeRejected",
+        "columns": columns,
+        "rows": rows,
+    });
+    eprintln!("{line}");
+}
+
+/// Names every handoff of the one control client tmux sizes from.
+///
+/// The flag and the size are two `refresh-client` writes to a pipe, and a pipe
+/// write that tmux ignores succeeds. When that happened the only symptom was a
+/// user's windows sitting at 80x24 with nothing anywhere saying which client
+/// had been asked for what — the whole of M13-E005 was reconstructed from a
+/// live `list-clients`. Recording the handoff is what makes the next one
+/// readable from a log.
+///
+/// tmux session identifiers (`$3`) are the server's own ordinals: not names,
+/// not paths, not hostnames, and not terminal content. This stays inside the
+/// privacy declaration above.
+///
+/// `error` is the one free-form field, and it is bounded rather than trusted;
+/// see `bounded_log_text`.
+pub fn write_terminal_sizing_handoff_log(
+    previous_session: Option<&str>,
+    session_id: &str,
+    size: Option<(u32, u32)>,
+    error: Option<&str>,
+) {
+    let error = error.map(bounded_log_text);
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "terminalSizingHandoff",
+        "previousSession": previous_session,
+        "sessionId": session_id,
+        // Null means the desktop has not asked for a size yet on this
+        // connection, which is why a newly visible client can be correct and
+        // still be at tmux's default.
+        "size": size.map(|(columns, rows)| format!("{columns}x{rows}")),
+        "ok": error.is_none(),
+        "error": error,
+    });
+    eprintln!("{line}");
+}
+
+/// Names every flow-control resume tmux refused, and what was done about it.
+///
+/// A retried rejection is deliberately not an event: the host is still handling
+/// it and the desktop has nothing to do. That makes the log the only place it
+/// exists, which is the point — a pane that recovered on the second attempt
+/// recovered from something, and "it worked in the end" is not a diagnosis. It
+/// is also what the pause lane's injected-fault run reads to prove the fault
+/// fired at all.
+///
+/// A tmux pane identifier (`%3`) is the server's own ordinal, and `reason` is
+/// tmux's own refusal text — a parse error about a command this crate composed,
+/// never pane content, which the reader never puts in an error detail for
+/// exactly that reason. Bounded anyway; see `bounded_log_text`.
+pub fn write_flow_resume_rejected_log(pane_id: &str, disposition: &str, reason: &str) {
+    let reason = bounded_log_text(reason);
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "flowResumeRejected",
+        "paneId": pane_id,
+        "disposition": disposition,
+        "reason": reason,
+    });
+    eprintln!("{line}");
+}
+
+/// Bounds the one free-form field either of the two loggers above carries.
+///
+/// Both take text this crate composed from tmux's own refusal messages, which
+/// name no path and no host — but "none of them do today" is not a property a
+/// log line should rest on, and an unbounded string in a log is also how one
+/// bad error becomes a megabyte of stderr. Cut on a character boundary, because
+/// tmux's messages are not guaranteed ASCII.
+fn bounded_log_text(text: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    match text.char_indices().nth(MAX_CHARS) {
+        Some((index, _)) => format!("{}…", &text[..index]),
+        None => text.to_owned(),
     }
 }
 
@@ -856,7 +965,11 @@ mod tests {
     use super::*;
 
     fn private_directory() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("ade-diagnostics-{}", uuid::Uuid::new_v4()));
+        #[cfg(target_os = "macos")]
+        let temporary_root = Path::new("/private/tmp");
+        #[cfg(not(target_os = "macos"))]
+        let temporary_root = std::env::temp_dir();
+        let path = temporary_root.join(format!("ade-diagnostics-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path

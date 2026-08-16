@@ -210,11 +210,12 @@ impl StagingDirectory {
         Ok(true)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn exchange(&self, left: &OsStr, right: &OsStr) -> anyhow::Result<()> {
         let left = c_name(left)?;
         let right = c_name(right)?;
         // SAFETY: both names are descriptor-relative and remain live.
+        #[cfg(target_os = "linux")]
         let result = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
@@ -224,6 +225,16 @@ impl StagingDirectory {
                 right.as_ptr(),
                 libc::RENAME_EXCHANGE,
             )
+        };
+        #[cfg(target_os = "macos")]
+        let result = unsafe {
+            libc::renameatx_np(
+                self.file.as_raw_fd(),
+                left.as_ptr(),
+                self.file.as_raw_fd(),
+                right.as_ptr(),
+                libc::RENAME_SWAP,
+            ) as libc::c_long
         };
         if result < 0 {
             return Err(std::io::Error::last_os_error()).context("atomic staging exchange failed");
@@ -261,7 +272,8 @@ impl StagingDirectory {
                 .context("could not inspect staging free space");
         }
         let stats = unsafe { stats.assume_init() };
-        Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
+        let available = u128::from(stats.f_bavail).saturating_mul(u128::from(stats.f_frsize));
+        Ok(u64::try_from(available).unwrap_or(u64::MAX))
     }
 
     pub(super) fn sync(&self) -> anyhow::Result<()> {

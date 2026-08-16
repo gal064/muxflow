@@ -29,6 +29,11 @@ pub struct AppTabRecord {
     pub root_path: Option<String>,
     #[serde(default)]
     pub root_token: Option<String>,
+    /// VS Code's preview tab. `serde(default)` because every file written
+    /// before preview tabs existed lacks it, and a required field here is
+    /// exactly the mismatch that once made every save fail.
+    #[serde(default)]
+    pub preview: Option<bool>,
     #[serde(default)]
     pub view_mode: Option<AppTabViewMode>,
     #[serde(default)]
@@ -81,25 +86,43 @@ pub struct WorkspaceUiRecord {
     pub selected_app_tab_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// The shell preferences the frontend owns.
+///
+/// Every field is `#[serde(default)]`, and that is a contract rather than a
+/// convenience. This struct is the *storage* end of a shape declared in
+/// TypeScript (`features/shell/types.ts`, `ShellState`); the two are written by
+/// hand, so a field the frontend adds or drops must not be able to make the
+/// whole save fail. It could before: Phase 11 replaced the shell preferences
+/// wholesale and left three required fields behind here, so every
+/// `save_app_state` was rejected with `missing field \`explorerSurface\`` and
+/// the app silently stopped persisting open tabs, workspace selection,
+/// shortcut overrides and window geometry. `app_state_contract` below is the
+/// test that would have caught it.
+///
+/// Fields removed by the frontend are simply dropped: serde ignores unknown
+/// keys, so a file written by the previous build still loads, with the new
+/// preferences at their defaults. That is why `schema_version` stays at 1.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellPreferences {
-    pub explorer_surface: ExplorerSurface,
-    pub explorer_collapsed: bool,
-    pub agent_sidebar_collapsed: bool,
+    #[serde(default)]
+    pub panel_surface: PanelSurface,
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    #[serde(default)]
+    pub sidebar_width: Option<f64>,
+    #[serde(default)]
+    pub panel_open: bool,
+    #[serde(default)]
+    pub agent_sort: AgentSortMode,
+    #[serde(default)]
+    pub agents_section_ratio: Option<f64>,
+    #[serde(default)]
+    pub agent_state_glyphs: bool,
+    #[serde(default)]
+    pub terminal_screen_reader: bool,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
-}
-
-impl Default for ShellPreferences {
-    fn default() -> Self {
-        Self {
-            explorer_surface: ExplorerSurface::Explorer,
-            explorer_collapsed: false,
-            agent_sidebar_collapsed: false,
-            window_geometry: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,14 +144,48 @@ pub struct CommandPreferences {
     pub shortcut_overrides: HashMap<String, Option<String>>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Which half of the right panel is showing when it is open.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum ExplorerSurface {
-    Explorer,
+pub enum PanelSurface {
+    #[default]
+    Files,
     Git,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// The agents section's ordering: workspace order, or attention order.
+///
+/// The two orderings were named `grouped` and `priority` before they were
+/// named after what they sort by. An unknown variant is a hard deserialization
+/// error, not a defaulted field, so both old names are still accepted here:
+/// without the aliases, a file written by the previous build would make every
+/// `load_app_state` fail — and, worse, `save_app_state` would have rejected the
+/// frontend's new names, silently freezing every saved tab and preference.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentSortMode {
+    #[serde(alias = "priority")]
+    Status,
+    #[default]
+    #[serde(alias = "grouped")]
+    Workspace,
+}
+
+// No `Eq`: the shell's sidebar width and agents-section ratio are fractions.
+/// Whether the user has answered "set up this host" for one host profile.
+///
+/// Stored per host rather than globally: consent to change configuration files
+/// on a laptop says nothing about a shared build box, and the prompt is
+/// one-time per host precisely because re-asking is how a consent prompt turns
+/// into something people click through.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum HostSetupDecision {
+    Accepted,
+    Declined,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedAppState {
     pub schema_version: u32,
@@ -137,6 +194,8 @@ pub struct PersistedAppState {
     pub shell: ShellPreferences,
     #[serde(default)]
     pub commands: CommandPreferences,
+    #[serde(default)]
+    pub host_setup: HashMap<String, HostSetupDecision>,
 }
 
 impl Default for PersistedAppState {
@@ -147,6 +206,7 @@ impl Default for PersistedAppState {
             workspace_ui: Vec::new(),
             shell: ShellPreferences::default(),
             commands: CommandPreferences::default(),
+            host_setup: HashMap::new(),
         }
     }
 }
@@ -155,6 +215,9 @@ pub struct AppStateStore {
     path: PathBuf,
     value: Mutex<PersistedAppState>,
     recovery_error: Mutex<Option<String>>,
+    /// Serialises `save_app_state`, whose file write and cache update are now
+    /// separated by an await.
+    write_lock: tauri::async_runtime::Mutex<()>,
 }
 
 impl AppStateStore {
@@ -171,6 +234,7 @@ impl AppStateStore {
             path,
             value: Mutex::new(value),
             recovery_error: Mutex::new(recovery_error),
+            write_lock: tauri::async_runtime::Mutex::new(()),
         }
     }
 }
@@ -234,6 +298,12 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
         if let Some(binding) = binding {
             validate_text("shortcut binding", binding, false)?;
         }
+    }
+    if value.host_setup.len() > 1_024 {
+        return Err("too many recorded host setup decisions".into());
+    }
+    for host_profile_id in value.host_setup.keys() {
+        validate_text("host setup profile ID", host_profile_id, false)?;
     }
     let mut ids = HashSet::new();
     for tab in &value.app_tabs {
@@ -366,8 +436,11 @@ pub fn load_app_state(store: State<'_, AppStateStore>) -> Result<PersistedAppSta
     Ok(store.value.lock().unwrap().clone())
 }
 
+/// Async: shell state is saved on ordinary interactions such as opening a tab,
+/// and an atomic write plus fsync on the WebView's main thread stalls the whole
+/// UI for the length of that disk round trip.
 #[tauri::command]
-pub fn save_app_state(
+pub async fn save_app_state(
     state: PersistedAppState,
     store: State<'_, AppStateStore>,
 ) -> Result<(), String> {
@@ -375,7 +448,17 @@ pub fn save_app_state(
         return Err("saved shell state is write-frozen until explicit reset".into());
     }
     validate(&state)?;
-    write_private_atomic(&store.path, &state)?;
+    // One save at a time. The await between writing the file and updating the
+    // cache is a window two concurrent saves could interleave in, leaving the
+    // file holding one state and the cache another — and shell state is saved
+    // on ordinary interactions, so concurrent saves are the normal case, not an
+    // exotic one.
+    let _serialized = store.write_lock.lock().await;
+    let path = store.path.clone();
+    let persisted = state.clone();
+    tauri::async_runtime::spawn_blocking(move || write_private_atomic(&path, &persisted))
+        .await
+        .map_err(|error| format!("shell state write task failed: {error}"))??;
     *store.value.lock().unwrap() = state;
     Ok(())
 }
@@ -417,6 +500,7 @@ mod tests {
                 resource: "/work/README.md".into(),
                 root_path: Some("/work".into()),
                 root_token: Some("root-token".into()),
+                preview: Some(true),
                 view_mode: Some(AppTabViewMode::Split),
                 git_repository_id: None,
                 git_path: None,
@@ -435,9 +519,14 @@ mod tests {
                 selected_app_tab_id: Some("tab-1".into()),
             }],
             shell: ShellPreferences {
-                explorer_surface: ExplorerSurface::Git,
-                explorer_collapsed: true,
-                agent_sidebar_collapsed: true,
+                panel_surface: PanelSurface::Git,
+                sidebar_collapsed: true,
+                sidebar_width: Some(260.0),
+                panel_open: true,
+                agent_sort: AgentSortMode::Status,
+                agents_section_ratio: Some(0.42),
+                agent_state_glyphs: true,
+                terminal_screen_reader: false,
                 window_geometry: Some(WindowGeometry {
                     x: 20,
                     y: 30,
@@ -450,6 +539,7 @@ mod tests {
             commands: CommandPreferences {
                 shortcut_overrides: HashMap::from([("window.new".into(), Some("Ctrl+T".into()))]),
             },
+            host_setup: HashMap::from([("local".into(), HostSetupDecision::Accepted)]),
         }
     }
 
@@ -487,6 +577,7 @@ mod tests {
             resource: "staged:new name".into(),
             root_path: Some("/work".into()),
             root_token: Some("root-token".into()),
+            preview: None,
             view_mode: None,
             git_repository_id: Some("repo-identity".into()),
             git_path: Some("bmV3IG5hbWU=".into()),
@@ -533,6 +624,137 @@ mod tests {
         });
         let restored: WindowGeometry = serde_json::from_value(legacy).unwrap();
         assert_eq!(restored.scale_factor_milli, None);
+    }
+
+    /// The storage end of the `save_app_state` contract.
+    ///
+    /// `PersistedAppState` is declared twice — here and in
+    /// `src/features/shell/types.ts` — and hand-copied between them. The
+    /// fixture below is read by both ends; `appStateContract.test.ts` asserts
+    /// the frontend's key set against it, and this asserts that everything in
+    /// it deserializes and that this side invents no field the frontend never
+    /// sends.
+    ///
+    /// The break it exists to prevent, measured on the packaged app: the
+    /// frontend replaced the shell preferences wholesale, three fields stayed
+    /// required here, and every save was refused with
+    /// `missing field \`explorerSurface\`` — open tabs, workspace selection,
+    /// shortcut overrides and window geometry all silently stopped persisting.
+    #[test]
+    fn app_state_contract_matches_the_frontend_shape() {
+        const CONTRACT: &str =
+            include_str!("../../src/features/shell/persistedAppState.contract.json");
+        let value: PersistedAppState =
+            serde_json::from_str(CONTRACT).expect("the frontend's own payload must deserialize");
+        assert_eq!(value.shell.panel_surface, PanelSurface::Git);
+        assert_eq!(value.shell.agent_sort, AgentSortMode::Status);
+        assert_eq!(value.shell.sidebar_width, Some(260.0));
+        assert_eq!(value.shell.agents_section_ratio, Some(0.42));
+        assert!(value.shell.sidebar_collapsed && value.shell.panel_open);
+        assert!(value.shell.agent_state_glyphs && value.shell.terminal_screen_reader);
+        assert!(value.shell.window_geometry.is_some());
+        assert_eq!(
+            value.host_setup.get("local"),
+            Some(&HostSetupDecision::Accepted)
+        );
+        assert_eq!(
+            value.host_setup.get("ssh-omarchy"),
+            Some(&HostSetupDecision::Declined)
+        );
+        validate(&value).expect("the frontend's own payload must validate");
+
+        // Nothing may be stored that the frontend does not send, and nothing the
+        // frontend sends may be silently dropped. Checked for every struct that
+        // crosses, not just the one that broke: `appTabs` carries nineteen
+        // fields and `workspaceUi` five, and either could lose one the same way.
+        let expected: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
+        let stored = serde_json::to_value(&value).unwrap();
+        let keys = |value: &serde_json::Value| {
+            let mut names: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+            names.sort();
+            names
+        };
+        assert_eq!(keys(&stored["shell"]), keys(&expected["shell"]), "shell");
+        assert_eq!(
+            keys(&stored["appTabs"][0]),
+            keys(&expected["appTabs"][0]),
+            "appTabs"
+        );
+        assert_eq!(
+            keys(&stored["workspaceUi"][0]),
+            keys(&expected["workspaceUi"][0]),
+            "workspaceUi"
+        );
+        assert_eq!(
+            keys(&stored["commands"]),
+            keys(&expected["commands"]),
+            "commands"
+        );
+        // And the envelope itself, so a whole section cannot go missing.
+        assert_eq!(
+            keys(&stored),
+            keys(
+                &expected
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(name, _)| !name.starts_with('_'))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into()
+            )
+        );
+    }
+
+    /// A file written by the build before Phase 11 must still load, with the
+    /// preferences it never heard of at their defaults. The schema version
+    /// deliberately did not move for a shell-preferences change.
+    #[test]
+    fn shell_preferences_written_by_the_previous_build_still_load() {
+        let legacy = serde_json::json!({
+            "schemaVersion": 1,
+            "appTabs": [],
+            "workspaceUi": [],
+            "shell": {
+                "explorerSurface": "git",
+                "explorerCollapsed": true,
+                "agentSidebarCollapsed": true,
+                "windowGeometry": { "x": 1, "y": 2, "width": 900, "height": 700, "maximized": false }
+            }
+        });
+        let value: PersistedAppState = serde_json::from_value(legacy).unwrap();
+        assert_eq!(value.shell.panel_surface, PanelSurface::Files);
+        assert_eq!(value.shell.agent_sort, AgentSortMode::Workspace);
+        assert!(!value.shell.sidebar_collapsed);
+        assert_eq!(value.shell.window_geometry.unwrap().width, 900);
+    }
+
+    /// The agent ordering was renamed, not changed. A file naming an ordering
+    /// the way the previous build wrote it must still load — as the *same*
+    /// ordering, not as the default. An unknown enum variant is a hard error
+    /// in serde, so without the aliases this is a load failure that freezes
+    /// every saved tab and preference behind the recovery path.
+    #[test]
+    fn renamed_agent_orderings_still_load_under_their_previous_names() {
+        let load = |sort: &str| {
+            let value: PersistedAppState = serde_json::from_value(serde_json::json!({
+                "schemaVersion": 1,
+                "appTabs": [],
+                "workspaceUi": [],
+                "shell": { "agentSort": sort },
+            }))
+            .unwrap_or_else(|error| panic!("agentSort {sort} must load: {error}"));
+            value.shell.agent_sort
+        };
+        assert_eq!(load("priority"), AgentSortMode::Status);
+        assert_eq!(load("grouped"), AgentSortMode::Workspace);
+        assert_eq!(load("status"), AgentSortMode::Status);
+        assert_eq!(load("workspace"), AgentSortMode::Workspace);
+        // And what is written back is the current name, never the old one.
+        assert_eq!(
+            serde_json::to_value(AgentSortMode::Status).unwrap(),
+            serde_json::json!("status")
+        );
     }
 
     #[test]

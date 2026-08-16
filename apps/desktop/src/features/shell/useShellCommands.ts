@@ -1,20 +1,23 @@
 import { useCallback, useMemo, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
-import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
+import type { HostProfile, Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { createTmuxConfirmation, type PendingTmuxConfirmation } from "../../commands/destructiveConfirmation";
 import type { PendingTextPrompt } from "../../commands/TextInputDialog";
-import { commandRegistry, type CommandContext, type CommandId, type CommandTarget } from "../../commands/registry";
+import { commandRegistry, selectionIndex, type CommandContext, type CommandId, type CommandTarget } from "../../commands/registry";
+import { rowCommandRegistry } from "../../commands/rowCommands";
+import { nextSortMode } from "../agents/agentsList";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
-import type { TmuxAction } from "../tmux/actions";
+import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
 import { relativeWindowReorderAction } from "../../app/windowSelection";
 import { closeAppTab, reorderAppTab, type CombinedTab } from "./model";
 import type { AppOwnedTab, PersistedAppState } from "./types";
 import type { HostScopeToken } from "./hostScope";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
+import { shellAfterSidebarCommand } from "./responsiveShell";
 
 type PerformAction = (
   action: TmuxAction,
   precondition?: { serverIdentity: string; generation: number },
-) => Promise<boolean>;
+) => Promise<TmuxActionResult | undefined>;
 
 interface ShellCommandOptions {
   activePane?: Pane;
@@ -23,6 +26,11 @@ interface ShellCommandOptions {
   appState: PersistedAppState;
   canMutate: boolean;
   combinedTabs: readonly CombinedTab[];
+  /** The saved host Settings has picked, when it is one that can be deleted. */
+  deletableHostProfile?: HostProfile;
+  /** Asks for the destructive confirmation; App owns the dialog and the store call. */
+  requestHostProfileDelete(profile: HostProfile): void;
+
   controllers: MutableRefObject<Map<string, TerminalPaneController>>;
   currentHostProfileId: string;
   focusDirection(direction: "left" | "right" | "up" | "down"): void;
@@ -30,16 +38,72 @@ interface ShellCommandOptions {
   hostScope: HostScopeToken;
   isHostScopeCurrent(scope: HostScopeToken): boolean;
   performAction: PerformAction;
+  /** Live subscription to what the row surfaces currently offer. */
+  rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
+  selectCreatedSession(sessionId: string): void;
+  /**
+   * Land on the terminal tab ⌘T just made. The host creates it detached, so
+   * tmux's active window does not move and the app — which mirrors that flag
+   * on every snapshot — would put the selection straight back.
+   *
+   * `generation` is the one the creation returned, not the one in scope: the
+   * create bumped the topology and the app's own scope does not catch up until
+   * the next snapshot, so a selection sent against the older number is
+   * rejected as stale and only lands on a retry.
+   */
+  selectCreatedWindow(sessionId: string, windowId: string, generation: number): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
   setConfirmation: Dispatch<SetStateAction<PendingTmuxConfirmation | undefined>>;
   setPaletteOpen: Dispatch<SetStateAction<boolean>>;
+  setSettingsOpen: Dispatch<SetStateAction<boolean>>;
   setShortcutEditorOpen: Dispatch<SetStateAction<boolean>>;
   setStatus: Dispatch<SetStateAction<string>>;
   setTextPrompt: Dispatch<SetStateAction<PendingTextPrompt | undefined>>;
+  setWorkspaceSwitcherOpen: Dispatch<SetStateAction<boolean>>;
   snapshot: TmuxSnapshot;
   windows: readonly TmuxWindow[];
+  /** ⌘1–9: the nth workspace in the sidebar's order. */
+  selectWorkspaceByIndex(index: number): void;
+  /** ⌃1–9 and ⌘⇧[/]: positions in the one combined tab strip. */
+  selectTabByIndex(index: number): void;
+  selectRelativeTab(direction: -1 | 1): void;
+  /** ⌘⇧U. */
+  jumpToUnreadAgent(): void;
+  stepFocusHistory(direction: "back" | "forward"): void;
+}
+
+/**
+ * What a destructive command closes, and whether it asks first.
+ *
+ * `confirmLabel` present means a dialog names that target; absent means the
+ * close happens on the spot. A terminal tab and a pane are the surface the
+ * user is looking at and their disappearance is the confirmation — the same
+ * call this user's own terminal makes with `confirm-close-surface = false`. A
+ * workspace takes every window in it, which is a different blast radius.
+ *
+ * Either way the action reaches the host identically: `confirmed: true` plus
+ * the precondition captured when the command ran. Only the gate differs.
+ */
+function closeTarget(
+  commandId: CommandId,
+  targets: { targetSession?: Session; targetWindow?: TmuxWindow; targetPane?: Pane },
+): { action: TmuxAction; confirmLabel?: string } | undefined {
+  const { targetSession, targetWindow, targetPane } = targets;
+  if (commandId === "session.close" && targetSession) {
+    return {
+      action: { kind: "closeSession", sessionId: targetSession.id },
+      confirmLabel: `workspace “${targetSession.name}” and all of its windows`,
+    };
+  }
+  if (commandId === "window.close" && targetWindow) {
+    return { action: { kind: "closeWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id } };
+  }
+  if (commandId === "pane.close" && targetPane) {
+    return { action: { kind: "closePane", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id } };
+  }
+  return undefined;
 }
 
 export function useShellCommands(options: ShellCommandOptions): {
@@ -49,6 +113,15 @@ export function useShellCommands(options: ShellCommandOptions): {
   const runCommand = useCallback(async (commandId: CommandId, target?: CommandTarget) => {
     const definition = commandRegistry.find((command) => command.id === commandId);
     if (!definition) return;
+    // Row commands belong to the surface that published them; this hook has no
+    // business knowing what "the selected file" is. The row may also have gone
+    // between the palette opening and Enter — a panel closed, a connection
+    // dropped — and that has to be said rather than silently doing nothing.
+    if (definition.requires === "row") {
+      const outcome = rowCommandRegistry.run(commandId);
+      if (!outcome.ran) options.setStatus(`${definition.title.replace(/…$/, "")} is unavailable: nothing is selected in that panel any more.`);
+      return;
+    }
     const targetSession = target?.kind === "session"
       ? options.snapshot.sessions.find((session) => session.id === target.id)
       : options.activeSession;
@@ -71,56 +144,70 @@ export function useShellCommands(options: ShellCommandOptions): {
         options.setStatus(`Could not close ${targetAppTab.title} because its editor did not save: ${String(error)}`);
         return;
       }
+      // No toast: the tab is gone from the strip, which is the whole message.
+      // Status is for what the user cannot see or must act on — the failure
+      // branch above is exactly that, and stays.
       options.setAppState((current) => closeAppTab(current, options.currentHostProfileId, targetAppTab.id));
-      options.setStatus(`Closed ${targetAppTab.title}`);
-      return;
-    }
-    if (commandId === "session.close" && targetSession) {
-      if (!options.serverIdentity) return;
-      options.setConfirmation(createTmuxConfirmation(
-        commandId,
-        definition.title,
-        `workspace “${targetSession.name}” and all of its windows`,
-        { kind: "closeSession", sessionId: targetSession.id },
-        { serverIdentity: options.serverIdentity, generation: options.generation },
-      ));
       return;
     }
     if (definition.destructive) {
       if (!options.serverIdentity) return;
-      const captured = commandId === "window.close" && targetWindow
-        ? {
-            label: `terminal tab “${targetWindow.name}” and all of its panes`,
-            action: { kind: "closeWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id } as TmuxAction,
-          }
-        : commandId === "pane.close" && targetPane
-            ? {
-                label: `pane ${targetPane.id}`,
-                action: { kind: "closePane", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id } as TmuxAction,
-              }
-            : undefined;
-      if (!captured) return;
-      options.setConfirmation(createTmuxConfirmation(
-        commandId, definition.title, captured.label, captured.action,
-        { serverIdentity: options.serverIdentity, generation: options.generation },
-      ));
+      const close = closeTarget(commandId, { targetSession, targetWindow, targetPane });
+      if (!close) return;
+      // One dispatch, so `confirmed: true` and the authoritative precondition
+      // are stamped in exactly one place whether or not a dialog is involved.
+      // Whether a close *asks* is data — `confirmLabel` — not a second branch
+      // of control flow above this one.
+      const action: TmuxAction = { ...close.action, confirmed: true };
+      const precondition = { serverIdentity: options.serverIdentity, generation: options.generation };
+      if (close.confirmLabel) {
+        options.setConfirmation(createTmuxConfirmation(commandId, definition.title, close.confirmLabel, action, precondition));
+      } else {
+        await options.performAction(action, precondition);
+      }
       return;
     }
+    const workspaceIndex = selectionIndex(commandId, "workspace.select");
+    if (workspaceIndex !== undefined) return options.selectWorkspaceByIndex(workspaceIndex - 1);
+    const tabIndex = selectionIndex(commandId, "tab.select");
+    if (tabIndex !== undefined) return options.selectTabByIndex(tabIndex - 1);
+
     switch (commandId) {
       case "commands.show": options.setPaletteOpen(true); return;
+      case "workspaces.switch": options.setWorkspaceSwitcherOpen(true); return;
       case "shortcuts.configure": options.setShortcutEditorOpen(true); return;
-      case "view.toggleExplorer": options.setAppState((current) => ({ ...current, shell: { ...current.shell, explorerCollapsed: !current.shell.explorerCollapsed } })); return;
-      case "view.toggleAgents": options.setAppState((current) => ({ ...current, shell: { ...current.shell, agentSidebarCollapsed: !current.shell.agentSidebarCollapsed } })); return;
-      case "view.showExplorer": options.setAppState((current) => ({ ...current, shell: { ...current.shell, explorerCollapsed: false, explorerSurface: "explorer" } })); return;
-      case "view.showGit": options.setAppState((current) => ({ ...current, shell: { ...current.shell, explorerCollapsed: false, explorerSurface: "git" } })); return;
-      case "focus.workspaces": document.querySelector<HTMLButtonElement>(".workspace-select[aria-current=page], .workspace-select")?.focus(); return;
-      case "focus.tabs": document.querySelector<HTMLButtonElement>(".combined-tab-select[aria-selected=true], .combined-tab-select")?.focus(); return;
+      case "settings.show": options.setSettingsOpen(true); return;
+      // The confirmation is the host picker's own, not the tmux one the
+      // `destructive` flag routes to — a saved host is a local preference, and
+      // there is no server identity or topology generation to capture.
+      case "host.delete": if (options.deletableHostProfile) options.requestHostProfileDelete(options.deletableHostProfile); return;
+      case "view.toggleSidebar":
+      case "view.togglePanel":
+      case "view.showFiles":
+      case "view.showGit":
+        options.setAppState((current) => ({
+          ...current,
+          shell: shellAfterSidebarCommand(current.shell, commandId),
+        }));
+        return;
+      case "agents.toggleSort":
+        options.setAppState((current) => ({ ...current, shell: { ...current.shell, agentSort: nextSortMode(current.shell.agentSort) } }));
+        return;
+      case "agents.jumpUnread": options.jumpToUnreadAgent(); return;
+      case "focus.workspaces": document.querySelector<HTMLButtonElement>(".workspace-button[aria-current=true], .workspace-button")?.focus(); return;
+      case "focus.tabs": document.querySelector<HTMLButtonElement>(".tab-select[aria-selected=true], .tab-select")?.focus(); return;
+      case "focus.back": options.stepFocusHistory("back"); return;
+      case "focus.forward": options.stepFocusHistory("forward"); return;
+      case "tab.previous": options.selectRelativeTab(-1); return;
+      case "tab.next": options.selectRelativeTab(1); return;
       case "session.new": {
         const scope = options.hostScope;
         options.setTextPrompt({ title: "New workspace", label: "Workspace name", submit: (name) => {
           options.setTextPrompt(undefined);
           if (!options.isHostScopeCurrent(scope)) return options.setStatus("Workspace creation was cancelled because its host scope changed.");
-          void options.performAction({ kind: "createSession", name });
+          void options.performAction({ kind: "createSession", name }).then((result) => {
+            if (result?.sessionId && options.isHostScopeCurrent(scope)) options.selectCreatedSession(result.sessionId);
+          });
         } });
         return;
       }
@@ -141,7 +228,19 @@ export function useShellCommands(options: ShellCommandOptions): {
         if (current >= 0 && index >= 0 && index < ordered.length) await options.performAction({ kind: "reorderSession", sessionId: targetSession.id, index });
         return;
       }
-      case "window.new": if (targetSession) await options.performAction({ kind: "createWindow", sessionId: targetSession.id }); return;
+      case "window.new": {
+        if (!targetSession) return;
+        // Same shape as `session.new`: create, then select what came back, and
+        // only if the app is still pointed at the host that created it.
+        const scope = options.hostScope;
+        const sessionId = targetSession.id;
+        void options.performAction({ kind: "createWindow", sessionId }).then((result) => {
+          if (result?.windowId && options.isHostScopeCurrent(scope)) {
+            options.selectCreatedWindow(sessionId, result.windowId, result.topologyGeneration);
+          }
+        });
+        return;
+      }
       case "window.rename": {
         const scope = options.hostScope;
         if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: targetWindow.name, submit: (name) => {
@@ -193,6 +292,8 @@ export function useShellCommands(options: ShellCommandOptions): {
     canMoveTabRight: options.selectedAppTab
       ? Boolean(options.combinedTabs.find((tab) => tab.key === `app:${options.selectedAppTab!.id}`)?.canMoveRight)
       : Boolean(options.activeWindow && relativeWindowReorderAction(options.windows, options.activeWindow.id, "right")),
+    hasHostProfile: Boolean(options.deletableHostProfile),
+    rowCommands: options.rowCommands,
     run: runCommand,
   }), [options, runCommand]);
 

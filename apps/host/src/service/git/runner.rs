@@ -4,8 +4,8 @@ use std::{
     fs::File,
     io::{Read, Write},
     ops::Deref,
-    os::unix::ffi::OsStringExt,
     os::unix::{
+        ffi::OsStringExt,
         fs::MetadataExt as _,
         io::{AsRawFd as _, FromRawFd as _},
         process::CommandExt,
@@ -14,6 +14,9 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use std::{ffi::CString, os::unix::ffi::OsStrExt as _, path::PathBuf};
 
 use anyhow::{Context, bail};
 #[cfg(test)]
@@ -27,7 +30,19 @@ pub(super) const GIT_COMMIT_DEADLINE: Duration = Duration::from_secs(5 * 60);
 const TERMINATION_GRACE: Duration = Duration::from_millis(250);
 
 thread_local! {
-    static GIT_METADATA_ENV: RefCell<Vec<(OsString, OsString)>> = const { RefCell::new(Vec::new()) };
+    static GIT_METADATA_ENV: RefCell<Vec<GitMetadataBinding>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone)]
+struct GitMetadataBinding {
+    #[cfg(target_os = "linux")]
+    git_dir: OsString,
+    #[cfg(target_os = "linux")]
+    common_dir: OsString,
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    git_fd: i32,
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    common_fd: i32,
 }
 
 pub(super) struct GitMetadataCapability {
@@ -66,10 +81,16 @@ impl GitMetadataCapability {
 
     pub(super) fn install(&self) -> GitMetadataGuard<'_> {
         GIT_METADATA_ENV.with(|environment| {
-            environment.borrow_mut().push((
-                descriptor_directory(self.git_dir.as_raw_fd()),
-                descriptor_directory(self.common_dir.as_raw_fd()),
-            ));
+            environment.borrow_mut().push(GitMetadataBinding {
+                #[cfg(target_os = "linux")]
+                git_dir: descriptor_directory(self.git_dir.as_raw_fd()),
+                #[cfg(target_os = "linux")]
+                common_dir: descriptor_directory(self.common_dir.as_raw_fd()),
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                git_fd: self.git_dir.as_raw_fd(),
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                common_fd: self.common_dir.as_raw_fd(),
+            });
         });
         GitMetadataGuard { _capability: self }
     }
@@ -120,10 +141,21 @@ fn retain_exec_fd(fd: i32) -> anyhow::Result<()> {
 
 fn descriptor_directory(fd: i32) -> OsString {
     #[cfg(target_os = "linux")]
-    let prefix = "/proc/self/fd/";
-    #[cfg(not(target_os = "linux"))]
-    let prefix = "/dev/fd/";
-    OsString::from(format!("{prefix}{fd}"))
+    return OsString::from(format!("/proc/self/fd/{fd}"));
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let mut buffer = [0_u8; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes the live metadata directory's vnode path
+        // into this fixed-size buffer. Identity is revalidated around use.
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, buffer.as_mut_ptr()) } == 0 {
+            let length = buffer
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(buffer.len());
+            return OsString::from_vec(buffer[..length].to_vec());
+        }
+        OsString::from(format!("/dev/fd/{fd}"))
+    }
 }
 
 pub(super) struct GitOutput {
@@ -235,10 +267,21 @@ fn git_output_inner(
     deadline: Duration,
 ) -> anyhow::Result<GitOutput> {
     let mut command = Command::new("git");
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let worktree_only_apply =
+        args.first() == Some(&OsStr::new("apply")) && !args.contains(&OsStr::new("--cached"));
+    command.args(["-c", "core.quotePath=false"]);
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let root_fd = root
+        .strip_prefix("/dev/fd/")
+        .and_then(|value| value.parse::<i32>().ok());
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let root_fd: Option<i32> = None;
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    if root_fd.is_none() {
+        command.arg("-C").arg(root);
+    }
     command
-        .arg("-C")
-        .arg(root)
-        .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "true")
         .env("SSH_ASKPASS", "true")
@@ -254,21 +297,53 @@ fn git_output_inner(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    GIT_METADATA_ENV.with(|environment| {
-        if let Some((git_dir, common_dir)) = environment.borrow().last() {
+    let metadata_binding = GIT_METADATA_ENV.with(|environment| {
+        let binding = environment.borrow().last().cloned();
+        #[cfg(target_os = "linux")]
+        if let Some(binding) = &binding {
             command
-                .env("GIT_DIR", git_dir)
-                .env("GIT_COMMON_DIR", common_dir);
+                .env("GIT_DIR", &binding.git_dir)
+                .env("GIT_COMMON_DIR", &binding.common_dir);
         }
+        binding
     });
-    // SAFETY: this closure only performs async-signal-safe `setpgid` before
-    // exec. A separate process group lets timeout/cancellation terminate hooks
-    // and grandchildren as well as the direct Git process.
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let _ = metadata_binding;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let darwin_boundary = DarwinGitBoundary::capture(
+        root,
+        root_fd,
+        if worktree_only_apply {
+            None
+        } else {
+            metadata_binding.as_ref()
+        },
+    )?;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        command.arg("-C").arg(&darwin_boundary.root.path);
+        if let Some(metadata) = &darwin_boundary.metadata {
+            command
+                .env("GIT_DIR", &metadata.git.path)
+                .env("GIT_COMMON_DIR", &metadata.common.path)
+                .env("GIT_WORK_TREE", &darwin_boundary.root.path);
+        }
+        command.args(args);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    command.args(args);
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let pre_exec_boundary = darwin_boundary.clone();
+    // SAFETY: this closure only performs async-signal-safe descriptor/path
+    // validation and `setpgid` before exec. A separate process group lets
+    // timeout/cancellation terminate hooks and grandchildren as well as Git.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             if libc::setpgid(0, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            pre_exec_boundary.validate_raw()?;
             Ok(())
         });
     }
@@ -328,6 +403,10 @@ fn git_output_inner(
         }
     }
     stdin_error?;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    darwin_boundary
+        .validate()
+        .context("Git repository paths changed during command; refresh required")?;
     Ok(GitOutput {
         output: Output {
             status: termination.0,
@@ -338,6 +417,150 @@ fn git_output_inner(
         stderr_truncated: stderr_overflow,
         interrupted: termination.1.map(str::to_owned),
     })
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone)]
+struct DarwinDirectoryBinding {
+    path: PathBuf,
+    raw_path: CString,
+    identity: (u64, u64),
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone)]
+struct DarwinMetadataBinding {
+    git: DarwinDirectoryBinding,
+    common: DarwinDirectoryBinding,
+}
+
+// Match the path-based trust boundary used by mainstream desktop Git
+// integrations: present stock Git with ordinary absolute paths, but bind those
+// paths to the directories captured for this operation immediately before
+// exec and again after completion. A hostile process running as the same user
+// can still race Git's own pathname opens after exec; that is outside the local
+// desktop threat model and would require a patched Git or privileged mediation.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone)]
+struct DarwinGitBoundary {
+    root: DarwinDirectoryBinding,
+    metadata: Option<DarwinMetadataBinding>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+impl DarwinGitBoundary {
+    fn capture(
+        root: &str,
+        root_fd: Option<i32>,
+        metadata: Option<&GitMetadataBinding>,
+    ) -> anyhow::Result<Self> {
+        let root = match root_fd {
+            Some(fd) => DarwinDirectoryBinding::capture(fd)?,
+            None => DarwinDirectoryBinding::capture_path(root)?,
+        };
+        let metadata = metadata
+            .map(|binding| {
+                Ok::<_, anyhow::Error>(DarwinMetadataBinding {
+                    git: DarwinDirectoryBinding::capture(binding.git_fd)?,
+                    common: DarwinDirectoryBinding::capture(binding.common_fd)?,
+                })
+            })
+            .transpose()?;
+        let boundary = Self { root, metadata };
+        boundary.validate()?;
+        Ok(boundary)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        self.validate_raw().map_err(anyhow::Error::from)
+    }
+
+    fn validate_raw(&self) -> std::io::Result<()> {
+        self.root.validate_raw()?;
+        if let Some(metadata) = &self.metadata {
+            metadata.git.validate_raw()?;
+            metadata.common.validate_raw()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+impl DarwinDirectoryBinding {
+    fn capture(fd: i32) -> anyhow::Result<Self> {
+        let path = descriptor_current_path(fd)?;
+        let raw_path = CString::new(path.as_os_str().as_bytes())
+            .context("Git repository path contains NUL")?;
+        Ok(Self {
+            path,
+            raw_path,
+            identity: descriptor_identity(fd)?,
+        })
+    }
+
+    fn capture_path(path: &str) -> anyhow::Result<Self> {
+        let raw_path = CString::new(path.as_bytes()).context("Git repository path contains NUL")?;
+        // SAFETY: the path is live and a successful open returns an owned fd.
+        let fd = unsafe {
+            libc::open(
+                raw_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Git worktree path is unavailable");
+        }
+        let captured = Self::capture(fd);
+        // SAFETY: the successful open returned this uniquely owned fd.
+        unsafe { libc::close(fd) };
+        captured
+    }
+
+    fn validate_raw(&self) -> std::io::Result<()> {
+        // SAFETY: raw_path is a live C string. The fd is closed before return.
+        let fd = unsafe {
+            libc::open(
+                self.raw_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let actual = descriptor_identity(fd);
+        // SAFETY: the successful open returned this uniquely owned fd.
+        unsafe { libc::close(fd) };
+        if actual? != self.identity {
+            return Err(std::io::Error::from_raw_os_error(libc::ESTALE));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn descriptor_current_path(fd: i32) -> anyhow::Result<PathBuf> {
+    let mut buffer = [0_u8; libc::PATH_MAX as usize];
+    if unsafe { libc::fcntl(fd, libc::F_GETPATH, buffer.as_mut_ptr()) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("descriptor path unavailable");
+    }
+    let length = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    Ok(PathBuf::from(OsString::from_vec(buffer[..length].to_vec())))
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn descriptor_identity(fd: i32) -> std::io::Result<(u64, u64)> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fd is live and the output buffer is valid for a complete stat.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: successful fstat initialized the value.
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.st_dev as u64, stat.st_ino))
 }
 
 fn terminate_child_group(child: &mut Child) -> std::io::Result<std::process::ExitStatus> {

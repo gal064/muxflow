@@ -3,9 +3,9 @@ use tmux_agent_protocol::v1;
 
 use super::snapshot::{discover_consistent, reorder_session, server_identity, tmux_command};
 use super::terminal::validate_tmux_id;
+use command::{configure_new_window, configure_split, run, run_for_id, validate_name};
 
-const MAX_NAME_BYTES: usize = 200;
-const APP_SHELL: &str = "exec \"${SHELL:-/bin/sh}\"";
+mod command;
 
 pub(super) struct ActionOutcome {
     pub result: v1::TmuxActionResult,
@@ -19,7 +19,36 @@ pub(super) fn execute(
     expected_snapshot: tmux_control::TmuxSnapshot,
     expected_identity: String,
 ) -> anyhow::Result<ActionOutcome> {
-    let (mut before, identity) = discover_consistent()?;
+    let kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
+    // The dispatcher discovered this snapshot under the same topology lock
+    // immediately before calling in, and proved it equals the cached baseline.
+    // Re-discovering here would repeat six tmux forks to learn nothing, and the
+    // forks were most of every action's latency. The snapshot the dispatcher
+    // resolved is the pre-action topology by construction.
+    let bootstrapping = bootstraps_server(kind, &expected_identity);
+    if bootstrapping && server_identity() != "tmux:none" {
+        // The bootstrap arm is the one path where the dispatcher deliberately
+        // skipped discovery, so it is the only place a server can have appeared
+        // since. Probing identity costs one fork on the first-ever create and
+        // preserves the previous refusal: a session is never created on a
+        // server the caller never saw.
+        bail!("stale topology: a tmux server started before the bootstrap action executed");
+    }
+    // Re-discover immediately before mutating. The topology lock serialises
+    // *this* daemon, not the user's other tmux clients, and between the
+    // dispatcher's discovery and this point the request has waited on an input
+    // barrier that can be several tmux forks long. This is the check that keeps
+    // an action from running against a topology an external client has already
+    // changed — the phase's own invariant. Batching made it one fork rather
+    // than six, which is why it is affordable to keep.
+    let (mut before, identity) = if bootstrapping {
+        (
+            tmux_control::TmuxSnapshot::default(),
+            "tmux:none".to_owned(),
+        )
+    } else {
+        discover_consistent()?
+    };
     if identity != expected_identity || !super::same_action_topology(&before, &expected_snapshot) {
         bail!("stale topology: external tmux structural mutation occurred before action execution");
     }
@@ -30,7 +59,6 @@ pub(super) fn execute(
         bail!("stale topology: generation changed");
     }
 
-    let kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
     require_confirmation(kind, action.confirmed)?;
     validate_targets(kind, &action, &before)?;
     let postcondition_action = action.clone();
@@ -45,7 +73,7 @@ pub(super) fn execute(
                 validate_name(&action.name)?;
                 command.args(["-s", &action.name]);
             }
-            command.arg(APP_SHELL);
+            command.arg(command::APP_SHELL);
             result.session_id = run_for_id(command, '$')?;
         }
         v1::TmuxActionKind::RenameSession => {
@@ -73,20 +101,7 @@ pub(super) fn execute(
             result.session_id = action.session_id;
         }
         v1::TmuxActionKind::CreateWindow => {
-            command.args([
-                "new-window",
-                "-d",
-                "-P",
-                "-F",
-                "#{window_id}",
-                "-t",
-                &action.session_id,
-            ]);
-            if !action.name.is_empty() {
-                validate_name(&action.name)?;
-                command.args(["-n", &action.name]);
-            }
-            command.arg(APP_SHELL);
+            configure_new_window(&mut command, &action)?;
             result.session_id = action.session_id;
             result.window_id = run_for_id(command, '@')?;
         }
@@ -118,18 +133,7 @@ pub(super) fn execute(
             result.window_id = action.window_id;
         }
         v1::TmuxActionKind::SplitPaneRight | v1::TmuxActionKind::SplitPaneDown => {
-            command.args(["split-window", "-d", "-P", "-F", "#{pane_id}"]);
-            if kind == v1::TmuxActionKind::SplitPaneRight {
-                command.arg("-h");
-            }
-            if action.split_size != 0 {
-                if !(1..=99).contains(&action.split_size) {
-                    bail!("split size must be between 1 and 99 percent");
-                }
-                command.args(["-p", &action.split_size.to_string()]);
-            }
-            command.args(["-t", &action.pane_id]);
-            command.arg(APP_SHELL);
+            configure_split(&mut command, kind, &action)?;
             result.pane_id = run_for_id(command, '%')?;
         }
         v1::TmuxActionKind::FocusPane => {
@@ -188,14 +192,9 @@ pub(super) fn execute(
     }
 
     let (snapshot, server_identity) =
-        normalize_post_action(kind, discover_consistent(), &server_identity())?;
-    let identity_preserved = server_identity == identity
-        || (matches!(
-            kind,
-            v1::TmuxActionKind::CloseSession
-                | v1::TmuxActionKind::CloseWindow
-                | v1::TmuxActionKind::ClosePane
-        ) && server_identity == "tmux:none");
+        normalize_post_action(kind, discover_consistent(), server_identity)?;
+    let identity_preserved =
+        identity_transition_allowed(kind, bootstrapping, &identity, &server_identity);
     if !identity_preserved
         || !action_postcondition(
             kind,
@@ -214,6 +213,47 @@ pub(super) fn execute(
         snapshot,
         server_identity,
     })
+}
+
+/// `discover_consistent` refuses when no tmux server is running, and every
+/// action used to pass through it first — including `new-session`, the one
+/// command that *starts* a server. On a machine that has never run tmux the app
+/// was therefore unusable: creating the first session was gated behind a server
+/// already existing, and the only thing a user saw was
+/// `tmux_action_rejected: tmux server is unavailable`, with no way forward and
+/// nothing in the message suggesting one (M10-E060). Creating a session is the
+/// single legitimate bootstrap, so it — and only it — may start from no server,
+/// evaluated against an empty snapshot.
+fn bootstraps_server(kind: v1::TmuxActionKind, current_identity: &str) -> bool {
+    kind == v1::TmuxActionKind::CreateSession && current_identity == "tmux:none"
+}
+
+/// A server identity change normally means the action's outcome is unknowable,
+/// so it is refused. Two transitions are legitimate: closing the last object
+/// ends the server, and the bootstrap creation starts one. The bootstrap arm
+/// still demands a real resulting identity, so a `new-session` that failed to
+/// bring a server up cannot be mistaken for success.
+fn identity_transition_allowed(
+    kind: v1::TmuxActionKind,
+    bootstrapping: bool,
+    before_identity: &str,
+    after_identity: &str,
+) -> bool {
+    // The bootstrap arm is tested first on purpose. It starts from "tmux:none",
+    // so an unchanged identity here means `new-session` did not bring a server
+    // up — the one case where "identity preserved" would wrongly read as success.
+    if bootstrapping {
+        return after_identity != "tmux:none";
+    }
+    if after_identity == before_identity {
+        return true;
+    }
+    matches!(
+        kind,
+        v1::TmuxActionKind::CloseSession
+            | v1::TmuxActionKind::CloseWindow
+            | v1::TmuxActionKind::ClosePane
+    ) && after_identity == "tmux:none"
 }
 
 fn action_postcondition(
@@ -309,28 +349,52 @@ fn action_postcondition(
     }
 }
 
+/// `current_identity` is resolved lazily: it only matters when discovery
+/// failed, and probing it eagerly would put an extra tmux fork on the hot path
+/// of every successful action.
 fn normalize_post_action(
     kind: v1::TmuxActionKind,
     discovered: anyhow::Result<(tmux_control::TmuxSnapshot, String)>,
-    current_identity: &str,
+    current_identity: impl FnOnce() -> String,
 ) -> anyhow::Result<(tmux_control::TmuxSnapshot, String)> {
     match discovered {
         Ok(value) => Ok(value),
-        Err(_)
+        Err(error) => {
             if matches!(
                 kind,
                 v1::TmuxActionKind::CloseSession
                     | v1::TmuxActionKind::CloseWindow
                     | v1::TmuxActionKind::ClosePane
-            ) && current_identity == "tmux:none" =>
-        {
-            Ok((tmux_control::TmuxSnapshot::default(), "tmux:none".into()))
+            ) && current_identity() == "tmux:none"
+            {
+                Ok((tmux_control::TmuxSnapshot::default(), "tmux:none".into()))
+            } else {
+                Err(error)
+            }
         }
-        Err(error) => Err(error),
     }
 }
 
 pub(super) fn discover_before_action() -> anyhow::Result<(tmux_control::TmuxSnapshot, String)> {
+    discover_consistent()
+}
+
+/// The dispatcher resolves a baseline before it reaches [`execute`], so the
+/// bootstrap exemption has to be honoured here as well; otherwise the request
+/// is rejected as `tmux_action_rejected: tmux server is unavailable` and the
+/// exemption inside `execute` is unreachable. That is exactly how the first
+/// attempt at M10-E060 failed: the rule was correct and never ran. Background
+/// reconciliation keeps using [`discover_before_action`], which stays strict,
+/// because it has no action to be a bootstrap for.
+pub(super) fn discover_for_action(
+    kind: v1::TmuxActionKind,
+) -> anyhow::Result<(tmux_control::TmuxSnapshot, String)> {
+    if bootstraps_server(kind, &server_identity()) {
+        return Ok((
+            tmux_control::TmuxSnapshot::default(),
+            "tmux:none".to_owned(),
+        ));
+    }
     discover_consistent()
 }
 
@@ -423,13 +487,6 @@ fn validate_targets(
         if !snapshot.panes.iter().any(|item| item.id == action.pane_id) {
             bail!("pane no longer exists");
         }
-    }
-    Ok(())
-}
-
-fn validate_name(name: &str) -> anyhow::Result<()> {
-    if name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control) {
-        bail!("tmux name must be 1 to {MAX_NAME_BYTES} bytes without control characters");
     }
     Ok(())
 }
@@ -539,30 +596,6 @@ fn relative_reorder_position(
     Ok(target.min(length.saturating_sub(1)))
 }
 
-fn run(mut command: std::process::Command) -> anyhow::Result<()> {
-    let output = command.output().context("run tmux action")?;
-    if !output.status.success() {
-        bail!(
-            "tmux rejected action: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
-}
-
-fn run_for_id(mut command: std::process::Command, prefix: char) -> anyhow::Result<String> {
-    let output = command.output().context("run tmux action")?;
-    if !output.status.success() {
-        bail!(
-            "tmux rejected action: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    validate_tmux_id(&id, prefix)?;
-    Ok(id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,21 +649,78 @@ mod tests {
     }
 
     #[test]
+    fn creating_the_first_session_is_the_only_action_allowed_with_no_tmux_server() {
+        assert!(bootstraps_server(
+            v1::TmuxActionKind::CreateSession,
+            "tmux:none"
+        ));
+        // With a server already running this is an ordinary create, not a
+        // bootstrap, and must still go through consistent discovery.
+        assert!(!bootstraps_server(
+            v1::TmuxActionKind::CreateSession,
+            "tmux:12345"
+        ));
+        for kind in [
+            v1::TmuxActionKind::CreateWindow,
+            v1::TmuxActionKind::SplitPaneRight,
+            v1::TmuxActionKind::RenameSession,
+            v1::TmuxActionKind::SelectSession,
+            v1::TmuxActionKind::CloseSession,
+        ] {
+            assert!(!bootstraps_server(kind, "tmux:none"), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn only_bootstrap_and_last_close_may_change_the_server_identity() {
+        // The bootstrap goes from no server to a real one.
+        assert!(identity_transition_allowed(
+            v1::TmuxActionKind::CreateSession,
+            true,
+            "tmux:none",
+            "tmux:12345"
+        ));
+        // A bootstrap that left no server behind failed, however tmux exited.
+        assert!(!identity_transition_allowed(
+            v1::TmuxActionKind::CreateSession,
+            true,
+            "tmux:none",
+            "tmux:none"
+        ));
+        // Closing the last object legitimately ends the server.
+        assert!(identity_transition_allowed(
+            v1::TmuxActionKind::CloseSession,
+            false,
+            "tmux:12345",
+            "tmux:none"
+        ));
+        // Any other identity change means the outcome is unknown.
+        assert!(!identity_transition_allowed(
+            v1::TmuxActionKind::RenameSession,
+            false,
+            "tmux:12345",
+            "tmux:67890"
+        ));
+        assert!(!identity_transition_allowed(
+            v1::TmuxActionKind::CreateSession,
+            false,
+            "tmux:12345",
+            "tmux:67890"
+        ));
+        // An unchanged identity is always fine.
+        assert!(identity_transition_allowed(
+            v1::TmuxActionKind::RenameWindow,
+            false,
+            "tmux:12345",
+            "tmux:12345"
+        ));
+    }
+
+    #[test]
     fn destructive_actions_require_explicit_confirmation() {
         assert!(require_confirmation(v1::TmuxActionKind::ClosePane, false).is_err());
         assert!(require_confirmation(v1::TmuxActionKind::ClosePane, true).is_ok());
         assert!(require_confirmation(v1::TmuxActionKind::RenameWindow, true).is_ok());
-    }
-
-    #[test]
-    fn names_reject_command_record_boundaries() {
-        assert!(validate_name("normal name").is_ok());
-        assert!(validate_name("bad\nkill-server").is_err());
-    }
-
-    #[test]
-    fn app_shell_executes_the_configured_shell_directly() {
-        assert_eq!(APP_SHELL, "exec \"${SHELL:-/bin/sh}\"");
     }
 
     #[test]
@@ -641,8 +731,10 @@ mod tests {
             v1::TmuxActionKind::ClosePane,
         ] {
             let (snapshot, identity) =
-                normalize_post_action(kind, Err(anyhow::anyhow!("no server")), "tmux:none")
-                    .unwrap();
+                normalize_post_action(kind, Err(anyhow::anyhow!("no server")), || {
+                    "tmux:none".into()
+                })
+                .unwrap();
             assert_eq!(snapshot, tmux_control::TmuxSnapshot::default());
             assert_eq!(identity, "tmux:none");
         }
@@ -650,7 +742,7 @@ mod tests {
             normalize_post_action(
                 v1::TmuxActionKind::RenameSession,
                 Err(anyhow::anyhow!("no server")),
-                "tmux:none",
+                || "tmux:none".into(),
             )
             .is_err()
         );
@@ -658,7 +750,7 @@ mod tests {
             normalize_post_action(
                 v1::TmuxActionKind::CloseSession,
                 Err(anyhow::anyhow!("discovery failed")),
-                "tmux:still-running",
+                || "tmux:still-running".into(),
             )
             .is_err()
         );

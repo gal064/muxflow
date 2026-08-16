@@ -37,31 +37,37 @@ interface WireResponse { operationId: string; status?: WireStatus; diff?: WireDi
 export interface WireGitEvent { watchId?: string; rootToken: string; status?: WireStatus; error?: string }
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
+const MAX_SUPERSEDED_RETRIES = 4;
 
 export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   readonly #listeners = new Set<(event: GitWorkspaceEvent) => void>();
 
   async status(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitStatusSnapshot> {
-    throwIfAborted(signal);
-    const operationId = crypto.randomUUID();
-    const response = await abortable(
-      this.#request(scope, root, { operation: "status", operationId }),
-      signal,
-      () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }),
-    );
+    const response = await retrySuperseded(async () => {
+      throwIfAborted(signal);
+      const operationId = crypto.randomUUID();
+      return await abortable(
+        this.#request(scope, root, { operation: "status", operationId }),
+        signal,
+        () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }),
+      );
+    }, signal);
     if (!response.status) throw new Error("Host omitted Git status.");
     return mapStatus(response.status);
   }
 
   async watch(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitWatchLease> {
-    throwIfAborted(signal);
-    const watchId = crypto.randomUUID();
-    const operationId = crypto.randomUUID();
-    const response = await abortable(
-      this.#request(scope, root, { operation: "watch", operationId, watchId }),
-      signal,
-      () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }),
-    );
+    const { operationId, response, watchId } = await retrySuperseded(async () => {
+      throwIfAborted(signal);
+      const watchId = crypto.randomUUID();
+      const operationId = crypto.randomUUID();
+      const response = await abortable(
+        this.#request(scope, root, { operation: "watch", operationId, watchId }),
+        signal,
+        () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }),
+      );
+      return { operationId, response, watchId };
+    }, signal);
     if (!response.status) throw new Error("Host omitted the Git watch bootstrap status.");
     let released = false;
     return {
@@ -87,13 +93,15 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     expectedStatusGeneration: string,
     signal?: AbortSignal,
   ): Promise<GitDiff> {
-    throwIfAborted(signal);
-    const operationId = crypto.randomUUID();
-    const response = await abortable(this.#request(scope, root, {
-      operation: "diff", operationId, repositoryId, path: [...fromBase64(path)],
-      ...(originalPath ? { originalPath: [...fromBase64(originalPath)] } : {}),
-      diffTarget: target, expectedStatusGeneration,
-    }), signal, () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }));
+    const response = await retrySuperseded(async () => {
+      throwIfAborted(signal);
+      const operationId = crypto.randomUUID();
+      return await abortable(this.#request(scope, root, {
+        operation: "diff", operationId, repositoryId, path: [...fromBase64(path)],
+        ...(originalPath ? { originalPath: [...fromBase64(originalPath)] } : {}),
+        diffTarget: target, expectedStatusGeneration,
+      }), signal, () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }));
+    }, signal);
     if (!response.diff) throw new Error("Host omitted the Git diff.");
     const diff = mapDiff(response.diff);
     if (diff.repository.id !== repositoryId || diff.path !== path || (diff.originalPath ?? "") !== (originalPath ?? "") || diff.target !== target) {
@@ -113,16 +121,23 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     if ((request.kind === "discardFile" || request.kind === "discardHunk") && !request.confirmationToken) {
       throw new Error("Discard requires confirmation.");
     }
-    const response = await this.#request(scope, root, mutationCommand("mutate", repositoryId, request));
+    // The host emits this exact rejection only while pre-command status is
+    // being established. Once Git starts, uncertainty is returned as a
+    // command outcome and must never pass through this retry path.
+    const response = await retrySuperseded(
+      () => this.#request(scope, root, mutationCommand("mutate", repositoryId, request)),
+    );
     if (!response.command) throw new Error("Host omitted the Git mutation result.");
     return mapCommand(response.command);
   }
 
   async commit(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult> {
     if (!message.trim()) throw new Error("Enter a commit message.");
-    const response = await this.#request(scope, root, {
+    // See mutate(): post-command outcomes are responses, never retryable
+    // superseded-status transport errors.
+    const response = await retrySuperseded(() => this.#request(scope, root, {
       operation: "commit", operationId: crypto.randomUUID(), repositoryId, expectedStatusGeneration, commitMessage: message,
-    });
+    }));
     if (!response.command) throw new Error("Host omitted the Git commit result.");
     return mapCommand(response.command);
   }
@@ -291,6 +306,17 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal, cancelRemote?: 
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("Git request was cancelled.", "AbortError");
+}
+
+async function retrySuperseded<T>(request: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await request(); }
+    catch (cause) {
+      if (attempt >= MAX_SUPERSEDED_RETRIES || !String(cause).includes("Git status refresh superseded by a newer snapshot")) throw cause;
+      throwIfAborted(signal);
+      await Promise.resolve();
+    }
+  }
 }
 
 function requireDecimalU64(value: string, label: string): void {

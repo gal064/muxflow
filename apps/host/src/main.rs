@@ -45,12 +45,15 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         Some("helper") => remote_helper::run_cli(std::env::args().skip(2).collect()),
-        Some("hook") => {
-            if std::env::args().nth(2).as_deref() != Some("ingest") {
-                bail!("usage: tmux-ide-host hook ingest --adapter codex|claude-code");
+        Some("hook") => match std::env::args().nth(2).as_deref() {
+            Some("ingest") => hook::run(std::env::args().skip(3).collect()).await,
+            Some(verb @ ("status" | "install" | "uninstall")) => {
+                hook::manage(verb, std::env::args().skip(3).collect())
             }
-            hook::run(std::env::args().skip(3).collect()).await
-        }
+            _ => bail!(
+                "usage: tmux-ide-host hook <ingest --adapter ID|status|install|uninstall> [--adapter ID] [--home PATH] [--settings-path PATH]"
+            ),
+        },
         Some("version") => {
             println!(
                 "{}",
@@ -75,6 +78,18 @@ async fn main() -> anyhow::Result<()> {
                     "managedAdapters": managed,
                 })
             );
+            Ok(())
+        }
+        // The same code path the desktop drives after the one-time host
+        // prompt, reachable without one — which is how it is tested against
+        // real tmux servers on isolated sockets rather than a developer's own.
+        Some("host-naming") => {
+            let outcome = if std::env::args().any(|argument| argument == "--remove") {
+                service::remove_recommended_tmux_naming()?
+            } else {
+                service::apply_recommended_tmux_naming()?
+            };
+            println!("{}", serde_json::json!({ "outcome": outcome.label() }));
             Ok(())
         }
         Some("discover") => {
@@ -102,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(debug_assertions)]
         Some("phase1-client") => phase1_client::run(std::env::args().skip(2).collect()),
         _ => bail!(
-            "usage: tmux-ide-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook ingest|hooks-status|helper|version|doctor [--json]|support-bundle --output PATH|discover>"
+            "usage: tmux-ide-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover>"
         ),
     }
 }
@@ -122,7 +137,16 @@ fn phase0_ssh(target: &str) -> anyhow::Result<()> {
     if target.is_empty() || target.starts_with('-') || target.contains(char::is_whitespace) {
         bail!("invalid SSH target");
     }
-    let control_socket = std::env::temp_dir().join(format!("ade-phase0-{}.sock", Uuid::new_v4()));
+    // OpenSSH appends a temporary suffix while creating a control socket, and a
+    // macOS per-user temporary directory leaves no room for it under the
+    // 104-byte AF_UNIX limit. Use the same short, private, uid-scoped runtime
+    // root the helper's own SSH control sockets already use.
+    let runtime = std::path::PathBuf::from(format!("/tmp/tmux-agent-ide-{}", unsafe {
+        libc::geteuid()
+    }))
+    .join("ssh");
+    paths::prepare_runtime_dir(&runtime)?;
+    let control_socket = runtime.join(format!("ade-phase0-{}.sock", Uuid::new_v4()));
     let result = phase0_ssh_inner(target, &control_socket);
     let _ = ssh_command()
         .arg("-S")

@@ -77,6 +77,12 @@ export class TauriTerminalTransferClient implements TerminalTransferClient {
       }
       return { kind: "files", uris: payload.uris };
     }
+    if (payload.kind === "text") {
+      if (typeof payload.text !== "string" || !payload.text) {
+        throw new Error("The native clipboard returned invalid text.");
+      }
+      return { kind: "text", text: payload.text };
+    }
     if (payload.kind !== "image" || !payload.staged) {
       throw new Error("The native clipboard returned an unknown payload.");
     }

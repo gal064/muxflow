@@ -8,7 +8,7 @@ import { GitDiffSurface } from "./GitDiffSurface";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.mock("@monaco-editor/react", () => ({ DiffEditor: (props: { original: string; modified: string }) => <div data-modified={props.modified} data-original={props.original}>diff editor</div> }));
-vi.mock("../files/monaco", () => ({}));
+vi.mock("../files/monaco", () => ({ ADE_MONACO_THEME: "ade-dark" }));
 
 describe("GitDiffSurface", () => {
   it("renders a read-only Monaco diff and exposes complete-hunk actions", async () => {
@@ -31,6 +31,43 @@ describe("GitDiffSurface", () => {
     await act(async () => { cancel?.props.onClick(); await settle(); });
     expect(client.prepareDiscard).not.toHaveBeenCalled();
     expect(client.mutate).not.toHaveBeenCalled();
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("removes stale actionable diff content while a post-mutation refresh is pending", async () => {
+    const client = mockClient();
+    let resolveRefresh!: (value: GitStatusSnapshot) => void;
+    vi.mocked(client.status)
+      .mockResolvedValueOnce(status)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRefresh = resolve; }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
+    const stage = renderer.root.findAllByType("button").find((button) => button.props.children === "Stage file");
+    await act(async () => { stage?.props.onClick(); await settle(); });
+    expect(renderer.root.findAllByProps({ "data-original": "old\n" })).toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON())).toContain("Loading Git diff");
+    await act(async () => { resolveRefresh(status); await settle(); });
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("does not resurrect an unstaged diff after the mutation moves the file to staged changes", async () => {
+    const client = mockClient();
+    const stagedStatus = {
+      ...status,
+      generation: "8",
+      entries: [{ ...status.entries[0], indexKind: "added" as const, worktreeKind: "none" as const, indexStatus: "A", worktreeStatus: "." }],
+    };
+    vi.mocked(client.status).mockResolvedValueOnce(status).mockResolvedValueOnce(stagedStatus);
+    vi.mocked(client.mutate).mockResolvedValueOnce({
+      exitCode: 0, stdout: "", stderr: "", applied: true, refreshFailed: false, refreshError: "", outcome: "applied", status: stagedStatus,
+    });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
+    const stage = renderer.root.findAllByType("button").find((button) => button.props.children === "Stage file");
+    await act(async () => { stage?.props.onClick(); await settle(); await settle(); });
+    expect(JSON.stringify(renderer.toJSON())).toContain("no longer has unstaged changes");
+    expect(renderer.root.findAllByType("button").filter((button) => button.props.children === "Stage file")).toHaveLength(0);
+    expect(client.diff).toHaveBeenCalledTimes(1);
     await act(async () => { renderer.unmount(); });
   });
 

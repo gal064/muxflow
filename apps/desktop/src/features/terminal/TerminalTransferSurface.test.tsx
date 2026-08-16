@@ -196,6 +196,40 @@ describe("TerminalTransferSurface", () => {
     expect(view.onPaste).toHaveBeenCalledWith(mode === "local" ? staged.path : `/remote/${name}`);
   });
 
+  it.each(["local", "ssh"] as const)("pastes native clipboard text copied by another application for %s", async (mode) => {
+    // M10-E054: WebKit refuses `navigator.clipboard` reads for foreign content,
+    // so the native rung is the only path that carries this text through.
+    const transferClient = client({ readNativeClipboard: vi.fn(async () => ({ kind: "text" as const, text: "echo from-another-app\n" })) });
+    let controller: TerminalTransferSurfaceController | undefined;
+    const view = await mounted(mode, transferClient, vi.fn(), (value) => { controller = value; });
+    await act(async () => { expect(await controller!.pasteClipboard()).toBe(true); });
+    expect(view.onPaste).toHaveBeenCalledWith("echo from-another-app\n");
+    expect(transferClient.preflight).not.toHaveBeenCalled();
+    expect(transferClient.start).not.toHaveBeenCalled();
+  });
+
+  it("renders a native clipboard rejection instead of leaking an unhandled paste promise", async () => {
+    const diagnostic = vi.fn();
+    const transferClient = client({
+      readNativeClipboard: vi.fn(async () => { throw new Error("clipboard PNG exceeds the 25 MiB encoded-image limit"); }),
+    });
+    let controller: TerminalTransferSurfaceController | undefined;
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<TerminalTransferSurface
+        client={transferClient}
+        onController={(value) => { controller = value; }}
+        onDiagnostic={diagnostic}
+        onPaste={vi.fn()}
+        scope={scope("local")}
+        target={{ current: null }}
+      ><div /></TerminalTransferSurface>);
+    });
+    await act(async () => { expect(await controller!.pasteClipboard()).toBe(true); });
+    expect(alertText(renderer!.root.findByProps({ role: "alert" }))).toContain("25 MiB");
+    expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining("25 MiB"));
+  });
+
   it("processes every mixed PNG/text DOM drop path in original order without image staging", async () => {
     const transferClient = client();
     const view = await mounted("ssh", transferClient);
@@ -285,8 +319,8 @@ describe("TerminalTransferSurface", () => {
     });
     expect(transferClient.cancel).toHaveBeenCalledWith("transfer-second");
     expect(view.onPaste).not.toHaveBeenCalled();
-    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => node.children.join("").includes("disk full"))).toBe(true);
-    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => node.children.join("").includes("Partial cleanup failed: permission denied"))).toBe(true);
+    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => alertText(node).includes("disk full"))).toBe(true);
+    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => alertText(node).includes("Partial cleanup failed: permission denied"))).toBe(true);
   });
 
   it("surfaces source rejection and never starts or pastes", async () => {
@@ -296,7 +330,7 @@ describe("TerminalTransferSurface", () => {
       view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onPasteCapture(clipboardEvent("file:///tmp/folder"));
       await Promise.resolve(); await Promise.resolve();
     });
-    expect(view.renderer.root.findByProps({ role: "alert" }).children.join("")).toContain("Directories");
+    expect(alertText(view.renderer.root.findByProps({ role: "alert" }))).toContain("Directories");
     expect(transferClient.start).not.toHaveBeenCalled();
     expect(view.onPaste).not.toHaveBeenCalled();
   });
@@ -316,7 +350,7 @@ describe("TerminalTransferSurface", () => {
       view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onPasteCapture(clipboardEvent("file:///tmp/timeout"));
       await Promise.resolve(); await Promise.resolve();
     });
-    const alerts = view.renderer.root.findAllByProps({ role: "alert" }).map((node) => node.children.join(""));
+    const alerts = view.renderer.root.findAllByProps({ role: "alert" }).map((node) => alertText(node));
     expect(alerts).toContain("Upload timed out before an authoritative result arrived.");
     expect(alerts).toContain("The upload outcome is unknown. Inspect the destination before retrying or pasting.");
     expect(view.onPaste).not.toHaveBeenCalled();
@@ -332,7 +366,7 @@ describe("TerminalTransferSurface", () => {
       await Promise.resolve(); await Promise.resolve();
     });
     expect(view.renderer.root.findByProps({ role: "dialog" })).toBeDefined();
-    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => node.children.join("").includes("500 MiB"))).toBe(true);
+    expect(view.renderer.root.findAllByProps({ role: "alert" }).some((node) => alertText(node).includes("500 MiB"))).toBe(true);
     await act(async () => {
       view.renderer.root.findByProps({ "aria-label": "Upload collision behavior" }).props.onChange({ target: { value: "overwriteConfirmed" } });
     });
@@ -625,9 +659,29 @@ describe("u64-safe transfer presentation", () => {
     expect(progressPercent("9007199254740993", "18014398509481986")).toBe(50);
   });
 
-  it("maps native physical coordinates to CSS pixels", () => {
+  it("hit-tests a native drop against the box's own CSS pixels", () => {
     const element = { getBoundingClientRect: () => ({ left: 10, right: 110, top: 20, bottom: 120 }) };
-    expect(pointIsInside(element as HTMLElement, { x: 100, y: 120 }, 2)).toBe(true);
-    expect(pointIsInside(element as HTMLElement, { x: 5, y: 5 }, 2)).toBe(false);
+    expect(pointIsInside(element as HTMLElement, { x: 100, y: 120 })).toBe(true);
+    expect(pointIsInside(element as HTMLElement, { x: 5, y: 5 })).toBe(false);
+    // The regression, and the only point that discriminates: it is inside the
+    // box, and halving it for a Retina display's device pixel ratio moves it
+    // above the top edge — which is why dropping a file from Finder did
+    // nothing. A point further from an edge stays inside even when halved, so
+    // it says nothing about this.
+    expect(pointIsInside(element as HTMLElement, { x: 30, y: 35 })).toBe(true);
   });
 });
+
+/**
+ * A rejection banner is a summary plus a `<details>` disclosure now, so its
+ * text no longer sits directly under the alert node.
+ */
+function alertText(node: { children: readonly unknown[] }): string {
+  const walk = (value: unknown): string => {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return value.map(walk).join("");
+    if (value && typeof value === "object" && "children" in value) return walk((value as { children: unknown }).children ?? []);
+    return "";
+  };
+  return walk(node.children);
+}

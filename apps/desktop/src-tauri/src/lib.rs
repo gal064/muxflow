@@ -1,7 +1,9 @@
 mod app_state;
 mod connection;
 mod external_links;
+mod macos_window;
 mod notifications;
+mod perf_log;
 mod power_events;
 
 use phase0_core::{NotificationRoute, ResolvedRoute, SyntheticTopology, resolve_route};
@@ -67,11 +69,25 @@ struct AgentNotificationContent {
     title: String,
     body: String,
     request_action: bool,
+    /// Whether macOS should show this while the app itself is frontmost. The
+    /// frontend is the only side that knows which pane the user is looking at.
+    ///
+    /// Defaulted to *presenting*, not to suppressing. A missing field is a bug
+    /// either way, but its two failure modes are not equal: showing a banner
+    /// for a pane already on screen is a duplicate, while suppressing one is
+    /// silence — which is the exact defect this flag exists to end, and the
+    /// kind nobody reports because nothing happens.
+    #[serde(default = "present_by_default")]
+    present_in_foreground: bool,
     route: AgentNotificationRouteContent,
 }
 
+fn present_by_default() -> bool {
+    true
+}
+
 #[tauri::command]
-fn emit_agent_notification(
+async fn emit_agent_notification(
     notification: AgentNotificationContent,
     notifications: tauri::State<'_, notifications::NativeNotifications>,
 ) -> Result<notifications::NotificationReceipt, String> {
@@ -81,12 +97,57 @@ fn emit_agent_notification(
     if !valid_notification_content(&notification.title, &notification.body) {
         return Err("native notification content is malformed".into());
     }
-    notifications.notify(
-        &notification.title,
-        &notification.body,
-        notification.route.into_route()?,
-        notification.request_action,
-    )
+    let notifications = notifications.inner().clone();
+    let route = notification.route.into_route()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        notifications.notify(
+            &notification.title,
+            &notification.body,
+            route,
+            notification.request_action,
+            notification.present_in_foreground,
+        )
+    })
+    .await
+    .map_err(|error| format!("native notification worker failed: {error}"))?
+}
+
+/// What the OS says about this app's permission, so Settings can say it too.
+///
+/// Read-only and never prompts: a status line that raised a modal system
+/// prompt just for being looked at would be a worse surface than none.
+#[tauri::command]
+async fn notification_permission_status(
+    notifications: tauri::State<'_, notifications::NativeNotifications>,
+) -> Result<String, String> {
+    let notifications = notifications.inner().clone();
+    let status = tauri::async_runtime::spawn_blocking(move || notifications.authorization_status())
+        .await
+        .map_err(|error| format!("notification status worker failed: {error}"))??;
+    // Three backends write this vocabulary independently and the UI renders one
+    // sentence per word, so a sixth word would render as an empty status line.
+    // The frontend re-checks it too; this is where a new backend finds out.
+    debug_assert!(
+        notifications::PERMISSION_STATUSES.contains(&status.as_str()),
+        "{status} is not a notification permission the UI can render"
+    );
+    Ok(status)
+}
+
+/// The notification the user asks for from Settings.
+///
+/// This is also the only thing in the app that reliably *raises* the OS
+/// permission prompt: authorization is requested lazily on the first
+/// notification, so on a machine where no agent has ever blocked or finished,
+/// the app never appeared in System Settings and there was nothing to grant.
+#[tauri::command]
+async fn emit_test_notification(
+    notifications: tauri::State<'_, notifications::NativeNotifications>,
+) -> Result<notifications::NotificationReceipt, String> {
+    let notifications = notifications.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || notifications.send_test_notification())
+        .await
+        .map_err(|error| format!("native notification worker failed: {error}"))?
 }
 
 fn valid_notification_content(title: &str, body: &str) -> bool {
@@ -104,6 +165,7 @@ fn valid_notification_content(title: &str, body: &str) -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("navigation-policy")
                 .on_navigation(|_, url| {
@@ -128,18 +190,22 @@ pub fn run() {
                 config_dir.join("app-state.json"),
             ));
             app.manage(connection::TerminalClients::default());
-            app.manage(connection::files::DownloadManager);
+            app.manage(connection::files::DownloadManager::default());
             app.manage(connection::files::FileIoManager);
             app.manage(connection::files::UploadManager);
             app.manage(notifications::NativeNotifications::new(
                 app.handle().clone(),
             ));
+            for window in app.webview_windows().values() {
+                macos_window::enable_native_full_screen(window)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             connection::profiles::list_host_profiles,
             connection::profiles::save_host_profile,
             connection::profiles::reset_host_profiles,
+            connection::profiles::delete_host_profile,
             app_state::load_app_state,
             app_state::save_app_state,
             app_state::reset_app_state,
@@ -147,11 +213,14 @@ pub fn run() {
             connection::helper::install_remote_helper,
             resolve_notification_route,
             emit_agent_notification,
+            emit_test_notification,
+            notification_permission_status,
             connection::start_terminal,
             connection::stop_terminal,
             connection::send_terminal_input,
             connection::send_terminal_input_bytes,
             connection::resize_terminal_client,
+            connection::select_terminal_session,
             connection::set_terminal_visibility,
             connection::request_terminal_seed,
             connection::tmux_action::tmux_action,
@@ -161,6 +230,9 @@ pub fn run() {
             connection::git::cancel_git_request,
             connection::files::download_manager::start_download,
             connection::files::download_manager::cancel_download,
+            connection::files::download_manager::suggest_download_destination,
+            connection::files::download_opener::open_download,
+            connection::files::download_opener::reveal_download,
             connection::files::editor_manager::start_file_read,
             connection::files::editor_manager::start_file_write,
             connection::files::editor_manager::cancel_file_io,
@@ -172,6 +244,8 @@ pub fn run() {
             connection::files::upload_manager::stage_clipboard_png,
             connection::files::native_clipboard::read_native_terminal_clipboard,
             external_links::open_external_link,
+            perf_log::perf_log_enabled,
+            perf_log::append_perf_log,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tmux Agent IDE");

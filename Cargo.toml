@@ -13,6 +13,18 @@ edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.97.1"
 
+# A development build runs the same control parser, protocol codec and hashing
+# as a release build, and at opt-level 0 those are slow enough to be mistaken
+# for product latency — every measurement taken against `tauri dev` was really
+# measuring the compiler. Level 1 on our own crates keeps builds quick and
+# debugging usable; dependencies are compiled once, so they get full
+# optimisation.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [workspace.dependencies]
 anyhow = "1"
 bytes = "1"

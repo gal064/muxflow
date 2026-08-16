@@ -27,6 +27,7 @@ pub(super) fn handles(operation: v1::Operation) -> bool {
             | v1::Operation::AgentMarkSeen
             | v1::Operation::AgentHookIngest
             | v1::Operation::AgentHookManagement
+            | v1::Operation::AgentHostNaming
     )
 }
 
@@ -68,7 +69,13 @@ fn handle_inner(
     let runtime = AgentRuntime::global();
     let mut response = v1::AgentResponse::default();
     match operation {
-        v1::Operation::AgentSnapshot => response.snapshot = Some(runtime.snapshot()),
+        v1::Operation::AgentSnapshot => {
+            // Before the snapshot is built, not after: a reconnecting desktop
+            // must never be handed a Working state the daemon already knows
+            // nothing has confirmed for fifteen minutes.
+            super::super::agents::sweep_stale_and_publish();
+            response.snapshot = Some(runtime.snapshot());
+        }
         v1::Operation::AgentMarkSeen => {
             let event = runtime.mark_seen(&request.agent_id, request.attention_generation)?;
             response.agent = event.agent.clone();
@@ -99,6 +106,24 @@ fn handle_inner(
                 }
                 manager.apply(adapter, action, &request.confirmation_token)?
             });
+        }
+        v1::Operation::AgentHostNaming => {
+            // Requires no confirmation token of its own: nothing is written to
+            // disk, and the one-time host prompt that authorised it is the same
+            // consent as the hook install. The desktop re-sends it on every
+            // connect because a tmux server restart drops the hook — and sends
+            // the uninstall alongside the file hooks' own, because without an
+            // explicit removal this would keep renaming the user's windows
+            // until their server happened to restart.
+            let outcome = if v1::HookManagementAction::try_from(request.hook_management)
+                .unwrap_or_default()
+                == v1::HookManagementAction::Uninstall
+            {
+                super::super::tmux_config::remove_recommended_naming()?
+            } else {
+                super::super::tmux_config::apply_recommended_naming()?
+            };
+            response.host_naming = outcome.label().into();
         }
         v1::Operation::AgentAction => {
             let action = v1::AgentActionKind::try_from(request.action).unwrap_or_default();

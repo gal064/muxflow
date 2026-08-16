@@ -1,6 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{BufReader, Read, Seek},
+    io::{Read, Seek},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -13,16 +13,16 @@ use tauri::{State, ipc::Channel};
 use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
+use super::bulk_pool::BulkLease;
 use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
 use super::cleanup::CleanupReport;
 use super::clipboard_staging::lock_owned_source as lock_owned_clipboard_source;
-use super::scheduler::{BulkBinding, BulkChild, CancelState, cancel_transfer, enqueue_transfer};
+use super::scheduler::{BulkBinding, CancelState, cancel_transfer, enqueue_transfer};
 use super::transfer_event::{
     CleanupStatus, TransferEvent, TransferFailure, TransferFailureKind, TransferOutcome,
     TransferResult, TransferState,
 };
 use super::{BULK_CHUNK_BYTES, parse_required_u64};
-use crate::connection::transport::spawn_bulk_bridge;
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
 
 const LARGE_UPLOAD_BYTES: u64 = 500 * 1024 * 1024;
@@ -381,23 +381,11 @@ fn run_upload_preflight(job: &UploadPreflightJob) -> Result<(), String> {
         return Err("upload source changed while preflight was queued".into());
     }
     let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-    let _process_binding = job.cancellation.bind_process(child.0.id())?;
-    let mut stdin = child
-        .0
-        .stdin
-        .take()
-        .ok_or("bulk bridge stdin unavailable")?;
-    let stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or("bulk bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
+    let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+    let mut protocol = lease.client();
     let descriptor = prepare_remote(
         &mut protocol,
-        2,
         &job.transfer_id,
         &job.destination_name,
         job.source_identity.size,
@@ -408,7 +396,7 @@ fn run_upload_preflight(job: &UploadPreflightJob) -> Result<(), String> {
         &_deadline,
     )?;
     _deadline.touch();
-    let cleanup = protocol.cancel_terminal_upload(&job.transfer_id, 3);
+    let cleanup = protocol.cancel_terminal_upload(&job.transfer_id);
     _deadline.touch();
     let (cleanup_status, cleanup_error) = classify_upload_cleanup(cleanup);
     let mut cleanup = CleanupReport::new(cleanup_status, cleanup_error);
@@ -489,23 +477,11 @@ fn run_upload(job: &UploadJob) -> TransferResult {
     validate_png_if_requested(&mut source, &identity, job.image_png)?;
     let session = {
         let deadline = job.cancellation.arm_inactivity_deadline();
-        let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-        let _process_binding = job.cancellation.bind_process(child.0.id())?;
-        let mut stdin = child
-            .0
-            .stdin
-            .take()
-            .ok_or("bulk bridge stdin unavailable")?;
-        let stdout = child
-            .0
-            .stdout
-            .take()
-            .ok_or("bulk bridge stdout unavailable")?;
-        let mut reader = BufReader::new(stdout);
-        let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+        let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
+        let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+        let mut protocol = lease.client();
         prepare_remote(
             &mut protocol,
-            2,
             &job.transfer_id,
             &job.destination_name,
             identity.size,
@@ -518,9 +494,8 @@ fn run_upload(job: &UploadJob) -> TransferResult {
         match stream_upload(job, &mut protocol, &mut source, &deadline) {
             Ok(session) => Ok(session),
             Err(mut failure) => {
-                let (status, error) = classify_upload_cleanup(
-                    protocol.cancel_terminal_upload(&job.transfer_id, u64::MAX - 1),
-                );
+                let (status, error) =
+                    classify_upload_cleanup(protocol.cancel_terminal_upload(&job.transfer_id));
                 failure.merge_cleanup(status, error);
                 Err(failure)
             }
@@ -578,7 +553,6 @@ fn stream_upload(
     let mut last_progress = Instant::now() - Duration::from_secs(1);
     let mut hasher = blake3::Hasher::new();
     let mut offset = 0_u64;
-    let mut request_id = 10_u64;
     let mut buffer = vec![0_u8; BULK_CHUNK_BYTES as usize];
     loop {
         job.binding.validate()?;
@@ -599,7 +573,6 @@ fn stream_upload(
         }
         hasher.update(&buffer[..count]);
         let response = protocol.request_cancellable(
-            request_id,
             v1::Request {
                 operation: v1::Operation::WriteTerminalUploadChunk.into(),
                 file: Some(v1::FileServiceRequest {
@@ -624,7 +597,6 @@ fn stream_upload(
             return Err("upload destination acknowledged an unexpected offset".into());
         }
         offset = next;
-        request_id = request_id.saturating_add(1);
         let elapsed = started.elapsed().as_secs_f64().max(0.001);
         let throughput = offset as f64 / elapsed;
         let eta = job.source_identity.size.saturating_sub(offset) as f64 / throughput.max(1.0);
@@ -660,7 +632,6 @@ fn stream_upload(
     emit(job, TransferState::Verifying, json!({}));
     let digest = hasher.finalize().to_hex().to_string();
     let commit_response = protocol.request_classified_with_deadline(
-        request_id,
         v1::Request {
             operation: v1::Operation::CommitTerminalUpload.into(),
             file: Some(v1::FileServiceRequest {
@@ -738,23 +709,13 @@ fn reconcile_upload_outcome(
 ) -> Result<v1::UploadDescriptor, String> {
     job.binding.validate()?;
     let deadline = job.cancellation.arm_inactivity_deadline();
-    let mut child = BulkChild(spawn_bulk_bridge(&job.connection)?);
-    let _process_binding = job.cancellation.bind_authoritative_process(child.0.id())?;
-    let mut stdin = child
-        .0
-        .stdin
-        .take()
-        .ok_or("bulk bridge stdin unavailable")?;
-    let stdout = child
-        .0
-        .stdout
-        .take()
-        .ok_or("bulk bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    let mut protocol = BulkProtocolClient::connect(&mut stdin, &mut reader, &job.binding)?;
+    let mut lease = BulkLease::acquire(&job.connection, &job.binding, &job.cancellation)?;
+    let _process_binding = job
+        .cancellation
+        .bind_authoritative_process(lease.process_id())?;
+    let mut protocol = lease.client();
     deadline.touch();
     let response = protocol.request_with_deadline(
-        2,
         v1::Request {
             operation: v1::Operation::ReconcileTerminalUpload.into(),
             file: Some(v1::FileServiceRequest {
@@ -830,7 +791,6 @@ fn emit_verified_upload(
 #[allow(clippy::too_many_arguments)]
 fn prepare_remote(
     protocol: &mut BulkProtocolClient<'_>,
-    request_id: u64,
     transfer_id: &str,
     destination_name: &str,
     total: u64,
@@ -842,7 +802,6 @@ fn prepare_remote(
 ) -> Result<v1::UploadDescriptor, String> {
     protocol
         .request_cancellable(
-            request_id,
             v1::Request {
                 operation: v1::Operation::PrepareTerminalUpload.into(),
                 file: Some(v1::FileServiceRequest {
@@ -874,7 +833,18 @@ fn open_regular_source(path: &Path) -> Result<(File, SourceIdentity), String> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|error| format!("upload source is unavailable or unsafe: {error}"))?;
+        // The path is in the message because without it this refusal is not
+        // diagnosable: `Not a directory (os error 20)` on a file the user can
+        // see in Finder says nothing about *which* string was opened, and the
+        // one that produced it was a file reference URL the clipboard reader
+        // forwarded verbatim (`native_clipboard::file_path_url`). It is the
+        // user's own path, already shown in the transfer history.
+        .map_err(|error| {
+            format!(
+                "upload source is unavailable or unsafe: {error} ({})",
+                path.display()
+            )
+        })?;
     let metadata = file.metadata().map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("only regular files may be uploaded".into());

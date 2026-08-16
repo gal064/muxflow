@@ -116,15 +116,17 @@ pub struct TmuxActionResultWire {
     topology_generation: u64,
 }
 
+/// Async so a create, split, or tab switch never freezes the WebView's main
+/// thread for the length of the host round trip. The user's report that creates
+/// take seconds was mostly this: the UI could not repaint while it waited.
 #[tauri::command]
-pub fn tmux_action(
+pub async fn tmux_action(
     client_id: String,
     action: TmuxActionWire,
     clients: State<'_, TerminalClients>,
 ) -> Result<TmuxActionResultWire, String> {
     let client = get_client(&clients, &client_id)?;
-    client.flush_input()?;
-    let response = client.request(v1::Request {
+    let request = v1::Request {
         operation: v1::Operation::TmuxAction.into(),
         tmux_action: Some(v1::TmuxAction {
             kind: v1::TmuxActionKind::from(action.kind).into(),
@@ -143,7 +145,13 @@ pub fn tmux_action(
             relative_position: v1::WindowRelativePosition::from(action.relative_position).into(),
         }),
         ..Default::default()
-    })?;
+    };
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        client.flush_input()?;
+        client.request(request)
+    })
+    .await
+    .map_err(|error| format!("tmux action task failed: {error}"))??;
     let result = response
         .tmux_action_result
         .ok_or_else(|| "host omitted tmux action result".to_owned())?;

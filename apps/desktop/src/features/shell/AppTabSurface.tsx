@@ -4,10 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { AutosaveController, type AutosaveView } from "../files/autosave";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
+import { attachEditorLayout } from "../files/editorLayout";
 import { renderSafeMarkdown, renderSafeSvg } from "../files/markdown";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
+import { SurfaceError } from "../../ui/SurfaceError";
 import type { AppOwnedTab } from "./types";
-import "../files/monaco";
+import { ADE_MONACO_THEME } from "../files/monaco";
 
 interface Props {
   tab: AppOwnedTab;
@@ -16,6 +18,12 @@ interface Props {
   client: FileWorkspaceClient;
   canWrite: boolean;
   onDownload(path: string, kind: "file" | "folder", root: ActiveRoot): void;
+  /**
+   * The buffer became dirty. A preview tab stops being disposable here: the
+   * one thing that must never happen is the next single click in the Explorer
+   * replacing a tab the user has typed into.
+   */
+  onDirty(): void;
   onStatus(message: string): void;
   onViewMode(mode: "source" | "preview" | "split"): void;
 }
@@ -28,6 +36,7 @@ export function AppTabSurface(props: Props) {
   const controller = useRef<AutosaveController | undefined>(undefined);
   const loadSerial = useRef(0);
   const loadAbort = useRef<AbortController | undefined>(undefined);
+  const detachLayout = useRef<(() => void) | undefined>(undefined);
   const root = useMemo<ActiveRoot | undefined>(() => {
     if (props.tab.rootPath && props.tab.rootToken) return {
       token: props.tab.rootToken,
@@ -93,6 +102,8 @@ export function AppTabSurface(props: Props) {
     return () => {
       loadSerial.current += 1;
       loadAbort.current?.abort();
+      detachLayout.current?.();
+      detachLayout.current = undefined;
       if (controller.current) {
         const pending = controller.current.flush();
         editorFlushRegistry.track(pending);
@@ -106,6 +117,12 @@ export function AppTabSurface(props: Props) {
   useEffect(() => editorFlushRegistry.register(props.tab.id, async () => {
     await controller.current?.flush();
   }), [props.tab.id]);
+
+  // "The buffer is dirty" is a state this surface already tracks, so the tab
+  // hears about it once per clean→dirty transition rather than once per
+  // keystroke. `onDirty` is deliberately not a dependency: it closes over
+  // render-fresh state and would re-run this on every render.
+  useEffect(() => { if (view?.state === "dirty") props.onDirty(); }, [view?.state]);
 
   useEffect(() => {
     if (!props.scope || !root) return;
@@ -157,7 +174,19 @@ export function AppTabSurface(props: Props) {
 
   const mode = props.tab.kind === "markdown" ? props.tab.viewMode ?? "split" : "source";
   const source = view?.content ?? opened.file.content;
-  return <section className={`file-tab-surface ${props.tab.kind === "markdown" ? `markdown-${mode}` : ""}`} role="tabpanel" aria-label={props.tab.title}>
+  // The view mode is data, not a class. As a class it was `markdown-${mode}`,
+  // and in preview mode that is `markdown-preview` — the preview article's own
+  // class — so every rule written for the article landed on the whole tab
+  // surface too: 24px of padding, a scroll container around the scroll
+  // container, a left border, a reading line-height, and the `code`/`pre`/`img`
+  // rules restyling the toolbar's path chip. An attribute value shares no
+  // namespace with a class name, so the collision cannot come back.
+  return <section
+    aria-label={props.tab.title}
+    className="file-tab-surface"
+    data-view-mode={props.tab.kind === "markdown" ? mode : undefined}
+    role="tabpanel"
+  >
     <header className="editor-toolbar">
       <code title={props.tab.resource}>{props.tab.resource}</code>
       <span className={`save-state ${view?.state ?? "saved"}`} role="status">{view?.state === "saving" ? "Saving…" : view?.state === "dirty" ? "Unsaved" : view?.state === "error" ? "Save failed" : "Saved"}</span>
@@ -166,15 +195,16 @@ export function AppTabSurface(props: Props) {
       </div>}
       <button onClick={() => props.onDownload(props.tab.resource, "file", root)} type="button">Download…</button>
     </header>
-    {view?.error && <div className="editor-error" role="alert">{view.error}</div>}
+    {view?.error && <SurfaceError className="editor-error" detail={view.error} />}
     {mode !== "preview" && <div className="monaco-host">
       <Editor
         language={languageForPath(props.tab.resource)}
         onChange={(content) => { if (props.canWrite && typeof content === "string") controller.current?.edit(content, opened.file.lineEnding); }}
+        onMount={(editor) => { detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor); }}
         options={{ automaticLayout: true, minimap: { enabled: false }, readOnly: !props.canWrite, scrollBeyondLastLine: false, wordWrap: props.tab.kind === "markdown" ? "on" : "off" }}
         path={modelPath(props.tab)}
         saveViewState
-        theme="vs-dark"
+        theme={ADE_MONACO_THEME}
         value={source}
       />
     </div>}
@@ -195,6 +225,7 @@ function MarkdownPreview({ source, onStatus }: { source: string; onStatus(messag
   }} dangerouslySetInnerHTML={{ __html: html }} />
   {externalUrl && <ConfirmationDialog
     confirmLabel="Open link"
+    destructive={false}
     detail={externalUrl}
     onCancel={() => setExternalUrl(undefined)}
     onConfirm={() => {

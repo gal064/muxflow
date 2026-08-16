@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SearchAddon } from "@xterm/addon-search";
-import { TerminalWriteScheduler } from "./TerminalRenderer";
-import { isForcedLocalSelection, paneRecoveryPlan } from "./TerminalPane";
+import { SerializeAddon } from "@xterm/addon-serialize";
+import { restoreDecision, TerminalWriteScheduler, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
+import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan, reconcilePaneGrid } from "./TerminalPane";
+import type { Pane } from "../../app/types";
 
 describe("TerminalWriteScheduler", () => {
   it("preserves byte order and respects the per-frame budget", () => {
@@ -20,33 +22,75 @@ describe("TerminalWriteScheduler", () => {
     );
     scheduler.enqueue(Uint8Array.from([1, 2, 3, 4]));
     scheduler.enqueue(Uint8Array.from([5, 6]));
+    // The first event took the idle fast path and was cut at the 3-byte budget.
     frames.shift()!(0);
     expect(written).toEqual([[1, 2, 3]]);
     expect(scheduler.pendingBytes).toBe(6);
     expect(frames).toHaveLength(0);
     completions.shift()!();
     expect(scheduler.pendingBytes).toBe(3);
+    // One frame carries the rest of the split event and the event behind it,
+    // coalesced into a single write, still in byte order.
     frames.shift()!(16);
-    expect(written.flat()).toEqual([1, 2, 3, 4]);
+    expect(written).toEqual([[1, 2, 3], [4, 5, 6]]);
     completions.shift()!();
-    frames.shift()!(32);
-    completions.shift()!();
-    expect(written.flat()).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(scheduler.pendingBytes).toBe(0);
     expect(pending.at(-1)).toBe(0);
   });
 
-  it("cancels and drops queued work on disposal", () => {
+  it("cancels and drops queued work on disposal", async () => {
     let cancelled = 0;
+    const completions: Array<() => void> = [];
     const scheduler = new TerminalWriteScheduler(
-      (_chunk, _done) => undefined,
+      (_chunk, done) => completions.push(done),
       () => 7,
       () => { cancelled += 1; },
     );
     scheduler.enqueue(Uint8Array.of(1));
+    scheduler.enqueue(Uint8Array.of(2, 3));
+    // The first byte took the idle fast path and is inside xterm's parser,
+    // where nothing will ever complete it once the terminal is disposed.
+    const drained = scheduler.sealAndDrain();
     scheduler.dispose();
-    scheduler.enqueue(Uint8Array.of(2));
-    expect(cancelled).toBe(1);
+    scheduler.enqueue(Uint8Array.of(4));
+    expect(cancelled).toBeGreaterThan(0);
     expect(scheduler.pendingBytes).toBe(0);
+    // Disposal must release the drain, or the next reveal of this pane — which
+    // waits on it — never happens.
+    await expect(drained).resolves.toBeUndefined();
+    // A completion arriving after disposal is harmless.
+    completions.shift()!();
+    expect(scheduler.pendingBytes).toBe(0);
+  });
+
+  it("writes immediately when idle and falls back to frame pacing under load", () => {
+    const frames: FrameRequestCallback[] = [];
+    const written: number[][] = [];
+    const completions: Array<() => void> = [];
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => { written.push(Array.from(chunk)); completions.push(done); },
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      64,
+      1024,
+    );
+    // An echoed keystroke arriving into an empty queue must not wait a frame.
+    scheduler.enqueue(Uint8Array.of(1));
+    expect(written).toEqual([[1]]);
+    completions.shift()!();
+
+    // A second write in the same frame is paced, so a flood cannot spin.
+    scheduler.enqueue(Uint8Array.of(2));
+    expect(written).toEqual([[1]]);
+    const paced = frames.pop()!;
+    paced(0);
+    expect(written).toEqual([[1], [2]]);
+    completions.shift()!();
+
+    // Once a frame boundary passes, the fast path is available again.
+    frames.shift()!(16);
+    scheduler.enqueue(Uint8Array.of(3));
+    expect(written).toEqual([[1], [2], [3]]);
   });
 
   it("advances a rendered checkpoint only after every chunk reaches xterm", () => {
@@ -111,7 +155,10 @@ describe("TerminalWriteScheduler", () => {
     expect(scheduler.enqueue(Uint8Array.from([1, 2, 3, 4]))).toBe(true);
     expect(scheduler.enqueue(Uint8Array.from([5, 6]))).toBe(false);
     expect(scheduler.overflowed).toBe(true);
-    expect(scheduler.pendingBytes).toBe(0);
+    // The first chunk went straight to xterm on the idle fast path and is still
+    // in flight there; dropping the queue cannot retract bytes already handed
+    // over, and pretending otherwise would under-report the real backlog.
+    expect(scheduler.pendingBytes).toBe(4);
     expect(scheduler.enqueue(Uint8Array.of(7))).toBe(false);
     expect(overflow).toEqual([6]);
   });
@@ -143,11 +190,205 @@ describe("TerminalWriteScheduler", () => {
     completions.shift()!();
     frames.shift()!(16);
     completions.shift()!();
-    frames.shift()!(32);
-    completions.shift()!();
     expect(written.flat()).toEqual([1, 2, 3, 4, 0x1b, 0x63, 20, 21, 22]);
     expect(overflow).toEqual([11]);
     expect(scheduler.pendingBytes).toBe(0);
+  });
+});
+
+/**
+ * Stage 12.9 item 3 measurement lane (P12-U002).
+ *
+ * An agent TUI repaint does not arrive as one write: tmux splits it across many
+ * `%output`/`%extended-output` records, so the renderer sees K queued events for
+ * one frame of screen. The number this lane reports is how many animation frames
+ * pass before the last of those bytes — and the keystroke echo queued behind
+ * them — reach xterm. It is the renderer-side half of the typing-lag budget, and
+ * it is deterministic: the frame clock and the write completions are injected,
+ * so the figure is a count, not a stopwatch reading.
+ */
+describe("agent-repaint frame cost", () => {
+  const FRAME_MS = 1000 / 60;
+
+  const measure = (eventCount: number, bytesPerEvent: number) => {
+    const frames: FrameRequestCallback[] = [];
+    const completions: Array<() => void> = [];
+    const scheduler = new TerminalWriteScheduler(
+      (_chunk, done) => completions.push(done),
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+      256 * 1024,
+      8 * 1024 * 1024,
+    );
+    let echoReached = false;
+    for (let index = 0; index < eventCount; index += 1) {
+      scheduler.enqueue(new Uint8Array(bytesPerEvent));
+    }
+    // The user's keystroke echo is one small event queued behind the repaint.
+    scheduler.enqueue(Uint8Array.of(0x61), () => { echoReached = true; });
+
+    let framesElapsed = 0;
+    while (!echoReached && framesElapsed < 500) {
+      // xterm parses what it was handed before the next frame is serviced.
+      while (completions.length) completions.shift()!();
+      if (echoReached) break;
+      const due = frames.splice(0, frames.length);
+      if (due.length === 0) break;
+      framesElapsed += 1;
+      for (const callback of due) callback(framesElapsed * FRAME_MS);
+    }
+    while (completions.length) completions.shift()!();
+    return { framesElapsed, echoReached, latencyMs: framesElapsed * FRAME_MS };
+  };
+
+  it("delivers a 4 KiB 24-event repaint and the echo behind it within one frame", () => {
+    const repaint = measure(24, 170);
+    const singleEcho = measure(0, 0);
+
+    console.log(`agent-repaint frame cost: 24-event 4 KiB repaint + echo = ${repaint.framesElapsed} frames (${repaint.latencyMs.toFixed(1)} ms at 60 Hz); idle echo = ${singleEcho.framesElapsed} frames`);
+    expect(repaint.echoReached).toBe(true);
+    expect(singleEcho.framesElapsed).toBe(0);
+    // One frame of budget for a whole repaint, not one frame per event.
+    expect(repaint.framesElapsed).toBeLessThanOrEqual(1);
+  });
+
+  it("still paces a flood at the per-frame byte budget", () => {
+    const flood = measure(8, 256 * 1024);
+
+    console.log(`agent-repaint frame cost: 2 MiB flood + echo = ${flood.framesElapsed} frames (${flood.latencyMs.toFixed(1)} ms at 60 Hz)`);
+    expect(flood.echoReached).toBe(true);
+    expect(flood.framesElapsed).toBeGreaterThanOrEqual(7);
+  });
+});
+
+describe("synchronized output holds", () => {
+  it("never leaves a DEC 2026 bracket open for more than the frame that closed it", async () => {
+    // xterm force-clears a synchronized-output hold 1000 ms after the first
+    // held refresh and repaints a half-applied frame — the mid-word tearing in
+    // P12-U003.2. What delayed the closing bracket was the scheduler, so the
+    // check is that a bracketed repaint split across many output events closes
+    // inside one frame.
+    const terminal = new HeadlessTerminal({ cols: 40, rows: 8, allowProposedApi: true });
+    const frames: FrameRequestCallback[] = [];
+    const scheduler = new TerminalWriteScheduler(
+      (chunk, done) => terminal.write(chunk, done),
+      (callback) => { frames.push(callback); return frames.length; },
+      () => undefined,
+    );
+    const encoder = new TextEncoder();
+    const events = [encoder.encode("\u001b[?2026h")];
+    for (let row = 1; row <= 6; row += 1) events.push(encoder.encode(`\u001b[${row};1H` + "x".repeat(30)));
+    events.push(encoder.encode("\u001b[?2026l"));
+    for (const event of events) scheduler.enqueue(event);
+
+    const settle = () => new Promise<void>((resolve) => terminal.write("", resolve));
+    await settle();
+    expect(terminal.modes.synchronizedOutputMode).toBe(true);
+    for (const frame of frames.splice(0, frames.length)) frame(16);
+    await settle();
+    expect(terminal.modes.synchronizedOutputMode).toBe(false);
+    expect(scheduler.pendingBytes).toBe(0);
+    terminal.dispose();
+  });
+});
+
+describe("serialize/restore attribute parity", () => {
+  it("round-trips bold, dim and colour through the snapshot the hide handoff sends", async () => {
+    // Every hide snapshot and every cached restore flows through this addon.
+    // Until this upgrade the installed copy declared a peer of xterm ^5 against
+    // an installed 6.0.0 while reaching into private internals, which is the
+    // suspected source of the bold/dim wrongness reported after a reveal
+    // (P12-U003.5). The check is a full-cell comparison, not a text one.
+    const write = (terminal: HeadlessTerminal, value: string) =>
+      new Promise<void>((resolve) => terminal.write(value, resolve));
+    const source = new HeadlessTerminal({ cols: 40, rows: 4, allowProposedApi: true });
+    const serialize = new SerializeAddon();
+    source.loadAddon(serialize as unknown as Parameters<HeadlessTerminal["loadAddon"]>[0]);
+    await write(source, "\u001b[1mWor\u001b[22m\u001b[2mking\u001b[0m \u001b[31mred\u001b[39m λ🚀\r\nplain");
+
+    const restored = new HeadlessTerminal({ cols: 40, rows: 4, allowProposedApi: true });
+    await write(restored, serialize.serialize({ scrollback: 0 }));
+
+    for (let row = 0; row < 4; row += 1) {
+      const before = source.buffer.active.getLine(row);
+      const after = restored.buffer.active.getLine(row);
+      expect(after?.translateToString(true)).toBe(before?.translateToString(true));
+      for (let column = 0; column < 40; column += 1) {
+        const cell = before?.getCell(column);
+        const copy = after?.getCell(column);
+        expect(`${row}:${column} ${copy?.getChars()}/${copy?.isBold()}/${copy?.isDim()}/${copy?.getFgColor()}/${copy?.getBgColor()}`)
+          .toBe(`${row}:${column} ${cell?.getChars()}/${cell?.isBold()}/${cell?.isDim()}/${cell?.getFgColor()}/${cell?.getBgColor()}`);
+      }
+    }
+    source.dispose();
+    restored.dispose();
+  });
+});
+
+describe("restore admission", () => {
+  it("recovers from the host instead of replacing newer output with an older screen", () => {
+    expect(restoreDecision(5, 5, false)).toEqual({ kind: "apply" });
+    expect(restoreDecision(9, 5, false)).toEqual({ kind: "apply" });
+    expect(restoreDecision(4, 5, false).kind).toBe("reseed");
+    // An overflowed pane owes the host a seed; a cached screen is not one, and
+    // silently doing nothing marks the pane ready while it shows nothing.
+    expect(restoreDecision(9, 5, true).kind).toBe("reseed");
+  });
+});
+
+describe("pane grid reconciliation", () => {
+  const pane = { id: "%2", width: 49, height: 14 } as Pane;
+  const recordingRenderer = (outcome: (size: TerminalSize) => GridOutcome) => {
+    const applied: TerminalSize[] = [];
+    return {
+      applied,
+      renderer: { setGrid: (size: TerminalSize) => { applied.push(size); return outcome(size); } },
+    };
+  };
+
+  it("renders at tmux's grid, not at the grid its CSS box measured", () => {
+    const { applied, renderer } = recordingRenderer((size) => ({ kind: "applied", size }));
+    const report = reconcilePaneGrid(renderer, pane, { columns: 50, rows: 15 });
+    expect(applied).toEqual([{ columns: 49, rows: 14 }]);
+    expect(report).toContain("tmux reports 49x14");
+  });
+
+  it("says nothing when the box already agreed with tmux", () => {
+    const { renderer } = recordingRenderer(() => ({ kind: "unchanged" }));
+    expect(reconcilePaneGrid(renderer, pane, { columns: 49, rows: 14 })).toBeUndefined();
+  });
+
+  it("settles: reconciling twice resizes once and then says nothing", () => {
+    // Every reconcile is driven by something that can be caused by a resize —
+    // a ResizeObserver callback, a topology push. If applying tmux's grid could
+    // provoke another apply, the pane would resize in a loop and repaint on
+    // every frame, which is what continuous flickering is. `measure()` is
+    // propose-only and `setGrid` is the only writer, so the second call has
+    // nothing to do.
+    let grid: TerminalSize = { columns: 80, rows: 24 };
+    const resizes: TerminalSize[] = [];
+    const renderer = {
+      setGrid: (size: TerminalSize): GridOutcome => {
+        if (size.columns < 2 || size.rows < 2) return { kind: "rejected", reason: "unusable" };
+        if (grid.columns === size.columns && grid.rows === size.rows) return { kind: "unchanged" };
+        grid = size;
+        resizes.push(size);
+        return { kind: "applied", size };
+      },
+    };
+    const measured = { columns: 50, rows: 15 };
+    expect(reconcilePaneGrid(renderer, pane, measured)).toContain("tmux reports 49x14");
+    expect(reconcilePaneGrid(renderer, pane, measured)).toBeUndefined();
+    expect(reconcilePaneGrid(renderer, pane, measured)).toBeUndefined();
+    expect(resizes).toEqual([{ columns: 49, rows: 14 }]);
+  });
+
+  it("falls back to the measured box only when tmux reports no usable grid", () => {
+    const { applied, renderer } = recordingRenderer((size) =>
+      size.columns < 2 ? { kind: "rejected", reason: "0x0 is not a usable terminal grid" } : { kind: "applied", size });
+    const report = reconcilePaneGrid(renderer, { ...pane, width: 0, height: 0 } as Pane, { columns: 50, rows: 15 });
+    expect(applied.at(-1)).toEqual({ columns: 50, rows: 15 });
+    expect(report).toContain("no usable grid");
   });
 });
 
@@ -194,6 +435,37 @@ describe("local terminal selection modifier", () => {
   it("uses Shift to force local selection while Linux TUIs report mouse input", () => {
     expect(isForcedLocalSelection({ shiftKey: true })).toBe(true);
     expect(isForcedLocalSelection({ shiftKey: false })).toBe(false);
+  });
+});
+
+describe("native terminal paste interception", () => {
+  it("owns plain text before xterm can add a second bracketed-paste envelope", () => {
+    const paste = vi.fn();
+    const event = {
+      clipboardData: { getData: (type: string) => type === "text/plain" ? "printf 'rocket 🚀\\n'" : "" },
+      defaultPrevented: false,
+      preventDefault: vi.fn(),
+      stopImmediatePropagation: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+    expect(interceptTerminalPlainTextPaste(event, paste)).toBe(true);
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(event.stopPropagation).toHaveBeenCalledOnce();
+    expect(event.stopImmediatePropagation).toHaveBeenCalledOnce();
+    expect(paste).toHaveBeenCalledWith("printf 'rocket 🚀\\n'");
+  });
+
+  it("leaves file or image paste already claimed by the transfer surface alone", () => {
+    const paste = vi.fn();
+    const event = {
+      clipboardData: { getData: () => "file:///tmp/image.png" },
+      defaultPrevented: true,
+      preventDefault: vi.fn(),
+      stopImmediatePropagation: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+    expect(interceptTerminalPlainTextPaste(event, paste)).toBe(false);
+    expect(paste).not.toHaveBeenCalled();
   });
 });
 

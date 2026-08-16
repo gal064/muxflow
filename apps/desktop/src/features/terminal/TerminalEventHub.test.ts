@@ -37,6 +37,28 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(received).toEqual([seed(2, 2)]);
   });
 
+  it("asks for a usable seed instead of silently dropping one that looks stale", () => {
+    // A seed is a whole screen, not an increment. Dropping one because its
+    // generation is behind the hub's watermark leaves the pane waiting for
+    // content that has already been sent and will never be sent again
+    // (P12-U003.3), so the drop has to turn into an explicit request.
+    const requested: string[] = [];
+    const hub = new TerminalEventHub((paneId) => requested.push(paneId));
+    hub.publish(output(1, 7));
+    hub.publish(seed(2, 3));
+    const received: TerminalEvent[] = [];
+    hub.subscribePane("%1", (event) => received.push(event));
+    expect(received).toEqual([output(1, 7)]);
+    expect(requested).toEqual(["%1"]);
+    // The request is made once, not once per stale seed.
+    hub.publish(seed(3, 4));
+    expect(requested).toEqual(["%1"]);
+    // And a seed the hub can accept clears the debt.
+    hub.publish(seed(4, 9));
+    hub.publish(seed(5, 5));
+    expect(requested).toEqual(["%1", "%1"]);
+  });
+
   it("does not replay output already delivered to a mounted pane", () => {
     const hub = new TerminalEventHub();
     const unsubscribe = hub.subscribePane("%1", () => undefined);

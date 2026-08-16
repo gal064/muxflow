@@ -11,9 +11,17 @@ use tokio::time::sleep;
 
 use super::snapshot::{discover_authoritative, snapshot_from_identity};
 use super::terminal::TerminalClients;
-use super::{SequencerControl, emit_event, reconcile_terminal_clients};
+use super::{SequencerControl, emit_event, reconcile_terminal_clients_if_open};
 
-const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+/// Backstop for a tmux notification the reader never saw.
+///
+/// tmux notifies on every structural change, and those notifications are what
+/// actually drive reconciliation; this timer only exists for the case where one
+/// is missed. Running it every two seconds meant a fully idle connection did a
+/// tmux discovery and woke every consumer twice a second forever, which is the
+/// opposite of "zero periodic round-trips at idle". Thirty seconds is still a
+/// backstop and is invisible at rest.
+const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Default)]
 pub(super) struct TopologySignal {
@@ -68,6 +76,11 @@ impl TopologyActor {
                 if notified && self.signal.epoch.load(Ordering::Acquire) == last_reconciled_epoch {
                     continue;
                 }
+                // After the no-op early-out, not before it: an agent that
+                // stopped reporting has no event of its own left to arrive, but
+                // a notification the actor is about to discard is not a reason
+                // to take the agent store's lock.
+                super::agents::sweep_stale_and_publish();
                 if self.overflowed.swap(false, Ordering::AcqRel) {
                     emit_event(
                         &self.sender,
@@ -114,8 +127,30 @@ impl TopologyActor {
                                         ..Default::default()
                                     }))
                                     .await;
+                            } else if notified {
+                                // A tmux notification can describe a transient
+                                // change that has already settled back to the
+                                // authoritative baseline. Close the frontend's
+                                // reconciliation state even when no generation
+                                // change is needed.
+                                let generation = self.generation.load(Ordering::Acquire);
+                                let _ = self
+                                    .sender
+                                    .send(SequencerControl::OrderedEvent(v1::HostEvent {
+                                        kind: v1::EventKind::TopologySnapshot.into(),
+                                        scope: "topology".into(),
+                                        snapshot: Some(snapshot_from_identity(
+                                            current.clone(),
+                                            generation,
+                                            identity.clone(),
+                                        )),
+                                        detail: "topology reconciliation completed".into(),
+                                        ..Default::default()
+                                    }))
+                                    .await;
                             }
-                            reconcile_terminal_clients(
+                            reconcile_terminal_clients_if_open(
+                                &self.closed,
                                 &self.terminal,
                                 &current,
                                 &self.sender,
