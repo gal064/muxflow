@@ -85,10 +85,16 @@ function mount(): void {
 // between here and `render` would otherwise leave a permanently blank window
 // with nothing to look at and nothing logged.
 void fontsReady().then((outcome) => {
-  void perfReady.then(() => recordPerfMilestone(`startup.font.${outcome}`));
+  const atMs = performance.now();
+  void perfReady.then((enabled) => {
+    if (enabled) recordPerfMilestone(`startup.font.${outcome}`, atMs);
+  });
   mount();
 }, (error) => {
   console.warn("font readiness check failed; rendering anyway", error);
-  void perfReady.then(() => recordPerfMilestone("startup.font.error"));
+  const atMs = performance.now();
+  void perfReady.then((enabled) => {
+    if (enabled) recordPerfMilestone("startup.font.error", atMs);
+  });
   mount();
 });

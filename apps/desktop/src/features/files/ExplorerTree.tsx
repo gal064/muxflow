@@ -9,7 +9,7 @@ import type { DownloadIntent } from "./downloadFlow";
 import { DownloadTransfers } from "./DownloadTransfers";
 import { fileIcon } from "./fileIcons";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
-import { closePerfSpan, recordPerfHighWater } from "../../perf/probe";
+import { recordPerfHighWater } from "../../perf/probe";
 
 interface Props {
   root?: ActiveRoot;
@@ -74,13 +74,14 @@ export function ExplorerTree(props: Props) {
   const rootName = props.root?.path.split("/").filter(Boolean).at(-1) ?? props.root?.path ?? "No active root";
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
+  // This is the actual slice owned by the render below. A future windowing
+  // implementation must narrow this value, keeping the metric about mounted
+  // row cost rather than silently continuing to count the logical model.
+  const renderedRows = rows;
   useEffect(() => {
-    recordPerfHighWater("explorer.domRows", rows.length);
-    closePerfSpan("explorer.expandToPaint");
-    closePerfSpan("explorer.externalChangeToPaint");
-    closePerfSpan("workflow.explorer.rootPaint");
-    closePerfSpan("workflow.explorer.directoryExpandPaint");
-  }, [rows]);
+    recordPerfHighWater("explorer.logicalRows", rows.length);
+    recordPerfHighWater("explorer.renderedRows", renderedRows.length);
+  }, [renderedRows, rows.length]);
   useEffect(() => setFocusIndex((current) => Math.min(current, Math.max(0, rows.length - 1))), [rows.length]);
   // A new root is a new repository, and the toggle is not offered when that
   // repository has nothing ignored — so a `true` carried across would leave
@@ -252,7 +253,7 @@ export function ExplorerTree(props: Props) {
       ref={treeRef}
       role="tree"
     >
-      {rows.map((row, index) => {
+      {renderedRows.map((row, index) => {
         if (row.kind === "more") return <button aria-level={row.depth + 1} className="load-more-files" data-tree-index={index} disabled={props.loading.has(row.directory)} key={`more:${row.directory}`} onClick={() => props.onLoadMore(row.directory)} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
         }} role="treeitem" style={{ marginLeft: `${8 + row.depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1} type="button">Load more…</button>;

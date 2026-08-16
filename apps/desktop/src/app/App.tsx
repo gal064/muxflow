@@ -18,7 +18,7 @@ import { setTerminalScreenReaderMode } from "../features/terminal/accessibilityP
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { TerminalTransferHistory } from "../features/terminal/TerminalTransferSurface";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
-import { abandonPerfSpan, openPerfSpan, type PanePaintSpan } from "../perf/probe";
+import { abandonPanePaintSpan, abandonPanePaintSpansForScope, openPanePaintSpan, targetPanePaintSpan, type PanePaintSpan } from "../perf/probe";
 import { requestTmuxAction, type TmuxAction } from "../features/tmux/actions";
 import { requestReconciledTmuxAction } from "../features/tmux/actionReconciliation";
 import { useAgentWorkflow } from "../features/agents/AgentHookWorkflow";
@@ -279,7 +279,7 @@ export function App() {
     // The user's wait for a create or a split ends when a pane paints, not when
     // tmux acks; the pane that paints closes this span (see TerminalPane).
     const paneSpan = INTERACTION_SPAN_BY_ACTION[action.kind];
-    if (paneSpan) openPerfSpan(paneSpan);
+    const paneSpanToken = paneSpan ? openPanePaintSpan(paneSpan, clientId) : undefined;
     try {
       const result = await requestReconciledTmuxAction({
         clientId,
@@ -288,14 +288,16 @@ export function App() {
         initialScope: hostScopeRef.current,
         currentScope: () => hostScopeRef.current,
       });
+      if (paneSpan) targetPanePaintSpan(paneSpanToken, result.paneId);
       setStatus("Waiting for authoritative tmux state…");
       return result;
     } catch (error) {
-      if (paneSpan) abandonPerfSpan(paneSpan);
+      abandonPanePaintSpan(paneSpanToken);
       setStatus(String(error));
       return undefined;
     }
   }, [clientId, hostState.canMutate, hostState.generation, hostState.serverIdentity]);
+  useEffect(() => () => abandonPanePaintSpansForScope(clientId), [clientId]);
 
   const surfacePaneDestination = useCallback(async (target: Pane, source: string, successMessage?: string): Promise<PaneSurfaceResult> => {
     const scope = hostScopeRef.current;

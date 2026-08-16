@@ -6,7 +6,6 @@ import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { GitCommandResult, GitDiffTarget, GitMutationRequest, GitStatusEntry, GitStatusSnapshot, GitWorkspaceClient } from "./types";
-import { closePerfSpan } from "../../perf/probe";
 
 interface Props {
   client: GitWorkspaceClient;
@@ -25,9 +24,6 @@ interface Props {
 type PendingDiscard = { entry: GitStatusEntry; target: GitDiffTarget; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
 
 export function GitSidebar(props: Props) {
-  useEffect(() => {
-    if (props.status) closePerfSpan("workflow.git.panelPaint");
-  }, [props.status]);
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
   // Stage / unstage / discard used to be a cluster of hover buttons on every
   // row. They are one right-click menu now, which is also the only way they can

@@ -6,7 +6,9 @@ import { enablePerfProbe, flushPerfProbe } from "./probe";
  * launched with `ADE_PERF_LOG` pointing at an absolute path. The host owns that
  * decision; the page cannot turn instrumentation on for itself.
  */
-export async function bootstrapPerfProbe(): Promise<boolean> {
+let bootstrapResult: Promise<boolean> | undefined;
+
+async function initializePerfProbe(): Promise<boolean> {
   let enabled = false;
   try {
     enabled = await invoke<boolean>("perf_log_enabled");
@@ -19,4 +21,14 @@ export async function bootstrapPerfProbe(): Promise<boolean> {
     void flushPerfProbe();
   });
   return true;
+}
+
+export function bootstrapPerfProbe(): Promise<boolean> {
+  bootstrapResult ??= initializePerfProbe();
+  return bootstrapResult;
+}
+
+/** Lets early terminal startup share the one in-flight opt-in decision. */
+export function perfProbeReady(): Promise<boolean> {
+  return bootstrapResult ?? bootstrapPerfProbe();
 }

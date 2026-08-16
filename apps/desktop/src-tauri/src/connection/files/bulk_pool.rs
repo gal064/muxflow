@@ -506,16 +506,15 @@ mod tests {
     fn an_idle_entry_is_reaped_with_nothing_else_touching_the_pool() {
         let idle_timeout = Duration::from_millis(30);
         let pool = Arc::new(SharedPool::new(idle_timeout, MAX_IDLE));
+        let started = Instant::now();
         assert!(pool.release(key("server", 1), "idle").is_empty());
 
         let reaping = {
             let pool = Arc::clone(&pool);
-            thread::spawn(move || {
-                let started = Instant::now();
-                (pool.reap(), started.elapsed())
-            })
+            thread::spawn(move || pool.reap())
         };
-        let (reaped, waited) = reaping.join().expect("the reaper thread");
+        let reaped = reaping.join().expect("the reaper thread");
+        let waited = started.elapsed();
         assert_eq!(reaped, vec!["idle"]);
         // Waited the timeout out rather than spinning it away.
         assert!(waited >= idle_timeout, "reaped after only {waited:?}");

@@ -42,9 +42,13 @@ describe("ExplorerTree", () => {
           onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
       });
       const highWater = perfHighWaterSnapshot();
-      expect(highWater["explorer.domRows"]).toBe(4_096);
-      expect(renderer.root.findAllByProps({ className: "file-row" })).toHaveLength(4_096);
-      console.log(`PHASE14_METRIC ${JSON.stringify({ lane: "explorerWide", entries: 4_096, domRowsHighWater: highWater["explorer.domRows"], rowParity: true })}`);
+      const renderedRows = renderer.root.findAllByProps({ className: "file-row" }).length;
+      const logicalRows = highWater["explorer.logicalRows"];
+      expect(logicalRows).toBe(wide.entries.length);
+      expect(renderedRows).toBeGreaterThan(0);
+      expect(renderedRows).toBeLessThanOrEqual(logicalRows);
+      expect(highWater["explorer.renderedRows"]).toBe(renderedRows);
+      console.log(`PHASE14_METRIC ${JSON.stringify({ lane: "explorerWide", entries: wide.entries.length, logicalRowsHighWater: logicalRows, renderedRowsHighWater: highWater["explorer.renderedRows"], rowParity: logicalRows === wide.entries.length })}`);
     } finally {
       await act(async () => { renderer?.unmount(); });
       resetPerfProbe();

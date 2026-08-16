@@ -6,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-use tauri::ipc::{Channel, InvokeResponseBody};
 use tmux_agent_protocol::{
     HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, envelope, read_frame_sync,
     v1::{self, envelope::Payload},
@@ -17,8 +16,8 @@ use uuid::Uuid;
 use super::event_frame::encode_event_with_sequence;
 use super::transport::{BridgeStderr, spawn_bridge, with_bridge_diagnostic};
 use super::{
-    ConnectionSpec, InitialHostState, TerminalClient, TerminalEvent, mark_input_reconnected,
-    send_event, snapshot_from_proto, validate_tmux_id,
+    ConnectionSpec, InitialHostState, TerminalClient, TerminalEvent, TerminalEventChannel,
+    mark_input_reconnected, send_event, snapshot_from_proto, validate_tmux_id,
 };
 
 pub(super) fn supervise_bridge(
@@ -26,7 +25,7 @@ pub(super) fn supervise_bridge(
     connection: ConnectionSpec,
     session_id: String,
     pane_ids: Vec<String>,
-    channel: Channel<InvokeResponseBody>,
+    channel: TerminalEventChannel,
     client: Arc<TerminalClient>,
 ) {
     let mut attempt = 0_u32;
@@ -73,9 +72,12 @@ pub(super) fn supervise_bridge(
             },
         );
         attempt = attempt.saturating_add(1);
-        thread::sleep(Duration::from_millis(reconnect_delay_millis(
-            &client_id, attempt,
-        )));
+        let delay = Duration::from_millis(reconnect_delay_millis(&client_id, attempt));
+        if client.measurement_enabled {
+            client.wait_for_reconnect(delay);
+        } else {
+            thread::sleep(delay);
+        }
     }
 }
 
@@ -108,7 +110,7 @@ fn run_bridge_once(
     connection: &ConnectionSpec,
     session_id: &str,
     pane_ids: &[String],
-    channel: &Channel<InvokeResponseBody>,
+    channel: &TerminalEventChannel,
     client: &Arc<TerminalClient>,
 ) -> Result<(), String> {
     let mut bridge = spawn_bridge(connection, client_id)?;
@@ -379,7 +381,7 @@ fn read_protocol_stream(
     mut reader: BufReader<ChildStdout>,
     mut sequence: u64,
     server_identity: &str,
-    channel: &Channel<InvokeResponseBody>,
+    channel: &TerminalEventChannel,
     client: &Arc<TerminalClient>,
 ) -> Result<(), String> {
     let mut resync_request_id = None;
@@ -511,7 +513,7 @@ fn process_event(
     frame: v1::Envelope,
     last_sequence: u64,
     expected_server_identity: &str,
-    channel: &Channel<InvokeResponseBody>,
+    channel: &TerminalEventChannel,
     client: &Arc<TerminalClient>,
 ) -> Result<(u64, Option<String>), String> {
     let Some(Payload::Event(event)) = frame.payload else {
@@ -716,11 +718,11 @@ fn process_event(
 }
 
 fn send_protocol_event(
-    channel: &Channel<InvokeResponseBody>,
+    channel: &TerminalEventChannel,
     sequence: u64,
     event: TerminalEvent,
 ) -> Result<(), String> {
-    crate::perf_log::send_bridge_frame(channel, encode_event_with_sequence(event, sequence))
+    channel.send(encode_event_with_sequence(event, sequence))
 }
 
 pub(super) fn scoped_terminal_recovery(scope: &str) -> Option<String> {

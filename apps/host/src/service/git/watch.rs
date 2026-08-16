@@ -12,6 +12,7 @@ pub(super) struct RepositoryWatcher {
 
 impl Drop for RepositoryWatcher {
     fn drop(&mut self) {
+        #[cfg(test)]
         phase14_git_watcher_dropped();
     }
 }
@@ -50,6 +51,7 @@ impl GitService {
         if let Some(previous) = previous {
             previous.cancelled.store(true, Ordering::Release);
         } else {
+            #[cfg(test)]
             phase14_git_subscribers(1);
         }
         let bootstrap = (|| {
@@ -254,6 +256,7 @@ impl GitService {
             .is_some_and(|watch| Arc::ptr_eq(&watch.cancelled, cancellation))
         {
             watches.remove(watch_id);
+            #[cfg(test)]
             phase14_git_subscribers(-1);
         }
     }
@@ -265,6 +268,7 @@ impl GitService {
             .unwrap()
             .remove(watch_id)
             .ok_or_else(|| anyhow::anyhow!("unknown Git watch ID"))?;
+        #[cfg(test)]
         phase14_git_subscribers(-1);
         watch.cancelled.store(true, Ordering::Release);
         Ok(())
@@ -305,6 +309,7 @@ pub(super) fn start_repository_watcher(
     if current.identity()? != root_identity {
         bail!("repository root changed while establishing Git watch");
     }
+    #[cfg(test)]
     phase14_git_watcher_created();
     Ok((
         RepositoryWatcher {
@@ -320,10 +325,12 @@ pub(super) fn start_repository_watcher(
 impl Drop for GitService {
     fn drop(&mut self) {
         let watches = self.watches.get_mut().unwrap();
+        #[cfg(test)]
         let count = watches.len();
         for (_, watch) in watches.drain() {
             watch.cancelled.store(true, Ordering::Release);
         }
+        #[cfg(test)]
         phase14_git_subscribers(-(count as isize));
     }
 }

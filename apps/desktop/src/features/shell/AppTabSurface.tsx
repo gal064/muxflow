@@ -1,6 +1,6 @@
 import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { AutosaveController, type AutosaveView } from "../files/autosave";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
@@ -10,7 +10,8 @@ import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { AppOwnedTab } from "./types";
 import { ADE_MONACO_THEME } from "../files/monaco";
-import { closePerfSpan, openPerfSpan, recordPerfMilestone } from "../../perf/probe";
+import { recordPerfMilestone } from "../../perf/probe";
+import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
 
 interface Props {
   tab: AppOwnedTab;
@@ -29,6 +30,8 @@ interface Props {
   onViewMode(mode: "source" | "preview" | "split"): void;
 }
 
+const FILE_EDITOR_PAINT = ["workflow.file.editorPaint"] as const;
+
 export function AppTabSurface(props: Props) {
   const [opened, setOpened] = useState<OpenFile>();
   const [view, setView] = useState<AutosaveView>();
@@ -36,8 +39,21 @@ export function AppTabSurface(props: Props) {
   const [error, setError] = useState<string>();
   const controller = useRef<AutosaveController | undefined>(undefined);
   const loadSerial = useRef(0);
+  const surfaceLifecycle = useRef(0);
   const loadAbort = useRef<AbortController | undefined>(undefined);
   const detachLayout = useRef<(() => void) | undefined>(undefined);
+  const editorSurfaceSequence = useRef(0);
+  const mountedEditorSurface = useRef<number | undefined>(undefined);
+  const readyEditorSurface = useRef<number | undefined>(undefined);
+  const pendingPaint = useRef<PaintTicket | undefined>(undefined);
+  const bindEditorHost = useCallback((node: HTMLDivElement | null) => {
+    if (node) {
+      mountedEditorSurface.current ??= ++editorSurfaceSequence.current;
+    } else {
+      mountedEditorSurface.current = undefined;
+      readyEditorSurface.current = undefined;
+    }
+  }, []);
   const root = useMemo<ActiveRoot | undefined>(() => {
     if (props.tab.rootPath && props.tab.rootToken) return {
       token: props.tab.rootToken,
@@ -49,23 +65,59 @@ export function AppTabSurface(props: Props) {
     };
     return props.activeRoot;
   }, [props.activeRoot, props.scope?.paneId, props.tab.rootPath, props.tab.rootToken]);
-  const editorRequested = opened?.kind === "text"
-    && !(props.tab.kind === "markdown" && (props.tab.viewMode ?? "split") === "preview");
+  const viewAllowsEditor = !(props.tab.kind === "markdown" && (props.tab.viewMode ?? "split") === "preview");
+  const previousViewAllowsEditor = useRef(viewAllowsEditor);
+  const editorRequested = !loading && !error && opened?.kind === "text"
+    && Number(opened.file.sizeBytes) <= TEXT_FILE_LIMIT_BYTES
+    && viewAllowsEditor;
   useEffect(() => {
-    if (editorRequested) recordPerfMilestone("editor.monacoRequest");
+    if (!editorRequested) {
+      pendingPaint.current?.abandon();
+      pendingPaint.current = undefined;
+      return;
+    }
+    recordPerfMilestone("editor.monacoRequest");
   }, [editorRequested, props.tab.id]);
+  useEffect(() => {
+    const enteringEditor = !previousViewAllowsEditor.current && viewAllowsEditor;
+    previousViewAllowsEditor.current = viewAllowsEditor;
+    // Only an explicit preview -> source/split request owns a new interaction.
+    // Background reads may change content kind but never manufacture one.
+    if (enteringEditor && editorRequested && !pendingPaint.current) {
+      const paint = createPaintTicket(FILE_EDITOR_PAINT, surfaceLifecycle.current);
+      paint.expectSurface(mountedEditorSurface.current ?? editorSurfaceSequence.current + 1);
+      pendingPaint.current = paint;
+    }
+  }, [editorRequested, viewAllowsEditor]);
 
-  const load = async (externalOperationId?: string) => {
+  const load = async (options: { externalOperationId?: string; measureEditorPaint?: boolean } = {}) => {
     if (!props.scope || !root) return;
     loadAbort.current?.abort();
     const abort = new AbortController();
     loadAbort.current = abort;
     const serial = ++loadSerial.current;
-    openPerfSpan("workflow.file.editorPaint");
+    const paint = options.measureEditorPaint
+      ? createPaintTicket(FILE_EDITOR_PAINT, surfaceLifecycle.current)
+      : undefined;
+    if (paint) {
+      pendingPaint.current?.abandon();
+      pendingPaint.current = paint;
+    }
     try {
       const next = await props.client.openFile(props.scope, root, props.tab.resource, abort.signal);
-      if (serial !== loadSerial.current) return;
+      if (serial !== loadSerial.current) {
+        if (paint && pendingPaint.current !== paint) paint.abandon();
+        return;
+      }
       setOpened(next);
+      const interactionPaint = paint ?? pendingPaint.current;
+      if (next.kind === "text"
+        && Number(next.file.sizeBytes) <= TEXT_FILE_LIMIT_BYTES
+        && viewAllowsEditor) {
+        interactionPaint?.expectSurface(
+          mountedEditorSurface.current ?? editorSurfaceSequence.current + 1,
+        );
+      }
       setError(undefined);
       if (next.kind === "text") {
         const snapshot = { content: next.file.content, generation: next.file.generation, lineEnding: next.file.lineEnding };
@@ -73,8 +125,8 @@ export function AppTabSurface(props: Props) {
           // Polling directory snapshots also observe our own atomic rename.
           // Preserve a newer local edit when disk still has the generation we
           // already know; any genuinely newer generation remains last-writer.
-          if (!externalOperationId && controller.current.current().generation === snapshot.generation) return;
-          controller.current.external(snapshot, externalOperationId);
+          if (!options.externalOperationId && controller.current.current().generation === snapshot.generation) return;
+          controller.current.external(snapshot, options.externalOperationId);
         }
         else {
           const autosave = new AutosaveController(snapshot, async (saving, operationId) => {
@@ -92,6 +144,9 @@ export function AppTabSurface(props: Props) {
         }
       }
     } catch (cause) {
+      if (abort.signal.aborted && serial !== loadSerial.current) return;
+      paint?.abandon();
+      if (pendingPaint.current === paint) pendingPaint.current = undefined;
       if (abort.signal.aborted) return;
       if (serial === loadSerial.current) setError(String(cause));
     } finally {
@@ -100,14 +155,18 @@ export function AppTabSurface(props: Props) {
   };
 
   useEffect(() => {
+    surfaceLifecycle.current += 1;
     setLoading(true);
     setOpened(undefined);
     setView(undefined);
     controller.current?.dispose();
     controller.current = undefined;
-    void load();
+    void load({ measureEditorPaint: true });
     return () => {
+      surfaceLifecycle.current += 1;
       loadSerial.current += 1;
+      pendingPaint.current?.abandon();
+      pendingPaint.current = undefined;
       loadAbort.current?.abort();
       detachLayout.current?.();
       detachLayout.current = undefined;
@@ -120,6 +179,27 @@ export function AppTabSurface(props: Props) {
       controller.current = undefined;
     };
   }, [props.client, props.scope?.clientId, props.tab.resource, root?.token]);
+
+  useEffect(() => {
+    if (loading || error || !opened) return;
+    const paint = pendingPaint.current;
+    if (!paint || paint.surfaceGeneration !== 0) return;
+    pendingPaint.current = undefined;
+    // Binary, oversized, and preview-only surfaces never mount Monaco, so
+    // they must never publish the specifically named editor-paint span.
+    paint.abandon();
+  }, [error, loading, opened]);
+
+  useEffect(() => {
+    if (!editorRequested || loading || error || !opened) return;
+    const paint = pendingPaint.current;
+    const surface = mountedEditorSurface.current;
+    if (!paint || !surface || paint.surfaceGeneration !== surface || readyEditorSurface.current !== surface) return;
+    pendingPaint.current = undefined;
+    paint.afterPaint((ticket) => ticket.lifecycleGeneration === surfaceLifecycle.current
+      && ticket.surfaceGeneration === mountedEditorSurface.current,
+    () => recordPerfMilestone("editor.paint"));
+  }, [editorRequested, error, loading, opened]);
 
   useEffect(() => editorFlushRegistry.register(props.tab.id, async () => {
     await controller.current?.flush();
@@ -166,7 +246,7 @@ export function AppTabSurface(props: Props) {
         setError("The file was deleted externally. The tab remains open.");
         return;
       }
-      void load(event.operationId);
+        void load({ externalOperationId: event.operationId });
     }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });
     return () => { disposed = true; stop?.(); };
   }, [props.client, props.scope?.clientId, props.tab.resource, root?.token]);
@@ -203,13 +283,20 @@ export function AppTabSurface(props: Props) {
       <button onClick={() => props.onDownload(props.tab.resource, "file", root)} type="button">Download…</button>
     </header>
     {view?.error && <SurfaceError className="editor-error" detail={view.error} />}
-    {mode !== "preview" && <div className="monaco-host">
+    {mode !== "preview" && <div className="monaco-host" ref={bindEditorHost}>
       <Editor
         language={languageForPath(props.tab.resource)}
         onChange={(content) => { if (props.canWrite && typeof content === "string") controller.current?.edit(content, opened.file.lineEnding); }}
         onMount={(editor) => {
-          recordPerfMilestone("editor.paint");
-          closePerfSpan("workflow.file.editorPaint");
+          const paint = pendingPaint.current;
+          const surface = mountedEditorSurface.current;
+          readyEditorSurface.current = surface;
+          if (paint && surface && paint.surfaceGeneration === surface) {
+            pendingPaint.current = undefined;
+            paint.afterPaint((ticket) => ticket.lifecycleGeneration === surfaceLifecycle.current
+              && ticket.surfaceGeneration === mountedEditorSurface.current,
+            () => recordPerfMilestone("editor.paint"));
+          }
           detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor);
         }}
         options={{ automaticLayout: true, minimap: { enabled: false }, readOnly: !props.canWrite, scrollBeyondLastLine: false, wordWrap: props.tab.kind === "markdown" ? "on" : "off" }}

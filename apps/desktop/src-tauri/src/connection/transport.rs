@@ -42,46 +42,62 @@ fn ssh_masters() -> &'static Mutex<HashMap<PathBuf, SshMaster>> {
 }
 
 pub(super) fn spawn_bridge(connection: &ConnectionSpec, _client_id: &str) -> Result<Child, String> {
-    connection.validate()?;
-    let mut command = match connection {
-        ConnectionSpec::Local => {
-            let mut command = Command::new(host_helper_path()?);
-            command.args(["bridge", "--stdio"]);
-            command
-        }
-        ConnectionSpec::Ssh {
-            profile_id,
-            target,
-            config_path,
-        } => {
-            crate::perf_log::record_remote_operation("interactiveBridgeSpawn");
-            let socket = ssh_profile_control_socket(profile_id, target, config_path.as_deref())?;
-            ensure_control_master(
+    let measured = matches!(connection, ConnectionSpec::Ssh { .. });
+    if measured {
+        crate::perf_log::record_remote_operation(
+            crate::perf_log::RemoteOperation::InteractiveBridgeSpawnAttempt,
+        );
+    }
+    let result = (|| {
+        connection.validate()?;
+        let mut command = match connection {
+            ConnectionSpec::Local => {
+                let mut command = Command::new(host_helper_path()?);
+                command.args(["bridge", "--stdio"]);
+                command
+            }
+            ConnectionSpec::Ssh {
+                profile_id,
                 target,
-                config_path.as_deref(),
-                &socket,
-                ControlLane::Interactive,
-            )?;
-            let mut command = ssh_base(config_path.as_deref());
-            command
-                .arg("-T")
-                .arg("-S")
-                .arg(socket)
-                .arg(target)
-                .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
-            command
-        }
-    };
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        // Keep the child's stderr instead of discarding it. Without this, every
-        // way a bridge or daemon can fail to start — an over-long AF_UNIX socket
-        // path, a refused SSH key, a missing helper — reached the user as the
-        // single generic string "host closed during handshake" (M10-E058).
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start host bridge: {error}"))
+                config_path,
+            } => {
+                let socket =
+                    ssh_profile_control_socket(profile_id, target, config_path.as_deref())?;
+                ensure_control_master(
+                    target,
+                    config_path.as_deref(),
+                    &socket,
+                    ControlLane::Interactive,
+                )?;
+                let mut command = ssh_base(config_path.as_deref());
+                command
+                    .arg("-T")
+                    .arg("-S")
+                    .arg(socket)
+                    .arg(target)
+                    .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
+                command
+            }
+        };
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            // Keep the child's stderr instead of discarding it. Without this, every
+            // way a bridge or daemon can fail to start — an over-long AF_UNIX socket
+            // path, a refused SSH key, a missing helper — reached the user as the
+            // single generic string "host closed during handshake" (M10-E058).
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("failed to start host bridge: {error}"))
+    })();
+    if measured {
+        crate::perf_log::record_remote_operation(if result.is_ok() {
+            crate::perf_log::RemoteOperation::InteractiveBridgeSpawnSuccess
+        } else {
+            crate::perf_log::RemoteOperation::InteractiveBridgeSpawnFailure
+        });
+    }
+    result
 }
 
 /// Bound on retained bridge stderr. Large enough for a stack of `anyhow`
@@ -151,49 +167,64 @@ pub(super) fn with_bridge_diagnostic(error: String, stderr: Option<&BridgeStderr
 }
 
 pub(crate) fn spawn_bulk_bridge(connection: &ConnectionSpec) -> Result<Child, String> {
-    connection.validate()?;
-    let mut command = match connection {
-        ConnectionSpec::Local => {
-            let mut command = Command::new(host_helper_path()?);
-            command.args(["bridge", "--stdio"]);
-            command
-        }
-        ConnectionSpec::Ssh {
-            profile_id,
-            target,
-            config_path,
-        } => {
-            crate::perf_log::record_remote_operation("bulkBridgeSpawn");
-            let mut command = ssh_base(config_path.as_deref());
-            command.arg("-T");
-            // Bulk traffic keeps its own TCP connection so a multi-gigabyte
-            // transfer cannot head-of-line block a keystroke. That does not
-            // require a *fresh* connection per request, which is what this used
-            // to do: opening a 3 KB file paid a full TCP handshake, key
-            // exchange and authentication before a byte moved. A second
-            // persistent master gives the same isolation at no per-request
-            // cost, and a failure to establish it falls back to the previous
-            // one-off connection rather than failing the transfer.
-            match bulk_control_socket(profile_id, target, config_path.as_deref()) {
-                Ok(socket) => {
-                    command.arg("-S").arg(socket);
-                }
-                Err(_) => {
-                    command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
-                }
+    let measured = matches!(connection, ConnectionSpec::Ssh { .. });
+    if measured {
+        crate::perf_log::record_remote_operation(
+            crate::perf_log::RemoteOperation::BulkBridgeSpawnAttempt,
+        );
+    }
+    let result = (|| {
+        connection.validate()?;
+        let mut command = match connection {
+            ConnectionSpec::Local => {
+                let mut command = Command::new(host_helper_path()?);
+                command.args(["bridge", "--stdio"]);
+                command
             }
-            command
-                .arg(target)
-                .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
-            command
-        }
-    };
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("failed to start independent bulk bridge: {error}"))
+            ConnectionSpec::Ssh {
+                profile_id,
+                target,
+                config_path,
+            } => {
+                let mut command = ssh_base(config_path.as_deref());
+                command.arg("-T");
+                // Bulk traffic keeps its own TCP connection so a multi-gigabyte
+                // transfer cannot head-of-line block a keystroke. That does not
+                // require a *fresh* connection per request, which is what this used
+                // to do: opening a 3 KB file paid a full TCP handshake, key
+                // exchange and authentication before a byte moved. A second
+                // persistent master gives the same isolation at no per-request
+                // cost, and a failure to establish it falls back to the previous
+                // one-off connection rather than failing the transfer.
+                match bulk_control_socket(profile_id, target, config_path.as_deref()) {
+                    Ok(socket) => {
+                        command.arg("-S").arg(socket);
+                    }
+                    Err(_) => {
+                        command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
+                    }
+                }
+                command
+                    .arg(target)
+                    .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
+                command
+            }
+        };
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("failed to start independent bulk bridge: {error}"))
+    })();
+    if measured {
+        crate::perf_log::record_remote_operation(if result.is_ok() {
+            crate::perf_log::RemoteOperation::BulkBridgeSpawnSuccess
+        } else {
+            crate::perf_log::RemoteOperation::BulkBridgeSpawnFailure
+        });
+    }
+    result
 }
 
 /// Resolves (creating if needed) the persistent master that carries bulk file
@@ -404,10 +435,29 @@ pub(super) fn ensure_control_master(
     socket: &Path,
     lane: ControlLane,
 ) -> Result<(), String> {
-    crate::perf_log::record_remote_operation("controlMasterEnsure");
+    crate::perf_log::record_remote_operation(
+        crate::perf_log::RemoteOperation::ControlMasterEnsureAttempt,
+    );
+    let result = ensure_control_master_inner(target, config_path, socket, lane);
+    if result.is_err() {
+        crate::perf_log::record_remote_operation(
+            crate::perf_log::RemoteOperation::ControlMasterFailure,
+        );
+    }
+    result
+}
+
+fn ensure_control_master_inner(
+    target: &str,
+    config_path: Option<&str>,
+    socket: &Path,
+    lane: ControlLane,
+) -> Result<(), String> {
     validate_control_socket(socket)?;
     let mut masters = ssh_masters().lock().unwrap();
-    crate::perf_log::record_remote_operation("controlMasterCheck");
+    crate::perf_log::record_remote_operation(
+        crate::perf_log::RemoteOperation::ControlMasterCheckAttempt,
+    );
     let check = ssh_base(config_path)
         .arg("-S")
         .arg(socket)
@@ -417,7 +467,9 @@ pub(super) fn ensure_control_master(
         .stderr(Stdio::null())
         .status();
     if check.is_ok_and(|status| status.success()) {
-        crate::perf_log::record_remote_operation("controlMasterReuse");
+        crate::perf_log::record_remote_operation(
+            crate::perf_log::RemoteOperation::ControlMasterReuseSuccess,
+        );
         masters
             .entry(socket.to_owned())
             .or_insert_with(|| SshMaster {
@@ -432,7 +484,6 @@ pub(super) fn ensure_control_master(
         fs::remove_file(socket).map_err(|error| error.to_string())?;
     }
     let mut master = ssh_base(config_path);
-    crate::perf_log::record_remote_operation("controlMasterEstablishment");
     if lane == ControlLane::Interactive {
         apply_control_lane_options(&mut master);
     }
@@ -463,6 +514,9 @@ pub(super) fn ensure_control_master(
                 socket: socket.to_owned(),
                 leases: 0,
             },
+        );
+        crate::perf_log::record_remote_operation(
+            crate::perf_log::RemoteOperation::ControlMasterEstablishmentSuccess,
         );
         Ok(())
     } else {

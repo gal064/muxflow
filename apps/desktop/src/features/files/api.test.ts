@@ -36,6 +36,7 @@ describe("TauriFileWorkspaceClient", () => {
     first.release();
     second.release();
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(perfCounterSnapshot()["explorer.listMappedPayloadBytes"]).toBeGreaterThan(0));
     const counters = perfCounterSnapshot();
     const highWater = perfHighWaterSnapshot();
     expect(counters["explorer.directoryListRequests"]).toBe(1);
@@ -43,13 +44,23 @@ describe("TauriFileWorkspaceClient", () => {
     expect(counters["explorer.watchRequests"]).toBe(1);
     expect(counters["explorer.watchReleases"]).toBe(2);
     expect(counters["explorer.listPayloadEntries"]).toBe(1);
-    expect(counters["desktop.hostRequests"]).toBe(3);
+    expect(counters["desktop.hostRequestAttempts"]).toBe(3);
+    expect(counters["desktop.hostRequestSuccesses"]).toBe(3);
+    expect(counters["desktop.hostRequestFailures"]).toBeUndefined();
+    expect(counters["desktop.hostRequestCancellations"]).toBeUndefined();
+    const exactBoundaryBytes = invokeMock.mock.calls.reduce((total, [, boundary]) =>
+      total + new TextEncoder().encode(JSON.stringify(boundary)).byteLength, 0);
+    expect(counters["desktop.hostRequestBytes"]).toBe(exactBoundaryBytes);
     expect(highWater["explorer.activeWatches"]).toBe(1);
     console.log(`PHASE14_METRIC ${JSON.stringify({
       lane: "explorerListWatch", directoryListRequests: counters["explorer.directoryListRequests"],
       watchSubscribers: counters["explorer.watchSubscribers"], watchRequests: counters["explorer.watchRequests"],
       watchReleases: counters["explorer.watchReleases"], activeWatchHighWater: highWater["explorer.activeWatches"],
-      hostRequests: counters["desktop.hostRequests"], mappedPayloadBytes: counters["explorer.listMappedPayloadBytes"],
+      hostRequestAttempts: counters["desktop.hostRequestAttempts"],
+      hostRequestSuccesses: counters["desktop.hostRequestSuccesses"],
+      hostRequestFailures: counters["desktop.hostRequestFailures"] ?? 0,
+      hostRequestCancellations: counters["desktop.hostRequestCancellations"] ?? 0,
+      mappedPayloadBytes: counters["explorer.listMappedPayloadBytes"],
     })}`);
   });
 
@@ -58,6 +69,21 @@ describe("TauriFileWorkspaceClient", () => {
     const client = new TauriFileWorkspaceClient();
     await expect(client.resolveActiveRoot(scope)).resolves.toEqual({ token: "token", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "18446744073709551615" });
     expect(invokeMock).toHaveBeenCalledWith("file_request", { clientId: "client", command: expect.objectContaining({ operation: "resolveActiveRoot", paneId: "%1", expectedServerIdentity: "server", expectedTopologyGeneration: "7" }) });
+  });
+
+  it("counts a malformed host response as a request failure, never a success", async () => {
+    enablePerfProbe(async () => undefined);
+    invokeMock.mockResolvedValueOnce({ operationId: "missing-root" });
+
+    await expect(new TauriFileWorkspaceClient().resolveActiveRoot(scope)).rejects.toThrow("omitted the active root");
+
+    expect(perfCounterSnapshot()).toMatchObject({
+      "desktop.hostRequestAttempts": 1,
+      "desktop.hostRequestFailures": 1,
+      "file.hostRequestAttempts": 1,
+      "file.hostRequestFailures": 1,
+    });
+    expect(perfCounterSnapshot()["desktop.hostRequestSuccesses"]).toBeUndefined();
   });
 
   it("maps lazy directory pages including collapsed protected entries", async () => {

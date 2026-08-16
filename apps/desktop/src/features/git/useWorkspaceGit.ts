@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { GitStatusSnapshot, GitWorkspaceClient, GitWorkspaceEvent } from "./types";
+import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
 
 export interface WorkspaceGitState {
   status?: GitStatusSnapshot;
@@ -16,6 +17,7 @@ export function useWorkspaceGit(client: GitWorkspaceClient, scope: FileWorkspace
   const [error, setError] = useState<string>();
   const serial = useRef(0);
   const abort = useRef<AbortController | undefined>(undefined);
+  const pendingPanelPaint = useRef<PaintTicket | undefined>(undefined);
   const identity = root && scope ? `${scope.clientId}\0${scope.serverIdentity}\0${scope.terminalEpoch}\0${root.token}\0${root.path}` : "";
 
   const accept = useCallback((next: GitStatusSnapshot) => {
@@ -30,14 +32,29 @@ export function useWorkspaceGit(client: GitWorkspaceClient, scope: FileWorkspace
     if (!scope || !root?.gitWorktree) return;
     const current = ++serial.current;
     abort.current?.abort();
+    pendingPanelPaint.current?.abandon();
     const controller = new AbortController();
     abort.current = controller;
     setLoading(true);
+    const paint = createPaintTicket(["workflow.git.panelPaint"], current);
+    pendingPanelPaint.current = paint;
     try {
       const next = await client.status(scope, root, controller.signal);
-      if (current !== serial.current || controller.signal.aborted) return;
+      if (current !== serial.current || controller.signal.aborted) {
+        paint.abandon();
+        if (pendingPanelPaint.current === paint) pendingPanelPaint.current = undefined;
+        return;
+      }
       accept(next);
+      paint.afterPaint(
+        (ticket) => ticket === pendingPanelPaint.current
+          && ticket.lifecycleGeneration === serial.current
+          && !controller.signal.aborted,
+        () => { if (pendingPanelPaint.current === paint) pendingPanelPaint.current = undefined; },
+      );
     } catch (cause) {
+      paint.abandon();
+      if (pendingPanelPaint.current === paint) pendingPanelPaint.current = undefined;
       if (controller.signal.aborted || current !== serial.current) return;
       setError(String(cause));
     } finally {
@@ -48,6 +65,8 @@ export function useWorkspaceGit(client: GitWorkspaceClient, scope: FileWorkspace
   useEffect(() => {
     serial.current += 1;
     abort.current?.abort();
+    pendingPanelPaint.current?.abandon();
+    pendingPanelPaint.current = undefined;
     setStatus(undefined);
     setError(undefined);
     setLoading(Boolean(scope && root?.gitWorktree));
@@ -59,6 +78,9 @@ export function useWorkspaceGit(client: GitWorkspaceClient, scope: FileWorkspace
     let activeWatchId: string | undefined;
     const pendingEvents: GitWorkspaceEvent[] = [];
     const watchAbort = new AbortController();
+    const lifecycle = serial.current;
+    const initialPanelPaint = createPaintTicket(["workflow.git.panelPaint"], lifecycle);
+    pendingPanelPaint.current = initialPanelPaint;
     const stop = client.subscribe((event) => {
       if (disposed || event.rootToken !== rootToken) return;
       if (!activeWatchId) {
@@ -71,11 +93,20 @@ export function useWorkspaceGit(client: GitWorkspaceClient, scope: FileWorkspace
       else accept(event.status);
     });
     void client.watch(scope, root, watchAbort.signal).then((lease) => {
-      if (disposed || lease.rootToken !== rootToken || lease.connectionEpoch !== connectionEpoch) lease.release();
-      else {
+      if (disposed || lease.rootToken !== rootToken || lease.connectionEpoch !== connectionEpoch) {
+        initialPanelPaint.abandon();
+        if (pendingPanelPaint.current === initialPanelPaint) pendingPanelPaint.current = undefined;
+        lease.release();
+      } else {
         release = lease.release;
         activeWatchId = lease.watchId;
         accept(lease.status);
+        initialPanelPaint.afterPaint(
+          (ticket) => ticket === pendingPanelPaint.current
+            && ticket.lifecycleGeneration === serial.current
+            && !disposed,
+          () => { if (pendingPanelPaint.current === initialPanelPaint) pendingPanelPaint.current = undefined; },
+        );
         for (const event of pendingEvents) {
           if (event.watchId !== activeWatchId) continue;
           if (event.kind === "error") setError(event.error);
@@ -85,6 +116,8 @@ export function useWorkspaceGit(client: GitWorkspaceClient, scope: FileWorkspace
         setLoading(false);
       }
     }).catch((cause) => {
+      initialPanelPaint.abandon();
+      if (pendingPanelPaint.current === initialPanelPaint) pendingPanelPaint.current = undefined;
       if (!disposed) {
         setError(String(cause));
         setLoading(false);
@@ -92,6 +125,8 @@ export function useWorkspaceGit(client: GitWorkspaceClient, scope: FileWorkspace
     });
     return () => {
       disposed = true;
+      initialPanelPaint.abandon();
+      if (pendingPanelPaint.current === initialPanelPaint) pendingPanelPaint.current = undefined;
       serial.current += 1;
       abort.current?.abort();
       watchAbort.abort();

@@ -188,8 +188,9 @@ fn canonical_engine_limits_all_bulk_jobs_to_two_and_stales_queued_binding() {
 
 #[test]
 #[ignore = "Phase 14 opt-in full admission queue fixture"]
-fn phase14_full_queue_reports_admission_and_exact_terminal_outcomes() {
+fn phase14_full_queue_reports_admission_and_completion_results() {
     let _serial = engine_test_lock();
+    crate::perf_log::reset_transfer_measurements();
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let (finished_tx, finished_rx) = std::sync::mpsc::channel();
     for index in 0..2 {
@@ -265,16 +266,37 @@ fn phase14_full_queue_reports_admission_and_exact_terminal_outcomes() {
         outcomes.iter().filter(|result| result.is_err()).count(),
         MAX_QUEUED_TRANSFERS
     );
+    let measurements = crate::perf_log::transfer_measurements_for_test();
+    assert_eq!(measurements.active_high_water, 2);
+    assert_eq!(measurements.queued_high_water, MAX_QUEUED_TRANSFERS);
+    assert_eq!(
+        measurements.admission_attempts,
+        (MAX_QUEUED_TRANSFERS + 3) as u64
+    );
+    assert_eq!(
+        measurements.admission_accepted,
+        (MAX_QUEUED_TRANSFERS + 2) as u64
+    );
+    assert_eq!(measurements.admission_rejected, 1);
+    assert_eq!(
+        measurements.completed_successes + measurements.completed_failures,
+        outcomes.len() as u64
+    );
+    assert_eq!(measurements.completed_successes, 2);
+    assert_eq!(measurements.completed_failures, MAX_QUEUED_TRANSFERS as u64);
+    assert_eq!(measurements.active, 0);
+    assert_eq!(measurements.queued, 0);
     println!(
         "PHASE14_METRIC {}",
         serde_json::json!({
             "lane": "transferAdmission",
-            "activeHighWater": 2,
-            "queuedHighWater": MAX_QUEUED_TRANSFERS,
-            "accepted": MAX_QUEUED_TRANSFERS + 2,
-            "rejected": 1,
-            "terminalOutcomes": outcomes.len(),
-            "outcomeParity": outcomes.len() == MAX_QUEUED_TRANSFERS + 2,
+            "activeHighWater": measurements.active_high_water,
+            "queuedHighWater": measurements.queued_high_water,
+            "accepted": measurements.admission_accepted,
+            "rejected": measurements.admission_rejected,
+            "completedSuccesses": measurements.completed_successes,
+            "completedFailures": measurements.completed_failures,
+            "completionParity": measurements.completed_successes + measurements.completed_failures == measurements.admission_accepted,
         })
     );
 }

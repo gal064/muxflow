@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { measurePerf, openPerfSpan, recordPerfCounter, recordPerfHighWater } from "../../perf/probe";
+import { measurePerfOutcome, measurePerfRequest, recordPerfCounter, recordPerfHighWater, recordPerfJsonBytesDeferred } from "../../perf/probe";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type {
   GitChangeKind,
@@ -45,47 +45,47 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
 
   async status(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitStatusSnapshot> {
     recordPerfCounter("git.statusRequests");
-    openPerfSpan("workflow.git.panelPaint");
-    const response = await measurePerf("git.status", () => retrySuperseded(async () => {
+    const status = await measurePerfOutcome("git.status", () => retrySuperseded(async () => {
       throwIfAborted(signal);
       const operationId = crypto.randomUUID();
       return await abortable(
-        this.#request(scope, root, { operation: "status", operationId }),
+        this.#request(scope, root, { operation: "status", operationId }, validateStatus, "git.status.request"),
         signal,
-        () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }),
+        () => this.#cancelRequest(scope.clientId, operationId),
       );
     }, signal));
-    if (!response.status) throw new Error("Host omitted Git status.");
-    recordPerfCounter("git.statusEntries", response.status.entries.length);
-    recordPerfCounter("git.statusMappedPayloadBytes", new TextEncoder().encode(JSON.stringify(response.status)).byteLength);
-    return mapStatus(response.status);
+    observeStatus(status);
+    return status;
   }
 
   async watch(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitWatchLease> {
     recordPerfCounter("git.watchRequests");
-    const { operationId, response, watchId } = await retrySuperseded(async () => {
+    const { status, watchId } = await retrySuperseded(async () => {
       throwIfAborted(signal);
       const watchId = crypto.randomUUID();
       const operationId = crypto.randomUUID();
-      const response = await abortable(
-        this.#request(scope, root, { operation: "watch", operationId, watchId }),
+      const status = await abortable(
+        this.#request(scope, root, { operation: "watch", operationId, watchId }, validateStatus, "git.watch.request"),
         signal,
-        () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }),
+        () => this.#cancelRequest(scope.clientId, operationId),
       );
-      return { operationId, response, watchId };
+      return { status, watchId };
     }, signal);
-    if (!response.status) throw new Error("Host omitted the Git watch bootstrap status.");
+    observeStatus(status);
     let released = false;
     return {
       watchId,
       rootToken: root.token,
       connectionEpoch: scope.terminalEpoch,
-      status: mapStatus(response.status),
+      status,
       release: () => {
         if (released) return;
         released = true;
         recordPerfCounter("git.watchReleases");
-        void this.#request(scope, root, { operation: "unwatch", operationId: crypto.randomUUID(), watchId }).catch(() => undefined);
+        void this.#request(
+          scope, root, { operation: "unwatch", operationId: crypto.randomUUID(), watchId },
+          () => undefined, "git.unwatch.request",
+        ).catch(() => undefined);
       },
     };
   }
@@ -101,30 +101,30 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     signal?: AbortSignal,
   ): Promise<GitDiff> {
     recordPerfCounter("git.diffRequests");
-    openPerfSpan("workflow.git.diffPaint");
-    const response = await measurePerf("git.diff", () => retrySuperseded(async () => {
+    const diff = await measurePerfOutcome("git.diff", () => retrySuperseded(async () => {
       throwIfAborted(signal);
       const operationId = crypto.randomUUID();
       return await abortable(this.#request(scope, root, {
         operation: "diff", operationId, repositoryId, path: [...fromBase64(path)],
         ...(originalPath ? { originalPath: [...fromBase64(originalPath)] } : {}),
         diffTarget: target, expectedStatusGeneration,
-      }), signal, () => invoke("cancel_git_request", { clientId: scope.clientId, operationId }));
+      }, (response) => validateDiff(response, repositoryId, path, originalPath, target), "git.diff.request"), signal,
+      () => this.#cancelRequest(scope.clientId, operationId));
     }, signal));
-    if (!response.diff) throw new Error("Host omitted the Git diff.");
-    recordPerfCounter("git.diffPayloadBytes", response.diff.oldContent.length + response.diff.newContent.length + response.diff.patch.length);
-    const diff = mapDiff(response.diff);
-    if (diff.repository.id !== repositoryId || diff.path !== path || (diff.originalPath ?? "") !== (originalPath ?? "") || diff.target !== target) {
-      throw new Error("Host returned a stale Git diff identity.");
-    }
+    recordPerfCounter("git.diffPayloadBytes", (diff.oldContent?.byteLength ?? 0) + (diff.newContent?.byteLength ?? 0) + (diff.patch?.byteLength ?? 0));
     return diff;
   }
 
   async prepareDiscard(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, request: GitMutationRequest): Promise<string> {
     if (request.kind !== "discardFile" && request.kind !== "discardHunk") throw new Error("Only discard operations require confirmation tokens.");
-    const response = await this.#request(scope, root, mutationCommand("prepareDiscard", repositoryId, request));
-    if (!response.confirmation?.token) throw new Error("Host omitted the discard confirmation token.");
-    return response.confirmation.token;
+    return this.#request(
+      scope, root, mutationCommand("prepareDiscard", repositoryId, request),
+      (response) => {
+        if (!response.confirmation?.token) throw new Error("Host omitted the discard confirmation token.");
+        return response.confirmation.token;
+      },
+      "git.prepareDiscard.request",
+    );
   }
 
   async mutate(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, request: GitMutationRequest): Promise<GitCommandResult> {
@@ -135,11 +135,11 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     // The host emits this exact rejection only while pre-command status is
     // being established. Once Git starts, uncertainty is returned as a
     // command outcome and must never pass through this retry path.
-    const response = await measurePerf("workflow.git.mutationAck", () => retrySuperseded(
-      () => this.#request(scope, root, mutationCommand("mutate", repositoryId, request)),
+    return measurePerfOutcome("workflow.git.mutationAck", () => retrySuperseded(
+      () => this.#request(
+        scope, root, mutationCommand("mutate", repositoryId, request), validateCommand, "git.mutation.request",
+      ),
     ));
-    if (!response.command) throw new Error("Host omitted the Git mutation result.");
-    return mapCommand(response.command);
   }
 
   async commit(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult> {
@@ -147,11 +147,9 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     if (!message.trim()) throw new Error("Enter a commit message.");
     // See mutate(): post-command outcomes are responses, never retryable
     // superseded-status transport errors.
-    const response = await measurePerf("workflow.git.mutationAck", () => retrySuperseded(() => this.#request(scope, root, {
+    return measurePerfOutcome("workflow.git.mutationAck", () => retrySuperseded(() => this.#request(scope, root, {
       operation: "commit", operationId: crypto.randomUUID(), repositoryId, expectedStatusGeneration, commitMessage: message,
-    })));
-    if (!response.command) throw new Error("Host omitted the Git commit result.");
-    return mapCommand(response.command);
+    }, validateCommand, "git.commit.request")));
   }
 
   subscribe(listener: (event: GitWorkspaceEvent) => void): () => void {
@@ -174,10 +172,21 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
 
   #publish(event: GitWorkspaceEvent): void { for (const listener of this.#listeners) listener(event); }
 
-  #request(scope: FileWorkspaceScope, root: ActiveRoot, command: Record<string, unknown>): Promise<WireResponse> {
-    recordPerfCounter("desktop.hostRequests");
-    recordPerfCounter("git.requestBytes", new TextEncoder().encode(JSON.stringify(command)).byteLength);
-    return invoke("git_request", {
+  #cancelRequest(clientId: string, operationId: string): Promise<unknown> {
+    const boundary = { clientId, operationId };
+    return measurePerfRequest(
+      "git.requestCancellation", "git", boundary, (request) => invoke("cancel_git_request", request),
+    );
+  }
+
+  async #request<T>(
+    scope: FileWorkspaceScope,
+    root: ActiveRoot,
+    command: Record<string, unknown>,
+    validate: (response: WireResponse) => T,
+    metricName: string,
+  ): Promise<T> {
+    const boundary = {
       clientId: scope.clientId,
       command: {
         ...command,
@@ -186,8 +195,42 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
         connectionEpoch: String(scope.terminalEpoch),
         expectedServerIdentity: scope.serverIdentity,
       },
-    });
+    };
+    return measurePerfRequest(metricName, "git", boundary, async (requestBoundary) => {
+      const response = await invoke<WireResponse>("git_request", requestBoundary);
+      return validate(response);
+    }, { byteCounters: ["git.requestBytes"] });
   }
+}
+
+function validateStatus(response: WireResponse): GitStatusSnapshot {
+  if (!response.status) throw new Error("Host omitted Git status.");
+  return mapStatus(response.status);
+}
+
+function observeStatus(status: GitStatusSnapshot): void {
+  recordPerfCounter("git.statusEntries", status.entries.length);
+  recordPerfJsonBytesDeferred("git.statusMappedPayloadBytes", status);
+}
+
+function validateDiff(
+  response: WireResponse,
+  repositoryId: string,
+  path: string,
+  originalPath: string | undefined,
+  target: GitDiffTarget,
+): GitDiff {
+  if (!response.diff) throw new Error("Host omitted the Git diff.");
+  const diff = mapDiff(response.diff);
+  if (diff.repository.id !== repositoryId || diff.path !== path || (diff.originalPath ?? "") !== (originalPath ?? "") || diff.target !== target) {
+    throw new Error("Host returned a stale Git diff identity.");
+  }
+  return diff;
+}
+
+function validateCommand(response: WireResponse): GitCommandResult {
+  if (!response.command) throw new Error("Host omitted the Git mutation result.");
+  return mapCommand(response.command);
 }
 
 function mutationCommand(operation: "prepareDiscard" | "mutate", repositoryId: string, request: GitMutationRequest): Record<string, unknown> {

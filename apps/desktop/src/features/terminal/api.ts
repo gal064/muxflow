@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { measurePerf, perfProbeEnabled, recordPerfCounter, startPerfSpan } from "../../perf/probe";
+import { measurePerfRequest, recordPerfCounter } from "../../perf/probe";
+import { perfProbeReady } from "../../perf/bootstrap";
 import type { ConnectionSpec, TmuxSnapshot } from "../../app/types";
 import type { WireFileEvent } from "../files/api";
 import type { WireGitEvent } from "../git/api";
@@ -184,6 +185,202 @@ export function decodeTerminalEvent(buffer: ArrayBuffer): TerminalEvent {
   }
 }
 
+class BridgeAcknowledgements {
+  readonly measurementId = crypto.randomUUID();
+  readonly #enabled: boolean;
+  #cumulativeFrames = 0;
+  #cumulativeBytes = 0;
+  #submittedFrames = 0;
+  #submittedBytes = 0;
+  #timer: ReturnType<typeof setTimeout> | undefined;
+  #inFlight: Promise<void> | undefined;
+  #closed = false;
+  #finalized = false;
+  #closePromise: Promise<void> | undefined;
+  #finalTotalsWaiter: (() => void) | undefined;
+
+  constructor(enabled: boolean) {
+    this.#enabled = enabled;
+  }
+
+  record(byteLength: number): void {
+    if (this.#closed || !this.#enabled) return;
+    this.#cumulativeFrames += 1;
+    this.#cumulativeBytes += byteLength;
+    this.#finalTotalsWaiter?.();
+    this.#schedule(16);
+  }
+
+  close(waitForQuiescence = false): Promise<void> {
+    this.#closePromise ??= this.#closeOnce(waitForQuiescence);
+    return this.#closePromise;
+  }
+
+  async #closeOnce(waitForQuiescence: boolean): Promise<void> {
+    if (this.#finalized) return;
+    if (!this.#enabled) {
+      this.#closed = true;
+      return;
+    }
+    const deadline = Date.now() + FINAL_BRIDGE_SHUTDOWN_WAIT_MS;
+    const finalTotals = waitForQuiescence ? await this.#waitForQuiescence(deadline) : undefined;
+    if (waitForQuiescence && !finalTotals) recordPerfCounter("bridge.finalQuiesceTimeouts");
+    if (finalTotals && !(await this.#waitForFinalTotals(finalTotals, deadline))) {
+      recordPerfCounter("bridge.finalDeliveryTimeouts");
+      recordPerfCounter("bridge.finalDeliveryOutstandingFrames", Math.max(0, finalTotals.cumulativeFrameCount - this.#cumulativeFrames));
+      recordPerfCounter("bridge.finalDeliveryOutstandingBytes", Math.max(0, finalTotals.cumulativeByteLength - this.#cumulativeBytes));
+    }
+    this.#closed = true;
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
+    if (this.#inFlight) await this.#inFlight.catch(() => undefined);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (this.#submittedFrames === this.#cumulativeFrames && this.#submittedBytes === this.#cumulativeBytes) break;
+      await this.#send(deadline).catch(() => undefined);
+      if (Date.now() >= deadline) break;
+    }
+    if (!waitForQuiescence || finalTotals) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const boundary = { measurementId: this.measurementId };
+        try {
+          await measurePerfRequest(
+            "bridge.finalize", "terminal", boundary,
+            (request) => this.#invokeWithinDeadline(invoke("finalize_bridge_measurement", request), deadline),
+          );
+          this.#finalized = true;
+          break;
+        } catch {
+          // A retained native tombstone keeps this failure observable. Retry the
+          // explicit finalization without making terminal shutdown fatal.
+        }
+        if (Date.now() >= deadline) break;
+      }
+    }
+    if (!this.#finalized) {
+      recordPerfCounter("bridge.finalizationIncomplete");
+      if (Date.now() >= deadline) recordPerfCounter("bridge.shutdownDeadlineTimeouts");
+    }
+  }
+
+  async #waitForQuiescence(deadline: number): Promise<BridgeFinalTotals | undefined> {
+    while (Date.now() < deadline) {
+      const boundary = { measurementId: this.measurementId };
+      let totals: BridgeFinalTotals | undefined;
+      try {
+        await measurePerfRequest(
+          "bridge.finalTotals", "terminal", boundary,
+          async (request) => {
+            const value = await this.#invokeWithinDeadline(
+              invoke<BridgeFinalTotals>("bridge_final_totals", request), deadline,
+            );
+          if (!validBridgeFinalTotals(value)) throw new Error("Native bridge totals were invalid.");
+          totals = value;
+          },
+        );
+      } catch {
+        // The producer may still be releasing a measured channel. Continue to
+        // the one absolute deadline so a missing quiescence signal is explicit.
+      }
+      if (totals?.quiesced) return totals;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(16, Math.max(0, deadline - Date.now()))));
+    }
+    return undefined;
+  }
+
+  async #waitForFinalTotals(expected: BridgeFinalTotals, deadline: number): Promise<boolean> {
+    const complete = () => this.#cumulativeFrames >= expected.cumulativeFrameCount
+      && this.#cumulativeBytes >= expected.cumulativeByteLength;
+    if (complete()) return true;
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (delivered: boolean) => {
+        if (this.#finalTotalsWaiter === check) this.#finalTotalsWaiter = undefined;
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(delivered);
+      };
+      const check = () => { if (complete()) finish(true); };
+      this.#finalTotalsWaiter = check;
+      timer = setTimeout(
+        () => finish(false),
+        Math.min(FINAL_BRIDGE_DELIVERY_WAIT_MS, Math.max(0, deadline - Date.now())),
+      );
+      check();
+    });
+  }
+
+  async #invokeWithinDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+    const remaining = Math.min(MEASUREMENT_INVOKE_WAIT_MS, Math.max(0, deadline - Date.now()));
+    if (remaining === 0) {
+      recordPerfCounter("bridge.measurementInvokeTimeouts");
+      throw new Error("measurement invoke exceeded the shutdown deadline");
+    }
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        recordPerfCounter("bridge.measurementInvokeTimeouts");
+        reject(new Error("measurement invoke timed out"));
+      }, remaining);
+      void promise.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error) => { clearTimeout(timer); reject(error); },
+      );
+    });
+  }
+
+  #schedule(delay: number): void {
+    if (this.#timer !== undefined || this.#inFlight || this.#closed) return;
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      void this.#send().catch(() => undefined);
+    }, delay);
+  }
+
+  #send(deadline = Date.now() + MEASUREMENT_INVOKE_WAIT_MS): Promise<void> {
+    if (this.#inFlight) return this.#inFlight;
+    const cumulativeFrameCount = this.#cumulativeFrames;
+    const cumulativeByteLength = this.#cumulativeBytes;
+    const boundary = {
+      measurementId: this.measurementId,
+      cumulativeFrameCount,
+      cumulativeByteLength,
+    };
+    this.#inFlight = measurePerfRequest(
+      "bridge.acknowledgement", "terminal", boundary,
+      (request) => this.#invokeWithinDeadline(invoke("acknowledge_bridge_events", request), deadline),
+    ).then(() => {
+      this.#submittedFrames = cumulativeFrameCount;
+      this.#submittedBytes = cumulativeByteLength;
+    }).finally(() => {
+      this.#inFlight = undefined;
+      if (this.#submittedFrames !== this.#cumulativeFrames || this.#submittedBytes !== this.#cumulativeBytes) {
+        this.#schedule(100);
+      }
+    });
+    return this.#inFlight;
+  }
+}
+
+/** Shutdown remains bounded when WebView delivery loses an admitted callback. */
+export const FINAL_BRIDGE_DELIVERY_WAIT_MS = 1_000;
+export const FINAL_BRIDGE_SHUTDOWN_WAIT_MS = 2_000;
+const MEASUREMENT_INVOKE_WAIT_MS = 250;
+
+const bridgeAcknowledgements = new Map<string, BridgeAcknowledgements>();
+
+interface BridgeFinalTotals {
+  cumulativeFrameCount: number;
+  cumulativeByteLength: number;
+  quiesced: boolean;
+}
+
+function validBridgeFinalTotals(value: BridgeFinalTotals | undefined): value is BridgeFinalTotals {
+  return Boolean(value
+    && Number.isSafeInteger(value.cumulativeFrameCount)
+    && value.cumulativeFrameCount >= 0
+    && Number.isSafeInteger(value.cumulativeByteLength)
+    && value.cumulativeByteLength >= 0
+    && typeof value.quiesced === "boolean");
+}
+
 function decodePaneResource(paneId: string, sequence: number, payload: Uint8Array): TerminalEvent {
   requireHostSequence(sequence, "pane resource");
   requirePaneId(paneId, "pane resource");
@@ -272,38 +469,67 @@ export async function startTerminal(
   connection: ConnectionSpec,
   onEvent: (event: TerminalEvent) => void,
 ): Promise<string> {
+  const measurementEnabled = await perfProbeReady();
   const channel = new Channel<ArrayBuffer>();
+  const acknowledgements = new BridgeAcknowledgements(measurementEnabled);
   channel.onmessage = (frame) => {
-    const admission = startPerfSpan("bridge.jsAdmission");
     recordPerfCounter("bridge.ingressBytes", frame.byteLength);
     recordPerfCounter("desktop.hostEvents");
     try {
       onEvent(decodeTerminalEvent(frame));
     } finally {
-      admission();
-      if (perfProbeEnabled()) {
-        void invoke("acknowledge_bridge_event", { byteLength: frame.byteLength }).catch(() => undefined);
-      }
+      acknowledgements.record(frame.byteLength);
     }
   };
-  return measurePerf("workflow.connect", () =>
-    invoke<string>("start_terminal", { sessionId, paneIds, connection, onEvent: channel }));
+  try {
+    const startRequest = {
+      sessionId, paneIds, connection, measurementId: acknowledgements.measurementId,
+    };
+    const boundary = { ...startRequest, onEvent: channel };
+    const clientId = await measurePerfRequest("workflow.connect", "terminal", boundary, async (request) => {
+      const value = await invoke<string>("start_terminal", request);
+      if (!value) throw new Error("Native terminal startup omitted its client ID.");
+      return value;
+    });
+    bridgeAcknowledgements.set(clientId, acknowledgements);
+    return clientId;
+  } catch (error) {
+    await acknowledgements.close();
+    throw error;
+  }
 }
 
-export function stopTerminal(clientId: string): Promise<void> {
-  return invoke("stop_terminal", { clientId });
+export async function stopTerminal(clientId: string): Promise<void> {
+  const acknowledgements = bridgeAcknowledgements.get(clientId);
+  let stopped = false;
+  try {
+    const boundary = { clientId };
+    await measurePerfRequest(
+      "terminal.stop", "terminal", boundary, (request) => invoke<void>("stop_terminal", request),
+    );
+    stopped = true;
+  } finally {
+    bridgeAcknowledgements.delete(clientId);
+    await acknowledgements?.close(stopped);
+  }
 }
 
 export function sendInput(clientId: string, paneId: string, data: string): Promise<void> {
   const byteLength = encoder.encode(data).byteLength;
   if (byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(byteLength);
-  return measurePerf("invoke.send_terminal_input", () => invoke("send_terminal_input", { clientId, paneId, data }));
+  const boundary = { clientId, paneId, data };
+  return measurePerfRequest(
+    "invoke.send_terminal_input", "terminal", boundary, (request) => invoke("send_terminal_input", request),
+  );
 }
 
 export function sendBinaryInput(clientId: string, paneId: string, data: Uint8Array): Promise<void> {
   if (data.byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(data.byteLength);
-  return measurePerf("invoke.send_terminal_input_bytes", () =>
-    invoke("send_terminal_input_bytes", encodeTerminalInputFrame(clientId, paneId, data)));
+  const frame = encodeTerminalInputFrame(clientId, paneId, data);
+  return measurePerfRequest(
+    "invoke.send_terminal_input_bytes", "terminal", frame,
+    (request) => invoke("send_terminal_input_bytes", request), { encoding: "raw" },
+  );
 }
 
 /**
@@ -333,7 +559,10 @@ function oversizedTerminalInput(byteLength: number): Promise<never> {
 }
 
 export function resizeClient(clientId: string, columns: number, rows: number): Promise<void> {
-  return invoke("resize_terminal_client", { clientId, columns, rows });
+  const boundary = { clientId, columns, rows };
+  return measurePerfRequest(
+    "invoke.resize_terminal_client", "terminal", boundary, (request) => invoke("resize_terminal_client", request),
+  );
 }
 
 /**
@@ -342,8 +571,10 @@ export function resizeClient(clientId: string, columns: number, rows: number): P
  * why this exists and when it is sent.
  */
 export function selectTerminalSession(clientId: string, sessionId: string): Promise<void> {
-  return measurePerf("invoke.select_terminal_session", () =>
-    invoke("select_terminal_session", { clientId, sessionId }));
+  const boundary = { clientId, sessionId };
+  return measurePerfRequest(
+    "invoke.select_terminal_session", "terminal", boundary, (request) => invoke("select_terminal_session", request),
+  );
 }
 
 export function setTerminalVisibility(
@@ -353,9 +584,14 @@ export function setTerminalVisibility(
   serializedSnapshot: Uint8Array,
   checkpoint: TerminalVisibilityCheckpoint,
 ): Promise<void> {
-  return measurePerf(visible ? "invoke.set_terminal_visibility.reveal" : "invoke.set_terminal_visibility.hide", () =>
-    invoke("set_terminal_visibility",
-      encodeTerminalVisibilityFrame(clientId, paneId, visible, serializedSnapshot, checkpoint)));
+  const frame = encodeTerminalVisibilityFrame(clientId, paneId, visible, serializedSnapshot, checkpoint);
+  return measurePerfRequest(
+    visible ? "invoke.set_terminal_visibility.reveal" : "invoke.set_terminal_visibility.hide",
+    "terminal",
+    frame,
+    (request) => invoke("set_terminal_visibility", request),
+    { encoding: "raw" },
+  );
 }
 
 /**
@@ -393,7 +629,10 @@ export function encodeTerminalVisibilityFrame(
 }
 
 export function requestTerminalSeed(clientId: string, paneId: string): Promise<void> {
-  return measurePerf("invoke.request_terminal_seed", () => invoke("request_terminal_seed", { clientId, paneId }));
+  const boundary = { clientId, paneId };
+  return measurePerfRequest(
+    "invoke.request_terminal_seed", "terminal", boundary, (request) => invoke("request_terminal_seed", request),
+  );
 }
 
 export function terminalBridgeKey(connection: ConnectionSpec, epoch: number): string {

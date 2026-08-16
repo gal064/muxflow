@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { keyForScope, keyForTransferConnection, sameRoot } from "./api";
-import { measurePerf, openPerfSpan, recordPerfCounter } from "../../perf/probe";
+import { measurePerfOutcome, recordPerfCounter } from "../../perf/probe";
+import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
 import { isTerminalTransferState, mergeCanonicalTransfer } from "../transfers/transferState";
 import type {
   ActiveRoot,
@@ -25,6 +26,8 @@ interface WorkspaceFilesState {
 }
 
 const EMPTY = new Map<string, DirectoryListing>();
+const EXTERNAL_CHANGE_PAINT = ["explorer.externalChangeToPaint"] as const;
+type DirectoryLoadResult = "applied" | "stale" | "failed";
 
 /**
  * How often the workspace root is re-resolved when nothing has changed. Every
@@ -60,7 +63,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const scopeEpoch = useRef(0);
   const rootProbeSerial = useRef(0);
   const directorySerial = useRef(new Map<string, number>());
-  const refreshTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const refreshTimers = useRef(new Map<string, { timer: ReturnType<typeof setTimeout>; paint: PaintTicket }>());
+  const paintGenerations = useRef(new Map<string, number>());
   const scopeKey = scope ? keyForScope(scope) : "";
   const transferConnectionKey = scope ? keyForTransferConnection(scope) : "";
   const scopeRef = useRef(scope);
@@ -78,17 +82,22 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
    * they compare against the root the request carried, which was the new one.
    * One guard here covers every caller, including the next deferred one.
    */
-  const loadDirectory = useCallback(async (root: ActiveRoot, path: string, force = false, append = false) => {
+  const loadDirectory = useCallback(async (
+    root: ActiveRoot,
+    path: string,
+    force = false,
+    append = false,
+  ): Promise<DirectoryLoadResult> => {
     const activeScope = scopeRef.current;
-    if (!activeScope || keyForScope(activeScope) !== scopeKey) return;
-    if (!sameRoot(stateRef.current.root, root)) return;
+    if (!activeScope || keyForScope(activeScope) !== scopeKey) return "stale";
+    if (!sameRoot(stateRef.current.root, root)) return "stale";
     const previous = stateRef.current.listings.get(path);
     if (!force && !append && previous) {
       recordPerfCounter("explorer.cacheHits");
-      return;
+      return "applied";
     }
     recordPerfCounter("explorer.cacheMisses");
-    if (append && (!previous?.nextPageToken || previous.complete)) return;
+    if (append && (!previous?.nextPageToken || previous.complete)) return "stale";
     const epoch = scopeEpoch.current;
     const serial = (directorySerial.current.get(path) ?? 0) + 1;
     directorySerial.current.set(path, serial);
@@ -97,11 +106,12 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       // What a directory read costs on this link, when `ADE_PERF_LOG` is set and
       // nothing otherwise. The flicker this hook was reported for is only ever
       // visible when this number is large, and until now nothing measured it.
-      const listing = await measurePerf(
+      const listing = await measurePerfOutcome(
         append ? "files.listDirectory.page" : "files.listDirectory",
         () => client.listDirectory(activeScope, root, path, append ? previous?.nextPageToken : undefined),
       );
-      if (epoch !== scopeEpoch.current || directorySerial.current.get(path) !== serial || keyForScope(activeScope) !== scopeKey) return;
+      if (epoch !== scopeEpoch.current || directorySerial.current.get(path) !== serial || keyForScope(activeScope) !== scopeKey) return "stale";
+      if (!sameRoot(stateRef.current.root, root) || listing.rootToken !== root.token) return "stale";
       setState((current) => {
         if (!sameRoot(current.root, root) || listing.rootToken !== root.token) return current;
         const listings = new Map(current.listings);
@@ -114,12 +124,14 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
         loading.delete(path);
         return { ...current, listings, loading };
       });
+      return "applied";
     } catch (error) {
       setState((current) => {
         const loading = new Set(current.loading);
         loading.delete(path);
         return sameRoot(current.root, root) ? { ...current, loading, error: String(error) } : current;
       });
+      return "failed";
     }
   }, [client, scopeKey]);
 
@@ -144,10 +156,24 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const timers = refreshTimers.current;
     const key = `${root.token}\0${path}`;
     if (timers.has(key)) return;
-    timers.set(key, setTimeout(() => {
+    const paint = createPaintTicket(EXTERNAL_CHANGE_PAINT, scopeEpoch.current);
+    const timer = setTimeout(() => {
       timers.delete(key);
-      void loadDirectory(root, path, true);
-    }, DIRECTORY_REFRESH_COALESCE_MS));
+      if (!sameRoot(stateRef.current.root, root)) {
+        paint.abandon();
+        return;
+      }
+      void loadDirectory(root, path, true).then((result) => {
+        if (result !== "applied") {
+          paint.abandon();
+          return;
+        }
+        paint.afterPaint((ticket) => ticket.lifecycleGeneration === scopeEpoch.current
+          && sameRoot(stateRef.current.root, root)
+          && stateRef.current.expanded.has(path));
+      });
+    }, DIRECTORY_REFRESH_COALESCE_MS);
+    timers.set(key, { timer, paint });
   }, [loadDirectory]);
 
   const applyEvent = useCallback((event: WorkspaceEvent) => {
@@ -167,10 +193,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     }
     if (!current.root || event.rootToken !== current.root.token) return;
     if (event.kind === "directoryChanged") {
-      openPerfSpan("explorer.externalChangeToPaint");
       coalesceRefresh(current.root, event.directory);
     } else if (event.kind === "fileChanged" || event.kind === "fileDeleted") {
-      openPerfSpan("explorer.externalChangeToPaint");
       coalesceRefresh(current.root, parentPath(event.path));
     }
   }, [coalesceRefresh]);
@@ -208,22 +232,37 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       if (resolving) return;
       resolving = true;
       const probe = ++rootProbeSerial.current;
-      openPerfSpan("workflow.explorer.rootPaint");
+      const rootPaint = createPaintTicket(["workflow.explorer.rootPaint"], epoch);
       try {
         const activeScope = scopeRef.current;
-        if (!activeScope || keyForScope(activeScope) !== scopeKey) return;
+        if (!activeScope || keyForScope(activeScope) !== scopeKey) {
+          rootPaint.abandon();
+          return;
+        }
         const root = await client.resolveActiveRoot(activeScope);
-        if (disposed || epoch !== scopeEpoch.current || probe !== rootProbeSerial.current) return;
-        setState((current) => sameRoot(current.root, root) ? current : {
-          ...current,
-          scopeKey,
-          root,
-          listings: new Map(),
-          expanded: new Set([root.path]),
-          loading: new Set(),
-          error: undefined,
-        });
+        if (disposed || epoch !== scopeEpoch.current || probe !== rootProbeSerial.current) {
+          rootPaint.abandon();
+          return;
+        }
+        if (sameRoot(stateRef.current.root, root)) {
+          rootPaint.abandon();
+          return;
+        }
+        setState((current) => ({
+            ...current,
+            scopeKey,
+            root,
+            listings: new Map(),
+            expanded: new Set([root.path]),
+            loading: new Set(),
+            error: undefined,
+        }));
+        rootPaint.afterPaint((ticket) => !disposed
+          && ticket.lifecycleGeneration === scopeEpoch.current
+          && probe === rootProbeSerial.current
+          && sameRoot(stateRef.current.root, root));
       } catch (error) {
+        rootPaint.abandon();
         if (!disposed && epoch === scopeEpoch.current && probe === rootProbeSerial.current) setState((current) => ({ ...current, error: String(error) }));
       } finally {
         resolving = false;
@@ -244,8 +283,12 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       // A refresh still waiting out its window belongs to the scope that is
       // going away; letting it fire would read a directory for a pane the user
       // has already left.
-      for (const timer of refreshTimers.current.values()) clearTimeout(timer);
+      for (const { timer, paint } of refreshTimers.current.values()) {
+        clearTimeout(timer);
+        paint.abandon();
+      }
       refreshTimers.current.clear();
+      paintGenerations.current.clear();
       unsubscribe?.();
     };
   }, [applyEvent, client, scopeKey]);
@@ -278,10 +321,12 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   }, [client, scopeKey, state.expanded, state.root]);
 
   const toggleDirectory = useCallback((path: string) => {
-    if (!stateRef.current.expanded.has(path)) {
-      openPerfSpan("explorer.expandToPaint");
-      openPerfSpan("workflow.explorer.directoryExpandPaint");
-    }
+    const expanding = !stateRef.current.expanded.has(path);
+    const generation = (paintGenerations.current.get(path) ?? 0) + 1;
+    paintGenerations.current.set(path, generation);
+    const paint = expanding ? createPaintTicket(
+      ["explorer.expandToPaint", "workflow.explorer.directoryExpandPaint"], generation,
+    ) : undefined;
     setState((current) => {
       const expanded = new Set(current.expanded);
       if (expanded.has(path)) expanded.delete(path);
@@ -289,7 +334,17 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       return { ...current, expanded };
     });
     const root = stateRef.current.root;
-    if (root && !stateRef.current.listings.has(path)) void loadDirectory(root, path);
+    const schedulePaint = () => paint?.afterPaint((ticket) =>
+      ticket.lifecycleGeneration === paintGenerations.current.get(path)
+      && sameRoot(stateRef.current.root, root)
+      && stateRef.current.expanded.has(path));
+    if (root && !stateRef.current.listings.has(path)) {
+      void loadDirectory(root, path).then((result) => {
+        if (result === "applied") schedulePaint();
+        else paint?.abandon();
+      });
+    }
+    else schedulePaint();
   }, [loadDirectory]);
 
   /**
