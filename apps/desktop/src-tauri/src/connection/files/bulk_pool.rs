@@ -37,6 +37,7 @@ const FIRST_REQUEST_ID: u64 = 2;
 /// stale binding past the check that exists to catch it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BulkKey {
+    client_scope: uuid::Uuid,
     connection: ConnectionSpec,
     server_identity: String,
     connection_epoch: u64,
@@ -308,6 +309,12 @@ pub(super) struct BulkLease {
     cancellation: Arc<CancelState>,
 }
 
+#[derive(Clone, Copy)]
+enum AcquisitionMode {
+    Request,
+    AuthoritativeReconciliation,
+}
+
 impl BulkLease {
     pub(super) fn acquire(
         connection: &ConnectionSpec,
@@ -315,8 +322,58 @@ impl BulkLease {
         cancellation: &Arc<CancelState>,
         deadline: &DeadlineGuard,
     ) -> Result<Self, String> {
+        Self::acquire_with_mode(
+            connection,
+            binding,
+            cancellation,
+            deadline,
+            AcquisitionMode::Request,
+        )
+    }
+
+    pub(super) fn acquire_authoritative(
+        connection: &ConnectionSpec,
+        binding: &BulkBinding,
+        cancellation: &Arc<CancelState>,
+        deadline: &DeadlineGuard,
+    ) -> Result<Self, String> {
+        Self::acquire_with_mode(
+            connection,
+            binding,
+            cancellation,
+            deadline,
+            AcquisitionMode::AuthoritativeReconciliation,
+        )
+    }
+
+    fn acquire_with_mode(
+        connection: &ConnectionSpec,
+        binding: &BulkBinding,
+        cancellation: &Arc<CancelState>,
+        deadline: &DeadlineGuard,
+        mode: AcquisitionMode,
+    ) -> Result<Self, String> {
+        Self::acquire_with_spawn(
+            connection,
+            binding,
+            cancellation,
+            deadline,
+            mode,
+            spawn_bulk_bridge,
+        )
+    }
+
+    fn acquire_with_spawn(
+        connection: &ConnectionSpec,
+        binding: &BulkBinding,
+        cancellation: &Arc<CancelState>,
+        deadline: &DeadlineGuard,
+        mode: AcquisitionMode,
+        spawn: impl FnOnce(&ConnectionSpec, &dyn Fn() -> bool) -> Result<Child, String>,
+    ) -> Result<Self, String> {
         let cancellation = Arc::clone(cancellation);
         let key = BulkKey {
+            client_scope: binding.client.bulk_scope,
             connection: connection.clone(),
             server_identity: binding.expected_server_identity.clone(),
             connection_epoch: binding.connection_epoch,
@@ -341,8 +398,8 @@ impl BulkLease {
             });
         }
 
-        let cancelled = || cancellation.is_cancelled();
-        let mut child = spawn_bulk_bridge(connection, &cancelled)?;
+        let cancelled = || matches!(mode, AcquisitionMode::Request) && cancellation.is_cancelled();
+        let mut child = spawn(connection, &cancelled)?;
         let stdin = child.stdin.take().ok_or("bulk bridge stdin unavailable")?;
         let stdout = child
             .stdout
@@ -359,7 +416,12 @@ impl BulkLease {
         // The helper is cancellation-owned before any handshake I/O. User,
         // stale-binding, and inactivity cancellation can therefore interrupt
         // a silent peer instead of occupying one of the two engine lanes.
-        let _process_binding = cancellation.bind_process(bridge.child.id())?;
+        let _process_binding = match mode {
+            AcquisitionMode::Request => cancellation.bind_process(bridge.child.id())?,
+            AcquisitionMode::AuthoritativeReconciliation => {
+                cancellation.bind_authoritative_process(bridge.child.id())?
+            }
+        };
         // The handshake is part of establishing the bridge, not part of the job:
         // a reused bridge has already made it, which is one of the round trips
         // this pool exists to stop paying.
@@ -367,7 +429,7 @@ impl BulkLease {
             &mut bridge.stdin,
             &mut bridge.reader,
             binding,
-            &cancellation,
+            matches!(mode, AcquisitionMode::Request).then_some(cancellation.as_ref()),
             deadline,
         )?;
         drop(_process_binding);
@@ -419,31 +481,32 @@ impl Drop for BulkLease {
     }
 }
 
-/// Drops the pooled connections belonging to one control connection.
+/// Drops every pooled bridge owned by one exact desktop control client.
 ///
-/// Filtered by the server identity the bridges handshook against, because a
-/// second connection to another host can be live at the same moment: draining
-/// everything would close bridges that are still perfectly reachable and make
-/// the next file operation over there pay a handshake it had already paid. This
-/// connection's own entries are unreachable once it stops — a pooled bridge is
-/// only ever handed to a job whose binding matches its key — and closing them
-/// now frees an ssh channel and a remote helper process rather than waiting out
-/// the idle timeout. An identity that never completed a handshake is empty and
-/// matches nothing, which is right: no bridge can be pooled under one.
-pub(crate) fn close_pooled_bulk_bridges(server_identity: &str) {
+/// The client token is narrower than server identity: two windows may attach
+/// to the same server without owning one another's bridges. The token remains
+/// stable across reconnect so draining immediately before epoch replacement
+/// retires every now-unreachable old-epoch bridge.
+pub(crate) fn close_pooled_bulk_bridges(client_scope: uuid::Uuid) {
     // Taken out of the lock first: closing a bridge kills and reaps a process,
     // and doing that under the pool mutex would block every other file
     // operation for the length of two `waitpid` calls.
-    let closing = pool().drain_matching(|key| key.server_identity == server_identity);
+    let closing = pool().drain_matching(|key| key.client_scope == client_scope);
     drop(closing);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     fn key(identity: &str, epoch: u64) -> BulkKey {
+        key_for(uuid::Uuid::from_u128(1), identity, epoch)
+    }
+
+    fn key_for(client_scope: uuid::Uuid, identity: &str, epoch: u64) -> BulkKey {
         BulkKey {
+            client_scope,
             connection: ConnectionSpec::Local,
             server_identity: identity.into(),
             connection_epoch: epoch,
@@ -459,6 +522,7 @@ mod tests {
         assert_ne!(
             base,
             BulkKey {
+                client_scope: base.client_scope,
                 connection: ConnectionSpec::Ssh {
                     profile_id: "p".into(),
                     target: "host".into(),
@@ -559,17 +623,101 @@ mod tests {
     }
 
     #[test]
-    fn stopping_one_connection_leaves_another_connections_bridges_pooled() {
+    fn stopping_one_same_server_client_leaves_the_other_clients_bridges_pooled() {
         let mut pool = IdlePool::new(IDLE_TIMEOUT, MAX_IDLE);
         let now = Instant::now();
-        pool.release(key("stopping", 1), "theirs", now);
-        pool.release(key("staying", 1), "ours", now);
+        let stopping = uuid::Uuid::from_u128(10);
+        let staying = uuid::Uuid::from_u128(11);
+        pool.release(key_for(stopping, "same-server", 1), "theirs", now);
+        pool.release(key_for(staying, "same-server", 1), "ours", now);
 
         assert_eq!(
-            pool.drain_matching(|key| key.server_identity == "stopping"),
+            pool.drain_matching(|key| key.client_scope == stopping),
             vec!["theirs"]
         );
         // The second live connection keeps the bridge it had warm.
-        assert_eq!(pool.take(&key("staying", 1), now).0, Some("ours"));
+        assert_eq!(
+            pool.take(&key_for(staying, "same-server", 1), now).0,
+            Some("ours")
+        );
+    }
+
+    #[test]
+    fn reconnect_drains_both_warm_bridges_from_the_previous_epoch() {
+        let mut pool = IdlePool::new(IDLE_TIMEOUT, MAX_IDLE);
+        let now = Instant::now();
+        let scope = uuid::Uuid::from_u128(20);
+        pool.release(key_for(scope, "server", 7), "first", now);
+        pool.release(key_for(scope, "server", 7), "second", now);
+
+        assert_eq!(
+            pool.drain_matching(|key| key.client_scope == scope),
+            vec!["first", "second"]
+        );
+        assert!(pool.entries.is_empty());
+    }
+
+    #[test]
+    fn cancelled_verifying_request_can_acquire_an_authoritative_bulk_lease() {
+        let client = Arc::new(crate::connection::TerminalClient::new());
+        client
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
+        client
+            .terminal_epoch
+            .store(7, std::sync::atomic::Ordering::Release);
+        *client.server_identity.lock().unwrap() = "server-a".into();
+        let binding = BulkBinding::capture(Arc::clone(&client), "server-a".into(), 7).unwrap();
+        let cancellation = Arc::new(CancelState::new());
+        cancellation.prepare_finalize().unwrap();
+        cancellation.cancel();
+        let deadline = cancellation.arm_inactivity_deadline();
+        let response = tmux_agent_protocol::encode_frame(&tmux_agent_protocol::envelope(
+            1,
+            0,
+            tmux_agent_protocol::v1::envelope::Payload::ServerHello(
+                tmux_agent_protocol::v1::ServerHello {
+                    server_identity: "server-a".into(),
+                    connection_epoch: 7,
+                    ..Default::default()
+                },
+            ),
+        ))
+        .unwrap();
+        let escaped = response
+            .iter()
+            .map(|byte| format!("\\{byte:03o}"))
+            .collect::<String>();
+
+        let lease = BulkLease::acquire_with_spawn(
+            &ConnectionSpec::Local,
+            &binding,
+            &cancellation,
+            &deadline,
+            AcquisitionMode::AuthoritativeReconciliation,
+            move |_, cancelled| {
+                assert!(
+                    !cancelled(),
+                    "authoritative establishment ignores request cancellation"
+                );
+                Command::new("sh")
+                    .args([
+                        "-c",
+                        "printf '%b' \"$1\"; exec sleep 30",
+                        "bulk-fixture",
+                        &escaped,
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .unwrap();
+
+        assert_ne!(lease.process_id(), 0);
+        drop(lease);
+        deadline.complete();
     }
 }

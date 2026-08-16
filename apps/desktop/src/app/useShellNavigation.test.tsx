@@ -709,7 +709,7 @@ describe("shell navigation hook cross-kind ownership", () => {
     const renderer = await harness.renderer();
     const reserved = harness.navigation.beginDeferredNavigation();
     act(() => harness.navigation.selectAppTab("$1", "@0", "notes"));
-    act(() => harness.navigation.selectCreatedWindow("$1", "@9", 2, reserved));
+    act(() => harness.navigation.commitCreatedWindow("$1", "@9", 2, reserved));
     await flush();
     expect(performAction).not.toHaveBeenCalled();
     expect(harness.setAppTab).toHaveBeenLastCalledWith("$1", "notes");

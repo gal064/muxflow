@@ -86,6 +86,7 @@ use transport::{
 };
 
 struct TerminalClient {
+    bulk_scope: Uuid,
     stdin: Mutex<Option<ChildStdin>>,
     child: Mutex<Option<Child>>,
     stop_signal: StopSignal,
@@ -113,6 +114,7 @@ struct InitialHostState {
 impl TerminalClient {
     fn new() -> Self {
         Self {
+            bulk_scope: Uuid::new_v4(),
             stdin: Mutex::new(None),
             child: Mutex::new(None),
             stop_signal: StopSignal::default(),
@@ -478,15 +480,14 @@ pub fn start_terminal(
 pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> Result<(), String> {
     if let Some(client) = clients.0.lock().unwrap().remove(&client_id) {
         client.shutdown_transport("host connection stopped");
-        // Pooled bulk bridges are bound to a control connection's server
-        // identity and epoch, so once that connection is gone none of *its*
-        // bridges can be handed to anything: closing them here frees their ssh
+        // Pooled bulk bridges are owned by this exact control-client token, so
+        // once the connection is gone none of *its* bridges can be handed to
+        // anything: closing them here frees their ssh
         // channels and remote helper processes now rather than at the idle
         // timeout. Only this connection's, though — another window can be
         // connected to another host at the same time, and its warm bridges are
         // still reachable.
-        let server_identity = client.server_identity.lock().unwrap().clone();
-        files::bulk_pool::close_pooled_bulk_bridges(&server_identity);
+        files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
     }
     Ok(())
 }

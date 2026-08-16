@@ -159,14 +159,19 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                             ..Default::default()
                         }))
                         .await;
-                    let selection_error = (action_kind == v1::TmuxActionKind::SelectSession)
-                        .then(|| {
-                            terminal
-                                .lock()
-                                .unwrap()
-                                .select_session(&outcome.result.session_id)
-                        })
-                        .and_then(Result::err);
+                    let selection_error = matches!(
+                        action_kind,
+                        v1::TmuxActionKind::SelectSession
+                            | v1::TmuxActionKind::CreateSession
+                            | v1::TmuxActionKind::CreateWindow
+                    )
+                    .then(|| {
+                        terminal
+                            .lock()
+                            .unwrap()
+                            .select_session(&outcome.result.session_id)
+                    })
+                    .and_then(Result::err);
                     if let Some(error) = selection_error {
                         send_response(
                             control_tx,
@@ -174,7 +179,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                             response_error(
                                 "outcome_unknown",
                                 &format!(
-                                    "outcome unknown: selected session remained authoritative but client selection failed: {error}"
+                                    "outcome unknown: action remained authoritative but client session selection failed: {error}"
                                 ),
                             ),
                         )

@@ -169,6 +169,7 @@ pub(super) fn run_client_input_dispatch(
     receiver: mpsc::Receiver<ClientInputDispatch>,
 ) {
     let mut deferred = None;
+    let mut pending_error = None;
     loop {
         let message = match deferred.take() {
             Some(message) => message,
@@ -213,19 +214,25 @@ pub(super) fn run_client_input_dispatch(
                     && !client.read_only.load(Ordering::Acquire)
                 {
                     let dispatched_bytes = data.len();
-                    let _ = client.dispatch_request(v1::Request {
+                    let result = client.dispatch_request(v1::Request {
                         operation: v1::Operation::TerminalInput.into(),
                         scope: pane_id,
                         data,
                         ..Default::default()
                     });
+                    if let Err(error) = result
+                        && pending_error.is_none()
+                    {
+                        pending_error = Some(error);
+                    }
                     client.release_input_budget(message_count, dispatched_bytes);
                 } else {
                     client.release_input_budget(message_count, data.len());
                 }
             }
             ClientInputDispatch::Barrier(sender) => {
-                let _ = sender.send(Ok(()));
+                let result = pending_error.take().map_or(Ok(()), Err);
+                let _ = sender.send(result);
             }
             ClientInputDispatch::Stop => break,
         }

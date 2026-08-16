@@ -12,7 +12,6 @@ pub(super) fn configure_new_window(
 ) -> anyhow::Result<()> {
     command.args([
         "new-window",
-        "-d",
         "-P",
         "-F",
         "#{window_id}",
@@ -152,7 +151,6 @@ mod tests {
             args,
             [
                 "new-window",
-                "-d",
                 "-P",
                 "-F",
                 "#{window_id}",
