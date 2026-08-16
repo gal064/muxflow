@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { useModalDialog } from "../../commands/useModalDialog";
@@ -7,6 +7,7 @@ import { SurfaceError } from "../../ui/SurfaceError";
 import type { DownloadIntent } from "./downloadFlow";
 import { DownloadTransfers } from "./DownloadTransfers";
 import { ExplorerEntryRow, ExplorerMoreRow, type ExplorerRowActions } from "./ExplorerRow";
+import { DEFAULT_ROW_HEIGHT, rowWindow, scrollOffsetForRow } from "./explorerWindow";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
 import { recordPerfHighWater } from "../../perf/probe";
 
@@ -73,10 +74,18 @@ export function ExplorerTree(props: Props) {
   const rootName = props.root?.path.split("/").filter(Boolean).at(-1) ?? props.root?.path ?? "No active root";
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
-  // This is the actual slice owned by the render below. A future windowing
-  // implementation must narrow this value, keeping the metric about mounted
-  // row cost rather than silently continuing to count the logical model.
-  const renderedRows = rows;
+  const viewport = useTreeViewport(treeRef, rows.length);
+  const window_ = rowWindow({
+    rowCount: rows.length,
+    rowHeight: viewport.rowHeight,
+    scrollTop: viewport.scrollTop,
+    viewportHeight: viewport.height,
+    focusIndex,
+  });
+  // The actual slice mounted below, so the metric stays about mounted row cost
+  // rather than the logical model. Below the windowing threshold the two are
+  // the same value and the tree behaves exactly as it always has.
+  const renderedRows = rows.slice(window_.start, window_.end);
   useEffect(() => {
     recordPerfHighWater("explorer.logicalRows", rows.length);
     recordPerfHighWater("explorer.renderedRows", renderedRows.length);
@@ -104,7 +113,20 @@ export function ExplorerTree(props: Props) {
   const focusRow = (index: number) => {
     const next = Math.max(0, Math.min(rows.length - 1, index));
     setFocusIndex(next);
-    window.requestAnimationFrame(() => treeRef.current?.querySelector<HTMLElement>(`[data-tree-index="${next}"]`)?.focus());
+    // Bring the row into view before asking for focus. The window always keeps
+    // the focused row mounted, so this is about what the user can see rather
+    // than about whether the element exists.
+    const offset = scrollOffsetForRow({
+      index: next,
+      rowHeight: viewport.rowHeight,
+      scrollTop: viewport.scrollTop,
+      viewportHeight: viewport.height,
+    });
+    if (offset !== undefined && treeRef.current) {
+      treeRef.current.scrollTop = offset;
+      viewport.setScrollTop(offset);
+    }
+    globalThis.requestAnimationFrame(() => treeRef.current?.querySelector<HTMLElement>(`[data-tree-index="${next}"]`)?.focus());
   };
 
   const navigateEntry = (event: KeyboardEvent<HTMLDivElement>, index: number, depth: number, entry: FileEntry) => {
@@ -278,28 +300,41 @@ export function ExplorerTree(props: Props) {
         event.preventDefault();
         setMenu({ anchor: { x: event.clientX, y: event.clientY } });
       }}
+      onScroll={(event) => viewport.setScrollTop(event.currentTarget.scrollTop)}
       ref={treeRef}
       role="tree"
     >
-      {renderedRows.map((row, index) => row.kind === "more"
-        ? <ExplorerMoreRow
-          actions={rowActionsRef}
-          depth={row.depth}
-          directory={row.directory}
-          disabled={props.loading.has(row.directory)}
-          focused={index === focusIndex}
-          index={index}
-          key={`more:${row.directory}`}
-        />
-        : <ExplorerEntryRow
-          actions={rowActionsRef}
-          depth={row.depth}
-          entry={row.entry}
-          focused={index === focusIndex}
-          index={index}
-          key={row.entry.path}
-          open={props.expanded.has(row.entry.path)}
-        />)}
+      {/* Reserved height for the rows above and below the mounted band, so the
+          scrollbar describes the whole directory rather than the slice. Both
+          are zero below the windowing threshold. */}
+      {window_.leadingHeight > 0 && <div aria-hidden="true" style={{ height: `${window_.leadingHeight}px` }} />}
+      {renderedRows.map((row, offset) => {
+        const index = window_.start + offset;
+        return row.kind === "more"
+          ? <ExplorerMoreRow
+            actions={rowActionsRef}
+            depth={row.depth}
+            directory={row.directory}
+            disabled={props.loading.has(row.directory)}
+            focused={index === focusIndex}
+            index={index}
+            key={`more:${row.directory}`}
+            positionInSet={index + 1}
+            setSize={rows.length}
+          />
+          : <ExplorerEntryRow
+            actions={rowActionsRef}
+            depth={row.depth}
+            entry={row.entry}
+            focused={index === focusIndex}
+            index={index}
+            key={row.entry.path}
+            open={props.expanded.has(row.entry.path)}
+            positionInSet={index + 1}
+            setSize={rows.length}
+          />;
+      })}
+      {window_.trailingHeight > 0 && <div aria-hidden="true" style={{ height: `${window_.trailingHeight}px` }} />}
       {/* Only until this directory has answered once — "we have no listing yet",
           not "we have no rows", so a directory that is genuinely empty does not
           swap between these two lines every time it is re-read either.
@@ -370,7 +405,7 @@ function flattenTree(
   expanded: ReadonlySet<string>,
   ignored?: ReadonlySet<string>,
 ) {
-  const rows: ({ kind: "entry"; entry: FileEntry; depth: number } | { kind: "more"; directory: string; depth: number })[] = [];
+  const rows: ExplorerRowModel[] = [];
   // Git reports `target/` once and never its ten thousand contents, which
   // membership alone would miss — except that this walk only ever descends
   // into a directory it has already decided to keep, so a dropped directory
@@ -381,15 +416,56 @@ function flattenTree(
   // can sit under an ignored ancestor this walk never saw.
   const visit = (directory: string, depth: number) => {
     const listing = listings.get(directory);
-    for (const entry of listing?.entries ?? []) {
-      if (ignored?.has(entry.path)) continue;
-      rows.push({ kind: "entry", entry, depth });
+    const shown = (listing?.entries ?? []).filter((entry) => !ignored?.has(entry.path));
+    // Sibling counts, because windowing means an assistive technology can no
+    // longer infer position from what happens to be in the DOM. They are per
+    // level, as the tree role requires — not positions in the flattened walk.
+    const siblings = shown.length + (listing && !listing.complete && listing.nextPageToken ? 1 : 0);
+    let position = 0;
+    for (const entry of shown) {
+      position += 1;
+      rows.push({ kind: "entry", entry, depth, positionInSet: position, setSize: siblings });
       if (entry.expandable && expanded.has(entry.path)) visit(entry.path, depth + 1);
     }
-    if (listing && !listing.complete && listing.nextPageToken) rows.push({ kind: "more", directory, depth });
+    if (listing && !listing.complete && listing.nextPageToken) {
+      rows.push({ kind: "more", directory, depth, positionInSet: siblings, setSize: siblings });
+    }
   };
   visit(root, 0);
   return rows;
+}
+
+type ExplorerRowModel =
+  | { kind: "entry"; entry: FileEntry; depth: number; positionInSet: number; setSize: number }
+  | { kind: "more"; directory: string; depth: number; positionInSet: number; setSize: number };
+
+/**
+ * The tree's scroll geometry, measured rather than assumed.
+ *
+ * Row height comes from a real mounted row so the reserved spacer heights match
+ * what the stylesheet actually produces; a layout that has not reported one yet
+ * falls back to the module default, which only affects the size of the mounted
+ * band and never which rows exist.
+ */
+function useTreeViewport(ref: RefObject<HTMLDivElement | null>, rowCount: number) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const [height, setHeight] = useState(0);
+  const [rowHeight, setRowHeight] = useState(DEFAULT_ROW_HEIGHT);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setHeight(node.clientHeight));
+    observer.observe(node);
+    setHeight(node.clientHeight);
+    return () => observer.disconnect();
+  }, [ref]);
+  useEffect(() => {
+    const measured = ref.current?.querySelector<HTMLElement>(".file-row")?.offsetHeight ?? 0;
+    if (measured > 0) setRowHeight((current) => (current === measured ? current : measured));
+  }, [ref, rowCount]);
+  // A shorter tree can leave the viewport scrolled past its own content.
+  useEffect(() => { if (rowCount === 0) setScrollTop(0); }, [rowCount]);
+  return { height, rowHeight, scrollTop, setScrollTop };
 }
 
 function labelForAction(action: PendingAction["action"]): string {
