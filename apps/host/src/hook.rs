@@ -784,7 +784,10 @@ mod tests {
 
     #[tokio::test]
     async fn ambiguous_ack_never_retries_a_second_daemon() {
-        let root = std::env::temp_dir().join(format!("ade-ha-{}", uuid::Uuid::new_v4()));
+        // A short root, not the default tempdir: the sockets below must stay
+        // under the platform's 104/108-byte bind limit, and macOS puts the
+        // default tempdir 50+ bytes deep under /var/folders.
+        let root = std::path::PathBuf::from("/tmp").join(format!("ade-ha-{}", uuid::Uuid::new_v4()));
         let first = root.join("first");
         let second = root.join("second");
         fs::create_dir_all(&first).unwrap();
