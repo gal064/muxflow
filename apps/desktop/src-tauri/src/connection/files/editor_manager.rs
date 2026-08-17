@@ -438,7 +438,15 @@ impl<'a> FileReadStream<'a> {
                 ),
                 "transferredBytes": self.offset.to_string(),
                 "totalBytes": header.total_bytes.to_string(),
-                "generation": header.generation.to_string(),
+                // The leaf's generation — the identity every other producer of
+                // an on-screen fact reports: directory listings, precise watch
+                // events, and the write path all describe the name the user
+                // opened. `header.generation` describes the descriptor the host
+                // actually read, which for a symlink is its target, and exists
+                // only for the content cross-check above. Publishing it here
+                // made a symlinked file disagree with its own listing row on
+                // every open, costing a second full remote read per event.
+                "generation": metadata.generation.to_string(),
             }),
         );
         Ok(())

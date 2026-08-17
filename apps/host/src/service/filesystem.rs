@@ -54,6 +54,11 @@ const MAX_WATCHES: usize = 128;
 const MAX_TRANSFER_CHUNK: usize = 1024 * 1024;
 /// How long the parked fallback poller waits before re-checking `closed`.
 const IDLE_PARK: Duration = Duration::from_millis(500);
+/// Precise events one directory may contribute to one batch.
+///
+/// Beyond this the directory is re-listed once instead. The ordered event queue
+/// is counted in messages, and overflowing it is a connection-wide resync.
+const MAX_PRECISE_EVENTS_PER_BATCH: usize = 64;
 
 struct Transfer {
     source: TransferSource,

@@ -35,13 +35,25 @@ export type { WireFileEvent } from "./wire";
 
 interface OpenedFile { metadata: WireMetadata; contentKind: WireContent["kind"]; bytes?: Uint8Array; generation: string }
 
+/** One host watch, shared by every surface that asked for the same directory. */
+interface WatchRecord {
+  clientId: string;
+  subscribers: number;
+  watchId: string;
+  ready: Promise<DirectoryListing>;
+  /** Aborted only when the last subscriber leaves, never by one of them. */
+  cancel: AbortController;
+  /** Whether `ready` has settled, which is what makes a later join stale. */
+  resolved: boolean;
+}
+
 const encoder = new TextEncoder();
 const fatalDecoder = new TextDecoder("utf-8", { fatal: true });
 
 /** Renderer adapter for the production host file service. */
 export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   readonly #listeners = new Set<(event: WorkspaceEvent) => void>();
-  readonly #watches = new Map<string, { clientId: string; count: number; watchId: string; ready: Promise<DirectoryListing> }>();
+  readonly #watches = new Map<string, WatchRecord>();
 
   async resolveActiveRoot(scope: FileWorkspaceScope, options: ResolveRootOptions = {}): Promise<ActiveRoot> {
     return this.#request(scope, {
@@ -65,7 +77,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       recordPerfCounter("explorer.listPayloadEntries", response.directory.entries.length);
       recordPerfJsonBytesDeferred("explorer.listMappedPayloadBytes", response.directory);
       return mapDirectory(response.directory, root.token);
-    }, "files.listDirectory.request", { scope, operationId, signal: options.signal });
+    }, "files.listDirectory.request", { operationId, signal: options.signal });
   }
 
   /**
@@ -75,31 +87,28 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
    * Arming a watch already costs the host a full authoritative listing, so a
    * caller that also issued a list paid a second remote round trip for an
    * answer it was about to be handed. Callers take the lease and read
-   * `snapshot`.
+   * `snapshot` — but only when `fresh` says the snapshot is theirs. One host
+   * watch serves every subscriber, and its bootstrap is produced once, so a
+   * later joiner is handed a listing that may be arbitrarily old; treating that
+   * as authoritative silently reverted rows and forced re-reads on a false
+   * premise.
+   *
+   * Cancellation is per subscriber, never per watch. The remote request is only
+   * abandoned when the last subscriber has gone: one caller aborting an
+   * acquisition it no longer needs must not take another caller's watch — and
+   * with it every event that caller depends on — down with it.
    */
   async acquireDirectoryWatch(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, options: AcquireWatchOptions = {}): Promise<DirectoryWatchLease> {
     recordPerfCounter("explorer.watchSubscribers");
     const key = watchKey(scope, root, directory);
-    let record = this.#watches.get(key);
-    if (record) record.count += 1;
-    else {
-      recordPerfCounter("explorer.watchRequests");
-      const watchId = crypto.randomUUID();
-      const operationId = crypto.randomUUID();
-      const ready = this.#request(scope, this.#rootCommand(root, {
-        operation: "watchDirectory", operationId, path: directory, watchId,
-      }), (response) => {
-        if (!response.directory) throw new Error("Host omitted the watch bootstrap snapshot.");
-        recordPerfCounter("explorer.watchBootstrapEntries", response.directory.entries.length);
-        return mapDirectory(response.directory, root.token);
-      }, "files.watchDirectory.request", { scope, operationId, signal: options.signal });
-      record = { clientId: scope.clientId, count: 1, watchId, ready };
-      this.#watches.set(key, record);
-      recordPerfHighWater("explorer.activeWatches", this.#watches.size);
-      try { await ready; } catch (error) { if (this.#watches.get(key) === record) this.#watches.delete(key); throw error; }
-    }
-    const held = record;
-    const snapshot = await held.ready;
+    const existing = this.#watches.get(key);
+    const held = existing ?? this.#armWatch(scope, root, directory, key);
+    if (existing) existing.subscribers += 1;
+    // Whether the bootstrap in flight (or already resolved) belongs to this
+    // acquisition. A subscriber that joins before the answer lands shares the
+    // request, so the answer is as new as its own would have been.
+    const fresh = !held.resolved;
+
     let released = false;
     const release = () => {
       if (released) return;
@@ -107,20 +116,103 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       recordPerfCounter("explorer.watchReleases");
       // The exact record this lease belongs to. A key alone would let a lease
       // from a retired watch decrement the refcount of the one that replaced it.
-      const current = this.#watches.get(key);
-      if (current !== held) return;
-      current.count -= 1;
-      if (current.count > 0) return;
+      if (this.#watches.get(key) !== held) return;
+      held.subscribers -= 1;
+      if (held.subscribers > 0) return;
       this.#watches.delete(key);
-      recordPerfCounter("explorer.unwatchRequests");
-      void current.ready.then(() => this.#request(
-        { ...scope, clientId: current.clientId },
-        { operation: "unwatchDirectory", operationId: crypto.randomUUID(), watchId: current.watchId },
-        () => undefined,
-        "files.unwatchDirectory.request",
-      )).catch(() => undefined);
+      this.#retireWatch(scope, held);
     };
-    return { snapshot, release };
+    const abort = options.signal;
+    if (abort?.aborted) {
+      release();
+      throw new DOMException("Directory watch was cancelled.", "AbortError");
+    }
+    // Abandoning a subscription answers this caller immediately. Waiting out
+    // the shared request instead would hold a collapsed folder's expansion —
+    // and the effect that owns it — until some *other* surface's watch landed.
+    let abandon: ((reason: unknown) => void) | undefined;
+    const abandoned = new Promise<never>((_, reject) => { abandon = reject; });
+    const onAbort = () => {
+      release();
+      abandon?.(new DOMException("Directory watch was cancelled.", "AbortError"));
+    };
+    abort?.addEventListener("abort", onAbort, { once: true });
+    try {
+      const snapshot = await (abort ? Promise.race([held.ready, abandoned]) : held.ready);
+      return { snapshot, fresh, release };
+    } catch (error) {
+      release();
+      throw error;
+    } finally {
+      abort?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** Arms one host watch, shared by every subscriber that asks for it. */
+  #armWatch(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, key: string): WatchRecord {
+    recordPerfCounter("explorer.watchRequests");
+    const watchId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
+    const cancel = new AbortController();
+    const ready = this.#request(scope, this.#rootCommand(root, {
+      operation: "watchDirectory", operationId, path: directory, watchId,
+    }), (response) => {
+      if (!response.directory) throw new Error("Host omitted the watch bootstrap snapshot.");
+      recordPerfCounter("explorer.watchBootstrapEntries", response.directory.entries.length);
+      return mapDirectory(response.directory, root.token);
+    }, "files.watchDirectory.request", { operationId, signal: cancel.signal });
+    const record: WatchRecord = {
+      clientId: scope.clientId, subscribers: 1, watchId, ready, cancel, resolved: false,
+    };
+    // Marked before any subscriber's own continuation runs, so "did this
+    // acquisition produce the snapshot?" is decided by arrival order rather
+    // than by which promise callback happened to be scheduled first. A failed
+    // record is deliberately *not* dropped here: every subscriber releases its
+    // lease on the way out, and the last release is what gives the watch back
+    // to the host. Dropping the record first made that release a no-op and
+    // orphaned the registration.
+    const settled = () => { record.resolved = true; };
+    void ready.then(settled, settled);
+    this.#watches.set(key, record);
+    recordPerfHighWater("explorer.activeWatches", this.#watches.size);
+    return record;
+  }
+
+  /**
+   * Gives one watch back to the host, whatever happened to its bootstrap.
+   *
+   * The unwatch is sent even when the bootstrap failed. The watch ID is minted
+   * here, and the host registers the watch before it lists — so a control-lane
+   * timeout, which is exactly what a large directory on a slow link produces,
+   * leaves a registration the desktop has stopped counting. Against a 128-watch
+   * budget those orphans end as "every expansion is refused". Cancelling first
+   * keeps the common case cheap: a watch abandoned before it was ever armed
+   * costs the host nothing.
+   */
+  #retireWatch(scope: FileWorkspaceScope, record: WatchRecord): void {
+    record.cancel.abort();
+    recordPerfCounter("explorer.unwatchRequests");
+    const unwatch = () => this.#request(
+      { ...scope, clientId: record.clientId },
+      { operation: "unwatchDirectory", operationId: crypto.randomUUID(), watchId: record.watchId },
+      () => undefined,
+      "files.unwatchDirectory.request",
+    ).catch(() => undefined);
+    void record.ready.then(unwatch, unwatch);
+  }
+
+  /**
+   * Drops every shared watch this client holds.
+   *
+   * A client outlives the connection it was built for only as a dead object,
+   * and the records left in it hold promises that can never settle.
+   */
+  dispose(): void {
+    for (const [key, record] of [...this.#watches]) {
+      this.#watches.delete(key);
+      record.cancel.abort();
+    }
+    this.#listeners.clear();
   }
 
   /**
@@ -387,15 +479,15 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     command: Record<string, unknown>,
     validate: (response: WireResponse) => T,
     metricName: string,
-    cancellable?: { scope: FileWorkspaceScope; operationId: string; signal?: AbortSignal },
+    cancellable?: { operationId: string; signal?: AbortSignal },
   ): Promise<T> {
     const boundary = { clientId: scope.clientId, command };
     const abort = cancellable?.signal;
     if (abort?.aborted) throw new DOMException("Directory read was cancelled.", "AbortError");
+    const operationId = cancellable?.operationId;
     const stopRemoteWork = () => {
       recordPerfCounter("explorer.listCancellations");
-      void invoke("cancel_file_request", { clientId: cancellable!.scope.clientId, operationId: cancellable!.operationId })
-        .catch(() => undefined);
+      void invoke("cancel_file_request", { clientId: scope.clientId, operationId }).catch(() => undefined);
     };
     if (abort) abort.addEventListener("abort", stopRemoteWork, { once: true });
     try {

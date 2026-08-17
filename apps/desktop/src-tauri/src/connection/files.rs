@@ -254,14 +254,21 @@ mod tests {
             .request_file(v1::Request::default(), Some(claim))
             .unwrap_err();
         assert!(refused.starts_with("cancelled"), "got {refused}");
-        // The claim's slot is released with it, so the ID is reusable.
-        assert!(client.cancel_file("op-1").is_err());
     }
 
+    /// The abort and the request are separate messages across the command
+    /// boundary, so the abort really can arrive first. It must still stop the
+    /// request rather than let a remote scan run for an answer nobody reads.
     #[test]
-    fn cancelling_an_unknown_file_operation_is_reported_rather_than_silently_ignored() {
+    fn cancelling_a_file_read_before_its_request_is_claimed_still_refuses_it() {
         let client = Arc::new(TerminalClient::new());
-        assert!(client.cancel_file("never-claimed").is_err());
+        client.ready.store(true, Ordering::Release);
+        client.cancel_file("racing").unwrap();
+        let claim = client.claim_file_operation("racing").unwrap();
+        let refused = client
+            .request_file(v1::Request::default(), Some(claim))
+            .unwrap_err();
+        assert!(refused.starts_with("cancelled"), "got {refused}");
     }
 
     /// Requests that never reach a host must still leave the registry empty:

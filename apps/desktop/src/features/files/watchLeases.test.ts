@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DirectoryWatchLeases, WATCH_RETRY_BASE_MS } from "./watchLeases";
+import type { WatchLeaseHost } from "./watchLeases";
 import type { DirectoryListing, DirectoryWatchLease } from "./types";
 
 function listing(rootToken: string, directory: string, overrides: Partial<DirectoryListing> = {}): DirectoryListing {
@@ -11,10 +12,10 @@ function recorder() {
   const released: string[] = [];
   const bootstrapped: string[] = [];
   const errors: string[] = [];
-  let settle: ((directory: string) => void) | undefined;
+  const deferred: string[] = [];
   const pending = new Map<string, (lease: DirectoryWatchLease) => void>();
   const aborted: string[] = [];
-  const host = {
+  const host: WatchLeaseHost = {
     acquire: (directory: string, signal: AbortSignal) => {
       acquired.push(directory);
       signal.addEventListener("abort", () => aborted.push(directory), { once: true });
@@ -24,13 +25,14 @@ function recorder() {
     },
     onBootstrap: (directory: string) => { bootstrapped.push(directory); },
     onError: (directory: string) => { errors.push(directory); },
+    onDeferred: (directory: string) => { deferred.push(directory); },
   };
-  settle = (directory: string) => {
+  const settle = (directory: string, fresh = true) => {
     const resolve = pending.get(directory);
     pending.delete(directory);
-    resolve?.({ snapshot: listing("root", directory), release: () => released.push(directory) });
+    resolve?.({ snapshot: listing("root", directory), fresh, release: () => released.push(directory) });
   };
-  return { aborted, acquired, bootstrapped, errors, host, released, settle };
+  return { aborted, acquired, bootstrapped, deferred, errors, host, released, settle };
 }
 
 describe("DirectoryWatchLeases", () => {
@@ -99,36 +101,95 @@ describe("DirectoryWatchLeases", () => {
     // A refusal used to be retried on every expand or collapse anywhere in the
     // tree, and each retry cost a fallback directory list. Twenty refused
     // directories turned one keystroke into forty remote round trips.
+    vi.useFakeTimers();
+    try {
+      const leases = new DirectoryWatchLeases();
+      const errors: string[] = [];
+      const deferred: string[] = [];
+      const acquire = vi.fn()
+        .mockRejectedValueOnce(new Error("watch limit reached"))
+        .mockRejectedValueOnce(new Error("watch limit reached"))
+        .mockResolvedValue({ snapshot: listing("root", "/r"), fresh: true, release: () => undefined });
+      const host: WatchLeaseHost = {
+        acquire,
+        onBootstrap: () => undefined,
+        onError: (directory: string) => { errors.push(directory); },
+        onDeferred: (directory: string) => { deferred.push(directory); },
+      };
+      leases.sync(["/r"], host, 0);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(errors).toEqual(["/r"]);
+      expect(leases.held).toBe(0);
+
+      // Every unrelated toggle inside the window asks for nothing — but each
+      // one still says so, because a directory with no watch and no listing
+      // would otherwise sit empty and busy with nobody owing it anything.
+      for (let toggle = 0; toggle < 20; toggle += 1) leases.sync(["/r"], host, 10 * toggle);
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(deferred).toHaveLength(20);
+
+      // After the wait it tries once more, and backs off further when refused.
+      leases.sync(["/r"], host, WATCH_RETRY_BASE_MS + 1);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(acquire).toHaveBeenCalledTimes(2);
+      leases.sync(["/r"], host, WATCH_RETRY_BASE_MS + 2);
+      expect(acquire, "the second refusal did not lengthen the wait").toHaveBeenCalledTimes(2);
+
+      // A directory that stops being wanted forgets its refusal outright.
+      leases.sync([], host, WATCH_RETRY_BASE_MS + 3);
+      leases.sync(["/r"], host, WATCH_RETRY_BASE_MS + 3);
+      await Promise.resolve();
+      expect(acquire).toHaveBeenCalledTimes(3);
+      expect(leases.held).toBe(1);
+      leases.releaseAll();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-attempts a refused watch when its backoff expires, with no user activity", async () => {
+    // `sync` runs only when the set of open directories changes. Without a
+    // timer of its own a refused directory was never asked for again: it kept
+    // whatever listing it was given and stopped receiving changes entirely for
+    // as long as nobody touched the tree.
+    vi.useFakeTimers();
+    try {
+      const leases = new DirectoryWatchLeases();
+      const acquire = vi.fn()
+        .mockRejectedValueOnce(new Error("watch limit reached"))
+        .mockResolvedValue({ snapshot: listing("root", "/r"), fresh: true, release: () => undefined });
+      const host: WatchLeaseHost = {
+        acquire, onBootstrap: () => undefined, onError: () => undefined, onDeferred: () => undefined,
+      };
+      leases.sync(["/r"], host, 0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(leases.held).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(WATCH_RETRY_BASE_MS + 10);
+      expect(acquire, "the backoff expired and nothing retried").toHaveBeenCalledTimes(2);
+      expect(leases.held).toBe(1);
+      leases.releaseAll();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands the bootstrap's freshness through to its consumer", async () => {
     const leases = new DirectoryWatchLeases();
-    const errors: string[] = [];
-    const acquire = vi.fn()
-      .mockRejectedValueOnce(new Error("watch limit reached"))
-      .mockRejectedValueOnce(new Error("watch limit reached"))
-      .mockResolvedValue({ snapshot: listing("root", "/r"), release: () => undefined });
-    const host = { acquire, onBootstrap: () => undefined, onError: (directory: string) => errors.push(directory) };
-    leases.sync(["/r"], host, 0);
+    const fixture = recorder();
+    const seen: Array<[string, boolean]> = [];
+    const host: WatchLeaseHost = {
+      ...fixture.host,
+      onBootstrap: (directory, _listing, fresh) => { seen.push([directory, fresh]); },
+    };
+    leases.sync(["/r", "/r/src"], host);
+    fixture.settle("/r", true);
+    fixture.settle("/r/src", false);
     await Promise.resolve();
-    await Promise.resolve();
-    expect(errors).toEqual(["/r"]);
-    expect(leases.held).toBe(0);
-
-    // Every unrelated toggle in the next second asks for nothing.
-    for (let toggle = 0; toggle < 20; toggle += 1) leases.sync(["/r"], host, 10 * toggle);
-    expect(acquire).toHaveBeenCalledTimes(1);
-
-    // After the wait it tries once more, and backs off further when refused.
-    leases.sync(["/r"], host, Date.now() + WATCH_RETRY_BASE_MS + 1);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(acquire).toHaveBeenCalledTimes(2);
-    leases.sync(["/r"], host, Date.now() + WATCH_RETRY_BASE_MS + 1);
-    expect(acquire, "the second refusal did not lengthen the wait").toHaveBeenCalledTimes(2);
-
-    // A directory that stops being wanted forgets its refusal outright.
-    leases.sync([], host, Date.now());
-    leases.sync(["/r"], host, Date.now());
-    await Promise.resolve();
-    expect(acquire).toHaveBeenCalledTimes(3);
-    expect(leases.held).toBe(1);
+    expect(seen).toEqual([["/r", true], ["/r/src", false]]);
+    leases.releaseAll();
   });
 });

@@ -447,7 +447,7 @@ impl TerminalClient {
     }
 
     fn cancel_operation(&self, lane: OperationLane, operation_id: &str) -> Result<(), String> {
-        let Some(request_id) = self.operations.cancel(lane, operation_id)? else {
+        let Some(request_id) = self.operations.cancel(lane, operation_id) else {
             // Claimed but not yet dispatched. The tombstone the registry left
             // refuses the request rather than sending it to a host that would
             // never be told to stop.

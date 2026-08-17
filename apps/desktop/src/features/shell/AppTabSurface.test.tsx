@@ -56,6 +56,8 @@ function opened(generation: string): OpenFile {
 interface Fixture {
   bootstrap: DirectoryListing;
   generations?: string[];
+  /** False when the Explorer had already armed this directory's watch. */
+  fresh?: boolean;
 }
 
 function surfaceClient(fixture: Fixture) {
@@ -74,6 +76,7 @@ function surfaceClient(fixture: Fixture) {
       return { path: "/repo/note.txt", generation: "saved", operationId: request.operationId, sizeBytes: "5" };
     }),
     acquireDirectoryWatch: vi.fn(async (): Promise<DirectoryWatchLease> => ({
+      fresh: fixture.fresh ?? true,
       snapshot: fixture.bootstrap,
       release: () => undefined,
     })),
@@ -113,6 +116,20 @@ describe("AppTabSurface", () => {
     const surface = await mount({ bootstrap: listing([entry("/repo/note.txt", "g1")]) });
     expect(surface.opens, "the watch bootstrap triggered a second full open").toEqual(["g1"]);
     expect(surface.client.acquireDirectoryWatch).toHaveBeenCalledTimes(1);
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
+  it("never re-opens the file because a watch it merely joined disagrees", async () => {
+    // The Explorer already had this folder open, so the bootstrap is the
+    // listing from whenever *that* happened — arbitrarily older than the read
+    // that just completed. Reconciling against it re-read the whole file
+    // remotely on the strength of a row nobody claimed was current.
+    const surface = await mount({
+      bootstrap: listing([entry("/repo/note.txt", "stale")]),
+      generations: ["g1", "g2"],
+      fresh: false,
+    });
+    expect(surface.opens, "a joined watch's stale bootstrap forced a second open").toEqual(["g1"]);
     await act(async () => { surface.renderer.unmount(); });
   });
 

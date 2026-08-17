@@ -65,6 +65,17 @@ export interface DirectoryListing {
 
 export interface DirectoryWatchLease {
   snapshot: DirectoryListing;
+  /**
+   * Whether `snapshot` describes the directory as of *this* acquisition.
+   *
+   * One host watch is shared by every subscriber, and its bootstrap listing is
+   * produced once — when the watch was armed. A subscriber that joins an
+   * already-established watch is therefore handed a listing of arbitrary age:
+   * it can predate the join by the whole lifetime of the watch. Such a snapshot
+   * is a paint, never an authority. It must be revalidated, and no freshness
+   * decision may be taken from it.
+   */
+  fresh: boolean;
   release(): void;
 }
 

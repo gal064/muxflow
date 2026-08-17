@@ -476,15 +476,23 @@ function useTreeViewport(ref: RefObject<HTMLDivElement | null>, rowCount: number
   const scrollFrame = useRef(0);
   const [height, setHeight] = useState(0);
   const [rowHeight, setRowHeight] = useState(DEFAULT_ROW_HEIGHT);
-  useEffect(() => {
+  // Layout effects, not passive ones: they run before the browser paints, so
+  // the first frame the user actually sees is already sized by the real
+  // viewport rather than by the pre-layout assumption.
+  useLayoutEffect(() => {
     const node = ref.current;
-    if (!node || typeof ResizeObserver === "undefined") return;
+    if (!node) return;
+    // Measured directly, and first. Leaving this to `ResizeObserver` alone left
+    // the viewport at zero — and therefore assumed — on the first commit, and
+    // permanently wherever that observer does not exist, so a tree taller than
+    // the assumption rendered blank space below its band.
+    setHeight(node.clientHeight);
+    if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => setHeight(node.clientHeight));
     observer.observe(node);
-    setHeight(node.clientHeight);
     return () => observer.disconnect();
-  }, [ref]);
-  useEffect(() => {
+  }, [ref, rowCount]);
+  useLayoutEffect(() => {
     const measured = ref.current?.querySelector<HTMLElement>(".file-row")?.offsetHeight ?? 0;
     if (measured > 0) setRowHeight((current) => (current === measured ? current : measured));
   }, [ref, rowCount]);

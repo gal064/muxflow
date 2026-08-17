@@ -313,3 +313,32 @@ fn an_unchanged_root_capability_keeps_the_generation_its_client_already_holds() 
     drop(service);
     fs::remove_dir_all(root).unwrap();
 }
+
+/// One capability lists the same directory the same way every time.
+///
+/// The enumeration hands its descriptor to `fdopendir`, which consumes it. A
+/// `dup` of the capability shares its file offset, so the second listing began
+/// where the first stopped — at the end — and every authoritative rescan of an
+/// already-listed directory reported it as empty. The desktop installs an
+/// authoritative listing as the directory's contents, so that is every row on
+/// screen disappearing.
+#[test]
+fn a_capability_lists_the_same_entries_however_many_times_it_is_asked() {
+    let root_path = std::env::temp_dir().join(format!("ade-relist-{}", Uuid::new_v4()));
+    fs::create_dir_all(root_path.join("child")).unwrap();
+    fs::write(root_path.join("a"), "a").unwrap();
+    fs::write(root_path.join("child/b"), "b").unwrap();
+    let root = RootCapability::capture(root_path.to_str().unwrap()).unwrap();
+
+    for turn in 0..3 {
+        let names = root.directory_entries().unwrap();
+        assert_eq!(names.len(), 2, "root enumeration {turn} lost its entries");
+        let child = root.anchor(&root.logical_root().join("child")).unwrap();
+        assert_eq!(
+            child.directory_entries().unwrap().len(),
+            1,
+            "child enumeration {turn} lost its entries"
+        );
+    }
+    fs::remove_dir_all(root_path).unwrap();
+}
