@@ -83,6 +83,15 @@ export function ExplorerTree(props: Props) {
   // reversible from the tree itself, without a settings trip.
   const [showIgnored, setShowIgnored] = useState(false);
   const treeRef = useRef<HTMLDivElement>(null);
+  /**
+   * Whether the keyboard is inside this tree.
+   *
+   * Maintained as focus moves rather than asked for after the fact. A row
+   * being unmounted sends focus to `<body>`, which is indistinguishable from
+   * "the tree lost focus" if you only look afterwards — and on WebKit and
+   * Blink the removal reports no blur at all, so there is nothing to look at.
+   */
+  const ownsFocus = useRef(false);
   const rootName = props.root?.path.split("/").filter(Boolean).at(-1) ?? props.root?.path ?? "No active root";
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
@@ -114,9 +123,12 @@ export function ExplorerTree(props: Props) {
     if (heldIndex >= 0 || focusKey === undefined) return;
     const replacement = rows[focusIndex];
     if (!replacement) return;
-    // Only when this tree already had the keyboard: adopting focus because a
-    // row vanished somewhere else would steal it from whatever does.
-    const owned = treeRef.current?.contains(document.activeElement) ?? false;
+    // Whether this tree had the keyboard *before* the row went away. Asking
+    // the document now cannot answer it: removing a focused element moves
+    // focus to `<body>`, so a `contains(document.activeElement)` check here is
+    // false in exactly the case it was written for — and the restore never
+    // ran. Ownership is therefore tracked as it changes, below.
+    const owned = ownsFocus.current;
     setFocusKey(rowKey(replacement));
     if (owned) treeRef.current?.querySelector<HTMLElement>(`[data-tree-index="${focusIndex}"]`)?.focus();
   }, [focusIndex, focusKey, heldIndex, rows]);
@@ -145,6 +157,7 @@ export function ExplorerTree(props: Props) {
     const next = Math.max(0, Math.min(rows.length - 1, index));
     const row = rows[next];
     if (!row) return;
+    ownsFocus.current = true;
     setFocusKey(rowKey(row));
     lastFocusIndex.current = next;
     // Bring the row into view before asking for focus. The window always keeps
@@ -205,6 +218,11 @@ export function ExplorerTree(props: Props) {
     focus: (index) => {
       const row = rows[index];
       if (!row) return;
+      // A row reporting focus *is* the tree owning the keyboard. Recorded here
+      // rather than only from the container's own focus event, because that is
+      // the fact, and because it does not depend on an event reaching an
+      // ancestor.
+      ownsFocus.current = true;
       setFocusKey(rowKey(row));
       lastFocusIndex.current = index;
     },
@@ -312,6 +330,21 @@ export function ExplorerTree(props: Props) {
         event.preventDefault();
         setMenu({ anchor: { x: event.clientX, y: event.clientY } });
       }}
+      onBlur={(event) => {
+        // Two things look alike from here and are not. A row unmounted under
+        // the cursor reports no `relatedTarget` — and the row it left is
+        // already detached — which is the one case the restore above exists
+        // for. A click on non-focusable background also reports no
+        // `relatedTarget`, but the row it left is still in the document, and
+        // that genuinely does give the keyboard away: treating it as a removal
+        // would let the next external change pull focus back into a tree the
+        // user had put it down in.
+        const gaveItAway = event.relatedTarget
+          ? !event.currentTarget.contains(event.relatedTarget)
+          : event.target.isConnected;
+        if (gaveItAway) ownsFocus.current = false;
+      }}
+      onFocus={() => { ownsFocus.current = true; }}
       onScroll={(event) => viewport.observeScroll(event.currentTarget.scrollTop)}
       ref={treeRef}
       role="tree"
