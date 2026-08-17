@@ -47,6 +47,46 @@ describe("rowWindow", () => {
     expect(rowWindow({ ...VIEWPORT, rowCount: 0, scrollTop: 0, focusIndex: 0 }).segments).toEqual([]);
   });
 
+  /**
+   * The exact row at which the tree stops mounting everything.
+   *
+   * A threshold is one comparison, and an off-by-one in it is the difference
+   * between "windowing is off for ordinary trees" and "the ordinary tree is
+   * silently windowed", which nothing else here would catch.
+   */
+  it("switches to a band at exactly one row past the threshold, and not before", () => {
+    const below = rowWindow({ ...VIEWPORT, rowCount: WINDOW_ROW_THRESHOLD, scrollTop: 0, focusIndex: 0 });
+    expect(below.windowed).toBe(false);
+    expect(mountedRowCount(below)).toBe(WINDOW_ROW_THRESHOLD);
+
+    const above = rowWindow({ ...VIEWPORT, rowCount: WINDOW_ROW_THRESHOLD + 1, scrollTop: 0, focusIndex: 0 });
+    expect(above.windowed).toBe(true);
+    expect(mountedRowCount(above)).toBeLessThan(WINDOW_ROW_THRESHOLD + 1);
+    expect(contentHeight(above, ROW_HEIGHT)).toBe((WINDOW_ROW_THRESHOLD + 1) * ROW_HEIGHT);
+  });
+
+  /**
+   * `focusIndex` is `-1` whenever nothing in the tree has the keyboard, which
+   * is its state on every first paint. Clamping it is what stops that from
+   * mounting a segment at index -1 or reserving a negative spacer height.
+   */
+  it("treats an absent keyboard cursor as row zero rather than as a row at all", () => {
+    for (const focusIndex of [-1, -4_096]) {
+      const window = rowWindow({ ...VIEWPORT, rowCount: 4_096, scrollTop: 0, focusIndex });
+      expect(window.segments.every((segment) => segment.start >= 0)).toBe(true);
+      expect(window.segments.every((segment) => segment.leadingHeight >= 0)).toBe(true);
+      expect(window.trailingHeight).toBeGreaterThanOrEqual(0);
+      expect(contentHeight(window, ROW_HEIGHT)).toBe(4_096 * ROW_HEIGHT);
+      // Row 0 is inside the band the viewport is over, so no extra segment.
+      expect(window.segments).toHaveLength(1);
+    }
+    // And an index past the end clamps the other way rather than reserving a
+    // spacer for rows that do not exist.
+    const beyond = rowWindow({ ...VIEWPORT, rowCount: 4_096, scrollTop: 0, focusIndex: 99_999 });
+    expect(mounted(beyond).at(-1)).toBe(4_095);
+    expect(contentHeight(beyond, ROW_HEIGHT)).toBe(4_096 * ROW_HEIGHT);
+  });
+
   it("mounts what the viewport is over, plus overscan", () => {
     const window = rowWindow({ ...VIEWPORT, rowCount: 4_096, scrollTop: 0, focusIndex: 0 });
     expect(window.windowed).toBe(true);

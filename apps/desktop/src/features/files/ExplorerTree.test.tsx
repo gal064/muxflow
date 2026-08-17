@@ -180,6 +180,47 @@ describe("ExplorerTree", () => {
     }
   });
 
+  it("reaches the ends of a windowed directory with Home and End", async () => {
+    // Before windowing every row was in the DOM and the browser's own
+    // find-as-you-type could reach row 4,000. With ~46 rows mounted it cannot,
+    // so without these keys the only way to the end of a large directory is
+    // 4,000 ArrowDown presses — each a state commit, a frame, and a scroll
+    // assignment.
+    const wide: DirectoryListing = {
+      ...listing,
+      entries: Array.from({ length: 4_096 }, (_, index) => ({
+        path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
+        sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    };
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => {
+        renderer = create(<ExplorerTree root={root} scopeIdentity="ends" listings={new Map([["/r", wide]])}
+          expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+          onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+          onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      });
+      const press = (index: number, key: string) => act(async () => {
+        renderer.root.findByProps({ "data-tree-index": index }).props.onKeyDown({
+          key, target: 1, currentTarget: 1, preventDefault: vi.fn(),
+        });
+      });
+      const roving = () => renderer.root.findAllByProps({ className: "file-row" })
+        .filter((row) => row.props.tabIndex === 0)
+        .map((row) => row.props["data-tree-index"]);
+
+      await press(0, "End");
+      expect(roving(), "End did not reach the last row").toEqual([4_095]);
+      expect(renderer.root.findAllByProps({ "data-tree-index": 4_095 })).not.toHaveLength(0);
+
+      await press(4_095, "Home");
+      expect(roving(), "Home did not return to the first row").toEqual([0]);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
   it("keeps the keyboard on the row the user chose when the directory changes underneath it", async () => {
     // Precise external changes are the branch's central mechanism: an agent
     // creating one file patches a single row in place rather than re-listing.

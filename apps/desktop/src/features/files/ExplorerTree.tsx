@@ -56,6 +56,16 @@ interface Props {
  * A real object rather than a cast, because the ref is not optional — it is
  * uninitialized for exactly one render, during which no event can reach a row.
  */
+/**
+ * The zero-width probe the spacer model measures its row height from.
+ *
+ * Both row kinds — `.file-row` and `.load-more-files` — take their height from
+ * the same `--explorer-row-height`, which is what makes a uniform spacer model
+ * true rather than approximately true. The probe carries that height and no
+ * content, so it is measurable whether or not the directory has any rows.
+ */
+const ROW_METRIC_CLASS = "file-row-metric";
+
 const INERT_ROW_ACTIONS: ExplorerRowActions = {
   toggle: () => undefined,
   open: () => undefined,
@@ -188,6 +198,14 @@ export function ExplorerTree(props: Props) {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); return;
     }
+    // The tree role's own keys, and not a nicety once the tree is windowed:
+    // before windowing every row was in the DOM and the browser's own
+    // find-as-you-type could reach row 4,000. With a mounted band it cannot, so
+    // without these the only way to the end of a large directory is 4,000
+    // ArrowDown presses, each one a state commit and a scroll assignment.
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault(); focusRow(event.key === "Home" ? 0 : rows.length - 1); return;
+    }
     if (event.key === "ArrowRight") {
       event.preventDefault();
       if (entry.expandable && !props.expanded.has(entry.path)) props.onToggle(entry.path);
@@ -234,6 +252,7 @@ export function ExplorerTree(props: Props) {
     loadMore: (directory) => props.onLoadMore(directory),
     moreKeyDown: (event, index) => {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
+      else if (event.key === "Home" || event.key === "End") { event.preventDefault(); focusRow(event.key === "Home" ? 0 : rows.length - 1); }
     },
   };
   useLayoutEffect(() => { liveRowActions.current = committedRowActions; });
@@ -349,6 +368,11 @@ export function ExplorerTree(props: Props) {
       ref={treeRef}
       role="tree"
     >
+      {/* The row height the spacer model is built on, as a thing that exists
+          rather than a number copied into TypeScript. Zero-width, out of flow,
+          and never unmounted, so it can be measured at any moment — including
+          when the type scale changes and no row has been added or removed. */}
+      <div aria-hidden="true" className={ROW_METRIC_CLASS} />
       {/* Reserved height stands in for the rows that are not mounted, so the
           scrollbar describes the whole directory rather than the slice. All of
           it is zero below the windowing threshold. */}
@@ -491,36 +515,47 @@ type ExplorerRowModel =
 /**
  * The tree's scroll geometry, measured rather than assumed.
  *
- * Row height comes from a real mounted row so the reserved spacer heights match
- * what the stylesheet actually produces; a layout that has not reported one yet
- * falls back to the module default, which only affects the size of the mounted
- * band and never which rows exist.
+ * Row height comes from [`ROW_METRIC_CLASS`], a zero-width probe that carries
+ * the same `--explorer-row-height` every row does. Measuring a *mounted row*
+ * instead tied the measurement to the row set: it could only be taken when the
+ * rows changed, which is the one moment it never needs taking, and never when
+ * the type scale did, which is the only moment it does. The probe outlives
+ * every row, so one observer set up once covers both the viewport resizing and
+ * the row height changing under it.
  */
 function useTreeViewport(ref: RefObject<HTMLDivElement | null>, rowCount: number) {
   const [scrollTop, setScrollTop] = useState(0);
   const scrollFrame = useRef(0);
   const [height, setHeight] = useState(0);
   const [rowHeight, setRowHeight] = useState(DEFAULT_ROW_HEIGHT);
-  // Layout effects, not passive ones: they run before the browser paints, so
+  // A layout effect, not a passive one: it runs before the browser paints, so
   // the first frame the user actually sees is already sized by the real
   // viewport rather than by the pre-layout assumption.
+  //
+  // Its dependency is *whether* the tree has rows, never how many. Re-running
+  // on every count tore down and rebuilt the observer on the precise-event
+  // path this whole package exists to make cheap.
+  const populated = rowCount > 0;
   useLayoutEffect(() => {
     const node = ref.current;
     if (!node) return;
+    const probe = node.querySelector<HTMLElement>(`.${ROW_METRIC_CLASS}`);
     // Measured directly, and first. Leaving this to `ResizeObserver` alone left
     // the viewport at zero — and therefore assumed — on the first commit, and
     // permanently wherever that observer does not exist, so a tree taller than
     // the assumption rendered blank space below its band.
-    setHeight(node.clientHeight);
+    const measure = () => {
+      setHeight(node.clientHeight);
+      const row = probe?.offsetHeight ?? 0;
+      if (row > 0) setRowHeight((current) => (current === row ? current : row));
+    };
+    measure();
     if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => setHeight(node.clientHeight));
+    const observer = new ResizeObserver(measure);
     observer.observe(node);
+    if (probe) observer.observe(probe);
     return () => observer.disconnect();
-  }, [ref, rowCount]);
-  useLayoutEffect(() => {
-    const measured = ref.current?.querySelector<HTMLElement>(".file-row")?.offsetHeight ?? 0;
-    if (measured > 0) setRowHeight((current) => (current === measured ? current : measured));
-  }, [ref, rowCount]);
+  }, [populated, ref]);
   // A shorter tree can leave the viewport scrolled past its own content.
   useEffect(() => { if (rowCount === 0) setScrollTop(0); }, [rowCount]);
   useEffect(() => () => globalThis.cancelAnimationFrame?.(scrollFrame.current), []);

@@ -8,9 +8,10 @@ import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope } from "./type
  *
  * Every event that *can* be pushed already re-resolves it immediately; this
  * covers `cd` inside the current pane, which tmux does not announce. It is a
- * backstop rather than a pipeline: a hidden window checks nothing at all, the
- * host answers an unchanged root from the caller's own capability without a
- * second authoritative discovery or a broadcast payload, and — see
+ * backstop rather than a pipeline: a hidden window checks nothing at all (a
+ * visible but *unfocused* one still does — see the note beside `foreground`),
+ * the host answers an unchanged root from the caller's own capability without
+ * a second authoritative discovery or a broadcast payload, and — see
  * [`ACTIVE_ROOT_SETTLED_MULTIPLIER`] — a settled root is checked far less
  * often, though never not at all.
  */
@@ -47,7 +48,7 @@ interface Options {
   /** The capability the caller already holds, so an unchanged root costs nothing. */
   held: () => ActiveRoot | undefined;
   /** A root that is genuinely different from the one the caller holds. */
-  onRoot: (root: ActiveRoot, still: () => boolean) => void;
+  onRoot: (root: ActiveRoot) => void;
   onError: (message: string) => void;
   /** The caller's lifecycle counter, so paint measurements share its identity. */
   lifecycle: () => number;
@@ -108,7 +109,7 @@ export function useActiveRoot(options: Options): { rearm: () => void } {
           return;
         }
         unchangedProbes = 0;
-        current.onRoot(root, () => alive() && sameRoot(latest.current.held(), root));
+        current.onRoot(root);
         paint.afterPaint((ticket) => ticket.lifecycleGeneration === latest.current.lifecycle()
           && alive()
           && sameRoot(latest.current.held(), root));
@@ -127,6 +128,14 @@ export function useActiveRoot(options: Options): { rearm: () => void } {
     // emits no notification at all. A hidden window checks nothing, and a
     // window that becomes visible checks once on the transition rather than
     // waiting out the interval.
+    //
+    // "Foreground" here means *visible*, not focused: `visibilityState` is
+    // `"visible"` for a window sitting behind another one, so a visible but
+    // unfocused window still probes. That is a knowing gap against the round's
+    // "zero periodic desktop-to-host requests at idle" and is recorded as such
+    // in the branch ledger rather than papered over here — `document.hasFocus()`
+    // would close it, and is unobservable in the jsdom lane that covers this
+    // hook, so it belongs to the runtime QA lane that can actually verify it.
     const foreground = () => typeof document === "undefined" || document.visibilityState === "visible";
     const backstop = window.setInterval(() => {
       if (!foreground()) return;
