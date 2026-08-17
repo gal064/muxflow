@@ -14,7 +14,7 @@ use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
 use super::bulk_pool::BulkLease;
-use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
+use super::bulk_protocol::{BulkProtocolClient, Exchange, RequestFailure};
 use super::cleanup::CleanupReport;
 use super::clipboard_staging::lock_owned_source as lock_owned_clipboard_source;
 use super::scheduler::{
@@ -588,7 +588,7 @@ fn stream_upload(
             return Err("upload source grew during transfer".into());
         }
         hasher.update(&buffer[..count]);
-        let response = protocol.request_cancellable(
+        let response = protocol.request(
             v1::Request {
                 operation: v1::Operation::WriteTerminalUploadChunk.into(),
                 file: Some(v1::FileServiceRequest {
@@ -601,8 +601,7 @@ fn stream_upload(
                 }),
                 ..Default::default()
             },
-            &job.cancellation,
-            deadline,
+            Exchange::live(&job.cancellation, deadline),
         )?;
         deadline.touch();
         let accepted = response
@@ -647,7 +646,7 @@ fn stream_upload(
     job.cancellation.prepare_finalize()?;
     emit(job, TransferState::Verifying, json!({}));
     let digest = hasher.finalize().to_hex().to_string();
-    let commit_response = protocol.request_classified_with_deadline(
+    let commit_response = protocol.request_classified(
         v1::Request {
             operation: v1::Operation::CommitTerminalUpload.into(),
             file: Some(v1::FileServiceRequest {
@@ -659,7 +658,7 @@ fn stream_upload(
             }),
             ..Default::default()
         },
-        deadline,
+        Exchange::bounded(deadline),
     );
     // The streaming/commit watchdog may have killed a silent transport. It
     // must not remain armed while a fresh ownership-reconciliation helper is
@@ -736,7 +735,7 @@ fn reconcile_upload_outcome(
         .bind_authoritative_process(lease.process_id())?;
     let mut protocol = lease.client();
     deadline.touch();
-    let response = protocol.request_with_deadline(
+    let response = protocol.request(
         v1::Request {
             operation: v1::Operation::ReconcileTerminalUpload.into(),
             file: Some(v1::FileServiceRequest {
@@ -748,7 +747,7 @@ fn reconcile_upload_outcome(
             }),
             ..Default::default()
         },
-        &deadline,
+        Exchange::bounded(&deadline),
     )?;
     deadline.touch();
     response
@@ -822,7 +821,7 @@ fn prepare_remote(
     deadline: &super::scheduler::DeadlineGuard,
 ) -> Result<v1::UploadDescriptor, String> {
     protocol
-        .request_cancellable(
+        .request(
             v1::Request {
                 operation: v1::Operation::PrepareTerminalUpload.into(),
                 file: Some(v1::FileServiceRequest {
@@ -838,8 +837,7 @@ fn prepare_remote(
                 }),
                 ..Default::default()
             },
-            cancellation,
-            deadline,
+            Exchange::live(cancellation, deadline),
         )?
         .file
         .and_then(|file| file.upload)

@@ -9,7 +9,7 @@ use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
 use super::bulk_pool::BulkLease;
-use super::bulk_protocol::RequestFailure;
+use super::bulk_protocol::{Exchange, RequestFailure};
 use super::scheduler::{
     BulkBinding, CancelReason, CancelState, DeadlineGuard, QueuedPublication, cancel_transfer,
     enqueue_transfer_with_queued,
@@ -275,7 +275,7 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
     let mut protocol = lease.client();
     let mut state = FileReadStream::new(job, &_deadline);
     let response = protocol
-        .stream_cancellable(
+        .request_classified(
             v1::Request {
                 operation: v1::Operation::OpenFileStream.into(),
                 file: Some(v1::FileServiceRequest {
@@ -287,9 +287,11 @@ fn run_file_read(job: &FileReadJob) -> Result<(), String> {
                 }),
                 ..Default::default()
             },
-            &job.cancellation,
-            &_deadline,
-            &mut |frame| state.accept(frame),
+            Exchange {
+                cancellation: Some(&job.cancellation),
+                deadline: Some(&_deadline),
+                on_frame: Some(&mut |frame| state.accept(frame)),
+            },
         )
         .map_err(|error| error.to_string())?;
     _deadline.touch();
@@ -374,8 +376,13 @@ impl<'a> FileReadStream<'a> {
             return Err("file open stream chunks arrived out of sequence".into());
         }
         self.hasher.update(&frame.data);
-        if !frame.data.is_empty() {
-            emit_file_chunk(&self.job.channel, self.offset, &frame.data);
+        // The renderer's channel going away means the rest of this body has no
+        // reader. Failing here ends the exchange — and, because the caller
+        // treats an error as a cancellation, stops the remote work with it —
+        // instead of streaming a whole file into a channel nobody owns and
+        // then reporting success.
+        if !frame.data.is_empty() && !emit_file_chunk(&self.job.channel, self.offset, &frame.data) {
+            return Err("file open channel closed before its content".into());
         }
         self.offset = self
             .offset
@@ -460,7 +467,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
         BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &_deadline)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
-    protocol.request_cancellable(
+    protocol.request(
         v1::Request {
             operation: v1::Operation::BeginFileWrite.into(),
             file: Some(v1::FileServiceRequest {
@@ -475,8 +482,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
             }),
             ..Default::default()
         },
-        &job.cancellation,
-        &_deadline,
+        Exchange::live(&job.cancellation, &_deadline),
     )?;
     _deadline.touch();
     let mut offset = 0_u64;
@@ -488,7 +494,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
         let next = offset
             .checked_add(chunk.len() as u64)
             .ok_or("file write byte counter overflow")?;
-        protocol.request_cancellable(
+        protocol.request(
             v1::Request {
                 operation: v1::Operation::WriteFileChunk.into(),
                 file: Some(v1::FileServiceRequest {
@@ -501,8 +507,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
                 }),
                 ..Default::default()
             },
-            &job.cancellation,
-            &_deadline,
+            Exchange::live(&job.cancellation, &_deadline),
         )?;
         _deadline.touch();
         offset = next;
@@ -539,7 +544,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
         }),
     );
     let response = protocol
-        .request_classified_with_deadline(
+        .request_classified(
             v1::Request {
                 operation: v1::Operation::CommitFileWrite.into(),
                 file: Some(v1::FileServiceRequest {
@@ -550,7 +555,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
                 }),
                 ..Default::default()
             },
-            &_deadline,
+            Exchange::bounded(&_deadline),
         )
         .map_err(|error| match error {
             RequestFailure::Remote { code, message, .. } => {
@@ -668,10 +673,11 @@ fn emit_scoped_file_json(
     );
 }
 
-fn emit_file_chunk(channel: &Channel<InvokeResponseBody>, offset: u64, data: &[u8]) {
+/// Writes one content frame, reporting whether the renderer is still listening.
+fn emit_file_chunk(channel: &Channel<InvokeResponseBody>, offset: u64, data: &[u8]) -> bool {
     let mut frame = Vec::with_capacity(9 + data.len());
     frame.push(2);
     frame.extend_from_slice(&offset.to_be_bytes());
     frame.extend_from_slice(data);
-    let _ = channel.send(InvokeResponseBody::Raw(frame));
+    channel.send(InvokeResponseBody::Raw(frame)).is_ok()
 }

@@ -202,17 +202,20 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   }
 
   /**
-   * Drops every shared watch this client holds.
+   * Forgets every shared watch belonging to a connection that has gone.
    *
-   * A client outlives the connection it was built for only as a dead object,
-   * and the records left in it hold promises that can never settle.
+   * This client outlives any one bridge — it is built once for the app — so
+   * without this the records for a dead connection stay in the map forever,
+   * holding promises nothing can settle and a refcount nothing can release.
+   * The host has already lost the whole connection, so there is no unwatch to
+   * send: the registrations went with it.
    */
-  dispose(): void {
+  retireConnection(clientId: string): void {
     for (const [key, record] of [...this.#watches]) {
+      if (record.clientId !== clientId) continue;
       this.#watches.delete(key);
       record.cancel.abort();
     }
-    this.#listeners.clear();
   }
 
   /**

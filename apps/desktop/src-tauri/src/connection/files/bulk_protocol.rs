@@ -36,6 +36,37 @@ impl std::fmt::Display for RequestFailure {
 ///
 /// Keeping framing and control-session binding here ensures downloads and
 /// editor I/O cannot accidentally diverge in handshake or response handling.
+/// What one bulk exchange may do beyond writing a request and reading its
+/// response: observe cancellation, refresh an inactivity deadline, and receive
+/// the body frames that precede a streamed response.
+#[derive(Default)]
+pub(super) struct Exchange<'a> {
+    pub(super) cancellation: Option<&'a CancelState>,
+    pub(super) deadline: Option<&'a DeadlineGuard>,
+    pub(super) on_frame:
+        Option<&'a mut (dyn FnMut(v1::FileStreamFrame) -> Result<(), String> + 'a)>,
+}
+
+impl<'a> Exchange<'a> {
+    /// The ordinary shape: cancellable, and keeping the desktop's watchdog fed.
+    pub(super) fn live(cancellation: &'a CancelState, deadline: &'a DeadlineGuard) -> Self {
+        Self {
+            cancellation: Some(cancellation),
+            deadline: Some(deadline),
+            on_frame: None,
+        }
+    }
+
+    /// A request that cannot be cancelled but must still prove liveness.
+    pub(super) fn bounded(deadline: &'a DeadlineGuard) -> Self {
+        Self {
+            cancellation: None,
+            deadline: Some(deadline),
+            on_frame: None,
+        }
+    }
+}
+
 pub(super) struct BulkProtocolClient<'a> {
     stdin: &'a mut ChildStdin,
     reader: &'a mut BufReader<ChildStdout>,
@@ -164,84 +195,24 @@ impl<'a> BulkProtocolClient<'a> {
         id
     }
 
-    pub(super) fn request(&mut self, request: v1::Request) -> Result<v1::Response, String> {
-        self.request_classified(request)
-            .map_err(|error| error.to_string())
-    }
-
+    /// One exchange on the bulk bridge, with whatever it is entitled to do.
+    ///
+    /// A struct rather than six wrappers over four optional parameters: the
+    /// wrappers named every *combination* that happened to be used, so adding
+    /// one capability meant adding wrappers rather than a field, and a caller
+    /// had to find the name of its combination instead of saying what it
+    /// wanted.
     pub(super) fn request_classified(
         &mut self,
         request: v1::Request,
-    ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, None, None, None)
-    }
-
-    pub(super) fn request_with_deadline(
-        &mut self,
-        request: v1::Request,
-        deadline: &DeadlineGuard,
-    ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request, None, Some(deadline), None)
-            .map_err(|error| error.to_string())
-    }
-
-    pub(super) fn request_classified_with_deadline(
-        &mut self,
-        request: v1::Request,
-        deadline: &DeadlineGuard,
-    ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, None, Some(deadline), None)
-    }
-
-    pub(super) fn request_cancellable(
-        &mut self,
-        request: v1::Request,
-        cancellation: &CancelState,
-        deadline: &DeadlineGuard,
-    ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request, Some(cancellation), Some(deadline), None)
-            .map_err(|error| error.to_string())
-    }
-
-    pub(super) fn request_classified_cancellable(
-        &mut self,
-        request: v1::Request,
-        cancellation: &CancelState,
-        deadline: &DeadlineGuard,
-    ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, Some(cancellation), Some(deadline), None)
-    }
-
-    /// Issues one request whose answer is a stream of body frames followed by
-    /// exactly one terminal response.
-    ///
-    /// The body frames carry the request's own id, so this is one exchange on
-    /// one bridge: the bridge is only handed back after the terminal response,
-    /// and a body observer that refuses a frame poisons it exactly like any
-    /// other partial exchange.
-    pub(super) fn stream_cancellable(
-        &mut self,
-        request: v1::Request,
-        cancellation: &CancelState,
-        deadline: &DeadlineGuard,
-        on_frame: &mut dyn FnMut(v1::FileStreamFrame) -> Result<(), String>,
-    ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, Some(cancellation), Some(deadline), Some(on_frame))
-    }
-
-    /// Every request goes through here, so this is the one place that knows
-    /// whether the stream is still where the next request expects it. A remote
-    /// refusal is a complete response and leaves the bridge reusable; a
-    /// transport failure or a cancellation leaves a partial write or an
-    /// in-flight response behind, and the bridge must not be handed on.
-    fn request_classified_inner(
-        &mut self,
-        request: v1::Request,
-        cancellation: Option<&CancelState>,
-        deadline: Option<&DeadlineGuard>,
-        on_frame: Option<&mut dyn FnMut(v1::FileStreamFrame) -> Result<(), String>>,
+        exchange: Exchange<'_>,
     ) -> Result<v1::Response, RequestFailure> {
         let request_id = self.take_request_id();
+        let Exchange {
+            cancellation,
+            deadline,
+            on_frame,
+        } = exchange;
         let outcome = self.request_framed(request_id, request, cancellation, deadline, on_frame);
         // A cancellation that read its terminal response left the stream exactly
         // where the next request expects it; only an abandoned exchange did not.
@@ -249,6 +220,23 @@ impl<'a> BulkProtocolClient<'a> {
             *self.clean = false;
         }
         outcome
+    }
+
+    /// One exchange with nothing beyond the request: the cancel messages, whose
+    /// whole job is to be sent on a bridge that is being given up anyway.
+    fn request_default(&mut self, request: v1::Request) -> Result<v1::Response, String> {
+        self.request(request, Exchange::default())
+    }
+
+    /// The same exchange for a caller that only reports the failure, rather
+    /// than deciding anything from how it was classified.
+    pub(super) fn request(
+        &mut self,
+        request: v1::Request,
+        exchange: Exchange<'_>,
+    ) -> Result<v1::Response, String> {
+        self.request_classified(request, exchange)
+            .map_err(|error| error.to_string())
     }
 
     fn request_framed(
@@ -400,7 +388,7 @@ impl<'a> BulkProtocolClient<'a> {
     }
 
     pub(super) fn cancel_download(&mut self, transfer_id: &str) -> Result<(), String> {
-        self.request(v1::Request {
+        self.request_default(v1::Request {
             operation: v1::Operation::CancelDownload.into(),
             file: Some(v1::FileServiceRequest {
                 operation_id: transfer_id.into(),
@@ -417,7 +405,7 @@ impl<'a> BulkProtocolClient<'a> {
         operation_id: &str,
         transfer_id: &str,
     ) -> Result<(), String> {
-        self.request(v1::Request {
+        self.request_default(v1::Request {
             operation: v1::Operation::CancelFileWrite.into(),
             file: Some(v1::FileServiceRequest {
                 operation_id: operation_id.into(),
@@ -430,7 +418,7 @@ impl<'a> BulkProtocolClient<'a> {
     }
 
     pub(super) fn cancel_terminal_upload(&mut self, transfer_id: &str) -> Result<String, String> {
-        let response = self.request(v1::Request {
+        let response = self.request_default(v1::Request {
             operation: v1::Operation::CancelTerminalUpload.into(),
             file: Some(v1::FileServiceRequest {
                 operation_id: transfer_id.into(),
@@ -580,7 +568,7 @@ mod tests {
                 &mut next_id,
                 &mut clean,
             )
-            .request(v1::Request::default())
+            .request(v1::Request::default(), Exchange::default())
             .expect("the queued answer");
             assert_eq!(next_id, expected + 1, "the cursor advanced past {expected}");
         }
