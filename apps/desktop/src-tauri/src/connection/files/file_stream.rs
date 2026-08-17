@@ -99,6 +99,16 @@ impl<'a> FileReadStream<'a> {
         // connection scope was replaced mid-transfer must stop rather than run
         // to completion and publish content for a scope nobody is showing.
         self.job.binding.validate()?;
+        // The host stamps this on the header and on every body frame. Checked
+        // rather than ignored: a field the sender writes and the receiver never
+        // looks at is worse than no field, because it reads as a binding that
+        // holds. Scoping is genuinely by `request_id` on a lease-exclusive
+        // bridge, so this can only ever fail on a host that is confused about
+        // which open it is answering — which is exactly when the desktop should
+        // refuse the bytes rather than publish them.
+        if frame.operation_id != self.job.transfer_id {
+            return Err("file open stream frame named another operation".into());
+        }
         if let Some(header) = frame.header {
             if self.header.is_some() {
                 return Err("file open stream repeated its header".into());
@@ -266,7 +276,7 @@ mod tests {
 
     fn body(offset: u64, data: &[u8], eof: bool, digest: &str) -> v1::FileStreamFrame {
         v1::FileStreamFrame {
-            operation_id: "open".into(),
+            operation_id: "read".into(),
             header: None,
             offset,
             data: data.to_vec(),
@@ -294,6 +304,7 @@ mod tests {
         let digest = blake3::hash(bytes).to_hex().to_string();
         stream
             .accept(v1::FileStreamFrame {
+                operation_id: "read".into(),
                 header: Some(header(bytes, true)),
                 ..Default::default()
             })
@@ -327,10 +338,12 @@ mod tests {
                 "a second header",
                 Box::new(|stream| {
                     stream.accept(v1::FileStreamFrame {
+                        operation_id: "read".into(),
                         header: Some(header(b"hello", true)),
                         ..Default::default()
                     })?;
                     stream.accept(v1::FileStreamFrame {
+                        operation_id: "read".into(),
                         header: Some(header(b"hello", true)),
                         ..Default::default()
                     })
@@ -340,6 +353,7 @@ mod tests {
                 "a body frame out of sequence",
                 Box::new(|stream| {
                     stream.accept(v1::FileStreamFrame {
+                        operation_id: "read".into(),
                         header: Some(header(b"hello", true)),
                         ..Default::default()
                     })?;
@@ -350,6 +364,7 @@ mod tests {
                 "more bytes than the header declared",
                 Box::new(|stream| {
                     stream.accept(v1::FileStreamFrame {
+                        operation_id: "read".into(),
                         header: Some(header(b"hi", true)),
                         ..Default::default()
                     })?;
@@ -360,6 +375,7 @@ mod tests {
                 "a digest that does not describe the body",
                 Box::new(|stream| {
                     stream.accept(v1::FileStreamFrame {
+                        operation_id: "read".into(),
                         header: Some(header(b"hello", true)),
                         ..Default::default()
                     })?;
@@ -370,6 +386,7 @@ mod tests {
                 "a body cut short of its declared length",
                 Box::new(move |stream| {
                     stream.accept(v1::FileStreamFrame {
+                        operation_id: "read".into(),
                         header: Some(header(b"hello", true)),
                         ..Default::default()
                     })?;
@@ -398,6 +415,7 @@ mod tests {
             let mut stream = FileReadStream::new(&job, &deadline);
             stream
                 .accept(v1::FileStreamFrame {
+                    operation_id: "read".into(),
                     header: Some(header(bytes, true)),
                     ..Default::default()
                 })
@@ -410,6 +428,24 @@ mod tests {
         }
     }
 
+    /// A frame that names another operation is refused, not published.
+    #[test]
+    fn a_frame_belonging_to_another_open_is_refused() {
+        let job = job();
+        let deadline = job.cancellation.arm_inactivity_deadline();
+        let mut stream = FileReadStream::new(&job, &deadline);
+        assert!(
+            stream
+                .accept(v1::FileStreamFrame {
+                    operation_id: "some-other-open".into(),
+                    header: Some(header(b"hello", true)),
+                    ..Default::default()
+                })
+                .is_err(),
+            "a header for another operation was accepted"
+        );
+    }
+
     /// A classification-only open owes no body at all.
     #[test]
     fn a_metadata_only_open_finishes_without_content() {
@@ -418,6 +454,7 @@ mod tests {
         let mut stream = FileReadStream::new(&job, &deadline);
         stream
             .accept(v1::FileStreamFrame {
+                operation_id: "read".into(),
                 header: Some(header(&[], false)),
                 ..Default::default()
             })
