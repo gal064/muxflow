@@ -20,6 +20,8 @@
  * mounts — a plain editor and a diff editor — because both had the same defect.
  */
 
+import { useCallback, useEffect, useRef } from "react";
+
 /** The part of Monaco's editor API this needs, so a test can supply it. */
 export interface LayoutableEditor {
   layout(dimension?: { width: number; height: number }): void;
@@ -56,6 +58,27 @@ export function attachEditorLayout(
   };
   apply();
   return observe(host, apply);
+}
+
+/**
+ * Attaches the layout observer for as long as the editor is mounted.
+ *
+ * The lifetime is the editor component's, not the tab's. Both surfaces
+ * previously detached only when the whole tab lifecycle ended, so an editor
+ * that came and went inside one tab — a Markdown view switched to preview and
+ * back, a diff replaced by a binary one — left its `ResizeObserver` attached to
+ * a box whose editor no longer existed, once per switch.
+ */
+export function useEditorLayout(): (editor: LayoutableEditor) => void {
+  const detach = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => () => {
+    detach.current?.();
+    detach.current = undefined;
+  }, []);
+  return useCallback((editor: LayoutableEditor) => {
+    detach.current?.();
+    detach.current = attachEditorLayout(editor);
+  }, []);
 }
 
 function observeResize(target: Element, callback: () => void): () => void {

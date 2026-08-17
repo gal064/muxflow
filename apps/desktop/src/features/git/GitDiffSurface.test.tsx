@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, create } from "react-test-renderer";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
 import { GitRepositoryStore } from "./repositoryStore";
@@ -12,6 +12,12 @@ vi.mock("@monaco-editor/react", () => ({ DiffEditor: (props: { original: string;
 vi.mock("../files/monaco", () => ({ ADE_MONACO_THEME: "ade-dark" }));
 
 describe("GitDiffSurface", () => {
+  // The diff editor is imported lazily, so in production the surface renders
+  // its Suspense fallback while that chunk arrives. Resolving the module once
+  // up front leaves these tests measuring the surface rather than however long
+  // the runner takes to transform a file.
+  beforeAll(async () => { await import("./GitDiffEditor"); });
+
   it("opens a matching diff in one request, with no prerequisite status round trip", async () => {
     const client = mockClient();
     let renderer!: ReturnType<typeof create>;
