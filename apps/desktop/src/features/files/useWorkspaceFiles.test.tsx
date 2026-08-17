@@ -3,6 +3,7 @@ import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope, WorkspaceEvent } from "./types";
 import { keyForTransferConnection } from "./api";
+import { enablePerfProbe, perfSummary, resetPerfProbe } from "../../perf/probe";
 import { ACTIVE_ROOT_SETTLED_MULTIPLIER, ACTIVE_ROOT_STABLE_PROBES, useWorkspaceFiles } from "./useWorkspaceFiles";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -656,6 +657,12 @@ describe("useWorkspaceFiles", () => {
    * own listings and leaves the cache as the only thing that can paint.
    */
   it("holds the Phase 14 wide Explorer lane to one watch per directory and no list at all", async () => {
+    // The paint spans this feature is budgeted on are published from here, and
+    // until now nothing read them at all. A jsdom commit is not a browser
+    // paint, so the durations are recorded and deliberately not asserted; what
+    // *is* asserted is that both spans are published, because a budget nothing
+    // emits a sample for cannot be checked anywhere.
+    enablePerfProbe(async () => undefined);
     const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
     const wide = Array.from({ length: 4_096 }, (_, index) => entry(`/repo/wide/file-${index}`));
     const directories = new Map([
@@ -713,6 +720,15 @@ describe("useWorkspaceFiles", () => {
       await Promise.resolve();
     });
     const afterChangeRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+    // Read here, before the pane switch below: a paint measurement belongs to
+    // the lifecycle that raised it, and switching panes abandons it — which is
+    // the correct behaviour and would otherwise look like a missing span.
+    // Paint spans close two animation frames after the commit that satisfied
+    // them, which in jsdom is two timer ticks rather than two frames.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    const spans = new Map(perfSummary().map((row) => [row.name, row]));
+    const expandPaint = spans.get("workflow.explorer.directoryExpandPaint");
+    const changePaint = spans.get("explorer.externalChangeToPaint");
 
     await act(async () => { current?.toggleDirectory("/repo/wide"); await Promise.resolve(); });
     const collapseReleases = released.filter((directory) => directory === "/repo/wide").length;
@@ -735,8 +751,12 @@ describe("useWorkspaceFiles", () => {
     expect(cachedRevisitRows).toBe(4_097);
     expect(cachedRevisitWaiting).toBe(false);
     expect(listed).toEqual([]);
+    expect(expandPaint?.n, "the expand-to-paint span was never published").toBeGreaterThan(0);
+    expect(changePaint?.n, "the external-change-to-paint span was never published").toBeGreaterThan(0);
     console.log(`PHASE14_METRIC ${JSON.stringify({
       lane: "explorerWideWatchTraffic",
+      jsdomExpandToPaintP95Ms: expandPaint?.p95Ms,
+      jsdomExternalChangeToPaintP95Ms: changePaint?.p95Ms,
       entries: 4_096,
       rootWatchRequests: rootWatches,
       expandWatchRequests: expandWatches,
@@ -748,6 +768,7 @@ describe("useWorkspaceFiles", () => {
       cachedRevisitPaintedBeforeRevalidation: cachedRevisitRows === afterChangeRows && !cachedRevisitWaiting,
     })}`);
     await act(async () => { renderer.unmount(); });
+    resetPerfProbe();
   });
 
   it("holds the Phase 14 paginated Explorer lane to one bootstrap, one prefetch, and no list per change", async () => {
