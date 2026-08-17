@@ -315,8 +315,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_generated_operation_has_the_compatible_policy() {
+    /// Every operation's expected policy, in one table.
+    ///
+    /// A table rather than a run of assertions so that the coverage test below
+    /// can read the same list the compatibility test asserts. Two hand-written
+    /// lists of the same operations would be the very drift being guarded.
+    fn expected_policies() -> Vec<(v1::Operation, Access, Lane, Scheduling, Handler)> {
         use Access::{Mutation as M, ReadOnly as R};
         use Handler::{
             ActiveRoot as AR, Agent as AH, Daemon as DH, Filesystem as FH, Git as GH,
@@ -326,84 +330,103 @@ mod tests {
         use Scheduling::{Detached as Dd, Inline as I};
         use v1::Operation::*;
 
-        assert_policy(Unspecified, R, C, I, UH);
-        assert_policy(FullSnapshot, R, C, I, SH);
-        assert_policy(Subscribe, R, C, I, SH);
-        assert_policy(AttachTerminal, M, C, I, TH);
-        assert_policy(TerminalInput, M, C, I, TH);
-        assert_policy(ResizeTerminal, M, C, I, TH);
-        assert_policy(Resync, R, C, I, SH);
-        // Shutdown is intercepted before request registration, but remains a mutation.
-        assert_policy(ShutdownDaemon, M, C, I, DH);
-        assert_policy(TmuxAction, M, C, I, MH);
-        assert_policy(SetTerminalVisibility, M, C, I, TH);
-        assert_policy(RequestTerminalSeed, M, C, I, TH);
-        assert_policy(ResolveActiveRoot, R, C, Dd, AR);
-        assert_policy(ListDirectory, R, C, Dd, FH);
-        assert_policy(WatchDirectory, M, C, Dd, FH);
-        assert_policy(UnwatchDirectory, M, C, Dd, FH);
-        assert_policy(FileMutation, M, C, Dd, FH);
-        // `Either`, and it matters: the desktop this refusal exists for issued
-        // `ReadFile` on the *bulk* lane, so a `Control` classification turned
-        // it away at admission and it never saw the message naming its
-        // replacement.
-        assert_policy(ReadFile, R, E, I, FH);
-        assert_policy(OpenFileStream, R, B, Dd, FH);
-        assert_policy(WriteFile, M, C, Dd, FH);
-        assert_policy(StartDownload, M, B, I, FH);
-        assert_policy(ReadDownloadChunk, M, B, I, FH);
-        assert_policy(CancelDownload, M, B, I, FH);
-        assert_policy(BeginFileWrite, M, B, I, FH);
-        assert_policy(WriteFileChunk, M, B, I, FH);
-        assert_policy(CommitFileWrite, M, B, I, FH);
-        assert_policy(CancelFileWrite, M, B, I, FH);
-        assert_policy(GitStatus, R, C, Dd, GH);
-        assert_policy(WatchGit, M, C, Dd, GH);
-        assert_policy(UnwatchGit, M, C, Dd, GH);
-        assert_policy(GitDiff, R, C, Dd, GH);
-        assert_policy(GitDiffContent, R, B, Dd, GH);
-        assert_policy(PrepareGitDiscard, M, C, Dd, GH);
-        assert_policy(GitMutation, M, C, Dd, GH);
-        assert_policy(GitCommit, M, C, Dd, GH);
-        assert_policy(AgentSnapshot, R, C, I, AH);
-        assert_policy(AgentAction, M, C, I, AH);
-        assert_policy(AgentMarkSeen, M, C, I, AH);
-        assert_policy(AgentHookIngest, M, C, I, AH);
-        assert_policy(AgentHookManagement, M, C, I, AH);
-        assert_policy(PrepareTerminalUpload, M, B, I, FH);
-        assert_policy(WriteTerminalUploadChunk, M, B, I, FH);
-        assert_policy(CommitTerminalUpload, M, B, I, FH);
-        assert_policy(CancelTerminalUpload, M, B, I, FH);
-        assert_policy(ReconcileTerminalUpload, R, B, I, FH);
-        assert_policy(AgentHostNaming, M, C, I, AH);
-        assert_policy(SelectTerminalSession, M, C, I, TH);
-        assert_policy(TestDelay, R, C, I, XH);
-        assert_policy(TestInjectGap, R, C, I, XH);
-        assert_policy(TestOverflow, R, C, I, XH);
+        vec![
+            (Unspecified, R, C, I, UH),
+            (FullSnapshot, R, C, I, SH),
+            (Subscribe, R, C, I, SH),
+            (AttachTerminal, M, C, I, TH),
+            (TerminalInput, M, C, I, TH),
+            (ResizeTerminal, M, C, I, TH),
+            (Resync, R, C, I, SH),
+            // Shutdown is intercepted before request registration, but remains a mutation.
+            (ShutdownDaemon, M, C, I, DH),
+            (TmuxAction, M, C, I, MH),
+            (SetTerminalVisibility, M, C, I, TH),
+            (RequestTerminalSeed, M, C, I, TH),
+            (ResolveActiveRoot, R, C, Dd, AR),
+            (ListDirectory, R, C, Dd, FH),
+            (WatchDirectory, M, C, Dd, FH),
+            (UnwatchDirectory, M, C, Dd, FH),
+            (FileMutation, M, C, Dd, FH),
+            // `Either`, and it matters: the desktop this refusal exists for issued
+            // `ReadFile` on the *bulk* lane, so a `Control` classification turned
+            // it away at admission and it never saw the message naming its
+            // replacement.
+            (ReadFile, R, E, I, FH),
+            (OpenFileStream, R, B, Dd, FH),
+            (WriteFile, M, C, Dd, FH),
+            (StartDownload, M, B, I, FH),
+            (ReadDownloadChunk, M, B, I, FH),
+            (CancelDownload, M, B, I, FH),
+            (BeginFileWrite, M, B, I, FH),
+            (WriteFileChunk, M, B, I, FH),
+            (CommitFileWrite, M, B, I, FH),
+            (CancelFileWrite, M, B, I, FH),
+            (GitStatus, R, C, Dd, GH),
+            (WatchGit, M, C, Dd, GH),
+            (UnwatchGit, M, C, Dd, GH),
+            (GitDiff, R, C, Dd, GH),
+            (GitDiffContent, R, B, Dd, GH),
+            (PrepareGitDiscard, M, C, Dd, GH),
+            (GitMutation, M, C, Dd, GH),
+            (GitCommit, M, C, Dd, GH),
+            (AgentSnapshot, R, C, I, AH),
+            (AgentAction, M, C, I, AH),
+            (AgentMarkSeen, M, C, I, AH),
+            (AgentHookIngest, M, C, I, AH),
+            (AgentHookManagement, M, C, I, AH),
+            (PrepareTerminalUpload, M, B, I, FH),
+            (WriteTerminalUploadChunk, M, B, I, FH),
+            (CommitTerminalUpload, M, B, I, FH),
+            (CancelTerminalUpload, M, B, I, FH),
+            (ReconcileTerminalUpload, R, B, I, FH),
+            (AgentHostNaming, M, C, I, AH),
+            (SelectTerminalSession, M, C, I, TH),
+            (TestDelay, R, C, I, XH),
+            (TestInjectGap, R, C, I, XH),
+            (TestOverflow, R, C, I, XH),
+        ]
+    }
+
+    #[test]
+    fn every_generated_operation_has_the_compatible_policy() {
+        for (operation, access, lane, scheduling, handler) in expected_policies() {
+            assert_policy(operation, access, lane, scheduling, handler);
+        }
     }
 
     /// The list above is hand-written, so this is what makes its name true.
     ///
     /// The production `match` is compiler-exhaustive, so a new operation cannot
-    /// be added without giving it a policy — but nothing forced it into the
+    /// be added without *a* policy — but nothing forced it into the
     /// compatibility assertions, and an operation with a policy and no
     /// assertion is exactly what "compatible" was supposed to mean. Two
     /// operations were added to this schema in one round by two authors who
     /// each picked the same number; a list that silently stops covering the
     /// enum is the next version of that.
+    ///
+    /// An earlier version of this test asserted a hard-coded count of 49, which
+    /// does not check what the name says: bumping the count is exactly as easy
+    /// as adding the operation, and the list could still stop covering the
+    /// enum. This names the operations that are missing instead.
     #[test]
     fn the_compatibility_list_covers_every_operation_the_enum_accepts() {
         // The generated enum has no iterator, so this asks it directly. The
         // bound is above every assigned number and below anything plausible.
-        let generated = (0..=255_i32)
-            .filter(|value| v1::Operation::try_from(*value).is_ok())
-            .count();
-        // Kept beside the list rather than derived from it: a count that
-        // derives itself from the thing it checks proves nothing.
-        assert_eq!(
-            generated, 49,
-            "the operation enum changed; add the new operation to \
-             `every_generated_operation_has_the_compatible_policy` and update this count",
+        let generated: Vec<v1::Operation> = (0..=255_i32)
+            .filter_map(|value| v1::Operation::try_from(value).ok())
+            .collect();
+        let asserted: Vec<v1::Operation> =
+            expected_policies().into_iter().map(|row| row.0).collect();
+        let missing: Vec<&str> = generated
+            .iter()
+            .filter(|operation| !asserted.contains(*operation))
+            .map(|operation| operation.as_str_name())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these operations have a policy but no compatibility assertion; \
+             add them to `every_generated_operation_has_the_compatible_policy`: {missing:?}",
         );
     }
 

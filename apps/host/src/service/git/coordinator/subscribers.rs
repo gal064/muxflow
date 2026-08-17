@@ -7,6 +7,15 @@
 
 use super::*;
 
+/// Consumers one repository coordinator will multiplex at once.
+///
+/// The plan's own target is 32 consumers of one repository sharing one native
+/// watcher, so this is well clear of the shape being optimized for. It exists
+/// because the key is client-supplied: it bounds a client that opens watches
+/// and never releases them, which is exactly what `MAX_WATCHES` bounds on the
+/// filesystem side of the same round.
+const MAX_SUBSCRIBERS: usize = 128;
+
 /// One watching consumer. The snapshot is shared; the envelope is not, because
 /// each consumer identifies its events by its own watch id and root token.
 struct Subscriber {
@@ -96,6 +105,17 @@ impl RepositoryCoordinator {
         }
         let slot = {
             let mut subscribers = self.subscribers.lock().unwrap();
+            // The watch ID is the client's, so without a cap a client that
+            // opens watches and never closes them grows this map forever — and
+            // a coordinator with any subscriber is never evicted, so it pins
+            // its descriptors, its cached status and its native watcher with
+            // it. The filesystem side of this same round refuses past
+            // `MAX_WATCHES`; this is the same rule for the same reason.
+            if !subscribers.entries.contains_key(&request.watch_id)
+                && subscribers.entries.len() >= MAX_SUBSCRIBERS
+            {
+                bail!("Git watch limit of {MAX_SUBSCRIBERS} consumers reached");
+            }
             subscribers.next_slot += 1;
             let slot = subscribers.next_slot;
             let replaced = subscribers.entries.insert(
