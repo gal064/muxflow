@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use super::bulk_pool::BulkLease;
 use super::bulk_protocol::{Exchange, RequestFailure};
+use super::file_stream::run_file_read;
 use super::scheduler::{
-    BulkBinding, CancelReason, CancelState, DeadlineGuard, QueuedPublication, cancel_transfer,
+    BulkBinding, CancelReason, CancelState, QueuedPublication, cancel_transfer,
     enqueue_transfer_with_queued,
 };
 use super::serialization::metadata_json;
@@ -22,67 +23,34 @@ use super::transfer_event::{
 use super::{BULK_CHUNK_BYTES, parse_optional_u64, parse_required_u64};
 use crate::connection::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
 
-#[derive(Clone)]
-struct FileReadJob {
-    transfer_id: String,
-    connection: ConnectionSpec,
-    root: String,
-    root_token: String,
-    path: String,
-    binding: BulkBinding,
-    cancellation: Arc<CancelState>,
-    channel: Channel<InvokeResponseBody>,
+/// One editor file-I/O job: what both directions carry, and which one it is.
+///
+/// This was two structs sharing eight fields, wrapped in a two-variant enum
+/// whose entire body was four accessors — each a two-arm match returning a
+/// field *both* variants had. The shape says the true thing instead: reading
+/// and writing a file differ in three values, not in eleven.
+pub(super) struct FileJob {
+    pub(super) transfer_id: String,
+    pub(super) connection: ConnectionSpec,
+    pub(super) root: String,
+    pub(super) root_token: String,
+    pub(super) path: String,
+    pub(super) binding: BulkBinding,
+    pub(super) cancellation: Arc<CancelState>,
+    pub(super) channel: Channel<InvokeResponseBody>,
+    pub(super) kind: FileJobKind,
 }
 
-#[derive(Clone)]
-struct FileWriteJob {
-    transfer_id: String,
-    connection: ConnectionSpec,
-    root: String,
-    root_token: String,
-    path: String,
-    operation_id: String,
-    file_generation: u64,
-    content: Arc<[u8]>,
-    binding: BulkBinding,
-    cancellation: Arc<CancelState>,
-    channel: Channel<InvokeResponseBody>,
+/// The three values a write needs and a read does not.
+pub(super) enum FileJobKind {
+    Read,
+    Write(FileWrite),
 }
 
-#[derive(Clone)]
-enum FileIoJob {
-    Read(FileReadJob),
-    Write(FileWriteJob),
-}
-
-impl FileIoJob {
-    fn transfer_id(&self) -> &str {
-        match self {
-            Self::Read(job) => &job.transfer_id,
-            Self::Write(job) => &job.transfer_id,
-        }
-    }
-
-    fn cancellation(&self) -> &Arc<CancelState> {
-        match self {
-            Self::Read(job) => &job.cancellation,
-            Self::Write(job) => &job.cancellation,
-        }
-    }
-
-    fn channel(&self) -> &Channel<InvokeResponseBody> {
-        match self {
-            Self::Read(job) => &job.channel,
-            Self::Write(job) => &job.channel,
-        }
-    }
-
-    fn binding(&self) -> &BulkBinding {
-        match self {
-            Self::Read(job) => &job.binding,
-            Self::Write(job) => &job.binding,
-        }
-    }
+pub(super) struct FileWrite {
+    pub(super) operation_id: String,
+    pub(super) file_generation: u64,
+    pub(super) content: Arc<[u8]>,
 }
 
 #[derive(Clone, Default)]
@@ -113,7 +81,7 @@ pub fn start_file_read(
     )?;
     let transfer_id = Uuid::new_v4().to_string();
     let cancellation = Arc::new(CancelState::new());
-    file_io.enqueue(FileIoJob::Read(FileReadJob {
+    file_io.enqueue(FileJob {
         transfer_id: transfer_id.clone(),
         connection: profiles.connection_for(&profile_id)?,
         root,
@@ -122,7 +90,8 @@ pub fn start_file_read(
         binding,
         cancellation,
         channel: on_event,
-    }))?;
+        kind: FileJobKind::Read,
+    })?;
     Ok(transfer_id)
 }
 
@@ -160,19 +129,21 @@ pub fn start_file_write(
     )?;
     let transfer_id = Uuid::new_v4().to_string();
     let cancellation = Arc::new(CancelState::new());
-    file_io.enqueue(FileIoJob::Write(FileWriteJob {
+    file_io.enqueue(FileJob {
         transfer_id: transfer_id.clone(),
         connection: profiles.connection_for(&profile_id)?,
         root,
         root_token,
         path,
-        operation_id,
-        file_generation: parse_optional_u64("fileGeneration", &file_generation)?,
-        content: Arc::from(content),
         binding,
         cancellation,
         channel: on_event,
-    }))?;
+        kind: FileJobKind::Write(FileWrite {
+            operation_id,
+            file_generation: parse_optional_u64("fileGeneration", &file_generation)?,
+            content: Arc::from(content),
+        }),
+    })?;
     Ok(transfer_id)
 }
 
@@ -189,38 +160,44 @@ impl FileIoManager {
         cancel_transfer(transfer_id).map(|_| ())
     }
 
-    fn enqueue(&self, job: FileIoJob) -> Result<(), String> {
-        let transfer_id = job.transfer_id().to_owned();
-        let cancellation = Arc::clone(job.cancellation());
-        let binding = job.binding().clone();
+    /// One `Arc`, three closures. The job used to be cloned once per closure —
+    /// three deep copies of every string, capability, and channel handle for
+    /// three read-only borrows.
+    fn enqueue(&self, job: FileJob) -> Result<(), String> {
+        let transfer_id = job.transfer_id.clone();
+        let cancellation = Arc::clone(&job.cancellation);
+        let binding = job.binding.clone();
         let queued = QueuedPublication::raw(
-            job.channel().clone(),
+            job.channel.clone(),
             file_json_frame(
                 1,
-                TransferEvent::new(job.transfer_id(), job.binding(), TransferState::Queued).value(),
+                TransferEvent::new(&job.transfer_id, &job.binding, TransferState::Queued).value(),
             )?,
             file_json_frame(
                 4,
-                late_queued_publication_rollback(job.transfer_id(), job.binding()),
+                late_queued_publication_rollback(&job.transfer_id, &job.binding),
             )?,
             "could not publish queued file transfer event",
         );
-        let started_job = job.clone();
-        let work_job = job.clone();
-        let finished_job = job.clone();
+        let job = Arc::new(job);
+        let started_job = Arc::clone(&job);
+        let work_job = Arc::clone(&job);
+        let finished_job = job;
         enqueue_transfer_with_queued(
             transfer_id,
             binding,
             cancellation,
             queued,
             move || emit_file_job_state(&started_job, 1, TransferState::Running),
-            move || match &work_job {
-                FileIoJob::Read(job) => run_file_read(job).map_err(TransferFailure::not_published),
-                FileIoJob::Write(job) => run_file_write(job),
+            move || match &work_job.kind {
+                FileJobKind::Read => {
+                    run_file_read(&work_job).map_err(TransferFailure::not_published)
+                }
+                FileJobKind::Write(write) => run_file_write(&work_job, write),
             },
             move |result, _reason| {
                 if let Err(failure) = result {
-                    let state = if finished_job.cancellation().reason() == CancelReason::User
+                    let state = if finished_job.cancellation.reason() == CancelReason::User
                         && failure.outcome == TransferOutcome::NotPublished
                     {
                         TransferState::Cancelled
@@ -234,8 +211,8 @@ impl FileIoManager {
     }
 }
 
-fn emit_file_failure(job: &FileIoJob, kind: u8, state: TransferState, failure: TransferFailure) {
-    let event = TransferEvent::new(job.transfer_id(), job.binding(), state)
+fn emit_file_failure(job: &FileJob, kind: u8, state: TransferState, failure: TransferFailure) {
+    let event = TransferEvent::new(&job.transfer_id, &job.binding, state)
         .outcome(failure.outcome)
         .cleanup(failure.cleanup_status, failure.cleanup_error);
     let event = if state == TransferState::Cancelled {
@@ -243,252 +220,50 @@ fn emit_file_failure(job: &FileIoJob, kind: u8, state: TransferState, failure: T
     } else {
         event.failure(failure.failure_kind, failure.error)
     };
-    emit_file_json(job.channel(), kind, event.value());
+    emit_file_json(&job.channel, kind, event.value());
 }
 
-fn emit_file_job_state(job: &FileIoJob, kind: u8, state: TransferState) {
-    let _ = send_file_job_state(job, kind, state);
-}
-
-fn send_file_job_state(job: &FileIoJob, kind: u8, state: TransferState) -> Result<(), String> {
-    send_file_json(
-        job.channel(),
+fn emit_file_job_state(job: &FileJob, kind: u8, state: TransferState) {
+    let _ = send_file_json(
+        &job.channel,
         kind,
-        TransferEvent::new(job.transfer_id(), job.binding(), state).value(),
-    )
+        TransferEvent::new(&job.transfer_id, &job.binding, state).value(),
+    );
 }
 
-/// Opens one file over exactly one bulk request.
-///
-/// The staircase this replaces asked three different questions — stat, bulk
-/// preflight, then one request per mebibyte — so a warm 10 MiB open cost twelve
-/// round trips on the remote link and each answer could describe a different
-/// version of the file. Here the host classifies and streams from one
-/// descriptor, so the cost is one round trip plus transfer time and the
-/// metadata, generation, and bytes provably belong together.
-fn run_file_read(job: &FileReadJob) -> Result<(), String> {
+fn run_file_write(job: &FileJob, write: &FileWrite) -> Result<(), TransferFailure> {
     job.binding.validate()?;
-    let _deadline = job.cancellation.arm_inactivity_deadline();
+    // Not `_deadline`: it is refreshed by every frame and chunk below, so an
+    // underscore would have said the opposite of what it does.
+    let deadline = job.cancellation.arm_inactivity_deadline();
     let mut lease =
-        BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &_deadline)?;
-    let _process_binding = job.cancellation.bind_process(lease.process_id())?;
-    let mut protocol = lease.client();
-    let mut state = FileReadStream::new(job, &_deadline);
-    let response = protocol
-        .request_classified(
-            v1::Request {
-                operation: v1::Operation::OpenFileStream.into(),
-                file: Some(v1::FileServiceRequest {
-                    operation_id: job.transfer_id.clone(),
-                    root: job.root.clone(),
-                    root_token: job.root_token.clone(),
-                    path: job.path.clone(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            Exchange {
-                cancellation: Some(&job.cancellation),
-                deadline: Some(&_deadline),
-                on_frame: Some(&mut |frame| state.accept(frame)),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-    _deadline.touch();
-    let content = response
-        .file
-        .and_then(|file| file.content)
-        .ok_or("file open response omitted its content classification")?;
-    state.finish(&content)
-}
-
-/// The renderer-facing side of one `OpenFileStream` exchange.
-///
-/// It exists so the frame observer stays a state machine with one owner rather
-/// than a pile of captured mutable locals: exactly one header, strictly ordered
-/// body frames, and a terminal response that has to agree with both.
-struct FileReadStream<'a> {
-    job: &'a FileReadJob,
-    /// Refreshed by every accepted frame. Without it the inactivity watchdog
-    /// counts the whole transfer as one silence, so a large open on a slow
-    /// remote link is cancelled precisely while it is making steady progress.
-    deadline: &'a DeadlineGuard,
-    header: Option<v1::FileStreamHeader>,
-    offset: u64,
-    hasher: blake3::Hasher,
-    completed: bool,
-}
-
-impl<'a> FileReadStream<'a> {
-    fn new(job: &'a FileReadJob, deadline: &'a DeadlineGuard) -> Self {
-        Self {
-            job,
-            deadline,
-            header: None,
-            offset: 0,
-            hasher: blake3::Hasher::new(),
-            completed: false,
-        }
-    }
-
-    fn accept(&mut self, frame: v1::FileStreamFrame) -> Result<(), String> {
-        self.deadline.touch();
-        // Re-checked per frame, as the write path does per chunk: a read whose
-        // connection scope was replaced mid-transfer must stop rather than run
-        // to completion and publish content for a scope nobody is showing.
-        self.job.binding.validate()?;
-        if let Some(header) = frame.header {
-            if self.header.is_some() {
-                return Err("file open stream repeated its header".into());
-            }
-            let metadata = header
-                .metadata
-                .clone()
-                .ok_or("file open stream header omitted metadata")?;
-            let kind = v1::FileContentKind::try_from(header.content_kind).unwrap_or_default();
-            emit_scoped_file_json(
-                &self.job.channel,
-                &self.job.transfer_id,
-                &self.job.binding,
-                1,
-                TransferState::Running,
-                json!({
-                    "eventKind": "metadata",
-                    "metadata": metadata_json(&metadata),
-                    "contentKind": content_kind_name(kind),
-                    "totalBytes": header.total_bytes.to_string(),
-                }),
-            );
-            self.header = Some(header);
-            return Ok(());
-        }
-        let header = self
-            .header
-            .as_ref()
-            .ok_or("file open stream sent a body before its header")?;
-        if !header.content_streaming {
-            return Err("file open stream sent a body it declared it would not send".into());
-        }
-        if self.completed {
-            return Err("file open stream continued past its own end".into());
-        }
-        if frame.offset != self.offset {
-            return Err("file open stream chunks arrived out of sequence".into());
-        }
-        self.hasher.update(&frame.data);
-        // The renderer's channel going away means the rest of this body has no
-        // reader. Failing here ends the exchange — and, because the caller
-        // treats an error as a cancellation, stops the remote work with it —
-        // instead of streaming a whole file into a channel nobody owns and
-        // then reporting success.
-        if !frame.data.is_empty() && !emit_file_chunk(&self.job.channel, self.offset, &frame.data) {
-            return Err("file open channel closed before its content".into());
-        }
-        self.offset = self
-            .offset
-            .checked_add(frame.data.len() as u64)
-            .ok_or("file open byte counter overflow")?;
-        if self.offset > header.total_bytes {
-            return Err("file open stream exceeded its declared byte count".into());
-        }
-        emit_scoped_file_json(
-            &self.job.channel,
-            &self.job.transfer_id,
-            &self.job.binding,
-            1,
-            TransferState::Running,
-            json!({
-                "transferredBytes": self.offset.to_string(),
-                "totalBytes": header.total_bytes.to_string(),
-            }),
-        );
-        if frame.eof {
-            if self.offset != header.total_bytes
-                || frame.blake3 != self.hasher.finalize().to_hex().to_string()
-            {
-                return Err("file open byte/BLAKE3 verification failed".into());
-            }
-            self.completed = true;
-        }
-        Ok(())
-    }
-
-    /// Publishes the terminal renderer event, after checking that the response
-    /// describes the same file the header and body did.
-    fn finish(self, content: &v1::FileContent) -> Result<(), String> {
-        let header = self
-            .header
-            .ok_or("file open response arrived without a header")?;
-        let metadata = header
-            .metadata
-            .clone()
-            .ok_or("file open stream header omitted metadata")?;
-        if content.generation != header.generation || content.kind != header.content_kind {
-            return Err("file open response disagreed with its own stream header".into());
-        }
-        if header.content_streaming && !self.completed {
-            return Err("file open stream ended before its declared content".into());
-        }
-        emit_scoped_file_json(
-            &self.job.channel,
-            &self.job.transfer_id,
-            &self.job.binding,
-            3,
-            TransferState::Completed,
-            json!({
-                "outcome": TransferOutcome::Published,
-                "cleanupStatus": CleanupStatus::NotNeeded,
-                "metadataOnly": !header.content_streaming,
-                "metadata": metadata_json(&metadata),
-                "contentKind": content_kind_name(
-                    v1::FileContentKind::try_from(header.content_kind).unwrap_or_default(),
-                ),
-                "transferredBytes": self.offset.to_string(),
-                "totalBytes": header.total_bytes.to_string(),
-                // The leaf's generation — the identity every other producer of
-                // an on-screen fact reports: directory listings, precise watch
-                // events, and the write path all describe the name the user
-                // opened. `header.generation` describes the descriptor the host
-                // actually read, which for a symlink is its target, and exists
-                // only for the content cross-check above. Publishing it here
-                // made a symlinked file disagree with its own listing row on
-                // every open, costing a second full remote read per event.
-                "generation": metadata.generation.to_string(),
-            }),
-        );
-        Ok(())
-    }
-}
-
-fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
-    job.binding.validate()?;
-    let _deadline = job.cancellation.arm_inactivity_deadline();
-    let mut lease =
-        BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &_deadline)?;
-    let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+        BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &deadline)?;
+    // A guard: dropping it unbinds. Named for that rather than for being
+    // unread.
+    let _process_binding_guard = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     protocol.request(
         v1::Request {
             operation: v1::Operation::BeginFileWrite.into(),
             file: Some(v1::FileServiceRequest {
-                operation_id: job.operation_id.clone(),
+                operation_id: write.operation_id.clone(),
                 root: job.root.clone(),
                 root_token: job.root_token.clone(),
                 path: job.path.clone(),
                 transfer_id: job.transfer_id.clone(),
-                file_generation: job.file_generation,
-                total_bytes: job.content.len() as u64,
+                file_generation: write.file_generation,
+                total_bytes: write.content.len() as u64,
                 ..Default::default()
             }),
             ..Default::default()
         },
-        Exchange::live(&job.cancellation, &_deadline),
+        Exchange::live(&job.cancellation, &deadline),
     )?;
-    _deadline.touch();
+    deadline.touch();
     let mut offset = 0_u64;
-    for chunk in job.content.chunks(BULK_CHUNK_BYTES as usize) {
+    for chunk in write.content.chunks(BULK_CHUNK_BYTES as usize) {
         if job.cancellation.is_cancelled() {
-            let _ = protocol.cancel_write(&job.operation_id, &job.transfer_id);
+            let _ = protocol.cancel_write(&write.operation_id, &job.transfer_id);
             return Err("file write cancelled".into());
         }
         let next = offset
@@ -498,18 +273,18 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
             v1::Request {
                 operation: v1::Operation::WriteFileChunk.into(),
                 file: Some(v1::FileServiceRequest {
-                    operation_id: job.operation_id.clone(),
+                    operation_id: write.operation_id.clone(),
                     transfer_id: job.transfer_id.clone(),
                     offset,
-                    total_bytes: job.content.len() as u64,
+                    total_bytes: write.content.len() as u64,
                     content: chunk.to_vec(),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
-            Exchange::live(&job.cancellation, &_deadline),
+            Exchange::live(&job.cancellation, &deadline),
         )?;
-        _deadline.touch();
+        deadline.touch();
         offset = next;
         emit_scoped_file_json(
             &job.channel,
@@ -518,15 +293,15 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
             1,
             TransferState::Running,
             json!({
-                "operationId": job.operation_id,
+                "operationId": write.operation_id,
                 "transferredBytes": offset.to_string(),
-                "totalBytes": job.content.len().to_string(),
+                "totalBytes": write.content.len().to_string(),
             }),
         );
     }
-    let digest = blake3::hash(&job.content).to_hex().to_string();
+    let digest = blake3::hash(&write.content).to_hex().to_string();
     if job.cancellation.is_cancelled() {
-        let _ = protocol.cancel_write(&job.operation_id, &job.transfer_id);
+        let _ = protocol.cancel_write(&write.operation_id, &job.transfer_id);
         return Err("file write cancelled before commit".into());
     }
     job.binding.validate()?;
@@ -538,9 +313,9 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
         1,
         TransferState::Verifying,
         json!({
-            "operationId": job.operation_id,
+            "operationId": write.operation_id,
             "transferredBytes": offset.to_string(),
-            "totalBytes": job.content.len().to_string(),
+            "totalBytes": write.content.len().to_string(),
         }),
     );
     let response = protocol
@@ -548,14 +323,14 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
             v1::Request {
                 operation: v1::Operation::CommitFileWrite.into(),
                 file: Some(v1::FileServiceRequest {
-                    operation_id: job.operation_id.clone(),
+                    operation_id: write.operation_id.clone(),
                     transfer_id: job.transfer_id.clone(),
                     blake3: digest.clone(),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
-            Exchange::bounded(&_deadline),
+            Exchange::bounded(&deadline),
         )
         .map_err(|error| match error {
             RequestFailure::Remote { code, message, .. } => {
@@ -573,12 +348,12 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
                 TransferFailure::not_published("file write commit cancelled before dispatch")
             }
         })?;
-    _deadline.touch();
+    deadline.touch();
     let metadata = response
         .file
         .and_then(|file| file.metadata)
         .ok_or("file write commit omitted metadata")?;
-    if metadata.size != job.content.len() as u64 {
+    if metadata.size != write.content.len() as u64 {
         return Err("file write commit byte verification failed".into());
     }
     let stale = job.binding.validate().err();
@@ -591,7 +366,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
             )
             .cleanup(CleanupStatus::NotNeeded, None)
             .fields(json!({
-                "operationId": job.operation_id,
+                "operationId": write.operation_id,
                 "transferredBytes": metadata.size.to_string(),
                 "totalBytes": metadata.size.to_string(),
                 "generation": metadata.generation.to_string(),
@@ -609,7 +384,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
         3,
         TransferState::Completed,
         json!({
-            "operationId": job.operation_id,
+            "operationId": write.operation_id,
             "outcome": TransferOutcome::Published,
             "cleanupStatus": CleanupStatus::NotNeeded,
             "transferredBytes": metadata.size.to_string(),
@@ -622,7 +397,7 @@ fn run_file_write(job: &FileWriteJob) -> Result<(), TransferFailure> {
     Ok(())
 }
 
-fn content_kind_name(kind: v1::FileContentKind) -> &'static str {
+pub(super) fn content_kind_name(kind: v1::FileContentKind) -> &'static str {
     match kind {
         v1::FileContentKind::Text => "text",
         v1::FileContentKind::Binary => "binary",
@@ -656,7 +431,7 @@ fn file_json_frame(kind: u8, value: Value) -> Result<Vec<u8>, String> {
     Ok(frame)
 }
 
-fn emit_scoped_file_json(
+pub(super) fn emit_scoped_file_json(
     channel: &Channel<InvokeResponseBody>,
     transfer_id: &str,
     binding: &BulkBinding,
@@ -674,211 +449,14 @@ fn emit_scoped_file_json(
 }
 
 /// Writes one content frame, reporting whether the renderer is still listening.
-fn emit_file_chunk(channel: &Channel<InvokeResponseBody>, offset: u64, data: &[u8]) -> bool {
+pub(super) fn emit_file_chunk(
+    channel: &Channel<InvokeResponseBody>,
+    offset: u64,
+    data: &[u8],
+) -> bool {
     let mut frame = Vec::with_capacity(9 + data.len());
     frame.push(2);
     frame.extend_from_slice(&offset.to_be_bytes());
     frame.extend_from_slice(data);
     channel.send(InvokeResponseBody::Raw(frame)).is_ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::connection::TerminalClient;
-    use std::sync::atomic::Ordering;
-
-    fn job() -> FileReadJob {
-        let client = Arc::new(TerminalClient::new());
-        client.ready.store(true, Ordering::Release);
-        client.terminal_epoch.store(7, Ordering::Release);
-        *client.server_identity.lock().unwrap() = "server".into();
-        FileReadJob {
-            transfer_id: "read".into(),
-            connection: ConnectionSpec::Local,
-            root: "/repo".into(),
-            root_token: "token".into(),
-            path: "/repo/a.txt".into(),
-            binding: BulkBinding::capture(client, "server".into(), 7).unwrap(),
-            cancellation: Arc::new(CancelState::new()),
-            channel: Channel::new(|_| Ok(())),
-        }
-    }
-
-    fn header(bytes: &[u8], streaming: bool) -> v1::FileStreamHeader {
-        v1::FileStreamHeader {
-            metadata: Some(v1::FileMetadata {
-                path: "/repo/a.txt".into(),
-                generation: 5,
-                ..Default::default()
-            }),
-            content_kind: v1::FileContentKind::Text.into(),
-            generation: 5,
-            total_bytes: bytes.len() as u64,
-            content_streaming: streaming,
-        }
-    }
-
-    fn body(offset: u64, data: &[u8], eof: bool, digest: &str) -> v1::FileStreamFrame {
-        v1::FileStreamFrame {
-            operation_id: "open".into(),
-            header: None,
-            offset,
-            data: data.to_vec(),
-            eof,
-            blake3: digest.to_owned(),
-        }
-    }
-
-    fn content(generation: u64, kind: v1::FileContentKind) -> v1::FileContent {
-        v1::FileContent {
-            metadata: None,
-            kind: kind.into(),
-            content: Vec::new(),
-            generation,
-        }
-    }
-
-    /// The exchange this whole operation exists to make one round trip.
-    #[test]
-    fn a_header_a_body_and_an_agreeing_response_are_accepted() {
-        let job = job();
-        let deadline = job.cancellation.arm_inactivity_deadline();
-        let mut stream = FileReadStream::new(&job, &deadline);
-        let bytes = b"hello";
-        let digest = blake3::hash(bytes).to_hex().to_string();
-        stream
-            .accept(v1::FileStreamFrame {
-                header: Some(header(bytes, true)),
-                ..Default::default()
-            })
-            .unwrap();
-        stream.accept(body(0, bytes, true, &digest)).unwrap();
-        stream
-            .finish(&content(5, v1::FileContentKind::Text))
-            .unwrap();
-    }
-
-    /// Every refusal in the state machine, each named by what it protects.
-    ///
-    /// The whole point of the type is that content, identity, and byte count
-    /// provably belong together; without these the desktop would publish a
-    /// file assembled from frames that never agreed with each other.
-    #[test]
-    fn a_stream_that_disagrees_with_itself_is_refused_rather_than_published() {
-        let bytes = b"hello";
-        let digest = blake3::hash(bytes).to_hex().to_string();
-        /// One way a stream can contradict itself, and its name.
-        type Contradiction = (
-            &'static str,
-            Box<dyn Fn(&mut FileReadStream<'_>) -> Result<(), String>>,
-        );
-        let cases: Vec<Contradiction> = vec![
-            (
-                "a body with no header",
-                Box::new(move |stream| stream.accept(body(0, b"hello", true, ""))),
-            ),
-            (
-                "a second header",
-                Box::new(|stream| {
-                    stream.accept(v1::FileStreamFrame {
-                        header: Some(header(b"hello", true)),
-                        ..Default::default()
-                    })?;
-                    stream.accept(v1::FileStreamFrame {
-                        header: Some(header(b"hello", true)),
-                        ..Default::default()
-                    })
-                }),
-            ),
-            (
-                "a body frame out of sequence",
-                Box::new(|stream| {
-                    stream.accept(v1::FileStreamFrame {
-                        header: Some(header(b"hello", true)),
-                        ..Default::default()
-                    })?;
-                    stream.accept(body(8, b"lo", false, ""))
-                }),
-            ),
-            (
-                "more bytes than the header declared",
-                Box::new(|stream| {
-                    stream.accept(v1::FileStreamFrame {
-                        header: Some(header(b"hi", true)),
-                        ..Default::default()
-                    })?;
-                    stream.accept(body(0, b"far too many", false, ""))
-                }),
-            ),
-            (
-                "a digest that does not describe the body",
-                Box::new(|stream| {
-                    stream.accept(v1::FileStreamFrame {
-                        header: Some(header(b"hello", true)),
-                        ..Default::default()
-                    })?;
-                    stream.accept(body(0, b"hello", true, "0000"))
-                }),
-            ),
-            (
-                "a body cut short of its declared length",
-                Box::new(move |stream| {
-                    stream.accept(v1::FileStreamFrame {
-                        header: Some(header(b"hello", true)),
-                        ..Default::default()
-                    })?;
-                    stream.accept(body(0, b"hel", false, ""))?;
-                    let taken =
-                        std::mem::replace(stream, FileReadStream::new(stream.job, stream.deadline));
-                    taken.finish(&content(5, v1::FileContentKind::Text))
-                }),
-            ),
-        ];
-        for (name, run) in cases {
-            let job = job();
-            let deadline = job.cancellation.arm_inactivity_deadline();
-            let mut stream = FileReadStream::new(&job, &deadline);
-            assert!(run(&mut stream).is_err(), "{name} was published anyway");
-        }
-
-        // And a terminal response that describes a different file than the
-        // header did, which is the cross-check the two generations exist for.
-        for wrong in [
-            content(6, v1::FileContentKind::Text),
-            content(5, v1::FileContentKind::Binary),
-        ] {
-            let job = job();
-            let deadline = job.cancellation.arm_inactivity_deadline();
-            let mut stream = FileReadStream::new(&job, &deadline);
-            stream
-                .accept(v1::FileStreamFrame {
-                    header: Some(header(bytes, true)),
-                    ..Default::default()
-                })
-                .unwrap();
-            stream.accept(body(0, bytes, true, &digest)).unwrap();
-            assert!(
-                stream.finish(&wrong).is_err(),
-                "a response describing another file was published"
-            );
-        }
-    }
-
-    /// A classification-only open owes no body at all.
-    #[test]
-    fn a_metadata_only_open_finishes_without_content() {
-        let job = job();
-        let deadline = job.cancellation.arm_inactivity_deadline();
-        let mut stream = FileReadStream::new(&job, &deadline);
-        stream
-            .accept(v1::FileStreamFrame {
-                header: Some(header(&[], false)),
-                ..Default::default()
-            })
-            .unwrap();
-        stream
-            .finish(&content(5, v1::FileContentKind::Text))
-            .unwrap();
-    }
 }

@@ -22,6 +22,7 @@ mod manager_acceptance;
 pub(crate) mod native_clipboard;
 pub use download_manager::DownloadManager;
 pub(crate) mod editor_manager;
+mod file_stream;
 pub use editor_manager::FileIoManager;
 mod serialization;
 pub(crate) use serialization::{file_event_json, file_response_json};
