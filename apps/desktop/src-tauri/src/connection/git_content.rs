@@ -116,12 +116,15 @@ pub async fn read_git_diff_content(
     let read_id = job.read_id.clone();
     let registration = reads.register(&read_id, &job.cancellation)?;
     let reads = Arc::clone(&reads);
+    // Kept out of the worker so a panicking worker still has somewhere to
+    // report to; otherwise the renderer's read would never settle at all.
+    let reporter = job.channel.clone();
     tauri::async_runtime::spawn(async move {
         let _registration = registration;
         let permit = match reads.admission.acquire().await {
             Ok(permit) => permit,
             Err(_) => {
-                emit_error(&job.channel, "Git diff content admission closed");
+                emit_error(&reporter, "Git diff content admission closed");
                 return;
             }
         };
@@ -138,10 +141,7 @@ pub async fn read_git_diff_content(
                 let _ = job.channel.send(InvokeResponseBody::Raw(frame));
             }
             Ok((job, Err(error))) => emit_error(&job.channel, &error),
-            // The worker panicked, so its channel went with it. There is
-            // nothing left to report to, and the registration is released by
-            // this task's own guard.
-            Err(error) => eprintln!("Git diff content read failed: {error}"),
+            Err(error) => emit_error(&reporter, &format!("Git diff content read failed: {error}")),
         }
     });
     Ok(read_id)

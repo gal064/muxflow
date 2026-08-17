@@ -26,13 +26,6 @@ const MAX_GIT_DIAGNOSTIC: usize = 4 * 1024;
 const CONFIRMATION_TTL: Duration = Duration::from_secs(120);
 const MAX_CONFIRMATIONS: usize = 1024;
 
-/// How many times a diff re-reads when the repository changed under it.
-///
-/// A repository being written to continuously cannot produce a status and a
-/// diff describing the same state; saying so is better than returning a pair
-/// that does not agree.
-const DIFF_BRACKET_ATTEMPTS: usize = 3;
-
 /// Repositories one connection keeps discovered state for.
 ///
 /// Each retains a worktree descriptor and two metadata descriptors, so a client
@@ -228,13 +221,14 @@ impl GitService {
     /// One diff, plus the authoritative status it was read against.
     ///
     /// The desktop previously requested status and then diff, paying two round
-    /// trips for one visible action. The status is carried here because the
-    /// service already has it: for a watched repository it costs nothing.
+    /// trips for one visible action.
     ///
-    /// The pair is bracketed by re-taking the status after the read. For an
-    /// observed repository that costs nothing — the coordinator answers from
-    /// the same snapshot — and it is the only thing that actually proves the
-    /// status this response states is the one the diff was read against.
+    /// The status is taken *after* the read, so the response states the state
+    /// the diff actually landed on rather than asserting that nothing moved
+    /// during it. For an observed repository that read costs nothing — the
+    /// coordinator answers from the snapshot it already has. What binds a
+    /// mutation is not this pair but `GitDiff::source_generation`, which
+    /// `mutate_hunk` re-derives and re-validates under the repository lock.
     pub(in crate::service) async fn diff(
         &self,
         request: &v1::GitRequest,
@@ -243,46 +237,44 @@ impl GitService {
     ) -> anyhow::Result<(v1::GitDiff, v1::GitStatusSnapshot)> {
         require_repository_id(request)?;
         let (coordinator, capabilities) = self.repository(request, cancellation.clone()).await?;
-        for _ in 0..DIFF_BRACKET_ATTEMPTS {
-            if cancellation
-                .as_deref()
-                .is_some_and(|flag| flag.load(Ordering::Acquire))
-            {
-                bail!("Git diff cancelled");
-            }
-            let status = coordinator
-                .status(&capabilities, Freshness::Coalesced, cancellation.clone())
-                .await?;
-            if !status.authoritative || status.oversized {
-                bail!("Git status is not authoritative");
-            }
-            let repository = status
-                .repository
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("Git status omitted its repository identity"))?;
-            let work = request.clone();
-            let read_capabilities = Arc::clone(&capabilities);
-            let read_cancellation = cancellation.clone();
-            let read = tokio::task::spawn_blocking(move || {
-                let _guard = read_capabilities.metadata.install();
-                read_diff(
-                    &read_capabilities.stable_root(),
-                    repository,
-                    &work,
-                    DiffAudience::for_client(bulk_available),
-                    read_cancellation.as_deref(),
-                )
-            })
-            .await
-            .map_err(|error| anyhow::anyhow!("Git diff task failed: {error}"))??;
-            let after = coordinator
-                .status(&capabilities, Freshness::Coalesced, cancellation.clone())
-                .await?;
-            if after.generation == status.generation {
-                return Ok((read, (*status).clone()));
-            }
+        if cancellation
+            .as_deref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            bail!("Git diff cancelled");
         }
-        bail!("stale Git status generation during diff")
+        let before = coordinator
+            .status(&capabilities, Freshness::Coalesced, cancellation.clone())
+            .await?;
+        if !before.authoritative || before.oversized {
+            bail!("Git status is not authoritative");
+        }
+        let repository = before
+            .repository
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Git status omitted its repository identity"))?;
+        let work = request.clone();
+        let read_capabilities = Arc::clone(&capabilities);
+        let read_cancellation = cancellation.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            let _guard = read_capabilities.metadata.install();
+            read_diff(
+                &read_capabilities.stable_root(),
+                repository,
+                &work,
+                DiffAudience::for_client(bulk_available),
+                read_cancellation.as_deref(),
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Git diff task failed: {error}"))??;
+        let landed = coordinator
+            .status(&capabilities, Freshness::Coalesced, cancellation)
+            .await?;
+        if !landed.authoritative || landed.oversized {
+            bail!("Git status is not authoritative");
+        }
+        Ok((read, (*landed).clone()))
     }
 
     /// The diff including its raw patch, which the client response omits.

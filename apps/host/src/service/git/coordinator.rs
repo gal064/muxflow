@@ -300,6 +300,13 @@ impl RepositoryCoordinator {
         self.next_publication.fetch_add(1, Ordering::AcqRel) + 1
     }
 
+    /// Delivers one snapshot to subscribers, in pipeline order, off this stack.
+    fn spawn_publication(self: &Arc<Self>, snapshot: &Arc<v1::GitStatusSnapshot>, sequence: u64) {
+        let coordinator = Arc::clone(self);
+        let snapshot = Arc::clone(snapshot);
+        tokio::spawn(async move { coordinator.publish_status(&snapshot, sequence).await });
+    }
+
     pub(super) fn cached_status(&self) -> Option<Arc<v1::GitStatusSnapshot>> {
         self.latest
             .lock()
@@ -344,13 +351,14 @@ impl RepositoryCoordinator {
         .await
         .map_err(|error| anyhow::anyhow!("Git status task failed: {error}"))??;
         let snapshot = self.commit_snapshot(snapshot, observed, started_at);
-        // The pipeline lock is released before publishing. Fanning out awaits
-        // a bounded sequencer channel, and a stalled consumer must not be able
-        // to hold this repository's status pipeline — nor, through a mutation,
-        // the process-global repository lock. Ordering is preserved by the
-        // pipeline sequence rather than by holding the lock across the send.
         drop(pipeline);
-        self.publish_status(&snapshot, sequence).await;
+        // Delivery does not happen on this caller's stack at all. Fanning out
+        // awaits a bounded sequencer channel, so a stalled consumer would
+        // otherwise hold whatever the caller holds — for a mutation, the
+        // process-global repository lock, and with it every other connection's
+        // Git commands on this repository. The publisher orders itself by the
+        // pipeline sequence instead.
+        self.spawn_publication(&snapshot, sequence);
         Ok(snapshot)
     }
 

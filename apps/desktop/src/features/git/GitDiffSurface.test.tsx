@@ -166,6 +166,35 @@ describe("GitDiffSurface", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it("follows the tab to another file without reloading the previous one", async () => {
+    const client = mockClient();
+    const other = { ...status.entries[0], path: "Yg==", displayPath: "b" };
+    const both = { ...status, entries: [status.entries[0], other] };
+    vi.mocked(client.watch).mockImplementation(async (activeScope, activeRoot) => ({ watchId: "diff-watch", rootToken: activeRoot.token, connectionEpoch: activeScope.terminalEpoch, status: both, release: vi.fn() }));
+    vi.mocked(client.diff).mockImplementation(async (_scope, _root, _id, path) => ({ diff: { ...diff, path }, status: both }));
+    let listener: Parameters<GitWorkspaceClient["subscribe"]>[0] | undefined;
+    vi.mocked(client.subscribe).mockImplementation((next) => { listener = next; return () => undefined; });
+    const repositories = new GitRepositoryStore(client);
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitDiffSurface {...props(client)} repositories={repositories} />); await settle(); });
+    expect(vi.mocked(client.diff).mock.calls.map((call) => call[3])).toEqual(["YQ=="]);
+
+    // The tab's file changes while its repository does not, so the shared
+    // observation is never re-acquired. The live subscription must still follow
+    // the tab rather than keep fetching the path it was created with.
+    await act(async () => {
+      renderer.update(<GitDiffSurface {...props(client)} repositories={repositories} tab={{ ...tab, gitPath: "Yg==" }} />);
+      await settle();
+    });
+    const changed = { ...both, generation: "9", sourceGeneration: "moved" };
+    await act(async () => {
+      listener?.({ kind: "status", rootToken: "root", watchId: "diff-watch", status: changed });
+      await settle(); await settle();
+    });
+    expect(vi.mocked(client.diff).mock.calls.map((call) => call[3])).toEqual(["YQ==", "Yg=="]);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("presents binary changes safely without constructing a text diff", async () => {
     const client = mockClient();
     vi.mocked(client.diff).mockResolvedValueOnce({ diff: { ...diff, binary: true, oldContent: undefined, newContent: undefined }, status });

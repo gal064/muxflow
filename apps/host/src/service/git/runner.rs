@@ -622,15 +622,7 @@ fn read_process_output(mut reader: impl Read) -> std::io::Result<(Vec<u8>, bool)
 fn is_read_only_command(args: &[&OsStr]) -> bool {
     matches!(
         args.first().map(|verb| verb.as_bytes()),
-        Some(
-            b"status"
-                | b"diff"
-                | b"rev-parse"
-                | b"cat-file"
-                | b"show"
-                | b"ls-files"
-                | b"symbolic-ref"
-        )
+        Some(b"status" | b"diff" | b"rev-parse" | b"cat-file" | b"show" | b"ls-files")
     )
 }
 

@@ -193,9 +193,10 @@ impl RepositoryCoordinator {
         snapshot: &Arc<v1::GitStatusSnapshot>,
         sequence: u64,
     ) {
-        let ordered = self.publish.lock().await;
-        if !self.claim_publication(
-            ordered,
+        let mut ordered = self.publish.lock().await;
+        if !claim_publication(
+            &mut ordered,
+            &self.published,
             sequence,
             Publication::Status(snapshot.source_generation.clone()),
         ) {
@@ -216,8 +217,13 @@ impl RepositoryCoordinator {
         error: String,
         sequence: u64,
     ) {
-        let ordered = self.publish.lock().await;
-        if !self.claim_publication(ordered, sequence, Publication::Error(error.clone())) {
+        let mut ordered = self.publish.lock().await;
+        if !claim_publication(
+            &mut ordered,
+            &self.published,
+            sequence,
+            Publication::Error(error.clone()),
+        ) {
             return;
         }
         self.fan_out(|watch_id, root_token| v1::GitEvent {
@@ -227,26 +233,6 @@ impl RepositoryCoordinator {
             ..Default::default()
         })
         .await;
-    }
-
-    /// Whether this publication is both newer than the last and different from
-    /// it. Consumes the ordering guard, which is held for the caller's fan-out.
-    fn claim_publication(
-        &self,
-        mut ordered: tokio::sync::MutexGuard<'_, u64>,
-        sequence: u64,
-        next: Publication,
-    ) -> bool {
-        if sequence <= *ordered {
-            return false;
-        }
-        *ordered = sequence;
-        let mut published = self.published.lock().unwrap();
-        if *published == next {
-            return false;
-        }
-        *published = next;
-        true
     }
 
     async fn fan_out(self: &Arc<Self>, event: impl Fn(&str, &str) -> v1::GitEvent) {
@@ -279,6 +265,29 @@ impl RepositoryCoordinator {
             }
         }
     }
+}
+
+/// Whether this publication is both newer than the last and different from it.
+///
+/// The caller keeps the ordering guard across its fan-out, which is what makes
+/// delivery order match pipeline order: a slower older publication cannot
+/// interleave with a faster newer one.
+fn claim_publication(
+    ordered: &mut u64,
+    published: &Mutex<Publication>,
+    sequence: u64,
+    next: Publication,
+) -> bool {
+    if sequence <= *ordered {
+        return false;
+    }
+    *ordered = sequence;
+    let mut published = published.lock().unwrap();
+    if *published == next {
+        return false;
+    }
+    *published = next;
+    true
 }
 
 fn git_status_event(scope: String, git: v1::GitEvent) -> v1::HostEvent {
