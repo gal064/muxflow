@@ -58,16 +58,33 @@ interface Fixture {
   generations?: string[];
   /** False when the Explorer had already armed this directory's watch. */
   fresh?: boolean;
+  /** Holds every open until released, so a late answer can be aimed at a dead surface. */
+  holdOpens?: boolean;
+  /** Holds the watch bootstrap, so the read can be made to land first. */
+  holdWatch?: boolean;
 }
 
 function surfaceClient(fixture: Fixture) {
   const generations = [...(fixture.generations ?? ["g1"])];
   const opens: string[] = [];
   const writes: string[] = [];
+  const signals: AbortSignal[] = [];
+  const releases: number[] = [];
+  const settleOpen: Array<() => void> = [];
+  let releaseWatch: (() => void) | undefined;
   let listener: ((event: WorkspaceEvent) => void) | undefined;
   const client = {
-    openFile: vi.fn(async () => {
+    openFile: vi.fn(async (
+      _scope: FileWorkspaceScope,
+      _root: ActiveRoot,
+      _path: string,
+      signal?: AbortSignal,
+    ) => {
+      if (signal) signals.push(signal);
       const generation = generations.length > 1 ? generations.shift()! : generations[0];
+      if (fixture.holdOpens) {
+        await new Promise<void>((resolve) => { settleOpen.push(resolve); });
+      }
       opens.push(generation);
       return opened(generation);
     }),
@@ -75,11 +92,16 @@ function surfaceClient(fixture: Fixture) {
       writes.push(request.operationId);
       return { path: "/repo/note.txt", generation: "saved", operationId: request.operationId, sizeBytes: "5" };
     }),
-    acquireDirectoryWatch: vi.fn(async (): Promise<DirectoryWatchLease> => ({
-      fresh: fixture.fresh ?? true,
-      snapshot: fixture.bootstrap,
-      release: () => undefined,
-    })),
+    acquireDirectoryWatch: vi.fn(async (): Promise<DirectoryWatchLease> => {
+      if (fixture.holdWatch) {
+        await new Promise<void>((resolve) => { releaseWatch = resolve; });
+      }
+      return {
+        fresh: fixture.fresh ?? true,
+        snapshot: fixture.bootstrap,
+        release: () => releases.push(releases.length + 1),
+      };
+    }),
     subscribe: vi.fn(async (_scope: FileWorkspaceScope, next: (event: WorkspaceEvent) => void) => {
       listener = next;
       return () => { listener = undefined; };
@@ -87,7 +109,12 @@ function surfaceClient(fixture: Fixture) {
     listDirectory: vi.fn(), resolveActiveRoot: vi.fn(),
     mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
   } as unknown as FileWorkspaceClient;
-  return { client, opens, writes, publish: (event: WorkspaceEvent) => listener?.(event) };
+  return {
+    client, opens, writes, signals, releases,
+    publish: (event: WorkspaceEvent) => listener?.(event),
+    settleOpens: () => { settleOpen.splice(0).forEach((resolve) => resolve()); },
+    settleWatch: () => { releaseWatch?.(); releaseWatch = undefined; },
+  };
 }
 
 async function mount(fixture: Fixture) {
@@ -259,5 +286,87 @@ describe("AppTabSurface", () => {
     expect(surface.opens).toEqual(["g1"]);
     await act(async () => { surface.renderer.unmount(); });
     vi.useRealTimers();
+  });
+  /**
+   * The plan's own required outcome for a remote open: "a cancelled/stale open
+   * publishes no late buffer", and "one owning cancellation spans control and
+   * bulk work".
+   *
+   * Nothing tested either. The surface holds one `AbortController` per load and
+   * one serial; a closing tab has to abort the in-flight read *and* refuse its
+   * answer if it arrives anyway, because aborting a request already on the wire
+   * does not un-send the bytes.
+   */
+  it("aborts an in-flight open on unmount and publishes nothing when it answers late", async () => {
+    const surface = await mount({
+      bootstrap: listing([entry("/repo/note.txt", "g1")]),
+      holdOpens: true,
+    });
+    expect(surface.opens, "the read should still be in flight").toEqual([]);
+    expect(surface.signals, "the open was issued without a cancellation").toHaveLength(1);
+    expect(surface.signals[0].aborted).toBe(false);
+
+    await act(async () => { surface.renderer.unmount(); });
+    expect(surface.signals[0].aborted, "closing the tab left the remote read running").toBe(true);
+
+    // And the answer arrives anyway, as it does whenever the abort loses the
+    // race with the wire.
+    await act(async () => { surface.settleOpens(); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(surface.renderer.toJSON(), "a dead surface published a late buffer").toBeNull();
+  });
+
+  it("releases the parent watch lease when the tab closes", async () => {
+    const surface = await mount({ bootstrap: listing([entry("/repo/note.txt", "g1")]) });
+    expect(surface.releases, "the lease was released before the tab closed").toEqual([]);
+    await act(async () => { surface.renderer.unmount(); });
+    expect(
+      surface.releases,
+      "closing the tab left a directory watch armed on the host forever",
+    ).toEqual([1]);
+  });
+
+  it("abandons a watch bootstrap still in flight when the tab closes", async () => {
+    // The bootstrap is a full directory listing. A tab closed while it is in
+    // flight must stop paying for it rather than receive it and throw it away.
+    const surface = await mount({
+      bootstrap: listing([entry("/repo/note.txt", "g1")]),
+      holdWatch: true,
+    });
+    await act(async () => { surface.renderer.unmount(); });
+    await act(async () => { surface.settleWatch(); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    // Released rather than retained: the lease resolved after the unmount, and
+    // the surface hands it straight back.
+    expect(surface.releases, "a lease acquired after unmount was never released").toEqual([1]);
+  });
+
+  /**
+   * A parked bootstrap opinion belongs to the read it was waiting for.
+   *
+   * Without the serial, an opinion the bootstrap parked for read #1 was
+   * consumed by whichever read happened to finish next — so a later, unrelated
+   * load compared its own content against a generation that described a
+   * different read entirely, and re-opened the file for it.
+   */
+  it("never lets a parked bootstrap opinion reconcile a later, unrelated read", async () => {
+    // The bootstrap describes "g1" and lands first. Read #1 also answers "g1",
+    // consuming the opinion; the external change that follows answers "g2" and
+    // must not be re-read against the bootstrap's stale opinion.
+    const surface = await mount({
+      bootstrap: listing([entry("/repo/note.txt", "g1")]),
+      generations: ["g1", "g2", "g3"],
+    });
+    expect(surface.opens).toEqual(["g1"]);
+    await act(async () => {
+      surface.publish({ kind: "fileChanged", rootToken: "root", path: "/repo/note.txt", generation: "g2" });
+      await Promise.resolve();
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(
+      surface.opens,
+      "a consumed bootstrap opinion re-opened a later read that had nothing to do with it",
+    ).toEqual(["g1", "g2"]);
+    await act(async () => { surface.renderer.unmount(); });
   });
 });
