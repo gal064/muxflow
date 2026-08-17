@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
@@ -76,9 +76,13 @@ export function GitSidebar(props: Props) {
   };
 
   // Stable handlers for the memoized groups: a row must not be rebuilt because
-  // an unrelated prop identity changed above it.
+  // an unrelated prop identity changed above it. Committed rather than written
+  // during render, so a render React discards cannot leave these handlers
+  // acting on props that were never committed.
   const latest = useRef({ ...props, unavailable });
-  latest.current = { ...props, unavailable };
+  useEffect(() => {
+    latest.current = { ...props, unavailable };
+  });
   const openDiff = useCallback((entry: GitStatusEntry, target: GitDiffTarget) => {
     latest.current.onOpenDiff(entry, target);
   }, []);

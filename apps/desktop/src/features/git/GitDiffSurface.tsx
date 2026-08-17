@@ -164,6 +164,12 @@ export function GitDiffSurface(props: Props) {
       if (current === serial.current) setLoading(false);
     }
   }, [originalPathIdentity, pathIdentity, repositoryId, target]);
+  // The subscription outlives any one `load`: its lifetime is the shared
+  // observation's, and the diff this tab wants can change without the
+  // repository changing. Reading the current `load` through a ref is what keeps
+  // those two lifetimes independent without ever invoking a stale one.
+  const currentLoad = useRef(load);
+  currentLoad.current = load;
 
   /**
    * What the Refresh and Retry controls mean.
@@ -202,7 +208,7 @@ export function GitDiffSurface(props: Props) {
       if (!next.loading) setLoading(false);
       if (commanding.current || !next.status) return;
       if (next.status.generation === requestedGeneration.current) return;
-      void load();
+      void currentLoad.current();
     };
     loadWhenStatusMoves();
     const stop = acquired.subscribe(loadWhenStatusMoves);
@@ -218,8 +224,8 @@ export function GitDiffSurface(props: Props) {
       lease.release();
       repository.current = undefined;
     };
-    // `scopeIdentity` is the complete key of `boundScope`, and `load` is only
-    // called through a ref-stable path; neither belongs in this lifetime.
+    // `scopeIdentity` is the complete key of `boundScope`, and `load` is
+    // reached only through `currentLoad`; neither belongs in this lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repositories, repositoryId, scopeIdentity]);
 
@@ -303,7 +309,7 @@ export function GitDiffSurface(props: Props) {
   // An error outranks a spinner: a surface still claiming to load while it
   // holds a failure is a surface with no way out of it.
   if (surfaceError && !diff) return <GitDiffEmpty title={props.tab.title} detail={surfaceError} retry={() => void refreshFromHost()} />;
-  if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" />;
+  if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" retry={() => void refreshFromHost()} />;
   if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${target} changes.`} retry={() => void refreshFromHost()} />;
 
   const text = decodedText;

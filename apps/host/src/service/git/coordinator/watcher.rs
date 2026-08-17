@@ -164,20 +164,20 @@ impl RepositoryCoordinator {
 
     /// Sleeps, unless observation is already stopped or stops during it.
     ///
-    /// The stop check comes first: `Notify::notify_waiters` stores no permit,
-    /// so a stop landing between awaits would otherwise be missed and the task
-    /// would sleep out its whole fallback interval before noticing.
+    /// The waiter is enabled before the condition is read: `notify_waiters`
+    /// stores no permit, so a stop landing in that window would be lost and the
+    /// task would sleep out its whole fallback interval — up to 30 seconds —
+    /// after its last consumer had gone.
     async fn rest(&self, observation: &Observation, duration: Duration) {
-        if self.observation_stopped(observation) {
-            return;
-        }
         let stopping = observation.wake.notified();
+        tokio::pin!(stopping);
+        stopping.as_mut().enable();
         if self.observation_stopped(observation) {
             return;
         }
         tokio::select! {
-            _ = tokio::time::sleep(duration) => {}
-            _ = stopping => {}
+            () = tokio::time::sleep(duration) => {}
+            () = &mut stopping => {}
         }
     }
 
@@ -312,6 +312,9 @@ impl RepositoryCoordinator {
         if self.observation_stopped(observation) {
             return;
         }
+        // Claimed before the read, so a failure is ordered ahead of any
+        // pipeline that starts afterwards and cannot overwrite its success.
+        let sequence = self.next_publication();
         match self.status(capabilities, Freshness::Coalesced, None).await {
             Ok(snapshot) => {
                 let changed = snapshot.source_generation != *last_source;
@@ -321,8 +324,7 @@ impl RepositoryCoordinator {
                 }
             }
             Err(error) => {
-                self.publish_error(error.to_string(), self.next_publication())
-                    .await;
+                self.publish_error(error.to_string(), sequence).await;
                 if polling {
                     *fallback = next_fallback(*fallback, false);
                 }

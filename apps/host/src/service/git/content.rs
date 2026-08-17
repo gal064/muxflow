@@ -25,11 +25,11 @@ pub(super) struct CachedDiffBody {
 /// The scope fields are in here on purpose: a cache hit skips the discovery
 /// path that would otherwise revalidate them, and a body served across a tmux
 /// server swap or a root replacement would be a body from a repository the
-/// client can no longer address.
+/// client can no longer address. The connection's own epoch is not a dimension
+/// — this cache belongs to one connection, and that connection has one epoch.
 #[derive(Clone, PartialEq, Eq)]
 struct DiffBodyKey {
     server_identity: String,
-    connection_epoch: u64,
     root: String,
     root_token: String,
     repository_id: String,
@@ -47,7 +47,6 @@ impl DiffBodyKey {
     fn new(request: &v1::GitRequest, content: &v1::GitDiffContentRequest) -> Self {
         Self {
             server_identity: request.expected_server_identity.clone(),
-            connection_epoch: request.connection_epoch,
             root: request.root.clone(),
             root_token: request.root_token.clone(),
             repository_id: request.repository_id.clone(),
