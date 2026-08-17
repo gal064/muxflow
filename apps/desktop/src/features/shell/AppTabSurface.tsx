@@ -40,7 +40,14 @@ const FILE_EDITOR_PAINT = ["workflow.file.editorPaint"] as const;
  */
 type Reconciliation =
   | { kind: "pending" }
-  | { kind: "bootstrap"; generation: string | undefined }
+  /**
+   * The bootstrap arrived before the read did, so its opinion is parked for
+   * whichever read is in flight *now* — named by `serial`. A parked opinion
+   * with no epoch outlived the read it was waiting for: a later, unrelated
+   * load consumed it and re-opened the file against a generation that had
+   * described a different read entirely.
+   */
+  | { kind: "bootstrap"; generation: string | undefined; serial: number }
   | { kind: "done" };
 
 export function AppTabSurface(props: Props) {
@@ -147,7 +154,7 @@ export function AppTabSurface(props: Props) {
       // queued rather than called: re-entering `load` from inside its own
       // success path invalidates the serial of the invocation still running.
       const arrived = reconciliation.current;
-      if (arrived.kind === "bootstrap") {
+      if (arrived.kind === "bootstrap" && arrived.serial === serial) {
         reconciliation.current = { kind: "done" };
         if (arrived.generation !== undefined && arrived.generation !== next.file.generation) {
           queueMicrotask(() => { if (serial === loadSerial.current) void load(options); });
@@ -343,7 +350,7 @@ export function AppTabSurface(props: Props) {
     const generation = listingOpinion(lease.snapshot);
     const shown = shownGeneration();
     if (shown === undefined) {
-      reconciliation.current = { kind: "bootstrap", generation };
+      reconciliation.current = { kind: "bootstrap", generation, serial: loadSerial.current };
       return;
     }
     reconciliation.current = { kind: "done" };
