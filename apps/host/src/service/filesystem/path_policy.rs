@@ -146,20 +146,35 @@ impl AnchoredMetadata {
         self.kind() == libc::S_IFLNK
     }
 
+    // Already the target type on Linux, a narrower and sometimes signed one
+    // elsewhere. See `device`.
+    #[allow(clippy::unnecessary_cast)]
     pub(super) fn device(&self) -> u64 {
-        lossless_stat_component(self.stat.st_dev)
+        // Widened, never validated. These three are identity components, not
+        // quantities: what has to survive is the bits. Platforms disagree
+        // about the sign and width of every one of them — `dev_t` is a signed
+        // 32-bit value on macOS and unsigned 64-bit on Linux — so a conversion
+        // that refused a negative device number panicked on the listing hot
+        // path for a value that platform considers perfectly ordinary.
+        self.stat.st_dev as u64
     }
 
+    // Already the target type on Linux, a narrower and sometimes signed one
+    // elsewhere. See `device`.
+    #[allow(clippy::unnecessary_cast)]
     pub(super) fn inode(&self) -> u64 {
-        lossless_stat_component(self.stat.st_ino)
+        self.stat.st_ino as u64
     }
 
     pub(super) fn len(&self) -> u64 {
         self.stat.st_size.max(0) as u64
     }
 
+    // Already the target type on Linux, a narrower and sometimes signed one
+    // elsewhere. See `device`.
+    #[allow(clippy::unnecessary_cast)]
     pub(super) fn mode(&self) -> u32 {
-        lossless_stat_component(self.stat.st_mode)
+        self.stat.st_mode as u32
     }
 
     pub(super) fn permissions(&self) -> Permissions {
@@ -184,16 +199,6 @@ impl AnchoredMetadata {
 
     fn kind(&self) -> libc::mode_t {
         self.stat.st_mode & libc::S_IFMT
-    }
-}
-
-fn lossless_stat_component<T, U>(value: T) -> U
-where
-    T: TryInto<U>,
-{
-    match value.try_into() {
-        Ok(value) => value,
-        Err(_) => panic!("platform stat component does not fit its canonical representation"),
     }
 }
 
@@ -430,8 +435,22 @@ fn stat_modified(stat: &libc::stat) -> (i64, i64) {
 }
 
 fn directory_entry_names(directory: &File) -> anyhow::Result<Vec<OsString>> {
-    // fdopendir owns its descriptor, so duplicate the capability first.
-    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    // `fdopendir` owns the descriptor it is given, so this needs one of its
+    // own — and it must be an *independent* one. A `dup` shares the file
+    // offset with the descriptor it copied, so the second enumeration of a
+    // long-lived capability began where the first one stopped: at the end.
+    // Every authoritative rescan of an already-listed directory therefore
+    // reported it as empty, and the desktop installs that as its contents.
+    // `openat(fd, ".")` re-opens the same directory the descriptor already
+    // names — still relative to it, so no path is re-traversed and no symlink
+    // can be interposed — with its own offset.
+    let duplicate = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
     if duplicate < 0 {
         return Err(std::io::Error::last_os_error().into());
     }

@@ -117,6 +117,17 @@ pub(super) enum SequencerControl {
         snapshot_barrier: bool,
     },
     OrderedEvent(v1::HostEvent),
+    /// One body frame of an in-flight `OpenFileStream`.
+    ///
+    /// Bound to its request's own id and carried on the same ordered FIFO as
+    /// that request's terminal response, so header, body, and response can
+    /// never be reordered relative to each other. It deliberately does not
+    /// consume an event sequence number: it is part of one request/response
+    /// exchange, not an independent host event a resync could have missed.
+    FileStream {
+        request_id: u64,
+        frame: v1::FileStreamFrame,
+    },
     InjectGap(v1::HostEvent),
     /// Internal FIFO barrier. The connection writer resolves it after every
     /// earlier topology-dirty event has advanced `TopologySignal`.
@@ -213,6 +224,9 @@ impl ProtocolSequencer {
             SequencerControl::OrderedEvent(event) => {
                 self.sequence = self.sequence.saturating_add(1);
                 envelope(0, self.sequence, Payload::Event(event))
+            }
+            SequencerControl::FileStream { request_id, frame } => {
+                envelope(request_id, 0, Payload::FileStream(frame))
             }
             SequencerControl::InjectGap(event) => {
                 self.sequence = self.sequence.saturating_add(2);

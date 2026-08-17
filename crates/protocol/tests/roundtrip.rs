@@ -1,5 +1,8 @@
 use prost::Message;
-use tmux_agent_protocol::{PROTOCOL_MAJOR, PROTOCOL_MINOR, encode_frame, read_frame_sync, v1};
+use tmux_agent_protocol::{
+    PROTOCOL_MAJOR, PROTOCOL_MINOR, encode_frame, envelope, read_frame_sync, v1,
+    v1::envelope::Payload,
+};
 
 #[test]
 fn terminal_upload_reconciliation_operation_is_append_only() {
@@ -451,4 +454,143 @@ fn phase7_terminal_upload_contract_round_trips_u64_and_opaque_names() {
         v1::PublicationOutcome::Published as i32
     );
     assert!(decoded.cleanup_failed);
+}
+
+/// The file-open stream is append-only: existing operations keep their numbers
+/// and existing payload variants keep theirs, so an older peer that does not
+/// know the operation still refuses it as unsupported rather than misreading a
+/// neighbouring one.
+#[test]
+fn open_file_stream_operation_and_payload_are_append_only() {
+    assert_eq!(v1::Operation::OpenFileStream as i32, 44);
+    assert_eq!(v1::Operation::SelectTerminalSession as i32, 43);
+    assert_eq!(v1::Operation::TestDelay as i32, 100);
+    assert!(v1::Operation::try_from(45).is_err());
+}
+
+#[test]
+fn file_stream_header_and_body_round_trip_on_the_requests_own_id() {
+    let header = envelope(
+        77,
+        0,
+        Payload::FileStream(v1::FileStreamFrame {
+            operation_id: "open-1".into(),
+            header: Some(v1::FileStreamHeader {
+                metadata: Some(v1::FileMetadata {
+                    path: "/repo/note.txt".into(),
+                    name: "note.txt".into(),
+                    kind: v1::FileKind::File.into(),
+                    size: u64::MAX,
+                    generation: u64::MAX - 1,
+                    ..Default::default()
+                }),
+                content_kind: v1::FileContentKind::Text.into(),
+                generation: u64::MAX - 1,
+                total_bytes: u64::MAX,
+                content_streaming: true,
+            }),
+            ..Default::default()
+        }),
+    );
+    let decoded = v1::Envelope::decode(header.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded.request_id, 77);
+    let Some(Payload::FileStream(frame)) = decoded.payload else {
+        panic!("expected a file stream frame")
+    };
+    let carried = frame.header.expect("a header");
+    assert_eq!(carried.total_bytes, u64::MAX);
+    assert_eq!(carried.generation, u64::MAX - 1);
+    assert!(carried.content_streaming);
+    assert_eq!(carried.metadata.unwrap().size, u64::MAX);
+    // A header frame carries no body, so an offset of zero is unambiguous.
+    assert!(frame.data.is_empty());
+    assert!(!frame.eof);
+
+    let body = envelope(
+        77,
+        0,
+        Payload::FileStream(v1::FileStreamFrame {
+            operation_id: "open-1".into(),
+            offset: 1 << 40,
+            data: vec![0, 159, 146, 150],
+            eof: true,
+            blake3: "digest".into(),
+            ..Default::default()
+        }),
+    );
+    let decoded = v1::Envelope::decode(body.encode_to_vec().as_slice()).unwrap();
+    let Some(Payload::FileStream(frame)) = decoded.payload else {
+        panic!("expected a file stream frame")
+    };
+    assert_eq!(frame.offset, 1 << 40);
+    assert_eq!(
+        frame.data,
+        vec![0, 159, 146, 150],
+        "bodies are opaque bytes"
+    );
+    assert!(frame.eof);
+    assert_eq!(frame.blake3, "digest");
+    assert!(frame.header.is_none());
+}
+
+#[test]
+fn active_root_probe_round_trips_a_known_capability_and_its_unchanged_answer() {
+    let request = v1::FileServiceRequest {
+        operation_id: "probe".into(),
+        pane_id: "%1".into(),
+        known_root_token: "capability-7".into(),
+        ..Default::default()
+    };
+    let decoded = v1::FileServiceRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded.known_root_token, "capability-7");
+
+    let response = v1::FileServiceResponse {
+        operation_id: "probe".into(),
+        root_unchanged: true,
+        ..Default::default()
+    };
+    let decoded = v1::FileServiceResponse::decode(response.encode_to_vec().as_slice()).unwrap();
+    assert!(decoded.root_unchanged);
+    assert!(decoded.directory.is_none());
+}
+
+/// Single-request file opens are a required capability, and the requirement is
+/// enforced by the same rule that names what is missing.
+///
+/// The daemon lives on a host the user upgrades separately from the app, so
+/// "this helper predates the operation" is a real state. It is answered by
+/// refusing the connection and reporting the exact missing capability by name —
+/// not by a second, unexercised code path for opening files.
+#[test]
+fn single_request_file_opens_are_a_required_capability() {
+    use tmux_agent_protocol::{
+        CAP_FILE_STREAM, CAP_TERMINAL_OUTPUT_CREDIT, HOST_CAPABILITIES, capability_names,
+        missing_host_capabilities,
+    };
+    assert_eq!(CAP_FILE_STREAM, 1 << 15);
+    // Append-only: every previously assigned bit keeps its position.
+    assert_eq!(CAP_TERMINAL_OUTPUT_CREDIT, 1 << 14);
+
+    // The rule the desktop's handshake applies — called, not restated. A copy
+    // of it here would pass whatever the handshake did, which is the opposite
+    // of what a drift test is for.
+    assert_eq!(missing_host_capabilities(HOST_CAPABILITIES), 0);
+    let outdated = HOST_CAPABILITIES & !CAP_FILE_STREAM;
+    assert_eq!(
+        missing_host_capabilities(outdated),
+        CAP_FILE_STREAM,
+        "a helper that cannot serve a single-request open must be refused"
+    );
+    // And the refusal names it, rather than reporting a hex mask nobody outside
+    // the protocol crate can read.
+    assert_eq!(
+        capability_names(missing_host_capabilities(outdated)),
+        vec!["fileStream"]
+    );
+    // Every required bit has a name, so no refusal can be unexplainable.
+    assert!(!capability_names(HOST_CAPABILITIES).contains(&"unknown"));
+    assert_eq!(
+        capability_names(HOST_CAPABILITIES).len(),
+        HOST_CAPABILITIES.count_ones() as usize
+    );
 }

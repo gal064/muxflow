@@ -4,9 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { AutosaveController, type AutosaveView } from "../files/autosave";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
+import { parentPath } from "../files/listingModel";
 import { attachEditorLayout } from "../files/editorLayout";
 import { renderSafeMarkdown, renderSafeSvg } from "../files/markdown";
-import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
+import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type DirectoryListing, type DirectoryWatchLease, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { AppOwnedTab } from "./types";
 import { ADE_MONACO_THEME } from "../files/monaco";
@@ -32,6 +33,24 @@ interface Props {
 
 const FILE_EDITOR_PAINT = ["workflow.file.editorPaint"] as const;
 
+/**
+ * Where the initial read and its parent watch bootstrap have got to.
+ *
+ * They are started together and either can land first, so the surface has to
+ * remember which — and having remembered, must decide exactly once.
+ */
+type Reconciliation =
+  | { kind: "pending" }
+  /**
+   * The bootstrap arrived before the read did, so its opinion is parked for
+   * whichever read is in flight *now* — named by `serial`. A parked opinion
+   * with no epoch outlived the read it was waiting for: a later, unrelated
+   * load consumed it and re-opened the file against a generation that had
+   * described a different read entirely.
+   */
+  | { kind: "bootstrap"; generation: string | undefined; serial: number }
+  | { kind: "done" };
+
 export function AppTabSurface(props: Props) {
   const [opened, setOpened] = useState<OpenFile>();
   const [view, setView] = useState<AutosaveView>();
@@ -46,6 +65,17 @@ export function AppTabSurface(props: Props) {
   const mountedEditorSurface = useRef<number | undefined>(undefined);
   const readyEditorSurface = useRef<number | undefined>(undefined);
   const pendingPaint = useRef<PaintTicket | undefined>(undefined);
+  /**
+   * Generation of a non-text file on screen.
+   *
+   * Text has a better answer — the autosave controller owns the generation and
+   * advances it on every save — and a second copy of that fact went stale the
+   * moment anything was written, which made every self-save echo look like an
+   * external change and cost a full remote re-open.
+   */
+  const shownBinaryGeneration = useRef<string | undefined>(undefined);
+  /** Where the read and its parent watch have got to relative to each other. */
+  const reconciliation = useRef<Reconciliation>({ kind: "pending" });
   const bindEditorHost = useCallback((node: HTMLDivElement | null) => {
     if (node) {
       mountedEditorSurface.current ??= ++editorSurfaceSequence.current;
@@ -110,6 +140,27 @@ export function AppTabSurface(props: Props) {
         return;
       }
       setOpened(next);
+      shownBinaryGeneration.current = next.kind === "binary" ? next.file.generation : undefined;
+      if (next.kind !== "text") {
+        // A file that stopped being text has no editor and no autosave state.
+        // Leaving the previous controller in place would make it the answer to
+        // "what generation is on screen" forever after.
+        controller.current?.dispose();
+        controller.current = undefined;
+        setView(undefined);
+      }
+      // The watch bootstrap can land while the first read is still in flight.
+      // It is the authoritative directory listing, so a difference here is a
+      // real change rather than a reason to re-read on principle. The reload is
+      // queued rather than called: re-entering `load` from inside its own
+      // success path invalidates the serial of the invocation still running.
+      const arrived = reconciliation.current;
+      if (arrived.kind === "bootstrap" && arrived.serial === serial) {
+        reconciliation.current = { kind: "done" };
+        if (arrived.generation !== undefined && arrived.generation !== next.file.generation) {
+          queueMicrotask(() => { if (serial === loadSerial.current) void load(options); });
+        }
+      }
       const interactionPaint = paint ?? pendingPaint.current;
       if (next.kind === "text"
         && Number(next.file.sizeBytes) <= TEXT_FILE_LIMIT_BYTES
@@ -154,10 +205,42 @@ export function AppTabSurface(props: Props) {
     }
   };
 
+  // Declared before the read below, because effects run in the order they are
+  // written: the listener has to exist before the read starts, or a change
+  // landing between the two is described to nobody and the tab shows content
+  // it will never be told is stale.
+  useEffect(() => {
+    if (!props.scope) return;
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void props.client.subscribe(props.scope, (event) => {
+      if (disposed || !root) return;
+      if (event.kind === "directorySnapshot" && event.rootToken === root.token && event.listing.directory === parentPath(props.tab.resource)) {
+        // An authoritative rescan carries the directory's contents, so it can
+        // say whether *this* file moved. Re-reading because some other entry
+        // changed is a remote round trip for nothing. Never let a generic
+        // self-save echo replace a newer dirty edit either; the precise path
+        // events below retain last-writer order.
+        const generation = listingOpinion(event.listing);
+        if (generation !== undefined && generation !== shownGeneration()) reloadFromDisk();
+        return;
+      }
+      if (!(event.kind === "fileChanged" || event.kind === "fileDeleted") || event.path !== props.tab.resource) return;
+      if (event.kind === "fileDeleted") {
+        setError("The file was deleted externally. The tab remains open.");
+        return;
+      }
+      if (event.generation && event.generation === shownGeneration()) return;
+      void load({ externalOperationId: event.operationId });
+    }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });
+    return () => { disposed = true; stop?.(); };
+  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
+
   useEffect(() => {
     surfaceLifecycle.current += 1;
     setLoading(true);
     setOpened(undefined);
+    shownBinaryGeneration.current = undefined;
     setView(undefined);
     controller.current?.dispose();
     controller.current = undefined;
@@ -178,7 +261,11 @@ export function AppTabSurface(props: Props) {
       controller.current?.dispose();
       controller.current = undefined;
     };
-  }, [props.client, props.scope?.clientId, props.tab.resource, root?.token]);
+    // The read, the parent watch, and the event subscription all belong to one
+    // connection generation. Leaving `terminalEpoch` out of this one meant an
+    // epoch bump re-armed the watch and its reconciliation against a read that
+    // had never restarted.
+  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
 
   useEffect(() => {
     if (loading || error || !opened) return;
@@ -211,45 +298,109 @@ export function AppTabSurface(props: Props) {
   // render-fresh state and would re-run this on every render.
   useEffect(() => { if (view?.state === "dirty") props.onDirty(); }, [view?.state]);
 
+  /**
+   * The generation of the content on screen.
+   *
+   * Derived, never mirrored: for text the autosave controller already owns it
+   * and advances it on every save, so anything that kept a second copy would
+   * disagree with disk from the first write onwards.
+   */
+  const shownGeneration = () => controller.current?.current().generation ?? shownBinaryGeneration.current;
+
+  /**
+   * The listing entry that describes this file, when the listing is entitled to
+   * an opinion about it.
+   *
+   * A symlink's entry describes the *link*, whose identity does not move when
+   * its target is rewritten, while the open describes the bytes. Comparing the
+   * two would report a change on every single open of every symlinked file, so
+   * a symlink is simply not reconciled from its parent's listing.
+   */
+  const listingOpinion = (snapshot: DirectoryListing) => {
+    const entry = snapshot.entries.find((candidate) => candidate.path === props.tab.resource);
+    if (entry) return entry.kind === "symlink" ? undefined : entry.generation;
+    // Absence proves nothing here. A partial page has simply not reached the
+    // file, and even a complete listing omits names the host never reports.
+    // Only an explicit delete event may retire this tab.
+    return undefined;
+  };
+
+  /**
+   * Reconciles the file this surface read against an authoritative listing of
+   * its parent directory.
+   *
+   * The watch bootstrap already carries the directory's exact contents, so it
+   * can answer "did the file change between the read and the watch being
+   * armed?" without asking again. It previously re-read unconditionally, which
+   * on the remote link is a second full open per tab that almost always
+   * confirmed what had just arrived. A reload happens only on a real
+   * generation mismatch, and only once per bootstrap.
+   */
+  const reconcileBootstrap = (lease: DirectoryWatchLease) => {
+    if (reconciliation.current.kind === "done") return;
+    if (!lease.fresh) {
+      // The watch was already armed — by the Explorer showing this folder —
+      // so its bootstrap describes the directory as of whenever that happened
+      // and has no opinion about a file read just now. Acting on it re-opened
+      // the file remotely on the strength of an arbitrarily old row. Nothing is
+      // lost by declining: changes since that watch was armed have already
+      // arrived as events, and changes after this read arrive as events too.
+      reconciliation.current = { kind: "done" };
+      return;
+    }
+    const generation = listingOpinion(lease.snapshot);
+    const shown = shownGeneration();
+    if (shown === undefined) {
+      reconciliation.current = { kind: "bootstrap", generation, serial: loadSerial.current };
+      return;
+    }
+    reconciliation.current = { kind: "done" };
+    if (generation !== undefined && generation !== shown) reloadFromDisk();
+  };
+
+  /**
+   * Re-reads the file because an authoritative listing says it moved.
+   *
+   * One guard, one caller shape: a buffer the person is still typing into, or
+   * one whose save is in flight, is never replaced by disk. The reload path
+   * hands the content to `AutosaveController.external`, which overwrites the
+   * view outright, so an unguarded caller silently discards unsaved work.
+   */
+  const reloadFromDisk = () => {
+    const state = controller.current?.current().state;
+    if (state === "dirty" || state === "saving") return;
+    void load();
+  };
+
   useEffect(() => {
     if (!props.scope || !root) return;
     let disposed = false;
     let release: (() => void) | undefined;
-    void props.client.acquireDirectoryWatch(props.scope, root, parentPath(props.tab.resource)).then((next) => {
+    // The bootstrap *is* a full directory listing, so a tab closed while it is
+    // in flight must stop it rather than pay for it and throw it away. Only
+    // this subscriber is abandoned: the watch itself survives for whoever else
+    // holds it.
+    const abandon = new AbortController();
+    reconciliation.current = { kind: "pending" };
+    void props.client.acquireDirectoryWatch(props.scope, root, parentPath(props.tab.resource), {
+      signal: abandon.signal,
+    }).then((next) => {
       if (disposed) next.release();
       else {
         release = next.release;
-        // Re-read after the watch is armed. This closes the initial
-        // read-before-watch gap without relying on a later filesystem event.
-        void load();
+        reconcileBootstrap(next);
       }
-    }).catch((watchError) => { if (!disposed) props.onStatus(`File watch unavailable: ${String(watchError)}`); });
-    return () => { disposed = true; release?.(); };
+    }).catch((watchError) => {
+      if (disposed || (watchError instanceof DOMException && watchError.name === "AbortError")) return;
+      props.onStatus(`File watch unavailable: ${String(watchError)}`);
+    });
+    return () => {
+      disposed = true;
+      if (release) release();
+      else abandon.abort();
+    };
   }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
 
-  useEffect(() => {
-    if (!props.scope) return;
-    let disposed = false;
-    let stop: (() => void) | undefined;
-    void props.client.subscribe(props.scope, (event) => {
-      if (disposed || !root) return;
-      if (event.kind === "directoryChanged" && event.rootToken === root.token && event.directory === parentPath(props.tab.resource)) {
-        // Directory snapshots are an overflow/fallback signal and do not carry
-        // the writer operation. Never let a generic self-save echo replace a
-        // newer dirty edit; precise path events below retain last-writer order.
-        const state = controller.current?.current().state;
-        if (state !== "dirty" && state !== "saving") void load();
-        return;
-      }
-      if (!(event.kind === "fileChanged" || event.kind === "fileDeleted") || event.path !== props.tab.resource) return;
-      if (event.kind === "fileDeleted") {
-        setError("The file was deleted externally. The tab remains open.");
-        return;
-      }
-        void load({ externalOperationId: event.operationId });
-    }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });
-    return () => { disposed = true; stop?.(); };
-  }, [props.client, props.scope?.clientId, props.tab.resource, root?.token]);
 
   if (!props.scope || !root) return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
   if (loading) return <EmptyTab tab={props.tab} detail="Loading file…" />;
@@ -384,9 +535,4 @@ function formatBytes(value: string): string {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
   return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
-}
-
-function parentPath(path: string): string {
-  const index = path.lastIndexOf("/");
-  return index <= 0 ? "/" : path.slice(0, index);
 }

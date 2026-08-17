@@ -2,12 +2,19 @@ use std::{
     io::{BufReader, Read, Write},
     os::fd::AsRawFd,
     process::{ChildStdin, ChildStdout},
+    time::{Duration, Instant},
 };
 
 use tmux_agent_protocol::{
-    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope,
+    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, capability_names, encode_frame, envelope,
+    missing_host_capabilities,
     v1::{self, envelope::Payload},
 };
+
+/// How long a cancellation will wait for a blocked pipe before giving up on
+/// telling the host. Bounded because this runs on the interaction path: a
+/// cancel that waits is a cancel that has stopped being one.
+const CANCEL_WRITE_BUDGET: Duration = Duration::from_millis(50);
 
 use super::scheduler::{BulkBinding, CancelState, DeadlineGuard};
 
@@ -36,6 +43,37 @@ impl std::fmt::Display for RequestFailure {
 ///
 /// Keeping framing and control-session binding here ensures downloads and
 /// editor I/O cannot accidentally diverge in handshake or response handling.
+/// What one bulk exchange may do beyond writing a request and reading its
+/// response: observe cancellation, refresh an inactivity deadline, and receive
+/// the body frames that precede a streamed response.
+#[derive(Default)]
+pub(super) struct Exchange<'a> {
+    pub(super) cancellation: Option<&'a CancelState>,
+    pub(super) deadline: Option<&'a DeadlineGuard>,
+    pub(super) on_frame:
+        Option<&'a mut (dyn FnMut(v1::FileStreamFrame) -> Result<(), String> + 'a)>,
+}
+
+impl<'a> Exchange<'a> {
+    /// The ordinary shape: cancellable, and keeping the desktop's watchdog fed.
+    pub(super) fn live(cancellation: &'a CancelState, deadline: &'a DeadlineGuard) -> Self {
+        Self {
+            cancellation: Some(cancellation),
+            deadline: Some(deadline),
+            on_frame: None,
+        }
+    }
+
+    /// A request that cannot be cancelled but must still prove liveness.
+    pub(super) fn bounded(deadline: &'a DeadlineGuard) -> Self {
+        Self {
+            cancellation: None,
+            deadline: Some(deadline),
+            on_frame: None,
+        }
+    }
+}
+
 pub(super) struct BulkProtocolClient<'a> {
     stdin: &'a mut ChildStdin,
     reader: &'a mut BufReader<ChildStdout>,
@@ -137,6 +175,19 @@ impl<'a> BulkProtocolClient<'a> {
                 "bulk bridge handshake did not match its control identity/epoch binding".into(),
             );
         }
+        // The same admission rule the control handshake applies, on the lane
+        // that actually carries the single-request file open. Checking it only
+        // on the control lane meant a helper that predated `OpenFileStream`
+        // could be admitted here and fail every open with an unknown-operation
+        // error — precisely the outcome `CAP_FILE_STREAM` exists to replace
+        // with a refusal that names what is missing.
+        let missing = missing_host_capabilities(hello.capabilities);
+        if missing != 0 {
+            return Err(format!(
+                "bulk bridge is missing required capabilities: {}",
+                capability_names(missing).join(", ")
+            ));
+        }
         binding.validate()?;
         Ok(())
     }
@@ -164,74 +215,48 @@ impl<'a> BulkProtocolClient<'a> {
         id
     }
 
-    pub(super) fn request(&mut self, request: v1::Request) -> Result<v1::Response, String> {
-        self.request_classified(request)
-            .map_err(|error| error.to_string())
-    }
-
+    /// One exchange on the bulk bridge, with whatever it is entitled to do.
+    ///
+    /// A struct rather than six wrappers over four optional parameters: the
+    /// wrappers named every *combination* that happened to be used, so adding
+    /// one capability meant adding wrappers rather than a field, and a caller
+    /// had to find the name of its combination instead of saying what it
+    /// wanted.
     pub(super) fn request_classified(
         &mut self,
         request: v1::Request,
-    ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, None, None)
-    }
-
-    pub(super) fn request_with_deadline(
-        &mut self,
-        request: v1::Request,
-        deadline: &DeadlineGuard,
-    ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request, None, Some(deadline))
-            .map_err(|error| error.to_string())
-    }
-
-    pub(super) fn request_classified_with_deadline(
-        &mut self,
-        request: v1::Request,
-        deadline: &DeadlineGuard,
-    ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, None, Some(deadline))
-    }
-
-    pub(super) fn request_cancellable(
-        &mut self,
-        request: v1::Request,
-        cancellation: &CancelState,
-        deadline: &DeadlineGuard,
-    ) -> Result<v1::Response, String> {
-        self.request_classified_inner(request, Some(cancellation), Some(deadline))
-            .map_err(|error| error.to_string())
-    }
-
-    pub(super) fn request_classified_cancellable(
-        &mut self,
-        request: v1::Request,
-        cancellation: &CancelState,
-        deadline: &DeadlineGuard,
-    ) -> Result<v1::Response, RequestFailure> {
-        self.request_classified_inner(request, Some(cancellation), Some(deadline))
-    }
-
-    /// Every request goes through here, so this is the one place that knows
-    /// whether the stream is still where the next request expects it. A remote
-    /// refusal is a complete response and leaves the bridge reusable; a
-    /// transport failure or a cancellation leaves a partial write or an
-    /// in-flight response behind, and the bridge must not be handed on.
-    fn request_classified_inner(
-        &mut self,
-        request: v1::Request,
-        cancellation: Option<&CancelState>,
-        deadline: Option<&DeadlineGuard>,
+        exchange: Exchange<'_>,
     ) -> Result<v1::Response, RequestFailure> {
         let request_id = self.take_request_id();
-        let outcome = self.request_framed(request_id, request, cancellation, deadline);
-        if matches!(
-            outcome,
-            Err(RequestFailure::Transport(_) | RequestFailure::Cancelled)
-        ) {
+        let Exchange {
+            cancellation,
+            deadline,
+            on_frame,
+        } = exchange;
+        let outcome = self.request_framed(request_id, request, cancellation, deadline, on_frame);
+        // A cancellation that read its terminal response left the stream exactly
+        // where the next request expects it; only an abandoned exchange did not.
+        if matches!(outcome, Err(RequestFailure::Transport(_))) {
             *self.clean = false;
         }
         outcome
+    }
+
+    /// One exchange with nothing beyond the request: the cancel messages, whose
+    /// whole job is to be sent on a bridge that is being given up anyway.
+    fn request_default(&mut self, request: v1::Request) -> Result<v1::Response, String> {
+        self.request(request, Exchange::default())
+    }
+
+    /// The same exchange for a caller that only reports the failure, rather
+    /// than deciding anything from how it was classified.
+    pub(super) fn request(
+        &mut self,
+        request: v1::Request,
+        exchange: Exchange<'_>,
+    ) -> Result<v1::Response, String> {
+        self.request_classified(request, exchange)
+            .map_err(|error| error.to_string())
     }
 
     fn request_framed(
@@ -240,6 +265,7 @@ impl<'a> BulkProtocolClient<'a> {
         request: v1::Request,
         cancellation: Option<&CancelState>,
         deadline: Option<&DeadlineGuard>,
+        mut on_frame: Option<&mut dyn FnMut(v1::FileStreamFrame) -> Result<(), String>>,
     ) -> Result<v1::Response, RequestFailure> {
         self.write_envelope_cancellable(
             &envelope(request_id, 0, Payload::Request(request)),
@@ -248,6 +274,18 @@ impl<'a> BulkProtocolClient<'a> {
         )?;
         loop {
             if cancellation.is_some_and(CancelState::is_cancelled) {
+                // Sent and then abandoned, deliberately. Reading through to the
+                // host's terminal response would leave the bridge in a reusable
+                // state — but a cancelled lease is never returned to the pool
+                // anyway (`bulk_pool::returnable`), because the watcher that
+                // cancels it publishes its intent before it swaps the pid out
+                // to kill it, and handing that process to an unrelated job in
+                // between is how a healthy transfer dies. So draining buys
+                // nothing, and on the operations the host schedules `Inline` —
+                // download and upload chunks, whose reader is blocked and
+                // cannot see the cancel at all — it turns a cancellation that
+                // used to take milliseconds into one that waits out the
+                // inactivity deadline.
                 let cancel = encode_frame(&envelope(
                     0,
                     0,
@@ -256,7 +294,7 @@ impl<'a> BulkProtocolClient<'a> {
                     }),
                 ))
                 .map_err(|error| RequestFailure::Transport(error.to_string()))?;
-                let _ = self.stdin.write(&cancel);
+                self.write_cancel_frame(&cancel);
                 return Err(RequestFailure::Cancelled);
             }
             if let Some(frame) = self
@@ -267,8 +305,19 @@ impl<'a> BulkProtocolClient<'a> {
                 if frame.request_id != request_id {
                     continue;
                 }
-                let Some(Payload::Response(response)) = frame.payload else {
-                    continue;
+                let response = match frame.payload {
+                    Some(Payload::FileStream(stream)) => {
+                        let Some(observer) = on_frame.as_deref_mut() else {
+                            return Err(RequestFailure::Transport(
+                                "bulk bridge streamed a body for a request that asked for none"
+                                    .into(),
+                            ));
+                        };
+                        observer(stream).map_err(RequestFailure::Transport)?;
+                        continue;
+                    }
+                    Some(Payload::Response(response)) => response,
+                    _ => continue,
                 };
                 return if response.ok {
                     Ok(response)
@@ -316,6 +365,38 @@ impl<'a> BulkProtocolClient<'a> {
         }
     }
 
+    /// Writes the `Cancel` that abandons a request, past the cancellation that
+    /// prompted it.
+    ///
+    /// `stdin` is `O_NONBLOCK`, so a bare `write` had two failure modes and no
+    /// answer to either: `WouldBlock` dropped the cancellation entirely — the
+    /// host then streams a whole file to a reader that has left, which is the
+    /// guarantee this package is built around — and a *short* write left a
+    /// truncated envelope in the host's frame parser, desynchronizing the lane
+    /// permanently. The lane is marked unclean before the attempt rather than
+    /// after it, because there is no outcome here from which it can be trusted
+    /// again, and relying on the pool's separate cancelled-lease check to catch
+    /// that is relying on a fact stated in another module.
+    fn write_cancel_frame(&mut self, bytes: &[u8]) {
+        *self.clean = false;
+        let deadline = Instant::now() + CANCEL_WRITE_BUDGET;
+        let mut offset = 0;
+        while offset < bytes.len() && Instant::now() < deadline {
+            match self.stdin.write(&bytes[offset..]) {
+                Ok(0) => return,
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if wait_ready(self.stdin.as_raw_fd(), libc::POLLOUT, 10).is_err() {
+                        return;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+        let _ = self.stdin.flush();
+    }
+
     fn write_envelope_cancellable(
         &mut self,
         value: &v1::Envelope,
@@ -327,6 +408,10 @@ impl<'a> BulkProtocolClient<'a> {
         let mut offset = 0;
         while offset < bytes.len() {
             if cancellation.is_some_and(CancelState::is_cancelled) {
+                // Abandoned mid-frame, so the peer's parser is left expecting
+                // bytes that will never come. Unlike a cancellation that read
+                // its terminal response, this one really does poison the lane.
+                *self.clean = false;
                 return Err(RequestFailure::Cancelled);
             }
             match self.stdin.write(&bytes[offset..]) {
@@ -354,7 +439,7 @@ impl<'a> BulkProtocolClient<'a> {
     }
 
     pub(super) fn cancel_download(&mut self, transfer_id: &str) -> Result<(), String> {
-        self.request(v1::Request {
+        self.request_default(v1::Request {
             operation: v1::Operation::CancelDownload.into(),
             file: Some(v1::FileServiceRequest {
                 operation_id: transfer_id.into(),
@@ -371,7 +456,7 @@ impl<'a> BulkProtocolClient<'a> {
         operation_id: &str,
         transfer_id: &str,
     ) -> Result<(), String> {
-        self.request(v1::Request {
+        self.request_default(v1::Request {
             operation: v1::Operation::CancelFileWrite.into(),
             file: Some(v1::FileServiceRequest {
                 operation_id: operation_id.into(),
@@ -384,7 +469,7 @@ impl<'a> BulkProtocolClient<'a> {
     }
 
     pub(super) fn cancel_terminal_upload(&mut self, transfer_id: &str) -> Result<String, String> {
-        let response = self.request(v1::Request {
+        let response = self.request_default(v1::Request {
             operation: v1::Operation::CancelTerminalUpload.into(),
             file: Some(v1::FileServiceRequest {
                 operation_id: transfer_id.into(),
@@ -534,7 +619,7 @@ mod tests {
                 &mut next_id,
                 &mut clean,
             )
-            .request(v1::Request::default())
+            .request(v1::Request::default(), Exchange::default())
             .expect("the queued answer");
             assert_eq!(next_id, expected + 1, "the cursor advanced past {expected}");
         }

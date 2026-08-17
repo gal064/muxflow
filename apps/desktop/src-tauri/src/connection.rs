@@ -32,10 +32,12 @@ use delivery_window::{DeliveryWindow, HostCharge};
 pub(crate) mod delivery_ack;
 use delivery_ack::flush_delivery_ack;
 mod dispatch;
+mod operations;
 use dispatch::{
     ClientInputDispatch, ClientInputQueue, INPUT_BYTE_BUDGET, INPUT_MESSAGE_BUDGET, ResizeQueue,
     StopSignal, TerminalSize, run_client_input_dispatch, run_client_resize_dispatch,
 };
+use operations::{Bound, OperationClaim, OperationLane, OperationRegistry};
 mod writer;
 use writer::ControlWriterHandle;
 pub(crate) mod agent;
@@ -99,7 +101,7 @@ struct TerminalClient {
     read_only: AtomicBool,
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
-    git_operations: Mutex<HashMap<String, u64>>,
+    operations: Arc<OperationRegistry>,
     input_queue: Mutex<ClientInputQueue>,
     resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
@@ -130,7 +132,7 @@ impl TerminalClient {
             read_only: AtomicBool::new(false),
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
-            git_operations: Mutex::new(HashMap::new()),
+            operations: Arc::new(OperationRegistry::default()),
             input_queue: Mutex::new(ClientInputQueue::default()),
             resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
@@ -331,18 +333,33 @@ impl TerminalClient {
     }
 
     fn request_git(
-        &self,
+        self: &Arc<Self>,
         request: v1::Request,
         operation_id: &str,
     ) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, GIT_REQUEST_TIMEOUT, Some(operation_id.to_owned()))
+        let claim = self.operations.claim(OperationLane::Git, operation_id)?;
+        self.request_with_timeout(request, GIT_REQUEST_TIMEOUT, Some(claim))
+    }
+
+    /// A control-lane file request the renderer can cancel by operation id.
+    ///
+    /// Explorer listings are the one control-lane file operation worth
+    /// cancelling: a collapsed folder, a replaced root, or a superseded
+    /// preview leaves a bounded remote enumeration running that nothing will
+    /// ever read, and on the remote link that is the whole cost of the action.
+    fn request_file(
+        &self,
+        request: v1::Request,
+        claim: Option<OperationClaim>,
+    ) -> Result<v1::Response, String> {
+        self.request_with_timeout(request, REQUEST_TIMEOUT, claim)
     }
 
     fn request_with_timeout(
         &self,
         request: v1::Request,
         timeout: Duration,
-        git_operation_id: Option<String>,
+        operation: Option<OperationClaim>,
     ) -> Result<v1::Response, String> {
         let deadline = Instant::now() + timeout;
         if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
@@ -358,13 +375,11 @@ impl TerminalClient {
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = mpsc::channel();
         self.pending.lock().unwrap().insert(request_id, sender);
-        if let Some(operation_id) = &git_operation_id {
-            let mut operations = self.git_operations.lock().unwrap();
-            if operations.contains_key(operation_id) {
-                self.pending.lock().unwrap().remove(&request_id);
-                return Err("duplicate Git operation ID".into());
-            }
-            operations.insert(operation_id.clone(), request_id);
+        if let Some(claim) = &operation
+            && matches!(self.operations.bind(claim, request_id), Bound::Cancelled)
+        {
+            self.pending.lock().unwrap().remove(&request_id);
+            return Err("cancelled: request was cancelled before dispatch".into());
         }
         let write_result = self
             .writer
@@ -377,10 +392,23 @@ impl TerminalClient {
             });
         if let Err(error) = write_result {
             self.pending.lock().unwrap().remove(&request_id);
-            if let Some(operation_id) = &git_operation_id {
-                self.git_operations.lock().unwrap().remove(operation_id);
+            if let Some(claim) = &operation {
+                self.operations.unbind(claim);
             }
             return Err(error);
+        }
+        // A cancel raised between the bind above and the write that has just
+        // finished reached the host *before* the request it names, and the host
+        // discards a cancel for a request it has never seen — so the request
+        // would have run with nothing able to stop it. Rather than serialize
+        // dispatch behind one lock, which would put every Explorer cancellation
+        // in the queue behind any five-minute Git request, the cancellation is
+        // simply re-sent now that the request is provably on the wire. A
+        // duplicate cancel is harmless; a lost one is the whole guarantee.
+        if let Some(claim) = &operation
+            && self.operations.cancelled(claim)
+        {
+            self.cancel_request(request_id);
         }
         let result = match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
         {
@@ -391,18 +419,7 @@ impl TerminalClient {
             )),
             Ok(Err(error)) => Err(error),
             Err(_) => {
-                if let Some(writer) = self.writer.lock().unwrap().clone() {
-                    let _ = writer.try_write(
-                        envelope(
-                            self.next_request_id.fetch_add(1, Ordering::AcqRel),
-                            0,
-                            Payload::Cancel(v1::Cancel {
-                                target_request_id: request_id,
-                            }),
-                        ),
-                        Instant::now() + REQUEST_TIMEOUT,
-                    );
-                }
+                self.cancel_request(request_id);
                 self.pending.lock().unwrap().remove(&request_id);
                 Err(
                     "host request timed out; commit outcome is unknown and the request will not be replayed"
@@ -410,20 +427,36 @@ impl TerminalClient {
                 )
             }
         };
-        if let Some(operation_id) = &git_operation_id {
-            self.git_operations.lock().unwrap().remove(operation_id);
+        if let Some(claim) = &operation {
+            self.operations.unbind(claim);
         }
         result
     }
 
     fn cancel_git(&self, operation_id: &str) -> Result<(), String> {
-        let request_id = self
-            .git_operations
-            .lock()
-            .unwrap()
-            .get(operation_id)
-            .copied()
-            .ok_or_else(|| "unknown or completed Git operation ID".to_owned())?;
+        self.cancel_operation(OperationLane::Git, operation_id)
+    }
+
+    fn cancel_file(&self, operation_id: &str) -> Result<(), String> {
+        self.cancel_operation(OperationLane::File, operation_id)
+    }
+
+    pub(crate) fn claim_file_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<OperationClaim, String> {
+        self.operations.claim(OperationLane::File, operation_id)
+    }
+
+    fn cancel_operation(&self, lane: OperationLane, operation_id: &str) -> Result<(), String> {
+        let Some(request_id) = self.operations.cancel(lane, operation_id) else {
+            // Claimed but not yet dispatched. The registry's tombstone refuses
+            // the request rather than sending it to a host that would never be
+            // told to stop — and if the request is being written right now, its
+            // own dispatcher re-sends this cancellation once the request is
+            // provably on the wire.
+            return Ok(());
+        };
         let writer = self
             .writer
             .lock()
@@ -442,8 +475,24 @@ impl TerminalClient {
         )
     }
 
+    /// Best-effort `Cancel` for a request already on the wire.
+    fn cancel_request(&self, request_id: u64) {
+        if let Some(writer) = self.writer.lock().unwrap().clone() {
+            let _ = writer.try_write(
+                envelope(
+                    self.next_request_id.fetch_add(1, Ordering::AcqRel),
+                    0,
+                    Payload::Cancel(v1::Cancel {
+                        target_request_id: request_id,
+                    }),
+                ),
+                Instant::now() + REQUEST_TIMEOUT,
+            );
+        }
+    }
+
     fn fail_pending(&self, message: &str) {
-        self.git_operations.lock().unwrap().clear();
+        self.operations.clear();
         for (_, sender) in self.pending.lock().unwrap().drain() {
             let _ = sender.send(Err(message.into()));
         }

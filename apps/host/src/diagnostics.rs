@@ -502,7 +502,9 @@ fn build_report() -> DiagnosticsReport {
             protocol_major: tmux_agent_protocol::PROTOCOL_MAJOR,
             protocol_minor: tmux_agent_protocol::PROTOCOL_MINOR,
             capability_bits: tmux_agent_protocol::HOST_CAPABILITIES,
-            capabilities: capability_names(tmux_agent_protocol::HOST_CAPABILITIES),
+            capabilities: tmux_agent_protocol::capability_names(
+                tmux_agent_protocol::HOST_CAPABILITIES,
+            ),
         },
         dependencies: DependenciesReport {
             tmux: dependency_version("tmux", "-V"),
@@ -557,31 +559,6 @@ fn print_human_report(report: &DiagnosticsReport) {
         report.recent_errors.len()
     );
     println!("privacy: local-only, content and credentials excluded");
-}
-
-fn capability_names(bits: u64) -> Vec<&'static str> {
-    [
-        (tmux_agent_protocol::CAP_SNAPSHOTS, "snapshots"),
-        (tmux_agent_protocol::CAP_ORDERED_EVENTS, "ordered_events"),
-        (tmux_agent_protocol::CAP_CANCELLATION, "cancellation"),
-        (tmux_agent_protocol::CAP_TERMINAL_STREAM, "terminal_stream"),
-        (tmux_agent_protocol::CAP_RESYNC, "resync"),
-        (tmux_agent_protocol::CAP_TMUX_ACTIONS, "tmux_actions"),
-        (
-            tmux_agent_protocol::CAP_TERMINAL_RESOURCES,
-            "terminal_resources",
-        ),
-        (tmux_agent_protocol::CAP_ACTIVE_ROOT, "active_root"),
-        (tmux_agent_protocol::CAP_FILE_SERVICE, "file_service"),
-        (tmux_agent_protocol::CAP_TEXT_EDITOR, "text_editor"),
-        (tmux_agent_protocol::CAP_BULK_DOWNLOAD, "bulk_download"),
-        (tmux_agent_protocol::CAP_GIT, "git"),
-        (tmux_agent_protocol::CAP_AGENTS, "agents"),
-        (tmux_agent_protocol::CAP_TERMINAL_UPLOAD, "terminal_upload"),
-    ]
-    .into_iter()
-    .filter_map(|(flag, name)| (bits & flag != 0).then_some(name))
-    .collect()
 }
 
 fn dependency_version(program: &str, version_argument: &str) -> DependencyReport {

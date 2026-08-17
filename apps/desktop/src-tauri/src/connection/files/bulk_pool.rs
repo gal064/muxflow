@@ -684,6 +684,7 @@ mod tests {
                 tmux_agent_protocol::v1::ServerHello {
                     server_identity: "server-a".into(),
                     connection_epoch: 7,
+                    capabilities: tmux_agent_protocol::HOST_CAPABILITIES,
                     ..Default::default()
                 },
             ),
