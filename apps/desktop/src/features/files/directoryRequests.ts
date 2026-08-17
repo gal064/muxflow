@@ -1,11 +1,18 @@
 /**
  * What a directory read is for.
  *
- * Two reads of the same directory for *different* purposes are not rivals: a
- * "Load more" click and a recovery list want different answers and must not
- * cancel each other. Two reads for the same purpose are, and the later one
- * wins. Keying only on the path made every page click silently abandon any
- * recovery in flight for that directory — and nothing rescheduled it.
+ * A `"page"` read *extends* a listing rather than replacing one, so it is not a
+ * rival of anything and nothing supersedes it: keying only on the path made
+ * every "Load more" click silently abandon any recovery in flight for that
+ * directory, and nothing rescheduled it. `"list"` and `"restore"` both answer
+ * the question "what does this directory contain now", so they do supersede
+ * each other and the later one wins — a Refresh raised over a running restore
+ * is the newer question, and so is the reverse.
+ *
+ * Stated this way round because the previous wording claimed the broader rule —
+ * that reads for *different* purposes are never rivals — which is true of
+ * `"page"` and of nothing else, and a cancellation ledger guarded by an
+ * invariant it does not hold is worse than one with no comment at all.
  */
 export type RequestKind = "list" | "page" | "restore";
 
@@ -61,6 +68,19 @@ export class DirectoryRequests {
         if (this.#inflight.get(key)?.controller === controller) this.#inflight.delete(key);
       },
     };
+  }
+
+  /**
+   * Whether a read of this exact kind is already running for this directory.
+   *
+   * The one owner of this fact answering it, rather than a caller inferring it
+   * from whatever the tree has already installed. A read that has not landed
+   * yet has installed nothing, so "no listing" and "no read" look identical
+   * from the outside — and a caller that asks again on that basis does not
+   * merely duplicate the read, it *aborts* the one that was already fetching.
+   */
+  reading(path: string, kind: RequestKind): boolean {
+    return this.#inflight.has(`${path}\0${kind}`);
   }
 
   /**

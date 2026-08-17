@@ -70,24 +70,23 @@ export function GitDiffSurface(props: Props) {
 
   const loading = shared.loading;
   const surfaceError = shared.error;
+  // What this surface knows about its own editor. Live readers, because the
+  // surface can remount between a measurement being armed and its pixels
+  // landing.
+  const editorFacts = useMemo(() => ({
+    expected: 0,
+    mounted: () => mountedEditorSurface.current,
+    ready: () => readyEditorSurface.current,
+  }), []);
   useEffect(() => {
     if (loading || surfaceError || !diff) return;
-    paint.committed.current = paint.lifecycle.current;
-    const ticket = paint.pending.current;
-    if (!ticket) return;
-    if (diffUsesEditor) {
-      ticket.expectSurface(
-        mountedEditorSurface.current ?? editorSurfaceSequence.current + 1,
-      );
-      if (ticket.surfaceGeneration !== mountedEditorSurface.current
-        || readyEditorSurface.current !== mountedEditorSurface.current) return;
-    }
-    paint.pending.current = undefined;
-    ticket.afterPaint((held) => held.lifecycleGeneration === paint.lifecycle.current
-      && held.lifecycleGeneration === paint.committed.current
-      && (!diffUsesEditor || held.surfaceGeneration === mountedEditorSurface.current),
-    diffUsesEditor ? () => recordPerfMilestone("editor.paint") : undefined);
-  }, [diff, diffUsesEditor, surfaceError, loading, paint]);
+    paint.noteCommitted();
+    editorFacts.expected = editorSurfaceSequence.current + 1;
+    paint.notePaintable(
+      diffUsesEditor ? editorFacts : undefined,
+      diffUsesEditor ? () => recordPerfMilestone("editor.paint") : undefined,
+    );
+  }, [diff, diffUsesEditor, editorFacts, surfaceError, loading, paint]);
 
   const applyCommand = async (run: () => Promise<GitCommandResult>) => {
     setBusy(true);
@@ -165,18 +164,8 @@ export function GitDiffSurface(props: Props) {
             modified={text.modified}
             modifiedModelPath={modelUri(props.tab, "modified")}
             onMount={(editor) => {
-              const ticket = paint.pending.current;
-              const surface = mountedEditorSurface.current;
-              readyEditorSurface.current = surface;
-              if (ticket && surface
-                && ticket.surfaceGeneration === surface
-                && ticket.lifecycleGeneration === paint.committed.current) {
-                paint.pending.current = undefined;
-                ticket.afterPaint((held) => held.lifecycleGeneration === paint.lifecycle.current
-                  && held.lifecycleGeneration === paint.committed.current
-                  && held.surfaceGeneration === mountedEditorSurface.current,
-                () => recordPerfMilestone("editor.paint"));
-              }
+              readyEditorSurface.current = mountedEditorSurface.current;
+              paint.notePaintable(editorFacts, () => recordPerfMilestone("editor.paint"));
               detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor);
             }}
             options={{ automaticLayout: true, enableSplitViewResizing: true, minimap: { enabled: false }, originalEditable: false, readOnly: true, renderSideBySide: true, scrollBeyondLastLine: false }}

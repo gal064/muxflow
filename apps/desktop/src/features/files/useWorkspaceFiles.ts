@@ -25,6 +25,7 @@ import {
   withoutPath,
   type WorkspaceFilesState,
 } from "./directoryState";
+import { useCommittedRef } from "../../commands/useCommittedRef";
 import { useActiveRoot } from "./useActiveRoot";
 import { useConnectionTransfers } from "./useConnectionTransfers";
 import { DirectoryWatchLeases } from "./watchLeases";
@@ -68,10 +69,11 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   });
   const downloads = useConnectionTransfers(scope);
   const recordTransfer = downloads.record;
-  const stateRef = useRef(state);
-  stateRef.current = state;
+  // Committed rather than written during render: every reader below is a
+  // completion guard or a timer running after the fact, and a render React
+  // discarded is not a state any of them should be deciding against.
+  const stateRef = useCommittedRef(state);
   const scopeEpoch = useRef(0);
-  const rootProbeSerial = useRef(0);
   const requests = useRef(new DirectoryRequests());
   const refreshTimers = useRef(new Map<string, { timer: ReturnType<typeof setTimeout>; paint: PaintTicket }>());
   const paintGenerations = useRef(new Map<string, number>());
@@ -83,8 +85,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const cache = useRef(new DirectoryListingCache());
   const leases = useRef(new DirectoryWatchLeases());
   const scopeKey = scope ? keyForScope(scope) : "";
-  const scopeRef = useRef(scope);
-  scopeRef.current = scope;
+  const scopeRef = useCommittedRef(scope);
 
   /**
    * Stops remote read work for directories nothing will read any more.
@@ -591,6 +592,16 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       // it shows an empty folder marked busy, and nothing ever clears either.
       onDeferred: (directory) => {
         if (stateRef.current.listings.has(directory)) return;
+        // And not while its own fallback list is still fetching. `sync` runs on
+        // every change to the watch-target set — every expand and every
+        // collapse anywhere in the tree — so without this the backoff stops the
+        // *watch* being re-requested and nothing stops the *list*: each
+        // interaction re-entered here, `open(directory, "list")` aborted the
+        // read already in flight, and a refused directory could be starved
+        // indefinitely while paying for a cancelled round trip per keystroke.
+        // The queried owner rather than the mirrored `loading` set, because the
+        // fact belongs to `DirectoryRequests` and the mirror can lag it.
+        if (requests.current.reading(directory, "list")) return;
         recordPerfCounter("explorer.watchFallbackLists");
         void loadDirectory(root, directory);
       },
