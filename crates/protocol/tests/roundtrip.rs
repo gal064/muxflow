@@ -456,16 +456,21 @@ fn phase7_terminal_upload_contract_round_trips_u64_and_opaque_names() {
     assert!(decoded.cleanup_failed);
 }
 
-/// The file-open stream is append-only: existing operations keep their numbers
-/// and existing payload variants keep theirs, so an older peer that does not
-/// know the operation still refuses it as unsupported rather than misreading a
-/// neighbouring one.
+/// The file-open stream and the Git diff-body lane are append-only: existing
+/// operations keep their numbers and existing payload variants keep theirs, so
+/// an older peer that does not know the operation still refuses it as
+/// unsupported rather than misreading a neighbouring one.
+///
+/// 44 and 45 were added in the same round by two branches that each picked 44
+/// independently. The file lane kept it and the Git lane took 45; this asserts
+/// the settled assignment so neither can drift back.
 #[test]
 fn open_file_stream_operation_and_payload_are_append_only() {
-    assert_eq!(v1::Operation::OpenFileStream as i32, 44);
     assert_eq!(v1::Operation::SelectTerminalSession as i32, 43);
+    assert_eq!(v1::Operation::OpenFileStream as i32, 44);
+    assert_eq!(v1::Operation::GitDiffContent as i32, 45);
     assert_eq!(v1::Operation::TestDelay as i32, 100);
-    assert!(v1::Operation::try_from(45).is_err());
+    assert!(v1::Operation::try_from(46).is_err());
 }
 
 #[test]

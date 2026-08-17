@@ -7,14 +7,18 @@ async fn mutations_enforce_status_diff_epoch_and_one_time_discard_guards() {
     fixture.git(&["add", "file"]);
     fixture.git(&["commit", "-qm", "base"]);
     fixture.write("file", b"A\nb\nC\n");
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut request = fixture.request();
     request.repository_id = status.repository.unwrap().repository_id;
     request.expected_status_generation = status.generation;
     request.path = b"file".to_vec();
     request.diff_target = v1::GitDiffTarget::Unstaged.into();
-    request.expected_source_generation = service.diff(&request).unwrap().source_generation;
+    request.expected_source_generation = service
+        .diff_only(&request, None)
+        .await
+        .unwrap()
+        .source_generation;
     request.mutation = v1::GitMutationKind::StageHunk.into();
     assert!(
         service
@@ -34,7 +38,7 @@ async fn mutations_enforce_status_diff_epoch_and_one_time_discard_guards() {
     request.expected_status_generation = fresh.generation;
     request.mutation = v1::GitMutationKind::DiscardFile.into();
     request.expected_source_generation.clear();
-    let confirmation = service.prepare_discard(&request, 7).unwrap();
+    let confirmation = service.prepare_discard(&request, 7).await.unwrap();
     request.confirmation_token = confirmation.token;
     let wrong_epoch = service
         .mutate(request.clone(), 8, Arc::new(AtomicBool::new(false)))
@@ -70,15 +74,15 @@ async fn complete_hunks_stage_unstage_and_confirmed_discard_match_git_apply() {
         .replace("line-14\n", "changed-14\n");
     fixture.write("file", changed.as_bytes());
 
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut operation = fixture.request();
     operation.repository_id = status.repository.unwrap().repository_id;
     operation.expected_status_generation = status.generation;
     operation.connection_epoch = 17;
     operation.path = b"file".to_vec();
     operation.diff_target = v1::GitDiffTarget::Unstaged.into();
-    let unstaged = service.diff(&operation).unwrap();
+    let unstaged = service.diff_only(&operation, None).await.unwrap();
     assert_eq!(unstaged.hunk_count, 2);
     operation.expected_source_generation = unstaged.source_generation;
     operation.mutation = v1::GitMutationKind::StageHunk.into();
@@ -90,7 +94,7 @@ async fn complete_hunks_stage_unstage_and_confirmed_discard_match_git_apply() {
 
     operation.expected_status_generation = staged.status.unwrap().generation;
     operation.diff_target = v1::GitDiffTarget::Staged.into();
-    let staged_diff = service.diff(&operation).unwrap();
+    let staged_diff = service.diff_only(&operation, None).await.unwrap();
     assert_eq!(staged_diff.hunk_count, 1);
     operation.expected_source_generation = staged_diff.source_generation;
     operation.mutation = v1::GitMutationKind::UnstageHunk.into();
@@ -102,21 +106,22 @@ async fn complete_hunks_stage_unstage_and_confirmed_discard_match_git_apply() {
 
     operation.expected_status_generation = unstaged_again.status.unwrap().generation;
     operation.diff_target = v1::GitDiffTarget::Unstaged.into();
-    let stale_diff = service.diff(&operation).unwrap();
+    let stale_diff = service.diff_only(&operation, None).await.unwrap();
     fixture.write("file", format!("{changed}external-tail\n").as_bytes());
-    operation.expected_status_generation = service.status(&operation).unwrap().generation;
+    operation.expected_status_generation =
+        service.status(&operation, None).await.unwrap().generation;
     operation.expected_source_generation = stale_diff.source_generation;
     operation.mutation = v1::GitMutationKind::DiscardHunk.into();
-    operation.confirmation_token = service.prepare_discard(&operation, 17).unwrap().token;
+    operation.confirmation_token = service.prepare_discard(&operation, 17).await.unwrap().token;
     let stale = service
         .mutate(operation.clone(), 17, Arc::new(AtomicBool::new(false)))
         .await
         .unwrap();
     assert_eq!(stale.outcome, v1::GitCommandOutcome::NotApplied as i32);
     assert!(stale.error.contains("source diff"));
-    let discard_diff = service.diff(&operation).unwrap();
+    let discard_diff = service.diff_only(&operation, None).await.unwrap();
     operation.expected_source_generation = discard_diff.source_generation;
-    operation.confirmation_token = service.prepare_discard(&operation, 17).unwrap().token;
+    operation.confirmation_token = service.prepare_discard(&operation, 17).await.unwrap().token;
     let discarded = service
         .mutate(operation, 17, Arc::new(AtomicBool::new(false)))
         .await
@@ -139,8 +144,8 @@ async fn copy_provenance_never_mutates_the_independent_source_path() {
     fixture.git(&["add", "copy"]);
     fixture.write("source", source_edit);
 
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let copy = status
         .entries
         .iter()
@@ -163,7 +168,7 @@ async fn copy_provenance_never_mutates_the_independent_source_path() {
     assert_eq!(fixture.git(&["show", ":source"]).stdout, base);
 
     fixture.git(&["add", "copy"]);
-    let status = service.status(&fixture.request()).unwrap();
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let copy = status
         .entries
         .iter()
@@ -174,7 +179,7 @@ async fn copy_provenance_never_mutates_the_independent_source_path() {
     request.original_path = copy.original_path.clone();
     request.mutation = v1::GitMutationKind::DiscardFile.into();
     request.diff_target = v1::GitDiffTarget::Staged.into();
-    request.confirmation_token = service.prepare_discard(&request, 71).unwrap().token;
+    request.confirmation_token = service.prepare_discard(&request, 71).await.unwrap().token;
     let discarded = service
         .mutate(request, 71, Arc::new(AtomicBool::new(false)))
         .await
@@ -194,8 +199,8 @@ async fn rename_diffs_use_target_specific_objects_and_reject_hunk_mutations() {
     fixture.git(&["commit", "-qm", "base"]);
     fixture.git(&["mv", "original", "destination"]);
 
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let renamed = status
         .entries
         .iter()
@@ -210,19 +215,21 @@ async fn rename_diffs_use_target_specific_objects_and_reject_hunk_mutations() {
     request.path = b"destination".to_vec();
     request.original_path = b"original".to_vec();
     request.diff_target = v1::GitDiffTarget::Staged.into();
-    let staged = service.diff(&request).unwrap();
+    let staged = service.diff_only(&request, None).await.unwrap();
     assert_eq!(staged.old_content, base);
     assert_eq!(staged.new_content, base);
     assert_eq!(staged.hunk_count, 0);
+    // The client response carries content only; the patch that proves rename
+    // provenance is what the hunk path re-derives.
+    assert!(staged.patch.is_empty());
+    let staged_patch = service.diff_with_patch(&request).await.unwrap().patch;
     assert!(
-        staged
-            .patch
+        staged_patch
             .windows(b"rename from original\n".len())
             .any(|part| part == b"rename from original\n")
     );
     assert!(
-        staged
-            .patch
+        staged_patch
             .windows(22)
             .any(|part| part == b"rename to destination\n")
     );
@@ -236,23 +243,23 @@ async fn rename_diffs_use_target_specific_objects_and_reject_hunk_mutations() {
     assert!(error.to_string().contains("renamed or copied"));
 
     fixture.write("destination", modified);
-    let mixed_status = service.status(&fixture.request()).unwrap();
+    let mixed_status = service.status(&fixture.request(), None).await.unwrap();
     request.expected_status_generation = mixed_status.generation;
     request.mutation = v1::GitMutationKind::Unspecified.into();
-    let staged_mixed = service.diff(&request).unwrap();
+    let staged_mixed = service.diff_only(&request, None).await.unwrap();
     assert_eq!(staged_mixed.old_content, base);
     assert_eq!(staged_mixed.new_content, base);
     assert_eq!(staged_mixed.hunk_count, 0);
 
     request.diff_target = v1::GitDiffTarget::Unstaged.into();
-    let unstaged = service.diff(&request).unwrap();
+    let unstaged = service.diff_only(&request, None).await.unwrap();
     assert_eq!(unstaged.old_content, base);
     assert_eq!(unstaged.new_content, modified);
     assert_eq!(unstaged.hunk_count, 1);
-    assert!(!unstaged.patch.windows(8).any(|part| part == b"original"));
+    let unstaged_patch = service.diff_with_patch(&request).await.unwrap().patch;
+    assert!(!unstaged_patch.windows(8).any(|part| part == b"original"));
     assert!(
-        !unstaged
-            .patch
+        !unstaged_patch
             .windows(18)
             .any(|part| part == b"deleted file mode")
     );
@@ -273,19 +280,19 @@ async fn staged_hunk_discard_preserves_unrelated_unstaged_worktree_changes() {
     let mixed_content = staged_content.replace("line-29\n", "unstaged-twenty-nine\n");
     fixture.write("file", mixed_content.as_bytes());
 
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut request = fixture.request();
     request.repository_id = status.repository.unwrap().repository_id;
     request.expected_status_generation = status.generation;
     request.connection_epoch = 73;
     request.path = b"file".to_vec();
     request.diff_target = v1::GitDiffTarget::Staged.into();
-    let diff = service.diff(&request).unwrap();
+    let diff = service.diff_only(&request, None).await.unwrap();
     assert_eq!(diff.hunk_count, 1);
     request.expected_source_generation = diff.source_generation;
     request.mutation = v1::GitMutationKind::DiscardHunk.into();
-    request.confirmation_token = service.prepare_discard(&request, 73).unwrap().token;
+    request.confirmation_token = service.prepare_discard(&request, 73).await.unwrap().token;
     let result = service
         .mutate(request, 73, Arc::new(AtomicBool::new(false)))
         .await
@@ -311,8 +318,8 @@ async fn concurrent_repository_mutations_serialize_and_second_observes_stale_gen
     fixture.git(&["add", "file"]);
     fixture.git(&["commit", "-qm", "base"]);
     fixture.write("file", b"changed\n");
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut request = fixture.request();
     request.repository_id = status.repository.unwrap().repository_id;
     request.expected_status_generation = status.generation;
@@ -357,8 +364,8 @@ async fn raw_leading_dash_newline_non_utf8_path_is_safe_as_a_mutation_argument()
         b"raw\n",
     )
     .unwrap();
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     assert!(status.entries.iter().any(|entry| entry.path == raw));
     let mut request = fixture.request();
     request.repository_id = status.repository.unwrap().repository_id;
@@ -450,8 +457,8 @@ async fn literal_magic_paths_are_safe_and_directory_or_mismatched_targets_fail_c
     )
     .unwrap();
     fixture.write("ordinary", b"must remain untracked\n");
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut request = fixture.request();
     request.repository_id = status.repository.as_ref().unwrap().repository_id.clone();
     request.expected_status_generation = status.generation;
@@ -474,7 +481,7 @@ async fn literal_magic_paths_are_safe_and_directory_or_mismatched_targets_fail_c
     assert_eq!(staged_name.pop(), Some(b'\n'));
     assert_eq!(staged_name, magic);
 
-    let status = service.status(&fixture.request()).unwrap();
+    let status = service.status(&fixture.request(), None).await.unwrap();
     request.expected_status_generation = status.generation;
     request.path = b"ordinary".to_vec();
     request.original_path = b"not-current".to_vec();
@@ -514,8 +521,8 @@ async fn commit_revalidates_generation_and_cancellation_kills_blocking_hook_grou
     let fixture = Fixture::new("commit-cancel");
     fixture.write("file", b"one\n");
     fixture.git(&["add", "file"]);
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut request = fixture.request();
     request.repository_id = status.repository.as_ref().unwrap().repository_id.clone();
     request.expected_status_generation = status.generation;
@@ -528,7 +535,11 @@ async fn commit_revalidates_generation_and_cancellation_kills_blocking_hook_grou
         .unwrap_err();
     assert!(stale.to_string().contains("stale Git status"));
 
-    request.expected_status_generation = service.status(&fixture.request()).unwrap().generation;
+    request.expected_status_generation = service
+        .status(&fixture.request(), None)
+        .await
+        .unwrap()
+        .generation;
     let hook = fixture.root.join(".git/hooks/pre-commit");
     fs::write(
         &hook,
@@ -567,8 +578,8 @@ async fn normal_hook_longer_than_desktop_default_timeout_completes_successfully(
     let mut mode = fs::metadata(&hook).unwrap().permissions();
     mode.set_mode(0o755);
     fs::set_permissions(&hook, mode).unwrap();
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut request = fixture.request();
     request.repository_id = status.repository.unwrap().repository_id;
     request.expected_status_generation = status.generation;
@@ -589,8 +600,8 @@ async fn commit_output_keeps_unicode_paths_human_readable() {
     let fixture = Fixture::new("unicode-commit-output");
     fixture.write("qa-日本語.txt", b"readable\n");
     fixture.git(&["add", "qa-日本語.txt"]);
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut request = fixture.request();
     request.repository_id = status.repository.unwrap().repository_id;
     request.expected_status_generation = status.generation;
@@ -621,8 +632,8 @@ async fn successful_commit_with_oversized_hook_output_is_applied_and_flagged_tru
     let mut mode = fs::metadata(&hook).unwrap().permissions();
     mode.set_mode(0o755);
     fs::set_permissions(&hook, mode).unwrap();
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut request = fixture.request();
     request.repository_id = status.repository.unwrap().repository_id;
     request.expected_status_generation = status.generation;
@@ -704,8 +715,8 @@ async fn cancellation_during_post_commit_hook_reports_applied_authoritative_head
     let mut mode = fs::metadata(&hook).unwrap().permissions();
     mode.set_mode(0o755);
     fs::set_permissions(&hook, mode).unwrap();
-    let service = Arc::new(GitService::new());
-    let status = service.status(&fixture.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
     let mut request = fixture.request();
     request.repository_id = status.repository.unwrap().repository_id;
     request.expected_status_generation = status.generation;
@@ -777,8 +788,8 @@ async fn submodule_mutations_are_explicitly_rejected_without_changing_pointer_or
     fs::write(parent.root.join("module/nested"), b"two\n").unwrap();
     parent.git(&["-C", "module", "commit", "-qam", "two"]);
 
-    let service = Arc::new(GitService::new());
-    let status = service.status(&parent.request()).unwrap();
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&parent.request(), None).await.unwrap();
     let mut request = parent.request();
     request.repository_id = status.repository.as_ref().unwrap().repository_id.clone();
     request.expected_status_generation = status.generation;

@@ -1,10 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { measurePerfOutcome, measurePerfRequest, recordPerfCounter, recordPerfHighWater, recordPerfJsonBytesDeferred } from "../../perf/probe";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type {
   GitChangeKind,
   GitCommandResult,
   GitDiff,
+  GitDiffContentRef,
+  GitDiffResult,
   GitDiffTarget,
   GitMutationRequest,
   GitRepository,
@@ -23,10 +25,12 @@ interface WireStatusEntry {
   submoduleState: string; symlink: boolean; binary: boolean; renameScore: string;
 }
 interface WireStatus { repository: WireRepository; generation: string; sourceGeneration: string; entries: WireStatusEntry[]; authoritative: boolean; oversized?: boolean; totalEntryCount?: string; error?: string; copyDetectionIncomplete?: boolean }
+interface WireContentRef { size: string; contentDigest: string }
 interface WireDiff {
   repository: WireRepository; target: string; path: number[]; originalPath: number[]; displayPath: string;
-  oldContent: number[]; newContent: number[]; patch: number[]; sourceGeneration: string; binary: boolean; tooLarge: boolean;
+  oldContent: number[]; newContent: number[]; sourceGeneration: string; binary: boolean; tooLarge: boolean;
   oldMissing: boolean; newMissing: boolean; hunkCount: number;
+  oldContentRef?: WireContentRef | null; newContentRef?: WireContentRef | null;
 }
 interface WireCommand {
   exitCode: number; stdout: number[]; stderr: number[]; applied?: boolean; refreshFailed?: boolean; refreshError?: string; outcome?: string;
@@ -38,14 +42,25 @@ interface WireResponse { operationId: string; status?: WireStatus; diff?: WireDi
 export interface WireGitEvent { watchId?: string; rootToken: string; status?: WireStatus; error?: string }
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
-const MAX_SUPERSEDED_RETRIES = 4;
+
+/**
+ * The host's own bounded diff limit. A body it describes as larger than this
+ * would not be one it could serve, so it is never allocated here.
+ */
+const MAX_DEFERRED_BODY_BYTES = 10 * 1024 * 1024;
+
+/** Frame kinds, matching `apps/desktop/src-tauri/src/connection/git_content.rs`. */
+const FRAME_CHUNK = 1;
+const FRAME_COMPLETE = 2;
+const SIDE_OLD = 1;
+const SIDE_NEW = 2;
 
 export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   readonly #listeners = new Set<(event: GitWorkspaceEvent) => void>();
 
   async status(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitStatusSnapshot> {
     recordPerfCounter("git.statusRequests");
-    const status = await measurePerfOutcome("git.status", () => retrySuperseded(async () => {
+    const status = await measurePerfOutcome("git.status", async () => {
       throwIfAborted(signal);
       const operationId = crypto.randomUUID();
       return await abortable(
@@ -53,24 +68,21 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
         signal,
         () => this.#cancelRequest(scope.clientId, operationId),
       );
-    }, signal));
+    });
     observeStatus(status);
     return status;
   }
 
   async watch(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitWatchLease> {
     recordPerfCounter("git.watchRequests");
-    const { status, watchId } = await retrySuperseded(async () => {
-      throwIfAborted(signal);
-      const watchId = crypto.randomUUID();
-      const operationId = crypto.randomUUID();
-      const status = await abortable(
-        this.#request(scope, root, { operation: "watch", operationId, watchId }, validateStatus, "git.watch.request"),
-        signal,
-        () => this.#cancelRequest(scope.clientId, operationId),
-      );
-      return { status, watchId };
-    }, signal);
+    throwIfAborted(signal);
+    const watchId = crypto.randomUUID();
+    const watchOperationId = crypto.randomUUID();
+    const status = await abortable(
+      this.#request(scope, root, { operation: "watch", operationId: watchOperationId, watchId }, validateStatus, "git.watch.request"),
+      signal,
+      () => this.#cancelRequest(scope.clientId, watchOperationId),
+    );
     observeStatus(status);
     let released = false;
     return {
@@ -90,6 +102,9 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     };
   }
 
+  /// One round trip: the diff and the authoritative status it was read
+  /// against. Bodies the host withheld from the control lane are then read over
+  /// the bulk lane, where they cannot delay a keystroke.
   async diff(
     scope: FileWorkspaceScope,
     root: ActiveRoot,
@@ -97,22 +112,39 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     path: string,
     originalPath: string | undefined,
     target: GitDiffTarget,
-    expectedStatusGeneration: string,
     signal?: AbortSignal,
-  ): Promise<GitDiff> {
+  ): Promise<GitDiffResult> {
     recordPerfCounter("git.diffRequests");
-    const diff = await measurePerfOutcome("git.diff", () => retrySuperseded(async () => {
+    const result = await measurePerfOutcome("git.diff", async () => {
       throwIfAborted(signal);
       const operationId = crypto.randomUUID();
       return await abortable(this.#request(scope, root, {
         operation: "diff", operationId, repositoryId, path: [...fromBase64(path)],
         ...(originalPath ? { originalPath: [...fromBase64(originalPath)] } : {}),
-        diffTarget: target, expectedStatusGeneration,
-      }, (response) => validateDiff(response, repositoryId, path, originalPath, target), "git.diff.request"), signal,
+        diffTarget: target,
+      }, (response) => validateDiffResult(response, repositoryId, path, originalPath, target), "git.diff.request"), signal,
       () => this.#cancelRequest(scope.clientId, operationId));
-    }, signal));
-    recordPerfCounter("git.diffPayloadBytes", (diff.oldContent?.byteLength ?? 0) + (diff.newContent?.byteLength ?? 0) + (diff.patch?.byteLength ?? 0));
-    return diff;
+    });
+    const diff = await this.#resolveDeferredBodies(scope, root, result.diff, signal);
+    recordPerfCounter("git.diffPayloadBytes", (diff.oldContent?.byteLength ?? 0) + (diff.newContent?.byteLength ?? 0));
+    observeStatus(result.status);
+    return { diff, status: result.status };
+  }
+
+  async #resolveDeferredBodies(
+    scope: FileWorkspaceScope,
+    root: ActiveRoot,
+    diff: GitDiff,
+    signal?: AbortSignal,
+  ): Promise<GitDiff> {
+    if (!diff.oldContentRef && !diff.newContentRef) return diff;
+    recordPerfCounter("git.diffBulkBodies", Number(Boolean(diff.oldContentRef)) + Number(Boolean(diff.newContentRef)));
+    const bodies = await readDeferredBodies(scope, root, diff, signal);
+    return {
+      ...diff,
+      ...(bodies.old ? { oldContent: bodies.old } : {}),
+      ...(bodies.new ? { newContent: bodies.new } : {}),
+    };
   }
 
   async prepareDiscard(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, request: GitMutationRequest): Promise<string> {
@@ -132,24 +164,20 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     if ((request.kind === "discardFile" || request.kind === "discardHunk") && !request.confirmationToken) {
       throw new Error("Discard requires confirmation.");
     }
-    // The host emits this exact rejection only while pre-command status is
-    // being established. Once Git starts, uncertainty is returned as a
-    // command outcome and must never pass through this retry path.
-    return measurePerfOutcome("workflow.git.mutationAck", () => retrySuperseded(
-      () => this.#request(
-        scope, root, mutationCommand("mutate", repositoryId, request), validateCommand, "git.mutation.request",
-      ),
+    // A mutation is never replayed. Once Git has started, uncertainty is
+    // returned as a command outcome, not as a transport error.
+    return measurePerfOutcome("workflow.git.mutationAck", () => this.#request(
+      scope, root, mutationCommand("mutate", repositoryId, request), validateCommand, "git.mutation.request",
     ));
   }
 
   async commit(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult> {
     recordPerfCounter("git.commitRequests");
     if (!message.trim()) throw new Error("Enter a commit message.");
-    // See mutate(): post-command outcomes are responses, never retryable
-    // superseded-status transport errors.
-    return measurePerfOutcome("workflow.git.mutationAck", () => retrySuperseded(() => this.#request(scope, root, {
+    // See mutate(): a commit is sent exactly once.
+    return measurePerfOutcome("workflow.git.mutationAck", () => this.#request(scope, root, {
       operation: "commit", operationId: crypto.randomUUID(), repositoryId, expectedStatusGeneration, commitMessage: message,
-    }, validateCommand, "git.commit.request")));
+    }, validateCommand, "git.commit.request"));
   }
 
   subscribe(listener: (event: GitWorkspaceEvent) => void): () => void {
@@ -213,19 +241,23 @@ function observeStatus(status: GitStatusSnapshot): void {
   recordPerfJsonBytesDeferred("git.statusMappedPayloadBytes", status);
 }
 
-function validateDiff(
+function validateDiffResult(
   response: WireResponse,
   repositoryId: string,
   path: string,
   originalPath: string | undefined,
   target: GitDiffTarget,
-): GitDiff {
+): GitDiffResult {
   if (!response.diff) throw new Error("Host omitted the Git diff.");
   const diff = mapDiff(response.diff);
   if (diff.repository.id !== repositoryId || diff.path !== path || (diff.originalPath ?? "") !== (originalPath ?? "") || diff.target !== target) {
     throw new Error("Host returned a stale Git diff identity.");
   }
-  return diff;
+  const status = validateStatus(response);
+  if (status.repository.id !== repositoryId) {
+    throw new Error("Host returned a Git diff status for a different repository.");
+  }
+  return { diff, status };
 }
 
 function validateCommand(response: WireResponse): GitCommandResult {
@@ -295,15 +327,22 @@ function mapDiff(value: WireDiff): GitDiff {
   requireBytes(value.originalPath, "Git diff original path");
   requireBytes(value.oldContent, "Git old content");
   requireBytes(value.newContent, "Git new content");
-  requireBytes(value.patch, "Git patch");
   if (!Number.isSafeInteger(value.hunkCount) || value.hunkCount < 0) throw new Error("Host returned an invalid Git hunk count.");
   return {
     repository: mapRepository(value.repository), target: mapTarget(value.target), path: toBase64(value.path),
     ...(value.originalPath.length ? { originalPath: toBase64(value.originalPath) } : {}), displayPath: value.displayPath,
     ...(value.oldContent.length ? { oldContent: new Uint8Array(value.oldContent) } : {}), ...(value.newContent.length ? { newContent: new Uint8Array(value.newContent) } : {}),
-    ...(value.patch.length ? { patch: new Uint8Array(value.patch) } : {}), sourceGeneration: value.sourceGeneration,
+    sourceGeneration: value.sourceGeneration,
     binary: Boolean(value.binary), tooLarge: Boolean(value.tooLarge), oldMissing: Boolean(value.oldMissing), newMissing: Boolean(value.newMissing), hunkCount: value.hunkCount,
+    ...(value.oldContentRef ? { oldContentRef: mapContentRef(value.oldContentRef) } : {}),
+    ...(value.newContentRef ? { newContentRef: mapContentRef(value.newContentRef) } : {}),
   };
+}
+
+function mapContentRef(value: WireContentRef): GitDiffContentRef {
+  requireDecimalU64(value.size, "Git diff content size");
+  if (!value.contentDigest) throw new Error("Host omitted the Git diff content digest.");
+  return { size: value.size, contentDigest: value.contentDigest };
 }
 
 function mapCommand(value: WireCommand): GitCommandResult {
@@ -371,15 +410,113 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("Git request was cancelled.", "AbortError");
 }
 
-async function retrySuperseded<T>(request: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  for (let attempt = 0; ; attempt += 1) {
-    try { return await request(); }
-    catch (cause) {
-      if (attempt >= MAX_SUPERSEDED_RETRIES || !String(cause).includes("Git status refresh superseded by a newer snapshot")) throw cause;
-      throwIfAborted(signal);
-      await Promise.resolve();
-    }
+/**
+ * Reads the diff bodies the control response withheld.
+ *
+ * One call for both sides, because they belong to one diff: the native lane
+ * reads them over a single bulk lease, and a failure on either side stops the
+ * other instead of leaving it streaming to nobody.
+ */
+function readDeferredBodies(
+  scope: FileWorkspaceScope,
+  root: ActiveRoot,
+  diff: GitDiff,
+  signal?: AbortSignal,
+): Promise<{ old?: Uint8Array; new?: Uint8Array }> {
+  return new Promise((resolve, reject) => {
+    const sides = new Map<number, { name: "old" | "new"; body: Uint8Array; received: number }>();
+    if (diff.oldContentRef) sides.set(SIDE_OLD, deferredSide("old", diff.oldContentRef));
+    if (diff.newContentRef) sides.set(SIDE_NEW, deferredSide("new", diff.newContentRef));
+    let settled = false;
+    let readId: string | undefined;
+    const cancelRemote = () => {
+      if (!readId) return;
+      void invoke("cancel_git_diff_content", { clientId: scope.clientId, readId }).catch(() => undefined);
+    };
+    const finish = (outcome: () => void) => {
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      outcome();
+    };
+    const abort = () => {
+      if (settled) return;
+      recordPerfCounter("git.cancellations");
+      cancelRemote();
+      finish(() => reject(new DOMException("Git diff content read was cancelled.", "AbortError")));
+    };
+    const fail = (message: string) => {
+      if (settled) return;
+      // Whatever is left of the stream has nowhere to go; stop it at the host
+      // rather than paying for bytes nothing will read.
+      cancelRemote();
+      finish(() => reject(new Error(message)));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (raw) => {
+      if (settled) return;
+      const frame = new Uint8Array(raw instanceof ArrayBuffer ? raw : (raw as unknown as ArrayBuffer));
+      if (frame.byteLength < 1) return fail("Host emitted an empty Git diff content frame.");
+      if (frame[0] === FRAME_CHUNK) {
+        if (frame.byteLength < 10) return fail("Host emitted an invalid Git diff content chunk.");
+        const side = sides.get(frame[1]);
+        if (!side) return fail("Host emitted a Git diff content chunk for a side that was not requested.");
+        const offset = Number(new DataView(frame.buffer, frame.byteOffset + 2, 8).getBigUint64(0, false));
+        const data = frame.subarray(10);
+        if (offset !== side.received || offset + data.byteLength > side.body.byteLength) {
+          return fail("Host emitted an out-of-order Git diff content chunk.");
+        }
+        side.body.set(data, offset);
+        side.received += data.byteLength;
+        return;
+      }
+      if (frame[0] === FRAME_COMPLETE) {
+        const incomplete = [...sides.values()].some((side) => side.received !== side.body.byteLength);
+        if (incomplete) return fail("Git diff content ended before the described bodies.");
+        const bodies: { old?: Uint8Array; new?: Uint8Array } = {};
+        let total = 0;
+        for (const side of sides.values()) {
+          bodies[side.name] = side.body;
+          total += side.body.byteLength;
+        }
+        recordPerfCounter("git.diffBulkBytes", total);
+        finish(() => resolve(bodies));
+        return;
+      }
+      fail(new TextDecoder().decode(frame.subarray(1)) || "Git diff content read failed.");
+    };
+    if (signal?.aborted) { abort(); return; }
+    void measurePerfRequest("git.diffContent.request", "git", {
+      command: {
+        clientId: scope.clientId,
+        profileId: scope.hostProfileId,
+        expectedServerIdentity: scope.serverIdentity,
+        connectionEpoch: String(scope.terminalEpoch),
+        root: root.path,
+        rootToken: root.token,
+        repositoryId: diff.repository.id,
+        path: [...fromBase64(diff.path)],
+        originalPath: diff.originalPath ? [...fromBase64(diff.originalPath)] : [],
+        diffTarget: diff.target,
+        ...(diff.oldContentRef ? { old: { contentDigest: diff.oldContentRef.contentDigest, size: diff.oldContentRef.size } } : {}),
+        ...(diff.newContentRef ? { new: { contentDigest: diff.newContentRef.contentDigest, size: diff.newContentRef.size } } : {}),
+      },
+      onEvent: channel,
+    }, (request) => invoke<string>("read_git_diff_content", request))
+      .then((id) => {
+        readId = id;
+        if (signal?.aborted || settled) cancelRemote();
+      })
+      .catch((cause) => fail(String(cause)));
+  });
+}
+
+function deferredSide(name: "old" | "new", ref: GitDiffContentRef) {
+  const size = Number(ref.size);
+  if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_DEFERRED_BODY_BYTES) {
+    throw new Error("Host described a Git diff body outside the bounded diff limit.");
   }
+  return { name, body: new Uint8Array(size), received: 0 };
 }
 
 function requireDecimalU64(value: string, label: string): void {

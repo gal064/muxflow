@@ -5,19 +5,19 @@ import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
 import { SurfaceError } from "../../ui/SurfaceError";
 import { attachEditorLayout } from "../files/editorLayout";
-import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot, GitWorkspaceClient, GitWorkspaceEvent } from "./types";
+import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot } from "./types";
+import type { GitRepositoryStore } from "./repositoryStore";
+import { useSharedGitDiff } from "./useSharedGitDiff";
 import { ADE_MONACO_THEME } from "../files/monaco";
 import { recordPerfMilestone } from "../../perf/probe";
-import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
 
 interface Props {
   tab: AppOwnedTab;
   scope?: FileWorkspaceScope;
   activeRoot?: ActiveRoot;
-  client: GitWorkspaceClient;
+  repositories: GitRepositoryStore;
   canWrite: boolean;
   onMessage(message: string): void;
-  onStatus(status: GitStatusSnapshot): void;
 }
 
 type PendingDiscard = { kind: "discardFile" | "discardHunk"; hunkIndex?: number; diff: GitDiff; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
@@ -41,197 +41,79 @@ export function GitDiffSurface(props: Props) {
     mountedEditorSurface.current = undefined;
     readyEditorSurface.current = undefined;
   }, []);
-  const [diff, setDiff] = useState<GitDiff>();
-  const [status, setStatus] = useState<GitStatusSnapshot>();
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
-  const serial = useRef(0);
-  const committedLoadSerial = useRef(0);
-  const abort = useRef<AbortController | undefined>(undefined);
-  const loadedGeneration = useRef<string | undefined>(undefined);
-  const watchedGeneration = useRef<string | undefined>(undefined);
-  const pendingDiffPaint = useRef<PaintTicket | undefined>(undefined);
   const root = useMemo<ActiveRoot | undefined>(() => props.tab.rootPath && props.tab.rootToken ? {
     path: props.tab.rootPath, cwd: props.tab.rootPath, token: props.tab.rootToken, paneId: props.scope?.paneId ?? "",
     gitWorktree: true, revision: "0",
   } : props.activeRoot, [props.activeRoot, props.scope?.paneId, props.tab.rootPath, props.tab.rootToken]);
   const repositoryId = props.tab.gitRepositoryId;
-  const pathIdentity = props.tab.gitPath;
-  const originalPathIdentity = props.tab.gitOriginalPath;
-  const target = props.tab.gitTarget;
+
+  // Everything about when this diff is read, including the lease on the shared
+  // repository observation. This component owns only what is drawn.
+  const shared = useSharedGitDiff({
+    repositories: props.repositories,
+    scope: props.scope,
+    root,
+    repositoryId,
+    path: props.tab.gitPath,
+    originalPath: props.tab.gitOriginalPath,
+    target: props.tab.gitTarget,
+  });
+  const { diff, status, paint } = shared;
+
   const decodedText = useMemo(() => diff ? decodeTextDiff(diff) : undefined, [diff]);
   const diffUsesEditor = Boolean(diff && !diff.binary && !diff.tooLarge && decodedText);
   useEffect(() => {
     if (diffUsesEditor) recordPerfMilestone("editor.monacoRequest");
   }, [diffUsesEditor]);
 
-  const load = useCallback(async (clearStale = false) => {
-    if (!props.scope || !root || !repositoryId || !pathIdentity || !target) return;
-    const current = ++serial.current;
-    abort.current?.abort();
-    const controller = new AbortController();
-    abort.current = controller;
-    setLoading(true);
-    pendingDiffPaint.current?.abandon();
-    pendingDiffPaint.current = undefined;
-    const paint = createPaintTicket(["workflow.git.diffPaint"], current);
-    if (clearStale) {
-      setDiff(undefined);
-      setStatus(undefined);
-      setError(undefined);
-    }
-    try {
-      const nextStatus = await props.client.status(props.scope, root, controller.signal);
-      if (nextStatus.repository.id !== repositoryId) throw new Error("This diff belongs to a different repository. Return to its workspace or close the tab.");
-      const nextEntry = nextStatus.entries.find((entry) => entry.path === pathIdentity);
-      if (!nextEntry || (target === "staged" ? nextEntry.indexKind === "none" : nextEntry.worktreeKind === "none")) {
-        if (current !== serial.current || controller.signal.aborted) {
-          paint.abandon();
-          return;
-        }
-        paint.abandon();
-        loadedGeneration.current = nextStatus.generation;
-        setStatus(nextStatus);
-        setDiff(undefined);
-        setError(undefined);
-        props.onStatus(nextStatus);
-        return;
-      }
-      const nextDiff = await props.client.diff(props.scope, root, repositoryId, pathIdentity, originalPathIdentity, target, nextStatus.generation, controller.signal);
-      if (current !== serial.current || controller.signal.aborted) {
-        paint.abandon();
-        return;
-      }
-      if (watchedGeneration.current && BigInt(watchedGeneration.current) > BigInt(nextStatus.generation)) {
-        paint.abandon();
-        void load(clearStale);
-        return;
-      }
-      if (!watchedGeneration.current || BigInt(nextStatus.generation) > BigInt(watchedGeneration.current)) watchedGeneration.current = nextStatus.generation;
-      loadedGeneration.current = nextStatus.generation;
-      setStatus(nextStatus);
-      setDiff(nextDiff);
-      pendingDiffPaint.current = paint;
-      setError(undefined);
-      props.onStatus(nextStatus);
-    } catch (cause) {
-      paint.abandon();
-      if (controller.signal.aborted || current !== serial.current) return;
-      setError(String(cause));
-    } finally {
-      if (current === serial.current) setLoading(false);
-    }
-  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, repositoryId, pathIdentity, originalPathIdentity, root?.token, root?.path, target]);
-
+  const loading = shared.loading;
+  const surfaceError = shared.error;
   useEffect(() => {
-    void load();
-    return () => {
-      serial.current += 1;
-      committedLoadSerial.current = 0;
-      pendingDiffPaint.current?.abandon();
-      pendingDiffPaint.current = undefined;
-      abort.current?.abort();
-      loadedGeneration.current = undefined;
-      watchedGeneration.current = undefined;
-    };
-  }, [load]);
-
-  useEffect(() => {
-    if (loading || error || !diff) return;
-    committedLoadSerial.current = serial.current;
-    const paint = pendingDiffPaint.current;
-    if (!paint) return;
+    if (loading || surfaceError || !diff) return;
+    paint.committed.current = paint.lifecycle.current;
+    const ticket = paint.pending.current;
+    if (!ticket) return;
     if (diffUsesEditor) {
-      paint.expectSurface(
+      ticket.expectSurface(
         mountedEditorSurface.current ?? editorSurfaceSequence.current + 1,
       );
-      if (paint.surfaceGeneration !== mountedEditorSurface.current
+      if (ticket.surfaceGeneration !== mountedEditorSurface.current
         || readyEditorSurface.current !== mountedEditorSurface.current) return;
     }
-    pendingDiffPaint.current = undefined;
-    paint.afterPaint((ticket) => ticket.lifecycleGeneration === serial.current
-      && ticket.lifecycleGeneration === committedLoadSerial.current
-      && (!diffUsesEditor || ticket.surfaceGeneration === mountedEditorSurface.current),
+    paint.pending.current = undefined;
+    ticket.afterPaint((held) => held.lifecycleGeneration === paint.lifecycle.current
+      && held.lifecycleGeneration === paint.committed.current
+      && (!diffUsesEditor || held.surfaceGeneration === mountedEditorSurface.current),
     diffUsesEditor ? () => recordPerfMilestone("editor.paint") : undefined);
-  }, [diff, diffUsesEditor, error, loading]);
+  }, [diff, diffUsesEditor, surfaceError, loading, paint]);
 
-  useEffect(() => {
-    if (!props.scope || !root || !repositoryId) return;
-    let disposed = false;
-    let activeWatchId: string | undefined;
-    const pendingEvents: GitWorkspaceEvent[] = [];
-    let release: (() => void) | undefined;
-    const watchAbort = new AbortController();
-    const rootToken = root.token;
-    const connectionEpoch = props.scope.terminalEpoch;
-    const stop = props.client.subscribe((event) => {
-      if (disposed || event.rootToken !== rootToken) return;
-      if (!activeWatchId) {
-        pendingEvents.push(event);
-        if (pendingEvents.length > 64) pendingEvents.shift();
-        return;
-      }
-      if (event.watchId !== activeWatchId) return;
-      if (event.kind === "error") {
-        setError(event.error);
-        return;
-      }
-      if (event.status.repository.id !== repositoryId) return;
-      watchedGeneration.current = event.status.generation;
-      if (loadedGeneration.current !== event.status.generation) void load();
-    });
-    void props.client.watch(props.scope, root, watchAbort.signal).then((lease) => {
-      if (disposed || lease.rootToken !== rootToken || lease.connectionEpoch !== connectionEpoch || lease.status.repository.id !== repositoryId) {
-        lease.release();
-        if (!disposed) setError("The saved Git tab no longer belongs to this repository.");
-        return;
-      }
-      activeWatchId = lease.watchId;
-      release = lease.release;
-      watchedGeneration.current = lease.status.generation;
-      let shouldReload = Boolean(loadedGeneration.current && loadedGeneration.current !== lease.status.generation);
-      for (const event of pendingEvents) {
-        if (event.watchId !== activeWatchId) continue;
-        if (event.kind === "error") setError(event.error);
-        else if (event.status.repository.id === repositoryId && BigInt(event.status.generation) >= BigInt(watchedGeneration.current)) {
-          watchedGeneration.current = event.status.generation;
-          if (loadedGeneration.current !== event.status.generation) shouldReload = true;
-        }
-      }
-      pendingEvents.length = 0;
-      if (shouldReload) void load();
-    }).catch((cause) => { if (!disposed) setError(String(cause)); });
-    return () => {
-      disposed = true;
-      watchAbort.abort();
-      stop();
-      release?.();
-    };
-  }, [props.client, props.scope?.clientId, props.scope?.serverIdentity, props.scope?.terminalEpoch, root?.path, root?.token, repositoryId, load]);
+  const applyCommand = async (run: () => Promise<GitCommandResult>) => {
+    setBusy(true);
+    try {
+      const result = await shared.command(run);
+      if (result) reportResult(result, props.onMessage);
+    } finally { setBusy(false); }
+  };
 
-  const mutate = async (kind: GitMutationKind, hunkIndex?: number, confirmation?: string) => {
-    if (!props.scope || !root || !status?.authoritative || !diff || !repositoryId || !props.canWrite) return;
+  const mutate = async (kind: GitMutationKind, hunkIndex?: number) => {
+    const owner = shared.repository;
+    if (!owner || !status?.authoritative || !diff || !repositoryId || !props.canWrite) return;
     const request: GitMutationRequest = {
       kind, path: diff.path, ...(diff.originalPath ? { originalPath: diff.originalPath } : {}), target: diff.target,
       expectedStatusGeneration: status.generation, expectedSourceGeneration: diff.sourceGeneration,
-      ...(hunkIndex !== undefined ? { hunkIndex } : {}), ...(confirmation ? { confirmationToken: confirmation } : {}),
+      ...(hunkIndex !== undefined ? { hunkIndex } : {}),
     };
-    setBusy(true);
-    try {
-      const result = await props.client.mutate(props.scope, root, repositoryId, request);
-      reportResult(result, props.onMessage);
-      if (result.status) props.onStatus(result.status);
-      await load(true);
-    } catch (cause) { setError(String(cause)); }
-    finally { setBusy(false); }
+    await applyCommand(() => owner.mutate(repositoryId, request));
   };
 
   const confirmDiscard = async (pending: PendingDiscard) => {
-    if (!props.scope || !root || !repositoryId || !pending.status.authoritative) return;
-    if (root.token !== pending.rootToken || props.scope.terminalEpoch !== pending.connectionEpoch || repositoryId !== pending.status.repository.id) {
-      setError("Discard was cancelled because the repository connection changed.");
+    const scope = props.scope;
+    const owner = shared.repository;
+    if (!owner || !scope || !root || !repositoryId || !pending.status.authoritative) return;
+    if (root.token !== pending.rootToken || scope.terminalEpoch !== pending.connectionEpoch || repositoryId !== pending.status.repository.id) {
+      shared.fail("Discard was cancelled because the repository connection changed.");
       return;
     }
     const request: GitMutationRequest = {
@@ -239,22 +121,20 @@ export function GitDiffSurface(props: Props) {
       expectedStatusGeneration: pending.status.generation, expectedSourceGeneration: pending.diff.sourceGeneration,
       ...(pending.hunkIndex !== undefined ? { hunkIndex: pending.hunkIndex } : {}),
     };
-    setBusy(true);
-    try {
-      const token = await props.client.prepareDiscard(props.scope, root, repositoryId, request);
-      const result = await props.client.mutate(props.scope, root, repositoryId, { ...request, confirmationToken: token });
-      reportResult(result, props.onMessage);
-      if (result.status) props.onStatus(result.status);
-      await load(true);
-    } catch (cause) { setError(String(cause)); }
-    finally { setBusy(false); }
+    await applyCommand(async () => {
+      const token = await owner.prepareDiscard(repositoryId, request);
+      return owner.mutate(repositoryId, { ...request, confirmationToken: token });
+    });
   };
 
+  const refresh = () => void shared.refresh();
   if (!props.scope || !root) return <GitDiffEmpty title={props.tab.title} detail="Reconnect to reopen this Git diff." />;
-  if (!repositoryId || !pathIdentity || !target) return <GitDiffEmpty title={props.tab.title} detail="This saved Git tab is missing its repository identity." />;
-  if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" />;
-  if (error && !diff) return <GitDiffEmpty title={props.tab.title} detail={error} retry={() => void load()} />;
-  if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${target} changes.`} retry={() => void load()} />;
+  if (!repositoryId || !props.tab.gitPath || !props.tab.gitTarget) return <GitDiffEmpty title={props.tab.title} detail="This saved Git tab is missing its repository identity." />;
+  // An error outranks a spinner: a surface still claiming to load while it
+  // holds a failure is a surface with no way out of it.
+  if (surfaceError && !diff) return <GitDiffEmpty title={props.tab.title} detail={surfaceError} retry={refresh} />;
+  if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" retry={refresh} />;
+  if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${props.tab.gitTarget} changes.`} retry={refresh} />;
 
   const text = decodedText;
   const currentEntry = status.entries.find((entry) => entry.path === diff.path);
@@ -266,14 +146,14 @@ export function GitDiffSurface(props: Props) {
     <header className="editor-toolbar git-diff-toolbar">
       <span className={`git-target ${diff.target}`}>{diff.target}</span>
       <code title={diff.displayPath}>{diff.displayPath}</code>
-      <button disabled={busy} onClick={() => void load(true)} type="button">Refresh</button>
+      <button disabled={busy} onClick={refresh} type="button">Refresh</button>
       {diff.target === "unstaged" && <button disabled={busy || !canMutate} onClick={() => void mutate("stageFile")} type="button">Stage file</button>}
       {diff.target === "staged" && <button disabled={busy || !canMutate} onClick={() => void mutate("unstageFile")} type="button">Unstage file</button>}
       <button className="danger" disabled={busy || !canMutate} onClick={() => setPendingDiscard({ kind: "discardFile", diff, status, rootToken: root.token, connectionEpoch: props.scope!.terminalEpoch })} type="button">Discard file…</button>
     </header>
     <div className="git-diff-errors">
       {mutationBlock && <div className="git-diff-error" role="note">{mutationBlock}</div>}
-      {error && <SurfaceError className="git-diff-error" detail={error} />}
+      {surfaceError && <SurfaceError className="git-diff-error" detail={surfaceError} />}
     </div>
     <div className="git-diff-content" ref={diffUsesEditor ? bindEditorHost : undefined}>
       {diff.binary || !text ? <GitDiffEmpty title={diff.displayPath} detail={diff.binary ? "Binary changes cannot be displayed or edited as text." : "This diff contains non-UTF-8 content and is shown safely as binary."} />
@@ -285,16 +165,16 @@ export function GitDiffSurface(props: Props) {
             modified={text.modified}
             modifiedModelPath={modelUri(props.tab, "modified")}
             onMount={(editor) => {
-              const paint = pendingDiffPaint.current;
+              const ticket = paint.pending.current;
               const surface = mountedEditorSurface.current;
               readyEditorSurface.current = surface;
-              if (paint && surface
-                && paint.surfaceGeneration === surface
-                && paint.lifecycleGeneration === committedLoadSerial.current) {
-                pendingDiffPaint.current = undefined;
-                paint.afterPaint((ticket) => ticket.lifecycleGeneration === serial.current
-                  && ticket.lifecycleGeneration === committedLoadSerial.current
-                  && ticket.surfaceGeneration === mountedEditorSurface.current,
+              if (ticket && surface
+                && ticket.surfaceGeneration === surface
+                && ticket.lifecycleGeneration === paint.committed.current) {
+                paint.pending.current = undefined;
+                ticket.afterPaint((held) => held.lifecycleGeneration === paint.lifecycle.current
+                  && held.lifecycleGeneration === paint.committed.current
+                  && held.surfaceGeneration === mountedEditorSurface.current,
                 () => recordPerfMilestone("editor.paint"));
               }
               detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor);

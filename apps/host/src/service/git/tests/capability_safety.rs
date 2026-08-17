@@ -26,27 +26,31 @@ fn descriptor_bound_worktree_entry_resists_outside_root_parent_symlink_swap() {
     fs::remove_dir_all(outside).unwrap();
 }
 
-#[test]
-fn stable_root_capability_survives_same_path_repository_replacement_and_identity_changes() {
+#[tokio::test]
+async fn stable_root_capability_survives_same_path_repository_replacement_and_identity_changes() {
     let fixture = Fixture::new("root-replacement");
     fixture.write("old", b"old\n");
     fixture.git(&["add", "old"]);
     fixture.git(&["commit", "-qm", "old"]);
-    let service = GitService::new();
+    let service = GitService::new(Arc::new(AtomicBool::new(false)), 0);
     let request = fixture.request();
-    let old_status = service.status(&request).unwrap();
+    let old_status = service.status(&request, None).await.unwrap();
     let old_repository = old_status
         .repository
         .as_ref()
         .unwrap()
         .repository_id
         .clone();
-    let old_metadata = GitMetadataCapability::capture(
-        &old_status.repository.as_ref().unwrap().git_dir,
-        &old_status.repository.as_ref().unwrap().common_dir,
+    let capability = WorktreeRoot::capture(fixture.root.to_str().unwrap()).unwrap();
+    let old_identity = discover_repository(
+        &capability.stable_path(),
+        fixture.root.to_str().unwrap(),
+        capability.identity().unwrap(),
+        None,
     )
     .unwrap();
-    let capability = WorktreeRoot::capture(fixture.root.to_str().unwrap()).unwrap();
+    let old_metadata =
+        GitMetadataCapability::capture(&old_identity.git_dir, &old_identity.common_dir).unwrap();
     let stable_root = capability.stable_path();
     let old_head = runner::git_output_cancellable(
         &stable_root,
@@ -79,17 +83,31 @@ fn stable_root_capability_survives_same_path_repository_replacement_and_identity
     )
     .unwrap();
     assert_eq!(still_old.stdout, old_head);
+    let capabilities = Arc::new(RepositoryCapabilities::for_test(
+        old_identity,
+        old_metadata,
+        capability.try_clone().unwrap(),
+    ));
     assert!(
-        start_repository_watcher(&request, capability.try_clone().unwrap(), old_metadata,).is_err()
+        start_repository_watcher(
+            &capabilities,
+            &request.root,
+            &request.root_token,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(measurements::GitObservation::default()),
+        )
+        .is_err()
     );
     assert!(
         service
-            .status(&request)
+            .status(&request, None)
+            .await
             .unwrap_err()
             .to_string()
             .contains("root snapshot")
     );
-    let replacement = service.status(&fixture.request()).unwrap();
+    let replacement = service.status(&fixture.request(), None).await.unwrap();
     assert_ne!(
         replacement.repository.unwrap().repository_id,
         old_repository
@@ -121,7 +139,17 @@ fn git_metadata_capability_prevents_same_path_dot_git_retarget_for_stage_and_com
         &metadata,
     )
     .unwrap();
-    let old_head = repository.head_oid;
+    let old_head = String::from_utf8(
+        runner::git_stdout_cancellable(
+            &stable_root,
+            &[OsStr::new("rev-parse"), OsStr::new("HEAD")],
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
     fixture.write("staged-after-swap", b"old repository only\n");
     fs::rename(fixture.root.join(".git"), fixture.root.join(".git-held")).unwrap();
     fixture.git(&["init", "-q"]);

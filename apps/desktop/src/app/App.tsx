@@ -28,6 +28,7 @@ import { reconcileDownloadStatus, type ActiveDownloadStatus } from "../features/
 import { ignoredPathsFromStatus } from "../features/files/ignoredPaths";
 import type { FileEntry } from "../features/files/types";
 import { TauriGitWorkspaceClient } from "../features/git/api";
+import { GitRepositoryStore } from "../features/git/repositoryStore";
 import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
 import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
@@ -93,6 +94,8 @@ export function App() {
   const agentClient = useMemo(() => new TauriAgentClient(), []);
   const fileClient = useMemo(() => new TauriFileWorkspaceClient(), []);
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
+  // One shared observation per repository, for the sidebar and every diff tab.
+  const gitRepositories = useMemo(() => new GitRepositoryStore(gitClient), [gitClient]);
   const connectionController = useAppConnectionController({ agentClient, fileClient, gitClient, setStatus });
   const {
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
@@ -170,7 +173,7 @@ export function App() {
     terminalTransferScope, workspaceAppTabs, workspaceFiles, workspaceGit,
   } = useWorkspaceDomainController({
     activeSessionId, activeWindowId, appState, clientId, connection,
-    currentHostProfileId, fileClient, generation: hostState.generation, gitClient,
+    currentHostProfileId, fileClient, generation: hostState.generation, gitRepositories,
     serverIdentity: hostState.serverIdentity, snapshot, terminalEpoch, windows,
   });
   const selectedAppTabRef = useRef(selectedAppTab);
@@ -710,9 +713,8 @@ export function App() {
           {selectedAppTab ? <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>{selectedAppTab.kind === "gitDiff" ? <GitDiffSurface
             activeRoot={workspaceFiles.root}
             canWrite={hostState.canMutate}
-            client={gitClient}
+            repositories={gitRepositories}
             onMessage={setStatus}
-            onStatus={(next) => { if (workspaceFiles.root?.path === next.repository.worktreeRoot) workspaceGit.accept(next); }}
             scope={fileScope}
             tab={selectedAppTab}
             key={`${selectedAppTab.hostProfileId}\0${selectedAppTab.serverIdentity}\0${selectedAppTab.sessionId}\0${selectedAppTab.id}\0${selectedAppTab.gitRepositoryId}\0${selectedAppTab.gitPath}\0${selectedAppTab.gitTarget}`}
@@ -754,7 +756,6 @@ export function App() {
         canMutate={hostState.canMutate}
         fileClient={fileClient}
         fileScope={fileScope}
-        gitClient={gitClient}
         ignoredPaths={ignoredPaths}
         onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
         onGitDiff={(entry, target) => {

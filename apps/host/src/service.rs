@@ -185,7 +185,10 @@ pub async fn serve_with_shutdown(
     let topology_lock = Arc::new(tokio::sync::Mutex::new(()));
     let topology_baseline = Arc::new(Mutex::new(None::<(tmux_control::TmuxSnapshot, String)>));
     let files = Arc::new(FileService::new());
-    let git = Arc::new(GitService::new());
+    let git = Arc::new(GitService::new(
+        Arc::clone(&closed),
+        client_hello.connection_epoch,
+    ));
     files.spawn_watcher(
         Arc::clone(&closed),
         control_tx.clone(),
@@ -347,6 +350,7 @@ pub async fn serve_with_shutdown(
                         files: Arc::clone(&files),
                         git: Arc::clone(&git),
                         bulk_connection: client_hello.bulk_connection,
+                        bulk_available: !read_only,
                         connection_epoch: client_hello.connection_epoch,
                         closed: Arc::clone(&closed),
                     },

@@ -46,8 +46,12 @@ impl std::fmt::Display for RequestFailure {
 /// What one bulk exchange may do beyond writing a request and reading its
 /// response: observe cancellation, refresh an inactivity deadline, and receive
 /// the body frames that precede a streamed response.
+///
+/// `pub(crate)` rather than `pub(super)` because the Git diff-body lane
+/// (`connection::git_content`) is a sibling of `connection::files`, not a
+/// child of it, and it reads its bodies over this same bridge.
 #[derive(Default)]
-pub(super) struct Exchange<'a> {
+pub(crate) struct Exchange<'a> {
     pub(super) cancellation: Option<&'a CancelState>,
     pub(super) deadline: Option<&'a DeadlineGuard>,
     pub(super) on_frame:
@@ -56,7 +60,7 @@ pub(super) struct Exchange<'a> {
 
 impl<'a> Exchange<'a> {
     /// The ordinary shape: cancellable, and keeping the desktop's watchdog fed.
-    pub(super) fn live(cancellation: &'a CancelState, deadline: &'a DeadlineGuard) -> Self {
+    pub(crate) fn live(cancellation: &'a CancelState, deadline: &'a DeadlineGuard) -> Self {
         Self {
             cancellation: Some(cancellation),
             deadline: Some(deadline),
@@ -74,7 +78,7 @@ impl<'a> Exchange<'a> {
     }
 }
 
-pub(super) struct BulkProtocolClient<'a> {
+pub(crate) struct BulkProtocolClient<'a> {
     stdin: &'a mut ChildStdin,
     reader: &'a mut BufReader<ChildStdout>,
     /// Borrowed, not owned: a decoder can be holding bytes read past the last
@@ -250,7 +254,7 @@ impl<'a> BulkProtocolClient<'a> {
 
     /// The same exchange for a caller that only reports the failure, rather
     /// than deciding anything from how it was classified.
-    pub(super) fn request(
+    pub(crate) fn request(
         &mut self,
         request: v1::Request,
         exchange: Exchange<'_>,
