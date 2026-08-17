@@ -48,6 +48,19 @@ pub(in crate::service) struct SubscriberActivation {
 }
 
 impl SubscriberActivation {
+    pub(in crate::service::git) fn new(
+        coordinator: Arc<RepositoryCoordinator>,
+        watch_id: String,
+    ) -> Self {
+        Self {
+            coordinator,
+            watch_id,
+            settled: false,
+        }
+    }
+}
+
+impl SubscriberActivation {
     pub(in crate::service) fn activate(mut self) {
         self.settled = true;
         let coordinator = Arc::clone(&self.coordinator);
@@ -88,18 +101,14 @@ impl RepositoryCoordinator {
                     bootstrap_source: String::new(),
                 },
             );
-            #[cfg(test)]
             if replaced.is_none() {
                 self.observation.subscribers_changed(1);
             }
-            #[cfg(not(test))]
-            let _ = replaced;
         }
-        Ok(SubscriberActivation {
-            coordinator: Arc::clone(self),
-            watch_id: request.watch_id.clone(),
-            settled: false,
-        })
+        Ok(SubscriberActivation::new(
+            Arc::clone(self),
+            request.watch_id.clone(),
+        ))
     }
 
     /// Removes one consumer, stopping the shared watcher with the last of them.
@@ -107,7 +116,6 @@ impl RepositoryCoordinator {
         let (removed, remaining) = {
             let mut subscribers = self.subscribers.lock().unwrap();
             let removed = subscribers.entries.remove(watch_id).is_some();
-            #[cfg(test)]
             if removed {
                 self.observation.subscribers_changed(-1);
             }
@@ -135,7 +143,6 @@ impl RepositoryCoordinator {
     /// its task go with them.
     pub(in crate::service::git) fn drop_all_subscribers(&self) {
         let mut subscribers = self.subscribers.lock().unwrap();
-        #[cfg(test)]
         self.observation
             .subscribers_changed(-(subscribers.entries.len() as isize));
         subscribers.entries.clear();

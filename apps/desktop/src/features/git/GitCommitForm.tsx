@@ -7,7 +7,6 @@ interface Props {
   stagedCount: number;
   disabled: boolean;
   commit(message: string): Promise<GitCommandResult | undefined>;
-  onMessage(message: string): void;
 }
 
 /**

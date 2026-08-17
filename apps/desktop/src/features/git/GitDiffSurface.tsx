@@ -6,7 +6,7 @@ import type { AppOwnedTab } from "../shell/types";
 import { SurfaceError } from "../../ui/SurfaceError";
 import { attachEditorLayout } from "../files/editorLayout";
 import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot } from "./types";
-import type { GitRepositoryHandle, GitRepositoryStore } from "./repositoryStore";
+import { gitScopeKey, type GitRepositoryHandle, type GitRepositoryStore } from "./repositoryStore";
 import { ADE_MONACO_THEME } from "../files/monaco";
 import { recordPerfMilestone } from "../../perf/probe";
 import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
@@ -45,11 +45,13 @@ export function GitDiffSurface(props: Props) {
   const [status, setStatus] = useState<GitStatusSnapshot>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
+  // The shared observation's error, held separately so that clearing it does
+  // not also clear an error this surface raised itself.
+  const [sharedError, setSharedError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
   const serial = useRef(0);
   const committedLoadSerial = useRef(0);
-  const loadedGeneration = useRef<string | undefined>(undefined);
   const requestedGeneration = useRef<string | undefined>(undefined);
   const abort = useRef<AbortController | undefined>(undefined);
   // A command owns its own reload. While one is running the shared observation
@@ -66,13 +68,13 @@ export function GitDiffSurface(props: Props) {
   const pathIdentity = props.tab.gitPath;
   const originalPathIdentity = props.tab.gitOriginalPath;
   const target = props.tab.gitTarget;
-  // Held in a ref so acquiring the shared observation does not re-run whenever
-  // an unrelated prop identity changes.
-  const boundScope = useRef<{ scope: FileWorkspaceScope; root: ActiveRoot } | undefined>(undefined);
-  boundScope.current = props.scope && root ? { scope: props.scope, root } : undefined;
-  const scopeIdentity = props.scope && root
-    ? `${props.scope.clientId}\0${props.scope.serverIdentity}\0${props.scope.terminalEpoch}\0${root.token}\0${root.path}`
-    : "";
+  // Memoized on the identity that keys the acquisition effect, so the effect
+  // and the scope it acquires cannot describe different repositories.
+  const boundScope = useMemo(
+    () => (props.scope && root ? { scope: props.scope, root } : undefined),
+    [props.scope, root],
+  );
+  const scopeIdentity = boundScope ? gitScopeKey(boundScope.scope, boundScope.root) : "";
   const decodedText = useMemo(() => diff ? decodeTextDiff(diff) : undefined, [diff]);
   const diffUsesEditor = Boolean(diff && !diff.binary && !diff.tooLarge && decodedText);
   useEffect(() => {
@@ -119,7 +121,6 @@ export function GitDiffSurface(props: Props) {
       }
       if (shared && !entryStillChanged(shared, pathIdentity, target)) {
         paint.abandon();
-        loadedGeneration.current = shared.generation;
         setStatus(shared);
         setDiff(undefined);
         setError(undefined);
@@ -138,7 +139,6 @@ export function GitDiffSurface(props: Props) {
       if (result.status.repository.id !== repositoryId) {
         throw new Error("This diff belongs to a different repository. Return to its workspace or close the tab.");
       }
-      loadedGeneration.current = result.status.generation;
       setStatus(result.status);
       if (!entryStillChanged(result.status, pathIdentity, target)) {
         paint.abandon();
@@ -161,20 +161,36 @@ export function GitDiffSurface(props: Props) {
     }
   }, [originalPathIdentity, pathIdentity, repositoryId, target]);
 
+  /**
+   * What the Refresh and Retry controls mean.
+   *
+   * `load` deliberately answers from the shared observation when that already
+   * says this file has no such change. That is right for an automatic reload
+   * and wrong for a person asking again, so an explicit refresh re-reads the
+   * repository first and then decides.
+   */
+  const refreshFromHost = useCallback(async () => {
+    const before = requestedGeneration.current;
+    await repository.current?.refresh();
+    // A refresh that moved the repository has already started the reload
+    // through the subscription; forcing a second one here would be the same
+    // request twice. Only a refresh that changed nothing still owes a read.
+    if (repository.current?.state().status?.generation === before) await load(true);
+  }, [load]);
+
   // The shared repository observation. Acquiring it is what makes a matching
   // diff tab free: it joins the sidebar's watch rather than opening its own.
   const repositories = props.repositories;
   useEffect(() => {
-    const bound = boundScope.current;
-    if (!scopeIdentity || !bound || !repositoryId) return;
-    const acquired = repositories.acquire(bound.scope, bound.root);
+    if (!scopeIdentity || !boundScope || !repositoryId) return;
+    const acquired = repositories.acquire(boundScope.scope, boundScope.root);
     repository.current = acquired;
     // Loading is driven by the shared status, never ahead of it: reading a diff
     // before the repository is observed would fetch against an unknown state
     // and then immediately fetch again.
     const loadWhenStatusMoves = () => {
       const next = acquired.state();
-      if (next.error) setError(next.error);
+      setSharedError(next.error);
       if (commanding.current || !next.status) return;
       if (next.status.generation === requestedGeneration.current) return;
       void load();
@@ -186,7 +202,6 @@ export function GitDiffSurface(props: Props) {
       committedLoadSerial.current = 0;
       pendingDiffPaint.current?.abandon();
       pendingDiffPaint.current = undefined;
-      loadedGeneration.current = undefined;
       requestedGeneration.current = undefined;
       abort.current?.abort();
       abort.current = undefined;
@@ -194,7 +209,10 @@ export function GitDiffSurface(props: Props) {
       acquired.release();
       repository.current = undefined;
     };
-  }, [load, repositories, repositoryId, scopeIdentity]);
+    // `scopeIdentity` is the complete key of `boundScope`, and `load` is only
+    // called through a ref-stable path; neither belongs in this lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repositories, repositoryId, scopeIdentity]);
 
   useEffect(() => {
     if (loading || error || !diff) return;
@@ -272,9 +290,10 @@ export function GitDiffSurface(props: Props) {
 
   if (!props.scope || !root) return <GitDiffEmpty title={props.tab.title} detail="Reconnect to reopen this Git diff." />;
   if (!repositoryId || !pathIdentity || !target) return <GitDiffEmpty title={props.tab.title} detail="This saved Git tab is missing its repository identity." />;
+  const surfaceError = error ?? sharedError;
   if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" />;
-  if (error && !diff) return <GitDiffEmpty title={props.tab.title} detail={error} retry={() => void load()} />;
-  if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${target} changes.`} retry={() => void load()} />;
+  if (surfaceError && !diff) return <GitDiffEmpty title={props.tab.title} detail={surfaceError} retry={() => void refreshFromHost()} />;
+  if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${target} changes.`} retry={() => void refreshFromHost()} />;
 
   const text = decodedText;
   const currentEntry = status.entries.find((entry) => entry.path === diff.path);
@@ -286,14 +305,14 @@ export function GitDiffSurface(props: Props) {
     <header className="editor-toolbar git-diff-toolbar">
       <span className={`git-target ${diff.target}`}>{diff.target}</span>
       <code title={diff.displayPath}>{diff.displayPath}</code>
-      <button disabled={busy} onClick={() => void load(true)} type="button">Refresh</button>
+      <button disabled={busy} onClick={() => void refreshFromHost()} type="button">Refresh</button>
       {diff.target === "unstaged" && <button disabled={busy || !canMutate} onClick={() => void mutate("stageFile")} type="button">Stage file</button>}
       {diff.target === "staged" && <button disabled={busy || !canMutate} onClick={() => void mutate("unstageFile")} type="button">Unstage file</button>}
       <button className="danger" disabled={busy || !canMutate} onClick={() => setPendingDiscard({ kind: "discardFile", diff, status, rootToken: root.token, connectionEpoch: props.scope!.terminalEpoch })} type="button">Discard file…</button>
     </header>
     <div className="git-diff-errors">
       {mutationBlock && <div className="git-diff-error" role="note">{mutationBlock}</div>}
-      {error && <SurfaceError className="git-diff-error" detail={error} />}
+      {surfaceError && <SurfaceError className="git-diff-error" detail={surfaceError} />}
     </div>
     <div className="git-diff-content" ref={diffUsesEditor ? bindEditorHost : undefined}>
       {diff.binary || !text ? <GitDiffEmpty title={diff.displayPath} detail={diff.binary ? "Binary changes cannot be displayed or edited as text." : "This diff contains non-UTF-8 content and is shown safely as binary."} />

@@ -91,6 +91,10 @@ describe("GitRepositoryStore", () => {
 
   it("treats an identical authoritative status as no transition at all", async () => {
     const { client, publish } = stubClient();
+    vi.mocked(client.mutate).mockResolvedValue({
+      exitCode: 0, stdout: "", stderr: "", applied: true, refreshFailed: false, refreshError: "",
+      outcome: "applied", status: snapshot("1"),
+    });
     const store = new GitRepositoryStore(client);
     const handle = store.acquire(scope, root);
     await flush();
@@ -99,12 +103,13 @@ describe("GitRepositoryStore", () => {
 
     // A mutation delivers its status in its own response; the shared watch then
     // echoes the same snapshot. That is one transition, not two.
-    handle.accept(snapshot("1"));
+    await handle.mutate("repo", stageRequest);
     publish(snapshot("1"));
     await flush();
     expect(listener).not.toHaveBeenCalled();
 
-    handle.accept(snapshot("2"));
+    publish(snapshot("2"));
+    await flush();
     expect(listener).toHaveBeenCalledTimes(1);
     handle.release();
   });
@@ -151,22 +156,20 @@ describe("GitRepositoryStore", () => {
     const store = new GitRepositoryStore(client);
     const handle = store.acquire(scope, root);
     await flush();
-    await handle.mutate("repo", {
-      kind: "stageFile", path: "YQ==", target: "unstaged",
-      expectedStatusGeneration: "1", expectedSourceGeneration: "source-1",
-    });
+    await handle.mutate("repo", stageRequest);
     expect(handle.state().status?.generation).toBe("2");
     expect(calls.status).toBe(0);
     handle.release();
   });
 
   it("never regresses to an older generation", async () => {
-    const { client } = stubClient();
+    const { client, publish } = stubClient();
     const store = new GitRepositoryStore(client);
     const handle = store.acquire(scope, root);
     await flush();
-    handle.accept(snapshot("5"));
-    handle.accept(snapshot("3"));
+    publish(snapshot("5"));
+    publish(snapshot("3"));
+    await flush();
     expect(handle.state().status?.generation).toBe("5");
     handle.release();
   });
@@ -183,6 +186,11 @@ describe("GitRepositoryStore", () => {
     handle.release();
   });
 });
+
+const stageRequest = {
+  kind: "stageFile" as const, path: "YQ==", target: "unstaged" as const,
+  expectedStatusGeneration: "1", expectedSourceGeneration: "source-1",
+};
 
 const scope: FileWorkspaceScope = { clientId: "c", hostProfileId: "local", serverIdentity: "s", generation: 1, terminalEpoch: 4, sessionId: "$1", paneId: "%1" };
 const root: ActiveRoot = { token: "root-token", path: "/repo", cwd: "/repo", paneId: "%1", gitWorktree: true, revision: "1" };

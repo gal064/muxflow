@@ -316,7 +316,7 @@ impl TerminalClient {
     }
 
     fn request(&self, request: v1::Request) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, REQUEST_TIMEOUT, None)
+        self.request_with_timeout(request, REQUEST_TIMEOUT, None, false)
     }
 
     /// Writes a request without registering a waiter for its response.
@@ -348,7 +348,12 @@ impl TerminalClient {
         request: v1::Request,
         operation_id: &str,
     ) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, GIT_REQUEST_TIMEOUT, Some(operation_id.to_owned()))
+        self.request_with_timeout(
+            request,
+            GIT_REQUEST_TIMEOUT,
+            Some(operation_id.to_owned()),
+            false,
+        )
     }
 
     fn request_with_timeout(
@@ -356,9 +361,12 @@ impl TerminalClient {
         request: v1::Request,
         timeout: Duration,
         git_operation_id: Option<String>,
+        read_only_permitted: bool,
     ) -> Result<v1::Response, String> {
         let deadline = Instant::now() + timeout;
-        if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
+        if !self.ready.load(Ordering::Acquire)
+            || (self.read_only.load(Ordering::Acquire) && !read_only_permitted)
+        {
             // Coded like the host's own refusals, so the frontend can lead with
             // a sentence and keep this behind the disclosure (11.4.4). The
             // uncoded form reached the user verbatim as a full-width red banner
@@ -431,13 +439,31 @@ impl TerminalClient {
         result
     }
 
-    /// One Git request on the control lane, for callers outside this module.
-    pub(crate) fn request_git_operation(
+    /// One read-only Git request on the control lane.
+    ///
+    /// Separate from `request_git` because the ordinary path refuses every
+    /// request while the connection is read-only, and a read-only connection is
+    /// exactly when this is used: such a host will not open a bulk bridge, so a
+    /// large diff body has nowhere else to travel. Reading is still allowed
+    /// there; only mutations are not.
+    pub(crate) fn request_git_read_only(
         &self,
         request: v1::Request,
         operation_id: &str,
     ) -> Result<v1::Response, String> {
-        self.request_git(request, operation_id)
+        if !self.ready.load(Ordering::Acquire) {
+            return Err("mutation_rejected: host connection is not ready".into());
+        }
+        self.request_with_timeout(
+            request,
+            GIT_REQUEST_TIMEOUT,
+            Some(operation_id.to_owned()),
+            true,
+        )
+    }
+
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.read_only.load(Ordering::Acquire)
     }
 
     /// Records a diff-body read so connection replacement can cancel it.

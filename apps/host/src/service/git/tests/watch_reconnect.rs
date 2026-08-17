@@ -509,6 +509,17 @@ async fn a_broken_native_watcher_is_retired_and_re_established() {
     // The platform reports the watch broken. It must be retired and replaced,
     // not silently kept as the reason a stale snapshot is still trusted.
     service.fail_native_watcher_for_test();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while service.observation().native_watcher_creations < 2 && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        service.observation().native_watcher_creations >= 2,
+        "a broken watcher must be retired and re-established"
+    );
+
+    while receiver.try_recv().is_ok() {}
     fixture.write("file", b"changed after failure\n");
     let status = next_status(&mut receiver)
         .await
@@ -519,7 +530,6 @@ async fn a_broken_native_watcher_is_retired_and_re_established() {
             .iter()
             .any(|entry| entry.path == b"file" && entry.worktree_status == "M")
     );
-    assert!(service.observation().native_watcher_creations >= 2);
     service.unwatch("recovering").unwrap();
     closed.store(true, Ordering::Release);
 }

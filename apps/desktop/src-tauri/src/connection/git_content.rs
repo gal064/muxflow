@@ -196,13 +196,18 @@ fn prepare(
     let client = get_client(clients, &command.client_id)?;
     // A read-only host refuses a bulk connection outright, so its bodies come
     // back over the control lane instead. They are bounded chunks, and this is
-    // the only way a large diff stays viewable there at all.
-    let binding = BulkBinding::capture(
-        Arc::clone(&client),
-        command.expected_server_identity.clone(),
-        connection_epoch,
-    )
-    .ok();
+    // the only way a large diff stays viewable there at all. Every other
+    // binding failure — a replaced epoch, a replaced server identity — is a
+    // scope invalidation and must stay an error, not a change of lane.
+    let binding = if client.is_read_only() {
+        None
+    } else {
+        Some(BulkBinding::capture(
+            Arc::clone(&client),
+            command.expected_server_identity.clone(),
+            connection_epoch,
+        )?)
+    };
     Ok(GitContentJob {
         read_id: Uuid::new_v4().to_string(),
         connection: profiles.connection_for(&command.profile_id)?,
@@ -243,7 +248,7 @@ fn stream_git_diff_content(job: &GitContentJob) -> Result<u64, String> {
         }
         None => stream_sides(job, |request| {
             job.client
-                .request_git_operation(request, &Uuid::new_v4().to_string())
+                .request_git_read_only(request, &Uuid::new_v4().to_string())
         }),
     }
 }

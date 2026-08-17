@@ -6,6 +6,23 @@
 
 use super::*;
 
+/// Which coordinator, if any, a release pass must leave alone.
+trait RetainedCoordinator {
+    fn retains(&self, candidate: &Arc<RepositoryCoordinator>) -> bool;
+}
+
+impl RetainedCoordinator for Arc<RepositoryCoordinator> {
+    fn retains(&self, candidate: &Arc<RepositoryCoordinator>) -> bool {
+        Arc::ptr_eq(self, candidate)
+    }
+}
+
+impl RetainedCoordinator for Option<Arc<RepositoryCoordinator>> {
+    fn retains(&self, _candidate: &Arc<RepositoryCoordinator>) -> bool {
+        false
+    }
+}
+
 pub(in crate::service) struct GitWatchBootstrap {
     pub(in crate::service) status: v1::GitStatusSnapshot,
     /// Withholds this subscription's events until its bootstrap response has
@@ -40,8 +57,11 @@ impl GitService {
             .await?;
         // Registered before the bootstrap read so a change racing that read is
         // either folded into it or delivered afterwards, never dropped.
+        // Re-registering on the same coordinator replaces the entry in place,
+        // so a reconnecting consumer never drops the subscriber count to zero
+        // and tears the shared watcher down underneath its peers.
         let activate = coordinator.subscribe(&request, sender)?;
-        self.rebind_watch(&request.watch_id, &coordinator);
+        self.release_watch_elsewhere(&request.watch_id, &coordinator);
         coordinator.ensure_watcher(&capabilities).await;
         let status = match coordinator
             .status(
@@ -90,31 +110,38 @@ impl GitService {
         Ok(())
     }
 
-    /// Points a watch id at its coordinator, retiring an earlier binding.
+    /// Removes a watch id wherever it is registered.
     ///
-    /// Re-registering the same id on the same coordinator replaces the entry in
-    /// place, so a reconnecting consumer never briefly drops the subscriber
-    /// count to zero and tears the shared watcher down underneath its peers.
-    fn rebind_watch(&self, watch_id: &str, coordinator: &Arc<RepositoryCoordinator>) {
-        let previous = {
-            let mut watches = self.watches.lock().unwrap();
-            watches.insert(watch_id.to_owned(), Arc::clone(coordinator))
-        };
-        if let Some(previous) = previous
-            && !Arc::ptr_eq(&previous, coordinator)
-        {
-            previous.unsubscribe(watch_id);
-            self.retire(&previous);
-        }
+    /// The subscriber registries are the only record of who is watching what;
+    /// a second index keyed by client-supplied watch ids would be a duplicate
+    /// of that fact, and every path that forgot to update it would leak. There
+    /// are at most `MAX_TRACKED_REPOSITORIES` coordinators to ask.
+    pub(in crate::service::git) fn release_watch(&self, watch_id: &str) -> bool {
+        self.release_watch_elsewhere(watch_id, &None)
     }
 
-    fn release_watch(&self, watch_id: &str) -> bool {
-        let coordinator = self.watches.lock().unwrap().remove(watch_id);
-        let Some(coordinator) = coordinator else {
-            return false;
-        };
-        let removed = coordinator.unsubscribe(watch_id);
-        self.retire(&coordinator);
+    /// Releases a watch id from every coordinator except one.
+    ///
+    /// `retained` is the coordinator that has just taken ownership of the id,
+    /// which must not have its brand-new subscription removed by the same pass.
+    fn release_watch_elsewhere(&self, watch_id: &str, retained: &impl RetainedCoordinator) -> bool {
+        let coordinators: Vec<_> = self
+            .repositories
+            .lock()
+            .unwrap()
+            .values()
+            .map(Arc::clone)
+            .collect();
+        let mut removed = false;
+        for coordinator in coordinators {
+            if retained.retains(&coordinator) {
+                continue;
+            }
+            if coordinator.unsubscribe(watch_id) {
+                removed = true;
+                self.retire(&coordinator);
+            }
+        }
         removed
     }
 }

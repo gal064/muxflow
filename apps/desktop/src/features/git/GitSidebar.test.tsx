@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { GitCommandResult, GitStatusSnapshot } from "./types";
 import type { WorkspaceGitState } from "./useWorkspaceGit";
+import type { GitRepositoryHandle } from "./repositoryStore";
 import { rowCommandRegistry } from "../../commands/rowCommands";
 import { GitSidebar } from "./GitSidebar";
 
@@ -47,8 +48,8 @@ describe("GitSidebar", () => {
     expect(renderer.root.findAllByProps({ role: "alertdialog" })).toHaveLength(1);
     const cancel = renderer.root.findAllByType("button").find((button) => button.props.children === "Cancel");
     await act(async () => { cancel?.props.onClick(); await Promise.resolve(); });
-    expect(props.git.prepareDiscard).not.toHaveBeenCalled();
-    expect(props.git.mutate).not.toHaveBeenCalled();
+    expect(props.git.handle!.prepareDiscard).not.toHaveBeenCalled();
+    expect(props.git.handle!.mutate).not.toHaveBeenCalled();
     await act(async () => { renderer.unmount(); });
   });
 
@@ -58,7 +59,7 @@ describe("GitSidebar", () => {
     await act(async () => { renderer = create(<GitSidebar {...props} />); });
     const form = renderer.root.findByType("form");
     await act(async () => { form.props.onSubmit({ preventDefault: vi.fn() }); });
-    expect(props.git.commit).not.toHaveBeenCalled();
+    expect(props.git.handle!.commit).not.toHaveBeenCalled();
     expect(JSON.stringify(renderer.toJSON())).toContain("Enter a commit message");
     await act(async () => { renderer.unmount(); });
   });
@@ -76,13 +77,13 @@ describe("GitSidebar", () => {
 
   it("surfaces failing hook stdout/stderr and preserves the commit message", async () => {
     const props = baseProps();
-    vi.mocked(props.git.commit).mockResolvedValueOnce({ exitCode: 1, stdout: "checking files", stderr: "pre-commit rejected", applied: false, refreshFailed: false, refreshError: "", outcome: "notApplied" });
+    vi.mocked(props.git.handle!.commit).mockResolvedValueOnce({ exitCode: 1, stdout: "checking files", stderr: "pre-commit rejected", applied: false, refreshFailed: false, refreshError: "", outcome: "notApplied" });
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...props} />); });
     const textarea = renderer.root.findByType("textarea");
     await act(async () => { textarea.props.onChange({ target: { value: "message" } }); });
     await act(async () => { renderer.root.findByType("form").props.onSubmit({ preventDefault: vi.fn() }); await settle(); });
-    expect(props.git.commit).toHaveBeenCalledWith("repo", "1", "message");
+    expect(props.git.handle!.commit).toHaveBeenCalledWith("repo", "1", "message");
     expect(JSON.stringify(renderer.toJSON())).toContain("pre-commit rejected");
     expect(renderer.root.findByType("textarea").props.value).toBe("message");
     await act(async () => { renderer.unmount(); });
@@ -97,8 +98,8 @@ describe("GitSidebar", () => {
     await act(async () => { renderer.update(<GitSidebar {...props} scope={{ ...scope, terminalEpoch: 2 }} />); });
     const confirm = renderer.root.findAllByType("button").find((button) => button.props.children === "Discard");
     await act(async () => { confirm?.props.onClick(); await settle(); });
-    expect(props.git.prepareDiscard).not.toHaveBeenCalled();
-    expect(props.git.mutate).not.toHaveBeenCalled();
+    expect(props.git.handle!.prepareDiscard).not.toHaveBeenCalled();
+    expect(props.git.handle!.mutate).not.toHaveBeenCalled();
     expect(props.onMessage).toHaveBeenCalledWith(expect.stringContaining("connection changed"));
     await act(async () => { renderer.unmount(); });
   });
@@ -109,17 +110,17 @@ describe("GitSidebar", () => {
     await act(async () => { renderer = create(<GitSidebar {...props} />); });
     const discard = await rowMenuItem(renderer, "staged.txt", "discard");
     await act(async () => { discard.props.onClick(); });
-    expect(props.git.prepareDiscard).not.toHaveBeenCalled();
+    expect(props.git.handle!.prepareDiscard).not.toHaveBeenCalled();
     const confirm = renderer.root.findAllByType("button").find((button) => button.props.children === "Discard");
     await act(async () => { confirm?.props.onClick(); await settle(); });
-    expect(props.git.prepareDiscard).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "discardFile", target: "staged" }));
-    expect(props.git.mutate).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "discardFile", target: "staged", confirmationToken: "confirmed" }));
+    expect(props.git.handle!.prepareDiscard).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "discardFile", target: "staged" }));
+    expect(props.git.handle!.mutate).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "discardFile", target: "staged", confirmationToken: "confirmed" }));
     await act(async () => { renderer.unmount(); });
   });
 
   it("reports a completed commit separately from a failed status refresh", async () => {
     const props = baseProps();
-    vi.mocked(props.git.commit).mockResolvedValueOnce({ exitCode: 0, stdout: "created", stderr: "", applied: true, refreshFailed: true, refreshError: "root changed", outcome: "applied" });
+    vi.mocked(props.git.handle!.commit).mockResolvedValueOnce({ exitCode: 0, stdout: "created", stderr: "", applied: true, refreshFailed: true, refreshError: "root changed", outcome: "applied" });
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...props} />); });
     await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "message" } }); });
@@ -163,7 +164,7 @@ describe("GitSidebar", () => {
     await act(async () => { gitRow(renderer, "changed.txt").props.onFocus(); });
     expect(rowCommandRegistry.available()).toEqual(["git.openDiff", "git.stage", "git.discard"]);
     await act(async () => { rowCommandRegistry.run("git.stage"); await settle(); });
-    expect(props.git.mutate).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "stageFile", target: "unstaged" }));
+    expect(props.git.handle!.mutate).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "stageFile", target: "unstaged" }));
 
     // The staged copy of a path offers the opposite direction.
     await act(async () => { gitRow(renderer, "staged.txt").props.onFocus(); });
@@ -274,17 +275,29 @@ function rowHandlers(renderer: ReturnType<typeof create>) {
  * The sidebar renders one shared repository observation and mutates through it,
  * so the test double is that observation rather than a protocol client.
  */
-function gitState(overrides: Partial<WorkspaceGitState> = {}): WorkspaceGitState {
+function gitState(overrides: Partial<WorkspaceGitState & GitRepositoryHandle> = {}): WorkspaceGitState {
+  const { status: snapshot, loading, error, refresh, ...handle } = overrides;
   return {
-    status: status(),
-    loading: false,
-    refresh: vi.fn(async () => undefined),
-    accept: vi.fn(),
-    mutate: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "", applied: true, refreshFailed: false, refreshError: "", outcome: "applied" as const, status: status() })),
-    prepareDiscard: vi.fn(async () => "confirmed"),
-    commit: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "", applied: true, refreshFailed: false, refreshError: "", outcome: "applied" as const, status: status() })),
-    ...overrides,
+    status: "status" in overrides ? snapshot : status(),
+    loading: loading ?? false,
+    ...(error !== undefined ? { error } : {}),
+    refresh: refresh ?? vi.fn(async () => undefined),
+    handle: {
+      state: vi.fn(() => ({ loading: false })),
+      subscribe: vi.fn(() => () => undefined),
+      refresh: vi.fn(async () => undefined),
+      diff: vi.fn(),
+      mutate: vi.fn(async () => applied()),
+      prepareDiscard: vi.fn(async () => "confirmed"),
+      commit: vi.fn(async () => applied()),
+      release: vi.fn(),
+      ...handle,
+    },
   };
+}
+
+function applied(): GitCommandResult {
+  return { exitCode: 0, stdout: "", stderr: "", applied: true, refreshFailed: false, refreshError: "", outcome: "applied", status: status() };
 }
 
 function baseProps(git: WorkspaceGitState = gitState()) {

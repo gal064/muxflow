@@ -20,8 +20,18 @@ pub(super) struct CachedDiffBody {
     body: Arc<Vec<u8>>,
 }
 
-#[derive(PartialEq, Eq)]
+/// Everything a cached body is bound to.
+///
+/// The scope fields are in here on purpose: a cache hit skips the discovery
+/// path that would otherwise revalidate them, and a body served across a tmux
+/// server swap or a root replacement would be a body from a repository the
+/// client can no longer address.
+#[derive(Clone, PartialEq, Eq)]
 struct DiffBodyKey {
+    server_identity: String,
+    connection_epoch: u64,
+    root: String,
+    root_token: String,
     repository_id: String,
     path: Vec<u8>,
     original_path: Vec<u8>,
@@ -33,6 +43,10 @@ struct DiffBodyKey {
 impl DiffBodyKey {
     fn new(request: &v1::GitRequest, content: &v1::GitDiffContentRequest) -> Self {
         Self {
+            server_identity: request.expected_server_identity.clone(),
+            connection_epoch: request.connection_epoch,
+            root: request.root.clone(),
+            root_token: request.root_token.clone(),
             repository_id: request.repository_id.clone(),
             path: request.path.clone(),
             original_path: request.original_path.clone(),
@@ -49,6 +63,9 @@ impl GitService {
         request: &v1::GitRequest,
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<v1::GitDiffContentChunk> {
+        // Checked before the cache, not only on the miss that reaches
+        // discovery: every chunk must be answered under the same identity.
+        ensure_server_identity(request)?;
         require_repository_id(request)?;
         let content = request
             .content
@@ -68,7 +85,7 @@ impl GitService {
             bail!("Git diff content offset is outside the described body");
         }
         let key = DiffBodyKey::new(request, &content);
-        let key_for_release = DiffBodyKey::new(request, &content);
+        let key_for_release = key.clone();
         let cached = {
             let held = self.diff_body.lock().unwrap();
             held.as_ref()

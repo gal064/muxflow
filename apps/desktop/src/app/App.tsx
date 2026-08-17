@@ -168,7 +168,7 @@ export function App() {
     terminalTransferScope, workspaceAppTabs, workspaceFiles, workspaceGit,
   } = useWorkspaceDomainController({
     activeSessionId, activeWindowId, appState, clientId, connection,
-    currentHostProfileId, fileClient, generation: hostState.generation, gitClient, gitRepositories,
+    currentHostProfileId, fileClient, generation: hostState.generation, gitRepositories,
     serverIdentity: hostState.serverIdentity, snapshot, terminalEpoch, windows,
   });
   const selectedAppTabRef = useRef(selectedAppTab);

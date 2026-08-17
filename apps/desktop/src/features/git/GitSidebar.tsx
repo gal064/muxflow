@@ -37,37 +37,48 @@ export function GitSidebar(props: Props) {
   // already gone, and the click handler threw.
   const [menu, setMenu] = useState<{ entry: GitStatusEntry; target: GitDiffTarget; anchor: ContextMenuAnchor }>();
   const [focusedRow, setFocusedRow] = useState<{ path: string; target: GitDiffTarget }>();
-  // The row a mutation is currently being applied to, and what is being done
-  // to it. Shown immediately so the target of a pending action is visible while
-  // the host is still the authority on whether it happened.
-  const [pending, setPending] = useState<{ path: string; label: string }>();
+  // What is being applied to each row, shown immediately so the target of a
+  // pending action is visible while the host is still the authority on whether
+  // it happened. Keyed by path, so two overlapping actions cannot clobber one
+  // another's indicator.
+  const [pending, setPending] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const markPending = useCallback((path: string, label: string | undefined) => {
+    setPending((current) => {
+      const next = new Map(current);
+      if (label === undefined) next.delete(path);
+      else next.set(path, label);
+      return next;
+    });
+  }, []);
   // Grouping is keyed on the entry list, not the snapshot: an authoritative
   // refresh that reports the same entries must not rebuild a thousand rows.
   const groups = useMemo(() => groupEntries(props.git.status?.entries ?? []), [props.git.status?.entries]);
-  const unavailable = props.disabled || !props.scope || !props.root || !props.git.status?.authoritative;
+  const unavailable = props.disabled || !props.scope || !props.root
+    || !props.git.handle || !props.git.status?.authoritative;
 
   const mutateFile = async (entry: GitStatusEntry, target: GitDiffTarget, kind: GitMutationRequest["kind"], confirmed = false, capturedStatus = props.git.status) => {
-    if (!capturedStatus || unavailable) return;
+    const observation = props.git.handle;
+    if (!observation || !capturedStatus || unavailable) return;
     const request: GitMutationRequest = {
       kind, path: entry.path, ...(entry.originalPath ? { originalPath: entry.originalPath } : {}), target,
       expectedStatusGeneration: capturedStatus.generation, expectedSourceGeneration: capturedStatus.sourceGeneration,
     };
-    setPending({ path: entry.path, label: pendingLabelFor(kind) });
+    markPending(entry.path, pendingLabelFor(kind));
     try {
       if (kind === "discardFile") {
         if (!confirmed) throw new Error("Discard was not confirmed.");
-        request.confirmationToken = await props.git.prepareDiscard(capturedStatus.repository.id, request);
+        request.confirmationToken = await observation.prepareDiscard(capturedStatus.repository.id, request);
       }
-      const result = await props.git.mutate(capturedStatus.repository.id, request);
+      const result = await observation.mutate(capturedStatus.repository.id, request);
       props.onMessage(gitResultMessage(result, `${labelFor(kind)} ${entry.displayPath}`));
     } catch (cause) { props.onMessage(String(cause)); }
-    finally { setPending(undefined); }
+    finally { markPending(entry.path, undefined); }
   };
 
   // Stable handlers for the memoized groups: a row must not be rebuilt because
   // an unrelated prop identity changed above it.
-  const latest = useRef(props);
-  latest.current = props;
+  const latest = useRef({ ...props, unavailable });
+  latest.current = { ...props, unavailable };
   const openDiff = useCallback((entry: GitStatusEntry, target: GitDiffTarget) => {
     latest.current.onOpenDiff(entry, target);
   }, []);
@@ -84,10 +95,12 @@ export function GitSidebar(props: Props) {
     setMenu({ entry, target, anchor });
   }, [focusRow]);
   const commit = useCallback(async (message: string) => {
-    const { git, disabled } = latest.current;
+    const { git } = latest.current;
     const status = git.status;
-    if (!status || disabled || !status.authoritative) return undefined;
-    const result = await git.commit(status.repository.id, status.generation, message);
+    // The same condition the form's controls are disabled by. A guard that is
+    // weaker than its own control is a guard that does not hold.
+    if (!status || !git.handle || latest.current.unavailable) return undefined;
+    const result = await git.handle.commit(status.repository.id, status.generation, message);
     latest.current.onMessage(gitResultMessage(result, result.outcome === "applied" ? "Commit created." : "Commit failed."));
     return result;
   }, []);
@@ -155,7 +168,7 @@ export function GitSidebar(props: Props) {
     </div>
     {/* The commit form is not permanent chrome any more: it exists exactly when
         there is something staged to commit. */}
-    {stagedCount > 0 && <GitCommitForm commit={commit} disabled={unavailable} onMessage={props.onMessage} stagedCount={stagedCount} />}
+    {stagedCount > 0 && <GitCommitForm commit={commit} disabled={unavailable} stagedCount={stagedCount} />}
     {menu && <ContextMenu
       anchor={menu.anchor}
       items={[
@@ -197,7 +210,7 @@ export function GitSidebar(props: Props) {
 }
 
 const GitGroup = memo(function GitGroup(props: {
-  title: string; entries: GitStatusEntry[]; target: GitDiffTarget; pending?: { path: string; label: string };
+  title: string; entries: GitStatusEntry[]; target: GitDiffTarget; pending?: ReadonlyMap<string, string>;
   onOpen(entry: GitStatusEntry, target: GitDiffTarget): void;
   onFocusEntry(entry: GitStatusEntry, target: GitDiffTarget): void;
   onMenu?(entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor): void;
@@ -210,7 +223,7 @@ const GitGroup = memo(function GitGroup(props: {
     <ul>
       {visible.map((entry) => <li key={`${props.target}\0${entry.path}`} className={entry.conflicted ? "conflicted" : ""}>
         <button
-          aria-busy={props.pending?.path === entry.path}
+          aria-busy={props.pending?.has(entry.path) ?? false}
           className="git-file"
           disabled={entry.ignored}
           onClick={() => props.onOpen(entry, props.target)}
@@ -237,7 +250,7 @@ const GitGroup = memo(function GitGroup(props: {
           <span className={`git-state ${statusTitle(entry, props.target)}`}>{statusCode(entry, props.target)}</span>
           <span className="git-path">{entry.displayPath}</span>
         </button>
-        {props.pending?.path === entry.path && <small className="git-entry-note">{props.pending.label}</small>}
+        {props.pending?.get(entry.path) && <small className="git-entry-note">{props.pending.get(entry.path)}</small>}
         {entry.submodule && <small className="git-entry-note">submodule {entry.submoduleState} · actions unavailable</small>}
         {entry.displayOriginalPath && <small className="git-entry-note">{entry.indexKind === "copied" || entry.worktreeKind === "copied" ? "copied" : "renamed"} from {entry.displayOriginalPath}</small>}
         {entry.symlink && <small className="git-entry-note">symbolic link</small>}
