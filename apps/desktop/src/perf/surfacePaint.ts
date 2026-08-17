@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useRef } from "react";
-import { createPaintTicket, type PaintTicket } from "./paintTicket";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { type PaintTicket } from "./paintTicket";
+import { recordPerfMilestone } from "./probe";
 
 /**
  * What a rendering surface knows about the editor it is painting into.
@@ -49,40 +50,57 @@ export interface PaintReporter extends SurfacePaint {
   /** Takes ownership of the measurement this surface will publish next. */
   hold(ticket: PaintTicket): void;
   /**
-   * Whether a measurement is pending — that one, if a ticket is named.
+   * The measurement currently pending, if any.
    *
-   * A superseded load asks by name: the interaction it was measuring is still
-   * on screen if a newer read has not replaced the ticket, and retiring it
-   * there would lose the measurement of an open that does finish.
+   * A superseded load compares against it before retiring its own ticket: the
+   * interaction it was measuring is still on screen if a newer read has not
+   * replaced the ticket, and the newer read is the one that will finish it.
    */
-  holding(ticket?: PaintTicket): boolean;
+  pending(): PaintTicket | undefined;
+  /** Drops the pending measurement, whatever it is, without publishing it. */
+  abandon(): void;
   /**
-   * Drops a measurement without publishing it.
+   * Retires one load's ticket, and the pending slot with it if that is what
+   * the slot holds.
    *
-   * With a ticket, only that ticket is dropped, and the pending slot is left
-   * alone unless the ticket is the pending one — a load that failed after being
-   * superseded must not silently retire its successor's measurement.
+   * The two halves matter separately: a load that failed after being
+   * superseded must retire only its own ticket, never its successor's.
    */
-  abandon(ticket?: PaintTicket): void;
+  discard(ticket: PaintTicket): void;
 }
 
+/**
+ * One surface's pending paint measurement and the rules for publishing it.
+ *
+ * The identity comparisons below are exact while the perf probe is on, which
+ * is the only state in which anything is published at all. With the probe off
+ * `createPaintTicket` hands out one inert frozen singleton, so every ticket is
+ * the same object and `pending()`/`discard` cannot tell them apart — harmless,
+ * because an inert ticket publishes nothing whichever way the comparison goes,
+ * and deliberate, because ordinary unmeasured file and diff traffic should not
+ * allocate a ticket per event to keep an identity nobody reads.
+ */
 export function createPaintReporter(generation: () => number): PaintReporter {
   let pending: PaintTicket | undefined;
   let committed = 0;
+  const drop = () => {
+    pending?.abandon();
+    pending = undefined;
+    committed = 0;
+  };
   return {
     hold: (ticket) => {
       if (pending !== ticket) pending?.abandon();
       pending = ticket;
     },
-    holding: (ticket) => (ticket ? pending === ticket : pending !== undefined),
-    abandon: (ticket) => {
-      if (ticket && pending !== ticket) {
+    pending: () => pending,
+    abandon: drop,
+    discard: (ticket) => {
+      if (pending !== ticket) {
         ticket.abandon();
         return;
       }
-      pending?.abandon();
-      pending = undefined;
-      committed = 0;
+      drop();
     },
     noteCommitted: () => {
       committed = generation();
@@ -107,12 +125,51 @@ export function createPaintReporter(generation: () => number): PaintReporter {
   };
 }
 
-/** A rendering surface's live view of its own editor host. */
-export interface EditorSurface {
-  facts: EditorSurfaceFacts;
+/** What a surface has to give its editor host for the measurement to complete. */
+export interface EditorPaint {
   /** Ref callback for the box the editor is mounted into. */
   bindHost(node: Element | null): void;
-  /** The mounted editor has reported itself ready to paint. */
+  /** The mounted editor exists and is about to paint. */
+  onReady(): void;
+}
+
+const recordEditorPaint = () => recordPerfMilestone("editor.paint");
+
+/**
+ * The surface half of an editor paint measurement, for both surfaces that have
+ * one.
+ *
+ * Three things have to happen in a fixed order — the load React committed is
+ * noted, the surface reports itself paintable, and the editor reports itself
+ * mounted — and the file tab and the Git diff had each written that sequence
+ * out by hand. Two copies of an ordering rule is two places for it to drift.
+ *
+ * `settled` is "this surface is showing the thing it was loading"; `usesEditor`
+ * is whether that thing is an editor. A surface that is settled without one —
+ * a binary diff — still completes its own paint span, and never claims the
+ * editor milestone.
+ */
+export function useEditorPaint(paint: SurfacePaint, settled: boolean, usesEditor: boolean): EditorPaint {
+  const surface = useEditorSurface();
+  useEffect(() => {
+    if (!settled) return;
+    paint.noteCommitted();
+    paint.notePaintable(
+      usesEditor ? surface.facts : undefined,
+      usesEditor ? recordEditorPaint : undefined,
+    );
+  }, [paint, settled, surface.facts, usesEditor]);
+  const onReady = useCallback(() => {
+    surface.noteReady();
+    paint.notePaintable(surface.facts, recordEditorPaint);
+  }, [paint, surface]);
+  return useMemo(() => ({ bindHost: surface.bindHost, onReady }), [onReady, surface.bindHost]);
+}
+
+/** A rendering surface's live view of its own editor host. */
+interface EditorSurface {
+  facts: EditorSurfaceFacts;
+  bindHost(node: Element | null): void;
   noteReady(): void;
 }
 
@@ -125,7 +182,7 @@ export interface EditorSurface {
  * different file before the first mount ever reports. Only the generation the
  * measurement named may finish it.
  */
-export function useEditorSurface(): EditorSurface {
+function useEditorSurface(): EditorSurface {
   const sequence = useRef(0);
   const mounted = useRef<number | undefined>(undefined);
   const ready = useRef<number | undefined>(undefined);

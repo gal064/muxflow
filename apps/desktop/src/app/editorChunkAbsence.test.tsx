@@ -23,9 +23,21 @@ import type { GitDiff, GitStatusSnapshot, GitWorkspaceClient } from "../features
  * every case here has to be one that must not reach the editor: the first case
  * that did would make the rest of the file prove nothing. That is the whole
  * reason this is a separate file from `editorChunkBoundary.test.tsx`.
+ *
+ * All three doors are watched — the two components that import Monaco, and
+ * Monaco itself — so a static import reintroduced anywhere above them is
+ * caught here as well as in the bundle graph.
  */
 const probe = vi.hoisted(() => ({ editorEvaluated: false }));
 
+vi.mock("../features/files/FileEditor", async (importOriginal) => {
+  probe.editorEvaluated = true;
+  return await importOriginal();
+});
+vi.mock("../features/git/GitDiffEditor", async (importOriginal) => {
+  probe.editorEvaluated = true;
+  return await importOriginal();
+});
 vi.mock("@monaco-editor/react", () => {
   probe.editorEvaluated = true;
   return { default: () => null, DiffEditor: () => null };

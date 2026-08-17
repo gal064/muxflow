@@ -45,18 +45,17 @@ describe("createPaintReporter", () => {
     expect(onPaint, "a measurement published before its editor existed").not.toHaveBeenCalled();
     // It named the generation it is waiting for, so the mount can recognise it.
     expect(ticket.surfaceGeneration).toBe(4);
-    expect(reporter.holding(ticket)).toBe(true);
+    expect(reporter.pending()).toBe(ticket);
   });
 
   it("keeps a superseded load's measurement when a newer load has taken it over", () => {
     const { reporter, ticket } = armed(() => 1);
     const replacement = createPaintTicket(["surface.test"], 2);
     reporter.hold(replacement);
-    expect(reporter.holding(ticket), "the older ticket was still the pending one").toBe(false);
-    expect(reporter.holding(replacement)).toBe(true);
-    // Abandoning by name drops only that ticket, never the pending successor.
-    reporter.abandon(ticket);
-    expect(reporter.holding(replacement)).toBe(true);
+    expect(reporter.pending(), "the older ticket was still the pending one").toBe(replacement);
+    // Discarding by name drops only that ticket, never the pending successor.
+    reporter.discard(ticket);
+    expect(reporter.pending()).toBe(replacement);
   });
 
   it("publishes nothing after the lifetime that armed it has moved on", async () => {

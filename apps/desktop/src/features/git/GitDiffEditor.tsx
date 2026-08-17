@@ -34,8 +34,8 @@ export function GitDiffEditor(props: GitDiffEditorProps) {
       attachLayout(editor);
     }}
     options={{
-      // See `FileEditor`: the custom observer supplements Monaco's automatic
-      // layout rather than replacing it.
+      // Left on for the reason stated in `FileEditor`: disabling it is gated on
+      // resize/restore coverage that needs the packaged macOS lane.
       automaticLayout: true,
       enableSplitViewResizing: true,
       minimap: { enabled: false },
