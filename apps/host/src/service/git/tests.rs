@@ -20,7 +20,9 @@ impl Fixture {
             .join(format!("phase5-unit-{name}-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let fixture = Self { root };
-        fixture.git(&["init", "-q"]);
+        // Pinned so assertions on the branch name do not depend on the
+        // machine's init.defaultBranch.
+        fixture.git(&["init", "-q", "-b", "master"]);
         fixture.git(&["config", "user.name", "Phase Five"]);
         fixture.git(&["config", "user.email", "phase5@example.test"]);
         fixture
