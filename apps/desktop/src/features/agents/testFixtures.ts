@@ -10,7 +10,7 @@ type AgentFixtureOverrides = Partial<Omit<AgentRecord, "lifecycleGeneration" | "
 export const agent = (overrides: AgentFixtureOverrides = {}): AgentRecord => ({
   id: "agent-1", adapterId: "codex", nativeSessionId: "native-1", displayName: "Codex one",
   hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionName: "work",
-  windowId: "@1", windowName: "agent", paneId: "%1", lifecycle: "working", authority: "hook",
+  windowId: "@1", windowName: "agent", paneId: "%1", lifecycle: "working",
   lifecycleGeneration: agentGeneration(overrides.lifecycleGeneration ?? 3),
   attentionGeneration: agentGeneration(overrides.attentionGeneration ?? 0),
   seenGeneration: agentGeneration(overrides.seenGeneration ?? 0),

@@ -98,7 +98,16 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
     let hook_retry = tokio::spawn(async {
         loop {
             sleep(Duration::from_secs(2)).await;
-            let _ = tokio::task::spawn_blocking(service::agents::ingest_fallbacks).await;
+            let _ = tokio::task::spawn_blocking(|| {
+                let _ = service::agents::ingest_fallbacks();
+                // After the drain, never before it: maintenance withdraws
+                // states that nothing has confirmed, and a hook already sitting
+                // in the durable mailbox is a confirmation. Sweeping first
+                // would withdraw a state the very next line was about to
+                // restore, and publish both.
+                service::agents::maintain();
+            })
+            .await;
         }
     });
 

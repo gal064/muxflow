@@ -54,7 +54,6 @@ pub(super) fn record(value: &StoredAgent) -> v1::AgentRecord {
             attention_generation: value.attention_generation,
         }),
         lifecycle: value.lifecycle,
-        authority: value.authority,
         state_generation: value.state_generation,
         attention_generation: value.attention_generation,
         seen_generation: value.seen_generation,

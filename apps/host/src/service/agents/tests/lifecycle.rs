@@ -82,6 +82,202 @@ fn manual_detection_is_unknown_and_only_hooks_move_an_agent_through_its_turn() {
     );
 }
 
+/// The guard that hooks stayed the *only* writer of lifecycle.
+///
+/// Screen scraping was the second writer, and it was the one that could not be
+/// made correct: it only ever saw panes the user had on screen, and it matched
+/// vendor TUI output that changes without notice. Its failure mode was a pane
+/// stuck at `working` with no reachable exit.
+///
+/// If a future change reintroduces any inference from pane content, presence,
+/// or elapsed time, this test fails — a pane that has produced no hook must
+/// read `unknown` no matter how much traffic it emits or how long it sits.
+#[test]
+fn a_pane_without_hooks_stays_unknown_no_matter_what_it_puts_on_screen() {
+    let runtime = runtime("hookless-stays-unknown");
+    let topology = topology("codex");
+    runtime.reconcile_topology(&topology, "server-a").unwrap();
+    let unknown = || runtime.snapshot_for("server-a").agents[0].lifecycle;
+    assert_eq!(unknown(), v1::AgentLifecycleState::Unknown as i32);
+
+    // Reconciling repeatedly is the closest thing left to "the host looked at
+    // the pane again". Presence is re-proved every time and still says nothing.
+    for _ in 0..3 {
+        runtime.reconcile_topology(&topology, "server-a").unwrap();
+        assert_eq!(unknown(), v1::AgentLifecycleState::Unknown as i32);
+    }
+
+    // Nor does age move it. Staleness only ever withdraws a claim; it has no
+    // claim to withdraw here.
+    {
+        let mut state = runtime.state.lock().unwrap();
+        for record in state.agents.values_mut() {
+            record.updated_at_unix_millis = now_millis() - STALE_WORKING_TTL_MILLIS * 10;
+            record.lifecycle_observed_at_unix_millis = now_millis() - STALE_WORKING_TTL_MILLIS * 10;
+        }
+    }
+    assert!(runtime.sweep_stale().is_empty());
+    assert_eq!(unknown(), v1::AgentLifecycleState::Unknown as i32);
+}
+
+/// A killed agent's row disappears, and does so on process evidence alone —
+/// no tmux topology change is required, which is what `reconcile_topology`
+/// waits for and why a process-tree-detected agent used to claim `Working`
+/// forever after exiting.
+#[test]
+fn a_departed_process_retires_a_working_agent_and_publishes_the_retirement() {
+    let runtime = runtime("departed");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let working = runtime.snapshot_for("server-a").agents[0].clone();
+    assert_eq!(working.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert!(
+        runtime
+            .retire_departed_from(&topology, "server-a")
+            .is_empty(),
+        "a detected process is not departed"
+    );
+
+    // The agent exits. The pane survives it, which is exactly the case
+    // reconciliation cannot see.
+    let mut departed = topology.clone();
+    departed.panes[0].current_command = "zsh".into();
+    departed.panes[0].start_command = "zsh".into();
+    let events = runtime.retire_departed_from(&departed, "server-a");
+    assert_eq!(events.len(), 1);
+    assert!(events[0].agent.is_none(), "there is no record left to send");
+    assert_eq!(events[0].retired_agent_ids, vec![working.agent_id.clone()]);
+    assert_eq!(events[0].reason, "departed");
+    assert!(!events[0].notify);
+    assert!(runtime.snapshot_for("server-a").agents.is_empty());
+}
+
+/// The conservatism half. A false positive deletes a live agent's row, so
+/// every guard that stops one is pinned here.
+#[test]
+fn retirement_never_convicts_an_agent_on_evidence_that_cannot_see_it() {
+    let runtime = runtime("departed-conservative");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    // An unmapped hook-only record: no pane to look for, so no pane's absence
+    // can convict it. It lives on its hook lease, as reconciliation also allows.
+    let mut unmapped = event("unmapped", 0, "UserPromptSubmit");
+    unmapped.native_session_id = "unmapped-session".into();
+    unmapped.pane_id = "%404".into();
+    runtime
+        .ingest_hook_with_context(&unmapped, "server-a", Some(&topology))
+        .unwrap();
+    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 2);
+
+    let mut departed = topology.clone();
+    departed.panes[0].current_command = "zsh".into();
+    departed.panes[0].start_command = "zsh".into();
+
+    // Another tmux server's topology is evidence about that server, not this
+    // one. Judging this host's records against it would empty the list.
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-b")
+            .is_empty(),
+        "a foreign server's snapshot convicts nobody"
+    );
+    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 2);
+
+    let events = runtime.retire_departed_from(&departed, "server-a");
+    assert_eq!(events.len(), 1);
+    let survivors = runtime.snapshot_for("server-a").agents;
+    assert_eq!(survivors.len(), 1);
+    assert_eq!(
+        survivors[0].route.as_ref().unwrap().pane_id,
+        "",
+        "the unmapped hook-only record survived on its lease"
+    );
+}
+
+/// An idle agent is never retired on absence. It is claiming nothing that
+/// outliving its process would turn into a lie, and its row is still how the
+/// user reaches that pane. Retirement exists to end a false `working`, not to
+/// garbage-collect the list — reconciliation already owns that.
+#[test]
+fn retirement_leaves_an_idle_agent_alone() {
+    let runtime = runtime("departed-idle");
+    let topology = topology("codex");
+    for name in ["UserPromptSubmit", "Stop"] {
+        runtime
+            .ingest_hook_with_context(&event(name, 0, name), "server-a", Some(&topology))
+            .unwrap();
+    }
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+    let mut departed = topology.clone();
+    departed.panes[0].current_command = "zsh".into();
+    departed.panes[0].start_command = "zsh".into();
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
+    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
+}
+
+/// The headless case, which is the whole point of moving the sweep onto the
+/// daemon: no subscriber, no hub, nothing connected — and the state still
+/// stops claiming to work.
+///
+/// `maintain()` is deliberately not called here. It resolves
+/// `AgentRuntime::global()`, which would read the developer's own agent store
+/// instead of this test's; `fallback.rs` records that class of bug. The
+/// isolated runtime with no hub registered *is* the headless condition.
+#[test]
+fn a_working_agent_decays_with_nothing_connected_to_ask_for_it() {
+    let runtime = runtime("headless-decay");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    {
+        let mut state = runtime.state.lock().unwrap();
+        for record in state.agents.values_mut() {
+            record.lifecycle_observed_at_unix_millis =
+                now_millis() - STALE_WORKING_TTL_MILLIS - 1_000;
+        }
+    }
+    let events = runtime.sweep_stale();
+    assert_eq!(
+        events.len(),
+        1,
+        "no subscriber is not a reason to keep lying"
+    );
+    assert_eq!(events[0].reason, "stale");
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Unknown as i32
+    );
+    // Publishing with no hub registered is a no-op rather than a failure,
+    // which is what lets the daemon run this pass unconditionally.
+    for event in events {
+        publish(event);
+    }
+}
+
 /// Claude Code's `StopFailure` ends a turn exactly like `Stop`. Before it
 /// was taken, a failed turn left the agent working with nothing left to
 /// arrive that could ever end it.

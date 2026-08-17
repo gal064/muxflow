@@ -31,14 +31,33 @@ describe("agentReducer", () => {
     expect(agentReducer(state, { type: "wire", event: { kind: "removed", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, sequence: agentGeneration(5), agentId: "agent-1", updatedAt: 130 } })).toBe(state);
   });
 
-  it("does not let a newer weak heuristic overwrite unexpired hook authority", () => {
-    const hook = agent({ authority: "hook", authorityExpiresAt: 500, updatedAt: 100 });
-    const first = agentReducer(initialAgentState, { type: "wire", event: { kind: "snapshot", snapshot: snapshot([hook]) } });
-    const screen = agent({ authority: "screen", lifecycle: "unknown", lifecycleGeneration: 4, updatedAt: 400 });
-    const guarded = agentReducer(first, { type: "wire", event: { kind: "upsert", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, sequence: agentGeneration(5), record: screen } });
-    expect(guarded.byId["agent-1"]).toMatchObject({ authority: "hook", lifecycle: "working" });
-    const expired = agentReducer(guarded, { type: "wire", event: { kind: "upsert", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, sequence: agentGeneration(6), record: { ...screen, updatedAt: 501 } } });
-    expect(expired.byId["agent-1"].authority).toBe("screen");
+  // The host says "this agent's process is gone" with retirements and no
+  // record. Nothing else in the protocol carries that, so dropping the event
+  // for want of a record leaves a killed agent's row on screen until some
+  // unrelated snapshot happens to follow.
+  it("applies a retirement that carries no surviving record", () => {
+    const first = agentReducer(initialAgentState, { type: "wire", event: { kind: "snapshot", snapshot: snapshot([agent()]) } });
+    const retired = agentReducer(first, { type: "wire", event: {
+      kind: "retired", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1,
+      sequence: agentGeneration(5), retiredAgentIds: ["agent-1"],
+    } });
+    expect(retired.byId["agent-1"]).toBeUndefined();
+    expect(retired.eventSequence).toEqual(agentGeneration(5));
+  });
+
+  it("ignores a retirement from another host and one for an agent it never had", () => {
+    const first = agentReducer(initialAgentState, { type: "wire", event: { kind: "snapshot", snapshot: snapshot([agent()]) } });
+    const foreign = agentReducer(first, { type: "wire", event: {
+      kind: "retired", hostProfileId: "local", serverIdentity: "server-b", connectionEpoch: 1,
+      sequence: agentGeneration(5), retiredAgentIds: ["agent-1"],
+    } });
+    expect(foreign).toBe(first);
+    const unknown = agentReducer(first, { type: "wire", event: {
+      kind: "retired", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1,
+      sequence: agentGeneration(5), retiredAgentIds: ["never-existed"],
+    } });
+    expect(unknown.byId["agent-1"]).toBeDefined();
+    expect(unknown.eventSequence).toEqual(agentGeneration(5));
   });
 
   it("atomically retires a manually detected identity when the native identity arrives", () => {

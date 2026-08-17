@@ -1,8 +1,13 @@
 # Codex and Claude Code hooks
 
 Codex and Claude Code are the only V1 agent adapters. The app can launch them or
-detect manually started processes. Installed hooks improve lifecycle authority;
-process and screen detection remain bounded fallbacks.
+detect manually started processes.
+
+**Hooks are the only source of lifecycle state.** An agent whose hooks are not
+installed appears in the list and reads `unknown` — the app says which agents
+exist and nothing about what they are doing. Process detection proves an agent
+is there, and its absence retires the row when the process exits; neither ever
+decides whether the agent is working, blocked, or idle.
 
 Hook installation is always a separate, reviewable action from remote-helper
 installation. The review shows every touched file, before/after hashes, a

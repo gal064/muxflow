@@ -9,13 +9,23 @@ pub(super) struct ReconcileResult {
     pub changed: bool,
 }
 
-pub(super) fn topology(
-    state: &mut StoredState,
-    snapshot: &tmux_control::TmuxSnapshot,
-    server_identity: &str,
-    now: i64,
-) -> ReconcileResult {
-    let detected: BTreeMap<_, _> = snapshot
+/// Every `(pane_id, adapter_id)` this tmux server is currently running an agent
+/// on, as proven by the pane's command or its process tree.
+///
+/// Shared with the daemon's maintenance pass so "is this agent still alive"
+/// is answered by exactly one piece of evidence. Two implementations of that
+/// question would eventually disagree, and the disagreement would show up as a
+/// row that either vanished while its agent worked or lingered after it died.
+pub(super) fn detect_all<'a>(
+    snapshot: &'a tmux_control::TmuxSnapshot,
+) -> BTreeMap<
+    (String, String),
+    (
+        &'a tmux_control::Pane,
+        &'static dyn super::adapters::AgentAdapter,
+    ),
+> {
+    snapshot
         .panes
         .iter()
         .filter_map(|pane| {
@@ -26,7 +36,16 @@ pub(super) fn topology(
                 )
             })
         })
-        .collect();
+        .collect()
+}
+
+pub(super) fn topology(
+    state: &mut StoredState,
+    snapshot: &tmux_control::TmuxSnapshot,
+    server_identity: &str,
+    now: i64,
+) -> ReconcileResult {
+    let detected = detect_all(snapshot);
 
     let mut retired = Vec::new();
     state.agents.retain(|agent_id, record| {
@@ -66,9 +85,8 @@ pub(super) fn topology(
                 record.updated_at_unix_millis = now;
                 changed = true;
             }
-            // Process discovery proves presence, not lifecycle. Expiring hook
-            // dominance permits future screen evidence but never erases the
-            // last strong lifecycle/attention evidence by itself.
+            // Process discovery proves presence, not lifecycle: it never
+            // erases the lifecycle or attention a hook established.
             continue;
         }
 
@@ -85,7 +103,6 @@ pub(super) fn topology(
                 route: identity::direct_route(snapshot, server_identity, &pane_id)
                     .expect("detected pane belongs to snapshot"),
                 lifecycle: v1::AgentLifecycleState::Unknown as i32,
-                authority: v1::AgentAuthority::Process as i32,
                 state_generation: state.generation,
                 attention_generation: 0,
                 attention_kind: String::new(),

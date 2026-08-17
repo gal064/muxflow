@@ -89,11 +89,6 @@ impl TopologyActor {
                 if notified && self.signal.epoch.load(Ordering::Acquire) == last_reconciled_epoch {
                     continue;
                 }
-                // After the no-op early-out, not before it: an agent that
-                // stopped reporting has no event of its own left to arrive, but
-                // a notification the actor is about to discard is not a reason
-                // to take the agent store's lock.
-                super::agents::sweep_stale_and_publish();
                 if self.overflowed.swap(false, Ordering::AcqRel) {
                     emit_event(
                         &self.sender,

@@ -131,7 +131,6 @@ fn persist_failure_rolls_back_runtime_mutations() {
     let failing = || AgentRuntime {
         state_path: blocker.join("agents.json"),
         state: Mutex::new(baseline_state.clone()),
-        screen_observer: Mutex::new(screen::ScreenObserver::default()),
         wiring: Mutex::new(hooks::WiringCache::default()),
     };
     let agent_id = baseline_state.agents.keys().next().unwrap().clone();
@@ -216,8 +215,11 @@ fn snapshot_exposes_raw_records_for_frontend_rollups() {
     );
 }
 
+/// Process detection proves the agent exists; it never overwrites what a hook
+/// said the agent was doing. Reconciliation runs over a pane a hook has already
+/// claimed, and the blocked state has to come through it intact.
 #[test]
-fn unexpired_hook_authority_survives_process_reconciliation() {
+fn process_reconciliation_never_overwrites_a_hook_established_lifecycle() {
     let runtime = runtime("authority");
     let topology = topology("codex");
     runtime
@@ -231,22 +233,11 @@ fn unexpired_hook_authority_survives_process_reconciliation() {
     let snapshot = runtime.snapshot_for("server-a");
     assert_eq!(snapshot.agents.len(), 1);
     let record = &snapshot.agents[0];
-    assert_eq!(record.authority, v1::AgentAuthority::Hook as i32);
     assert_eq!(record.lifecycle, v1::AgentLifecycleState::Blocked as i32);
-}
-
-#[test]
-fn screen_fallback_classifies_but_cannot_override_current_hook() {
-    let runtime = runtime("screen-authority");
-    runtime
-        .ingest_hook(&event("e1", 1, "UserPromptSubmit"))
-        .unwrap();
-    runtime
-        .observe_screen("%7", b"Permission required: Allow command?", true)
-        .unwrap();
-    let current = &runtime.snapshot().agents[0];
-    assert_eq!(current.authority, v1::AgentAuthority::Hook as i32);
-    assert_eq!(current.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert!(
+        record.hook_authority_expires_at_unix_millis > 0,
+        "the hook lease is what reconciliation reads to leave the record alone"
+    );
 }
 
 #[test]

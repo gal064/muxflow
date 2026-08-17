@@ -49,17 +49,18 @@ export function agentReducer(state: AgentStoreState, action: AgentAction): Agent
     delete byId[event.agentId];
     return { ...state, eventSequence: event.sequence, byId };
   }
+  if (event.kind === "retired") {
+    const present = event.retiredAgentIds.filter((agentId) => agentId in state.byId);
+    if (present.length === 0) return { ...state, eventSequence: event.sequence };
+    const byId = { ...state.byId };
+    for (const agentId of present) delete byId[agentId];
+    return { ...state, eventSequence: event.sequence, byId };
+  }
   if (!validRecord(event.record, event.hostProfileId, event.serverIdentity)) {
     return { ...state, eventSequence: event.sequence };
   }
   const previous = state.byId[event.record.id];
   if (previous && compareAgentGenerations(event.record.lifecycleGeneration, previous.lifecycleGeneration) < 0) {
-    return { ...state, eventSequence: event.sequence };
-  }
-  if (previous?.authority === "hook"
-    && previous.authorityExpiresAt !== undefined
-    && event.record.authority !== "hook"
-    && event.record.updatedAt < previous.authorityExpiresAt) {
     return { ...state, eventSequence: event.sequence };
   }
   const byId = { ...state.byId };

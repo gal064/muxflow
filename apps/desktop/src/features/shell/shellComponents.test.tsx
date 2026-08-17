@@ -133,7 +133,7 @@ describe("application shell accessibility contracts", () => {
     );
     const adapters: AgentAdapterDescriptor[] = [{
       id: "codex", displayName: "Codex", supportsLaunch: true, supportsResume: true, supportsHooks: true,
-      supportsProcessDetection: true, supportsScreenFallback: false, hookConfigPath: "~/.codex/config.toml",
+      supportsProcessDetection: true, hookConfigPath: "~/.codex/config.toml",
       hookEvents: [], placements: ["window", "split"], hookWiring: "wired", hookWiringDetail: "", hookSetupRecommended: false,
     }];
     let renderer!: ReturnType<typeof create>;

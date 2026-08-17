@@ -5,7 +5,6 @@ import { AGENT_HOOK_WIRINGS, AGENT_HOST_NAMING_OUTCOMES } from "./types";
 import type {
   AgentAdapterDescriptor,
   AgentAdapterId,
-  AgentAuthority,
   AgentHookReview,
   AgentHookWiring,
   AgentHostNamingOutcome,
@@ -38,13 +37,11 @@ interface WireRecord {
   displayName: string;
   route: WireRoute;
   lifecycle: string;
-  authority: string;
   stateGeneration: string | number;
   attentionGeneration: string | number;
   attentionKind?: string;
   seenGeneration: string | number;
   updatedAtUnixMillis: string | number;
-  hookAuthorityExpiresAtUnixMillis?: string | number;
   detectedManually: boolean;
   present: boolean;
 }
@@ -58,7 +55,7 @@ export interface WireAgentSnapshot {
   connectionEpoch: string | number;
   adapters?: Array<{
     adapter: string; id: string; displayName: string; supportsLaunch?: boolean; supportsResume?: boolean;
-    supportsHooks?: boolean; supportsProcessDetection?: boolean; supportsScreenFallback?: boolean;
+    supportsHooks?: boolean; supportsProcessDetection?: boolean;
     hookConfigPath?: string; hookEvents?: string[];
     hookWiring?: string; hookWiringDetail?: string; hookSetupRecommended?: boolean;
   }>;
@@ -217,7 +214,24 @@ export class TauriAgentClient implements AgentClient {
 
   publishWireEvent(scope: AgentRequestScope, event: WireAgentEvent): void {
     if (!sameWireConnectionEpoch(scope, event.connectionEpoch)) return;
-    if (!event.agent) return;
+    const retiredAgentIds = event.retiredAgentIds ?? [];
+    // An event may carry retirements and no record: that is how the host says
+    // an agent's process is gone. Returning early on a missing record dropped
+    // those on the floor, and the row only ever disappeared because a full
+    // snapshot happened to follow.
+    if (!event.agent) {
+      if (retiredAgentIds.length === 0) return;
+      this.#publish({
+        kind: "retired",
+        hostProfileId: scope.hostProfileId,
+        serverIdentity: scope.serverIdentity,
+        connectionEpoch: scope.connectionEpoch,
+        sequence: agentGeneration(event.generation, "agent event generation"),
+        retiredAgentIds,
+        replayed: event.notify === false,
+      });
+      return;
+    }
     const record = mapRecord(scope, event.agent);
     this.#publish({
       kind: "upsert",
@@ -226,7 +240,7 @@ export class TauriAgentClient implements AgentClient {
       connectionEpoch: scope.connectionEpoch,
       sequence: agentGeneration(event.generation, "agent event generation"),
       record,
-      retiredAgentIds: event.retiredAgentIds ?? [],
+      retiredAgentIds,
       replayed: event.notify === false,
     });
   }
@@ -286,7 +300,6 @@ function mapRecord(scope: AgentRequestScope, value: WireRecord): AgentRecord {
   if (agentGeneration(value.route.attentionGeneration, "agent route generation") !== attentionGeneration) {
     throw new Error("Agent route generation conflicts with its record.");
   }
-  const hookExpiry = safeNumber(value.hookAuthorityExpiresAtUnixMillis ?? 0, "hook authority expiry");
   return {
     id: value.agentId,
     adapterId: canonicalAdapterId(value.adapterId, value.adapter),
@@ -300,13 +313,11 @@ function mapRecord(scope: AgentRequestScope, value: WireRecord): AgentRecord {
     windowName: value.route.windowNameFallback,
     paneId: value.route.paneId,
     lifecycle: mapLifecycle(value.lifecycle),
-    authority: mapAuthority(value.authority),
     lifecycleGeneration: agentGeneration(value.stateGeneration, "agent state generation"),
     attentionGeneration,
     ...mapAttentionKind(value.attentionKind),
     seenGeneration: agentGeneration(value.seenGeneration, "agent seen generation"),
     updatedAt: safeNumber(value.updatedAtUnixMillis, "agent update time"),
-    ...(hookExpiry > 0 ? { authorityExpiresAt: hookExpiry } : {}),
     detectedManually: Boolean(value.detectedManually),
     present: Boolean(value.present),
   };
@@ -319,7 +330,6 @@ function mapAdapterDescriptor(value: NonNullable<WireAgentSnapshot["adapters"]>[
     supportsLaunch: Boolean(value.supportsLaunch), supportsResume: Boolean(value.supportsResume),
     supportsHooks: Boolean(value.supportsHooks),
     supportsProcessDetection: Boolean(value.supportsProcessDetection),
-    supportsScreenFallback: Boolean(value.supportsScreenFallback),
     hookConfigPath: value.hookConfigPath ?? "", hookEvents: value.hookEvents ?? [],
     placements: value.supportsLaunch ? ["window", "split"] : [],
     hookWiring: mapHookWiring(value.hookWiring),
@@ -339,20 +349,24 @@ function mapHookWiring(value: string | undefined): AgentHookWiring {
   return known ?? "unspecified";
 }
 
+/**
+ * A value this build does not know degrades to `unknown`, which is already the
+ * product's word for "nothing here can say what this agent is doing".
+ *
+ * These used to throw. Nothing catches per record, so `mapSnapshot` aborted on
+ * the first unrecognised value and the user's entire agent list went blank —
+ * a far worse outcome than one row reading `unknown`, and one that a host
+ * merely newer than the desktop could cause.
+ */
 function mapLifecycle(value: string): AgentLifecycle {
-  if (value === "working" || value === "blocked" || value === "idle" || value === "unknown") return value;
-  throw new Error(`Unsupported agent lifecycle ${value}.`);
+  if (value === "working" || value === "blocked" || value === "idle") return value;
+  return "unknown";
 }
 
+/** An unrecognised kind is no attention rather than a thrown snapshot. */
 function mapAttentionKind(value: string | undefined): Pick<AgentRecord, "attentionKind"> {
-  if (!value) return {};
   if (value === "blocked" || value === "completed") return { attentionKind: value };
-  throw new Error(`Unsupported agent attention kind ${value}.`);
-}
-
-function mapAuthority(value: string): AgentAuthority {
-  if (value === "hook" || value === "process" || value === "screen") return value;
-  throw new Error(`Unsupported agent authority ${value}.`);
+  return {};
 }
 
 function safeNumber(value: string | number, label: string): number {
