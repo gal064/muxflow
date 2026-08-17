@@ -212,6 +212,25 @@ describe("TauriFileWorkspaceClient", () => {
     expect(invokeMock).toHaveBeenCalledWith("cancel_file_io", { transferId: "obsolete-read" });
   });
 
+  it("tells the host to stop when the read itself refuses what arrived", async () => {
+    // Settling the promise does not close the Tauri channel, so a purely local
+    // refusal used to leave the host streaming the rest of a file — up to
+    // 25 MiB — into something nobody was reading.
+    const metadata = { path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "3", mime: "text/plain", imagePreviewEligible: false };
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "cancel_file_io") return undefined;
+      const channel = (args as { onEvent: { onmessage?: (value: ArrayBuffer) => void } }).onEvent;
+      queueMicrotask(() => {
+        channel.onmessage?.(jsonFrame(1, { transferId: "read", state: "metadata", metadata, contentKind: "text" }));
+        // Offset 8 when the reader is expecting 0: a gap it cannot reassemble.
+        channel.onmessage?.(chunkFrame(8n, new TextEncoder().encode("late")));
+      });
+      return "refused-read";
+    });
+    await expect(new TauriFileWorkspaceClient().openFile(scope, root, "/repo/a")).rejects.toThrow("out of sequence");
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("cancel_file_io", { transferId: "refused-read" }));
+  });
+
   it("maps sequenced directory/file events only through known root capabilities", async () => {
     const client = new TauriFileWorkspaceClient();
     invokeMock.mockResolvedValueOnce({ operationId: "op", activeRoot: { paneId: "%1", root: "/repo", rootToken: "token", gitWorktree: true, serverIdentity: "server", topologyGeneration: "7", rootGeneration: "1" } });

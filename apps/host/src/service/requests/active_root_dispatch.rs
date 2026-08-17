@@ -6,7 +6,6 @@ pub(super) struct ActiveRootContext<'a> {
     pub(super) control_tx: &'a mpsc::Sender<SequencerControl>,
     pub(super) event_tx: &'a mpsc::Sender<SequencerControl>,
     pub(super) generation: &'a Arc<AtomicU64>,
-    pub(super) pending: &'a Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     pub(super) topology_lock: &'a Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -20,7 +19,6 @@ pub(super) async fn handle(
         control_tx,
         event_tx,
         generation,
-        pending,
         topology_lock,
     } = context;
     let Some(file) = request.file else {
@@ -30,7 +28,6 @@ pub(super) async fn handle(
             response_error("invalid_file_request", "file request payload is required"),
         )
         .await;
-        pending.lock().unwrap().remove(&request_id);
         return;
     };
     let result = resolve(&file, &cancellation, generation, topology_lock).await;

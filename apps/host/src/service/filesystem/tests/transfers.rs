@@ -64,8 +64,9 @@ fn exact_generation_rejects_same_size_replacement() {
     let (root, service) = fixture();
     fs::write(root.join("versioned"), "aaaa").unwrap();
     let generation = service
-        .read_file(root.to_str().unwrap(), "versioned")
+        .open_file_stream(root.to_str().unwrap(), "versioned")
         .unwrap()
+        .header()
         .generation;
     fs::write(root.join("replacement"), "bbbb").unwrap();
     fs::rename(root.join("replacement"), root.join("versioned")).unwrap();

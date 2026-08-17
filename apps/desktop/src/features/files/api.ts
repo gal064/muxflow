@@ -409,6 +409,8 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     recordPerfCounter("file.ioRequestAttempts");
     return new Promise((resolve, reject) => {
       let settled = false;
+      /** Set when this read ended in a way that leaves the host still sending. */
+      let stopHost = false;
       let metadata: WireMetadata | undefined;
       let contentKind: WireContent["kind"] | undefined;
       let transferId: string | undefined;
@@ -425,6 +427,16 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
         settled = true;
         recordPerfCounter(cancelled ? "file.ioRequestCancellations" : "file.ioRequestFailures");
         signal?.removeEventListener("abort", abort);
+        // A local refusal — a chunk out of sequence, a body past its limit, a
+        // frame that will not parse — ends this read, and the host has to be
+        // told. Settling the promise does not close the channel, so without
+        // this the host went on streaming up to 25 MiB into something nobody
+        // was reading, and the bridge's own "stop when nobody is listening"
+        // check never saw a closed channel to stop on.
+        if (!cancelled) {
+          stopHost = true;
+          if (transferId) cancelFileIo(transferId);
+        }
         reject(error instanceof Error ? error : new Error(String(error)));
       };
       const channel = new Channel<ArrayBuffer>();
@@ -465,7 +477,10 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
         return id;
       }, { byteCounters: ["file.ioRequestBytes"] }).then((id) => {
         transferId = id;
-        if (signal?.aborted) cancelFileIo(id);
+        // The ID can land after the read has already given up — the frames and
+        // the admission answer are two channels. Whatever ended it, the host is
+        // still holding a transfer nobody will read.
+        if (signal?.aborted || stopHost) cancelFileIo(id);
       }).catch(finishError);
     });
   }

@@ -252,9 +252,20 @@ impl<'a> BulkProtocolClient<'a> {
             cancellation,
             deadline,
         )?;
-        let mut cancel_sent = false;
         loop {
-            if !cancel_sent && cancellation.is_some_and(CancelState::is_cancelled) {
+            if cancellation.is_some_and(CancelState::is_cancelled) {
+                // Sent and then abandoned, deliberately. Reading through to the
+                // host's terminal response would leave the bridge in a reusable
+                // state — but a cancelled lease is never returned to the pool
+                // anyway (`bulk_pool::returnable`), because the watcher that
+                // cancels it publishes its intent before it swaps the pid out
+                // to kill it, and handing that process to an unrelated job in
+                // between is how a healthy transfer dies. So draining buys
+                // nothing, and on the operations the host schedules `Inline` —
+                // download and upload chunks, whose reader is blocked and
+                // cannot see the cancel at all — it turns a cancellation that
+                // used to take milliseconds into one that waits out the
+                // inactivity deadline.
                 let cancel = encode_frame(&envelope(
                     0,
                     0,
@@ -265,13 +276,7 @@ impl<'a> BulkProtocolClient<'a> {
                 .map_err(|error| RequestFailure::Transport(error.to_string()))?;
                 let _ = self.stdin.write(&cancel);
                 let _ = self.stdin.flush();
-                cancel_sent = true;
-                // Deliberately not returning here. The host answers every
-                // request with exactly one terminal response, cancelled or not,
-                // and leaving it unread would abandon the bridge mid-exchange —
-                // so every superseded preview would cost a fresh SSH child and
-                // handshake on the next open. The loop below reads through to
-                // that response, then reports the cancellation.
+                return Err(RequestFailure::Cancelled);
             }
             if let Some(frame) = self
                 .decoder
@@ -295,11 +300,6 @@ impl<'a> BulkProtocolClient<'a> {
                     Some(Payload::Response(response)) => response,
                     _ => continue,
                 };
-                if cancel_sent {
-                    // The exchange is complete, so the bridge is reusable; the
-                    // caller still learns it was cancelled.
-                    return Err(RequestFailure::Cancelled);
-                }
                 return if response.ok {
                     Ok(response)
                 } else {

@@ -38,7 +38,7 @@ pub(crate) use failure::FileFailure;
 pub(crate) use terminal_upload::UploadCommitFailure;
 mod watch_fallback;
 mod watch_service;
-use failure::{cancelled, stale_generation, stale_page_token};
+use failure::{cancelled, confirmation_required, stale_generation, stale_page_token};
 use listing::{NEVER_CANCELLED, resolve_watch_directory};
 use listing_page::DirectoryPageCache;
 use mutations::mutation_metadata;
