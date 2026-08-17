@@ -51,16 +51,37 @@ describe("ExplorerTree", () => {
       const logicalRows = highWater["explorer.logicalRows"];
       expect(logicalRows).toBe(wide.entries.length);
       expect(renderedRows).toBeGreaterThan(0);
-      expect(renderedRows).toBeLessThanOrEqual(logicalRows);
       expect(highWater["explorer.renderedRows"]).toBe(renderedRows);
-      console.log(`PHASE14_METRIC ${JSON.stringify({ lane: "explorerWide", entries: wide.entries.length, logicalRowsHighWater: logicalRows, renderedRowsHighWater: highWater["explorer.renderedRows"], rowParity: logicalRows === wide.entries.length, jsdomMountMillis: mountMillis })}`);
+      // The invariant the row budget actually rests on: what the tree mounts is
+      // a function of the viewport, not of the directory. `rendered <= logical`
+      // would hold with no windowing at all, which is what this lane exists to
+      // detect the absence of — so the same tree is measured four times larger
+      // and must mount exactly as much.
+      let larger!: ReturnType<typeof create>;
+      const quadrupled = {
+        ...wide,
+        entries: Array.from({ length: 16_384 }, (_, index) => ({
+          path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
+          sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+        })),
+      };
+      await act(async () => {
+        larger = create(<ExplorerTree root={root} scopeIdentity="phase14" listings={new Map([["/r", quadrupled]])}
+          expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+          onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+          onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      });
+      const largerRows = larger.root.findAllByProps({ className: "file-row" }).length;
+      await act(async () => { larger.unmount(); });
+      expect(largerRows, "the mounted band grew with the directory").toBe(renderedRows);
+      console.log(`PHASE14_METRIC ${JSON.stringify({ lane: "explorerWide", entries: wide.entries.length, logicalRowsHighWater: logicalRows, renderedRowsHighWater: highWater["explorer.renderedRows"], rowParity: logicalRows === wide.entries.length, mountedRowsAtFourTimesTheEntries: largerRows, jsdomMountMillis: mountMillis })}`);
     } finally {
       await act(async () => { renderer?.unmount(); });
       resetPerfProbe();
     }
   });
 
-  it("keeps roving focus, scroll-to-item, and sibling counts working while windowed", async () => {
+  it("keeps roving focus and sibling counts working while windowed", async () => {
     const wide: DirectoryListing = {
       ...listing,
       entries: Array.from({ length: 4_096 }, (_, index) => ({
@@ -107,6 +128,53 @@ describe("ExplorerTree", () => {
       expect(arrived[0].props["aria-posinset"]).toBe(target + 1);
       expect(mounted().filter((row) => row.props.tabIndex === 0)).toHaveLength(1);
       expect(mounted().length, "the band must stay bounded while scrolling").toBeLessThan(4_096);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
+  it("scrolls a row into view when the keyboard reaches one the viewport is not over", async () => {
+    // The tree assigns `scrollTop` on the element it holds a ref to, so nothing
+    // about it is observable without one. Under `react-test-renderer` refs are
+    // null unless a node mock supplies them, which is why the windowed-focus
+    // test above cannot see this at all.
+    const wide: DirectoryListing = {
+      ...listing,
+      entries: Array.from({ length: 4_096 }, (_, index) => ({
+        path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
+        sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    };
+    // Enough of an element for the tree to measure a row, move the viewport,
+    // and hand focus to a row — which is all it asks its ref for.
+    const tree = {
+      scrollTop: 0, clientHeight: 400,
+      querySelector: () => ({ offsetHeight: 20, focus: () => undefined }),
+    };
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => {
+        renderer = create(<ExplorerTree root={root} scopeIdentity="scroll" listings={new Map([["/r", wide]])}
+          expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+          onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+          onRefresh={vi.fn()} onLoadMore={vi.fn()} />, {
+          createNodeMock: (element) => (element.props as { role?: string }).role === "tree" ? tree : null,
+        });
+      });
+      expect(tree.scrollTop, "a row already in view must not move the viewport").toBe(0);
+
+      // 400px of viewport over 20px rows is twenty visible rows, so row twenty
+      // is the first one that is not.
+      const step = (index: number) => act(async () => {
+        renderer.root.findByProps({ "data-tree-index": index }).props.onKeyDown({
+          key: "ArrowDown", target: 1, currentTarget: 1, preventDefault: vi.fn(),
+        });
+      });
+      for (let index = 0; index < 20; index += 1) await step(index);
+      expect(tree.scrollTop, "the keyboard reached a row the viewport was not over").toBe(20);
+      // And it scrolls the minimum: one more row is one more row of offset.
+      await step(20);
+      expect(tree.scrollTop).toBe(40);
     } finally {
       await act(async () => { renderer?.unmount(); });
     }
