@@ -112,7 +112,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
         throw new Error("This diff belongs to a different repository. Return to its workspace or close the tab.");
       }
       if (shared && !entryStillChanged(shared, path, target)) {
-        paint.abandon(ticket);
+        paint.discard(ticket);
         setStatus(shared);
         setDiff(undefined);
         setError(undefined);
@@ -125,7 +125,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
         target,
       }, controller.signal);
       if (current !== serial.current) {
-        paint.abandon(ticket);
+        paint.discard(ticket);
         return;
       }
       if (result.status.repository.id !== repositoryId) {
@@ -137,7 +137,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
       requestedGeneration.current = result.status.generation;
       setStatus(result.status);
       if (!entryStillChanged(result.status, path, target)) {
-        paint.abandon(ticket);
+        paint.discard(ticket);
         setDiff(undefined);
         setError(undefined);
         return;
@@ -146,7 +146,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
       paint.hold(ticket);
       setError(undefined);
     } catch (cause) {
-      paint.abandon(ticket);
+      paint.discard(ticket);
       // The attempted generation is deliberately retained: a failure that the
       // repository state has not moved past must not be retried on every
       // subsequent watch publication. Retry is the user's, through the button.

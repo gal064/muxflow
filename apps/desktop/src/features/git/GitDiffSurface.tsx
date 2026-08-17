@@ -7,7 +7,7 @@ import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, Gi
 import type { GitRepositoryStore } from "./repositoryStore";
 import { useSharedGitDiff } from "./useSharedGitDiff";
 import { recordPerfMilestone } from "../../perf/probe";
-import { useEditorSurface } from "../../perf/surfacePaint";
+import { useEditorPaint } from "../../perf/surfacePaint";
 
 /**
  * The editor bundle, fetched when a text diff is actually going to be shown.
@@ -29,10 +29,7 @@ interface Props {
 
 type PendingDiscard = { kind: "discardFile" | "discardHunk"; hunkIndex?: number; diff: GitDiff; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
 
-const recordEditorPaint = () => recordPerfMilestone("editor.paint");
-
 export function GitDiffSurface(props: Props) {
-  const editor = useEditorSurface();
   const [busy, setBusy] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
   const root = useMemo<ActiveRoot | undefined>(() => props.tab.rootPath && props.tab.rootToken ? {
@@ -62,14 +59,7 @@ export function GitDiffSurface(props: Props) {
 
   const loading = shared.loading;
   const surfaceError = shared.error;
-  useEffect(() => {
-    if (loading || surfaceError || !diff) return;
-    paint.noteCommitted();
-    paint.notePaintable(
-      diffUsesEditor ? editor.facts : undefined,
-      diffUsesEditor ? recordEditorPaint : undefined,
-    );
-  }, [diff, diffUsesEditor, editor.facts, surfaceError, loading, paint]);
+  const editor = useEditorPaint(paint, !loading && !surfaceError && Boolean(diff), diffUsesEditor);
 
   const applyCommand = async (run: () => Promise<GitCommandResult>) => {
     setBusy(true);
@@ -138,21 +128,18 @@ export function GitDiffSurface(props: Props) {
       {surfaceError && <SurfaceError className="git-diff-error" detail={surfaceError} />}
     </div>
     <div className="git-diff-content" ref={diffUsesEditor ? editor.bindHost : undefined}>
-      {diff.binary || !text ? <GitDiffEmpty title={diff.displayPath} detail={diff.binary ? "Binary changes cannot be displayed or edited as text." : "This diff contains non-UTF-8 content and is shown safely as binary."} />
-        : diff.tooLarge ? <GitDiffEmpty title={diff.displayPath} detail="This diff is too large for the editor. File-level Git actions remain available." />
-          : <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>
-            <GitDiffEditor
-              modified={text.modified}
-              modifiedModelPath={modelUri(props.tab, "modified")}
-              onReady={() => {
-                editor.noteReady();
-                paint.notePaintable(editor.facts, recordEditorPaint);
-              }}
-              original={text.original}
-              originalModelPath={modelUri(props.tab, "original")}
-              path={diff.displayPath}
-            />
-          </Suspense>}
+      {diffUsesEditor && text
+        ? <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>
+          <GitDiffEditor
+            modified={text.modified}
+            modifiedModelPath={modelUri(props.tab, "modified")}
+            onReady={editor.onReady}
+            original={text.original}
+            originalModelPath={modelUri(props.tab, "original")}
+            path={diff.displayPath}
+          />
+        </Suspense>
+        : <GitDiffEmpty title={diff.displayPath} detail={withoutEditor(diff, text)} />}
     </div>
     {hunkActions && diff.hunkCount > 0 && <aside className="git-hunk-actions" aria-label="Complete hunk actions">
       {Array.from({ length: diff.hunkCount }, (_, hunkIndex) => <div key={hunkIndex}>
@@ -171,6 +158,19 @@ export function GitDiffSurface(props: Props) {
       title={pendingDiscard.hunkIndex === undefined ? "Discard file changes?" : "Discard complete hunk?"}
     />}
   </section>;
+}
+
+/**
+ * Why a diff has no editor, when it has none.
+ *
+ * Same three facts as `diffUsesEditor` a few lines above, in the same order:
+ * they were two separate ladders, so a diff could be declared editable by one
+ * and explained away by the other.
+ */
+function withoutEditor(diff: GitDiff, text: { original: string; modified: string } | undefined): string {
+  if (diff.binary) return "Binary changes cannot be displayed or edited as text.";
+  if (!text) return "This diff contains non-UTF-8 content and is shown safely as binary.";
+  return "This diff is too large for the editor. File-level Git actions remain available.";
 }
 
 function decodeTextDiff(diff: GitDiff): { original: string; modified: string } | undefined {

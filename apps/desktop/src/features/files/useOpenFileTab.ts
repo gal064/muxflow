@@ -9,11 +9,13 @@ import { parentPath } from "./listingModel";
 import {
   TEXT_FILE_LIMIT_BYTES,
   type ActiveRoot,
+  type BinaryFile,
   type DirectoryListing,
   type DirectoryWatchLease,
   type FileWorkspaceClient,
   type FileWorkspaceScope,
   type OpenFile,
+  type TextFile,
 } from "./types";
 
 const FILE_EDITOR_PAINT = ["workflow.file.editorPaint"] as const;
@@ -33,11 +35,29 @@ export interface OpenFileTabParams {
   onStatus(message: string): void;
 }
 
+/**
+ * What the tab has to show, decided once.
+ *
+ * The surface used to re-derive this from `loading`, `error`, the open file's
+ * kind and its size — the same ladder as the hook's own, with the editor
+ * threshold spelled out in both places. There is one ladder now; the surface
+ * chooses the words for each case, which is all it should be choosing.
+ */
+export type OpenFileContent =
+  | { kind: "loading" }
+  /** The read failed and there is nothing on screen to keep. */
+  | { kind: "failed"; detail: string }
+  /** Content is on screen, and the file behind it changed or went away. */
+  | { kind: "changed"; detail: string }
+  /** The read completed with nothing, which no path is expected to produce. */
+  | { kind: "unavailable" }
+  | { kind: "binary"; file: BinaryFile }
+  | { kind: "tooLarge"; file: TextFile }
+  | { kind: "text"; file: TextFile };
+
 export interface OpenFileTab {
-  opened?: OpenFile;
+  content: OpenFileContent;
   view?: AutosaveView;
-  loading: boolean;
-  error?: string;
   /**
    * This tab will render an editor for what it is holding.
    *
@@ -112,9 +132,16 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
   const notify = useCommittedRef(params.onStatus);
   const notifyDirty = useCommittedRef(params.onDirty);
 
-  const editorRequested = !loading && !error && opened?.kind === "text"
-    && Number(opened.file.sizeBytes) <= TEXT_FILE_LIMIT_BYTES
-    && editorVisible;
+  const content = useMemo<OpenFileContent>(() => {
+    if (loading) return { kind: "loading" };
+    if (error) return opened ? { kind: "changed", detail: error } : { kind: "failed", detail: error };
+    if (!opened) return { kind: "unavailable" };
+    if (opened.kind === "binary") return { kind: "binary", file: opened.file };
+    return Number(opened.file.sizeBytes) > TEXT_FILE_LIMIT_BYTES
+      ? { kind: "tooLarge", file: opened.file }
+      : { kind: "text", file: opened.file };
+  }, [error, loading, opened]);
+  const editorRequested = content.kind === "text" && editorVisible;
   const previousEditorVisible = useRef(editorVisible);
 
   useEffect(() => {
@@ -134,7 +161,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
     previousEditorVisible.current = editorVisible;
     // Only an explicit preview -> source/split request owns a new interaction.
     // Background reads may change content kind but never manufacture one.
-    if (enteringEditor && editorRequested && !paint.holding()) {
+    if (enteringEditor && editorRequested && !paint.pending()) {
       paint.hold(createPaintTicket(FILE_EDITOR_PAINT, surfaceLifecycle.current));
     }
   }, [editorRequested, editorVisible, paint]);
@@ -155,7 +182,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
         // Only if a newer read has not adopted it: the tab-open interaction
         // this ticket measures is still on screen, and the read that
         // superseded this one is the one that will finish it.
-        if (ticket && !paint.holding(ticket)) ticket.abandon();
+        if (ticket && paint.pending() !== ticket) ticket.abandon();
         return;
       }
       setOpened(next);
@@ -207,7 +234,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
       }
     } catch (cause) {
       if (abort.signal.aborted && serial !== loadSerial.current) return;
-      if (ticket) paint.abandon(ticket);
+      if (ticket) paint.discard(ticket);
       if (abort.signal.aborted) return;
       if (serial === loadSerial.current) setError(String(cause));
     } finally {
@@ -395,5 +422,5 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
     controller.current?.edit(content, lineEnding);
   }, [lineEnding]);
 
-  return { opened, view, loading, error, editorRequested, edit, paint };
+  return { content, view, editorRequested, edit, paint };
 }

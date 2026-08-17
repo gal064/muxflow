@@ -28,7 +28,15 @@ export function languageForPath(path: string): string {
   return LANGUAGE_BY_EXTENSION[extension ?? ""] ?? "plaintext";
 }
 
-/** Every language id the app can ask an editor for. Read by the capability probe. */
+/**
+ * Every language id the app can ask an editor for.
+ *
+ * The measured half of the plan's "measure Monaco capability use": the bundle
+ * ships every language it knows, this is the set anything ever requests, and
+ * `editorLanguage.test.ts` pins it so that narrowing the bundled surface has to
+ * be a decision with a diff rather than a silent loss of highlighting. Its only
+ * caller is that test, deliberately — it exists to be pinned.
+ */
 export function requestedLanguageIds(): readonly string[] {
   return [...new Set(Object.values(LANGUAGE_BY_EXTENSION))].sort();
 }

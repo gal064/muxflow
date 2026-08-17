@@ -63,11 +63,21 @@ export function attachEditorLayout(
 /**
  * Attaches the layout observer for as long as the editor is mounted.
  *
+ * This is how the app uses `attachEditorLayout`; that function stays exported
+ * as the DOM-level primitive the tests drive directly, because everything
+ * interesting about it — the zero box, the missing host — is about the box and
+ * not about React.
+ *
  * The lifetime is the editor component's, not the tab's. Both surfaces
  * previously detached only when the whole tab lifecycle ended, so an editor
  * that came and went inside one tab — a Markdown view switched to preview and
  * back, a diff replaced by a binary one — left its `ResizeObserver` attached to
  * a box whose editor no longer existed, once per switch.
+ *
+ * The returned callback is idempotent by replacement: calling it again is
+ * "this component's editor is now that one", which is what an editor swapped
+ * in place would need, and it detaches the previous observer rather than
+ * leaking it.
  */
 export function useEditorLayout(): (editor: LayoutableEditor) => void {
   const detach = useRef<(() => void) | undefined>(undefined);

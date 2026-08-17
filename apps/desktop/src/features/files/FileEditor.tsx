@@ -35,9 +35,12 @@ export function FileEditor(props: FileEditorProps) {
       attachLayout(editor);
     }}
     options={{
-      // Monaco's own automatic layout is deliberately left on: the custom
-      // observer exists because it does not survive the hidden container
-      // `@monaco-editor/react` mounts into, not because it is wrong.
+      // Left on, and it is a deferral rather than a preference. Turning it off
+      // is gated on coverage of every resize and restore path, and the paths
+      // the custom observer in `editorLayout.ts` exists for — WKWebView not
+      // delivering the first transition, window minimise/restore, display-scale
+      // change — need the packaged macOS lane. Removing the second observer on
+      // jsdom evidence alone risks the blank 30x157 editor it was written for.
       automaticLayout: true,
       minimap: { enabled: false },
       readOnly: props.readOnly,

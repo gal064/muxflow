@@ -21,27 +21,36 @@ import type { GitDiff, GitStatusSnapshot, GitWorkspaceClient } from "../features
  *
  * The point of the lazy boundary is that the editor bundle is fetched and
  * evaluated *after* the remote read has been issued. That ordering is not
- * observable from the rendered output, so the module standing in for Monaco
- * announces itself here and the data clients announce their reads into the
- * same list.
+ * observable from the rendered output, so the two modules that import Monaco
+ * announce their own evaluation here, and the data clients announce their
+ * reads into the same list.
+ *
+ * One marker per editor module rather than one for Monaco itself, because a
+ * module is evaluated once per registry: a single shared marker would be
+ * pushed by whichever surface loaded first and the second surface's ordering
+ * claim would hold no matter what it did.
  *
  * The mirror-image claim — that content which never reaches an editor never
- * fetches the bundle at all — needs a module registry in which nothing has
- * imported it, so it lives in `editorChunkAbsence.test.tsx`: one claim per
- * registry, one registry per file.
+ * fetches the bundle at all — needs a registry in which nothing has imported
+ * either module, so it lives in `editorChunkAbsence.test.tsx`.
  */
 const probe = vi.hoisted(() => ({ evaluated: [] as string[] }));
 
 function EditorStub(_props: { value: string; onChange(content: string): void }) { return null; }
 function DiffEditorStub(_props: { original: string; modified: string }) { return null; }
 
-vi.mock("@monaco-editor/react", () => {
-  probe.evaluated.push("editor module");
-  return {
-    default: (props: { value: string; onChange(content: string): void }) => <EditorStub {...props} />,
-    DiffEditor: (props: { original: string; modified: string }) => <DiffEditorStub {...props} />,
-  };
+vi.mock("../features/files/FileEditor", async (importOriginal) => {
+  probe.evaluated.push("file editor module");
+  return await importOriginal();
 });
+vi.mock("../features/git/GitDiffEditor", async (importOriginal) => {
+  probe.evaluated.push("diff editor module");
+  return await importOriginal();
+});
+vi.mock("@monaco-editor/react", () => ({
+  default: (props: { value: string; onChange(content: string): void }) => <EditorStub {...props} />,
+  DiffEditor: (props: { original: string; modified: string }) => <DiffEditorStub {...props} />,
+}));
 // The real module registers Monaco's workers and defines the theme against the
 // live token file; neither is what these tests are about.
 vi.mock("../features/files/monaco", () => ({ ADE_MONACO_THEME: "ade-test-theme" }));
@@ -150,7 +159,7 @@ describe("the editor chunk boundary", () => {
     expect(
       probe.evaluated,
       "the editor bundle was evaluated before the file host had been asked for anything",
-    ).toEqual(["openFile", "editor module"]);
+    ).toEqual(["openFile", "file editor module"]);
     expect(surface.renderer.root.findAllByType(EditorStub)).toHaveLength(1);
     await act(async () => { surface.renderer.unmount(); });
   });
@@ -212,7 +221,10 @@ describe("the editor chunk boundary", () => {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitDiffSurface {...gitProps(client)} />); });
     await turnLoop(() => renderer.root.findAllByType(DiffEditorStub).length > 0, 10_000);
-    expect(probe.evaluated[0], "the diff editor rendered before the diff was asked for").toBe("diff");
+    expect(
+      probe.evaluated,
+      "the editor bundle was evaluated before the repository had been asked for anything",
+    ).toEqual(["diff", "diff editor module"]);
     expect(renderer.root.findAllByType(DiffEditorStub)).toHaveLength(1);
     await act(async () => { renderer.unmount(); });
   });
