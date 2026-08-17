@@ -9,6 +9,7 @@ pub(crate) fn file_response_json(value: &v1::FileServiceResponse) -> Value {
         "content": value.content.as_ref().map(content_json),
         "metadata": value.metadata.as_ref().map(metadata_json),
         "deleted": value.deleted,
+        "rootUnchanged": value.root_unchanged,
     })
 }
 

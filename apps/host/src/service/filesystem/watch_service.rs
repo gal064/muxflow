@@ -26,8 +26,10 @@ impl FileService {
         let (native_tx, mut native_rx) = mpsc::channel::<()>(1);
         let native_dirty = Arc::new(Mutex::new(BTreeSet::<PathBuf>::new()));
         let native_rescan = Arc::new(AtomicBool::new(false));
+        let native_failed = Arc::new(AtomicBool::new(false));
         let callback_dirty = Arc::clone(&native_dirty);
         let callback_rescan = Arc::clone(&native_rescan);
+        let callback_failed = Arc::clone(&native_failed);
         let watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
             match event {
                 Ok(event) => {
@@ -43,7 +45,16 @@ impl FileService {
                         dirty.insert(path);
                     }
                 }
-                Err(_) => callback_rescan.store(true, Ordering::Release),
+                // The watcher's own stream is compromised, not one target's.
+                // A registration that has silently stopped delivering reports
+                // nothing at all — `is_native()` stays true, so the target is
+                // excluded from the polling fallback and watched by nobody —
+                // so every target is put back on polling, from where the
+                // ordinary native-retry backoff restores the healthy ones.
+                Err(_) => {
+                    callback_rescan.store(true, Ordering::Release);
+                    callback_failed.store(true, Ordering::Release);
+                }
             }
             let _ = native_tx.try_send(());
         });
@@ -73,16 +84,54 @@ impl FileService {
                 let by_parent =
                     changes_by_parent(std::mem::take(&mut *native_dirty.lock().unwrap()));
                 let all_rescan = native_rescan.swap(false, Ordering::AcqRel);
+                if native_failed.swap(false, Ordering::AcqRel) {
+                    service.degrade_all_to_polling();
+                }
                 for (watch_id, watch) in service.watch_entries() {
                     if all_rescan {
-                        service
-                            .publish_authoritative_listing(&watch_id, &watch, &sender, &overflowed)
-                            .await;
+                        // A rescan that could not be listed must not be
+                        // forgotten: the flag was already consumed, so failing
+                        // silently here left the client believing its cached
+                        // subtree was current when the watcher had told the
+                        // host otherwise.
+                        if !service
+                            .publish_authoritative_listing(
+                                &watch_id,
+                                &watch,
+                                &sender,
+                                &overflowed,
+                                true,
+                            )
+                            .await
+                        {
+                            native_rescan.store(true, Ordering::Release);
+                        }
                         continue;
                     }
                     let Some(children) = by_parent.get(&watch.target) else {
                         continue;
                     };
+                    if children.len() > MAX_PRECISE_EVENTS_PER_BATCH {
+                        // One authoritative listing instead of hundreds of
+                        // precise events. A build or a checkout touching a
+                        // whole directory would otherwise fill the ordered
+                        // event queue, and an overflow there is a
+                        // connection-wide resync — a far more expensive
+                        // recovery than the one re-list this costs.
+                        if !service
+                            .publish_authoritative_listing(
+                                &watch_id,
+                                &watch,
+                                &sender,
+                                &overflowed,
+                                false,
+                            )
+                            .await
+                        {
+                            native_rescan.store(true, Ordering::Release);
+                        }
+                        continue;
+                    }
                     // `precise_file_events` stats every dirty path, which on
                     // this host can be a slow filesystem and is now the
                     // primary path for the whole feature. It does not belong
@@ -96,7 +145,15 @@ impl FileService {
                         })
                         .await
                     };
-                    for event in mapped.unwrap_or_default() {
+                    // A batch that never came back described changes nobody
+                    // else will describe. Dropping it silently left the desktop
+                    // showing rows that no longer exist, so the next turn
+                    // re-lists everything instead.
+                    let Ok(mapped) = mapped else {
+                        native_rescan.store(true, Ordering::Release);
+                        continue;
+                    };
+                    for event in mapped {
                         broadcast_control_event(event);
                     }
                 }
@@ -128,13 +185,22 @@ impl FileService {
 
     /// Re-lists a watched directory and publishes it as an authoritative
     /// snapshot the desktop replaces its cached listing from.
-    async fn publish_authoritative_listing(
+    ///
+    /// `recovery` says whether events were *lost* rather than merely replaced
+    /// by this listing. It is the client's signal to drop what it has cached
+    /// below this directory, so a listing that simply stands in for a burst of
+    /// precise events — nothing was lost — must not claim it.
+    ///
+    /// Returns whether the snapshot was published, so a caller that has already
+    /// consumed the flag which caused it can put that flag back.
+    pub(super) async fn publish_authoritative_listing(
         self: &Arc<Self>,
         watch_id: &str,
         watch: &Watch,
         sender: &mpsc::Sender<SequencerControl>,
         overflowed: &Arc<AtomicBool>,
-    ) {
+        recovery: bool,
+    ) -> bool {
         let root = Arc::clone(&watch.root);
         let path = watch.path.clone();
         let listing_id = watch_id.to_owned();
@@ -155,16 +221,14 @@ impl FileService {
         })
         .await;
         let Ok(Ok(mut snapshot)) = listed else {
-            return;
+            return false;
         };
         if !self.watch_is_current(watch_id, watch) {
-            return;
+            // Not a failure: this registration was replaced, and the watch that
+            // replaced it published — or will publish — its own listing.
+            return true;
         }
-        // Every caller of this is a gap: the native watcher overflowed, the
-        // fallback found a change it cannot describe entry by entry, or a
-        // target just came back to the native watcher after a polling window.
-        // In all three the client's cached subtree may have missed events.
-        snapshot.recovered_from_overflow = true;
+        snapshot.recovered_from_overflow = recovery;
         snapshot.authoritative = true;
         emit_event(
             sender,
@@ -181,6 +245,15 @@ impl FileService {
                 ..Default::default()
             },
         );
+        true
+    }
+
+    /// Puts every native target back on polling after a watcher-level failure.
+    pub(super) fn degrade_all_to_polling(&self) {
+        for (_, watch) in self.watch_entries() {
+            watch.fallback.lock().unwrap().degrade_to_polling();
+        }
+        self.fallback_signal.notify_one();
     }
 
     /// Polls only the targets the native watcher refused.
@@ -221,7 +294,13 @@ impl FileService {
                             // completed scan and the registration taking effect
                             // is reported by nobody unless it is published now.
                             service
-                                .publish_authoritative_listing(&id, &watch, &sender, &overflowed)
+                                .publish_authoritative_listing(
+                                    &id,
+                                    &watch,
+                                    &sender,
+                                    &overflowed,
+                                    true,
+                                )
                                 .await;
                             continue;
                         }
@@ -241,7 +320,7 @@ impl FileService {
                         .is_ok_and(|turn| *turn == FallbackTurn::Changed)
                     {
                         service
-                            .publish_authoritative_listing(&id, &watch, &sender, &overflowed)
+                            .publish_authoritative_listing(&id, &watch, &sender, &overflowed, false)
                             .await;
                     }
                 }
@@ -250,7 +329,7 @@ impl FileService {
     }
 
     /// Exactly the watches whose native registration failed.
-    fn fallback_watches(&self) -> Vec<(String, Watch)> {
+    pub(super) fn fallback_watches(&self) -> Vec<(String, Watch)> {
         self.watch_entries()
             .into_iter()
             .filter(|(_, watch)| !watch.fallback.lock().unwrap().is_native())
@@ -390,17 +469,19 @@ impl FileService {
 
     pub(crate) fn unwatch_directory(&self, watch_id: &str) -> anyhow::Result<()> {
         validate_token("watch ID", watch_id)?;
-        let removed = self.watches.lock().unwrap().remove(watch_id);
-        let Some(removed) = removed else {
+        // One critical section across removal, the still-watched decision, and
+        // the native call — the same rule registration follows. Releasing the
+        // registry between them let a concurrent re-watch of the same target
+        // arm a registration this unwatch then tore down, leaving a directory
+        // that believed it was native, was excluded from the polling fallback,
+        // and silently stopped reporting anything at all.
+        let mut watches = self.watches.lock().unwrap();
+        let Some(removed) = watches.remove(watch_id) else {
             return Ok(());
         };
-        let still_watched = self
-            .watches
-            .lock()
-            .unwrap()
-            .values()
-            .any(|watch| watch.target == removed.target);
-        if !still_watched && let Some(watcher) = self.native_watcher.lock().unwrap().as_mut() {
+        if !watches.values().any(|watch| watch.target == removed.target)
+            && let Some(watcher) = self.native_watcher.lock().unwrap().as_mut()
+        {
             let _ = watcher.unwatch(&removed.target);
         }
         Ok(())

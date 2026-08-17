@@ -34,6 +34,13 @@ pub(super) struct OperationRegistry {
     slots: Mutex<HashMap<(OperationLane, String), Slot>>,
 }
 
+/// How many cancel-before-claim tombstones one connection retains.
+///
+/// Operation IDs are UUIDs used once, so a tombstone is normally consumed by
+/// the claim it was left for. The bound is only for the case where the claim
+/// never arrives at all — an aborted caller that never dispatched.
+const MAX_TOMBSTONES: usize = 64;
+
 #[derive(Default)]
 struct Slot {
     /// Set once the request has been written, cleared when it completes.
@@ -65,6 +72,12 @@ pub(super) enum Bound {
 
 impl OperationRegistry {
     /// Claims an operation ID before any request is written for it.
+    ///
+    /// A cancellation can arrive before the claim does: the renderer mints the
+    /// ID, issues the request, and may abort in the same tick, and those are two
+    /// separate messages across the command boundary. A cancellation that finds
+    /// no claim leaves a tombstone, which this consumes — so the request is
+    /// refused rather than sent to a host nobody will tell to stop.
     pub(super) fn claim(
         self: &Arc<Self>,
         lane: OperationLane,
@@ -72,10 +85,13 @@ impl OperationRegistry {
     ) -> Result<OperationClaim, String> {
         let key = (lane, operation_id.to_owned());
         let mut slots = self.slots.lock().unwrap();
-        if slots.contains_key(&key) {
-            return Err(format!("duplicate {} operation ID", lane.label()));
+        match slots.get(&key) {
+            Some(slot) if slot.cancelled && slot.request_id.is_none() => {}
+            Some(_) => return Err(format!("duplicate {} operation ID", lane.label())),
+            None => {
+                slots.insert(key.clone(), Slot::default());
+            }
         }
-        slots.insert(key.clone(), Slot::default());
         drop(slots);
         Ok(OperationClaim {
             registry: Arc::clone(self),
@@ -104,25 +120,38 @@ impl OperationRegistry {
         }
     }
 
-    /// The request ID to cancel, or `None` when the operation is claimed but
-    /// not yet dispatched — in which case a tombstone refuses it instead.
-    pub(super) fn cancel(
-        &self,
-        lane: OperationLane,
-        operation_id: &str,
-    ) -> Result<Option<u64>, String> {
+    /// The request ID to cancel, or `None` when the operation has no request in
+    /// flight — in which case a tombstone refuses the one that is coming.
+    pub(super) fn cancel(&self, lane: OperationLane, operation_id: &str) -> Option<u64> {
         let key = (lane, operation_id.to_owned());
         let mut slots = self.slots.lock().unwrap();
-        let slot = slots
-            .get_mut(&key)
-            .ok_or_else(|| format!("unknown or completed {} operation ID", lane.label()))?;
-        match slot.request_id {
-            Some(request_id) => Ok(Some(request_id)),
-            None => {
-                slot.cancelled = true;
-                Ok(None)
+        if let Some(slot) = slots.get_mut(&key) {
+            if let Some(request_id) = slot.request_id {
+                return Some(request_id);
+            }
+            slot.cancelled = true;
+            return None;
+        }
+        // Nothing claimed yet. The claim may still be on its way across the
+        // command boundary, so the refusal is left here for it to find.
+        if slots.len() >= MAX_TOMBSTONES {
+            let oldest: Vec<_> = slots
+                .iter()
+                .filter(|(_, slot)| slot.cancelled && slot.request_id.is_none())
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in oldest {
+                slots.remove(&key);
             }
         }
+        slots.insert(
+            key,
+            Slot {
+                request_id: None,
+                cancelled: true,
+            },
+        );
+        None
     }
 
     pub(super) fn clear(&self) {
@@ -159,7 +188,7 @@ mod tests {
     fn a_cancellation_that_beats_dispatch_refuses_the_request() {
         let registry = Arc::new(OperationRegistry::default());
         let claim = registry.claim(OperationLane::File, "op").unwrap();
-        assert_eq!(registry.cancel(OperationLane::File, "op").unwrap(), None);
+        assert_eq!(registry.cancel(OperationLane::File, "op"), None);
         assert!(matches!(registry.bind(&claim, 7), Bound::Cancelled));
         drop(claim);
         assert_eq!(registry.len(), 0);
@@ -168,18 +197,34 @@ mod tests {
         assert!(matches!(registry.bind(&reused, 8), Bound::Ready));
     }
 
+    /// The abort and the request are two separate messages across the command
+    /// boundary, so the abort can genuinely arrive first. It must still refuse
+    /// the request rather than let a remote scan run for nobody.
     #[test]
-    fn cancellation_targets_the_exact_lane_and_reports_an_unknown_one() {
+    fn a_cancellation_that_arrives_before_the_claim_still_refuses_it() {
+        let registry = Arc::new(OperationRegistry::default());
+        assert_eq!(registry.cancel(OperationLane::File, "not-yet"), None);
+        let claim = registry.claim(OperationLane::File, "not-yet").unwrap();
+        assert!(matches!(registry.bind(&claim, 3), Bound::Cancelled));
+        drop(claim);
+        assert_eq!(registry.len(), 0);
+        // Tombstones are bounded even when their claim never arrives.
+        for index in 0..MAX_TOMBSTONES * 3 {
+            registry.cancel(OperationLane::File, &format!("abandoned-{index}"));
+        }
+        assert!(registry.len() <= MAX_TOMBSTONES);
+    }
+
+    #[test]
+    fn cancellation_targets_the_exact_lane_and_leaves_the_other_alone() {
         let registry = Arc::new(OperationRegistry::default());
         let claim = registry.claim(OperationLane::Git, "shared-id").unwrap();
         registry.bind(&claim, 11);
-        assert!(registry.cancel(OperationLane::File, "shared-id").is_err());
-        assert_eq!(
-            registry.cancel(OperationLane::Git, "shared-id").unwrap(),
-            Some(11)
-        );
+        // A cancel on the other lane's identically named operation must not
+        // reach this one; it leaves its own tombstone instead.
+        assert_eq!(registry.cancel(OperationLane::File, "shared-id"), None);
+        assert_eq!(registry.cancel(OperationLane::Git, "shared-id"), Some(11));
         assert!(registry.claim(OperationLane::Git, "shared-id").is_err());
         drop(claim);
-        assert!(registry.cancel(OperationLane::Git, "shared-id").is_err());
     }
 }

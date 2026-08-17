@@ -64,6 +64,72 @@ describe("TauriFileWorkspaceClient", () => {
     })}`);
   });
 
+  it("marks a snapshot from an already-established watch as not fresh", async () => {
+    // The bootstrap is produced once, when the watch is armed. A subscriber
+    // joining ten minutes later is handed that same listing, so treating it as
+    // this acquisition's answer silently installed a ten-minute-old directory
+    // and reverted every row patched since.
+    const snapshot = (generation: string) => ({
+      watchId: "watch", root: "/repo", path: "/repo", generation, overflowed: false,
+      authoritative: true, nextPageToken: "", complete: true, entries: [],
+    });
+    invokeMock.mockResolvedValue({ operationId: "watch", directory: snapshot("1") });
+    const client = new TauriFileWorkspaceClient();
+    const first = await client.acquireDirectoryWatch(scope, root, "/repo");
+    expect(first.fresh).toBe(true);
+    const second = await client.acquireDirectoryWatch(scope, root, "/repo");
+    expect(second.fresh, "a joined watch answered as if its snapshot were current").toBe(false);
+    expect(second.snapshot.revision).toBe("1");
+    // Still exactly one host watch, and one unwatch when the last lease goes.
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    first.release();
+    second.release();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+      "file_request", { clientId: "client", command: expect.objectContaining({ operation: "unwatchDirectory" }) }));
+  });
+
+  it("keeps a shared watch alive when one of its subscribers abandons it", async () => {
+    // Cancellation used to be wired to whichever caller happened to arm the
+    // watch, so that caller giving up cancelled the request out from under
+    // every other subscriber — and the survivor was never told, so it sat
+    // there receiving no events at all for the life of the tab.
+    let settle!: (value: unknown) => void;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "cancel_file_request") return undefined;
+      return new Promise((resolve) => { settle = resolve; });
+    });
+    const abort = new AbortController();
+    const client = new TauriFileWorkspaceClient();
+    const abandoned = client.acquireDirectoryWatch(scope, root, "/repo", { signal: abort.signal });
+    const kept = client.acquireDirectoryWatch(scope, root, "/repo");
+    abort.abort();
+    await expect(abandoned).rejects.toMatchObject({ name: "AbortError" });
+    expect(invokeMock).not.toHaveBeenCalledWith("cancel_file_request", expect.anything());
+    settle({ operationId: "watch", directory: { watchId: "watch", root: "/repo", path: "/repo", generation: "4", authoritative: true, nextPageToken: "", complete: true, entries: [] } });
+    const lease = await kept;
+    expect(lease.snapshot.revision).toBe("4");
+    expect(lease.fresh).toBe(true);
+  });
+
+  it("gives a watch back to the host even when its own bootstrap failed", async () => {
+    // The watch ID is minted here and the host registers the watch before it
+    // lists, so a control-lane timeout on a large directory leaves a
+    // registration the desktop has stopped counting. Against the host's watch
+    // budget those orphans end as "every expansion is refused".
+    const failure = new Error("watch bootstrap timed out");
+    invokeMock.mockImplementation(async (command, args) => {
+      if ((args as { command?: { operation?: string } }).command?.operation === "unwatchDirectory") return { operationId: "unwatch" };
+      throw failure;
+    });
+    const client = new TauriFileWorkspaceClient();
+    await expect(client.acquireDirectoryWatch(scope, root, "/repo")).rejects.toThrow("timed out");
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
+      "file_request", { clientId: "client", command: expect.objectContaining({ operation: "unwatchDirectory" }) }));
+    // And the failed record is gone, so the next expansion arms a real watch.
+    invokeMock.mockResolvedValue({ operationId: "watch", directory: { watchId: "watch", root: "/repo", path: "/repo", generation: "2", authoritative: true, nextPageToken: "", complete: true, entries: [] } });
+    await expect(client.acquireDirectoryWatch(scope, root, "/repo")).resolves.toMatchObject({ fresh: true });
+  });
+
   it("maps active roots and preserves decimal u64 metadata without numeric coercion", async () => {
     invokeMock.mockResolvedValueOnce({ operationId: "op", activeRoot: { paneId: "%1", root: "/repo", rootToken: "token", gitWorktree: true, serverIdentity: "server", topologyGeneration: "7", rootGeneration: "18446744073709551615" } });
     const client = new TauriFileWorkspaceClient();

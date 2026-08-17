@@ -6,7 +6,7 @@ import { AutosaveController, type AutosaveView } from "../files/autosave";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { attachEditorLayout } from "../files/editorLayout";
 import { renderSafeMarkdown, renderSafeSvg } from "../files/markdown";
-import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type DirectoryListing, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
+import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type DirectoryListing, type DirectoryWatchLease, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { AppOwnedTab } from "./types";
 import { ADE_MONACO_THEME } from "../files/monaco";
@@ -297,9 +297,19 @@ export function AppTabSurface(props: Props) {
    * confirmed what had just arrived. A reload happens only on a real
    * generation mismatch, and only once per bootstrap.
    */
-  const reconcileBootstrap = (snapshot: DirectoryListing) => {
+  const reconcileBootstrap = (lease: DirectoryWatchLease) => {
     if (reconciliation.current.kind === "done") return;
-    const generation = listingOpinion(snapshot);
+    if (!lease.fresh) {
+      // The watch was already armed — by the Explorer showing this folder —
+      // so its bootstrap describes the directory as of whenever that happened
+      // and has no opinion about a file read just now. Acting on it re-opened
+      // the file remotely on the strength of an arbitrarily old row. Nothing is
+      // lost by declining: changes since that watch was armed have already
+      // arrived as events, and changes after this read arrive as events too.
+      reconciliation.current = { kind: "done" };
+      return;
+    }
+    const generation = listingOpinion(lease.snapshot);
     const shown = shownGeneration();
     if (shown === undefined) {
       reconciliation.current = { kind: "bootstrap", generation };
@@ -332,7 +342,7 @@ export function AppTabSurface(props: Props) {
       if (disposed) next.release();
       else {
         release = next.release;
-        reconcileBootstrap(next.snapshot);
+        reconcileBootstrap(next);
       }
     }).catch((watchError) => { if (!disposed) props.onStatus(`File watch unavailable: ${String(watchError)}`); });
     return () => { disposed = true; release?.(); };

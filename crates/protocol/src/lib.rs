@@ -111,10 +111,16 @@ pub const CAP_TERMINAL_OUTPUT_CREDIT: u64 = 1 << 14;
 /// One descriptor-bound editor open per request, replacing the metadata +
 /// preflight + per-chunk staircase.
 ///
-/// Negotiated rather than assumed because the daemon lives on a remote host the
-/// user upgrades separately: without a bit, a desktop paired with an older
-/// helper handshakes cleanly, runs terminals and the Explorer, and then fails
-/// every single file open with an unknown-operation error.
+/// A *required* capability, not an optional one: it is part of
+/// [`HOST_CAPABILITIES`], which the desktop demands in full, so a helper
+/// without it is refused at the handshake with the missing bit named. There is
+/// deliberately no fallback to the staircase — the daemon already has to match
+/// the desktop's helper version, and a second code path for opening files that
+/// nobody exercises is how the one people do use goes quietly wrong.
+///
+/// The bit exists so that refusal says *what* is missing. Without it, a helper
+/// that passed version checks but predated this operation would connect
+/// cleanly and then fail every file open with an unknown-operation error.
 pub const CAP_FILE_STREAM: u64 = 1 << 15;
 pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_ORDERED_EVENTS

@@ -554,3 +554,26 @@ fn input_flush_reports_bytes_accepted_by_a_replaced_connection() {
     sender.send(ClientInputDispatch::Stop).unwrap();
     worker.join().unwrap();
 }
+
+/// A helper that cannot serve a single-request file open is refused at the
+/// handshake, rather than admitted and found wanting one operation at a time.
+#[test]
+fn a_helper_missing_the_file_stream_capability_is_refused_at_the_handshake() {
+    use tmux_agent_protocol::{CAP_FILE_STREAM, HOST_CAPABILITIES, PROTOCOL_MAJOR};
+    let hello = |capabilities: u64| v1::ServerHello {
+        capabilities,
+        read_only: false,
+        ..Default::default()
+    };
+    assert!(super::bridge::handshake_allows_snapshot(
+        PROTOCOL_MAJOR,
+        &hello(HOST_CAPABILITIES)
+    ));
+    assert!(
+        !super::bridge::handshake_allows_snapshot(
+            PROTOCOL_MAJOR,
+            &hello(HOST_CAPABILITIES & !CAP_FILE_STREAM)
+        ),
+        "an older helper was admitted and would fail every file open"
+    );
+}

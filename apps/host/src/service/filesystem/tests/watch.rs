@@ -471,3 +471,84 @@ fn an_event_about_the_watched_directory_itself_is_never_a_row_inside_it() {
     );
     fs::remove_dir_all(root_path).unwrap();
 }
+
+/// `recovered_from_overflow` means events were *lost*, not merely replaced.
+///
+/// The desktop drops its whole cached subtree when it sees this flag, so a
+/// listing that simply stands in for a burst of precise events — where nothing
+/// was lost — must not set it. Every published snapshot claiming recovery made
+/// one ordinary file change invalidate the Explorer's entire cache.
+#[tokio::test]
+async fn an_authoritative_listing_claims_recovery_only_when_events_were_lost() {
+    let root_path = std::env::temp_dir().join(format!("ade-watch-recovery-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root_path).unwrap();
+    fs::write(root_path.join("kept"), "x").unwrap();
+    let service = Arc::new(FileService::new());
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let (sender, mut receiver) = mpsc::channel(8);
+    let bootstrap = service
+        .watch_directory(root_path.to_str().unwrap(), "", "watch-recovery")
+        .unwrap();
+    assert_eq!(bootstrap.entries.len(), 1);
+    let watch = service
+        .watches
+        .lock()
+        .unwrap()
+        .get("watch-recovery")
+        .cloned()
+        .unwrap();
+
+    for recovery in [false, true] {
+        assert!(
+            service
+                .publish_authoritative_listing(
+                    "watch-recovery",
+                    &watch,
+                    &sender,
+                    &overflowed,
+                    recovery
+                )
+                .await
+        );
+        let Some(SequencerControl::OrderedEvent(event)) = receiver.recv().await else {
+            panic!("the authoritative listing was not published");
+        };
+        let snapshot = event.file.unwrap().directory.unwrap();
+        assert!(snapshot.authoritative);
+        assert_eq!(snapshot.recovered_from_overflow, recovery);
+        assert_eq!(
+            snapshot.entries.len(),
+            1,
+            "the rescan reported an empty directory"
+        );
+    }
+    fs::remove_dir_all(root_path).unwrap();
+}
+
+/// A watcher-level failure moves every target onto polling.
+///
+/// A native registration that has silently stopped delivering reports nothing
+/// at all: `is_native()` stays true, so the target is excluded from the polling
+/// fallback and is watched by nobody, forever. The ordinary native-retry
+/// backoff puts the healthy ones back.
+#[test]
+fn a_failed_native_watcher_puts_every_target_back_on_polling() {
+    let root_path = std::env::temp_dir().join(format!("ade-watch-degrade-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root_path).unwrap();
+    let service = Arc::new(FileService::new());
+    service
+        .watch_directory(root_path.to_str().unwrap(), "", "watch-degrade")
+        .unwrap();
+    let native_before = service.fallback_watches().is_empty();
+
+    service.degrade_all_to_polling();
+
+    assert!(
+        !service.fallback_watches().is_empty(),
+        "a target the native watcher stopped covering is polled by nobody"
+    );
+    // Only meaningful on a host that had a native watcher in the first place;
+    // where there is none the target was already polling and stays polling.
+    assert!(native_before || !service.fallback_watches().is_empty());
+    fs::remove_dir_all(root_path).unwrap();
+}

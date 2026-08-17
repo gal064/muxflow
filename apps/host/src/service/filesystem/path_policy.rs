@@ -430,8 +430,22 @@ fn stat_modified(stat: &libc::stat) -> (i64, i64) {
 }
 
 fn directory_entry_names(directory: &File) -> anyhow::Result<Vec<OsString>> {
-    // fdopendir owns its descriptor, so duplicate the capability first.
-    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    // `fdopendir` owns the descriptor it is given, so this needs one of its
+    // own — and it must be an *independent* one. A `dup` shares the file
+    // offset with the descriptor it copied, so the second enumeration of a
+    // long-lived capability began where the first one stopped: at the end.
+    // Every authoritative rescan of an already-listed directory therefore
+    // reported it as empty, and the desktop installs that as its contents.
+    // `openat(fd, ".")` re-opens the same directory the descriptor already
+    // names — still relative to it, so no path is re-traversed and no symlink
+    // can be interposed — with its own offset.
+    let duplicate = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
     if duplicate < 0 {
         return Err(std::io::Error::last_os_error().into());
     }

@@ -3,7 +3,7 @@ import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope, WorkspaceEvent } from "./types";
 import { keyForTransferConnection } from "./api";
-import { ACTIVE_ROOT_STABLE_PROBES, useWorkspaceFiles } from "./useWorkspaceFiles";
+import { ACTIVE_ROOT_SETTLED_MULTIPLIER, ACTIVE_ROOT_STABLE_PROBES, useWorkspaceFiles } from "./useWorkspaceFiles";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -69,6 +69,7 @@ function watchingClient(directories: Map<string, ReturnType<typeof entry>[]>, ro
     acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => {
       acquired.push(directory);
       return {
+        fresh: true,
         snapshot: listing(active.token, directory, directories.get(directory) ?? []),
         release: () => released.push(directory),
       };
@@ -92,7 +93,7 @@ describe("useWorkspaceFiles", () => {
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn((scope) => scope.paneId === "%1" ? first.promise : second.promise),
       listDirectory: vi.fn(async (_scope, root, directory) => ({ rootToken: root.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true })),
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })), openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ fresh: true, snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })), openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async () => () => undefined),
     };
     const base = { clientId: "c", hostProfileId: "local", serverIdentity: "s", generation: 1, terminalEpoch: 41, sessionId: "$1" };
@@ -176,6 +177,7 @@ describe("useWorkspaceFiles", () => {
           await new Promise<void>((resolve) => { settle = resolve; });
         }
         return {
+          fresh: true,
           snapshot: listing(active.token, directory, directories.get(directory) ?? []),
           release: () => undefined,
         };
@@ -303,6 +305,7 @@ describe("useWorkspaceFiles", () => {
       acquireDirectoryWatch: vi.fn(async (_scope, root, directory) => {
         acquired.push({ token: root.token, directory });
         return {
+          fresh: true,
           snapshot: listing(root.token, directory, [entry(`${directory}/${root.token}`)]),
           release: () => released.push(`${root.token}:${directory}`),
         };
@@ -353,36 +356,120 @@ describe("useWorkspaceFiles", () => {
     await act(async () => { renderer.unmount(); });
   });
 
-  it("restores the pages an authoritative first-page rescan would have deleted", async () => {
+  it("never shows fewer rows than it had while an authoritative rescan is being restored", async () => {
     const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
-    const page = (names: string[], complete: boolean) => ({
+    const page = (names: string[], options: { complete: boolean; revision?: string }) => ({
       ...listing("root", "/repo", names.map((name) => entry(`/repo/${name}`))),
-      complete,
-      ...(complete ? {} : { nextPageToken: "next" }),
+      revision: options.revision ?? "1",
+      complete: options.complete,
+      ...(options.complete ? {} : { nextPageToken: "page-2" }),
     });
+    let published: ((event: WorkspaceEvent) => void) | undefined;
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn(async () => root),
-      listDirectory: vi.fn(async () => page(["c", "d"], true)),
-      acquireDirectoryWatch: vi.fn(async () => ({ snapshot: page(["a", "b"], false), release: () => undefined })),
+      listDirectory: vi.fn(async (_scope, _active, _directory, options) => options?.pageToken
+        ? page(["c", "d"], { complete: true, revision: "1" })
+        : page(["a", "b"], { complete: false, revision: "1" })),
+      acquireDirectoryWatch: vi.fn(async () => ({ fresh: true, snapshot: page(["a", "b"], { complete: false }), release: () => undefined })),
       openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async (_scope, next) => { published = next; return () => undefined; }),
     };
-    let published: ((event: WorkspaceEvent) => void) | undefined;
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    const seen: number[] = [];
+    function Harness() {
+      current = useWorkspaceFiles(client, BASE_SCOPE);
+      const rows = current.listings.get("/repo")?.entries.length;
+      if (rows !== undefined) seen.push(rows);
+      return null;
+    }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    // The bootstrap's page one, then the bounded prefetch of page two.
+    for (let turn = 0; turn < 5; turn += 1) await act(async () => { await Promise.resolve(); });
+    expect(current?.listings.get("/repo")?.entries).toHaveLength(4);
+
+    // An authoritative rescan carries only page one. The rows the user can see
+    // must not disappear, even for one commit: dropping to two rows would take
+    // the keyboard focus down with them and never put it back.
+    seen.length = 0;
+    await act(async () => { published?.({ kind: "directorySnapshot", rootToken: "root", listing: page(["a", "b"], { complete: false, revision: "9" }) }); });
+    for (let turn = 0; turn < 6; turn += 1) await act(async () => { await Promise.resolve(); });
+    expect(Math.min(...seen), "the tree shrank while its pages were being restored").toBe(4);
+    expect(current?.listings.get("/repo")?.entries).toHaveLength(4);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("revalidates a bootstrap that came from a watch it did not arm", async () => {
+    // One host watch serves every surface, and its bootstrap is produced once —
+    // when the watch was armed. An open file's tab watches its own folder, so
+    // an Explorer that expands that folder later joins an existing watch and is
+    // handed a listing of arbitrarily old rows. Painting it is the point;
+    // trusting it silently reverted every row created since.
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const listed: string[] = [];
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async () => root),
+      listDirectory: vi.fn(async (_scope, active, directory) => {
+        listed.push(directory);
+        return listing(active.token, directory, [entry("/repo/created-since")]);
+      }),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({
+        fresh: false,
+        snapshot: listing(active.token, directory, [entry("/repo/as-it-was")]),
+        release: () => undefined,
+      })),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async () => () => undefined),
+    };
     let current: ReturnType<typeof useWorkspaceFiles> | undefined;
     function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
-    await act(async () => { await Promise.resolve(); });
-    // The user pages to the end.
-    await act(async () => { current?.loadMore("/repo"); await Promise.resolve(); });
-    await act(async () => { await Promise.resolve(); });
-    expect(current?.listings.get("/repo")?.entries).toHaveLength(4);
+    for (let turn = 0; turn < 5; turn += 1) await act(async () => { await Promise.resolve(); });
+    expect(listed, "an inherited bootstrap was trusted as if it were current").toEqual(["/repo"]);
+    expect(current?.listings.get("/repo")?.entries.map((row) => row.name)).toEqual(["created-since"]);
+    await act(async () => { renderer.unmount(); });
+  });
 
-    // An authoritative rescan carries only page one. The rows the user can see
-    // must not disappear because the host answered a smaller question.
-    await act(async () => { published?.({ kind: "directorySnapshot", rootToken: "root", listing: page(["a", "b"], false) }); });
+  it("refuses a page that continues a listing the tree no longer holds", async () => {
+    // The page and the rescan race on the remote link. A page from the
+    // superseded listing would put back rows the rescan removed, and roll the
+    // listing's own revision backwards while doing it.
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const page = (names: string[], revision: string, complete: boolean) => ({
+      ...listing("root", "/repo", names.map((name) => entry(`/repo/${name}`))),
+      revision,
+      complete,
+      ...(complete ? {} : { nextPageToken: "page-2" }),
+    });
+    let releasePage: (() => void) | undefined;
+    let published: ((event: WorkspaceEvent) => void) | undefined;
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async () => root),
+      listDirectory: vi.fn(async () => {
+        await new Promise<void>((resolve) => { releasePage = resolve; });
+        // A slice of the listing that has since been replaced.
+        return page(["stale"], "1", true);
+      }),
+      acquireDirectoryWatch: vi.fn(async () => ({ fresh: true, snapshot: page(["a"], "1", false), release: () => undefined })),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async (_scope, next) => { published = next; return () => undefined; }),
+    };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
     for (let turn = 0; turn < 4; turn += 1) await act(async () => { await Promise.resolve(); });
-    expect(current?.listings.get("/repo")?.entries).toHaveLength(4);
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.name)).toEqual(["a"]);
+
+    // A complete rescan lands while the prefetched page is still in flight.
+    await act(async () => { published?.({ kind: "directorySnapshot", rootToken: "root", listing: page(["a"], "9", true) }); });
+    releasePage?.();
+    for (let turn = 0; turn < 4; turn += 1) await act(async () => { await Promise.resolve(); });
+    const held = current?.listings.get("/repo");
+    expect(held?.entries.map((item) => item.name), "a stale page put rows back").toEqual(["a"]);
+    expect(held?.revision, "the listing's revision went backwards").toBe("9");
+    expect(held?.complete).toBe(true);
     await act(async () => { renderer.unmount(); });
   });
 
@@ -394,6 +481,7 @@ describe("useWorkspaceFiles", () => {
       resolveActiveRoot,
       listDirectory: vi.fn(async (_scope, active, directory) => listing(active.token, directory)),
       acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({
+        fresh: true,
         snapshot: listing(active.token, directory, directory === "/repo" ? [entry("/repo/src", { directory: true })] : []),
         release: () => undefined,
       })),
@@ -408,21 +496,57 @@ describe("useWorkspaceFiles", () => {
     const initial = resolveActiveRoot.mock.calls.length;
 
     // Probe until the root has proved itself unchanged, then keep waiting: an
-    // idle window must not go on asking the host anything at all.
-    for (let tick = 0; tick < ACTIVE_ROOT_STABLE_PROBES + 6; tick += 1) {
+    // idle window must ask the host far less, though never nothing at all.
+    for (let tick = 0; tick < ACTIVE_ROOT_SETTLED_MULTIPLIER - 1; tick += 1) {
       await act(async () => { await vi.advanceTimersByTimeAsync(ACTIVE_ROOT_BACKSTOP_MS + 1); });
     }
     const settled = resolveActiveRoot.mock.calls.length;
     expect(settled).toBeGreaterThan(initial);
-    expect(settled - initial).toBeLessThanOrEqual(ACTIVE_ROOT_STABLE_PROBES);
-    await act(async () => { await vi.advanceTimersByTimeAsync(ACTIVE_ROOT_BACKSTOP_MS * 10) });
-    expect(resolveActiveRoot.mock.calls.length, "a settled backstop kept polling").toBe(settled);
+    expect(settled - initial, "a settled backstop kept polling at full rate").toBeLessThanOrEqual(ACTIVE_ROOT_STABLE_PROBES);
+
+    // But it does not switch itself off. `cd` inside the pane the user is
+    // already in is announced by nothing at all, so a backstop that stops
+    // never notices it again.
+    await act(async () => { await vi.advanceTimersByTimeAsync(ACTIVE_ROOT_BACKSTOP_MS + 1); });
+    const idle = resolveActiveRoot.mock.calls.length;
+    expect(idle, "a settled backstop stopped checking altogether").toBe(settled + 1);
 
     // Touching the tree is evidence the pane may have moved, so it re-arms.
     await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
-    expect(resolveActiveRoot.mock.calls.length).toBeGreaterThan(settled);
+    expect(resolveActiveRoot.mock.calls.length).toBeGreaterThan(idle);
     await act(async () => { renderer.unmount(); });
     vi.useRealTimers();
+  });
+
+  it("treats a host root announcement as a reason to check, never as the answer", async () => {
+    // The broadcast carries no caller epoch, so installing its root would
+    // reintroduce the stale cross-pane race the probe barriers exist to stop.
+    // Discarding it outright was the other extreme: the one signal the host
+    // can push about a moved root reached nobody.
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const resolveActiveRoot = vi.fn(async () => root);
+    let published: ((event: WorkspaceEvent) => void) | undefined;
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot,
+      listDirectory: vi.fn(async (_scope, active, directory) => listing(active.token, directory)),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({
+        fresh: true, snapshot: listing(active.token, directory), release: () => undefined,
+      })),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async (_scope, next) => { published = next; return () => undefined; }),
+    };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    for (let turn = 0; turn < 3; turn += 1) await act(async () => { await Promise.resolve(); });
+    const probes = resolveActiveRoot.mock.calls.length;
+
+    const announced: ActiveRoot = { token: "other", paneId: "%1", cwd: "/elsewhere", path: "/elsewhere", gitWorktree: false, revision: "4" };
+    await act(async () => { published?.({ kind: "rootChanged", root: announced }); await Promise.resolve(); });
+    expect(resolveActiveRoot.mock.calls.length, "the announcement reached nobody").toBeGreaterThan(probes);
+    expect(current?.root, "an unguarded broadcast was installed as the root").toEqual(root);
+    await act(async () => { renderer.unmount(); });
   });
 
   it("prefetches exactly one further page for a directory that opened incomplete", async () => {
@@ -436,6 +560,7 @@ describe("useWorkspaceFiles", () => {
         return { ...listing(active.token, directory, [entry("/repo/b")]), complete: true };
       }),
       acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({
+        fresh: true,
         snapshot: { ...listing(active.token, directory, [entry("/repo/a")]), complete: false, nextPageToken: "page-2" },
         release: () => undefined,
       })),
@@ -487,7 +612,7 @@ describe("useWorkspaceFiles", () => {
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn(async () => activeRoot),
       listDirectory,
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: listing(active.token, directory), release: () => undefined })),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ fresh: true, snapshot: listing(active.token, directory), release: () => undefined })),
       openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
     };
@@ -556,6 +681,7 @@ describe("useWorkspaceFiles", () => {
           await new Promise<void>((resolve) => { holdRevisit = resolve; });
         }
         return {
+          fresh: true,
           snapshot: listing(active.token, directory, directories.get(directory) ?? []),
           release: () => released.push(directory),
         };
@@ -630,7 +756,7 @@ describe("useWorkspaceFiles", () => {
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn(async (active) => ({ ...root, paneId: active.paneId })),
       listDirectory: vi.fn(async (_scope, active, directory) => ({ rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true })),
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ fresh: true, snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })),
       openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async (_scope, listener) => { listeners.push(listener); return () => undefined; }),
     };
@@ -668,7 +794,7 @@ describe("useWorkspaceFiles", () => {
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn(async (active) => ({ ...root, paneId: active.paneId })),
       listDirectory: vi.fn(async (_scope, active, directory) => ({ rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true })),
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ fresh: true, snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })),
       openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
     };
@@ -693,7 +819,7 @@ describe("useWorkspaceFiles", () => {
     const client: FileWorkspaceClient = {
       resolveActiveRoot: vi.fn(async () => root),
       listDirectory: vi.fn(async (_scope, active, directory) => ({ rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true })),
-      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({ fresh: true, snapshot: { rootToken: active.token, directory, revision: "1", entries: [], recoveredFromOverflow: false, complete: true }, release: () => undefined })),
       openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
     };

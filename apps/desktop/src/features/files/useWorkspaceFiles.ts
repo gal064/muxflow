@@ -70,19 +70,32 @@ type DirectoryLoadResult = "applied" | "stale" | "failed";
  * backstop rather than a pipeline: a hidden window checks nothing at all, the
  * host answers an unchanged root from the caller's own capability without a
  * second authoritative discovery or a broadcast payload, and — see
- * [`ACTIVE_ROOT_STABLE_PROBES`] — it stops entirely once the root has settled.
+ * [`ACTIVE_ROOT_SETTLED_MULTIPLIER`] — a settled root is checked far less
+ * often, though never not at all.
  */
 export const ACTIVE_ROOT_BACKSTOP_MS = 15_000;
 
 /**
- * Consecutive unchanged probes after which the backstop stops.
+ * Consecutive unchanged probes after which the backstop slows down.
  *
- * A timer that never stops is a periodic request forever, which the round's
+ * A timer that never slows is a periodic request forever, which the round's
  * idle budget refuses outright. Anything that could have moved the root — the
- * window coming back to the foreground, or the person touching the Explorer —
- * re-arms it, so the cost is bounded to activity rather than to uptime.
+ * window coming back to the foreground, the host announcing a different root,
+ * or the person touching the Explorer — puts it back to full rate, so the cost
+ * tracks activity rather than uptime.
  */
 export const ACTIVE_ROOT_STABLE_PROBES = 3;
+
+/**
+ * How much longer the settled backstop waits between probes.
+ *
+ * Deliberately a longer wait rather than a stop. `cd` inside the pane the user
+ * is already in is announced by nothing at all, so a backstop that switches
+ * itself off entirely leaves a moved root undetected for as long as the person
+ * does not happen to touch the Explorer or blur the window — which on a pane
+ * somebody is only reading is indefinitely.
+ */
+export const ACTIVE_ROOT_SETTLED_MULTIPLIER = 8;
 
 /**
  * How long one directory's *recovery* is deferred before it is re-read.
@@ -154,36 +167,43 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       // must not put rows back into a tree that no longer reaches them.
       if (!current.expanded.has(directory)) return current;
       const held = current.listings.get(directory);
+      const loading = withoutPath(current.loading, directory);
+      if (options.append) {
+        // A page continues one listing, and every page of one listing reports
+        // the revision that listing started with. A page whose revision no
+        // longer matches is a slice of a directory that has since been
+        // re-listed: merging it would put rows the rescan removed back on
+        // screen and roll the listing's own revision backwards.
+        if (!held || held.revision !== listing.revision) return { ...current, loading };
+        const listings = new Map(current.listings).set(directory, appendPage(held, listing));
+        return { ...current, listings, loading, error: undefined };
+      }
       // Revisions are the host's own ordering fact for one directory, and
       // three producers write this slot: the native rescan task, the polling
       // fallback, and client reads. All of them mint a revision before a
       // blocking scan and publish after it, so arrival order is not freshness
       // order and a late older snapshot would otherwise replace newer rows.
-      if (held && !options.append && olderRevision(listing, held)) return current;
-      if (options.append) {
-        if (!held) return current;
-        const listings = new Map(current.listings).set(directory, appendPage(held, listing));
-        const loading = new Set(current.loading);
-        loading.delete(directory);
-        return { ...current, listings, loading, error: undefined };
-      }
+      if (held && olderRevision(listing, held)) return { ...current, loading };
       // An authoritative rescan only ever carries the directory's first page.
       // Replacing a listing the user has paged further into would delete rows
-      // they can see, so the pages are restored instead — the recovery queue
-      // below owns that, and until it runs the rows stay.
-      const truncated = held && !listing.complete && held.entries.length > listing.entries.length
-        ? held.entries.length
-        : undefined;
-      const listings = new Map(current.listings);
-      listings.set(directory, listing);
-      const loading = new Set(current.loading);
-      loading.delete(directory);
-      const recoveries = truncated === undefined
-        ? current.recoveries
-        : new Map(current.recoveries).set(directory, { kind: "restorePages", entries: truncated } as const);
-      return { ...current, listings, loading, recoveries, error: undefined };
+      // they can see and clamp their keyboard focus to the shorter tree, so
+      // the rows they have stay exactly as they are and the recovery queue
+      // re-reads the whole depth before anything on screen moves.
+      if (held && !listing.complete && held.entries.length > listing.entries.length) {
+        const recoveries = new Map(current.recoveries)
+          .set(directory, { kind: "restorePages", entries: held.entries.length } as const);
+        return { ...current, loading, recoveries };
+      }
+      const listings = new Map(current.listings).set(directory, listing);
+      return { ...current, listings, loading, error: undefined };
     });
-  }, []);
+    if (!options.append) {
+      // A listing that has been replaced outright supersedes any page read
+      // still in flight for it: that page describes the directory as it was.
+      directorySerial.current.set(directory, (directorySerial.current.get(directory) ?? 0) + 1);
+      abortListing((candidate) => candidate === directory);
+    }
+  }, [abortListing]);
 
   /**
    * Reads one directory, against the root the caller was authorised for.
@@ -378,20 +398,45 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
    * it was, and never asks for more than [`MAX_RESTORED_PAGES`] pages.
    */
   const restorePages = useCallback(async (root: ActiveRoot, directory: string, entries: number) => {
-    for (let page = 0; page < MAX_RESTORED_PAGES; page += 1) {
-      const held = stateRef.current.listings.get(directory);
-      if (!held?.nextPageToken || held.complete || held.entries.length >= entries) return;
-      if (await loadDirectory(root, directory, { pageToken: held.nextPageToken }) !== "applied") return;
+    const activeScope = scopeRef.current;
+    if (!activeScope) return;
+    const epoch = scopeEpoch.current;
+    const serial = (directorySerial.current.get(directory) ?? 0) + 1;
+    directorySerial.current.set(directory, serial);
+    let assembled: DirectoryListing | undefined;
+    try {
+      for (let page = 0; page < MAX_RESTORED_PAGES; page += 1) {
+        const pageToken = assembled?.nextPageToken;
+        if (assembled && (assembled.complete || !pageToken)) break;
+        const next = await client.listDirectory(activeScope, root, directory,
+          pageToken ? { pageToken } : {});
+        if (epoch !== scopeEpoch.current || directorySerial.current.get(directory) !== serial) return;
+        if (next.rootToken !== root.token) return;
+        assembled = assembled ? appendPage(assembled, next) : next;
+        if (assembled.entries.length >= entries) break;
+      }
+    } catch {
+      // A failed restore leaves the rows the tree already had; the next
+      // authoritative event asks again.
+      return;
     }
-  }, [loadDirectory]);
+    // Applied once, whole. Applying each page as it arrives would put the
+    // truncation back: the tree would drop to one page and re-grow, taking the
+    // keyboard focus down with it.
+    if (assembled) applyListing(root, directory, assembled);
+  }, [applyListing, client]);
 
   const applyEvent = useCallback((event: WorkspaceEvent) => {
     const current = stateRef.current;
     if (event.kind === "rootChanged") {
-      // Root responses are also returned directly to the poller, where the
-      // scope epoch and operation serial reject completions from the previous
-      // pane. The broadcast has no caller epoch, so admitting it here would
-      // reintroduce the stale cross-pane race that those barriers prevent.
+      // A trigger, never an answer. Root responses are returned directly to the
+      // poller, where the scope epoch and operation serial reject completions
+      // from the previous pane; this broadcast carries no caller epoch, so
+      // installing its root would reintroduce exactly the stale cross-pane race
+      // those barriers exist to prevent. Announcing that the root may have
+      // moved is still real information, so it re-arms the backstop and the
+      // guarded probe decides.
+      if (!sameRoot(current.root, event.root)) rearmBackstop.current?.();
       return;
     }
     if (event.kind === "transfer") {
@@ -544,15 +589,19 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // window that becomes visible checks once on the transition rather than
     // waiting out the interval.
     const foreground = () => typeof document === "undefined" || document.visibilityState === "visible";
+    let ticks = 0;
     const backstop = window.setInterval(() => {
       if (!foreground()) return;
-      // Settled: nothing periodic remains until something happens that could
-      // have moved the root.
-      if (unchangedProbes >= ACTIVE_ROOT_STABLE_PROBES) return;
+      ticks += 1;
+      // Settled: the same check, far less often. See the multiplier's note for
+      // why this slows down rather than stopping.
+      const settled = unchangedProbes >= ACTIVE_ROOT_STABLE_PROBES;
+      if (settled && ticks % ACTIVE_ROOT_SETTLED_MULTIPLIER !== 0) return;
       void resolve();
     }, ACTIVE_ROOT_BACKSTOP_MS);
     const rearm = () => {
       unchangedProbes = 0;
+      ticks = 0;
       if (foreground()) void resolve();
     };
     rearmBackstop.current = rearm;
@@ -617,7 +666,18 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const root = activeRoot;
     leases.current.sync(watchTargets, {
       acquire: (directory, signal) => client.acquireDirectoryWatch(activeScope, root, directory, { signal }),
-      onBootstrap: (directory, listing) => {
+      onBootstrap: (directory, listing, fresh) => {
+        if (!fresh) {
+          // A watch another surface had already armed — an open file's tab
+          // watches its own parent — answers with the listing it produced when
+          // it was armed, which can be arbitrarily old. Painting it is fine and
+          // is the whole point of having it; trusting it is not, so this is the
+          // one bootstrap that still owes a read.
+          recordPerfCounter("explorer.joinedWatchRevalidations");
+          if (!stateRef.current.listings.has(directory)) applyListing(root, directory, listing);
+          void loadDirectory(root, directory);
+          return;
+        }
         applyListing(root, directory, listing);
         prefetchNextPage(root, directory, listing);
       },
@@ -636,6 +696,14 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
             : current);
         });
       },
+      // A directory still inside a refused watch's backoff window gets no
+      // watch this pass. It still has to get its contents: otherwise expanding
+      // it shows an empty folder marked busy, and nothing ever clears either.
+      onDeferred: (directory) => {
+        if (stateRef.current.listings.has(directory)) return;
+        recordPerfCounter("explorer.watchFallbackLists");
+        void loadDirectory(root, directory);
+      },
     });
     // `watchTargets` is derived from `watchTargetKey`, which is the exact
     // identity of the set; depending on the array itself would re-sync on every
@@ -649,14 +717,21 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
    * same rule however it arrived — bootstrap, authoritative rescan, precise
    * patch, recovery list, or restored page — and `set` itself refuses anything
    * incomplete or bound to another root.
+   *
+   * Only directories the tree can currently reach are mirrored, which is
+   * exactly the set that holds a watch. An expanded directory whose parent has
+   * since collapsed receives no events at all, so caching it would preserve a
+   * listing that nothing will ever correct — and would put back, on the very
+   * next commit, whatever an overflow recovery had just dropped.
    */
   useEffect(() => {
     const activeScope = scopeRef.current;
     if (!activeScope || !activeRoot) return;
-    for (const [directory, listing] of state.listings) {
-      cache.current.set(cacheKey(activeScope, activeRoot, directory), listing);
+    for (const directory of watchTargets) {
+      const listing = state.listings.get(directory);
+      if (listing) cache.current.set(cacheKey(activeScope, activeRoot, directory), listing);
     }
-  }, [activeRoot, state.listings]);
+  }, [activeRoot, state.listings, watchTargetKey]);
 
   const toggleDirectory = useCallback((path: string) => {
     const expanding = !stateRef.current.expanded.has(path);
