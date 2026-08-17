@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { GitCommandResult, GitDiff, GitStatusSnapshot } from "./types";
 import { gitScopeKey, type GitRepositoryHandle, type GitRepositoryStore } from "./repositoryStore";
-import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
+import { createPaintTicket } from "../../perf/paintTicket";
+import { createPaintReporter, type SurfacePaint } from "../../perf/surfacePaint";
 import { useCommittedRef } from "../../commands/useCommittedRef";
 
 interface Params {
@@ -13,47 +14,6 @@ interface Params {
   path?: string;
   originalPath?: string;
   target?: GitDiff["target"];
-}
-
-/**
- * What the rendering surface knows about the editor it is painting into.
- *
- * Live readers rather than captured numbers: a surface can remount between the
- * measurement being armed and the pixels landing, and the decision has to see
- * the generation that is mounted *then*, not the one that was mounted when the
- * surface last spoke.
- */
-export interface EditorSurfaceFacts {
-  /** The generation this surface will mount into if it has not yet. */
-  expected: number;
-  /** The generation mounted right now, if any. */
-  mounted(): number | undefined;
-  /** The generation that has reported itself ready to paint, if any. */
-  ready(): number | undefined;
-}
-
-/**
- * The measurement that spans this feature's two halves.
- *
- * It necessarily spans them — it starts when the request does and ends when the
- * pixels land — but only one half gets to decide anything. This one exports the
- * ticket, the load it belongs to and the load React has committed as three raw
- * mutable refs, so the rendering surface reconciled the hook's own request
- * supersession counter on its behalf, in a hook whose contract says the surface
- * owns none of it. It reports facts now; the decision stays here.
- */
-export interface DiffPaint {
-  /** React has committed the load the surface is currently rendering. */
-  noteCommitted(): void;
-  /**
-   * The surface has reached a state it believes is paintable.
-   *
-   * `editor` is absent for a surface that renders no editor at all. Whether
-   * this actually finishes the pending measurement is not the caller's
-   * question: a ticket for a superseded load, or for a surface generation that
-   * is not the mounted one, is simply left pending.
-   */
-  notePaintable(editor?: EditorSurfaceFacts, onPaint?: () => void): void;
 }
 
 export interface SharedGitDiff {
@@ -68,7 +28,14 @@ export interface SharedGitDiff {
   /** Runs one Git command and the single reload it owes. */
   command(run: () => Promise<GitCommandResult>): Promise<GitCommandResult | undefined>;
   fail(message: string): void;
-  paint: DiffPaint;
+  /**
+   * The measurement that spans this feature's two halves.
+   *
+   * It necessarily spans them — it starts when the request does and ends when
+   * the pixels land — but only one half gets to decide anything. The surface
+   * reports what it has rendered; the reconciliation stays here.
+   */
+  paint: SurfacePaint;
 }
 
 /**
@@ -89,14 +56,13 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
   const [sharedError, setSharedError] = useState<string>();
   const [repository, setRepository] = useState<GitRepositoryHandle>();
   const serial = useRef(0);
-  const committedLoadSerial = useRef(0);
   const requestedGeneration = useRef<string | undefined>(undefined);
   const abort = useRef<AbortController | undefined>(undefined);
   // A command owns its own reload. While one is running the shared observation
   // will publish the command's authoritative status, and reacting to that would
   // start the same reload a second time.
   const commanding = useRef(false);
-  const pendingDiffPaint = useRef<PaintTicket | undefined>(undefined);
+  const paint = useMemo(() => createPaintReporter(() => serial.current), []);
   const handle = useRef<GitRepositoryHandle | undefined>(undefined);
 
   const { repositories, repositoryId, path, originalPath, target } = params;
@@ -127,9 +93,8 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
     const controller = new AbortController();
     abort.current = controller;
     setLoading(true);
-    pendingDiffPaint.current?.abandon();
-    pendingDiffPaint.current = undefined;
-    const paint = createPaintTicket(["workflow.git.diffPaint"], current);
+    paint.abandon();
+    const ticket = createPaintTicket(["workflow.git.diffPaint"], current);
     if (clearStale) {
       setDiff(undefined);
       setStatus(undefined);
@@ -147,7 +112,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
         throw new Error("This diff belongs to a different repository. Return to its workspace or close the tab.");
       }
       if (shared && !entryStillChanged(shared, path, target)) {
-        paint.abandon();
+        paint.abandon(ticket);
         setStatus(shared);
         setDiff(undefined);
         setError(undefined);
@@ -160,7 +125,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
         target,
       }, controller.signal);
       if (current !== serial.current) {
-        paint.abandon();
+        paint.abandon(ticket);
         return;
       }
       if (result.status.repository.id !== repositoryId) {
@@ -172,16 +137,16 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
       requestedGeneration.current = result.status.generation;
       setStatus(result.status);
       if (!entryStillChanged(result.status, path, target)) {
-        paint.abandon();
+        paint.abandon(ticket);
         setDiff(undefined);
         setError(undefined);
         return;
       }
       setDiff(result.diff);
-      pendingDiffPaint.current = paint;
+      paint.hold(ticket);
       setError(undefined);
     } catch (cause) {
-      paint.abandon();
+      paint.abandon(ticket);
       // The attempted generation is deliberately retained: a failure that the
       // repository state has not moved past must not be retried on every
       // subsequent watch publication. Retry is the user's, through the button.
@@ -190,7 +155,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
     } finally {
       if (current === serial.current) setLoading(false);
     }
-  }, [originalPath, path, repositoryId, target]);
+  }, [originalPath, paint, path, repositoryId, target]);
   // The subscription outlives any one `load`: its lifetime is the shared
   // observation's, and the diff this tab wants can change without the
   // repository changing. Reading the current `load` through a ref is what keeps
@@ -223,9 +188,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
     const stop = acquired.subscribe(loadWhenStatusMoves);
     return () => {
       serial.current += 1;
-      committedLoadSerial.current = 0;
-      pendingDiffPaint.current?.abandon();
-      pendingDiffPaint.current = undefined;
+      paint.abandon();
       requestedGeneration.current = undefined;
       abort.current?.abort();
       abort.current = undefined;
@@ -278,29 +241,6 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
       commanding.current = false;
     }
   }, [load]);
-
-  const paint = useMemo<DiffPaint>(() => ({
-    noteCommitted: () => {
-      committedLoadSerial.current = serial.current;
-    },
-    notePaintable: (editor, onPaint) => {
-      const ticket = pendingDiffPaint.current;
-      if (!ticket) return;
-      if (editor) {
-        // Recorded before the bail, not after: a measurement armed while the
-        // editor is still mounting has to name the generation it is waiting
-        // for, or the mount that follows cannot recognise its own ticket.
-        ticket.expectSurface(editor.mounted() ?? editor.expected);
-        if (ticket.surfaceGeneration !== editor.mounted()
-          || editor.ready() !== editor.mounted()) return;
-      }
-      pendingDiffPaint.current = undefined;
-      ticket.afterPaint((held) => held.lifecycleGeneration === serial.current
-        && held.lifecycleGeneration === committedLoadSerial.current
-        && (!editor || held.surfaceGeneration === editor.mounted()),
-      onPaint);
-    },
-  }), []);
 
   return {
     diff,
