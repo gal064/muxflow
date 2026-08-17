@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 /// Which operation-id namespace a cancellable request belongs to.
@@ -49,6 +50,9 @@ struct Slot {
     /// refused rather than sent: a caller that abandoned its read faster than
     /// the worker thread could register it must not leave remote work running.
     cancelled: bool,
+    /// When an *unclaimed* cancellation was recorded, so eviction can drop the
+    /// one least likely to still be waiting for its claim.
+    tombstoned_at: Option<Instant>,
 }
 
 /// A claimed operation ID. Dropping it releases the ID for reuse.
@@ -116,6 +120,15 @@ impl OperationRegistry {
         Bound::Ready
     }
 
+    /// Whether this claim was cancelled at any point since it was made.
+    pub(super) fn cancelled(&self, claim: &OperationClaim) -> bool {
+        self.slots
+            .lock()
+            .unwrap()
+            .get(&claim.key)
+            .is_some_and(|slot| slot.cancelled)
+    }
+
     /// Marks a claim's request as finished while the claim itself lives on, so
     /// a cancellation racing completion still finds somewhere to land.
     pub(super) fn unbind(&self, claim: &OperationClaim) {
@@ -130,22 +143,40 @@ impl OperationRegistry {
         let key = (lane, operation_id.to_owned());
         let mut slots = self.slots.lock().unwrap();
         if let Some(slot) = slots.get_mut(&key) {
-            if let Some(request_id) = slot.request_id {
-                return Some(request_id);
-            }
+            // Recorded whether or not the request has an ID yet. A dispatcher
+            // that has just finished writing re-reads this, because a cancel
+            // written *between* the bind and the write reaches the host before
+            // the request it names — and a cancel for a request the host has
+            // never seen is discarded.
             slot.cancelled = true;
-            return None;
+            return slot.request_id;
         }
         // Nothing claimed yet. The claim may still be on its way across the
         // command boundary, so the refusal is left here for it to find.
-        if slots.len() >= MAX_TOMBSTONES {
-            let oldest: Vec<_> = slots
+        //
+        // Bounded per lane, by age, and counting only tombstones. Each of those
+        // three is a defect on its own: a whole-map sweep threw away the
+        // tombstones whose claims were still in flight — the entire case the
+        // mechanism exists for; counting live claims meant sixty-four
+        // concurrent operations disabled eviction altogether; and one budget
+        // across both lanes let a Git cancellation evict a file read's refusal,
+        // after which that read dispatched to a host nobody would tell to stop.
+        let mine = |candidate: &(OperationLane, String)| candidate.0 == lane;
+        let tombstones = slots
+            .iter()
+            .filter(|(candidate, slot)| mine(candidate) && slot.tombstoned_at.is_some())
+            .count();
+        if tombstones >= MAX_TOMBSTONES {
+            let oldest = slots
                 .iter()
-                .filter(|(_, slot)| slot.cancelled && slot.request_id.is_none())
-                .map(|(key, _)| key.clone())
-                .collect();
-            for key in oldest {
-                slots.remove(&key);
+                .filter(|(candidate, _)| mine(candidate))
+                .filter_map(|(candidate, slot)| {
+                    slot.tombstoned_at.map(|at| (at, candidate.clone()))
+                })
+                .min_by_key(|(at, _)| *at)
+                .map(|(_, candidate)| candidate);
+            if let Some(oldest) = oldest {
+                slots.remove(&oldest);
             }
         }
         slots.insert(
@@ -153,6 +184,7 @@ impl OperationRegistry {
             Slot {
                 request_id: None,
                 cancelled: true,
+                tombstoned_at: Some(Instant::now()),
             },
         );
         None
@@ -217,12 +249,62 @@ mod tests {
             registry.cancel(OperationLane::File, &format!("abandoned-{index}"));
         }
         assert!(registry.len() <= MAX_TOMBSTONES);
-        // And the newest survive: those are the ones whose claim may still be
+        // The most recent survive — those are the ones whose claim may still be
         // crossing the command boundary, which is the whole point of keeping
-        // any. Evicting every tombstone at once threw exactly those away.
-        let newest = format!("abandoned-{}", MAX_TOMBSTONES * 3 - 1);
-        let refused = registry.claim(OperationLane::File, &newest).unwrap();
-        assert!(matches!(registry.bind(&refused, 9), Bound::Cancelled));
+        // any — and eviction is oldest-first rather than a whole-map sweep.
+        for index in (MAX_TOMBSTONES * 2)..(MAX_TOMBSTONES * 3) {
+            let recent = format!("abandoned-{index}");
+            let refused = registry.claim(OperationLane::File, &recent).unwrap();
+            assert!(
+                matches!(registry.bind(&refused, 9), Bound::Cancelled),
+                "{recent} lost its refusal to a newer one"
+            );
+        }
+    }
+
+    /// One lane's cancellations must not evict another's.
+    ///
+    /// A file read's refusal thrown away by an unrelated Git cancellation
+    /// dispatches that read to a host nobody will tell to stop — which is the
+    /// exact failure the tombstone exists to prevent.
+    #[test]
+    fn a_lane_cannot_evict_the_other_lanes_cancellations() {
+        let registry = Arc::new(OperationRegistry::default());
+        registry.cancel(OperationLane::File, "abandoned-read");
+        for index in 0..MAX_TOMBSTONES * 2 {
+            registry.cancel(OperationLane::Git, &format!("git-{index}"));
+        }
+        let claim = registry
+            .claim(OperationLane::File, "abandoned-read")
+            .unwrap();
+        assert!(
+            matches!(registry.bind(&claim, 4), Bound::Cancelled),
+            "a Git cancellation evicted a file read's refusal"
+        );
+    }
+
+    /// A cancellation raised after the bind is still visible to the dispatcher.
+    ///
+    /// The window this closes: `bind` hands the registry a request ID, a cancel
+    /// arrives and writes its `Cancel` before the request itself reaches the
+    /// wire, and the host discards a cancel for a request it has never seen.
+    /// The dispatcher re-reads this on the far side of its write and re-sends,
+    /// so the cancellation cannot be lost — without serializing every dispatch
+    /// on this connection behind one lock.
+    #[test]
+    fn a_cancellation_raised_after_dispatch_is_still_visible_to_the_dispatcher() {
+        let registry = Arc::new(OperationRegistry::default());
+        let claim = registry.claim(OperationLane::File, "op").unwrap();
+        assert!(matches!(registry.bind(&claim, 11), Bound::Ready));
+        assert!(!registry.cancelled(&claim), "nothing has cancelled it yet");
+
+        assert_eq!(registry.cancel(OperationLane::File, "op"), Some(11));
+
+        assert!(
+            registry.cancelled(&claim),
+            "a cancellation racing the write was invisible to the dispatcher"
+        );
+        drop(claim);
     }
 
     /// A cleared registry is a connection that has gone.

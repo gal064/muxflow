@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { AutosaveController, type AutosaveView } from "../files/autosave";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
+import { parentPath } from "../files/listingModel";
 import { attachEditorLayout } from "../files/editorLayout";
 import { renderSafeMarkdown, renderSafeSvg } from "../files/markdown";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type DirectoryListing, type DirectoryWatchLease, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
@@ -534,9 +535,4 @@ function formatBytes(value: string): string {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
   return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
-}
-
-function parentPath(path: string): string {
-  const index = path.lastIndexOf("/");
-  return index <= 0 ? "/" : path.slice(0, index);
 }

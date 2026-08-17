@@ -102,13 +102,6 @@ struct TerminalClient {
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
     operations: Arc<OperationRegistry>,
-    /// Orders a cancellable request's dispatch against its own cancellation.
-    ///
-    /// Held only across binding an operation to its request ID and writing that
-    /// request — never across the wait for a response — so it serializes the
-    /// one window in which a cancel could otherwise overtake the request it is
-    /// cancelling.
-    dispatch: Mutex<()>,
     input_queue: Mutex<ClientInputQueue>,
     resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
@@ -140,7 +133,6 @@ impl TerminalClient {
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
             operations: Arc::new(OperationRegistry::default()),
-            dispatch: Mutex::new(()),
             input_queue: Mutex::new(ClientInputQueue::default()),
             resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
@@ -383,13 +375,6 @@ impl TerminalClient {
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = mpsc::channel();
         self.pending.lock().unwrap().insert(request_id, sender);
-        // Binding an operation to its request ID and writing that request are
-        // one step as far as cancellation is concerned. Apart, a cancel raised
-        // between them read the ID, wrote its `Cancel` first, and the host —
-        // which discards a cancel for a request it has never seen — dropped it;
-        // the request then ran with nothing able to stop it. That is the exact
-        // window this package's cancellation guarantee lives in.
-        let dispatch = operation.is_some().then(|| self.dispatch.lock().unwrap());
         if let Some(claim) = &operation
             && matches!(self.operations.bind(claim, request_id), Bound::Cancelled)
         {
@@ -405,13 +390,25 @@ impl TerminalClient {
             .and_then(|writer| {
                 writer.write(envelope(request_id, 0, Payload::Request(request)), deadline)
             });
-        drop(dispatch);
         if let Err(error) = write_result {
             self.pending.lock().unwrap().remove(&request_id);
             if let Some(claim) = &operation {
                 self.operations.unbind(claim);
             }
             return Err(error);
+        }
+        // A cancel raised between the bind above and the write that has just
+        // finished reached the host *before* the request it names, and the host
+        // discards a cancel for a request it has never seen — so the request
+        // would have run with nothing able to stop it. Rather than serialize
+        // dispatch behind one lock, which would put every Explorer cancellation
+        // in the queue behind any five-minute Git request, the cancellation is
+        // simply re-sent now that the request is provably on the wire. A
+        // duplicate cancel is harmless; a lost one is the whole guarantee.
+        if let Some(claim) = &operation
+            && self.operations.cancelled(claim)
+        {
+            self.cancel_request(request_id);
         }
         let result = match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
         {
@@ -422,18 +419,7 @@ impl TerminalClient {
             )),
             Ok(Err(error)) => Err(error),
             Err(_) => {
-                if let Some(writer) = self.writer.lock().unwrap().clone() {
-                    let _ = writer.try_write(
-                        envelope(
-                            self.next_request_id.fetch_add(1, Ordering::AcqRel),
-                            0,
-                            Payload::Cancel(v1::Cancel {
-                                target_request_id: request_id,
-                            }),
-                        ),
-                        Instant::now() + REQUEST_TIMEOUT,
-                    );
-                }
+                self.cancel_request(request_id);
                 self.pending.lock().unwrap().remove(&request_id);
                 Err(
                     "host request timed out; commit outcome is unknown and the request will not be replayed"
@@ -463,14 +449,12 @@ impl TerminalClient {
     }
 
     fn cancel_operation(&self, lane: OperationLane, operation_id: &str) -> Result<(), String> {
-        // Ordered against dispatch: see `request_with_timeout`. Taken before
-        // the ID is read, so a cancel either finds no request — and leaves a
-        // tombstone — or finds one the host has already been given.
-        let _dispatch = self.dispatch.lock().unwrap();
         let Some(request_id) = self.operations.cancel(lane, operation_id) else {
-            // Claimed but not yet dispatched. The tombstone the registry left
-            // refuses the request rather than sending it to a host that would
-            // never be told to stop.
+            // Claimed but not yet dispatched. The registry's tombstone refuses
+            // the request rather than sending it to a host that would never be
+            // told to stop — and if the request is being written right now, its
+            // own dispatcher re-sends this cancellation once the request is
+            // provably on the wire.
             return Ok(());
         };
         let writer = self
@@ -489,6 +473,22 @@ impl TerminalClient {
             ),
             Instant::now() + REQUEST_TIMEOUT,
         )
+    }
+
+    /// Best-effort `Cancel` for a request already on the wire.
+    fn cancel_request(&self, request_id: u64) {
+        if let Some(writer) = self.writer.lock().unwrap().clone() {
+            let _ = writer.try_write(
+                envelope(
+                    self.next_request_id.fetch_add(1, Ordering::AcqRel),
+                    0,
+                    Payload::Cancel(v1::Cancel {
+                        target_request_id: request_id,
+                    }),
+                ),
+                Instant::now() + REQUEST_TIMEOUT,
+            );
+        }
     }
 
     fn fail_pending(&self, message: &str) {

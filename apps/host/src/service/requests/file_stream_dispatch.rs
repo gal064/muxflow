@@ -182,12 +182,6 @@ mod tests {
     }
 
     impl BulkPeer {
-        fn advertised_capabilities(hello: &v1::ServerHello) -> u64 {
-            hello.capabilities
-        }
-    }
-
-    impl BulkPeer {
         async fn connect() -> (Self, tokio::task::JoinHandle<anyhow::Result<()>>) {
             let (mut client, server) = UnixStream::pair().unwrap();
             let task = tokio::spawn(serve_with_shutdown(server, None));
@@ -219,7 +213,7 @@ mod tests {
             // The desktop requires every host capability at its control
             // handshake, so a helper that serves this operation must say so.
             assert_ne!(
-                Self::advertised_capabilities(&hello) & tmux_agent_protocol::CAP_FILE_STREAM,
+                hello.capabilities & tmux_agent_protocol::CAP_FILE_STREAM,
                 0,
                 "a host that serves OpenFileStream must advertise it"
             );

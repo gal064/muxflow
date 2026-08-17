@@ -198,27 +198,49 @@ describe("ExplorerTree", () => {
       expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
       onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
       onRefresh={vi.fn()} onLoadMore={vi.fn()} />;
+    // The tree hands DOM focus to a row through its ref, so without a node mock
+    // the ref is null and the restore cannot be observed at all — the roving
+    // `tabIndex` would look right while the keyboard sat on `<body>`.
+    const focused: string[] = [];
+    const treeNode = {
+      scrollTop: 0, clientHeight: 400,
+      contains: () => false,
+      querySelector: (selector: string) => ({
+        offsetHeight: 20,
+        focus: () => focused.push(selector),
+      }),
+    };
     let renderer!: ReturnType<typeof create>;
     try {
-      await act(async () => { renderer = create(view(rows(["b.txt", "c.txt"]))); });
-      const focused = () => renderer.root.findAllByProps({ className: "file-row" })
+      await act(async () => {
+        renderer = create(view(rows(["b.txt", "c.txt"])), {
+          createNodeMock: (element) => (element.props as { role?: string }).role === "tree" ? treeNode : null,
+        });
+      });
+      const roving = () => renderer.root.findAllByProps({ className: "file-row" })
         .filter((row) => row.props.tabIndex === 0)
         .map((row) => row.props["data-tree-index"]);
       // Stand on "c.txt", the second row.
       await act(async () => {
         renderer.root.findByProps({ "data-tree-index": 1 }).props.onFocus();
       });
-      expect(focused()).toEqual([1]);
+      expect(roving()).toEqual([1]);
 
       // An agent creates a file that sorts above it.
       await act(async () => { renderer.update(view(rows(["a.txt", "b.txt", "c.txt"]))); });
-      expect(focused(), "an insert above the cursor moved it to another file").toEqual([2]);
+      expect(roving(), "an insert above the cursor moved it to another file").toEqual([2]);
       expect(renderer.root.findByProps({ "data-tree-index": 2 }).props["aria-selected"]).toBe(true);
 
-      // And then deletes the row the user is standing on.
+      // And then deletes the row the user is standing on. Removing a focused
+      // element sends focus to `<body>`, so the tree has to hand it back — and
+      // it has to know it owned the keyboard *before* the removal, which is
+      // not a question the document can answer afterwards.
+      focused.length = 0;
       await act(async () => { renderer.update(view(rows(["a.txt", "b.txt"]))); });
-      expect(focused(), "the tree lost its keyboard cursor entirely").toHaveLength(1);
-      expect(focused()[0]).toBe(1);
+      expect(roving(), "the tree lost its keyboard cursor entirely").toHaveLength(1);
+      expect(roving()[0]).toBe(1);
+      expect(focused, "the roving index moved but DOM focus was left on the body")
+        .toEqual(['[data-tree-index="1"]']);
     } finally {
       await act(async () => { renderer?.unmount(); });
     }
