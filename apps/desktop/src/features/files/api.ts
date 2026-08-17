@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { measurePerfOutcome, measurePerfRequest, recordPerfCounter, recordPerfHighWater, recordPerfJsonBytesDeferred, startPerfSpan } from "../../perf/probe";
+import { abortable, cancelled, throwIfAborted } from "../../transport/abortable";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES } from "./types";
 import type {
   AcquireWatchOptions,
@@ -49,6 +50,10 @@ interface WatchRecord {
 
 const encoder = new TextEncoder();
 const fatalDecoder = new TextDecoder("utf-8", { fatal: true });
+
+const WATCH_CANCELLED = "Directory watch was cancelled.";
+const READ_CANCELLED = "Directory read was cancelled.";
+const LOAD_CANCELLED = "File load was cancelled.";
 
 /** Renderer adapter for the production host file service. */
 export class TauriFileWorkspaceClient implements FileWorkspaceClient {
@@ -125,26 +130,21 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     const abort = options.signal;
     if (abort?.aborted) {
       release();
-      throw new DOMException("Directory watch was cancelled.", "AbortError");
+      throw cancelled(WATCH_CANCELLED);
     }
     // Abandoning a subscription answers this caller immediately. Waiting out
     // the shared request instead would hold a collapsed folder's expansion —
     // and the effect that owns it — until some *other* surface's watch landed.
-    let abandon: ((reason: unknown) => void) | undefined;
-    const abandoned = new Promise<never>((_, reject) => { abandon = reject; });
-    const onAbort = () => {
-      release();
-      abandon?.(new DOMException("Directory watch was cancelled.", "AbortError"));
-    };
-    abort?.addEventListener("abort", onAbort, { once: true });
+    //
+    // Cancellation is per subscriber, so the abort's side effect is this
+    // lease's `release` and nothing remote: the watch itself is only given
+    // back when the last subscriber has gone.
     try {
-      const snapshot = await (abort ? Promise.race([held.ready, abandoned]) : held.ready);
+      const snapshot = await abortable(held.ready, abort, release, WATCH_CANCELLED);
       return { snapshot, fresh, release };
     } catch (error) {
       release();
       throw error;
-    } finally {
-      abort?.removeEventListener("abort", onAbort);
     }
   }
 
@@ -419,7 +419,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
         settled = true;
         recordPerfCounter("file.ioRequestCancellations");
         if (transferId) cancelFileIo(transferId);
-        reject(new DOMException("File load was cancelled.", "AbortError"));
+        reject(cancelled(LOAD_CANCELLED));
       };
       signal?.addEventListener("abort", abort, { once: true });
       const finishError = (error: unknown, cancelled = false) => {
@@ -501,30 +501,17 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   ): Promise<T> {
     const boundary = { clientId: scope.clientId, command };
     const abort = cancellable?.signal;
-    if (abort?.aborted) throw new DOMException("Directory read was cancelled.", "AbortError");
+    // Before anything is asked of the host, so there is nothing to stop.
+    throwIfAborted(abort, READ_CANCELLED);
     const operationId = cancellable?.operationId;
-    // Abandoning answers the caller *now*, and stops the host as well. Merely
-    // telling the host to stop and then going on awaiting it made the whole
-    // abort path invisible to the caller: the promise resolved with whatever
-    // the host had already produced, and a listing could still be installed
-    // into a directory the tree had since collapsed.
-    let abandon: ((reason: unknown) => void) | undefined;
-    const abandoned = new Promise<never>((_, reject) => { abandon = reject; });
-    const stopRemoteWork = () => {
+    const answered = measurePerfRequest(metricName, "file", boundary, async (requestBoundary) => {
+      const response = await invoke<WireResponse>("file_request", requestBoundary);
+      return validate(response);
+    });
+    return await abortable(answered, abort, () => {
       recordPerfCounter("explorer.listCancellations");
       void invoke("cancel_file_request", { clientId: scope.clientId, operationId }).catch(() => undefined);
-      abandon?.(new DOMException("Directory read was cancelled.", "AbortError"));
-    };
-    if (abort) abort.addEventListener("abort", stopRemoteWork, { once: true });
-    try {
-      const answered = measurePerfRequest(metricName, "file", boundary, async (requestBoundary) => {
-        const response = await invoke<WireResponse>("file_request", requestBoundary);
-        return validate(response);
-      });
-      return await (abort ? Promise.race([answered, abandoned]) : answered);
-    } finally {
-      abort?.removeEventListener("abort", stopRemoteWork);
-    }
+    }, READ_CANCELLED);
   }
 
   #rootCommand(root: ActiveRoot, command: Record<string, unknown>): Record<string, unknown> {

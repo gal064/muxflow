@@ -13,7 +13,7 @@ use std::{
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use std::os::unix::ffi::OsStringExt;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 
 use super::validate_git_path;
 
@@ -41,17 +41,24 @@ pub(super) struct EntryMetadata {
 }
 
 impl EntryMetadata {
-    fn from_stat(value: libc::stat) -> Self {
-        Self {
-            dev: lossless_stat_component(value.st_dev),
+    /// Fallible rather than panicking.
+    ///
+    /// The widths differ by target — `st_dev` is `u64` on Linux and `i32` on
+    /// macOS, `st_mode` is `u32` and `u16` — so these really are conversions
+    /// and not casts dressed up as one. A component this host cannot represent
+    /// is a failed operation on one entry, not a reason to take the daemon
+    /// down, which is what the shared panicking helper did.
+    fn from_stat(value: libc::stat) -> anyhow::Result<Self> {
+        Ok(Self {
+            dev: stat_component(value.st_dev, "device number")?,
             ino: value.st_ino,
-            mode: lossless_stat_component(value.st_mode),
+            mode: stat_component(value.st_mode, "mode")?,
             len: value.st_size.max(0) as u64,
             mtime: value.st_mtime,
             mtime_nsec: value.st_mtime_nsec,
             ctime: value.st_ctime,
             ctime_nsec: value.st_ctime_nsec,
-        }
+        })
     }
 
     pub(super) fn mode(&self) -> u32 {
@@ -71,21 +78,27 @@ impl EntryMetadata {
     }
 }
 
-fn lossless_stat_component<T, U>(value: T) -> U
+/// One checked boundary for a platform-width `libc::stat` component.
+///
+/// Generic rather than a target-specific cast, so the same line is correct on
+/// every supported target and there is one place a widening can fail.
+fn stat_component<T, U>(value: T, field: &'static str) -> anyhow::Result<U>
 where
     T: TryInto<U>,
 {
-    match value.try_into() {
-        Ok(value) => value,
-        Err(_) => panic!("platform stat component does not fit its canonical representation"),
-    }
+    value
+        .try_into()
+        .map_err(|_| anyhow!("stat {field} does not fit its canonical representation"))
 }
 
-fn canonical_mode<T>(value: T) -> u32
-where
-    T: TryInto<u32>,
-{
-    lossless_stat_component(value)
+/// Widens a `mode_t` file-type constant to the width `EntryMetadata` keeps.
+///
+/// Only ever called with `libc::S_IF*` constants, each of which fits `u32` on
+/// every supported target, so the fallback is unreachable. It is `0` rather
+/// than a panic because `0` matches no file type: a platform that broke this
+/// assumption would misreport one entry's kind instead of killing the daemon.
+fn canonical_mode<T: TryInto<u32>>(value: T) -> u32 {
+    value.try_into().unwrap_or(0)
 }
 
 impl WorktreeRoot {
@@ -221,7 +234,7 @@ impl WorktreeEntry {
         // SAFETY: successful fstatat initialized the complete stat value.
         Ok(Some(EntryMetadata::from_stat(unsafe {
             stat.assume_init()
-        })))
+        })?))
     }
 
     pub(super) fn is_directory(&self) -> anyhow::Result<bool> {

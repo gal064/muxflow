@@ -164,6 +164,7 @@ impl FileService {
                             .await
                         {
                             native_rescan.store(true, Ordering::Release);
+                            rescan_failed = true;
                         }
                         continue;
                     }
@@ -189,16 +190,33 @@ impl FileService {
                     // re-lists everything instead.
                     let Ok(mapped) = mapped.await else {
                         native_rescan.store(true, Ordering::Release);
+                        rescan_failed = true;
                         continue;
                     };
                     for event in mapped {
                         broadcast_control_event(event);
                     }
                 }
-                if all_rescan {
-                    // Counted per sweep, not per watch: one deleted directory
-                    // among a hundred healthy ones must not push the backoff
-                    // out, and a sweep in which everything published clears it.
+                // Counted on any turn that re-armed the flag, and cleared only by
+                // a sweep in which everything published.
+                //
+                // Three sites above re-arm `native_rescan`, and this used to be
+                // fed by one of them. The two precise-event paths — an oversized
+                // batch answered by an authoritative listing, and a mapping task
+                // that never came back — re-armed without counting, so a
+                // directory failing either of those durably drove an uncounted
+                // rescan turn; whenever that turn's own sweep happened to
+                // publish, the counter was reset and the next failure started
+                // from zero. That is the un-backed-off ten-per-second re-list of
+                // every watch on the connection this counter exists to stop,
+                // reached without ever entering the branch that fed it.
+                //
+                // Still per sweep rather than per watch, for the original
+                // reason: one deleted directory among a hundred healthy ones
+                // must not push the backoff out. A turn that neither swept nor
+                // re-armed leaves the counter alone, so an ordinary precise
+                // turn cannot clear a backoff a pending rescan has earned.
+                if all_rescan || rescan_failed {
                     failed_rescans = if rescan_failed {
                         failed_rescans.saturating_add(1)
                     } else {

@@ -382,6 +382,31 @@ mod tests {
         assert_policy(TestOverflow, R, C, I, XH);
     }
 
+    /// The list above is hand-written, so this is what makes its name true.
+    ///
+    /// The production `match` is compiler-exhaustive, so a new operation cannot
+    /// be added without giving it a policy — but nothing forced it into the
+    /// compatibility assertions, and an operation with a policy and no
+    /// assertion is exactly what "compatible" was supposed to mean. Two
+    /// operations were added to this schema in one round by two authors who
+    /// each picked the same number; a list that silently stops covering the
+    /// enum is the next version of that.
+    #[test]
+    fn the_compatibility_list_covers_every_operation_the_enum_accepts() {
+        // The generated enum has no iterator, so this asks it directly. The
+        // bound is above every assigned number and below anything plausible.
+        let generated = (0..=255_i32)
+            .filter(|value| v1::Operation::try_from(*value).is_ok())
+            .count();
+        // Kept beside the list rather than derived from it: a count that
+        // derives itself from the thing it checks proves nothing.
+        assert_eq!(
+            generated, 49,
+            "the operation enum changed; add the new operation to \
+             `every_generated_operation_has_the_compatible_policy` and update this count",
+        );
+    }
+
     #[test]
     fn unknown_numeric_operations_remain_distinct_from_unspecified_and_each_other() {
         let first = OperationPolicy::for_raw(90);
