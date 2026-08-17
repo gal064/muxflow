@@ -2,12 +2,19 @@ use std::{
     io::{BufReader, Read, Write},
     os::fd::AsRawFd,
     process::{ChildStdin, ChildStdout},
+    time::{Duration, Instant},
 };
 
 use tmux_agent_protocol::{
-    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope,
+    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, capability_names, encode_frame, envelope,
+    missing_host_capabilities,
     v1::{self, envelope::Payload},
 };
+
+/// How long a cancellation will wait for a blocked pipe before giving up on
+/// telling the host. Bounded because this runs on the interaction path: a
+/// cancel that waits is a cancel that has stopped being one.
+const CANCEL_WRITE_BUDGET: Duration = Duration::from_millis(50);
 
 use super::scheduler::{BulkBinding, CancelState, DeadlineGuard};
 
@@ -168,6 +175,19 @@ impl<'a> BulkProtocolClient<'a> {
                 "bulk bridge handshake did not match its control identity/epoch binding".into(),
             );
         }
+        // The same admission rule the control handshake applies, on the lane
+        // that actually carries the single-request file open. Checking it only
+        // on the control lane meant a helper that predated `OpenFileStream`
+        // could be admitted here and fail every open with an unknown-operation
+        // error — precisely the outcome `CAP_FILE_STREAM` exists to replace
+        // with a refusal that names what is missing.
+        let missing = missing_host_capabilities(hello.capabilities);
+        if missing != 0 {
+            return Err(format!(
+                "bulk bridge is missing required capabilities: {}",
+                capability_names(missing).join(", ")
+            ));
+        }
         binding.validate()?;
         Ok(())
     }
@@ -274,8 +294,7 @@ impl<'a> BulkProtocolClient<'a> {
                     }),
                 ))
                 .map_err(|error| RequestFailure::Transport(error.to_string()))?;
-                let _ = self.stdin.write(&cancel);
-                let _ = self.stdin.flush();
+                self.write_cancel_frame(&cancel);
                 return Err(RequestFailure::Cancelled);
             }
             if let Some(frame) = self
@@ -344,6 +363,38 @@ impl<'a> BulkProtocolClient<'a> {
                 deadline.touch();
             }
         }
+    }
+
+    /// Writes the `Cancel` that abandons a request, past the cancellation that
+    /// prompted it.
+    ///
+    /// `stdin` is `O_NONBLOCK`, so a bare `write` had two failure modes and no
+    /// answer to either: `WouldBlock` dropped the cancellation entirely — the
+    /// host then streams a whole file to a reader that has left, which is the
+    /// guarantee this package is built around — and a *short* write left a
+    /// truncated envelope in the host's frame parser, desynchronizing the lane
+    /// permanently. The lane is marked unclean before the attempt rather than
+    /// after it, because there is no outcome here from which it can be trusted
+    /// again, and relying on the pool's separate cancelled-lease check to catch
+    /// that is relying on a fact stated in another module.
+    fn write_cancel_frame(&mut self, bytes: &[u8]) {
+        *self.clean = false;
+        let deadline = Instant::now() + CANCEL_WRITE_BUDGET;
+        let mut offset = 0;
+        while offset < bytes.len() && Instant::now() < deadline {
+            match self.stdin.write(&bytes[offset..]) {
+                Ok(0) => return,
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if wait_ready(self.stdin.as_raw_fd(), libc::POLLOUT, 10).is_err() {
+                        return;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+        let _ = self.stdin.flush();
     }
 
     fn write_envelope_cancellable(
