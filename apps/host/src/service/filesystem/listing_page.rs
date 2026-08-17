@@ -44,9 +44,17 @@ pub(super) struct DirectorySnapshotPage {
 /// Everything a page token is bound to. A token that does not reproduce this
 /// exact identity belongs to another server, root, or directory inode and is
 /// refused rather than answered from the wrong place.
+///
+/// The server's identity is *inside* `root_token` and deliberately not repeated
+/// as a field: `root_identity_token` (`path_policy.rs`) is
+/// `blake3(server_identity ‖ root path ‖ dev ‖ ino)`, so a token minted under
+/// another tmux server cannot reproduce this binding either way. Holding it
+/// separately cost a `tmux display-message` fork — `snapshot::server_identity()`
+/// is not memoized — on every `ListDirectory` *and* on every page, including
+/// the pages this type exists to answer out of memory without touching the
+/// filesystem or anything else at all.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct PageBinding {
-    server_identity: String,
     root_token: String,
     logical_path: Vec<u8>,
     device: u64,
@@ -61,7 +69,6 @@ impl PageBinding {
     ) -> anyhow::Result<Self> {
         let metadata = directory.metadata()?;
         Ok(Self {
-            server_identity: crate::service::snapshot::server_identity(),
             root_token: root.token().to_owned(),
             logical_path: logical_target.as_os_str().as_bytes().to_vec(),
             device: metadata.dev(),
@@ -92,7 +99,6 @@ impl PageBinding {
     ) -> String {
         let mut hasher = blake3::Hasher::new_keyed(token_key());
         for part in [
-            self.server_identity.as_bytes(),
             self.root_token.as_bytes(),
             self.logical_path.as_slice(),
             snapshot_id.as_bytes(),
