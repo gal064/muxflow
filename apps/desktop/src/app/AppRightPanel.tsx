@@ -4,7 +4,6 @@ import { ExplorerTree } from "../features/files/ExplorerTree";
 import type { DownloadIntent } from "../features/files/downloadFlow";
 import { keyForScope } from "../features/files/api";
 import type { FileEntry, FileMutation } from "../features/files/types";
-import type { GitWorkspaceClient } from "../features/git/types";
 import type { GitDiffTarget, GitStatusEntry } from "../features/git/types";
 import type { WorkspaceGitState } from "../features/git/useWorkspaceGit";
 import { GitSidebar } from "../features/git/GitSidebar";
@@ -25,7 +24,6 @@ interface AppRightPanelProps {
   surface: ShellState["panelSurface"];
   workspaceFiles: ReturnType<typeof useWorkspaceFiles>;
   workspaceGit: WorkspaceGitState;
-  gitClient: GitWorkspaceClient;
 }
 
 /** Explorer and Git rail wiring, kept outside the root application coordinator. */
@@ -53,17 +51,12 @@ export function AppRightPanel(props: AppRightPanelProps) {
       transfers={props.workspaceFiles.transfers}
     />}
     git={<GitSidebar
-      client={props.gitClient}
       disabled={!props.canMutate}
-      error={props.workspaceGit.error}
-      loading={props.workspaceGit.loading}
+      git={props.workspaceGit}
       onMessage={props.onMessage}
       onOpenDiff={props.onGitDiff}
-      onRefresh={() => void props.workspaceGit.refresh()}
-      onStatus={props.workspaceGit.accept}
       root={props.workspaceFiles.root}
       scope={props.fileScope}
-      status={props.workspaceGit.status}
     />}
     onSurface={props.onSurface}
     surface={props.surface}

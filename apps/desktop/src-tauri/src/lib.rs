@@ -227,6 +227,8 @@ pub fn run() {
             connection::git::git_request,
             connection::agent::agent_request,
             connection::git::cancel_git_request,
+            connection::git_content::read_git_diff_content,
+            connection::git_content::cancel_git_diff_content,
             connection::files::download_manager::start_download,
             connection::files::download_manager::cancel_download,
             connection::files::download_manager::suggest_download_destination,

@@ -43,6 +43,8 @@ use writer::ControlWriterHandle;
 pub(crate) mod agent;
 pub(crate) mod files;
 pub(crate) mod git;
+pub(crate) mod git_content;
+use git_content::GitContentReads;
 pub(crate) mod tmux_action;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -92,7 +94,7 @@ use transport::{
     ssh_profile_control_socket,
 };
 
-struct TerminalClient {
+pub(crate) struct TerminalClient {
     bulk_scope: Uuid,
     writer: Mutex<Option<ControlWriterHandle>>,
     child: Mutex<Option<Child>>,
@@ -102,6 +104,9 @@ struct TerminalClient {
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
     operations: Arc<OperationRegistry>,
+    /// Deferred Git diff-body reads this connection owns, so replacing the
+    /// connection cancels them rather than leaving them streaming.
+    git_content_reads: Arc<GitContentReads>,
     input_queue: Mutex<ClientInputQueue>,
     resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
@@ -133,6 +138,7 @@ impl TerminalClient {
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
             operations: Arc::new(OperationRegistry::default()),
+            git_content_reads: Arc::new(GitContentReads::default()),
             input_queue: Mutex::new(ClientInputQueue::default()),
             resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
@@ -433,6 +439,14 @@ impl TerminalClient {
         result
     }
 
+    pub(crate) fn git_content_reads(&self) -> Arc<GitContentReads> {
+        Arc::clone(&self.git_content_reads)
+    }
+
+    /// A renderer that aborts immediately can reach here before the request it
+    /// is cancelling has been written. The registry's tombstone makes that
+    /// abort take effect when the request binds, instead of letting the host
+    /// run a Git pipeline nobody is waiting for.
     fn cancel_git(&self, operation_id: &str) -> Result<(), String> {
         self.cancel_operation(OperationLane::Git, operation_id)
     }
@@ -493,6 +507,7 @@ impl TerminalClient {
 
     fn fail_pending(&self, message: &str) {
         self.operations.clear();
+        self.git_content_reads.cancel_all();
         for (_, sender) in self.pending.lock().unwrap().drain() {
             let _ = sender.send(Err(message.into()));
         }

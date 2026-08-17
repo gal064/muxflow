@@ -5,9 +5,9 @@ use std::{
     path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::bail;
@@ -26,19 +26,30 @@ const MAX_GIT_DIAGNOSTIC: usize = 4 * 1024;
 const CONFIRMATION_TTL: Duration = Duration::from_secs(120);
 const MAX_CONFIRMATIONS: usize = 1024;
 
+/// Repositories one connection keeps discovered state for.
+///
+/// Each retains a worktree descriptor and two metadata descriptors, so a client
+/// that walks many roots must not accumulate them without limit. Watched
+/// repositories are never evicted; a watch is a consumer saying it still wants
+/// this one.
+const MAX_TRACKED_REPOSITORIES: usize = 8;
+
+mod command;
+use command::{command_state, truthful_command_result};
+mod content;
+mod coordinator;
+pub(in crate::service) use coordinator::SubscriberActivation;
+#[cfg(test)]
+use coordinator::start_repository_watcher;
+use coordinator::{Freshness, RepositoryCapabilities, RepositoryCoordinator, RepositoryKey};
 mod diff;
-use diff::read_diff;
+use diff::{DiffAudience, read_diff};
 mod mutation;
 use mutation::{discard_file, mutate_hunk, unstage_file};
-#[cfg(test)]
 mod measurements;
+use measurements::GitObservation;
 #[cfg(test)]
-use measurements::phase14_git_snapshot;
-#[cfg(test)]
-use measurements::{
-    phase14_git_process_started, phase14_git_subscribers, phase14_git_watcher_created,
-    phase14_git_watcher_dropped,
-};
+use measurements::phase14_git_process_started;
 mod path;
 use path::WorktreeRoot;
 mod parser;
@@ -51,11 +62,10 @@ use runner::{
     git_output_with_deadline, git_path_cancellable,
 };
 mod status;
-use status::{discover_repository, read_status_cancellable, validate_metadata_capability};
+use status::{
+    RepositoryIdentity, discover_repository, read_status_cancellable, validate_metadata_capability,
+};
 mod watch;
-use watch::GitWatch;
-#[cfg(test)]
-use watch::start_repository_watcher;
 
 static REPOSITORY_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
@@ -77,153 +87,241 @@ struct ConfirmationBinding {
     expires: SystemTime,
 }
 
-#[derive(Default)]
-struct RepositoryState {
-    generation: u64,
-    fingerprint: String,
-    issued_refresh: u64,
-    applied_refresh: u64,
-}
-
-#[derive(Debug)]
-struct StatusRefreshSuperseded;
-
-impl std::fmt::Display for StatusRefreshSuperseded {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Git status refresh superseded by a newer snapshot")
-    }
-}
-
-impl std::error::Error for StatusRefreshSuperseded {}
-
+/// Every Git request for one connection.
+///
+/// The service itself holds no repository state: it routes each request to the
+/// one coordinator that owns that repository's identity, watcher, subscribers
+/// and status pipeline. Two consumers of the same repository therefore share
+/// all of it instead of each running their own discovery and their own watcher.
 pub(super) struct GitService {
-    states: Mutex<HashMap<String, RepositoryState>>,
+    repositories: Mutex<HashMap<RepositoryKey, Arc<RepositoryCoordinator>>>,
     confirmations: Mutex<HashMap<String, ConfirmationBinding>>,
-    watches: Mutex<HashMap<String, GitWatch>>,
-    next_generation: AtomicU64,
+    next_generation: Arc<AtomicU64>,
+    /// Monotonic clock for repository eviction order.
+    next_use: AtomicU64,
+    /// This connection's generation, taken from its `ClientHello` rather than
+    /// from any individual request.
+    connection_epoch: u64,
+    closed: Arc<AtomicBool>,
+    /// Deterministic observation counters for this connection. Always present:
+    /// a conditionally compiled field would give test and release builds
+    /// different shapes for the same code.
+    observation: Arc<GitObservation>,
 }
 
 impl GitService {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(closed: Arc<AtomicBool>, connection_epoch: u64) -> Self {
         Self {
-            states: Mutex::new(HashMap::new()),
+            repositories: Mutex::new(HashMap::new()),
             confirmations: Mutex::new(HashMap::new()),
-            watches: Mutex::new(HashMap::new()),
-            next_generation: AtomicU64::new(0),
+            next_generation: Arc::new(AtomicU64::new(0)),
+            next_use: AtomicU64::new(0),
+            connection_epoch,
+            closed,
+            observation: Arc::new(GitObservation::new()),
+        }
+    }
+
+    /// The live coordinator for a request, for tests that drive it directly.
+    #[cfg(test)]
+    pub(in crate::service::git) fn coordinator_for_test(
+        &self,
+        request: &v1::GitRequest,
+    ) -> Option<Arc<RepositoryCoordinator>> {
+        let key = RepositoryKey::for_connection(self.connection_epoch, request);
+        self.repositories.lock().unwrap().get(&key).map(Arc::clone)
+    }
+
+    /// Marks every established native watcher broken, as the platform would.
+    #[cfg(test)]
+    pub(in crate::service::git) fn fail_native_watcher_for_test(&self) {
+        for coordinator in self.repositories.lock().unwrap().values() {
+            coordinator.fail_native_watcher_for_test();
         }
     }
 
     #[cfg(test)]
-    pub(super) fn status(&self, request: &v1::GitRequest) -> anyhow::Result<v1::GitStatusSnapshot> {
-        self.status_cancellable(request, None)
+    pub(in crate::service::git) fn observation(&self) -> measurements::GitObservationCounts {
+        self.observation.snapshot()
     }
 
-    pub(super) fn status_cancellable(
+    /// The coordinator and cached identity for the requested repository.
+    ///
+    /// This is where a warm request stops costing Git subprocesses: the root
+    /// capability is revalidated with `fstat`, and discovery only runs when no
+    /// coordinator has ever resolved this root.
+    async fn repository(
         &self,
         request: &v1::GitRequest,
-        cancellation: Option<&AtomicBool>,
-    ) -> anyhow::Result<v1::GitStatusSnapshot> {
-        let root = capture_request_root(request)?;
-        self.status_with_root(request, &root, cancellation)
-    }
-
-    fn status_with_root(
-        &self,
-        request: &v1::GitRequest,
-        root: &WorktreeRoot,
-        cancellation: Option<&AtomicBool>,
-    ) -> anyhow::Result<v1::GitStatusSnapshot> {
-        let stable_root = root.stable_path();
-        let repository =
-            discover_repository(&stable_root, &request.root, root.identity()?, cancellation)?;
-        validate_repository_id(request, &repository)?;
-        let metadata = GitMetadataCapability::capture(&repository.git_dir, &repository.common_dir)?;
-        validate_metadata_capability(&request.root, root.identity()?, &repository, &metadata)?;
-        let _metadata_guard = metadata.install();
-        self.status_with_repository(request, &stable_root, repository, cancellation)
-    }
-
-    fn status_with_repository(
-        &self,
-        _request: &v1::GitRequest,
-        root: &str,
-        repository: v1::GitRepository,
-        cancellation: Option<&AtomicBool>,
-    ) -> anyhow::Result<v1::GitStatusSnapshot> {
-        let repository_id = repository.repository_id.clone();
-        let refresh = {
-            let mut states = self.states.lock().unwrap();
-            let state = states.entry(repository_id.clone()).or_default();
-            state.issued_refresh = state.issued_refresh.saturating_add(1);
-            state.issued_refresh
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> anyhow::Result<(Arc<RepositoryCoordinator>, Arc<RepositoryCapabilities>)> {
+        ensure_server_identity(request)?;
+        let key = RepositoryKey::for_connection(self.connection_epoch, request);
+        let use_order = self.next_use.fetch_add(1, Ordering::AcqRel);
+        let coordinator = {
+            let mut repositories = self.repositories.lock().unwrap();
+            let created = key.clone();
+            let coordinator = Arc::clone(repositories.entry(key.clone()).or_insert_with(|| {
+                Arc::new(RepositoryCoordinator::new(
+                    created,
+                    Arc::clone(&self.next_generation),
+                    Arc::clone(&self.closed),
+                    Arc::clone(&self.observation),
+                ))
+            }));
+            coordinator.touch(use_order);
+            evict_unwatched_repositories(&mut repositories, &key);
+            coordinator
         };
-        let mut snapshot = read_status_cancellable(root, repository, cancellation)?;
-        let fingerprint = status_fingerprint(&snapshot);
-        let mut states = self.states.lock().unwrap();
-        let state = states.entry(repository_id).or_default();
-        if refresh < state.applied_refresh {
-            return Err(StatusRefreshSuperseded.into());
+        match coordinator.capabilities(request, cancellation).await {
+            Ok(capabilities) => Ok((coordinator, capabilities)),
+            Err(error) => {
+                self.retire(&coordinator);
+                Err(error)
+            }
         }
-        state.applied_refresh = refresh;
-        if state.fingerprint != fingerprint {
-            state.fingerprint = fingerprint.clone();
-            state.generation = self.next_generation.fetch_add(1, Ordering::AcqRel) + 1;
+    }
+
+    /// Drops an unwatched coordinator, so the next request rediscovers rather
+    /// than inheriting one whose root it could no longer describe.
+    fn retire(&self, coordinator: &Arc<RepositoryCoordinator>) {
+        let mut repositories = self.repositories.lock().unwrap();
+        if repositories
+            .get(coordinator.key())
+            .is_some_and(|current| Arc::ptr_eq(current, coordinator))
+            && coordinator.subscriber_count() == 0
+        {
+            repositories.remove(coordinator.key());
+            coordinator.stop_watcher();
         }
-        snapshot.generation = state.generation;
-        snapshot.source_generation = fingerprint;
-        Ok(snapshot)
+    }
+
+    /// An explicitly requested status.
+    ///
+    /// Every automatic refresh now arrives through the shared watch, so a
+    /// client asking for status is a person asking for it — usually because
+    /// something looked wrong. Invalidating first is what makes that a real
+    /// re-read: answering from the snapshot the watcher last produced would
+    /// remove the only recovery there is from a watcher that missed an event.
+    pub(in crate::service) async fn status(
+        &self,
+        request: &v1::GitRequest,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> anyhow::Result<v1::GitStatusSnapshot> {
+        let (coordinator, capabilities) = self.repository(request, cancellation.clone()).await?;
+        coordinator.invalidate();
+        let status = coordinator
+            .status(&capabilities, Freshness::Coalesced, cancellation)
+            .await?;
+        Ok((*status).clone())
+    }
+
+    /// One diff, plus the authoritative status it was read against.
+    ///
+    /// The desktop previously requested status and then diff, paying two round
+    /// trips for one visible action.
+    ///
+    /// The status is read once, before the diff, and the repository's change
+    /// stamp is compared afterwards. An unchanged stamp means nothing
+    /// invalidated the repository while the diff was being read, so the
+    /// snapshot describes the state the diff landed on; a moved stamp is
+    /// re-read, which the coordinator coalesces with whatever refresh the
+    /// change already started. Reading status a second time unconditionally
+    /// would cost an unobserved repository two full pipelines and still prove
+    /// nothing, because that read could itself be overtaken.
+    pub(in crate::service) async fn diff(
+        &self,
+        request: &v1::GitRequest,
+        bulk_available: bool,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> anyhow::Result<(v1::GitDiff, v1::GitStatusSnapshot)> {
+        require_repository_id(request)?;
+        let (coordinator, capabilities) = self.repository(request, cancellation.clone()).await?;
+        if cancellation
+            .as_deref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            bail!("Git diff cancelled");
+        }
+        let ticket = coordinator.change_ticket();
+        let status = coordinator
+            .status(&capabilities, Freshness::Coalesced, cancellation.clone())
+            .await?;
+        require_authoritative(&status)?;
+        let repository = status
+            .repository
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Git status omitted its repository identity"))?;
+        let work = request.clone();
+        let read_capabilities = Arc::clone(&capabilities);
+        let read_cancellation = cancellation.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            let _guard = read_capabilities.metadata.install();
+            read_diff(
+                &read_capabilities.stable_root(),
+                repository,
+                &work,
+                DiffAudience::for_client(bulk_available),
+                read_cancellation.as_deref(),
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Git diff task failed: {error}"))??;
+        if coordinator.change_ticket() == ticket {
+            return Ok((read, (*status).clone()));
+        }
+        let landed = coordinator
+            .status(&capabilities, Freshness::Coalesced, cancellation)
+            .await?;
+        require_authoritative(&landed)?;
+        Ok((read, (*landed).clone()))
+    }
+
+    /// The diff including its raw patch, which the client response omits.
+    #[cfg(test)]
+    pub(super) async fn diff_with_patch(
+        &self,
+        request: &v1::GitRequest,
+    ) -> anyhow::Result<v1::GitDiff> {
+        let (coordinator, capabilities) = self.repository(request, None).await?;
+        let status = coordinator
+            .status(&capabilities, Freshness::Coalesced, None)
+            .await?;
+        let repository = status.repository.clone().unwrap();
+        let work = request.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = capabilities.metadata.install();
+            read_diff(
+                &capabilities.stable_root(),
+                repository,
+                &work,
+                DiffAudience::Mutation,
+                None,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Git diff task failed: {error}"))?
     }
 
     #[cfg(test)]
-    pub(super) fn diff(&self, request: &v1::GitRequest) -> anyhow::Result<v1::GitDiff> {
-        self.diff_cancellable(request, None)
-    }
-
-    pub(super) fn diff_cancellable(
+    pub(super) async fn diff_only(
         &self,
         request: &v1::GitRequest,
-        cancellation: Option<&AtomicBool>,
+        cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<v1::GitDiff> {
-        if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            bail!("Git diff cancelled");
-        }
-        let root = capture_request_root(request)?;
-        let stable_root = root.stable_path();
-        let repository =
-            discover_repository(&stable_root, &request.root, root.identity()?, cancellation)?;
-        validate_repository_id_required(request, &repository)?;
-        let metadata = GitMetadataCapability::capture(&repository.git_dir, &repository.common_dir)?;
-        validate_metadata_capability(&request.root, root.identity()?, &repository, &metadata)?;
-        let _metadata_guard = metadata.install();
-        let current =
-            self.status_with_repository(request, &stable_root, repository.clone(), cancellation)?;
-        validate_status_generation(request, &current)?;
-        let diff = read_diff(&stable_root, repository, request, cancellation)?;
-        let after = self.status_with_repository(
-            request,
-            &stable_root,
-            current.repository.clone().unwrap(),
-            cancellation,
-        )?;
-        if after.generation != current.generation {
-            bail!("stale Git status generation during diff");
-        }
-        if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            bail!("Git diff cancelled");
-        }
-        Ok(diff)
+        self.diff(request, true, cancellation)
+            .await
+            .map(|(diff, _)| diff)
     }
 
-    pub(super) fn prepare_discard(
+    pub(in crate::service) async fn prepare_discard(
         &self,
         request: &v1::GitRequest,
         connection_epoch: u64,
     ) -> anyhow::Result<v1::GitConfirmation> {
-        let root = capture_request_root(request)?;
-        let stable_root = root.stable_path();
-        let repository = discover_repository(&stable_root, &request.root, root.identity()?, None)?;
-        validate_repository_id_required(request, &repository)?;
+        require_repository_id(request)?;
         ensure_connection_epoch(request, connection_epoch)?;
+        let (_coordinator, capabilities) = self.repository(request, None).await?;
         let mutation = v1::GitMutationKind::try_from(request.mutation).unwrap_or_default();
         if !matches!(
             mutation,
@@ -244,7 +342,7 @@ impl GitService {
         confirmations.insert(
             token.clone(),
             ConfirmationBinding {
-                repository_id: repository.repository_id,
+                repository_id: capabilities.identity.repository_id.clone(),
                 root: request.root.clone(),
                 root_token: request.root_token.clone(),
                 server_identity: request.expected_server_identity.clone(),
@@ -270,82 +368,47 @@ impl GitService {
         })
     }
 
-    pub(super) async fn mutate(
-        self: &Arc<Self>,
+    pub(in crate::service) async fn mutate(
+        &self,
         request: v1::GitRequest,
         connection_epoch: u64,
         cancellation: Arc<AtomicBool>,
     ) -> anyhow::Result<v1::GitCommandResult> {
-        let preflight = request.clone();
-        let preflight_cancellation = Arc::clone(&cancellation);
-        let (root, repository, metadata) = tokio::task::spawn_blocking(move || {
-            let root = capture_request_root(&preflight)?;
-            ensure_connection_epoch(&preflight, connection_epoch)?;
-            let repository = discover_repository(
-                &root.stable_path(),
-                &preflight.root,
-                root.identity()?,
-                Some(&preflight_cancellation),
-            )?;
-            validate_repository_id_required(&preflight, &repository)?;
-            let metadata =
-                GitMetadataCapability::capture(&repository.git_dir, &repository.common_dir)?;
-            validate_metadata_capability(
-                &preflight.root,
-                root.identity()?,
-                &repository,
-                &metadata,
-            )?;
-            Ok::<_, anyhow::Error>((root, repository, metadata))
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("Git mutation preflight task failed: {error}"))??;
-        let guard = repository_lock(&repository.repository_id)
+        require_repository_id(&request)?;
+        ensure_connection_epoch(&request, connection_epoch)?;
+        let (coordinator, capabilities) = self
+            .repository(&request, Some(Arc::clone(&cancellation)))
+            .await?;
+        // The repository lock is process-global, so waiting for it can mean
+        // waiting on another connection's five-minute commit hook. Suppressing
+        // this connection's watcher only starts once this mutation actually
+        // owns the repository.
+        let _guard = repository_lock(&capabilities.identity.repository_id)
             .lock_owned()
             .await;
+        let _mutation = coordinator.begin_mutation();
         if cancellation.load(Ordering::Acquire) {
             bail!("cancelled before mutation");
         }
-        let service = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            let _guard = guard;
-            service.mutate_locked(
-                &request,
-                connection_epoch,
-                &cancellation,
-                &root,
-                repository,
-                metadata,
+        // Authority for a mutation is never inherited from another consumer's
+        // snapshot: the target is validated against a status pipeline this
+        // mutation ran itself, immediately before the command.
+        let current = coordinator
+            .status(
+                &capabilities,
+                Freshness::Exclusive,
+                Some(Arc::clone(&cancellation)),
             )
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("Git mutation task failed: {error}"))?
-    }
-
-    fn mutate_locked(
-        &self,
-        request: &v1::GitRequest,
-        connection_epoch: u64,
-        cancellation: &AtomicBool,
-        root: &WorktreeRoot,
-        repository: v1::GitRepository,
-        metadata: GitMetadataCapability,
-    ) -> anyhow::Result<v1::GitCommandResult> {
-        if cancellation.load(Ordering::Acquire) {
-            bail!("cancelled before mutation");
-        }
-        let stable_root = root.stable_path();
-        let _metadata_guard = metadata.install();
-        let current = self.status_with_repository(
-            request,
-            &stable_root,
-            repository.clone(),
-            Some(cancellation),
-        )?;
-        validate_status_generation(request, &current)?;
+            .await?;
+        validate_status_generation(&request, &current)?;
+        let repository = current
+            .repository
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Git status omitted its repository identity"))?;
         let mutation = v1::GitMutationKind::try_from(request.mutation).unwrap_or_default();
-        validate_mutation_target(request, mutation)?;
-        let target_entry = validate_current_target(&stable_root, request, &current)?;
+        validate_mutation_target(&request, mutation)?;
+        let stable_root = capabilities.stable_root();
+        let target_entry = validate_current_target(&stable_root, &request, &current)?;
         if target_entry.submodule {
             bail!("submodule Git mutations are unsupported");
         }
@@ -372,44 +435,59 @@ impl GitService {
             mutation,
             v1::GitMutationKind::DiscardFile | v1::GitMutationKind::DiscardHunk
         ) {
-            self.consume_confirmation(request, connection_epoch)?;
+            self.consume_confirmation(&request, connection_epoch)?;
         }
-        let pre_state = command_state(&stable_root, &current);
-        let execution = (|| match mutation {
-            v1::GitMutationKind::StageFile => {
-                git_path_cancellable(&stable_root, &[b"add"], &request.path, cancellation)
-            }
-            v1::GitMutationKind::UnstageFile => {
-                unstage_file(&stable_root, &repository, &mutation_request, cancellation)
-            }
-            v1::GitMutationKind::DiscardFile => {
-                discard_file(&stable_root, &repository, &mutation_request, cancellation)
-            }
-            v1::GitMutationKind::StageHunk
-            | v1::GitMutationKind::UnstageHunk
-            | v1::GitMutationKind::DiscardHunk => mutate_hunk(
-                &stable_root,
-                &repository,
-                &mutation_request,
-                mutation,
-                cancellation,
-            ),
-            v1::GitMutationKind::Unspecified => bail!("Git mutation kind is required"),
-        })();
-        // Once a mutation command starts, transport cancellation must not
-        // suppress the authority probe that tells the client what happened.
-        let refresh = self.status_with_repository(request, &stable_root, repository, None);
-        Ok(truthful_command_result(
-            execution,
-            pre_state,
-            refresh,
-            &stable_root,
-            false,
-        ))
+        let execution_capabilities = Arc::clone(&capabilities);
+        let execution_request = request.clone();
+        let execution_repository = repository.clone();
+        let execution_cancellation = Arc::clone(&cancellation);
+        let executed = tokio::task::spawn_blocking(move || {
+            let _metadata_guard = execution_capabilities.metadata.install();
+            let root = execution_capabilities.stable_root();
+            let pre_state = command_state(&root, &current);
+            let outcome = (|| match mutation {
+                v1::GitMutationKind::StageFile => git_path_cancellable(
+                    &root,
+                    &[b"add"],
+                    &execution_request.path,
+                    &execution_cancellation,
+                ),
+                v1::GitMutationKind::UnstageFile => unstage_file(
+                    &root,
+                    execution_repository.initial,
+                    &mutation_request,
+                    &execution_cancellation,
+                ),
+                v1::GitMutationKind::DiscardFile => discard_file(
+                    &root,
+                    &execution_capabilities.identity,
+                    execution_repository.initial,
+                    &mutation_request,
+                    &execution_cancellation,
+                ),
+                v1::GitMutationKind::StageHunk
+                | v1::GitMutationKind::UnstageHunk
+                | v1::GitMutationKind::DiscardHunk => mutate_hunk(
+                    &root,
+                    &execution_repository,
+                    &mutation_request,
+                    mutation,
+                    &execution_cancellation,
+                ),
+                v1::GitMutationKind::Unspecified => bail!("Git mutation kind is required"),
+            })();
+            (outcome, pre_state)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Git mutation task failed: {error}"))?;
+        let (execution, pre_state) = executed;
+        Ok(self
+            .reconcile_command(&coordinator, &capabilities, execution, pre_state, false)
+            .await)
     }
 
-    pub(super) async fn commit(
-        self: &Arc<Self>,
+    pub(in crate::service) async fn commit(
+        &self,
         request: v1::GitRequest,
         connection_epoch: u64,
         cancellation: Arc<AtomicBool>,
@@ -417,51 +495,33 @@ impl GitService {
         if request.commit_message.trim().is_empty() {
             bail!("commit message must not be empty");
         }
-        let preflight = request.clone();
-        let preflight_cancellation = Arc::clone(&cancellation);
-        let (root, repository, metadata) = tokio::task::spawn_blocking(move || {
-            let root = capture_request_root(&preflight)?;
-            ensure_connection_epoch(&preflight, connection_epoch)?;
-            let repository = discover_repository(
-                &root.stable_path(),
-                &preflight.root,
-                root.identity()?,
-                Some(&preflight_cancellation),
-            )?;
-            validate_repository_id_required(&preflight, &repository)?;
-            let metadata =
-                GitMetadataCapability::capture(&repository.git_dir, &repository.common_dir)?;
-            validate_metadata_capability(
-                &preflight.root,
-                root.identity()?,
-                &repository,
-                &metadata,
-            )?;
-            Ok::<_, anyhow::Error>((root, repository, metadata))
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("Git commit preflight task failed: {error}"))??;
-        let guard = repository_lock(&repository.repository_id)
+        require_repository_id(&request)?;
+        ensure_connection_epoch(&request, connection_epoch)?;
+        let (coordinator, capabilities) = self
+            .repository(&request, Some(Arc::clone(&cancellation)))
+            .await?;
+        let _guard = repository_lock(&capabilities.identity.repository_id)
             .lock_owned()
             .await;
-        let service = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            let _guard = guard;
-            if cancellation.load(Ordering::Acquire) {
-                bail!("cancelled before commit");
-            }
-            let stable_root = root.stable_path();
-            let _metadata_guard = metadata.install();
-            let current = service.status_with_repository(
-                &request,
-                &stable_root,
-                repository.clone(),
-                Some(&cancellation),
-            )?;
-            validate_status_generation(&request, &current)?;
-            let pre_state = command_state(&stable_root, &current);
-            let execution = git_output_with_deadline(
-                &stable_root,
+        let _mutation = coordinator.begin_mutation();
+        if cancellation.load(Ordering::Acquire) {
+            bail!("cancelled before commit");
+        }
+        let current = coordinator
+            .status(
+                &capabilities,
+                Freshness::Exclusive,
+                Some(Arc::clone(&cancellation)),
+            )
+            .await?;
+        validate_status_generation(&request, &current)?;
+        let execution_capabilities = Arc::clone(&capabilities);
+        let executed = tokio::task::spawn_blocking(move || {
+            let _metadata_guard = execution_capabilities.metadata.install();
+            let root = execution_capabilities.stable_root();
+            let pre_state = command_state(&root, &current);
+            let outcome = git_output_with_deadline(
+                &root,
                 &[
                     OsStr::new("commit"),
                     OsStr::new("-m"),
@@ -471,17 +531,44 @@ impl GitService {
                 Some(&cancellation),
                 GIT_COMMIT_DEADLINE,
             );
-            let refresh = service.status_with_repository(&request, &stable_root, repository, None);
-            Ok(truthful_command_result(
-                execution,
-                pre_state,
-                refresh,
-                &stable_root,
-                true,
-            ))
+            (outcome, pre_state)
         })
         .await
-        .map_err(|error| anyhow::anyhow!("Git commit task failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("Git commit task failed: {error}"))?;
+        let (execution, pre_state) = executed;
+        Ok(self
+            .reconcile_command(&coordinator, &capabilities, execution, pre_state, true)
+            .await)
+    }
+
+    /// The one authoritative refresh a completed Git command produces.
+    ///
+    /// Invalidating before refreshing means the watcher's own wake-up for these
+    /// same writes coalesces onto this pipeline instead of running a second
+    /// one, and publishing it here is what every other consumer of the
+    /// repository receives. Transport cancellation deliberately does not reach
+    /// this refresh: once a command has run, the client must be told what
+    /// happened.
+    async fn reconcile_command(
+        &self,
+        coordinator: &Arc<RepositoryCoordinator>,
+        capabilities: &Arc<RepositoryCapabilities>,
+        execution: anyhow::Result<GitOutput>,
+        pre_state: command::CommandState,
+        commit: bool,
+    ) -> v1::GitCommandResult {
+        coordinator.invalidate();
+        let refresh = coordinator
+            .status(capabilities, Freshness::Coalesced, None)
+            .await
+            .map(|status| (*status).clone());
+        truthful_command_result(
+            execution,
+            pre_state,
+            refresh,
+            &capabilities.stable_root(),
+            commit,
+        )
     }
 
     fn consume_confirmation(&self, request: &v1::GitRequest, epoch: u64) -> anyhow::Result<()> {
@@ -517,131 +604,39 @@ impl GitService {
     }
 }
 
-struct CommandState {
-    head_oid: String,
-    index_generation: Option<String>,
-    status_generation: u64,
-    source_generation: String,
-    authoritative: bool,
-}
-
-fn command_state(root: &str, status: &v1::GitStatusSnapshot) -> CommandState {
-    CommandState {
-        head_oid: status
-            .repository
-            .as_ref()
-            .map(|repository| repository.head_oid.clone())
-            .unwrap_or_default(),
-        index_generation: git_index_generation(root).ok(),
-        status_generation: status.generation,
-        source_generation: status.source_generation.clone(),
-        authoritative: status.authoritative && !status.oversized,
+impl Drop for GitService {
+    fn drop(&mut self) {
+        for (_, coordinator) in self.repositories.get_mut().unwrap().drain() {
+            coordinator.stop_watcher();
+            coordinator.drop_all_subscribers();
+        }
     }
 }
 
-fn truthful_command_result(
-    execution: anyhow::Result<GitOutput>,
-    pre: CommandState,
-    refresh: anyhow::Result<v1::GitStatusSnapshot>,
-    root: &str,
-    commit: bool,
-) -> v1::GitCommandResult {
-    let post = refresh
-        .as_ref()
-        .ok()
-        .map(|status| command_state(root, status));
-    let post_authoritative = post
-        .as_ref()
-        .is_some_and(|state| state.authoritative && state.index_generation.is_some());
-    let state_unchanged = post.as_ref().is_some_and(|state| {
-        pre.authoritative
-            && pre.index_generation.is_some()
-            && state.head_oid == pre.head_oid
-            && state.index_generation == pre.index_generation
-            && state.source_generation == pre.source_generation
-    });
-    let head_advanced = post.as_ref().is_some_and(|state| {
-        post_authoritative && !state.head_oid.is_empty() && state.head_oid != pre.head_oid
-    });
-
-    let (exit_code, stdout, stderr, stdout_truncated, stderr_truncated, command_error, success) =
-        match execution {
-            Ok(output) => {
-                let success = output.status.success() && output.interrupted.is_none();
-                let error = output.interrupted.clone().unwrap_or_else(|| {
-                    if success {
-                        String::new()
-                    } else {
-                        String::from_utf8_lossy(&output.stderr).trim().to_owned()
-                    }
-                });
-                (
-                    output.status.code().unwrap_or(-1),
-                    output.output.stdout,
-                    output.output.stderr,
-                    output.stdout_truncated,
-                    output.stderr_truncated,
-                    error,
-                    success,
-                )
-            }
-            Err(error) => (
-                -1,
-                Vec::new(),
-                Vec::new(),
-                false,
-                false,
-                error.to_string(),
-                false,
-            ),
+/// Drops the least recently used repositories nobody is watching.
+///
+/// `in_use` is the repository the current request is about to work with; it is
+/// never a candidate, even when it is the only unwatched one, because the
+/// caller already holds it and would otherwise proceed against a coordinator
+/// this map no longer knows about.
+fn evict_unwatched_repositories(
+    repositories: &mut HashMap<RepositoryKey, Arc<RepositoryCoordinator>>,
+    in_use: &RepositoryKey,
+) {
+    while repositories.len() > MAX_TRACKED_REPOSITORIES {
+        let Some(evicted) = repositories
+            .values()
+            .filter(|coordinator| {
+                coordinator.subscriber_count() == 0 && coordinator.key() != in_use
+            })
+            .min_by_key(|coordinator| coordinator.last_use())
+            .map(|coordinator| coordinator.key().clone())
+        else {
+            return;
         };
-    let outcome = if success || (commit && head_advanced) {
-        v1::GitCommandOutcome::Applied
-    } else if post_authoritative && state_unchanged {
-        v1::GitCommandOutcome::NotApplied
-    } else {
-        v1::GitCommandOutcome::PartialOrUnknown
-    };
-    let (status, refresh_failed, refresh_error) = match refresh {
-        Ok(status) if status.authoritative && !status.oversized => {
-            (Some(status), false, String::new())
+        if let Some(coordinator) = repositories.remove(&evicted) {
+            coordinator.stop_watcher();
         }
-        Ok(status) => {
-            let error = if status.error.is_empty() {
-                "post-command Git status is not authoritative".into()
-            } else {
-                status.error.clone()
-            };
-            (Some(status), true, error)
-        }
-        Err(error) => (None, true, error.to_string()),
-    };
-    v1::GitCommandResult {
-        exit_code,
-        stdout,
-        stderr,
-        status,
-        applied: outcome == v1::GitCommandOutcome::Applied,
-        refresh_failed,
-        refresh_error,
-        outcome: outcome.into(),
-        stdout_truncated,
-        stderr_truncated,
-        error: command_error,
-        pre_head_oid: pre.head_oid,
-        post_head_oid: post
-            .as_ref()
-            .map(|state| state.head_oid.clone())
-            .unwrap_or_default(),
-        pre_index_generation: pre.index_generation.unwrap_or_default(),
-        post_index_generation: post
-            .as_ref()
-            .and_then(|state| state.index_generation.clone())
-            .unwrap_or_default(),
-        post_state_authoritative: post_authoritative,
-        pre_status_generation: pre.status_generation,
-        post_status_generation: post.as_ref().map_or(0, |state| state.status_generation),
-        status_omitted: false,
     }
 }
 
@@ -658,15 +653,13 @@ fn repository_lock(id: &str) -> Arc<tokio::sync::Mutex<()>> {
     )
 }
 
-fn capture_request_root(request: &v1::GitRequest) -> anyhow::Result<WorktreeRoot> {
+fn ensure_server_identity(request: &v1::GitRequest) -> anyhow::Result<()> {
     if request.expected_server_identity.is_empty()
         || request.expected_server_identity != server_identity()
     {
         bail!("stale or missing tmux server identity");
     }
-    let root = WorktreeRoot::capture(&request.root)?;
-    root.validate_token(&request.root, &request.root_token)?;
-    Ok(root)
+    Ok(())
 }
 
 fn ensure_connection_epoch(request: &v1::GitRequest, epoch: u64) -> anyhow::Result<()> {
@@ -676,24 +669,22 @@ fn ensure_connection_epoch(request: &v1::GitRequest, epoch: u64) -> anyhow::Resu
     Ok(())
 }
 
-fn validate_repository_id(
-    request: &v1::GitRequest,
-    repository: &v1::GitRepository,
-) -> anyhow::Result<()> {
-    if !request.repository_id.is_empty() && request.repository_id != repository.repository_id {
-        bail!("stale repository identity");
+fn require_repository_id(request: &v1::GitRequest) -> anyhow::Result<()> {
+    if request.repository_id.is_empty() {
+        bail!("repository identity is required");
     }
     Ok(())
 }
 
-fn validate_repository_id_required(
-    request: &v1::GitRequest,
-    repository: &v1::GitRepository,
-) -> anyhow::Result<()> {
-    if request.repository_id.is_empty() {
-        bail!("repository identity is required");
+/// Rejects a request whose asserted repository is not the one this root is.
+///
+/// An empty assertion means the client is still discovering; anything else is
+/// a claim, and a claim that does not hold is a stale scope.
+fn require_matching_repository(request: &v1::GitRequest, discovered: &str) -> anyhow::Result<()> {
+    if !request.repository_id.is_empty() && request.repository_id != discovered {
+        bail!("stale repository identity");
     }
-    validate_repository_id(request, repository)
+    Ok(())
 }
 
 fn validate_status_generation(
@@ -792,6 +783,14 @@ fn validate_current_target(
         bail!("directory mutation targets are ambiguous and are not supported");
     }
     Ok(entry.clone())
+}
+
+/// Rejects a status no client decision may be based on.
+fn require_authoritative(status: &v1::GitStatusSnapshot) -> anyhow::Result<()> {
+    if !status.authoritative || status.oversized {
+        bail!("Git status is not authoritative");
+    }
+    Ok(())
 }
 
 fn status_fingerprint(status: &v1::GitStatusSnapshot) -> String {

@@ -56,7 +56,12 @@ struct Slot {
 }
 
 /// A claimed operation ID. Dropping it releases the ID for reuse.
-pub(super) struct OperationClaim {
+///
+/// `pub(crate)` only because `TerminalClient` itself is: the Git diff-body
+/// lane is a sibling module, so the client type is reachable crate-wide and a
+/// method returning this would otherwise leak a less-visible type. The claim
+/// is opaque either way — it has no constructor and no field outside here.
+pub(crate) struct OperationClaim {
     registry: Arc<OperationRegistry>,
     key: (OperationLane, String),
 }

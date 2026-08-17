@@ -6,102 +6,97 @@ use std::{collections::HashSet, sync::atomic::AtomicBool};
 use super::path::WorktreeRoot;
 use super::runner::{GitMetadataCapability, git_output_cancellable};
 
+/// The parts of a repository that identify it, and nothing else.
+///
+/// Deliberately not a `v1::GitRepository`: HEAD state is not known at discovery
+/// and a protobuf value with three blank fields would be a value that lies.
+/// Only `read_status_cancellable`, which reads HEAD authoritatively, builds the
+/// wire type.
+#[derive(Clone, Debug)]
+pub(super) struct RepositoryIdentity {
+    pub(super) repository_id: String,
+    pub(super) worktree_root: String,
+    pub(super) git_dir: Vec<u8>,
+    pub(super) common_dir: Vec<u8>,
+}
+
+/// Discovers the repository's static identity in one Git process.
+///
+/// `rev-parse` answers each query in argument order, so the worktree root, the
+/// git directory and the common directory arrive together. HEAD and the branch
+/// name are deliberately *not* asked for here: `git status --porcelain=v2
+/// --branch` already reports both authoritatively, and asking twice made a
+/// warm status refresh cost five processes before it read anything.
 pub(super) fn discover_repository(
     root: &str,
     logical_root: &str,
     root_identity: (u64, u64),
     cancellation: Option<&AtomicBool>,
-) -> anyhow::Result<v1::GitRepository> {
-    let top = runner::git_stdout_cancellable(
-        root,
-        &[
-            OsStr::new("rev-parse"),
-            OsStr::new("--path-format=absolute"),
-            OsStr::new("--show-toplevel"),
-        ],
-        cancellation,
-    )?;
-    let worktree_root = trim_one_newline(top);
+) -> anyhow::Result<RepositoryIdentity> {
+    let [worktree_root, git_dir, common_dir] = repository_paths(root, cancellation)?;
+    let worktree_root = String::from_utf8_lossy(&worktree_root).into_owned();
     if worktree_root.as_bytes() != logical_root.as_bytes() {
         bail!("active root is not the requested Git worktree root");
     }
-    let git_dir = trim_one_newline(runner::git_stdout_cancellable(
-        root,
-        &[
-            OsStr::new("rev-parse"),
-            OsStr::new("--path-format=absolute"),
-            OsStr::new("--git-dir"),
-        ],
-        cancellation,
-    )?)
-    .into_bytes();
-    let common_dir = trim_one_newline(runner::git_stdout_cancellable(
-        root,
-        &[
-            OsStr::new("rev-parse"),
-            OsStr::new("--path-format=absolute"),
-            OsStr::new("--git-common-dir"),
-        ],
-        cancellation,
-    )?)
-    .into_bytes();
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(logical_root.as_bytes());
-    hasher.update(&root_identity.0.to_le_bytes());
-    hasher.update(&root_identity.1.to_le_bytes());
-    hasher.update(&[0]);
-    hasher.update(&git_dir);
     let git_identity = directory_identity(&git_dir)?;
-    hasher.update(&git_identity.0.to_le_bytes());
-    hasher.update(&git_identity.1.to_le_bytes());
-    hasher.update(&[0]);
-    hasher.update(&common_dir);
     let common_identity = directory_identity(&common_dir)?;
-    hasher.update(&common_identity.0.to_le_bytes());
-    hasher.update(&common_identity.1.to_le_bytes());
-    let head = git_output_cancellable(
-        root,
-        &[
-            OsStr::new("rev-parse"),
-            OsStr::new("--verify"),
-            OsStr::new("HEAD"),
-        ],
-        None,
-        cancellation,
-    )?;
-    let initial = !head.status.success();
-    let head_oid = if initial {
-        String::new()
-    } else {
-        trim_one_newline(head.output.stdout)
-    };
-    let symbolic = git_output_cancellable(
-        root,
-        &[
-            OsStr::new("symbolic-ref"),
-            OsStr::new("--quiet"),
-            OsStr::new("--short"),
-            OsStr::new("HEAD"),
-        ],
-        None,
-        cancellation,
-    )?;
-    let detached_head = !initial && !symbolic.status.success();
-    let head_name = if symbolic.status.success() {
-        trim_one_newline(symbolic.output.stdout)
-    } else {
-        String::new()
-    };
-    Ok(v1::GitRepository {
-        repository_id: hasher.finalize().to_hex().to_string(),
+    Ok(RepositoryIdentity {
+        repository_id: repository_identity(
+            logical_root,
+            root_identity,
+            &git_dir,
+            git_identity,
+            &common_dir,
+            common_identity,
+        ),
         worktree_root,
         git_dir,
         common_dir,
-        initial,
-        detached_head,
-        head_name,
-        head_oid,
     })
+}
+
+/// The worktree root, git directory and common directory, absolute.
+///
+/// One `rev-parse` answers all three, but its output is newline separated and a
+/// directory name may contain a newline. When the batched answer is not exactly
+/// three lines the query is repeated one at a time, where each answer is the
+/// whole of its own output and cannot be mis-split.
+fn repository_paths(root: &str, cancellation: Option<&AtomicBool>) -> anyhow::Result<[Vec<u8>; 3]> {
+    const QUERIES: [&str; 3] = ["--show-toplevel", "--git-dir", "--git-common-dir"];
+    let batched = runner::git_stdout_cancellable(
+        root,
+        &[
+            OsStr::new("rev-parse"),
+            OsStr::new("--path-format=absolute"),
+            OsStr::new(QUERIES[0]),
+            OsStr::new(QUERIES[1]),
+            OsStr::new(QUERIES[2]),
+        ],
+        cancellation,
+    )?;
+    let lines: Vec<_> = batched
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| trim_one_carriage_return(line.to_vec()))
+        .collect();
+    if let Ok(paths) = <[Vec<u8>; 3]>::try_from(lines) {
+        return Ok(paths);
+    }
+    let mut separate = Vec::with_capacity(QUERIES.len());
+    for query in QUERIES {
+        let value = runner::git_stdout_cancellable(
+            root,
+            &[
+                OsStr::new("rev-parse"),
+                OsStr::new("--path-format=absolute"),
+                OsStr::new(query),
+            ],
+            cancellation,
+        )?;
+        separate.push(trim_one_trailing_newline(value));
+    }
+    <[Vec<u8>; 3]>::try_from(separate)
+        .map_err(|_| anyhow::anyhow!("git rev-parse omitted a repository path"))
 }
 
 fn directory_identity(path: &[u8]) -> anyhow::Result<(u64, u64)> {
@@ -125,26 +120,51 @@ fn directory_identity(path: &[u8]) -> anyhow::Result<(u64, u64)> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
-pub(super) fn validate_metadata_capability(
+/// The repository identity, derived in exactly one place.
+///
+/// Discovery computes it and capability validation recomputes it to prove the
+/// metadata directories did not change underneath. Two hand-written copies of
+/// this derivation that drifted apart would accept a capability describing a
+/// different repository, so there is only ever one.
+fn repository_identity(
     logical_root: &str,
     root_identity: (u64, u64),
-    repository: &v1::GitRepository,
-    capability: &GitMetadataCapability,
-) -> anyhow::Result<()> {
-    let (git_identity, common_identity) = capability.identities()?;
+    git_dir: &[u8],
+    git_identity: (u64, u64),
+    common_dir: &[u8],
+    common_identity: (u64, u64),
+) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(logical_root.as_bytes());
     hasher.update(&root_identity.0.to_le_bytes());
     hasher.update(&root_identity.1.to_le_bytes());
     hasher.update(&[0]);
-    hasher.update(&repository.git_dir);
+    hasher.update(git_dir);
     hasher.update(&git_identity.0.to_le_bytes());
     hasher.update(&git_identity.1.to_le_bytes());
     hasher.update(&[0]);
-    hasher.update(&repository.common_dir);
+    hasher.update(common_dir);
     hasher.update(&common_identity.0.to_le_bytes());
     hasher.update(&common_identity.1.to_le_bytes());
-    if hasher.finalize().to_hex().as_str() != repository.repository_id {
+    hasher.finalize().to_hex().to_string()
+}
+
+pub(super) fn validate_metadata_capability(
+    logical_root: &str,
+    root_identity: (u64, u64),
+    repository: &RepositoryIdentity,
+    capability: &GitMetadataCapability,
+) -> anyhow::Result<()> {
+    let (git_identity, common_identity) = capability.identities()?;
+    let recomputed = repository_identity(
+        logical_root,
+        root_identity,
+        &repository.git_dir,
+        git_identity,
+        &repository.common_dir,
+        common_identity,
+    );
+    if recomputed != repository.repository_id {
         bail!("Git metadata directories changed while capturing repository capability");
     }
     Ok(())
@@ -152,7 +172,7 @@ pub(super) fn validate_metadata_capability(
 
 pub(super) fn read_status_cancellable(
     root: &str,
-    mut repository: v1::GitRepository,
+    identity: &RepositoryIdentity,
     cancellation: Option<&AtomicBool>,
 ) -> anyhow::Result<v1::GitStatusSnapshot> {
     let output = git_output_cancellable(
@@ -169,6 +189,10 @@ pub(super) fn read_status_cancellable(
         cancellation,
     )?;
     ensure_success(&output, "git status")?;
+    // Parsed before the truncation check: the branch header is the first thing
+    // porcelain writes, so even a bounded snapshot can still say which branch
+    // it is bounded for.
+    let repository = repository_with_head(identity, &output.stdout);
     if output.stdout_truncated {
         let total_entry_count = output
             .stdout
@@ -207,39 +231,22 @@ pub(super) fn read_status_cancellable(
                 .is_some_and(|metadata| metadata.is_symlink());
         }
     }
-    for record in output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|record| record.starts_with(b"# "))
-    {
-        if let Some(value) = record.strip_prefix(b"# branch.oid ") {
-            repository.initial = value == b"(initial)";
-            repository.head_oid = String::from_utf8_lossy(value).into_owned();
-        } else if let Some(value) = record.strip_prefix(b"# branch.head ") {
-            repository.detached_head = value == b"(detached)";
-            repository.head_name = if repository.detached_head {
-                String::new()
-            } else {
-                String::from_utf8_lossy(value).into_owned()
-            };
-        }
-    }
-    let mut identity = blake3::Hasher::new();
-    identity.update(&output.stdout);
+    let mut content_identity = blake3::Hasher::new();
+    content_identity.update(&output.stdout);
     for entry in &entries {
         if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             bail!("Git status refresh cancelled");
         }
-        identity.update(&entry.path);
-        identity.update(&[0]);
-        identity.update(&entry.original_path);
-        identity.update(&[0]);
+        content_identity.update(&entry.path);
+        content_identity.update(&[0]);
+        content_identity.update(&entry.original_path);
+        content_identity.update(&[0]);
         // Hashing changed worktree entries makes content edits authoritative
         // even when porcelain XY/mode fields remain exactly the same.
         if entry.worktree_status != "." || entry.untracked || entry.conflicted {
             worktree
                 .entry(&entry.path)?
-                .hash_identity(&mut identity, cancellation)?;
+                .hash_identity(&mut content_identity, cancellation)?;
         }
     }
     Ok(bound_status_snapshot(v1::GitStatusSnapshot {
@@ -248,7 +255,7 @@ pub(super) fn read_status_cancellable(
         entries,
         authoritative: true,
         copy_detection_incomplete,
-        source_generation: identity.finalize().to_hex().to_string(),
+        source_generation: content_identity.finalize().to_hex().to_string(),
         ..Default::default()
     }))
 }
@@ -363,12 +370,51 @@ pub(super) fn apply_copy_detection(
     Ok(false)
 }
 
-fn trim_one_newline(mut value: Vec<u8>) -> String {
-    if value.ends_with(b"\n") {
-        value.pop();
-        if value.ends_with(b"\r") {
-            value.pop();
+/// The wire repository, with HEAD taken from porcelain's branch header.
+fn repository_with_head(identity: &RepositoryIdentity, porcelain: &[u8]) -> v1::GitRepository {
+    let mut repository = v1::GitRepository {
+        repository_id: identity.repository_id.clone(),
+        worktree_root: identity.worktree_root.clone(),
+        git_dir: identity.git_dir.clone(),
+        common_dir: identity.common_dir.clone(),
+        ..Default::default()
+    };
+    for record in porcelain
+        .split(|byte| *byte == 0)
+        .filter(|record| record.starts_with(b"# "))
+    {
+        if let Some(value) = record.strip_prefix(b"# branch.oid ") {
+            // Porcelain writes the literal `(initial)` where a repository has no
+            // commit yet. That is a state, not an object id.
+            repository.initial = value == b"(initial)";
+            repository.head_oid = if repository.initial {
+                String::new()
+            } else {
+                String::from_utf8_lossy(value).into_owned()
+            };
+        } else if let Some(value) = record.strip_prefix(b"# branch.head ") {
+            repository.detached_head = value == b"(detached)";
+            repository.head_name = if repository.detached_head {
+                String::new()
+            } else {
+                String::from_utf8_lossy(value).into_owned()
+            };
         }
     }
-    String::from_utf8_lossy(&value).into_owned()
+    repository
+}
+
+/// `rev-parse` output is split on `\n`; only a stray `\r` can remain.
+fn trim_one_carriage_return(mut value: Vec<u8>) -> Vec<u8> {
+    if value.ends_with(b"\r") {
+        value.pop();
+    }
+    value
+}
+
+fn trim_one_trailing_newline(mut value: Vec<u8>) -> Vec<u8> {
+    if value.ends_with(b"\n") {
+        value.pop();
+    }
+    trim_one_carriage_return(value)
 }

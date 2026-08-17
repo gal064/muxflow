@@ -20,9 +20,12 @@ use super::scheduler::{BulkBinding, CancelState, DeadlineGuard};
 /// holding an SSH connection and a remote helper process open indefinitely.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Idle connections kept at once. Two is the scheduler's concurrent-transfer
-/// bound, so this can hold what that many jobs left behind and never more.
-const MAX_IDLE: usize = 2;
+/// Idle connections kept at once.
+///
+/// Two for the scheduler's concurrent-transfer bound plus one for the Git
+/// diff-body lane, which is bounded to a single read: this can hold what every
+/// concurrent bulk consumer left behind and never more.
+const MAX_IDLE: usize = 3;
 
 /// The first request id a fresh connection may use. 1 is the handshake's.
 const FIRST_REQUEST_ID: u64 = 2;
@@ -303,7 +306,7 @@ fn returnable(cancelled: bool, clean: bool, alive: bool) -> bool {
 ///
 /// A lease reuses all of it, and reuses nothing whose stream position or
 /// liveness is in doubt (`Bridge::reusable`).
-pub(super) struct BulkLease {
+pub(crate) struct BulkLease {
     key: BulkKey,
     bridge: Option<Bridge>,
     cancellation: Arc<CancelState>,
@@ -316,7 +319,7 @@ enum AcquisitionMode {
 }
 
 impl BulkLease {
-    pub(super) fn acquire(
+    pub(crate) fn acquire(
         connection: &ConnectionSpec,
         binding: &BulkBinding,
         cancellation: &Arc<CancelState>,
@@ -446,14 +449,14 @@ impl BulkLease {
     }
 
     /// The process id a cancellation kills. See `CancelState::bind_process`.
-    pub(super) fn process_id(&self) -> u32 {
+    pub(crate) fn process_id(&self) -> u32 {
         self.bridge
             .as_ref()
             .map(|bridge| bridge.child.id())
             .unwrap_or(0)
     }
 
-    pub(super) fn client(&mut self) -> BulkProtocolClient<'_> {
+    pub(crate) fn client(&mut self) -> BulkProtocolClient<'_> {
         let bridge = self.bridge.as_mut().expect("a lease holds its bridge");
         BulkProtocolClient::resumed(
             &mut bridge.stdin,
