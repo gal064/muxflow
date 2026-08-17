@@ -329,7 +329,6 @@ fn phase6_agent_contract_round_trips_exact_route_and_reconnect_watermark() {
             attention_generation: (1_u64 << 53) + 7,
         }),
         lifecycle: v1::AgentLifecycleState::Blocked.into(),
-        authority: v1::AgentAuthority::Hook.into(),
         state_generation: (1_u64 << 53) + 5,
         attention_generation: (1_u64 << 53) + 7,
         attention_kind: "blocked".into(),

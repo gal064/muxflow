@@ -40,16 +40,6 @@ pub(super) fn emit_terminal(
     generation: u64,
     output_credit: &OutputCredit,
 ) {
-    if matches!(
-        kind,
-        v1::EventKind::TerminalSeed | v1::EventKind::TerminalOutput
-    ) {
-        let _ = crate::service::agents::AgentRuntime::global().observe_screen(
-            &pane_id,
-            &data,
-            kind == v1::EventKind::TerminalSeed,
-        );
-    }
     // Terminal bytes are lossless and already arrive on the dedicated control
     // reader thread. Let the bounded sequencer queue propagate socket pressure
     // back to that reader; tmux can then apply its own pause/continue protocol.

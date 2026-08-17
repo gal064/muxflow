@@ -73,7 +73,6 @@ pub(crate) trait AgentAdapter: Send + Sync {
             supports_resume: true,
             supports_hooks: true,
             supports_process_detection: true,
-            supports_screen_fallback: true,
             hook_config_path: self.hook_path(home).to_string_lossy().into_owned(),
             hook_events: self
                 .hook_events()
@@ -82,8 +81,6 @@ pub(crate) trait AgentAdapter: Send + Sync {
                 .collect(),
         }
     }
-
-    fn fallback_screen(&self, screen: &str) -> Option<v1::AgentLifecycleState>;
 }
 
 pub(super) struct CodexAdapter;
@@ -168,22 +165,6 @@ impl AgentAdapter for CodexAdapter {
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
         )
-    }
-
-    fn fallback_screen(&self, screen: &str) -> Option<v1::AgentLifecycleState> {
-        let screen = screen.to_ascii_lowercase();
-        if screen.contains("would you like to run")
-            || screen.contains("press enter to confirm")
-            || screen.contains("permission required")
-        {
-            Some(v1::AgentLifecycleState::Blocked)
-        } else if screen.contains("esc to interrupt") || screen.contains("working (press") {
-            Some(v1::AgentLifecycleState::Working)
-        } else if screen.ends_with("\n› ") || screen.contains("what would you like to do?") {
-            Some(v1::AgentLifecycleState::Idle)
-        } else {
-            None
-        }
     }
 }
 
@@ -287,22 +268,6 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
         )
-    }
-
-    fn fallback_screen(&self, screen: &str) -> Option<v1::AgentLifecycleState> {
-        let screen = screen.to_ascii_lowercase();
-        if screen.contains("do you want to proceed?")
-            || screen.contains("allow this tool")
-            || screen.contains("permission request")
-        {
-            Some(v1::AgentLifecycleState::Blocked)
-        } else if screen.contains("esc to interrupt") || screen.contains("claude is working") {
-            Some(v1::AgentLifecycleState::Working)
-        } else if screen.ends_with("\n❯ ") || screen.contains("how can i help you today?") {
-            Some(v1::AgentLifecycleState::Idle)
-        } else {
-            None
-        }
     }
 }
 
@@ -532,20 +497,5 @@ mod tests {
                 v1::AgentLifecycleState::Working
             );
         }
-    }
-
-    #[test]
-    fn screen_fallback_is_adapter_specific_and_conservative() {
-        let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
-        assert_eq!(
-            codex.fallback_screen("Permission required: press enter to confirm"),
-            Some(v1::AgentLifecycleState::Blocked)
-        );
-        assert_eq!(codex.fallback_screen("please allow ordinary text"), None);
-        let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
-        assert_eq!(
-            claude.fallback_screen("Do you want to proceed?"),
-            Some(v1::AgentLifecycleState::Blocked)
-        );
     }
 }

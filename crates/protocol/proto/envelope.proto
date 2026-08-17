@@ -816,13 +816,6 @@ enum AgentLifecycleState {
   AGENT_LIFECYCLE_STATE_UNKNOWN = 4;
 }
 
-enum AgentAuthority {
-  AGENT_AUTHORITY_UNSPECIFIED = 0;
-  AGENT_AUTHORITY_SCREEN = 1;
-  AGENT_AUTHORITY_PROCESS = 2;
-  AGENT_AUTHORITY_HOOK = 3;
-}
-
 enum AgentActionKind {
   AGENT_ACTION_KIND_UNSPECIFIED = 0;
   AGENT_ACTION_KIND_LAUNCH_WINDOW = 1;
@@ -888,7 +881,8 @@ message AgentAdapterDescriptor {
   bool supports_resume = 5;
   bool supports_hooks = 6;
   bool supports_process_detection = 7;
-  bool supports_screen_fallback = 8;
+  reserved 8;
+  reserved "supports_screen_fallback";
   string hook_config_path = 9;
   repeated string hook_events = 10;
   // Observed on the host at snapshot time, not a capability claim.
@@ -908,15 +902,20 @@ message AgentRecord {
   string display_name = 4;
   AgentRoute route = 5;
   AgentLifecycleState lifecycle = 6;
-  AgentAuthority authority = 7;
+  // Hooks are the only writer of `lifecycle`, so there is no longer a second
+  // source to name. Screen scraping — the only reason the field existed —
+  // was removed because it could only see visible panes and matched vendor
+  // TUI output that changes without notice.
+  reserved 7;
+  reserved "authority";
   uint64 state_generation = 8;
   uint64 attention_generation = 9;
   uint64 seen_generation = 10;
   int64 updated_at_unix_millis = 11;
   int64 hook_authority_expires_at_unix_millis = 12;
   bool detected_manually = 13;
-  // Presence is topology/process reachability, independent of the authority
-  // which supplied the retained lifecycle evidence.
+  // Presence is topology/process reachability, independent of the retained
+  // lifecycle evidence.
   bool present = 14;
   // Canonical registry identity. The enum remains for protocol compatibility.
   string adapter_id = 15;

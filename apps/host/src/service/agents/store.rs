@@ -23,6 +23,16 @@ pub(super) struct StoredRoute {
     pub pane_index_fallback: u32,
 }
 
+/// Deliberately tolerant of keys it does not know: **do not add
+/// `#[serde(deny_unknown_fields)]`.**
+///
+/// Every store already written to disk carries `"authority"`, a field removed
+/// when hooks became the only writer of `lifecycle`. Serde ignoring it is the
+/// entire migration — there is no schema bump and no rewrite. Denying unknown
+/// fields would turn every one of those files into a parse failure, and `load`
+/// answers a parse failure by discarding the state, so every user would lose
+/// their agent list on upgrade. `a_store_written_with_the_removed_authority_field_still_loads`
+/// pins this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct StoredAgent {
     pub agent_id: String,
@@ -33,7 +43,6 @@ pub(super) struct StoredAgent {
     pub display_name: String,
     pub route: StoredRoute,
     pub lifecycle: i32,
-    pub authority: i32,
     pub state_generation: u64,
     pub attention_generation: u64,
     #[serde(default)]
@@ -235,6 +244,71 @@ mod tests {
         assert_eq!(state.schema_version, STATE_SCHEMA_VERSION);
         assert_eq!(state.generation, 0);
         assert!(state.agents.is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    /// The entire migration for removing `authority`: serde ignores the key.
+    ///
+    /// There is no schema bump and no rewrite, which is only true while
+    /// [`StoredAgent`] stays tolerant of unknown fields. Adding
+    /// `#[serde(deny_unknown_fields)]` would turn every store already on disk
+    /// into a parse failure, and `load` answers a parse failure by discarding
+    /// the state — so every user would open the app to an empty agent list.
+    /// This is the test that fails first if someone adds it.
+    #[test]
+    fn a_store_written_with_the_removed_authority_field_still_loads() {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("authority-removal-{}.json", uuid::Uuid::new_v4()));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            br#"{
+              "schema_version": 2,
+              "generation": 9,
+              "agents": {
+                "codex:kept": {
+                  "agent_id": "codex:kept",
+                  "adapter": 1,
+                  "adapter_id": "codex",
+                  "native_session_id": "native-kept",
+                  "display_name": "Kept agent",
+                  "route": {
+                    "host_profile_id": "",
+                    "server_identity": "server-a",
+                    "session_id": "$1",
+                    "session_name_fallback": "work",
+                    "window_id": "@1",
+                    "window_name_fallback": "agent",
+                    "pane_id": "%1",
+                    "pane_index_fallback": 0
+                  },
+                  "lifecycle": 3,
+                  "authority": 1,
+                  "state_generation": 9,
+                  "attention_generation": 2,
+                  "attention_kind": "completed",
+                  "seen_generation": 1,
+                  "updated_at_unix_millis": 1786000000000,
+                  "hook_authority_expires_at_unix_millis": 0,
+                  "detected_manually": false,
+                  "present": true
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let state = load(&path);
+        assert_eq!(state.generation, 9, "the store was kept, not discarded");
+        let record = state
+            .agents
+            .get("codex:kept")
+            .expect("the record survived the removed field");
+        assert_eq!(record.lifecycle, 3);
+        assert_eq!(record.attention_kind, "completed");
+        assert_eq!(record.seen_generation, 1);
+        assert_eq!(record.route.pane_id, "%1");
         fs::remove_file(path).unwrap();
     }
 }

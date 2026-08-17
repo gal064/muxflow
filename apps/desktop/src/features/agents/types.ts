@@ -4,7 +4,6 @@ export type AgentAdapterId = string & {};
 export type AgentLifecycle = "working" | "blocked" | "idle" | "unknown";
 export type AgentAttentionKind = "blocked" | "completed";
 export type AgentDisplayState = AgentLifecycle | "done";
-export type AgentAuthority = "hook" | "process" | "screen";
 export type AgentPlacement = "window" | "split";
 
 /**
@@ -26,7 +25,6 @@ export interface AgentAdapterDescriptor {
   supportsResume: boolean;
   supportsHooks: boolean;
   supportsProcessDetection: boolean;
-  supportsScreenFallback: boolean;
   hookConfigPath: string;
   hookEvents: string[];
   placements: AgentPlacement[];
@@ -59,8 +57,6 @@ export interface AgentRecord extends AgentRoute {
   nativeSessionId: string;
   displayName: string;
   lifecycle: AgentLifecycle;
-  authority: AgentAuthority;
-  authorityExpiresAt?: number;
   lifecycleGeneration: AgentGeneration;
   attentionGeneration: AgentGeneration;
   /** Persisted cause of the current attention generation. */
@@ -88,6 +84,8 @@ export interface AgentSnapshot {
 export type AgentWireEvent =
   | { kind: "snapshot"; snapshot: AgentSnapshot; replayed?: boolean }
   | { kind: "upsert"; hostProfileId: string; serverIdentity: string; connectionEpoch: number; sequence: AgentGeneration; record: AgentRecord; retiredAgentIds?: readonly string[]; replayed?: boolean }
+  /** Retirements with no surviving record: the host saw the agent's process go. */
+  | { kind: "retired"; hostProfileId: string; serverIdentity: string; connectionEpoch: number; sequence: AgentGeneration; retiredAgentIds: readonly string[]; replayed?: boolean }
   | { kind: "removed"; hostProfileId: string; serverIdentity: string; connectionEpoch: number; sequence: AgentGeneration; agentId: string; updatedAt: number; replayed?: boolean };
 
 export interface AgentStoreState {

@@ -280,7 +280,6 @@ impl AgentRuntime {
                 .unwrap_or_else(|| adapter.display_name().into()),
             route,
             lifecycle: lifecycle as i32,
-            authority: v1::AgentAuthority::Hook as i32,
             state_generation: generation,
             attention_generation,
             attention_kind,

@@ -278,13 +278,11 @@ fn record_json(value: &v1::AgentRecord, host_profile_id: &str) -> Value {
             "attentionGeneration": route.attention_generation.to_string(),
         })),
         "lifecycle": lifecycle_name(value.lifecycle),
-        "authority": authority_name(value.authority),
         "stateGeneration": value.state_generation.to_string(),
         "attentionGeneration": value.attention_generation.to_string(),
         "attentionKind": value.attention_kind,
         "seenGeneration": value.seen_generation.to_string(),
         "updatedAtUnixMillis": value.updated_at_unix_millis.to_string(),
-        "hookAuthorityExpiresAtUnixMillis": value.hook_authority_expires_at_unix_millis.to_string(),
         "detectedManually": value.detected_manually,
         "present": value.present,
     })
@@ -309,7 +307,6 @@ fn adapter_descriptor_json(value: &v1::AgentAdapterDescriptor) -> Value {
         "displayName": value.display_name, "supportsLaunch": value.supports_launch,
         "supportsResume": value.supports_resume, "supportsHooks": value.supports_hooks,
         "supportsProcessDetection": value.supports_process_detection,
-        "supportsScreenFallback": value.supports_screen_fallback,
         "hookConfigPath": value.hook_config_path, "hookEvents": value.hook_events,
         "hookWiring": hook_wiring_name(value.hook_wiring),
         "hookWiringDetail": value.hook_wiring_detail,
@@ -336,15 +333,6 @@ fn lifecycle_name(value: i32) -> &'static str {
         v1::AgentLifecycleState::Blocked => "blocked",
         v1::AgentLifecycleState::Idle => "idle",
         v1::AgentLifecycleState::Unknown | v1::AgentLifecycleState::Unspecified => "unknown",
-    }
-}
-
-fn authority_name(value: i32) -> &'static str {
-    match v1::AgentAuthority::try_from(value).unwrap_or_default() {
-        v1::AgentAuthority::Screen => "screen",
-        v1::AgentAuthority::Process => "process",
-        v1::AgentAuthority::Hook => "hook",
-        v1::AgentAuthority::Unspecified => "unspecified",
     }
 }
 
@@ -400,7 +388,6 @@ mod tests {
             supports_resume: true,
             supports_hooks: true,
             supports_process_detection: true,
-            supports_screen_fallback: true,
             hook_config_path: "/home/user/.claude/settings.json".into(),
             hook_events: vec!["Stop".into()],
             hook_wiring: v1::AgentHookWiring::Partial.into(),
@@ -430,7 +417,6 @@ mod tests {
                 "supportsLaunch",
                 "supportsProcessDetection",
                 "supportsResume",
-                "supportsScreenFallback",
             ]
         );
         assert_eq!(json["hookWiring"], "partial");

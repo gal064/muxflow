@@ -35,12 +35,20 @@ source_digest=$(
   # tmp/work tree. Do not let Git walk upward and accidentally hash the parent
   # checkout; only use its index when this source root owns `.git` itself.
   if [[ -e "$repo_root/.git" ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    # `--deduplicate` and the existence filter both matter: `--cached` lists
+    # what the *index* holds, which still names a file deleted in the worktree
+    # but not yet staged. Hashing that path aborts the build on a state a
+    # developer is legitimately in mid-change, and the digest is supposed to
+    # describe the tree actually being compiled.
     git ls-files --cached --others --exclude-standard -z -- \
-      Cargo.lock Cargo.toml rust-toolchain.toml rustfmt.toml apps/host crates
+      Cargo.lock Cargo.toml rust-toolchain.toml rustfmt.toml apps/host crates \
+      | while IFS= read -r -d '' path; do
+          [[ -f "$path" ]] && printf '%s\0' "$path"
+        done
   else
     find Cargo.lock Cargo.toml rust-toolchain.toml rustfmt.toml apps/host crates \
       -type f -not -path '*/target/*' -not -path '*/tmp/*' -print0
-  fi | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
+  fi | LC_ALL=C sort -z -u | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
 )
 cache_dir="$work_root/cache/compatible-host/$arch/$source_digest"
 target_dir="$cache_dir/target"

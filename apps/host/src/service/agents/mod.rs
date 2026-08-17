@@ -17,7 +17,6 @@ mod identity;
 mod ingest;
 mod process;
 mod reconcile;
-mod screen;
 mod snapshot;
 mod store;
 pub(crate) use hooks::HookManager;
@@ -46,7 +45,6 @@ const STALE_WORKING_TTL_MILLIS: i64 = 15 * 60 * 1_000;
 pub(crate) struct AgentRuntime {
     state_path: PathBuf,
     state: Mutex<StoredState>,
-    screen_observer: Mutex<screen::ScreenObserver>,
     /// What this host's agent configuration was last observed to do with
     /// lifecycle events. Re-read only when a configuration file changed.
     wiring: Mutex<hooks::WiringCache>,
@@ -68,7 +66,6 @@ impl AgentRuntime {
         Self {
             state_path,
             state: Mutex::new(state),
-            screen_observer: Mutex::new(screen::ScreenObserver::default()),
             wiring: Mutex::new(hooks::WiringCache::default()),
         }
     }
@@ -85,21 +82,19 @@ impl AgentRuntime {
     /// Withdraw Working from agents that have gone silent past
     /// [`STALE_WORKING_TTL_MILLIS`], returning the events to publish.
     ///
-    /// Only the lifecycle is touched. Attention, what was already seen, and the
-    /// authority that supplied the last real evidence all survive: an agent
-    /// that went quiet after asking for a human is still asking for a human,
-    /// and forgetting that would be a second lie in place of the first.
+    /// Only the lifecycle is touched. Attention and what was already seen both
+    /// survive: an agent that went quiet after asking for a human is still
+    /// asking for a human, and forgetting that would be a second lie in place
+    /// of the first. Nothing outside the record is touched either — no signal
+    /// reaches the agent's process, and `notify` stays false, so a healthy
+    /// agent that merely ran one long silent tool call loses a label and
+    /// regains it on its next hook.
     pub(crate) fn sweep_stale(&self) -> Vec<v1::AgentEvent> {
         let now = now_millis();
         let mut state = self.state.lock().unwrap();
         let stale: Vec<String> = state
             .agents
             .values()
-            // Authority is deliberately not consulted. Every Working state in
-            // the store came from evidence — a hook, or a screen the observer
-            // confirmed — and both go silent the same way; process detection
-            // only ever writes Unknown, so there is no third case to carve out.
-            //
             // The clock is the lifecycle observation, not `updated_at`, which
             // reconciliation also moves when the agent merely changes pane.
             .filter(|record| {
@@ -138,6 +133,100 @@ impl AgentRuntime {
         events
     }
 
+    /// Retire agents whose process is no longer on the host, returning the
+    /// events to publish.
+    ///
+    /// This is what replaces screen scraping as the way out of `Working`, and
+    /// it is the only one that works for a pane nobody is looking at. It is
+    /// also the only route by which a killed agent's row disappears without
+    /// waiting on a tmux topology change: `reconcile_topology` runs only when
+    /// the snapshot *differs*, and an agent found through the process tree
+    /// (`node …/cli.js` under a shell) leaves `current_command` untouched when
+    /// it exits, so its record would otherwise claim `Working` indefinitely
+    /// even with a desktop connected.
+    ///
+    /// Deliberately conservative in three places, because a false positive
+    /// deletes a live agent's row:
+    ///
+    /// - Records belonging to another tmux server are never judged. This
+    ///   snapshot is evidence about this host and says nothing about theirs.
+    /// - A record with no pane is hook-only and unmapped; there is no pane to
+    ///   look for, so it survives on its hook lease exactly as reconciliation
+    ///   already lets it.
+    /// - A record with no adapter id cannot be matched against detection
+    ///   evidence at all, so no evidence can convict it.
+    ///
+    /// The bar is not a new one: `reconcile::topology` already deletes records
+    /// on this same evidence. And retirement is not final — any later hook
+    /// re-creates the agent.
+    fn retire_departed(&self) -> Vec<v1::AgentEvent> {
+        // The tmux fork happens outside the lock. `ingest_hook` takes the same
+        // mutex, and holding it across a subprocess would stall live hook
+        // ingestion behind a discovery that has nothing to do with it.
+        if !self.has_claimed_work() {
+            return Vec::new();
+        }
+        let Ok((topology, identity)) = super::snapshot::discover_consistent() else {
+            // No answer is not evidence of absence. A tmux server that is
+            // briefly unreachable must not empty the agent list.
+            return Vec::new();
+        };
+        self.retire_departed_from(&topology, &identity)
+    }
+
+    /// The decision half of [`Self::retire_departed`], separated from the tmux
+    /// discovery so the conservatism guards can be tested without a live
+    /// server.
+    fn retire_departed_from(
+        &self,
+        topology: &tmux_control::TmuxSnapshot,
+        identity: &str,
+    ) -> Vec<v1::AgentEvent> {
+        let detected = reconcile::detect_all(topology);
+        let mut state = self.state.lock().unwrap();
+        let departed: Vec<String> = state
+            .agents
+            .values()
+            .filter(|record| {
+                record.route.server_identity == identity
+                    && !record.route.pane_id.is_empty()
+                    && !record.adapter_id.is_empty()
+                    && claims_work(record)
+                    && !detected
+                        .contains_key(&(record.route.pane_id.clone(), record.adapter_id.clone()))
+            })
+            .map(|record| record.agent_id.clone())
+            .collect();
+        if departed.is_empty() {
+            return Vec::new();
+        }
+        let original = state.clone();
+        for agent_id in &departed {
+            state.agents.remove(agent_id);
+        }
+        state.generation = state.generation.saturating_add(1);
+        let generation = state.generation;
+        if self.persist_locked(&state).is_err() {
+            *state = original;
+            return Vec::new();
+        }
+        vec![v1::AgentEvent {
+            agent: None,
+            generation,
+            notify: false,
+            reason: "departed".into(),
+            retired_agent_ids: departed,
+        }]
+    }
+
+    /// Whether any record claims to be mid-turn, which is the only condition
+    /// under which the retirement pass is worth a tmux round-trip. Idle hosts
+    /// stay at zero periodic forks, which is what the topology actor's own
+    /// no-op early-out exists to preserve.
+    fn has_claimed_work(&self) -> bool {
+        self.state.lock().unwrap().agents.values().any(claims_work)
+    }
+
     pub(super) fn snapshot_for(&self, server_identity: &str) -> v1::AgentSnapshot {
         let state = self.state.lock().unwrap();
         // Which agents are actually running here, which is what corrects a
@@ -166,12 +255,6 @@ impl AgentRuntime {
             *state = original;
             return Err(error);
         }
-        drop(state);
-        let live_panes: BTreeSet<_> = topology.panes.iter().map(|pane| pane.id.as_str()).collect();
-        self.screen_observer
-            .lock()
-            .unwrap()
-            .retain_panes(live_panes.iter().copied());
         Ok(())
     }
 
@@ -209,125 +292,6 @@ impl AgentRuntime {
             reason: "seen".into(),
             retired_agent_ids: Vec::new(),
         })
-    }
-
-    pub(super) fn observe_screen(
-        &self,
-        pane_id: &str,
-        bytes: &[u8],
-        reset: bool,
-    ) -> anyhow::Result<()> {
-        let now = now_millis();
-        let (agent_id, adapter_kind) = {
-            let state = self.state.lock().unwrap();
-            let Some(current) = state.agents.values().find(|record| {
-                record.present
-                    && record.route.pane_id == pane_id
-                    && adapters::adapter(
-                        v1::AgentAdapterKind::try_from(record.adapter).unwrap_or_default(),
-                    )
-                    .is_some()
-            }) else {
-                return Ok(());
-            };
-            if current.authority == v1::AgentAuthority::Hook as i32
-                && current.hook_authority_expires_at_unix_millis > now
-            {
-                return Ok(());
-            }
-            (
-                current.agent_id.clone(),
-                v1::AgentAdapterKind::try_from(current.adapter).unwrap_or_default(),
-            )
-        };
-        let Some(screen) = self
-            .screen_observer
-            .lock()
-            .unwrap()
-            .observe(pane_id, bytes, reset, now)
-        else {
-            return Ok(());
-        };
-        let Some(lifecycle) =
-            adapters::adapter(adapter_kind).and_then(|adapter| adapter.fallback_screen(&screen))
-        else {
-            return Ok(());
-        };
-        if !self
-            .screen_observer
-            .lock()
-            .unwrap()
-            .confirms(pane_id, lifecycle)
-        {
-            return Ok(());
-        }
-        let mut state = self.state.lock().unwrap();
-        let original = state.clone();
-        let Some(current) = state.agents.get(&agent_id) else {
-            return Ok(());
-        };
-        if current.authority == v1::AgentAuthority::Hook as i32
-            && current.hook_authority_expires_at_unix_millis > now
-        {
-            return Ok(());
-        }
-        if current.authority == v1::AgentAuthority::Screen as i32
-            && current.lifecycle == lifecycle as i32
-        {
-            return Ok(());
-        }
-        let previous_lifecycle =
-            v1::AgentLifecycleState::try_from(current.lifecycle).unwrap_or_default();
-        state.generation = state.generation.saturating_add(1);
-        let generation = state.generation;
-        let record = state.agents.get_mut(&agent_id).unwrap();
-        let notify = lifecycle == v1::AgentLifecycleState::Blocked
-            && previous_lifecycle != v1::AgentLifecycleState::Blocked
-            || previous_lifecycle == v1::AgentLifecycleState::Working
-                && lifecycle == v1::AgentLifecycleState::Idle;
-        if notify {
-            record.attention_generation = record.attention_generation.saturating_add(1);
-            record.attention_kind = if lifecycle == v1::AgentLifecycleState::Blocked {
-                "blocked"
-            } else {
-                "completed"
-            }
-            .into();
-        } else if previous_lifecycle == v1::AgentLifecycleState::Blocked
-            && lifecycle == v1::AgentLifecycleState::Idle
-            && record.attention_kind == "blocked"
-            && record.seen_generation >= record.attention_generation
-        {
-            record.attention_kind.clear();
-        }
-        record.lifecycle = lifecycle as i32;
-        record.authority = v1::AgentAuthority::Screen as i32;
-        record.state_generation = generation;
-        record.updated_at_unix_millis = now;
-        record.lifecycle_observed_at_unix_millis = now;
-        let record = snapshot::record(record);
-        if let Err(error) = self.persist_locked(&state) {
-            *state = original;
-            return Err(error);
-        }
-        drop(state);
-        publish(v1::AgentEvent {
-            agent: Some(record),
-            generation,
-            notify,
-            reason: if previous_lifecycle == v1::AgentLifecycleState::Working
-                && lifecycle == v1::AgentLifecycleState::Idle
-            {
-                "completed"
-            } else if lifecycle == v1::AgentLifecycleState::Blocked {
-                "blocked"
-            } else {
-                "screen_recovery"
-            }
-            .into(),
-            retired_agent_ids: Vec::new(),
-        });
-        Ok(())
     }
 
     pub(super) fn rename(&self, agent_id: &str, name: &str) -> anyhow::Result<v1::AgentEvent> {
@@ -381,16 +345,35 @@ pub(crate) fn ingest_fallbacks() -> anyhow::Result<usize> {
     fallback::ingest()
 }
 
-/// Runs [`AgentRuntime::sweep_stale`] and broadcasts whatever it withdrew.
+/// The daemon's periodic honesty pass: retire agents whose process is gone,
+/// then withdraw Working from whatever is left that has gone silent.
 ///
-/// Called from the topology actor's own wakeups so a connected desktop sees a
-/// silent agent stop claiming to work without asking for a new snapshot, and
-/// from the snapshot request so a desktop that reconnects after the daemon sat
-/// alone never receives a stale Working in the first place.
-pub(crate) fn sweep_stale_and_publish() {
-    for event in AgentRuntime::global().sweep_stale() {
+/// This is the *only* caller of either. It runs on the daemon's own timer, not
+/// on a subscriber's wakeup, because both failures are properties of the host
+/// and neither stops happening when nobody is looking. The previous callers
+/// both sat behind a connected desktop — the topology actor's loop after
+/// `if !self.subscribed { continue; }`, and the snapshot request itself — so a
+/// daemon left alone accrued Working states that nothing could ever withdraw.
+///
+/// Retirement runs first. Removing a record makes any staleness question about
+/// it moot, and the reverse order would publish a withdrawal for an agent that
+/// is about to disappear in the same pass.
+pub(crate) fn maintain() {
+    let runtime = AgentRuntime::global();
+    for event in runtime.retire_departed() {
         publish(event);
     }
+    for event in runtime.sweep_stale() {
+        publish(event);
+    }
+}
+
+/// Whether this record is asserting something about a turn in flight, which is
+/// the only claim a departed process can still be falsely making. `Idle` and
+/// `Unknown` say nothing that outliving the process would turn into a lie.
+fn claims_work(record: &StoredAgent) -> bool {
+    record.lifecycle == v1::AgentLifecycleState::Working as i32
+        || record.lifecycle == v1::AgentLifecycleState::Blocked as i32
 }
 
 fn validate_pane_id(pane_id: &str) -> anyhow::Result<()> {

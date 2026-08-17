@@ -58,10 +58,11 @@ fn handle_inner(
     let mut response = v1::AgentResponse::default();
     match operation {
         v1::Operation::AgentSnapshot => {
-            // Before the snapshot is built, not after: a reconnecting desktop
-            // must never be handed a Working state the daemon already knows
-            // nothing has confirmed for fifteen minutes.
-            super::super::agents::sweep_stale_and_publish();
+            // No sweep here any more. The daemon's own maintenance pass runs
+            // every two seconds whether or not anything is connected, so a
+            // reconnecting desktop cannot be handed a state older than one
+            // tick — and doing it here only ever covered the case where a
+            // desktop was present to ask.
             response.snapshot = Some(runtime.snapshot());
         }
         v1::Operation::AgentMarkSeen => {
