@@ -1,15 +1,22 @@
-import { DiffEditor } from "@monaco-editor/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
 import { SurfaceError } from "../../ui/SurfaceError";
-import { attachEditorLayout } from "../files/editorLayout";
 import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot } from "./types";
 import type { GitRepositoryStore } from "./repositoryStore";
 import { useSharedGitDiff } from "./useSharedGitDiff";
-import { ADE_MONACO_THEME } from "../files/monaco";
 import { recordPerfMilestone } from "../../perf/probe";
+import { useEditorSurface } from "../../perf/surfacePaint";
+
+/**
+ * The editor bundle, fetched when a text diff is actually going to be shown.
+ *
+ * Nothing above this line imports Monaco: the diff request starts on mount, and
+ * a binary diff, an oversized diff, a saved tab with no repository and a file
+ * that no longer differs never fetch the editor at all.
+ */
+const GitDiffEditor = lazy(() => import("./GitDiffEditor").then((module) => ({ default: module.GitDiffEditor })));
 
 interface Props {
   tab: AppOwnedTab;
@@ -22,25 +29,10 @@ interface Props {
 
 type PendingDiscard = { kind: "discardFile" | "discardHunk"; hunkIndex?: number; diff: GitDiff; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
 
+const recordEditorPaint = () => recordPerfMilestone("editor.paint");
+
 export function GitDiffSurface(props: Props) {
-  const detachLayout = useRef<(() => void) | undefined>(undefined);
-  const editorSurfaceSequence = useRef(0);
-  const mountedEditorSurface = useRef<number | undefined>(undefined);
-  const readyEditorSurface = useRef<number | undefined>(undefined);
-  const bindEditorHost = useCallback((node: HTMLDivElement | null) => {
-    if (node) {
-      mountedEditorSurface.current ??= ++editorSurfaceSequence.current;
-    } else {
-      mountedEditorSurface.current = undefined;
-      readyEditorSurface.current = undefined;
-    }
-  }, []);
-  useEffect(() => () => {
-    detachLayout.current?.();
-    detachLayout.current = undefined;
-    mountedEditorSurface.current = undefined;
-    readyEditorSurface.current = undefined;
-  }, []);
+  const editor = useEditorSurface();
   const [busy, setBusy] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
   const root = useMemo<ActiveRoot | undefined>(() => props.tab.rootPath && props.tab.rootToken ? {
@@ -70,23 +62,14 @@ export function GitDiffSurface(props: Props) {
 
   const loading = shared.loading;
   const surfaceError = shared.error;
-  // What this surface knows about its own editor. Live readers, because the
-  // surface can remount between a measurement being armed and its pixels
-  // landing.
-  const editorFacts = useMemo(() => ({
-    expected: 0,
-    mounted: () => mountedEditorSurface.current,
-    ready: () => readyEditorSurface.current,
-  }), []);
   useEffect(() => {
     if (loading || surfaceError || !diff) return;
     paint.noteCommitted();
-    editorFacts.expected = editorSurfaceSequence.current + 1;
     paint.notePaintable(
-      diffUsesEditor ? editorFacts : undefined,
-      diffUsesEditor ? () => recordPerfMilestone("editor.paint") : undefined,
+      diffUsesEditor ? editor.facts : undefined,
+      diffUsesEditor ? recordEditorPaint : undefined,
     );
-  }, [diff, diffUsesEditor, editorFacts, surfaceError, loading, paint]);
+  }, [diff, diffUsesEditor, editor.facts, surfaceError, loading, paint]);
 
   const applyCommand = async (run: () => Promise<GitCommandResult>) => {
     setBusy(true);
@@ -154,25 +137,22 @@ export function GitDiffSurface(props: Props) {
       {mutationBlock && <div className="git-diff-error" role="note">{mutationBlock}</div>}
       {surfaceError && <SurfaceError className="git-diff-error" detail={surfaceError} />}
     </div>
-    <div className="git-diff-content" ref={diffUsesEditor ? bindEditorHost : undefined}>
+    <div className="git-diff-content" ref={diffUsesEditor ? editor.bindHost : undefined}>
       {diff.binary || !text ? <GitDiffEmpty title={diff.displayPath} detail={diff.binary ? "Binary changes cannot be displayed or edited as text." : "This diff contains non-UTF-8 content and is shown safely as binary."} />
         : diff.tooLarge ? <GitDiffEmpty title={diff.displayPath} detail="This diff is too large for the editor. File-level Git actions remain available." />
-          : <DiffEditor
-            keepCurrentModifiedModel
-            keepCurrentOriginalModel
-            language={languageForPath(diff.displayPath)}
-            modified={text.modified}
-            modifiedModelPath={modelUri(props.tab, "modified")}
-            onMount={(editor) => {
-              readyEditorSurface.current = mountedEditorSurface.current;
-              paint.notePaintable(editorFacts, () => recordPerfMilestone("editor.paint"));
-              detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor);
-            }}
-            options={{ automaticLayout: true, enableSplitViewResizing: true, minimap: { enabled: false }, originalEditable: false, readOnly: true, renderSideBySide: true, scrollBeyondLastLine: false }}
-            original={text.original}
-            originalModelPath={modelUri(props.tab, "original")}
-            theme={ADE_MONACO_THEME}
-          />}
+          : <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>
+            <GitDiffEditor
+              modified={text.modified}
+              modifiedModelPath={modelUri(props.tab, "modified")}
+              onReady={() => {
+                editor.noteReady();
+                paint.notePaintable(editor.facts, recordEditorPaint);
+              }}
+              original={text.original}
+              originalModelPath={modelUri(props.tab, "original")}
+              path={diff.displayPath}
+            />
+          </Suspense>}
     </div>
     {hunkActions && diff.hunkCount > 0 && <aside className="git-hunk-actions" aria-label="Complete hunk actions">
       {Array.from({ length: diff.hunkCount }, (_, hunkIndex) => <div key={hunkIndex}>
@@ -205,7 +185,6 @@ function GitDiffEmpty({ title, detail, retry }: { title: string; detail: string;
 }
 
 function modelUri(tab: AppOwnedTab, side: string): string { return `tmux-ide-git://${encodeURIComponent(tab.hostProfileId)}/${encodeURIComponent(tab.serverIdentity)}/${encodeURIComponent(tab.id)}/${side}`; }
-function languageForPath(path: string): string { const extension = path.split(".").at(-1)?.toLowerCase(); return ({ ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", rs: "rust", py: "python", md: "markdown", json: "json", css: "css", html: "html", sh: "shell", yml: "yaml", yaml: "yaml", toml: "ini" } as Record<string, string>)[extension ?? ""] ?? "plaintext"; }
 function reportResult(result: GitCommandResult, report: (message: string) => void) {
   const command = [result.stdout.trim(), result.stderr.trim(), result.error].filter(Boolean).join(" · ") || (result.outcome === "applied" ? "Git change applied." : result.outcome === "partialOrUnknown" ? "Git outcome is partial or unknown; inspect the repository before retrying." : `Git failed with exit code ${result.exitCode}.`);
   report(result.refreshFailed ? `${command} ${result.statusOmitted ? "Post-command status was omitted to keep the connection responsive" : "Status refresh failed"}: ${result.refreshError}` : command);

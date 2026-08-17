@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // jsdom, because the surface mounts an editor host and measures its layout.
 import { act, create } from "react-test-renderer";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { AppTabSurface } from "./AppTabSurface";
 import type { AppOwnedTab } from "./types";
 import type {
@@ -16,8 +16,9 @@ import type {
 } from "../files/types";
 
 // Monaco itself is not under test here, and loading it in jsdom pulls in the
-// browser clipboard contribution. P6 owns making this boundary lazy in
-// production; this file only asserts the file-open data flow around it.
+// browser clipboard contribution. The lazy boundary that keeps it out of the
+// surface's own module lives in `AppTabSurface`; this file asserts the
+// file-open data flow around it.
 function EditorStub(_props: { onChange?(value: string): void }) { return null; }
 vi.mock("@monaco-editor/react", () => ({ default: (props: { onChange?(value: string): void }) => <EditorStub {...props} /> }));
 vi.mock("../files/monaco", () => ({ ADE_MONACO_THEME: "ade-test-theme" }));
@@ -139,6 +140,12 @@ async function mount(fixture: Fixture) {
 }
 
 describe("AppTabSurface", () => {
+  // The editor is imported lazily, so in production the surface renders its
+  // Suspense fallback while that chunk arrives. Resolving the module once up
+  // front leaves these tests measuring the surface rather than however long the
+  // runner takes to transform a file.
+  beforeAll(async () => { await import("../files/FileEditor"); });
+
   it("accepts the first read when the watch bootstrap agrees, rather than re-reading on principle", async () => {
     const surface = await mount({ bootstrap: listing([entry("/repo/note.txt", "g1")]) });
     expect(surface.opens, "the watch bootstrap triggered a second full open").toEqual(["g1"]);

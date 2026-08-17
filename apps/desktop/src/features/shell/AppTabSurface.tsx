@@ -1,18 +1,23 @@
-import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
-import { AutosaveController, type AutosaveView } from "../files/autosave";
-import { editorFlushRegistry } from "../files/editorFlushRegistry";
-import { parentPath } from "../files/listingModel";
-import { attachEditorLayout } from "../files/editorLayout";
-import { renderSafeMarkdown, renderSafeSvg } from "../files/markdown";
-import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type DirectoryListing, type DirectoryWatchLease, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
+import { useSanitizedMarkdown } from "../files/markdownPreview";
+import { renderSafeSvg } from "../files/markdown";
+import { useOpenFileTab } from "../files/useOpenFileTab";
+import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES, type ActiveRoot, type FileWorkspaceClient, type FileWorkspaceScope, type OpenFile } from "../files/types";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { AppOwnedTab } from "./types";
-import { ADE_MONACO_THEME } from "../files/monaco";
 import { recordPerfMilestone } from "../../perf/probe";
-import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
+import { useEditorSurface } from "../../perf/surfacePaint";
+
+/**
+ * The editor bundle, fetched when a text file is actually going to be shown.
+ *
+ * Nothing above this line imports Monaco, which is the point: the remote read
+ * starts on mount, and a binary file, an oversized file, a disconnected tab or
+ * a Markdown preview never fetches the editor at all.
+ */
+const FileEditor = lazy(() => import("../files/FileEditor").then((module) => ({ default: module.FileEditor })));
 
 interface Props {
   tab: AppOwnedTab;
@@ -31,59 +36,9 @@ interface Props {
   onViewMode(mode: "source" | "preview" | "split"): void;
 }
 
-const FILE_EDITOR_PAINT = ["workflow.file.editorPaint"] as const;
-
-/**
- * Where the initial read and its parent watch bootstrap have got to.
- *
- * They are started together and either can land first, so the surface has to
- * remember which — and having remembered, must decide exactly once.
- */
-type Reconciliation =
-  | { kind: "pending" }
-  /**
-   * The bootstrap arrived before the read did, so its opinion is parked for
-   * whichever read is in flight *now* — named by `serial`. A parked opinion
-   * with no epoch outlived the read it was waiting for: a later, unrelated
-   * load consumed it and re-opened the file against a generation that had
-   * described a different read entirely.
-   */
-  | { kind: "bootstrap"; generation: string | undefined; serial: number }
-  | { kind: "done" };
+const recordEditorPaint = () => recordPerfMilestone("editor.paint");
 
 export function AppTabSurface(props: Props) {
-  const [opened, setOpened] = useState<OpenFile>();
-  const [view, setView] = useState<AutosaveView>();
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>();
-  const controller = useRef<AutosaveController | undefined>(undefined);
-  const loadSerial = useRef(0);
-  const surfaceLifecycle = useRef(0);
-  const loadAbort = useRef<AbortController | undefined>(undefined);
-  const detachLayout = useRef<(() => void) | undefined>(undefined);
-  const editorSurfaceSequence = useRef(0);
-  const mountedEditorSurface = useRef<number | undefined>(undefined);
-  const readyEditorSurface = useRef<number | undefined>(undefined);
-  const pendingPaint = useRef<PaintTicket | undefined>(undefined);
-  /**
-   * Generation of a non-text file on screen.
-   *
-   * Text has a better answer — the autosave controller owns the generation and
-   * advances it on every save — and a second copy of that fact went stale the
-   * moment anything was written, which made every self-save echo look like an
-   * external change and cost a full remote re-open.
-   */
-  const shownBinaryGeneration = useRef<string | undefined>(undefined);
-  /** Where the read and its parent watch have got to relative to each other. */
-  const reconciliation = useRef<Reconciliation>({ kind: "pending" });
-  const bindEditorHost = useCallback((node: HTMLDivElement | null) => {
-    if (node) {
-      mountedEditorSurface.current ??= ++editorSurfaceSequence.current;
-    } else {
-      mountedEditorSurface.current = undefined;
-      readyEditorSurface.current = undefined;
-    }
-  }, []);
   const root = useMemo<ActiveRoot | undefined>(() => {
     if (props.tab.rootPath && props.tab.rootToken) return {
       token: props.tab.rootToken,
@@ -95,322 +50,46 @@ export function AppTabSurface(props: Props) {
     };
     return props.activeRoot;
   }, [props.activeRoot, props.scope?.paneId, props.tab.rootPath, props.tab.rootToken]);
-  const viewAllowsEditor = !(props.tab.kind === "markdown" && (props.tab.viewMode ?? "split") === "preview");
-  const previousViewAllowsEditor = useRef(viewAllowsEditor);
-  const editorRequested = !loading && !error && opened?.kind === "text"
-    && Number(opened.file.sizeBytes) <= TEXT_FILE_LIMIT_BYTES
-    && viewAllowsEditor;
-  useEffect(() => {
-    if (!editorRequested) {
-      pendingPaint.current?.abandon();
-      pendingPaint.current = undefined;
-      return;
-    }
-    recordPerfMilestone("editor.monacoRequest");
-  }, [editorRequested, props.tab.id]);
-  useEffect(() => {
-    const enteringEditor = !previousViewAllowsEditor.current && viewAllowsEditor;
-    previousViewAllowsEditor.current = viewAllowsEditor;
-    // Only an explicit preview -> source/split request owns a new interaction.
-    // Background reads may change content kind but never manufacture one.
-    if (enteringEditor && editorRequested && !pendingPaint.current) {
-      const paint = createPaintTicket(FILE_EDITOR_PAINT, surfaceLifecycle.current);
-      paint.expectSurface(mountedEditorSurface.current ?? editorSurfaceSequence.current + 1);
-      pendingPaint.current = paint;
-    }
-  }, [editorRequested, viewAllowsEditor]);
-
-  const load = async (options: { externalOperationId?: string; measureEditorPaint?: boolean } = {}) => {
-    if (!props.scope || !root) return;
-    loadAbort.current?.abort();
-    const abort = new AbortController();
-    loadAbort.current = abort;
-    const serial = ++loadSerial.current;
-    const paint = options.measureEditorPaint
-      ? createPaintTicket(FILE_EDITOR_PAINT, surfaceLifecycle.current)
-      : undefined;
-    if (paint) {
-      pendingPaint.current?.abandon();
-      pendingPaint.current = paint;
-    }
-    try {
-      const next = await props.client.openFile(props.scope, root, props.tab.resource, abort.signal);
-      if (serial !== loadSerial.current) {
-        if (paint && pendingPaint.current !== paint) paint.abandon();
-        return;
-      }
-      setOpened(next);
-      shownBinaryGeneration.current = next.kind === "binary" ? next.file.generation : undefined;
-      if (next.kind !== "text") {
-        // A file that stopped being text has no editor and no autosave state.
-        // Leaving the previous controller in place would make it the answer to
-        // "what generation is on screen" forever after.
-        controller.current?.dispose();
-        controller.current = undefined;
-        setView(undefined);
-      }
-      // The watch bootstrap can land while the first read is still in flight.
-      // It is the authoritative directory listing, so a difference here is a
-      // real change rather than a reason to re-read on principle. The reload is
-      // queued rather than called: re-entering `load` from inside its own
-      // success path invalidates the serial of the invocation still running.
-      const arrived = reconciliation.current;
-      if (arrived.kind === "bootstrap" && arrived.serial === serial) {
-        reconciliation.current = { kind: "done" };
-        if (arrived.generation !== undefined && arrived.generation !== next.file.generation) {
-          queueMicrotask(() => { if (serial === loadSerial.current) void load(options); });
-        }
-      }
-      const interactionPaint = paint ?? pendingPaint.current;
-      if (next.kind === "text"
-        && Number(next.file.sizeBytes) <= TEXT_FILE_LIMIT_BYTES
-        && viewAllowsEditor) {
-        interactionPaint?.expectSurface(
-          mountedEditorSurface.current ?? editorSurfaceSequence.current + 1,
-        );
-      }
-      setError(undefined);
-      if (next.kind === "text") {
-        const snapshot = { content: next.file.content, generation: next.file.generation, lineEnding: next.file.lineEnding };
-        if (controller.current) {
-          // Polling directory snapshots also observe our own atomic rename.
-          // Preserve a newer local edit when disk still has the generation we
-          // already know; any genuinely newer generation remains last-writer.
-          if (!options.externalOperationId && controller.current.current().generation === snapshot.generation) return;
-          controller.current.external(snapshot, options.externalOperationId);
-        }
-        else {
-          const autosave = new AutosaveController(snapshot, async (saving, operationId) => {
-            if (!props.scope || !root) throw new Error("The file host is disconnected.");
-            return props.client.writeText(props.scope, root, {
-              path: props.tab.resource,
-              content: saving.content,
-              baseGeneration: saving.generation,
-              operationId,
-              lineEnding: saving.lineEnding,
-            });
-          }, setView);
-          controller.current = autosave;
-          setView(autosave.current());
-        }
-      }
-    } catch (cause) {
-      if (abort.signal.aborted && serial !== loadSerial.current) return;
-      paint?.abandon();
-      if (pendingPaint.current === paint) pendingPaint.current = undefined;
-      if (abort.signal.aborted) return;
-      if (serial === loadSerial.current) setError(String(cause));
-    } finally {
-      if (serial === loadSerial.current) setLoading(false);
-    }
-  };
-
-  // Declared before the read below, because effects run in the order they are
-  // written: the listener has to exist before the read starts, or a change
-  // landing between the two is described to nobody and the tab shows content
-  // it will never be told is stale.
-  useEffect(() => {
-    if (!props.scope) return;
-    let disposed = false;
-    let stop: (() => void) | undefined;
-    void props.client.subscribe(props.scope, (event) => {
-      if (disposed || !root) return;
-      if (event.kind === "directorySnapshot" && event.rootToken === root.token && event.listing.directory === parentPath(props.tab.resource)) {
-        // An authoritative rescan carries the directory's contents, so it can
-        // say whether *this* file moved. Re-reading because some other entry
-        // changed is a remote round trip for nothing. Never let a generic
-        // self-save echo replace a newer dirty edit either; the precise path
-        // events below retain last-writer order.
-        const generation = listingOpinion(event.listing);
-        if (generation !== undefined && generation !== shownGeneration()) reloadFromDisk();
-        return;
-      }
-      if (!(event.kind === "fileChanged" || event.kind === "fileDeleted") || event.path !== props.tab.resource) return;
-      if (event.kind === "fileDeleted") {
-        setError("The file was deleted externally. The tab remains open.");
-        return;
-      }
-      if (event.generation && event.generation === shownGeneration()) return;
-      void load({ externalOperationId: event.operationId });
-    }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });
-    return () => { disposed = true; stop?.(); };
-  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
+  const mode = props.tab.kind === "markdown" ? props.tab.viewMode ?? "split" : "source";
+  const editorSurface = useEditorSurface();
+  // Everything about when this file is read, written and reconciled, including
+  // the cancellation that spans it. This component owns only what is drawn.
+  const file = useOpenFileTab({
+    client: props.client,
+    scope: props.scope,
+    root,
+    resource: props.tab.resource,
+    tabId: props.tab.id,
+    editorVisible: mode !== "preview",
+    onDirty: props.onDirty,
+    onStatus: props.onStatus,
+  });
+  const { editorRequested, opened, paint, view } = file;
 
   useEffect(() => {
-    surfaceLifecycle.current += 1;
-    setLoading(true);
-    setOpened(undefined);
-    shownBinaryGeneration.current = undefined;
-    setView(undefined);
-    controller.current?.dispose();
-    controller.current = undefined;
-    void load({ measureEditorPaint: true });
-    return () => {
-      surfaceLifecycle.current += 1;
-      loadSerial.current += 1;
-      pendingPaint.current?.abandon();
-      pendingPaint.current = undefined;
-      loadAbort.current?.abort();
-      detachLayout.current?.();
-      detachLayout.current = undefined;
-      if (controller.current) {
-        const pending = controller.current.flush();
-        editorFlushRegistry.track(pending);
-        void pending.catch((saveError) => props.onStatus(`Could not save ${props.tab.resource}: ${String(saveError)}`));
-      }
-      controller.current?.dispose();
-      controller.current = undefined;
-    };
-    // The read, the parent watch, and the event subscription all belong to one
-    // connection generation. Leaving `terminalEpoch` out of this one meant an
-    // epoch bump re-armed the watch and its reconciliation against a read that
-    // had never restarted.
-  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
+    if (!editorRequested) return;
+    paint.noteCommitted();
+    paint.notePaintable(editorSurface.facts, recordEditorPaint);
+  }, [editorRequested, editorSurface.facts, paint]);
 
-  useEffect(() => {
-    if (loading || error || !opened) return;
-    const paint = pendingPaint.current;
-    if (!paint || paint.surfaceGeneration !== 0) return;
-    pendingPaint.current = undefined;
-    // Binary, oversized, and preview-only surfaces never mount Monaco, so
-    // they must never publish the specifically named editor-paint span.
-    paint.abandon();
-  }, [error, loading, opened]);
-
-  useEffect(() => {
-    if (!editorRequested || loading || error || !opened) return;
-    const paint = pendingPaint.current;
-    const surface = mountedEditorSurface.current;
-    if (!paint || !surface || paint.surfaceGeneration !== surface || readyEditorSurface.current !== surface) return;
-    pendingPaint.current = undefined;
-    paint.afterPaint((ticket) => ticket.lifecycleGeneration === surfaceLifecycle.current
-      && ticket.surfaceGeneration === mountedEditorSurface.current,
-    () => recordPerfMilestone("editor.paint"));
-  }, [editorRequested, error, loading, opened]);
-
-  useEffect(() => editorFlushRegistry.register(props.tab.id, async () => {
-    await controller.current?.flush();
-  }), [props.tab.id]);
-
-  // "The buffer is dirty" is a state this surface already tracks, so the tab
-  // hears about it once per clean→dirty transition rather than once per
-  // keystroke. `onDirty` is deliberately not a dependency: it closes over
-  // render-fresh state and would re-run this on every render.
-  useEffect(() => { if (view?.state === "dirty") props.onDirty(); }, [view?.state]);
-
-  /**
-   * The generation of the content on screen.
-   *
-   * Derived, never mirrored: for text the autosave controller already owns it
-   * and advances it on every save, so anything that kept a second copy would
-   * disagree with disk from the first write onwards.
-   */
-  const shownGeneration = () => controller.current?.current().generation ?? shownBinaryGeneration.current;
-
-  /**
-   * The listing entry that describes this file, when the listing is entitled to
-   * an opinion about it.
-   *
-   * A symlink's entry describes the *link*, whose identity does not move when
-   * its target is rewritten, while the open describes the bytes. Comparing the
-   * two would report a change on every single open of every symlinked file, so
-   * a symlink is simply not reconciled from its parent's listing.
-   */
-  const listingOpinion = (snapshot: DirectoryListing) => {
-    const entry = snapshot.entries.find((candidate) => candidate.path === props.tab.resource);
-    if (entry) return entry.kind === "symlink" ? undefined : entry.generation;
-    // Absence proves nothing here. A partial page has simply not reached the
-    // file, and even a complete listing omits names the host never reports.
-    // Only an explicit delete event may retire this tab.
-    return undefined;
-  };
-
-  /**
-   * Reconciles the file this surface read against an authoritative listing of
-   * its parent directory.
-   *
-   * The watch bootstrap already carries the directory's exact contents, so it
-   * can answer "did the file change between the read and the watch being
-   * armed?" without asking again. It previously re-read unconditionally, which
-   * on the remote link is a second full open per tab that almost always
-   * confirmed what had just arrived. A reload happens only on a real
-   * generation mismatch, and only once per bootstrap.
-   */
-  const reconcileBootstrap = (lease: DirectoryWatchLease) => {
-    if (reconciliation.current.kind === "done") return;
-    if (!lease.fresh) {
-      // The watch was already armed — by the Explorer showing this folder —
-      // so its bootstrap describes the directory as of whenever that happened
-      // and has no opinion about a file read just now. Acting on it re-opened
-      // the file remotely on the strength of an arbitrarily old row. Nothing is
-      // lost by declining: changes since that watch was armed have already
-      // arrived as events, and changes after this read arrive as events too.
-      reconciliation.current = { kind: "done" };
-      return;
-    }
-    const generation = listingOpinion(lease.snapshot);
-    const shown = shownGeneration();
-    if (shown === undefined) {
-      reconciliation.current = { kind: "bootstrap", generation, serial: loadSerial.current };
-      return;
-    }
-    reconciliation.current = { kind: "done" };
-    if (generation !== undefined && generation !== shown) reloadFromDisk();
-  };
-
-  /**
-   * Re-reads the file because an authoritative listing says it moved.
-   *
-   * One guard, one caller shape: a buffer the person is still typing into, or
-   * one whose save is in flight, is never replaced by disk. The reload path
-   * hands the content to `AutosaveController.external`, which overwrites the
-   * view outright, so an unguarded caller silently discards unsaved work.
-   */
-  const reloadFromDisk = () => {
-    const state = controller.current?.current().state;
-    if (state === "dirty" || state === "saving") return;
-    void load();
-  };
-
-  useEffect(() => {
-    if (!props.scope || !root) return;
-    let disposed = false;
-    let release: (() => void) | undefined;
-    // The bootstrap *is* a full directory listing, so a tab closed while it is
-    // in flight must stop it rather than pay for it and throw it away. Only
-    // this subscriber is abandoned: the watch itself survives for whoever else
-    // holds it.
-    const abandon = new AbortController();
-    reconciliation.current = { kind: "pending" };
-    void props.client.acquireDirectoryWatch(props.scope, root, parentPath(props.tab.resource), {
-      signal: abandon.signal,
-    }).then((next) => {
-      if (disposed) next.release();
-      else {
-        release = next.release;
-        reconcileBootstrap(next);
-      }
-    }).catch((watchError) => {
-      if (disposed || (watchError instanceof DOMException && watchError.name === "AbortError")) return;
-      props.onStatus(`File watch unavailable: ${String(watchError)}`);
-    });
-    return () => {
-      disposed = true;
-      if (release) release();
-      else abandon.abort();
-    };
-  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
-
+  const onEditorReady = useCallback(() => {
+    editorSurface.noteReady();
+    paint.notePaintable(editorSurface.facts, recordEditorPaint);
+  }, [editorSurface, paint]);
+  const editFile = file.edit;
+  const canWrite = props.canWrite;
+  const onEditorChange = useCallback((content: string) => {
+    if (canWrite) editFile(content);
+  }, [canWrite, editFile]);
 
   if (!props.scope || !root) return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
-  if (loading) return <EmptyTab tab={props.tab} detail="Loading file…" />;
-  if (error && !opened) return <EmptyTab tab={props.tab} detail={error} download={() => props.onDownload(props.tab.resource, "file", root)} />;
-  if (error) return <EmptyTab tab={props.tab} detail={`The file changed or became unavailable: ${error}`} download={() => props.onDownload(props.tab.resource, "file", root)} />;
+  if (file.loading) return <EmptyTab tab={props.tab} detail="Loading file…" />;
+  if (file.error && !opened) return <EmptyTab tab={props.tab} detail={file.error} download={() => props.onDownload(props.tab.resource, "file", root)} />;
+  if (file.error) return <EmptyTab tab={props.tab} detail={`The file changed or became unavailable: ${file.error}`} download={() => props.onDownload(props.tab.resource, "file", root)} />;
   if (!opened) return <EmptyTab tab={props.tab} detail="File unavailable." />;
   if (opened.kind === "binary") return <BinarySurface file={opened.file} onDownload={() => props.onDownload(props.tab.resource, "file", root)} />;
   if (Number(opened.file.sizeBytes) > TEXT_FILE_LIMIT_BYTES) return <EmptyTab tab={props.tab} detail="This text file is larger than the 10 MiB editor limit." download={() => props.onDownload(props.tab.resource, "file", root)} />;
 
-  const mode = props.tab.kind === "markdown" ? props.tab.viewMode ?? "split" : "source";
   const source = view?.content ?? opened.file.content;
   // The view mode is data, not a class. As a class it was `markdown-${mode}`,
   // and in preview mode that is `markdown-preview` — the preview article's own
@@ -434,35 +113,25 @@ export function AppTabSurface(props: Props) {
       <button onClick={() => props.onDownload(props.tab.resource, "file", root)} type="button">Download…</button>
     </header>
     {view?.error && <SurfaceError className="editor-error" detail={view.error} />}
-    {mode !== "preview" && <div className="monaco-host" ref={bindEditorHost}>
-      <Editor
-        language={languageForPath(props.tab.resource)}
-        onChange={(content) => { if (props.canWrite && typeof content === "string") controller.current?.edit(content, opened.file.lineEnding); }}
-        onMount={(editor) => {
-          const paint = pendingPaint.current;
-          const surface = mountedEditorSurface.current;
-          readyEditorSurface.current = surface;
-          if (paint && surface && paint.surfaceGeneration === surface) {
-            pendingPaint.current = undefined;
-            paint.afterPaint((ticket) => ticket.lifecycleGeneration === surfaceLifecycle.current
-              && ticket.surfaceGeneration === mountedEditorSurface.current,
-            () => recordPerfMilestone("editor.paint"));
-          }
-          detachLayout.current?.(); detachLayout.current = attachEditorLayout(editor);
-        }}
-        options={{ automaticLayout: true, minimap: { enabled: false }, readOnly: !props.canWrite, scrollBeyondLastLine: false, wordWrap: props.tab.kind === "markdown" ? "on" : "off" }}
-        path={modelPath(props.tab)}
-        saveViewState
-        theme={ADE_MONACO_THEME}
-        value={source}
-      />
+    {editorRequested && <div className="monaco-host" ref={editorSurface.bindHost}>
+      <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>
+        <FileEditor
+          modelPath={modelPath(props.tab)}
+          onChange={onEditorChange}
+          onReady={onEditorReady}
+          path={props.tab.resource}
+          readOnly={!props.canWrite}
+          value={source}
+          wordWrap={props.tab.kind === "markdown"}
+        />
+      </Suspense>
     </div>}
     {props.tab.kind === "markdown" && mode !== "source" && <MarkdownPreview source={source} onStatus={props.onStatus} />}
   </section>;
 }
 
 function MarkdownPreview({ source, onStatus }: { source: string; onStatus(message: string): void }) {
-  const html = useMemo(() => renderSafeMarkdown(source), [source]);
+  const html = useSanitizedMarkdown(source);
   const [externalUrl, setExternalUrl] = useState<string>();
   return <><article className="markdown-preview" onClick={(event) => {
     const anchor = (event.target as HTMLElement).closest("a");
@@ -521,11 +190,6 @@ function EmptyTab({ tab, detail, download }: { tab: AppOwnedTab; detail: string;
 
 function modelPath(tab: AppOwnedTab): string {
   return `tmux-ide://${encodeURIComponent(tab.hostProfileId)}/${encodeURIComponent(tab.serverIdentity)}/${encodeURIComponent(tab.sessionId)}${tab.resource}`;
-}
-
-function languageForPath(path: string): string {
-  const extension = path.split(".").at(-1)?.toLowerCase();
-  return ({ ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", rs: "rust", py: "python", md: "markdown", json: "json", css: "css", html: "html", sh: "shell", yml: "yaml", yaml: "yaml", toml: "ini" } as Record<string, string>)[extension ?? ""] ?? "plaintext";
 }
 
 function formatBytes(value: string): string {
