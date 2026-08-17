@@ -17,7 +17,7 @@ use tmux_agent_protocol::{PublicationOutcome, v1};
 use uuid::Uuid;
 
 use super::bulk_pool::BulkLease;
-use super::bulk_protocol::{BulkProtocolClient, RequestFailure};
+use super::bulk_protocol::{BulkProtocolClient, Exchange, RequestFailure};
 use super::local_destination::{DestinationReservations, PreparedDestination, ReservedDestination};
 use super::scheduler::{
     BulkBinding, CancelState, DeadlineGuard, QueuedPublication, cancel_transfer,
@@ -336,7 +336,7 @@ fn run_download(job: &DownloadJob) -> TransferResult {
         BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &_deadline)?;
     let _process_binding = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
-    let descriptor_response = match protocol.request_classified_cancellable(
+    let descriptor_response = match protocol.request_classified(
         v1::Request {
             operation: v1::Operation::StartDownload.into(),
             file: Some(v1::FileServiceRequest {
@@ -350,8 +350,7 @@ fn run_download(job: &DownloadJob) -> TransferResult {
             }),
             ..Default::default()
         },
-        &job.cancellation,
-        &_deadline,
+        Exchange::live(&job.cancellation, &_deadline),
     ) {
         Ok(response) => response,
         Err(RequestFailure::Remote { code, message, .. }) => {
@@ -447,7 +446,7 @@ fn stream_download(
         if job.cancellation.is_cancelled() {
             return Err("download cancelled".into());
         }
-        let response = protocol.request_cancellable(
+        let response = protocol.request(
             v1::Request {
                 operation: v1::Operation::ReadDownloadChunk.into(),
                 file: Some(v1::FileServiceRequest {
@@ -459,8 +458,7 @@ fn stream_download(
                 }),
                 ..Default::default()
             },
-            &job.cancellation,
-            deadline,
+            Exchange::live(&job.cancellation, deadline),
         )?;
         deadline.touch();
         let chunk = response

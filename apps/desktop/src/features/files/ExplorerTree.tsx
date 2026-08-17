@@ -1,13 +1,13 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
-import { useModalDialog } from "../../commands/useModalDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
-import { Icon } from "../../ui/Icon";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { DownloadIntent } from "./downloadFlow";
 import { DownloadTransfers } from "./DownloadTransfers";
-import { fileIcon } from "./fileIcons";
+import { ExplorerMutationDialog, type PendingMutation } from "./ExplorerMutationDialog";
+import { ExplorerEntryRow, ExplorerMoreRow, type ExplorerRowActions } from "./ExplorerRow";
+import { DEFAULT_ROW_HEIGHT, mountedRowCount, rowWindow, scrollOffsetForRow } from "./explorerWindow";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
 import { recordPerfHighWater } from "../../perf/probe";
 
@@ -50,51 +50,143 @@ interface Props {
   onLoadMore(path: string): void;
 }
 
-type PendingAction = { action: "newFile" | "newDirectory" | "rename" | "move" | "duplicate" | "delete"; rootToken: string; scopeIdentity: string; entry?: FileEntry };
+/**
+ * What a row's actions do before the first commit: nothing.
+ *
+ * A real object rather than a cast, because the ref is not optional — it is
+ * uninitialized for exactly one render, during which no event can reach a row.
+ */
+/**
+ * The zero-width probe the spacer model measures its row height from.
+ *
+ * Both row kinds — `.file-row` and `.load-more-files` — take their height from
+ * the same `--explorer-row-height`, which is what makes a uniform spacer model
+ * true rather than approximately true. The probe carries that height and no
+ * content, so it is measurable whether or not the directory has any rows.
+ */
+const ROW_METRIC_CLASS = "file-row-metric";
+
+const INERT_ROW_ACTIONS: ExplorerRowActions = {
+  toggle: () => undefined,
+  open: () => undefined,
+  focus: () => undefined,
+  contextMenu: () => undefined,
+  keyDown: () => undefined,
+  loadMore: () => undefined,
+  moreKeyDown: () => undefined,
+};
 
 export function ExplorerTree(props: Props) {
   // One right-click menu replaces the per-row `•••` button that used to appear
   // on hover, and the three header buttons above it. Nothing in this tree is a
   // resting control any more.
   const [menu, setMenu] = useState<{ entry?: FileEntry; anchor: ContextMenuAnchor }>();
-  const [pending, setPending] = useState<PendingAction>();
-  const [value, setValue] = useState("");
-  const [overwrite, setOverwrite] = useState(false);
-  const [nonEmptyOverwrite, setNonEmptyOverwrite] = useState(false);
-  const [dialogError, setDialogError] = useState<string>();
-  const [focusIndex, setFocusIndex] = useState(0);
+  const [pending, setPending] = useState<PendingMutation>();
+  // Which *row* has the keyboard, not which position. A precise external
+  // change inserts or removes one row without re-listing anything, so a
+  // position moved the user's cursor to a different file every time an agent
+  // touched the directory they were navigating — and deleting the focused row
+  // silently dropped DOM focus to the document body.
+  const [focusKey, setFocusKey] = useState<string>();
+  const lastFocusIndex = useRef(0);
   // VS Code's escape hatch, and the reason hiding them is safe: the rule is
   // reversible from the tree itself, without a settings trip.
   const [showIgnored, setShowIgnored] = useState(false);
   const treeRef = useRef<HTMLDivElement>(null);
-  const composing = useRef(false);
-  const dialogTitleId = useId();
-  const closeDialog = () => setPending(undefined);
-  const dialogRef = useModalDialog<HTMLFormElement>(closeDialog, Boolean(pending));
+  /**
+   * Whether the keyboard is inside this tree.
+   *
+   * Maintained as focus moves rather than asked for after the fact. A row
+   * being unmounted sends focus to `<body>`, which is indistinguishable from
+   * "the tree lost focus" if you only look afterwards — and on WebKit and
+   * Blink the removal reports no blur at all, so there is nothing to look at.
+   */
+  const ownsFocus = useRef(false);
   const rootName = props.root?.path.split("/").filter(Boolean).at(-1) ?? props.root?.path ?? "No active root";
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
-  // This is the actual slice owned by the render below. A future windowing
-  // implementation must narrow this value, keeping the metric about mounted
-  // row cost rather than silently continuing to count the logical model.
-  const renderedRows = rows;
+  const heldIndex = focusKey === undefined ? -1 : rows.findIndex((row) => rowKey(row) === focusKey);
+  // The row is gone — deleted, collapsed away, filtered out. Focus stays where
+  // the user put it rather than jumping to the top, and the effect below hands
+  // the element there the real DOM focus.
+  const focusIndex = heldIndex >= 0 ? heldIndex : Math.min(lastFocusIndex.current, Math.max(0, rows.length - 1));
+  const viewport = useTreeViewport(treeRef, rows.length);
+  const mounted = rowWindow({
+    rowCount: rows.length,
+    rowHeight: viewport.rowHeight,
+    scrollTop: viewport.scrollTop,
+    viewportHeight: viewport.height,
+    focusIndex,
+  });
+  // The real cost the row budget is about, so the metric stays about mounted
+  // rows rather than the logical model. Below the windowing threshold this is
+  // every row and the tree behaves exactly as it always has.
+  const renderedRowCount = mountedRowCount(mounted);
   useEffect(() => {
     recordPerfHighWater("explorer.logicalRows", rows.length);
-    recordPerfHighWater("explorer.renderedRows", renderedRows.length);
-  }, [renderedRows, rows.length]);
-  useEffect(() => setFocusIndex((current) => Math.min(current, Math.max(0, rows.length - 1))), [rows.length]);
+    recordPerfHighWater("explorer.renderedRows", renderedRowCount);
+    // Counts, not the slice: the slice is a fresh array on every render, and
+    // depending on it would run this on every render for no new information.
+  }, [renderedRowCount, rows.length]);
+  useLayoutEffect(() => { lastFocusIndex.current = focusIndex; }, [focusIndex]);
+  useEffect(() => {
+    if (heldIndex >= 0 || focusKey === undefined) return;
+    const replacement = rows[focusIndex];
+    if (!replacement) return;
+    // Whether this tree had the keyboard *before* the row went away. Asking
+    // the document now cannot answer it: removing a focused element moves
+    // focus to `<body>`, so a `contains(document.activeElement)` check here is
+    // false in exactly the case it was written for — and the restore never
+    // ran. Ownership is therefore tracked as it changes, below.
+    const owned = ownsFocus.current;
+    setFocusKey(rowKey(replacement));
+    if (owned) treeRef.current?.querySelector<HTMLElement>(`[data-tree-index="${focusIndex}"]`)?.focus();
+  }, [focusIndex, focusKey, heldIndex, rows]);
   // A new root is a new repository, and the toggle is not offered when that
   // repository has nothing ignored — so a `true` carried across would leave
   // ignored files showing with no visible reason and no way to put them back.
   useEffect(() => { setPending(undefined); setShowIgnored(false); }, [props.root?.token, props.scopeIdentity]);
 
+  // One stable object for every row, forwarding to handlers a layout effect
+  // keeps current. Rebuilding the object on each render would defeat the row
+  // memo boundary entirely — the props would differ every time even when the
+  // row did not — and assigning the live handlers during render would publish
+  // closures over state a discarded render never committed.
+  const liveRowActions = useRef<ExplorerRowActions>(INERT_ROW_ACTIONS);
+  const rowActionsRef = useMemo<ExplorerRowActions>(() => ({
+    toggle: (path) => liveRowActions.current.toggle(path),
+    open: (entry, options) => liveRowActions.current.open(entry, options),
+    focus: (index) => liveRowActions.current.focus(index),
+    contextMenu: (entry, anchor, index) => liveRowActions.current.contextMenu(entry, anchor, index),
+    keyDown: (event, index, depth, entry) => liveRowActions.current.keyDown(event, index, depth, entry),
+    loadMore: (directory) => liveRowActions.current.loadMore(directory),
+    moreKeyDown: (event, index) => liveRowActions.current.moreKeyDown(event, index),
+  }), []);
+
   const focusRow = (index: number) => {
     const next = Math.max(0, Math.min(rows.length - 1, index));
-    setFocusIndex(next);
-    window.requestAnimationFrame(() => treeRef.current?.querySelector<HTMLElement>(`[data-tree-index="${next}"]`)?.focus());
+    const row = rows[next];
+    if (!row) return;
+    ownsFocus.current = true;
+    setFocusKey(rowKey(row));
+    lastFocusIndex.current = next;
+    // Bring the row into view before asking for focus. The window always keeps
+    // the focused row mounted, so this is about what the user can see rather
+    // than about whether the element exists.
+    const offset = scrollOffsetForRow({
+      index: next,
+      rowHeight: viewport.rowHeight,
+      scrollTop: viewport.scrollTop,
+      viewportHeight: viewport.height,
+    });
+    if (offset !== undefined && treeRef.current) {
+      treeRef.current.scrollTop = offset;
+      viewport.setScrollTop(offset);
+    }
+    globalThis.requestAnimationFrame(() => treeRef.current?.querySelector<HTMLElement>(`[data-tree-index="${next}"]`)?.focus());
   };
 
-  const navigateEntry = (event: KeyboardEvent<HTMLDivElement>, index: number, depth: number, entry: FileEntry) => {
+  const navigateEntry = (event: KeyboardEvent<HTMLElement>, index: number, depth: number, entry: FileEntry) => {
     if (event.target !== event.currentTarget) return;
     // Every file action is on the context menu, so the keyboard needs a way to
     // open it or a keyboard-only user cannot rename, move or delete anything.
@@ -105,6 +197,14 @@ export function ExplorerTree(props: Props) {
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); return;
+    }
+    // The tree role's own keys, and not a nicety once the tree is windowed:
+    // before windowing every row was in the DOM and the browser's own
+    // find-as-you-type could reach row 4,000. With a mounted band it cannot, so
+    // without these the only way to the end of a large directory is 4,000
+    // ArrowDown presses, each one a state commit and a scroll assignment.
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault(); focusRow(event.key === "Home" ? 0 : rows.length - 1); return;
     }
     if (event.key === "ArrowRight") {
       event.preventDefault();
@@ -130,13 +230,36 @@ export function ExplorerTree(props: Props) {
     }
   };
 
-  const begin = (action: PendingAction["action"], entry?: FileEntry) => {
+  const committedRowActions: ExplorerRowActions = {
+    toggle: (path) => props.onToggle(path),
+    open: (entry, options) => props.onOpen(entry, options),
+    focus: (index) => {
+      const row = rows[index];
+      if (!row) return;
+      // A row reporting focus *is* the tree owning the keyboard. Recorded here
+      // rather than only from the container's own focus event, because that is
+      // the fact, and because it does not depend on an event reaching an
+      // ancestor.
+      ownsFocus.current = true;
+      setFocusKey(rowKey(row));
+      lastFocusIndex.current = index;
+    },
+    contextMenu: (entry, anchor, index) => {
+      focusRow(index);
+      setMenu({ ...(entry ? { entry } : {}), anchor });
+    },
+    keyDown: (event, index, depth, entry) => navigateEntry(event, index, depth, entry),
+    loadMore: (directory) => props.onLoadMore(directory),
+    moreKeyDown: (event, index) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
+      else if (event.key === "Home" || event.key === "End") { event.preventDefault(); focusRow(event.key === "Home" ? 0 : rows.length - 1); }
+    },
+  };
+  useLayoutEffect(() => { liveRowActions.current = committedRowActions; });
+
+  const begin = (action: PendingMutation["action"], entry?: FileEntry) => {
     if (!props.root) return;
     setPending({ action, entry, rootToken: props.root.token, scopeIdentity: props.scopeIdentity });
-    setOverwrite(false);
-    setNonEmptyOverwrite(false);
-    setDialogError(undefined);
-    setValue(action === "rename" || action === "duplicate" ? entry?.path ?? "" : "");
     setMenu(undefined);
   };
 
@@ -167,7 +290,7 @@ export function ExplorerTree(props: Props) {
   // for nothing. What the palette needs to be current is the *id list*, and
   // that is memoized above.
   const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
-  runRowCommand.current = (commandId) => {
+  const committedRowCommand = (commandId: CommandId) => {
     switch (commandId) {
       case "files.open": if (focusedEntry) props.onOpen(focusedEntry, { preview: false }); return;
       case "files.rename": begin("rename", focusedEntry); return;
@@ -180,37 +303,13 @@ export function ExplorerTree(props: Props) {
       case "files.refresh": props.onRefresh(); return;
     }
   };
+  useLayoutEffect(() => { runRowCommand.current = committedRowCommand; });
   const rowSource = useMemo<RowCommandSource | undefined>(() => rowActions.length === 0 ? undefined : {
     subject: focusedEntry?.name ?? rootName,
     available: rowActions,
     run: (commandId) => runRowCommand.current(commandId),
   }, [focusedEntry, rootName, rowActions]);
   usePublishedRowCommands("files", rowSource);
-
-  const submit = async () => {
-    if (!pending || !props.root) return;
-    if (pending.rootToken !== props.root.token || pending.scopeIdentity !== props.scopeIdentity || props.disabled) {
-      setDialogError("This file action was cancelled because its host or active root changed.");
-      return;
-    }
-    try {
-      const entry = pending.entry;
-      if ((pending.action === "newFile" || pending.action === "newDirectory") && value.trim()) {
-        await props.onMutate({ kind: pending.action === "newFile" ? "createFile" : "createDirectory", parent: entry?.kind === "directory" ? entry.path : props.root.path, name: value.trim() });
-      } else if (entry && pending.action === "rename" && value.trim()) {
-        await props.onMutate({ kind: "rename", path: entry.path, destination: value.trim(), overwrite, confirmedNonEmpty: nonEmptyOverwrite });
-      } else if (entry && pending.action === "move" && value.trim()) {
-        await props.onMutate({ kind: "move", path: entry.path, destination: value.trim(), overwrite, confirmedNonEmpty: nonEmptyOverwrite });
-      } else if (entry && pending.action === "duplicate" && value.trim()) {
-        await props.onMutate({ kind: "duplicate", path: entry.path, destination: value.trim(), overwrite, confirmedNonEmpty: nonEmptyOverwrite });
-      } else if (entry && pending.action === "delete") {
-        await props.onMutate({ kind: "delete", path: entry.path, confirmedNonEmpty: entry.kind === "directory" });
-      }
-      setPending(undefined);
-    } catch (error) {
-      setDialogError(String(error));
-    }
-  };
 
   // Offered only when git has actually told us something to hide: without an
   // authoritative status the tree already shows everything, and a toggle that
@@ -250,36 +349,63 @@ export function ExplorerTree(props: Props) {
         event.preventDefault();
         setMenu({ anchor: { x: event.clientX, y: event.clientY } });
       }}
+      onBlur={(event) => {
+        // Two things look alike from here and are not. A row unmounted under
+        // the cursor reports no `relatedTarget` — and the row it left is
+        // already detached — which is the one case the restore above exists
+        // for. A click on non-focusable background also reports no
+        // `relatedTarget`, but the row it left is still in the document, and
+        // that genuinely does give the keyboard away: treating it as a removal
+        // would let the next external change pull focus back into a tree the
+        // user had put it down in.
+        const gaveItAway = event.relatedTarget
+          ? !event.currentTarget.contains(event.relatedTarget)
+          : event.target.isConnected;
+        if (gaveItAway) ownsFocus.current = false;
+      }}
+      onFocus={() => { ownsFocus.current = true; }}
+      onScroll={(event) => viewport.observeScroll(event.currentTarget.scrollTop)}
       ref={treeRef}
       role="tree"
     >
-      {renderedRows.map((row, index) => {
-        if (row.kind === "more") return <button aria-level={row.depth + 1} className="load-more-files" data-tree-index={index} disabled={props.loading.has(row.directory)} key={`more:${row.directory}`} onClick={() => props.onLoadMore(row.directory)} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => {
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
-        }} role="treeitem" style={{ marginLeft: `${8 + row.depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1} type="button">Load more…</button>;
-        const { entry, depth } = row;
-        const isOpen = props.expanded.has(entry.path);
-        const icon = fileIcon(entry, isOpen);
-        return <div aria-expanded={entry.expandable ? isOpen : undefined} aria-level={depth + 1} aria-selected={index === focusIndex} className="file-row" data-tree-index={index} key={entry.path} onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry, { preview: true }); }} onDoubleClick={(event) => {
-          // The row's indent strip is outside the button but inside the row,
-          // so without this a file reached by clicking its padding could be
-          // previewed forever and never pinned.
-          if (event.target === event.currentTarget && !entry.expandable) props.onOpen(entry, { preview: false });
-        }} onContextMenu={(event) => {
-          event.preventDefault();
-          focusRow(index);
-          setMenu({ entry, anchor: { x: event.clientX, y: event.clientY } });
-        }} onFocus={() => setFocusIndex(index)} onKeyDown={(event) => navigateEntry(event, index, depth, entry)} onPointerDown={() => setFocusIndex(index)} role="treeitem" style={{ paddingLeft: `${8 + depth * 14}px` }} tabIndex={index === focusIndex ? 0 : -1}>
-          {/* The click of a double-click fires first and opens the preview;
-              the second click then pins that same tab, which is exactly the
-              VS Code behaviour and needs no click-delay timer. */}
-          <button className="file-main" onClick={() => entry.expandable ? props.onToggle(entry.path) : props.onOpen(entry, { preview: true })} onDoubleClick={() => { if (!entry.expandable) props.onOpen(entry, { preview: false }); }} tabIndex={-1} type="button">
-            <span className="file-twisty">{entry.expandable ? <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={11} /> : null}</span>
-            <span className={`file-icon ${entry.kind}`} style={{ color: icon.color }}><Icon name={icon.icon} size={14} /></span>
-            <span title={entryTooltip(entry)}>{entry.name}</span>
-          </button>
-        </div>;
-      })}
+      {/* The row height the spacer model is built on, as a thing that exists
+          rather than a number copied into TypeScript. Zero-width, out of flow,
+          and never unmounted, so it can be measured at any moment — including
+          when the type scale changes and no row has been added or removed. */}
+      <div aria-hidden="true" className={ROW_METRIC_CLASS} />
+      {/* Reserved height stands in for the rows that are not mounted, so the
+          scrollbar describes the whole directory rather than the slice. All of
+          it is zero below the windowing threshold. */}
+      {mounted.segments.map((segment) => <Fragment key={`segment:${segment.start}`}>
+        {segment.leadingHeight > 0 && <div aria-hidden="true" style={{ height: `${segment.leadingHeight}px` }} />}
+        {rows.slice(segment.start, segment.end).map((row, offset) => {
+          const index = segment.start + offset;
+          return row.kind === "more"
+            ? <ExplorerMoreRow
+              actions={rowActionsRef}
+              depth={row.depth}
+              directory={row.directory}
+              disabled={props.loading.has(row.directory)}
+              focused={index === focusIndex}
+              index={index}
+              key={`more:${row.directory}`}
+              positionInSet={row.positionInSet}
+              setSize={row.setSize}
+            />
+            : <ExplorerEntryRow
+              actions={rowActionsRef}
+              depth={row.depth}
+              entry={row.entry}
+              focused={index === focusIndex}
+              index={index}
+              key={row.entry.path}
+              open={props.expanded.has(row.entry.path)}
+              positionInSet={row.positionInSet}
+              setSize={row.setSize}
+            />;
+        })}
+      </Fragment>)}
+      {mounted.trailingHeight > 0 && <div aria-hidden="true" style={{ height: `${mounted.trailingHeight}px` }} />}
       {/* Only until this directory has answered once — "we have no listing yet",
           not "we have no rows", so a directory that is genuinely empty does not
           swap between these two lines every time it is re-read either.
@@ -309,7 +435,7 @@ export function ExplorerTree(props: Props) {
         ? [
           ...(menu.entry.kind === "directory" ? [] : [{ id: "open", label: "Open", run: () => props.onOpen(menu.entry!, { preview: false }) }]),
           { id: "rename", label: "Rename…", disabled: props.disabled, run: () => begin("rename", menu.entry) },
-          { id: "move", label: "Move…", disabled: props.disabled, run: () => { setValue(""); begin("move", menu.entry); } },
+          { id: "move", label: "Move…", disabled: props.disabled, run: () => begin("move", menu.entry) },
           { id: "duplicate", label: "Duplicate…", disabled: props.disabled, run: () => begin("duplicate", menu.entry) },
           { id: "download", label: menu.entry.kind === "directory" ? "Download folder…" : "Download…", run: () => void props.onDownload({ path: menu.entry!.path, kind: menu.entry!.kind === "directory" ? "folder" : "file" }) },
           "separator" as const,
@@ -330,17 +456,14 @@ export function ExplorerTree(props: Props) {
       onClose={() => setMenu(undefined)}
     />}
     <DownloadTransfers onCancelTransfer={props.onCancelTransfer} transfers={props.transfers} />
-    {pending && <div className="modal-backdrop" role="presentation"><form aria-labelledby={dialogTitleId} aria-modal="true" className="file-dialog confirmation" onSubmit={(event) => { event.preventDefault(); if (!composing.current) void submit(); }} ref={dialogRef} role="dialog">
-      <h2 id={dialogTitleId}>{labelForAction(pending.action)}</h2>
-      {pending.action === "delete" ? <p>Delete <code>{pending.entry?.path}</code>? {pending.entry?.kind === "directory" && "Non-empty directories require this confirmation."}</p> : <label>
-        {pending.action.startsWith("new") ? "Name" : "Destination path"}
-        <input autoFocus onChange={(event) => setValue(event.target.value)} onCompositionEnd={() => { composing.current = false; }} onCompositionStart={() => { composing.current = true; }} value={value} />
-      </label>}
-      {["rename", "move", "duplicate"].includes(pending.action) && <label className="overwrite"><input checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} type="checkbox" /> Allow overwrite after confirmation</label>}
-      {["rename", "move", "duplicate"].includes(pending.action) && overwrite && <label className="overwrite"><input checked={nonEmptyOverwrite} onChange={(event) => setNonEmptyOverwrite(event.target.checked)} type="checkbox" /> Also replace a non-empty destination directory</label>}
-      {dialogError && <SurfaceError detail={dialogError} />}
-      <div className="dialog-actions"><button onClick={() => setPending(undefined)} type="button">Cancel</button><button className={pending.action === "delete" ? "danger" : "primary"} type="submit">{pending.action === "delete" ? "Delete" : "Apply"}</button></div>
-    </form></div>}
+    {pending && <ExplorerMutationDialog
+      disabled={props.disabled}
+      onClose={() => setPending(undefined)}
+      onMutate={props.onMutate}
+      pending={pending}
+      root={props.root}
+      scopeIdentity={props.scopeIdentity}
+    />}
   </div>;
 }
 
@@ -350,7 +473,7 @@ function flattenTree(
   expanded: ReadonlySet<string>,
   ignored?: ReadonlySet<string>,
 ) {
-  const rows: ({ kind: "entry"; entry: FileEntry; depth: number } | { kind: "more"; directory: string; depth: number })[] = [];
+  const rows: ExplorerRowModel[] = [];
   // Git reports `target/` once and never its ten thousand contents, which
   // membership alone would miss — except that this walk only ever descends
   // into a directory it has already decided to keep, so a dropped directory
@@ -361,25 +484,97 @@ function flattenTree(
   // can sit under an ignored ancestor this walk never saw.
   const visit = (directory: string, depth: number) => {
     const listing = listings.get(directory);
-    for (const entry of listing?.entries ?? []) {
-      if (ignored?.has(entry.path)) continue;
-      rows.push({ kind: "entry", entry, depth });
+    const shown = (listing?.entries ?? []).filter((entry) => !ignored?.has(entry.path));
+    // Sibling counts, because windowing means an assistive technology can no
+    // longer infer position from what happens to be in the DOM. They are per
+    // level, as the tree role requires — not positions in the flattened walk.
+    const siblings = shown.length + (listing && !listing.complete && listing.nextPageToken ? 1 : 0);
+    let position = 0;
+    for (const entry of shown) {
+      position += 1;
+      rows.push({ kind: "entry", entry, depth, positionInSet: position, setSize: siblings });
       if (entry.expandable && expanded.has(entry.path)) visit(entry.path, depth + 1);
     }
-    if (listing && !listing.complete && listing.nextPageToken) rows.push({ kind: "more", directory, depth });
+    if (listing && !listing.complete && listing.nextPageToken) {
+      rows.push({ kind: "more", directory, depth, positionInSet: siblings, setSize: siblings });
+    }
   };
   visit(root, 0);
   return rows;
 }
 
-function labelForAction(action: PendingAction["action"]): string {
-  return ({ newFile: "Create file", newDirectory: "Create folder", rename: "Rename", move: "Move", duplicate: "Duplicate", delete: "Delete" } as const)[action];
+/** One row's stable identity, which is what the keyboard actually holds. */
+function rowKey(row: ExplorerRowModel): string {
+  return row.kind === "entry" ? row.entry.path : `${row.directory}\u0000more`;
 }
 
-function entryTooltip(entry: FileEntry): string {
-  const modified = Number(entry.modifiedMillis);
-  const lines = [entry.path, `${entry.kind} · ${entry.sizeBytes} bytes`];
-  if (Number.isFinite(modified) && modified > 0) lines.push(`Modified ${new Date(modified).toLocaleString()}`);
-  if (entry.symlinkTarget) lines.push(`Symlink → ${entry.symlinkTarget}`);
-  return lines.join("\n");
+type ExplorerRowModel =
+  | { kind: "entry"; entry: FileEntry; depth: number; positionInSet: number; setSize: number }
+  | { kind: "more"; directory: string; depth: number; positionInSet: number; setSize: number };
+
+/**
+ * The tree's scroll geometry, measured rather than assumed.
+ *
+ * Row height comes from [`ROW_METRIC_CLASS`], a zero-width probe that carries
+ * the same `--explorer-row-height` every row does. Measuring a *mounted row*
+ * instead tied the measurement to the row set: it could only be taken when the
+ * rows changed, which is the one moment it never needs taking, and never when
+ * the type scale did, which is the only moment it does. The probe outlives
+ * every row, so one observer set up once covers both the viewport resizing and
+ * the row height changing under it.
+ */
+function useTreeViewport(ref: RefObject<HTMLDivElement | null>, rowCount: number) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const scrollFrame = useRef(0);
+  const [height, setHeight] = useState(0);
+  const [rowHeight, setRowHeight] = useState(DEFAULT_ROW_HEIGHT);
+  // A layout effect, not a passive one: it runs before the browser paints, so
+  // the first frame the user actually sees is already sized by the real
+  // viewport rather than by the pre-layout assumption.
+  //
+  // Its dependency is *whether* the tree has rows, never how many. Re-running
+  // on every count tore down and rebuilt the observer on the precise-event
+  // path this whole package exists to make cheap.
+  const populated = rowCount > 0;
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const probe = node.querySelector<HTMLElement>(`.${ROW_METRIC_CLASS}`);
+    // Measured directly, and first. Leaving this to `ResizeObserver` alone left
+    // the viewport at zero — and therefore assumed — on the first commit, and
+    // permanently wherever that observer does not exist, so a tree taller than
+    // the assumption rendered blank space below its band.
+    const measure = () => {
+      setHeight(node.clientHeight);
+      const row = probe?.offsetHeight ?? 0;
+      if (row > 0) setRowHeight((current) => (current === row ? current : row));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    if (probe) observer.observe(probe);
+    return () => observer.disconnect();
+  }, [populated, ref]);
+  // A shorter tree can leave the viewport scrolled past its own content.
+  useEffect(() => { if (rowCount === 0) setScrollTop(0); }, [rowCount]);
+  useEffect(() => () => globalThis.cancelAnimationFrame?.(scrollFrame.current), []);
+  return {
+    height,
+    rowHeight,
+    scrollTop,
+    setScrollTop,
+    /**
+     * Coalesces scrolling to one commit per frame.
+     *
+     * A scroll event per state commit re-slices and re-renders the mounted
+     * band, which on the surface windowing exists to keep under a frame budget
+     * is the one place that cannot afford a render per event.
+     */
+    observeScroll: (offset: number) => {
+      globalThis.cancelAnimationFrame?.(scrollFrame.current);
+      scrollFrame.current = globalThis.requestAnimationFrame(() => setScrollTop(offset));
+    },
+  };
 }
+

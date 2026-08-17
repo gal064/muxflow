@@ -22,6 +22,7 @@ mod manager_acceptance;
 pub(crate) mod native_clipboard;
 pub use download_manager::DownloadManager;
 pub(crate) mod editor_manager;
+mod file_stream;
 pub use editor_manager::FileIoManager;
 mod serialization;
 pub(crate) use serialization::{file_event_json, file_response_json};
@@ -81,6 +82,8 @@ pub struct FileCommand {
     pub page_token: String,
     #[serde(default)]
     pub page_size: u32,
+    #[serde(default)]
+    pub known_root_token: String,
 }
 
 /// Async so the host round trip never runs on the WebView's main thread: a
@@ -114,19 +117,61 @@ pub async fn file_request(
         root_token: command.root_token,
         page_token: command.page_token,
         page_size: command.page_size,
+        known_root_token: command.known_root_token,
         ..Default::default()
     };
     let client = get_client(&clients, &client_id)?;
+    // Reads only. A mutation that could be cancelled mid-flight would leave the
+    // caller unable to say whether it happened, and this app never lets a
+    // remote mutation reach an unknown outcome it could have avoided.
+    let cancellable = matches!(
+        operation,
+        v1::Operation::ListDirectory | v1::Operation::WatchDirectory
+    );
+    // Claimed here, on the command thread, before anything is dispatched: a
+    // caller that abandons its read in the same tick must find something to
+    // cancel rather than a slot the worker has not created yet.
+    let claim = (cancellable && !request.operation_id.is_empty())
+        .then(|| client.claim_file_operation(&request.operation_id))
+        .transpose()?;
     let request = v1::Request {
         operation: operation.into(),
         file: Some(request),
         ..Default::default()
     };
-    let response = tauri::async_runtime::spawn_blocking(move || client.request(request))
-        .await
-        .map_err(|error| format!("file request task failed: {error}"))??;
+    let response =
+        tauri::async_runtime::spawn_blocking(move || client.request_file(request, claim))
+            .await
+            .map_err(|error| format!("file request task failed: {error}"))??;
     let file = response.file.ok_or("host omitted file-service response")?;
     Ok(file_response_json(&file))
+}
+
+/// Cancels an in-flight control-lane file request by its renderer operation ID.
+///
+/// The renderer owns the operation ID from the moment it issues the request, so
+/// a collapse, root replacement, or superseded preview can stop bounded remote
+/// enumeration that nothing will read — rather than paying for it and throwing
+/// the answer away.
+/// Async, and off the main thread, for the same reason `file_request` is: this
+/// reaches the control writer, which waits on a full queue and on the physical
+/// write. On the interaction path it is now issued by every collapse, root
+/// swap, and superseded preview, so a synchronous version would put a
+/// potentially multi-second stall on exactly the interactions whose budget is
+/// "no long task".
+#[tauri::command]
+pub async fn cancel_file_request(
+    client_id: String,
+    operation_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    if operation_id.is_empty() {
+        return Err("operation ID is required".into());
+    }
+    let client = get_client(&clients, &client_id)?;
+    tauri::async_runtime::spawn_blocking(move || client.cancel_file(&operation_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn operation_from_name(value: &str) -> Result<v1::Operation, String> {
@@ -136,7 +181,6 @@ fn operation_from_name(value: &str) -> Result<v1::Operation, String> {
         "watchDirectory" => Ok(v1::Operation::WatchDirectory),
         "unwatchDirectory" => Ok(v1::Operation::UnwatchDirectory),
         "mutate" => Ok(v1::Operation::FileMutation),
-        "readFile" => Ok(v1::Operation::ReadFile),
         "writeFile" => Err("writeFile bodies must use start_file_write on the bulk route".into()),
         _ => Err(format!("unsupported file operation {value}")),
     }
@@ -202,6 +246,58 @@ mod tests {
         });
         assert_eq!(event["rootToken"], "root-capability");
         assert_eq!(event["watchId"], "editor-parent");
+    }
+
+    /// A read abandoned before its request reached a worker thread must still
+    /// be cancellable: the claim exists from the moment the command thread
+    /// takes the operation ID, and a cancellation that beats dispatch refuses
+    /// the request rather than letting it run for an answer nobody reads.
+    #[test]
+    fn cancelling_before_dispatch_refuses_the_request_instead_of_losing_it() {
+        let client = Arc::new(TerminalClient::new());
+        client.ready.store(true, Ordering::Release);
+        let claim = client.claim_file_operation("op-1").unwrap();
+        // Claimed twice is a caller bug, and stays one.
+        assert!(client.claim_file_operation("op-1").is_err());
+        client.cancel_file("op-1").unwrap();
+        let refused = client
+            .request_file(v1::Request::default(), Some(claim))
+            .unwrap_err();
+        assert!(refused.starts_with("cancelled"), "got {refused}");
+    }
+
+    /// The abort and the request are separate messages across the command
+    /// boundary, so the abort really can arrive first. It must still stop the
+    /// request rather than let a remote scan run for an answer nobody reads.
+    #[test]
+    fn cancelling_a_file_read_before_its_request_is_claimed_still_refuses_it() {
+        let client = Arc::new(TerminalClient::new());
+        client.ready.store(true, Ordering::Release);
+        client.cancel_file("racing").unwrap();
+        let claim = client.claim_file_operation("racing").unwrap();
+        let refused = client
+            .request_file(v1::Request::default(), Some(claim))
+            .unwrap_err();
+        assert!(refused.starts_with("cancelled"), "got {refused}");
+    }
+
+    /// Requests that never reach a host must still leave the registry empty:
+    /// one retained entry per request is unbounded growth on a long session.
+    #[test]
+    fn refused_requests_leave_no_operation_behind_on_either_lane() {
+        let client = Arc::new(TerminalClient::new());
+        for round in 0..32 {
+            let id = format!("op-{round}");
+            let claim = client.claim_file_operation(&id).unwrap();
+            // Not ready, so the request is refused before it is written.
+            assert!(
+                client
+                    .request_file(v1::Request::default(), Some(claim))
+                    .is_err()
+            );
+            assert!(client.request_git(v1::Request::default(), &id).is_err());
+        }
+        assert_eq!(client.operations.len(), 0);
     }
 
     #[test]

@@ -223,6 +223,7 @@ pub fn run() {
             connection::request_terminal_seed,
             connection::tmux_action::tmux_action,
             connection::files::file_request,
+            connection::files::cancel_file_request,
             connection::git::git_request,
             connection::agent::agent_request,
             connection::git::cancel_git_request,

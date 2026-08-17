@@ -11,13 +11,13 @@ import type { ActiveRoot, DirectoryListing } from "./types";
 
 const root: ActiveRoot = { token: "root-1", paneId: "%1", cwd: "/r", path: "/r", gitWorktree: true, revision: "1" };
 const listing: DirectoryListing = {
-  rootToken: "root-1", directory: "/r", revision: "2", overflowRecovery: false, complete: true,
+  rootToken: "root-1", directory: "/r", revision: "2", recoveredFromOverflow: false, complete: true,
   entries: [
-    { path: "/r/.env", name: ".env", kind: "file", sizeBytes: "10", modifiedMillis: "1", executable: false, expandable: false },
-    { path: "/r/ignored.log", name: "ignored.log", kind: "file", sizeBytes: "20", modifiedMillis: "1", executable: false, expandable: false },
-    { path: "/r/.git", name: ".git", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: false },
-    { path: "/r/node_modules", name: "node_modules", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: false },
-    { path: "/r/link", name: "link", kind: "symlink", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: false, targetKind: "directory", symlinkTarget: "/outside" },
+    { path: "/r/.env", name: ".env", kind: "file", sizeBytes: "10", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+    { path: "/r/ignored.log", name: "ignored.log", kind: "file", sizeBytes: "20", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+    { path: "/r/.git", name: ".git", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+    { path: "/r/node_modules", name: "node_modules", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+    { path: "/r/link", name: "link", kind: "symlink", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: false, targetKind: "directory", symlinkTarget: "/outside" },
   ],
 };
 
@@ -30,29 +30,358 @@ describe("ExplorerTree", () => {
       ...listing,
       entries: Array.from({ length: 4_096 }, (_, index) => ({
         path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
-        sizeBytes: "1", modifiedMillis: "1", executable: false, expandable: false,
+        sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
       })),
     };
     let renderer!: ReturnType<typeof create>;
     try {
+      const startedAt = performance.now();
       await act(async () => {
         renderer = create(<ExplorerTree root={root} scopeIdentity="phase14" listings={new Map([["/r", wide]])}
           expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
           onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
           onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
       });
+      // Recorded, deliberately not asserted: a jsdom mount is not a browser
+      // paint, so this informs the windowing decision rather than gating it.
+      // The 150 ms budget belongs to the instrumented runtime lane.
+      const mountMillis = Math.round(performance.now() - startedAt);
       const highWater = perfHighWaterSnapshot();
       const renderedRows = renderer.root.findAllByProps({ className: "file-row" }).length;
       const logicalRows = highWater["explorer.logicalRows"];
       expect(logicalRows).toBe(wide.entries.length);
       expect(renderedRows).toBeGreaterThan(0);
-      expect(renderedRows).toBeLessThanOrEqual(logicalRows);
       expect(highWater["explorer.renderedRows"]).toBe(renderedRows);
-      console.log(`PHASE14_METRIC ${JSON.stringify({ lane: "explorerWide", entries: wide.entries.length, logicalRowsHighWater: logicalRows, renderedRowsHighWater: highWater["explorer.renderedRows"], rowParity: logicalRows === wide.entries.length })}`);
+      // The invariant the row budget actually rests on: what the tree mounts is
+      // a function of the viewport, not of the directory. `rendered <= logical`
+      // would hold with no windowing at all, which is what this lane exists to
+      // detect the absence of — so the same tree is measured four times larger
+      // and must mount exactly as much.
+      let larger!: ReturnType<typeof create>;
+      const quadrupled = {
+        ...wide,
+        entries: Array.from({ length: 16_384 }, (_, index) => ({
+          path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
+          sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+        })),
+      };
+      await act(async () => {
+        larger = create(<ExplorerTree root={root} scopeIdentity="phase14" listings={new Map([["/r", quadrupled]])}
+          expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+          onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+          onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      });
+      const largerRows = larger.root.findAllByProps({ className: "file-row" }).length;
+      await act(async () => { larger.unmount(); });
+      expect(largerRows, "the mounted band grew with the directory").toBe(renderedRows);
+      console.log(`PHASE14_METRIC ${JSON.stringify({ lane: "explorerWide", entries: wide.entries.length, logicalRowsHighWater: logicalRows, renderedRowsHighWater: highWater["explorer.renderedRows"], rowParity: logicalRows === wide.entries.length, mountedRowsAtFourTimesTheEntries: largerRows, jsdomMountMillis: mountMillis })}`);
     } finally {
       await act(async () => { renderer?.unmount(); });
       resetPerfProbe();
     }
+  });
+
+  it("keeps roving focus and sibling counts working while windowed", async () => {
+    const wide: DirectoryListing = {
+      ...listing,
+      entries: Array.from({ length: 4_096 }, (_, index) => ({
+        path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
+        sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    };
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => {
+        renderer = create(<ExplorerTree root={root} scopeIdentity="windowed" listings={new Map([["/r", wide]])}
+          expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+          onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+          onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      });
+      const mounted = () => renderer.root.findAllByProps({ className: "file-row" });
+      expect(mounted().length, "a windowed tree must not mount the whole directory").toBeLessThan(4_096);
+
+      // Every mounted row reports its position among its own siblings, which is
+      // the only way an assistive technology can know where it is once the DOM
+      // no longer contains the whole level.
+      const first = mounted()[0];
+      expect(first.props["aria-setsize"]).toBe(4_096);
+      expect(first.props["aria-posinset"]).toBe(1);
+      // Exactly one row is in the tab order, wherever the window sits.
+      expect(mounted().filter((row) => row.props.tabIndex === 0)).toHaveLength(1);
+
+      // Arrow-down past the mounted band keeps focus roving: the window follows
+      // and the row the tree asks to focus is really in the document.
+      const step = (index: number) => act(async () => {
+        renderer.root.findByProps({ "data-tree-index": index }).props.onKeyDown({
+          key: "ArrowDown", target: 1, currentTarget: 1, preventDefault: vi.fn(),
+        });
+      });
+      const band = mounted().length;
+      const target = band + 5;
+      for (let index = 0; index < target; index += 1) await step(index);
+      // The window followed the cursor: the row the tree now considers focused
+      // is mounted, is the only one in the tab order, and still knows where it
+      // sits among its siblings.
+      const arrived = renderer.root.findAllByProps({ "data-tree-index": target });
+      expect(arrived, "arrowing past the mounted band dropped the focused row").not.toHaveLength(0);
+      expect(arrived[0].props.tabIndex).toBe(0);
+      expect(arrived[0].props["aria-posinset"]).toBe(target + 1);
+      expect(mounted().filter((row) => row.props.tabIndex === 0)).toHaveLength(1);
+      expect(mounted().length, "the band must stay bounded while scrolling").toBeLessThan(4_096);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
+  it("scrolls a row into view when the keyboard reaches one the viewport is not over", async () => {
+    // The tree assigns `scrollTop` on the element it holds a ref to, so nothing
+    // about it is observable without one. Under `react-test-renderer` refs are
+    // null unless a node mock supplies them, which is why the windowed-focus
+    // test above cannot see this at all.
+    const wide: DirectoryListing = {
+      ...listing,
+      entries: Array.from({ length: 4_096 }, (_, index) => ({
+        path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
+        sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    };
+    // Enough of an element for the tree to measure a row, move the viewport,
+    // and hand focus to a row — which is all it asks its ref for.
+    const tree = {
+      scrollTop: 0, clientHeight: 400,
+      querySelector: () => ({ offsetHeight: 20, focus: () => undefined }),
+    };
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => {
+        renderer = create(<ExplorerTree root={root} scopeIdentity="scroll" listings={new Map([["/r", wide]])}
+          expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+          onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+          onRefresh={vi.fn()} onLoadMore={vi.fn()} />, {
+          createNodeMock: (element) => (element.props as { role?: string }).role === "tree" ? tree : null,
+        });
+      });
+      expect(tree.scrollTop, "a row already in view must not move the viewport").toBe(0);
+
+      // 400px of viewport over 20px rows is twenty visible rows, so row twenty
+      // is the first one that is not.
+      const step = (index: number) => act(async () => {
+        renderer.root.findByProps({ "data-tree-index": index }).props.onKeyDown({
+          key: "ArrowDown", target: 1, currentTarget: 1, preventDefault: vi.fn(),
+        });
+      });
+      for (let index = 0; index < 20; index += 1) await step(index);
+      expect(tree.scrollTop, "the keyboard reached a row the viewport was not over").toBe(20);
+      // And it scrolls the minimum: one more row is one more row of offset.
+      await step(20);
+      expect(tree.scrollTop).toBe(40);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
+  it("reaches the ends of a windowed directory with Home and End", async () => {
+    // Before windowing every row was in the DOM and the browser's own
+    // find-as-you-type could reach row 4,000. With ~46 rows mounted it cannot,
+    // so without these keys the only way to the end of a large directory is
+    // 4,000 ArrowDown presses — each a state commit, a frame, and a scroll
+    // assignment.
+    const wide: DirectoryListing = {
+      ...listing,
+      entries: Array.from({ length: 4_096 }, (_, index) => ({
+        path: `/r/wide/file-${index}`, name: `file-${index}`, kind: "file" as const,
+        sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    };
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => {
+        renderer = create(<ExplorerTree root={root} scopeIdentity="ends" listings={new Map([["/r", wide]])}
+          expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+          onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+          onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+      });
+      const press = (index: number, key: string) => act(async () => {
+        renderer.root.findByProps({ "data-tree-index": index }).props.onKeyDown({
+          key, target: 1, currentTarget: 1, preventDefault: vi.fn(),
+        });
+      });
+      const roving = () => renderer.root.findAllByProps({ className: "file-row" })
+        .filter((row) => row.props.tabIndex === 0)
+        .map((row) => row.props["data-tree-index"]);
+
+      await press(0, "End");
+      expect(roving(), "End did not reach the last row").toEqual([4_095]);
+      expect(renderer.root.findAllByProps({ "data-tree-index": 4_095 })).not.toHaveLength(0);
+
+      await press(4_095, "Home");
+      expect(roving(), "Home did not return to the first row").toEqual([0]);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
+  it("keeps the keyboard on the row the user chose when the directory changes underneath it", async () => {
+    // Precise external changes are the branch's central mechanism: an agent
+    // creating one file patches a single row in place rather than re-listing.
+    // With focus held as a position, every such insert above the cursor moved
+    // it to a different file, and deleting the focused row dropped DOM focus
+    // to the document body — the "no scroll/focus loss" outcome, inverted by
+    // the very change that made patching cheap.
+    const rows = (names: string[]): DirectoryListing => ({
+      ...listing,
+      entries: names.map((name) => ({
+        path: `/r/${name}`, name, kind: "file" as const, sizeBytes: "1",
+        modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    });
+    const view = (entries: DirectoryListing) => <ExplorerTree root={root} scopeIdentity="focus" listings={new Map([["/r", entries]])}
+      expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+      onRefresh={vi.fn()} onLoadMore={vi.fn()} />;
+    // The tree hands DOM focus to a row through its ref, so without a node mock
+    // the ref is null and the restore cannot be observed at all — the roving
+    // `tabIndex` would look right while the keyboard sat on `<body>`.
+    const focused: string[] = [];
+    const treeNode = {
+      scrollTop: 0, clientHeight: 400,
+      contains: () => false,
+      querySelector: (selector: string) => ({
+        offsetHeight: 20,
+        focus: () => focused.push(selector),
+      }),
+    };
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => {
+        renderer = create(view(rows(["b.txt", "c.txt"])), {
+          createNodeMock: (element) => (element.props as { role?: string }).role === "tree" ? treeNode : null,
+        });
+      });
+      const roving = () => renderer.root.findAllByProps({ className: "file-row" })
+        .filter((row) => row.props.tabIndex === 0)
+        .map((row) => row.props["data-tree-index"]);
+      // Stand on "c.txt", the second row.
+      await act(async () => {
+        renderer.root.findByProps({ "data-tree-index": 1 }).props.onFocus();
+      });
+      expect(roving()).toEqual([1]);
+
+      // An agent creates a file that sorts above it.
+      await act(async () => { renderer.update(view(rows(["a.txt", "b.txt", "c.txt"]))); });
+      expect(roving(), "an insert above the cursor moved it to another file").toEqual([2]);
+      expect(renderer.root.findByProps({ "data-tree-index": 2 }).props["aria-selected"]).toBe(true);
+
+      // And then deletes the row the user is standing on. Removing a focused
+      // element sends focus to `<body>`, so the tree has to hand it back — and
+      // it has to know it owned the keyboard *before* the removal, which is
+      // not a question the document can answer afterwards.
+      focused.length = 0;
+      await act(async () => { renderer.update(view(rows(["a.txt", "b.txt"]))); });
+      expect(roving(), "the tree lost its keyboard cursor entirely").toHaveLength(1);
+      expect(roving()[0]).toBe(1);
+      expect(focused, "the roving index moved but DOM focus was left on the body")
+        .toEqual(['[data-tree-index="1"]']);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
+  it("reports each row's position among its own siblings, not in the flattened walk", async () => {
+    // The tree role's setsize/posinset are per level. Using the flattened index
+    // makes a nested row announce a position in the whole walk, and makes
+    // setsize change on every insertion anywhere — which also invalidates every
+    // memoized row the extraction exists to keep still.
+    const nested: DirectoryListing = {
+      ...listing,
+      entries: [
+        { path: "/r/lib", name: "lib", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true },
+        { path: "/r/a.txt", name: "a.txt", kind: "file", sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+      ],
+    };
+    const child: DirectoryListing = {
+      rootToken: "root-1", directory: "/r/lib", revision: "2", recoveredFromOverflow: false, complete: true,
+      entries: ["one", "two", "three"].map((name) => ({
+        path: `/r/lib/${name}`, name, kind: "file" as const, sizeBytes: "1",
+        modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<ExplorerTree root={root} scopeIdentity="nested" listings={new Map([["/r", nested], ["/r/lib", child]])}
+        expanded={new Set(["/r", "/r/lib"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+        onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+        onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+    });
+    const rows = renderer.root.findAllByProps({ className: "file-row" });
+    const reported = rows.map((row) => ({
+      level: row.props["aria-level"],
+      position: row.props["aria-posinset"],
+      size: row.props["aria-setsize"],
+    }));
+    // Two top-level rows, three inside `lib` — five rows in the walk, but each
+    // level counts only itself.
+    expect(reported).toEqual([
+      { level: 1, position: 1, size: 2 },
+      { level: 2, position: 1, size: 3 },
+      { level: 2, position: 2, size: 3 },
+      { level: 2, position: 3, size: 3 },
+      { level: 1, position: 2, size: 2 },
+    ]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("keeps roving focus, selection, and the row context menu on the row the keyboard reached", async () => {
+    // Every one of these handlers now crosses a memo boundary and a forwarding
+    // ref, so the interactions the plan names by name are asserted here rather
+    // than assumed to have survived the extraction.
+    const onToggle = vi.fn();
+    const withDirectory: DirectoryListing = {
+      ...listing,
+      entries: [...listing.entries, { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true }],
+    };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<ExplorerTree root={root} scopeIdentity="keys" listings={new Map([["/r", withDirectory]])}
+        expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+        onToggle={onToggle} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+        onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+    });
+    const row = (index: number) => renderer.root.findByProps({ "data-tree-index": index });
+    const selected = () => renderer.root.findAllByProps({ className: "file-row" })
+      .filter((candidate) => candidate.props["aria-selected"] === true)
+      .map((candidate) => candidate.props["data-tree-index"]);
+    const tabbable = () => renderer.root.findAllByProps({ className: "file-row" })
+      .filter((candidate) => candidate.props.tabIndex === 0)
+      .map((candidate) => candidate.props["data-tree-index"]);
+
+    expect(selected()).toEqual([0]);
+    expect(tabbable()).toEqual([0]);
+
+    // Roving focus: Down moves selection and the tab stop together.
+    await act(async () => { row(0).props.onKeyDown({ key: "ArrowDown", target: 1, currentTarget: 1, preventDefault: vi.fn() }); });
+    expect(selected()).toEqual([1]);
+    expect(tabbable()).toEqual([1]);
+    await act(async () => { row(1).props.onKeyDown({ key: "ArrowUp", target: 1, currentTarget: 1, preventDefault: vi.fn() }); });
+    expect(selected()).toEqual([0]);
+
+    // ArrowRight on a collapsed directory expands it rather than moving.
+    const directoryIndex = withDirectory.entries.length - 1;
+    await act(async () => { row(directoryIndex).props.onPointerDown(); });
+    expect(selected()).toEqual([directoryIndex]);
+    await act(async () => {
+      row(directoryIndex).props.onKeyDown({ key: "ArrowRight", target: 1, currentTarget: 1, preventDefault: vi.fn() });
+    });
+    expect(onToggle).toHaveBeenCalledWith("/r/src");
+
+    // The row context menu opens for the row it was raised on, and moves the
+    // tree's focus cursor there.
+    await act(async () => { row(1).props.onContextMenu({ preventDefault: vi.fn(), clientX: 4, clientY: 5 }); });
+    expect(selected()).toEqual([1]);
+    const menu = JSON.stringify(renderer.toJSON());
+    expect(menu).toContain("Actions for ignored.log");
+    expect(menu).toContain("Rename…");
+    await act(async () => { renderer.unmount(); });
   });
 
   it("shows dotfiles/ignored entries while protected and symlink directories stay collapsed", () => {
@@ -83,13 +412,13 @@ describe("ExplorerTree", () => {
       ...listing,
       entries: [
         ...listing.entries,
-        { path: "/r/target", name: "target", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true },
-        { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true },
+        { path: "/r/target", name: "target", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true },
+        { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true },
       ],
     };
     const targetListing: DirectoryListing = {
-      rootToken: "root-1", directory: "/r/target", revision: "2", overflowRecovery: false, complete: true,
-      entries: [{ path: "/r/target/debug", name: "debug", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true }],
+      rootToken: "root-1", directory: "/r/target", revision: "2", recoveredFromOverflow: false, complete: true,
+      entries: [{ path: "/r/target/debug", name: "debug", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true }],
     };
     const listings = new Map([["/r", withTarget], ["/r/target", targetListing]]);
     const expanded = new Set(["/r", "/r/target"]);
@@ -145,7 +474,7 @@ describe("ExplorerTree", () => {
     const onToggle = vi.fn();
     const withDirectory: DirectoryListing = {
       ...listing,
-      entries: [...listing.entries, { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", executable: false, expandable: true }],
+      entries: [...listing.entries, { path: "/r/src", name: "src", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true }],
     };
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" listings={new Map([["/r", withDirectory]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false} error={undefined}

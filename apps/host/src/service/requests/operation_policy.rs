@@ -131,10 +131,38 @@ impl OperationPolicy {
                 Scheduling::Detached,
                 Handler::ActiveRoot,
             ),
-            v1::Operation::ListDirectory | v1::Operation::ReadFile => (
+            v1::Operation::ListDirectory => (
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Detached,
+                Handler::Filesystem,
+            ),
+            // Detached deliberately: the reader loop must stay free to admit
+            // this request's own Cancel while its bounded body is streaming.
+            v1::Operation::OpenFileStream => (
+                Access::ReadOnly,
+                Lane::Bulk,
+                Scheduling::Detached,
+                Handler::Filesystem,
+            ),
+            // Answered with a refusal naming `OpenFileStream`, so an older
+            // desktop is told what to use rather than silently served by a
+            // second code path that had already drifted from the first. Still
+            // classified as the read it asks to be: a read-only connection
+            // must get the same answer as any other.
+            //
+            // `Either`, because the desktop this refusal is *for* issued
+            // `ReadFile` on the **bulk** lane. Classifying it `Control` meant
+            // that desktop was turned away at admission with
+            // `control_connection_required` and never reached the refusal that
+            // names its replacement — the entire reason the operation was kept
+            // rather than deleted. `Inline`, because the answer is a constant:
+            // detaching it spent a task spawn and the dispatcher's deliberate
+            // 1 ms handoff on a request that touches nothing.
+            v1::Operation::ReadFile => (
+                Access::ReadOnly,
+                Lane::Either,
+                Scheduling::Inline,
                 Handler::Filesystem,
             ),
             v1::Operation::WatchDirectory
@@ -282,7 +310,7 @@ mod tests {
             ActiveRoot as AR, Agent as AH, Daemon as DH, Filesystem as FH, Git as GH,
             Snapshot as SH, Terminal as TH, Test as XH, TmuxAction as MH, Unsupported as UH,
         };
-        use Lane::{Bulk as B, Control as C};
+        use Lane::{Bulk as B, Control as C, Either as E};
         use Scheduling::{Detached as Dd, Inline as I};
         use v1::Operation::*;
 
@@ -303,7 +331,12 @@ mod tests {
         assert_policy(WatchDirectory, M, C, Dd, FH);
         assert_policy(UnwatchDirectory, M, C, Dd, FH);
         assert_policy(FileMutation, M, C, Dd, FH);
-        assert_policy(ReadFile, R, C, Dd, FH);
+        // `Either`, and it matters: the desktop this refusal exists for issued
+        // `ReadFile` on the *bulk* lane, so a `Control` classification turned
+        // it away at admission and it never saw the message naming its
+        // replacement.
+        assert_policy(ReadFile, R, E, I, FH);
+        assert_policy(OpenFileStream, R, B, Dd, FH);
         assert_policy(WriteFile, M, C, Dd, FH);
         assert_policy(StartDownload, M, B, I, FH);
         assert_policy(ReadDownloadChunk, M, B, I, FH);

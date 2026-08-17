@@ -151,6 +151,11 @@ export function App() {
   // A new bridge is a new link; the last one's measured round-trip describes
   // nothing about it.
   useEffect(() => { resetHostLatency(); }, [clientId]);
+  // The file client outlives any one bridge, so a connection that has gone must
+  // take its shared directory watches with it: the host lost those
+  // registrations along with the connection, and the records left behind hold
+  // promises nothing can settle.
+  useEffect(() => () => { if (clientId) fileClient.retireConnection(clientId); }, [clientId, fileClient]);
   const appRecovery = useAppRecoveryController({
     appState,
     currentHostProfileId,

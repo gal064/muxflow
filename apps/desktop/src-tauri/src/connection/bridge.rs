@@ -6,8 +6,8 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    CAP_TERMINAL_OUTPUT_CREDIT, HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, envelope,
-    read_frame_sync,
+    CAP_TERMINAL_OUTPUT_CREDIT, HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR,
+    capability_names, envelope, missing_host_capabilities, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -252,7 +252,7 @@ fn run_bridge_once(
             }
         }
     }
-    let missing_capabilities = HOST_CAPABILITIES & !hello.capabilities;
+    let missing_capabilities = missing_host_capabilities(hello.capabilities);
     let read_only = !negotiated_writable;
     client.read_only.store(read_only, Ordering::Release);
     if read_only {
@@ -269,7 +269,8 @@ fn run_bridge_once(
                 channel,
                 TerminalEvent::Error {
                     message: format!(
-                        "host helper is missing required capabilities 0x{missing_capabilities:x}"
+                        "host helper is missing required capabilities: {}",
+                        capability_names(missing_capabilities).join(", ")
                     ),
                 },
             );
@@ -434,10 +435,21 @@ fn event_follows_snapshot_barrier(frame: &v1::Envelope, accepted_sequence: u64) 
     matches!(&frame.payload, Some(Payload::Event(_))) && frame.sequence > accepted_sequence
 }
 
+/// Whether this helper may serve the app at all.
+///
+/// Every capability the desktop needs is required here, including the
+/// single-request file open: a helper that cannot serve one is refused at the
+/// handshake — and the read-only path above reports the missing capabilities by
+/// name, from [`capability_names`] — rather than being accepted and then found
+/// wanting one operation at a time. The daemon lives on a host the user
+/// upgrades separately from the app, so this is a real state.
+///
+/// The rule is [`missing_host_capabilities`] and lives in the protocol crate,
+/// so this decision and the error that explains it cannot disagree.
 pub(super) fn handshake_allows_snapshot(envelope_major: u32, hello: &v1::ServerHello) -> bool {
     envelope_major == PROTOCOL_MAJOR
         && !hello.read_only
-        && HOST_CAPABILITIES & !hello.capabilities == 0
+        && missing_host_capabilities(hello.capabilities) == 0
 }
 
 fn read_until_response(

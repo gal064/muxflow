@@ -171,7 +171,9 @@ impl FileService {
         } else if metadata.is_dir() {
             let non_empty = !target_anchor.directory_entries()?.is_empty();
             if non_empty && !request.non_empty_confirmed {
-                bail!("confirmation_required_non_empty_directory");
+                return Err(confirmation_required(
+                    "confirmation_required_non_empty_directory",
+                ));
             }
             if non_empty {
                 let staged = target_anchor.sibling(OsString::from(format!(
@@ -208,14 +210,18 @@ fn stage_destination(
         return Ok(None);
     }
     if !overwrite {
-        bail!("confirmation_required_destination_overwrite");
+        return Err(confirmation_required(
+            "confirmation_required_destination_overwrite",
+        ));
     }
     let metadata = path.metadata_no_follow()?;
     let expected_identity = (metadata.device(), metadata.inode());
     if metadata.is_dir() {
         let has_entries = !path.directory_entries()?.is_empty();
         if has_entries && !non_empty {
-            bail!("confirmation_required_non_empty_destination");
+            return Err(confirmation_required(
+                "confirmation_required_non_empty_destination",
+            ));
         }
     } else if !metadata.is_symlink() && !metadata.is_file() {
         bail!("unsupported overwrite destination type");

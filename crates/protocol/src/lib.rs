@@ -108,6 +108,20 @@ pub const CAP_GIT: u64 = 1 << 11;
 pub const CAP_AGENTS: u64 = 1 << 12;
 pub const CAP_TERMINAL_UPLOAD: u64 = 1 << 13;
 pub const CAP_TERMINAL_OUTPUT_CREDIT: u64 = 1 << 14;
+/// One descriptor-bound editor open per request, replacing the metadata +
+/// preflight + per-chunk staircase.
+///
+/// A *required* capability, not an optional one: it is part of
+/// [`HOST_CAPABILITIES`], which the desktop demands in full, so a helper
+/// without it is refused at the handshake with the missing bit named. There is
+/// deliberately no fallback to the staircase — the daemon already has to match
+/// the desktop's helper version, and a second code path for opening files that
+/// nobody exercises is how the one people do use goes quietly wrong.
+///
+/// The bit exists so that refusal says *what* is missing. Without it, a helper
+/// that passed version checks but predated this operation would connect
+/// cleanly and then fail every file open with an unknown-operation error.
+pub const CAP_FILE_STREAM: u64 = 1 << 15;
 pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_ORDERED_EVENTS
     | CAP_CANCELLATION
@@ -122,7 +136,53 @@ pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_GIT
     | CAP_AGENTS
     | CAP_TERMINAL_UPLOAD
-    | CAP_TERMINAL_OUTPUT_CREDIT;
+    | CAP_TERMINAL_OUTPUT_CREDIT
+    | CAP_FILE_STREAM;
+
+/// Every required capability, with the name a refusal reports it by.
+const CAPABILITY_NAMES: [(u64, &str); 16] = [
+    (CAP_SNAPSHOTS, "snapshots"),
+    (CAP_ORDERED_EVENTS, "orderedEvents"),
+    (CAP_CANCELLATION, "cancellation"),
+    (CAP_TERMINAL_STREAM, "terminalStream"),
+    (CAP_RESYNC, "resync"),
+    (CAP_TMUX_ACTIONS, "tmuxActions"),
+    (CAP_TERMINAL_RESOURCES, "terminalResources"),
+    (CAP_ACTIVE_ROOT, "activeRoot"),
+    (CAP_FILE_SERVICE, "fileService"),
+    (CAP_TEXT_EDITOR, "textEditor"),
+    (CAP_BULK_DOWNLOAD, "bulkDownload"),
+    (CAP_GIT, "git"),
+    (CAP_AGENTS, "agents"),
+    (CAP_TERMINAL_UPLOAD, "terminalUpload"),
+    (CAP_TERMINAL_OUTPUT_CREDIT, "terminalOutputCredit"),
+    (CAP_FILE_STREAM, "fileStream"),
+];
+
+/// Which required capabilities `advertised` does not carry.
+///
+/// The admission rule itself, in one place. Restating it — even in a comment
+/// beside a test — is how a helper that cannot serve an operation ends up
+/// admitted by one copy of the rule and refused by another.
+pub fn missing_host_capabilities(advertised: u64) -> u64 {
+    HOST_CAPABILITIES & !advertised
+}
+
+/// Names the capabilities in `mask`, so a refusal can say what is missing.
+///
+/// A bare hex mask names the *bit*, which is not a fact anyone outside this
+/// file can act on.
+pub fn capability_names(mask: u64) -> Vec<&'static str> {
+    let mut named: Vec<&'static str> = CAPABILITY_NAMES
+        .iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    if mask & !CAPABILITY_NAMES.iter().fold(0, |all, (bit, _)| all | bit) != 0 {
+        named.push("unknown");
+    }
+    named
+}
 
 #[derive(Debug, Error)]
 pub enum FrameError {

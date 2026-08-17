@@ -504,16 +504,18 @@ impl StreamState {
                     // Out of attempts. `reject_resume` has already stopped this
                     // pane's captures carrying a resume, so the seed asked for
                     // here is a plain capture and the recovery terminates.
-                    Some((RejectedResume::Stall, pane_id)) => emit_event(
-                        sender,
-                        overflowed,
-                        v1::HostEvent {
-                            kind: v1::EventKind::TerminalFlowStalled.into(),
-                            scope: pane_id,
-                            detail,
-                            ..Default::default()
-                        },
-                    ),
+                    Some((RejectedResume::Stall, pane_id)) => {
+                        emit_event(
+                            sender,
+                            overflowed,
+                            v1::HostEvent {
+                                kind: v1::EventKind::TerminalFlowStalled.into(),
+                                scope: pane_id,
+                                detail,
+                                ..Default::default()
+                            },
+                        );
+                    }
                     // Every other rejection, including a resume for a pane
                     // nothing paused, is a command the desktop has to be told
                     // about and has always been told about this way.
@@ -599,7 +601,7 @@ impl StreamState {
                         detail: name,
                         ..Default::default()
                     },
-                )
+                );
             }
             _ => {}
         }
