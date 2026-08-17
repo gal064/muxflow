@@ -408,6 +408,426 @@ impl Drop for GitContentRegistration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn ready_client() -> Arc<TerminalClient> {
+        let client = Arc::new(TerminalClient::new());
+        client.ready.store(true, Ordering::Release);
+        client.terminal_epoch.store(7, Ordering::Release);
+        *client.server_identity.lock().unwrap() = "server".into();
+        client
+    }
+
+    fn captured_channel() -> (Channel<InvokeResponseBody>, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&sent);
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Raw(bytes) = body {
+                sink.lock().unwrap().push(bytes);
+            }
+            Ok(())
+        });
+        (channel, sent)
+    }
+
+    fn deferred(side: v1::GitDiffContentSide, frame_tag: u8, digest: &str, size: u64) -> DeferredSide {
+        DeferredSide {
+            side,
+            frame_tag,
+            digest: digest.to_owned(),
+            size,
+        }
+    }
+
+    fn job(sides: Vec<DeferredSide>) -> (GitContentJob, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let (channel, sent) = captured_channel();
+        let job = GitContentJob {
+            read_id: "read".into(),
+            connection: ConnectionSpec::Local,
+            binding: BulkBinding::capture(ready_client(), "server".into(), 7).unwrap(),
+            cancellation: Arc::new(CancelState::new()),
+            request: v1::GitRequest {
+                root: "/repo".into(),
+                root_token: "token".into(),
+                expected_server_identity: "server".into(),
+                repository_id: "repo".into(),
+                connection_epoch: 7,
+                path: b"a.txt".to_vec(),
+                diff_target: v1::GitDiffTarget::Unstaged.into(),
+                ..Default::default()
+            },
+            sides,
+            channel,
+        };
+        (job, sent)
+    }
+
+    /// Answers one request the way the host does: from the described body,
+    /// honouring the requested offset but free to serve fewer bytes than asked.
+    fn host_chunk(body: &[u8], content: &v1::GitDiffContentRequest, serve: usize) -> v1::Response {
+        let offset = content.offset as usize;
+        let end = offset.saturating_add(serve).min(body.len());
+        chunk_response(v1::GitDiffContentChunk {
+            offset: content.offset,
+            data: body[offset.min(body.len())..end].to_vec(),
+            last: end >= body.len(),
+            total_size: body.len() as u64,
+        })
+    }
+
+    fn chunk_response(chunk: v1::GitDiffContentChunk) -> v1::Response {
+        v1::Response {
+            git: Some(v1::GitResponse {
+                content_chunk: Some(chunk),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn content_of(request: &v1::Request) -> v1::GitDiffContentRequest {
+        request
+            .git
+            .as_ref()
+            .and_then(|git| git.content.as_ref())
+            .expect("every request in this stream carries a content descriptor")
+            .clone()
+    }
+
+    /// Splits a published `FRAME_CHUNK` frame back into tag, offset, and data.
+    fn decode_chunk_frame(frame: &[u8]) -> (u8, u64, Vec<u8>) {
+        assert_eq!(frame[0], FRAME_CHUNK, "not a chunk frame: {frame:?}");
+        (
+            frame[1],
+            u64::from_be_bytes(frame[2..10].try_into().unwrap()),
+            frame[10..].to_vec(),
+        )
+    }
+
+    fn profiles() -> ProfileStore {
+        // A path that does not exist loads the defaults, whose one profile is
+        // the "local" identity the valid command below names.
+        ProfileStore::load(
+            std::env::temp_dir().join(format!("git-content-tests-{}", Uuid::new_v4())),
+        )
+        .unwrap()
+    }
+
+    fn command() -> GitDiffContentCommand {
+        GitDiffContentCommand {
+            client_id: "client".into(),
+            profile_id: "local".into(),
+            expected_server_identity: "server".into(),
+            connection_epoch: "7".into(),
+            root: "/repo".into(),
+            root_token: "token".into(),
+            repository_id: "repo".into(),
+            path: b"a.txt".to_vec(),
+            original_path: Vec::new(),
+            diff_target: "unstaged".into(),
+            old: Some(GitDiffContentSideCommand {
+                content_digest: "old-digest".into(),
+                size: "5".into(),
+            }),
+            new: Some(GitDiffContentSideCommand {
+                content_digest: "new-digest".into(),
+                size: "4".into(),
+            }),
+        }
+    }
+
+    /// The exchange this lane exists for: both withheld sides, each reassembled
+    /// from consecutive chunks, published in old-then-new order.
+    #[test]
+    fn both_sides_are_reassembled_in_order_from_consecutive_chunks() {
+        let old_body = b"0123456789";
+        let new_body = b"abcd";
+        let (job, sent) = job(vec![
+            deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "old-digest", old_body.len() as u64),
+            deferred(v1::GitDiffContentSide::New, SIDE_NEW, "new-digest", new_body.len() as u64),
+        ]);
+        let total = stream_sides(&job, |request| {
+            assert_eq!(request.operation, i32::from(v1::Operation::GitDiffContent));
+            let content = content_of(&request);
+            // Each request names the digest and size the diff was classified
+            // with, so the host can refuse a body that changed underneath it.
+            if content.side == i32::from(v1::GitDiffContentSide::Old) {
+                assert_eq!(content.expected_content_digest, "old-digest");
+                assert_eq!(content.expected_size, old_body.len() as u64);
+                Ok(host_chunk(old_body, &content, 4))
+            } else {
+                assert_eq!(content.expected_content_digest, "new-digest");
+                assert_eq!(content.expected_size, new_body.len() as u64);
+                Ok(host_chunk(new_body, &content, 4))
+            }
+        })
+        .unwrap();
+        assert_eq!(total, (old_body.len() + new_body.len()) as u64);
+        let frames = sent.lock().unwrap();
+        let decoded: Vec<_> = frames.iter().map(|frame| decode_chunk_frame(frame)).collect();
+        // Every old-side frame precedes every new-side frame.
+        let switch = decoded.iter().position(|(tag, _, _)| *tag == SIDE_NEW).unwrap();
+        assert!(decoded[..switch].iter().all(|(tag, _, _)| *tag == SIDE_OLD));
+        assert!(decoded[switch..].iter().all(|(tag, _, _)| *tag == SIDE_NEW));
+        // Offsets are consecutive and the reassembled bytes are the bodies.
+        for (side_frames, body) in [(&decoded[..switch], &old_body[..]), (&decoded[switch..], &new_body[..])] {
+            let mut reassembled = Vec::new();
+            for (_, offset, data) in side_frames {
+                assert_eq!(*offset, reassembled.len() as u64);
+                reassembled.extend_from_slice(data);
+            }
+            assert_eq!(reassembled, body);
+        }
+    }
+
+    /// A repeated or skipped offset is refused instead of silently reassembled
+    /// into a body the digest never described.
+    #[test]
+    fn a_chunk_at_the_wrong_offset_is_refused() {
+        let body = b"0123456789";
+        for wrong_offset in [0u64, 8] {
+            let (job, sent) =
+                job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", body.len() as u64)]);
+            let mut requests = 0;
+            let error = stream_sides(&job, |request| {
+                requests += 1;
+                assert!(requests <= 3, "the stream kept requesting past a corrupt chunk");
+                let content = content_of(&request);
+                if requests == 1 {
+                    return Ok(host_chunk(body, &content, 4));
+                }
+                // The second chunk repeats offset 0 (a duplicate) or jumps
+                // ahead (a gap); the client expects offset 4 either way.
+                let mut duplicate = content.clone();
+                duplicate.offset = wrong_offset;
+                Ok(host_chunk(body, &duplicate, 4))
+            })
+            .unwrap_err();
+            assert!(error.contains("out-of-order"), "unexpected error: {error}");
+            // Only the frame that agreed with the stream was published.
+            assert_eq!(sent.lock().unwrap().len(), 1);
+        }
+    }
+
+    /// A host describing a different body size than the control response did
+    /// means the diff changed; the read refuses rather than substitutes.
+    #[test]
+    fn a_chunk_describing_a_different_total_size_is_refused() {
+        let (job, _sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", 10)]);
+        let error = stream_sides(&job, |_request| {
+            Ok(chunk_response(v1::GitDiffContentChunk {
+                offset: 0,
+                data: b"0123".to_vec(),
+                last: false,
+                total_size: 11,
+            }))
+        })
+        .unwrap_err();
+        assert!(error.contains("different size"), "unexpected error: {error}");
+    }
+
+    /// A response that answers the operation but omits the chunk is a protocol
+    /// violation, not an empty body.
+    #[test]
+    fn a_response_without_a_chunk_is_refused() {
+        for response in [
+            v1::Response::default(),
+            v1::Response {
+                git: Some(v1::GitResponse::default()),
+                ..Default::default()
+            },
+        ] {
+            let (job, sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", 10)]);
+            let error = stream_sides(&job, |_request| Ok(response.clone())).unwrap_err();
+            assert!(error.contains("omitted"), "unexpected error: {error}");
+            assert!(sent.lock().unwrap().is_empty());
+        }
+    }
+
+    /// An empty non-final chunk would loop forever at the same offset.
+    #[test]
+    fn an_empty_chunk_that_is_not_last_is_refused_as_a_stall() {
+        let (job, _sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", 10)]);
+        let mut requests = 0;
+        let error = stream_sides(&job, |_request| {
+            requests += 1;
+            assert!(requests <= 2, "the stream kept re-requesting a stalled offset");
+            Ok(chunk_response(v1::GitDiffContentChunk {
+                offset: 0,
+                data: Vec::new(),
+                last: false,
+                total_size: 10,
+            }))
+        })
+        .unwrap_err();
+        assert!(error.contains("stalled"), "unexpected error: {error}");
+    }
+
+    /// `last` before the described byte count is a truncated body; bytes past
+    /// it are an oversized one. Neither may settle as a completed read.
+    #[test]
+    fn a_body_shorter_or_longer_than_described_is_refused() {
+        for data in [&b"0123"[..], &b"0123456789AB"[..]] {
+            let (job, _sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", 10)]);
+            let error = stream_sides(&job, |_request| {
+                Ok(chunk_response(v1::GitDiffContentChunk {
+                    offset: 0,
+                    data: data.to_vec(),
+                    last: true,
+                    total_size: 10,
+                }))
+            })
+            .unwrap_err();
+            assert!(
+                error.contains("ended before the described body"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    /// Cancellation between chunks stops the stream before the next request.
+    #[test]
+    fn cancellation_between_chunks_stops_the_read() {
+        let body = b"0123456789";
+        let (job, sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", body.len() as u64)]);
+        let cancellation = Arc::clone(&job.cancellation);
+        let error = stream_sides(&job, |request| {
+            let content = content_of(&request);
+            assert_eq!(content.offset, 0, "a request was issued after cancellation");
+            cancellation.cancel();
+            Ok(host_chunk(body, &content, 4))
+        })
+        .unwrap_err();
+        assert!(error.contains("cancelled"), "unexpected error: {error}");
+        // The chunk already read was published; nothing after it was.
+        assert_eq!(sent.lock().unwrap().len(), 1);
+    }
+
+    /// The error frame is the tag byte followed by the message itself.
+    #[test]
+    fn an_error_is_published_as_one_error_frame() {
+        let (channel, sent) = captured_channel();
+        emit_error(&channel, "boom");
+        assert_eq!(
+            sent.lock().unwrap().as_slice(),
+            [[&[FRAME_ERROR][..], b"boom"].concat()]
+        );
+    }
+
+    /// A valid command resolves to a job whose sides carry the frame tags and
+    /// declared identities the renderer will demultiplex by.
+    #[test]
+    fn prepare_resolves_both_sides_in_old_then_new_order() {
+        let (channel, _sent) = captured_channel();
+        let job = prepare(command(), channel, &profiles(), &ready_client()).unwrap();
+        assert!(!job.read_id.is_empty());
+        assert_eq!(job.request.diff_target, i32::from(v1::GitDiffTarget::Unstaged));
+        let described: Vec<_> = job
+            .sides
+            .iter()
+            .map(|side| (side.frame_tag, side.digest.as_str(), side.size))
+            .collect();
+        assert_eq!(
+            described,
+            [(SIDE_OLD, "old-digest", 5), (SIDE_NEW, "new-digest", 4)]
+        );
+    }
+
+    /// Every way a command can fail to describe a performable read.
+    #[test]
+    fn a_command_missing_its_identity_or_scope_is_refused() {
+        type Break = (&'static str, Box<dyn Fn(&mut GitDiffContentCommand)>);
+        let cases: Vec<Break> = vec![
+            ("an empty path", Box::new(|command| command.path = Vec::new())),
+            ("an empty root token", Box::new(|command| command.root_token = String::new())),
+            (
+                "no deferred side at all",
+                Box::new(|command| {
+                    command.old = None;
+                    command.new = None;
+                }),
+            ),
+            (
+                "a non-numeric epoch",
+                Box::new(|command| command.connection_epoch = "seven".into()),
+            ),
+            (
+                "a zero-sized side",
+                Box::new(|command| command.old.as_mut().unwrap().size = "0".into()),
+            ),
+            (
+                "a side without a digest",
+                Box::new(|command| command.new.as_mut().unwrap().content_digest = String::new()),
+            ),
+            (
+                "an unknown diff target",
+                Box::new(|command| command.diff_target = "banana".into()),
+            ),
+            (
+                "a profile that does not exist",
+                Box::new(|command| command.profile_id = "missing".into()),
+            ),
+            (
+                "a server identity the connection no longer has",
+                Box::new(|command| command.expected_server_identity = "other".into()),
+            ),
+        ];
+        for (name, sabotage) in cases {
+            let mut broken = command();
+            sabotage(&mut broken);
+            let (channel, _sent) = captured_channel();
+            assert!(
+                prepare(broken, channel, &profiles(), &ready_client()).is_err(),
+                "{name} was accepted anyway"
+            );
+        }
+    }
+
+    /// The per-connection registry bounds outstanding reads, and a finished
+    /// read's registration frees its slot on drop.
+    #[test]
+    fn the_registry_bounds_reads_and_a_dropped_registration_frees_its_slot() {
+        let reads = Arc::new(GitContentReads::default());
+        let mut held = Vec::new();
+        for index in 0..MAX_GIT_CONTENT_READS {
+            held.push(
+                reads
+                    .register(&format!("read-{index}"), &Arc::new(CancelState::new()))
+                    .unwrap(),
+            );
+        }
+        assert!(
+            reads
+                .register("one-too-many", &Arc::new(CancelState::new()))
+                .is_err()
+        );
+        held.pop();
+        reads
+            .register("replacement", &Arc::new(CancelState::new()))
+            .unwrap();
+    }
+
+    /// Cancel reaches exactly the named read; connection replacement sweeps
+    /// every read; an unknown id is a no-op.
+    #[test]
+    fn cancel_reaches_only_the_named_read_and_cancel_all_sweeps_the_rest() {
+        let reads = Arc::new(GitContentReads::default());
+        let first = Arc::new(CancelState::new());
+        let second = Arc::new(CancelState::new());
+        let _first_registration = reads.register("first", &first).unwrap();
+        let _second_registration = reads.register("second", &second).unwrap();
+        reads.cancel("missing");
+        assert!(!first.is_cancelled() && !second.is_cancelled());
+        reads.cancel("first");
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        reads.cancel_all();
+        assert!(second.is_cancelled());
+        // The sweep drained the registry, so an old name is registrable again.
+        reads
+            .register("second", &Arc::new(CancelState::new()))
+            .unwrap();
+    }
 
     #[test]
     fn targets_use_the_frontend_spelling() {
