@@ -577,3 +577,31 @@ fn a_helper_missing_the_file_stream_capability_is_refused_at_the_handshake() {
         "an older helper was admitted and would fail every file open"
     );
 }
+
+/// Cancelling an operation this connection has not dispatched succeeds, and
+/// leaves a refusal behind rather than an error.
+///
+/// A behaviour change worth pinning: `cancel_git` used to answer "unknown or
+/// completed Git operation ID" with an `Err`, because the only place a request
+/// ID could live was a map written *after* dispatch. Every renderer that
+/// abandoned a request faster than the worker thread could register it got an
+/// error for having been quick, and the request then ran with nothing able to
+/// stop it. The registry records the refusal instead, and the claim that
+/// arrives afterwards finds it.
+#[test]
+fn cancelling_an_operation_before_it_is_dispatched_refuses_it_rather_than_failing() {
+    use super::operations::{Bound, OperationLane};
+    for lane in [OperationLane::Git, OperationLane::File] {
+        let client = TerminalClient::new();
+        assert_eq!(
+            client.cancel_operation(lane, "raced"),
+            Ok(()),
+            "a cancellation that arrived first was reported as a failure"
+        );
+        let claim = client.operations.claim(lane, "raced").unwrap();
+        assert!(
+            matches!(client.operations.bind(&claim, 7), Bound::Cancelled),
+            "a request the renderer had already abandoned was dispatched anyway"
+        );
+    }
+}
