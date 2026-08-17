@@ -21,6 +21,7 @@ pub(crate) async fn handle_request(
         files,
         git,
         bulk_connection,
+        bulk_available,
         connection_epoch,
         closed,
     } = context;
@@ -97,6 +98,7 @@ pub(crate) async fn handle_request(
                     event_tx,
                     git,
                     connection_epoch,
+                    bulk_available,
                 },
             )
             .await;

@@ -169,16 +169,17 @@ impl GitService {
         let use_order = self.next_use.fetch_add(1, Ordering::AcqRel);
         let coordinator = {
             let mut repositories = self.repositories.lock().unwrap();
+            let created = key.clone();
             let coordinator = Arc::clone(repositories.entry(key.clone()).or_insert_with(|| {
                 Arc::new(RepositoryCoordinator::new(
-                    key,
+                    created,
                     Arc::clone(&self.next_generation),
                     Arc::clone(&self.closed),
                     Arc::clone(&self.observation),
                 ))
             }));
             coordinator.touch(use_order);
-            evict_unwatched_repositories(&mut repositories);
+            evict_unwatched_repositories(&mut repositories, &key);
             coordinator
         };
         match coordinator.capabilities(request, cancellation).await {
@@ -237,6 +238,7 @@ impl GitService {
     pub(in crate::service) async fn diff(
         &self,
         request: &v1::GitRequest,
+        bulk_available: bool,
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<(v1::GitDiff, v1::GitStatusSnapshot)> {
         require_repository_id(request)?;
@@ -267,7 +269,7 @@ impl GitService {
                     &read_capabilities.stable_root(),
                     repository,
                     &work,
-                    DiffAudience::Client,
+                    DiffAudience::for_client(bulk_available),
                     read_cancellation.as_deref(),
                 )
             })
@@ -315,7 +317,9 @@ impl GitService {
         request: &v1::GitRequest,
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<v1::GitDiff> {
-        self.diff(request, cancellation).await.map(|(diff, _)| diff)
+        self.diff(request, true, cancellation)
+            .await
+            .map(|(diff, _)| diff)
     }
 
     pub(in crate::service) async fn prepare_discard(
@@ -618,13 +622,21 @@ impl Drop for GitService {
 }
 
 /// Drops the least recently used repositories nobody is watching.
+///
+/// `in_use` is the repository the current request is about to work with; it is
+/// never a candidate, even when it is the only unwatched one, because the
+/// caller already holds it and would otherwise proceed against a coordinator
+/// this map no longer knows about.
 fn evict_unwatched_repositories(
     repositories: &mut HashMap<RepositoryKey, Arc<RepositoryCoordinator>>,
+    in_use: &RepositoryKey,
 ) {
     while repositories.len() > MAX_TRACKED_REPOSITORIES {
         let Some(evicted) = repositories
             .values()
-            .filter(|coordinator| coordinator.subscriber_count() == 0)
+            .filter(|coordinator| {
+                coordinator.subscriber_count() == 0 && coordinator.key() != in_use
+            })
             .min_by_key(|coordinator| coordinator.last_use())
             .map(|coordinator| coordinator.key().clone())
         else {
@@ -668,6 +680,17 @@ fn ensure_connection_epoch(request: &v1::GitRequest, epoch: u64) -> anyhow::Resu
 fn require_repository_id(request: &v1::GitRequest) -> anyhow::Result<()> {
     if request.repository_id.is_empty() {
         bail!("repository identity is required");
+    }
+    Ok(())
+}
+
+/// Rejects a request whose asserted repository is not the one this root is.
+///
+/// An empty assertion means the client is still discovering; anything else is
+/// a claim, and a claim that does not hold is a stale scope.
+fn require_matching_repository(request: &v1::GitRequest, discovered: &str) -> anyhow::Result<()> {
+    if !request.repository_id.is_empty() && request.repository_id != discovered {
+        bail!("stale repository identity");
     }
     Ok(())
 }

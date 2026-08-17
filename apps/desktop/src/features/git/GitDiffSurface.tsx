@@ -139,6 +139,10 @@ export function GitDiffSurface(props: Props) {
       if (result.status.repository.id !== repositoryId) {
         throw new Error("This diff belongs to a different repository. Return to its workspace or close the tab.");
       }
+      // The response states which status it was read against, which may be
+      // newer than the one this load set out from. Claiming it stops the
+      // subscriber from discarding a perfectly authoritative diff as stale.
+      requestedGeneration.current = result.status.generation;
       setStatus(result.status);
       if (!entryStillChanged(result.status, pathIdentity, target)) {
         paint.abandon();
@@ -183,7 +187,8 @@ export function GitDiffSurface(props: Props) {
   const repositories = props.repositories;
   useEffect(() => {
     if (!scopeIdentity || !boundScope || !repositoryId) return;
-    const acquired = repositories.acquire(boundScope.scope, boundScope.root);
+    const lease = repositories.acquire(boundScope.scope, boundScope.root);
+    const acquired = lease.handle;
     repository.current = acquired;
     // Loading is driven by the shared status, never ahead of it: reading a diff
     // before the repository is observed would fetch against an unknown state
@@ -191,6 +196,10 @@ export function GitDiffSurface(props: Props) {
     const loadWhenStatusMoves = () => {
       const next = acquired.state();
       setSharedError(next.error);
+      // The observation has answered, even if the answer is that it failed.
+      // Nothing else clears this: `load` is the only other place that does, and
+      // it never runs without a status.
+      if (!next.loading) setLoading(false);
       if (commanding.current || !next.status) return;
       if (next.status.generation === requestedGeneration.current) return;
       void load();
@@ -206,7 +215,7 @@ export function GitDiffSurface(props: Props) {
       abort.current?.abort();
       abort.current = undefined;
       stop();
-      acquired.release();
+      lease.release();
       repository.current = undefined;
     };
     // `scopeIdentity` is the complete key of `boundScope`, and `load` is only
@@ -291,8 +300,10 @@ export function GitDiffSurface(props: Props) {
   if (!props.scope || !root) return <GitDiffEmpty title={props.tab.title} detail="Reconnect to reopen this Git diff." />;
   if (!repositoryId || !pathIdentity || !target) return <GitDiffEmpty title={props.tab.title} detail="This saved Git tab is missing its repository identity." />;
   const surfaceError = error ?? sharedError;
-  if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" />;
+  // An error outranks a spinner: a surface still claiming to load while it
+  // holds a failure is a surface with no way out of it.
   if (surfaceError && !diff) return <GitDiffEmpty title={props.tab.title} detail={surfaceError} retry={() => void refreshFromHost()} />;
+  if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" />;
   if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${target} changes.`} retry={() => void refreshFromHost()} />;
 
   const text = decodedText;

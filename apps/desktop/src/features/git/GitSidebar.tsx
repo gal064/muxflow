@@ -27,7 +27,7 @@ type PendingDiscard = { entry: GitStatusEntry; target: GitDiffTarget; status: Gi
 
 export function GitSidebar(props: Props) {
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
-  const onRefresh = () => void props.git.refresh();
+  const onRefresh = () => void props.git.handle?.refresh();
   // Stage / unstage / discard used to be a cluster of hover buttons on every
   // row. They are one right-click menu now, which is also the only way they can
   // carry a readable label instead of `+`, `−` and `↶`.

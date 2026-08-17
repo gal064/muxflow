@@ -148,6 +148,8 @@ pub(super) struct RepositoryCoordinator {
     /// Serializes status pipelines for this repository, so `generation` cannot
     /// be published out of order and two consumers cannot fork the work.
     refresh: tokio::sync::Mutex<()>,
+    /// Orders publications without holding the pipeline lock across them.
+    publish: tokio::sync::Mutex<u64>,
     latest: Mutex<Option<CachedStatus>>,
     published: Mutex<Publication>,
     subscribers: Mutex<subscribers::SubscriberRegistry>,
@@ -160,10 +162,14 @@ pub(super) struct RepositoryCoordinator {
     /// filesystem events do not start a second, redundant status pipeline.
     mutations: AtomicUsize,
     mutations_idle: tokio::sync::Notify,
+    next_publication: AtomicU64,
     /// Raised by the `notify` callback when the platform reports the watch is
     /// broken. Owned here rather than by the observe task so that whoever
     /// notices the failure and whoever acts on it are not the same code.
     native_failed: Arc<AtomicBool>,
+    /// Signalled by that callback. A `Notify` permit rather than a flag poll,
+    /// so a failure raised while the observer is elsewhere is not lost.
+    native_broken: Arc<tokio::sync::Notify>,
     /// When this repository was last addressed, for eviction order only.
     last_use: AtomicU64,
     observation: Arc<GitObservation>,
@@ -184,6 +190,7 @@ impl RepositoryCoordinator {
             identity: Mutex::new(StatusIdentity::default()),
             change_ticket: AtomicU64::new(0),
             refresh: tokio::sync::Mutex::new(()),
+            publish: tokio::sync::Mutex::new(0),
             latest: Mutex::new(None),
             published: Mutex::new(Publication::default()),
             subscribers: Mutex::new(subscribers::SubscriberRegistry::default()),
@@ -191,7 +198,9 @@ impl RepositoryCoordinator {
             observing: AtomicBool::new(false),
             mutations: AtomicUsize::new(0),
             mutations_idle: tokio::sync::Notify::new(),
+            next_publication: AtomicU64::new(0),
             native_failed: Arc::new(AtomicBool::new(false)),
+            native_broken: Arc::new(tokio::sync::Notify::new()),
             last_use: AtomicU64::new(0),
             observation,
         }
@@ -235,7 +244,14 @@ impl RepositoryCoordinator {
             .await
             .map_err(|error| anyhow::anyhow!("Git capability revalidation failed: {error}"))?;
             match revalidated {
-                Ok(()) => return Ok(Arc::clone(slot.as_ref().expect("checked above"))),
+                Ok(()) => {
+                    let cached = Arc::clone(slot.as_ref().expect("checked above"));
+                    // Checked on the warm path too: a cached capability proves
+                    // which repository this root is, not which one the client
+                    // believed it was addressing.
+                    require_matching_repository(request, &cached.identity.repository_id)?;
+                    return Ok(cached);
+                }
                 // The directory the root names is not the one this capability
                 // describes any more. Rediscover rather than serve a stale one.
                 Err(_) => *slot = None,
@@ -278,6 +294,12 @@ impl RepositoryCoordinator {
         self.change_ticket.fetch_add(1, Ordering::AcqRel) + 1
     }
 
+    /// The next publication order stamp. Publications are delivered in this
+    /// order regardless of which task wins the race to send them.
+    pub(super) fn next_publication(&self) -> u64 {
+        self.next_publication.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
     pub(super) fn cached_status(&self) -> Option<Arc<v1::GitStatusSnapshot>> {
         self.latest
             .lock()
@@ -300,7 +322,7 @@ impl RepositoryCoordinator {
         {
             return Ok(cached);
         }
-        let _pipeline = self.refresh.lock().await;
+        let pipeline = self.refresh.lock().await;
         if freshness == Freshness::Coalesced
             && let Some(cached) = self.satisfied_by_cache(required, arrived)
         {
@@ -308,6 +330,7 @@ impl RepositoryCoordinator {
         }
         let started_at = Instant::now();
         let observed = self.change_ticket.load(Ordering::Acquire);
+        let sequence = self.next_publication();
         self.observation.status_pipeline();
         let capabilities = Arc::clone(capabilities);
         let snapshot = tokio::task::spawn_blocking(move || {
@@ -321,9 +344,13 @@ impl RepositoryCoordinator {
         .await
         .map_err(|error| anyhow::anyhow!("Git status task failed: {error}"))??;
         let snapshot = self.commit_snapshot(snapshot, observed, started_at);
-        // Published under the refresh lock, so subscribers observe exactly the
-        // order the pipelines ran in.
-        self.publish_status(&snapshot).await;
+        // The pipeline lock is released before publishing. Fanning out awaits
+        // a bounded sequencer channel, and a stalled consumer must not be able
+        // to hold this repository's status pipeline — nor, through a mutation,
+        // the process-global repository lock. Ordering is preserved by the
+        // pipeline sequence rather than by holding the lock across the send.
+        drop(pipeline);
+        self.publish_status(&snapshot, sequence).await;
         Ok(snapshot)
     }
 
@@ -385,16 +412,25 @@ impl RepositoryCoordinator {
     }
 
     /// Waits until no mutation is running, or until observation is stopped.
+    ///
+    /// Both waiters are enabled before the condition is read. `notify_waiters`
+    /// stores no permit, so a notification landing between the read and the
+    /// first poll of an unregistered future is simply lost — and this wait has
+    /// no timeout, so losing it would park the repository's only watcher
+    /// permanently.
     async fn await_mutation_quiescence(&self, observation: &Observation) {
         loop {
             let idle = self.mutations_idle.notified();
             let stopping = observation.wake.notified();
+            tokio::pin!(idle, stopping);
+            idle.as_mut().enable();
+            stopping.as_mut().enable();
             if self.mutations.load(Ordering::Acquire) == 0 || observation.stopped() {
                 return;
             }
             tokio::select! {
-                _ = idle => {}
-                _ = stopping => return,
+                () = &mut idle => {}
+                () = &mut stopping => return,
             }
         }
     }

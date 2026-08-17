@@ -11,8 +11,15 @@
 //! bridge acquisition rather than two, it lets the host serve consecutive
 //! chunks from one read, and it means a failure on either side stops the other
 //! instead of leaving it streaming to nobody.
+//!
+//! A connection with no bulk lane never gets here: the host inlines its diff
+//! bodies instead, because a reference to a body the client cannot fetch would
+//! be worse than the payload it was avoiding.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use serde::Deserialize;
 use tauri::{
@@ -24,17 +31,18 @@ use uuid::Uuid;
 
 use super::files::bulk_pool::BulkLease;
 use super::files::scheduler::{BulkBinding, CancelState};
-use super::{ConnectionSpec, ProfileStore, TerminalClient, TerminalClients, get_client};
+use super::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
 
 /// Bytes requested per round trip. Matches the file transfer chunk size, which
 /// the bulk framing and host flow control are already sized for.
 const GIT_CONTENT_CHUNK: u32 = 1024 * 1024;
 
-/// Diff-body reads running at once, across all connections.
+/// Diff-body reads one connection runs at once.
 ///
 /// One is enough — a diff surface has one read in flight and cancels it before
-/// starting another — and it bounds this lane to a single bulk bridge beyond
-/// the two the transfer engine may hold.
+/// starting another — and it bounds this lane to a single bulk bridge per
+/// connection beyond the two the transfer engine may hold. Per connection, so
+/// one profile's slow read cannot serialize an unrelated profile behind it.
 const MAX_CONCURRENT_READS: usize = 1;
 
 /// Frame kinds on the response channel. The renderer's matching decoder is in
@@ -45,11 +53,6 @@ const FRAME_ERROR: u8 = 3;
 
 pub(super) const SIDE_OLD: u8 = 1;
 pub(super) const SIDE_NEW: u8 = 2;
-
-fn admission() -> &'static tokio::sync::Semaphore {
-    static VALUE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
-    VALUE.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_READS))
-}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,10 +97,7 @@ struct DeferredSide {
 struct GitContentJob {
     read_id: String,
     connection: ConnectionSpec,
-    client: Arc<TerminalClient>,
-    /// Absent when this connection cannot open a bulk bridge, in which case the
-    /// bodies come back over the control lane instead.
-    binding: Option<BulkBinding>,
+    binding: BulkBinding,
     cancellation: Arc<CancelState>,
     request: v1::GitRequest,
     sides: Vec<DeferredSide>,
@@ -111,14 +111,14 @@ pub async fn read_git_diff_content(
     profiles: State<'_, ProfileStore>,
     clients: State<'_, TerminalClients>,
 ) -> Result<String, String> {
+    let reads = get_client(&clients, &command.client_id)?.git_content_reads();
     let job = prepare(command, on_event, &profiles, &clients)?;
     let read_id = job.read_id.clone();
-    let registration = job
-        .client
-        .register_git_content_read(&read_id, &job.cancellation)?;
+    let registration = reads.register(&read_id, &job.cancellation)?;
+    let reads = Arc::clone(&reads);
     tauri::async_runtime::spawn(async move {
         let _registration = registration;
-        let permit = match admission().acquire().await {
+        let permit = match reads.admission.acquire().await {
             Ok(permit) => permit,
             Err(_) => {
                 emit_error(&job.channel, "Git diff content admission closed");
@@ -153,7 +153,9 @@ pub fn cancel_git_diff_content(
     read_id: String,
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
-    get_client(&clients, &client_id)?.cancel_git_content_read(&read_id);
+    get_client(&clients, &client_id)?
+        .git_content_reads()
+        .cancel(&read_id);
     Ok(())
 }
 
@@ -194,24 +196,16 @@ fn prepare(
         return Err("Git diff content requires at least one deferred side".into());
     }
     let client = get_client(clients, &command.client_id)?;
-    // A read-only host refuses a bulk connection outright, so its bodies come
-    // back over the control lane instead. They are bounded chunks, and this is
-    // the only way a large diff stays viewable there at all. Every other
-    // binding failure — a replaced epoch, a replaced server identity — is a
-    // scope invalidation and must stay an error, not a change of lane.
-    let binding = if client.is_read_only() {
-        None
-    } else {
-        Some(BulkBinding::capture(
-            Arc::clone(&client),
-            command.expected_server_identity.clone(),
-            connection_epoch,
-        )?)
-    };
+    // Every binding failure — read-only, a replaced epoch, a replaced server
+    // identity — is a scope this read cannot be performed in.
+    let binding = BulkBinding::capture(
+        client,
+        command.expected_server_identity.clone(),
+        connection_epoch,
+    )?;
     Ok(GitContentJob {
         read_id: Uuid::new_v4().to_string(),
         connection: profiles.connection_for(&command.profile_id)?,
-        client,
         binding,
         cancellation: Arc::new(CancelState::new()),
         request: v1::GitRequest {
@@ -232,25 +226,17 @@ fn prepare(
 }
 
 fn stream_git_diff_content(job: &GitContentJob) -> Result<u64, String> {
-    match &job.binding {
-        Some(binding) => {
-            binding.validate()?;
-            let deadline = job.cancellation.arm_inactivity_deadline();
-            let mut lease =
-                BulkLease::acquire(&job.connection, binding, &job.cancellation, &deadline)?;
-            let _process_binding = job.cancellation.bind_process(lease.process_id())?;
-            let mut protocol = lease.client();
-            stream_sides(job, |request| {
-                let response = protocol.request_cancellable(request, &job.cancellation, &deadline);
-                deadline.touch();
-                response
-            })
-        }
-        None => stream_sides(job, |request| {
-            job.client
-                .request_git_read_only(request, &Uuid::new_v4().to_string())
-        }),
-    }
+    job.binding.validate()?;
+    let deadline = job.cancellation.arm_inactivity_deadline();
+    let mut lease =
+        BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &deadline)?;
+    let _process_binding = job.cancellation.bind_process(lease.process_id())?;
+    let mut protocol = lease.client();
+    stream_sides(job, |request| {
+        let response = protocol.request_cancellable(request, &job.cancellation, &deadline);
+        deadline.touch();
+        response
+    })
 }
 
 /// Reads every deferred side in order through one request transport.
@@ -344,21 +330,70 @@ fn diff_target(value: &str) -> Result<v1::GitDiffTarget, String> {
     }
 }
 
-/// Removes a read from its client's registry exactly once.
-pub(crate) struct GitContentRegistration {
-    client: Arc<TerminalClient>,
-    read_id: String,
+/// The diff-body reads one connection currently owns.
+///
+/// Registered per connection so replacing that connection cancels them, and
+/// bounded because a caller that starts reads it never finishes must not be
+/// able to grow this without limit. A diff surface cancels its previous read
+/// before starting another, so the bound is on misbehaviour, not on use.
+pub(crate) struct GitContentReads {
+    entries: Mutex<HashMap<String, Arc<CancelState>>>,
+    admission: tokio::sync::Semaphore,
 }
 
-impl GitContentRegistration {
-    pub(crate) fn new(client: Arc<TerminalClient>, read_id: String) -> Self {
-        Self { client, read_id }
+impl Default for GitContentReads {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            admission: tokio::sync::Semaphore::new(MAX_CONCURRENT_READS),
+        }
     }
+}
+
+/// Reads one connection may have outstanding at once.
+const MAX_GIT_CONTENT_READS: usize = 8;
+
+impl GitContentReads {
+    fn register(
+        self: &Arc<Self>,
+        read_id: &str,
+        cancellation: &Arc<CancelState>,
+    ) -> Result<GitContentRegistration, String> {
+        let mut entries = self.entries.lock().unwrap();
+        if entries.len() >= MAX_GIT_CONTENT_READS {
+            return Err("too many Git diff content reads are in progress".into());
+        }
+        entries.insert(read_id.to_owned(), Arc::clone(cancellation));
+        Ok(GitContentRegistration {
+            reads: Arc::clone(self),
+            read_id: read_id.to_owned(),
+        })
+    }
+
+    fn cancel(&self, read_id: &str) {
+        let cancellation = self.entries.lock().unwrap().get(read_id).cloned();
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+        }
+    }
+
+    /// Connection replacement. Nothing registered here can still be delivered.
+    pub(crate) fn cancel_all(&self) {
+        for (_, cancellation) in self.entries.lock().unwrap().drain() {
+            cancellation.cancel();
+        }
+    }
+}
+
+/// Removes a read from its connection's registry exactly once.
+struct GitContentRegistration {
+    reads: Arc<GitContentReads>,
+    read_id: String,
 }
 
 impl Drop for GitContentRegistration {
     fn drop(&mut self) {
-        self.client.release_git_content_read(&self.read_id);
+        self.reads.entries.lock().unwrap().remove(&self.read_id);
     }
 }
 

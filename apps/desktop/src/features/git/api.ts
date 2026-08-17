@@ -28,7 +28,7 @@ interface WireStatus { repository: WireRepository; generation: string; sourceGen
 interface WireContentRef { size: string; contentDigest: string }
 interface WireDiff {
   repository: WireRepository; target: string; path: number[]; originalPath: number[]; displayPath: string;
-  oldContent: number[]; newContent: number[]; patch: number[]; sourceGeneration: string; binary: boolean; tooLarge: boolean;
+  oldContent: number[]; newContent: number[]; sourceGeneration: string; binary: boolean; tooLarge: boolean;
   oldMissing: boolean; newMissing: boolean; hunkCount: number;
   oldContentRef?: WireContentRef | null; newContentRef?: WireContentRef | null;
 }
@@ -327,13 +327,12 @@ function mapDiff(value: WireDiff): GitDiff {
   requireBytes(value.originalPath, "Git diff original path");
   requireBytes(value.oldContent, "Git old content");
   requireBytes(value.newContent, "Git new content");
-  requireBytes(value.patch, "Git patch");
   if (!Number.isSafeInteger(value.hunkCount) || value.hunkCount < 0) throw new Error("Host returned an invalid Git hunk count.");
   return {
     repository: mapRepository(value.repository), target: mapTarget(value.target), path: toBase64(value.path),
     ...(value.originalPath.length ? { originalPath: toBase64(value.originalPath) } : {}), displayPath: value.displayPath,
     ...(value.oldContent.length ? { oldContent: new Uint8Array(value.oldContent) } : {}), ...(value.newContent.length ? { newContent: new Uint8Array(value.newContent) } : {}),
-    ...(value.patch.length ? { patch: new Uint8Array(value.patch) } : {}), sourceGeneration: value.sourceGeneration,
+    sourceGeneration: value.sourceGeneration,
     binary: Boolean(value.binary), tooLarge: Boolean(value.tooLarge), oldMissing: Boolean(value.oldMissing), newMissing: Boolean(value.newMissing), hunkCount: value.hunkCount,
     ...(value.oldContentRef ? { oldContentRef: mapContentRef(value.oldContentRef) } : {}),
     ...(value.newContentRef ? { newContentRef: mapContentRef(value.newContentRef) } : {}),

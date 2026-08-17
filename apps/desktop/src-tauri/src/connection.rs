@@ -42,18 +42,13 @@ pub(crate) mod agent;
 pub(crate) mod files;
 pub(crate) mod git;
 pub(crate) mod git_content;
-use git_content::GitContentRegistration;
+use git_content::GitContentReads;
 mod git_operations;
 use git_operations::GitOperations;
 pub(crate) mod tmux_action;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-
-/// Deferred Git diff-body reads one connection may have outstanding. A diff
-/// surface cancels its previous read before starting another, so this is a
-/// bound on misbehaviour rather than on ordinary use.
-const MAX_GIT_CONTENT_READS: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "camelCase")]
@@ -111,7 +106,7 @@ pub(crate) struct TerminalClient {
     git_operations: Mutex<GitOperations>,
     /// Deferred Git diff-body reads this connection owns, so replacing the
     /// connection cancels them rather than leaving them streaming.
-    git_content_reads: Mutex<HashMap<String, Arc<files::scheduler::CancelState>>>,
+    git_content_reads: Arc<GitContentReads>,
     input_queue: Mutex<ClientInputQueue>,
     resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
@@ -143,7 +138,7 @@ impl TerminalClient {
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
             git_operations: Mutex::new(GitOperations::default()),
-            git_content_reads: Mutex::new(HashMap::new()),
+            git_content_reads: Arc::new(GitContentReads::default()),
             input_queue: Mutex::new(ClientInputQueue::default()),
             resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
@@ -316,7 +311,7 @@ impl TerminalClient {
     }
 
     fn request(&self, request: v1::Request) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, REQUEST_TIMEOUT, None, false)
+        self.request_with_timeout(request, REQUEST_TIMEOUT, None)
     }
 
     /// Writes a request without registering a waiter for its response.
@@ -348,12 +343,7 @@ impl TerminalClient {
         request: v1::Request,
         operation_id: &str,
     ) -> Result<v1::Response, String> {
-        self.request_with_timeout(
-            request,
-            GIT_REQUEST_TIMEOUT,
-            Some(operation_id.to_owned()),
-            false,
-        )
+        self.request_with_timeout(request, GIT_REQUEST_TIMEOUT, Some(operation_id.to_owned()))
     }
 
     fn request_with_timeout(
@@ -361,12 +351,9 @@ impl TerminalClient {
         request: v1::Request,
         timeout: Duration,
         git_operation_id: Option<String>,
-        read_only_permitted: bool,
     ) -> Result<v1::Response, String> {
         let deadline = Instant::now() + timeout;
-        if !self.ready.load(Ordering::Acquire)
-            || (self.read_only.load(Ordering::Acquire) && !read_only_permitted)
-        {
+        if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
             // Coded like the host's own refusals, so the frontend can lead with
             // a sentence and keep this behind the disclosure (11.4.4). The
             // uncoded form reached the user verbatim as a full-width red banner
@@ -439,65 +426,8 @@ impl TerminalClient {
         result
     }
 
-    /// One read-only Git request on the control lane.
-    ///
-    /// Separate from `request_git` because the ordinary path refuses every
-    /// request while the connection is read-only, and a read-only connection is
-    /// exactly when this is used: such a host will not open a bulk bridge, so a
-    /// large diff body has nowhere else to travel. Reading is still allowed
-    /// there; only mutations are not.
-    pub(crate) fn request_git_read_only(
-        &self,
-        request: v1::Request,
-        operation_id: &str,
-    ) -> Result<v1::Response, String> {
-        if !self.ready.load(Ordering::Acquire) {
-            return Err("mutation_rejected: host connection is not ready".into());
-        }
-        self.request_with_timeout(
-            request,
-            GIT_REQUEST_TIMEOUT,
-            Some(operation_id.to_owned()),
-            true,
-        )
-    }
-
-    pub(crate) fn is_read_only(&self) -> bool {
-        self.read_only.load(Ordering::Acquire)
-    }
-
-    /// Records a diff-body read so connection replacement can cancel it.
-    pub(crate) fn register_git_content_read(
-        self: &Arc<Self>,
-        read_id: &str,
-        cancellation: &Arc<files::scheduler::CancelState>,
-    ) -> Result<GitContentRegistration, String> {
-        let mut reads = self.git_content_reads.lock().unwrap();
-        if reads.len() >= MAX_GIT_CONTENT_READS {
-            return Err("too many Git diff content reads are in progress".into());
-        }
-        reads.insert(read_id.to_owned(), Arc::clone(cancellation));
-        Ok(GitContentRegistration::new(
-            Arc::clone(self),
-            read_id.to_owned(),
-        ))
-    }
-
-    pub(crate) fn release_git_content_read(&self, read_id: &str) {
-        self.git_content_reads.lock().unwrap().remove(read_id);
-    }
-
-    pub(crate) fn cancel_git_content_read(&self, read_id: &str) {
-        let cancellation = self.git_content_reads.lock().unwrap().get(read_id).cloned();
-        if let Some(cancellation) = cancellation {
-            cancellation.cancel();
-        }
-    }
-
-    fn cancel_all_git_content_reads(&self) {
-        for (_, cancellation) in self.git_content_reads.lock().unwrap().drain() {
-            cancellation.cancel();
-        }
+    pub(crate) fn git_content_reads(&self) -> Arc<GitContentReads> {
+        Arc::clone(&self.git_content_reads)
     }
 
     fn cancel_git(&self, operation_id: &str) -> Result<(), String> {
@@ -528,7 +458,7 @@ impl TerminalClient {
 
     fn fail_pending(&self, message: &str) {
         self.git_operations.lock().unwrap().reset();
-        self.cancel_all_git_content_reads();
+        self.git_content_reads.cancel_all();
         for (_, sender) in self.pending.lock().unwrap().drain() {
             let _ = sender.send(Err(message.into()));
         }

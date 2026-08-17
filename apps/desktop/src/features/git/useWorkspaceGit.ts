@@ -1,19 +1,15 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
-import { gitScopeKey, type GitRepositoryHandle, type GitRepositoryState, type GitRepositoryStore } from "./repositoryStore";
+import { gitScopeKey, type GitRepositoryState, type GitRepositoryStore } from "./repositoryStore";
 import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
 
 /**
  * What the panel renders, and the observation it acts through.
  *
- * The handle is exposed rather than re-wrapped: every method a consumer needs
- * is already on it, and a second forwarding layer would only add a way for the
- * two to disagree. It is absent exactly while there is no repository to observe.
+ * This is the store's own published state: the handle travels inside it, so a
+ * consumer can never pair one repository's status with another's observation.
  */
-export interface WorkspaceGitState extends GitRepositoryState {
-  handle?: GitRepositoryHandle;
-  refresh(): Promise<void>;
-}
+export type WorkspaceGitState = GitRepositoryState;
 
 const IDLE: GitRepositoryState = { loading: false };
 
@@ -34,22 +30,18 @@ export function useWorkspaceGit(
   const observable = Boolean(scope && root?.gitWorktree);
   const bound = observable && scope && root ? { scope, root } : undefined;
   const identity = bound ? gitScopeKey(bound.scope, bound.root) : "";
-  const handle = useRef<GitRepositoryHandle | undefined>(undefined);
-
   // Acquisition and subscription are one lifetime, so the entry is held for
   // exactly as long as this component is listening to it. Both closures capture
   // the scope of the render that produced `identity`, so a scope change can
   // never read one repository's state under another's key.
   const subscribe = useCallback((listener: () => void) => {
     if (!bound) return () => undefined;
-    const acquired = store.acquire(bound.scope, bound.root);
-    handle.current = acquired;
-    const stop = acquired.subscribe(listener);
+    const lease = store.acquire(bound.scope, bound.root);
+    const stop = lease.handle.subscribe(listener);
     listener();
     return () => {
       stop();
-      acquired.release();
-      handle.current = undefined;
+      lease.release();
     };
     // `identity` is the complete key of `bound` for every purpose here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -82,15 +74,5 @@ export function useWorkspaceGit(
     ticket.afterPaint((candidate) => candidate.lifecycleGeneration === lifecycle.current);
   }, [state.status]);
 
-  const refresh = useCallback(async () => {
-    await handle.current?.refresh();
-  }, []);
-
-  return {
-    status: state.status,
-    loading: observable ? state.loading : false,
-    error: state.error,
-    handle: handle.current,
-    refresh,
-  };
+  return state;
 }

@@ -18,8 +18,8 @@ describe("GitRepositoryStore", () => {
     // status, no discovery.
     expect(calls.watch).toBe(1);
     expect(calls.status).toBe(0);
-    expect(diffTab.state().status?.generation).toBe("1");
-    expect(secondDiffTab.state().status?.generation).toBe("1");
+    expect(diffTab.handle.state().status?.generation).toBe("1");
+    expect(secondDiffTab.handle.state().status?.generation).toBe("1");
 
     diffTab.release();
     secondDiffTab.release();
@@ -41,7 +41,7 @@ describe("GitRepositoryStore", () => {
 
     expect(store.peek(scope, root)?.status?.generation).toBe("1");
     const reopened = store.acquire(scope, root);
-    expect(reopened.state().status?.generation).toBe("1");
+    expect(reopened.handle.state().status?.generation).toBe("1");
     expect(calls.watch).toBe(2);
     reopened.release();
   });
@@ -53,13 +53,13 @@ describe("GitRepositoryStore", () => {
     await flush();
 
     const request = { repositoryId: "repo", path: "YQ==", target: "unstaged" as const };
-    const [first, second] = await Promise.all([handle.diff(request), handle.diff(request)]);
+    const [first, second] = await Promise.all([handle.handle.diff(request), handle.handle.diff(request)]);
     expect(calls.diff).toBe(1);
     expect(first).toBe(second);
 
     // A resolved diff is never replayed: the host is the authority on what a
     // file currently looks like, so an explicit re-read must reach it.
-    await handle.diff(request);
+    await handle.handle.diff(request);
     expect(calls.diff).toBe(2);
     handle.release();
   });
@@ -79,8 +79,8 @@ describe("GitRepositoryStore", () => {
     const request = { repositoryId: "repo", path: "YQ==", target: "unstaged" as const };
     const leaving = new AbortController();
     const staying = new AbortController();
-    const abandoned = handle.diff(request, leaving.signal);
-    const wanted = handle.diff(request, staying.signal);
+    const abandoned = handle.handle.diff(request, leaving.signal);
+    const wanted = handle.handle.diff(request, staying.signal);
     expect(calls.diff).toBe(1);
     leaving.abort();
     expect(observed?.aborted).toBe(false);
@@ -99,11 +99,11 @@ describe("GitRepositoryStore", () => {
     const handle = store.acquire(scope, root);
     await flush();
     const listener = vi.fn();
-    handle.subscribe(listener);
+    handle.handle.subscribe(listener);
 
     // A mutation delivers its status in its own response; the shared watch then
     // echoes the same snapshot. That is one transition, not two.
-    await handle.mutate("repo", stageRequest);
+    await handle.handle.mutate("repo", stageRequest);
     publish(snapshot("1"));
     await flush();
     expect(listener).not.toHaveBeenCalled();
@@ -119,14 +119,14 @@ describe("GitRepositoryStore", () => {
     const store = new GitRepositoryStore(client);
     const handle = store.acquire(scope, root);
     await flush();
-    expect(handle.state().loading).toBe(false);
+    expect(handle.handle.state().loading).toBe(false);
 
     // The common case: the user presses refresh and the repository is exactly
     // as it was. That is still an answer, and the panel must settle on it.
-    await handle.refresh();
+    await handle.handle.refresh();
     await flush();
-    expect(handle.state().loading).toBe(false);
-    expect(handle.state().status?.generation).toBe("1");
+    expect(handle.handle.state().loading).toBe(false);
+    expect(handle.handle.state().status?.generation).toBe("1");
     handle.release();
   });
 
@@ -137,13 +137,13 @@ describe("GitRepositoryStore", () => {
     await flush();
     emit({ kind: "error", rootToken: root.token, watchId: "watch", error: "transient failure" });
     await flush();
-    expect(handle.state().error).toBe("transient failure");
+    expect(handle.handle.state().error).toBe("transient failure");
 
     // The identical snapshot, republished. Recovery is a transition even when
     // the repository state is byte-identical.
     publish(snapshot("1"));
     await flush();
-    expect(handle.state().error).toBeUndefined();
+    expect(handle.handle.state().error).toBeUndefined();
     handle.release();
   });
 
@@ -156,8 +156,8 @@ describe("GitRepositoryStore", () => {
     const store = new GitRepositoryStore(client);
     const handle = store.acquire(scope, root);
     await flush();
-    await handle.mutate("repo", stageRequest);
-    expect(handle.state().status?.generation).toBe("2");
+    await handle.handle.mutate("repo", stageRequest);
+    expect(handle.handle.state().status?.generation).toBe("2");
     expect(calls.status).toBe(0);
     handle.release();
   });
@@ -170,8 +170,36 @@ describe("GitRepositoryStore", () => {
     publish(snapshot("5"));
     publish(snapshot("3"));
     await flush();
-    expect(handle.state().status?.generation).toBe("5");
+    expect(handle.handle.state().status?.generation).toBe("5");
     handle.release();
+  });
+
+  it("does not open a second watch while one is still in flight", async () => {
+    const { client, calls } = stubClient();
+    let settleWatch!: () => void;
+    vi.mocked(client.watch).mockImplementation(() => new Promise((resolve) => {
+      calls.watch += 1;
+      settleWatch = () => resolve({
+        watchId: "watch", rootToken: root.token, connectionEpoch: scope.terminalEpoch,
+        status: snapshot("1"), release: () => { calls.release += 1; },
+      });
+    }));
+    const store = new GitRepositoryStore(client);
+    const lease = store.acquire(scope, root);
+    await flush();
+    expect(calls.watch).toBe(1);
+
+    // A refresh while the bootstrap is still pending must not start a second
+    // one: whichever lease lost the race would never be released.
+    void lease.handle.refresh();
+    void lease.handle.refresh();
+    await flush();
+    expect(calls.watch).toBe(1);
+    settleWatch();
+    await flush();
+    lease.release();
+    await flush();
+    expect(calls.release).toBe(1);
   });
 
   it("ignores events belonging to another watch or another root", async () => {
@@ -182,7 +210,7 @@ describe("GitRepositoryStore", () => {
     emit({ kind: "status", rootToken: "other-root", watchId: "watch", status: snapshot("9") });
     emit({ kind: "status", rootToken: root.token, watchId: "someone-else", status: snapshot("9") });
     await flush();
-    expect(handle.state().status?.generation).toBe("1");
+    expect(handle.handle.state().status?.generation).toBe("1");
     handle.release();
   });
 });

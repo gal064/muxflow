@@ -13,13 +13,6 @@ use std::path::{Path, PathBuf};
 const FALLBACK_MIN: Duration = Duration::from_millis(750);
 /// Ceiling for the fallback poll interval.
 const FALLBACK_MAX: Duration = Duration::from_secs(30);
-/// How often a waiting observer rechecks its watcher's health.
-///
-/// The `notify` callback raises `native_failed` and then `try_send`s a signal,
-/// and that send can be dropped when the one-slot channel is already full. So a
-/// broken watcher can be flagged with no signal ever arriving, and waiting on
-/// that stream alone would wait forever.
-const WATCH_HEALTH_RECHECK: Duration = Duration::from_secs(1);
 
 pub(in crate::service::git) enum WatchSignal {
     Changed,
@@ -105,6 +98,12 @@ impl RepositoryCoordinator {
             observation
         };
         let native = self.establish(capabilities).await;
+        // The last subscriber can leave during establishment. A watcher with
+        // nobody to publish to is a task that refreshes forever for nobody.
+        if self.subscriber_count() == 0 {
+            self.stop_watcher();
+            return;
+        }
         self.publish_observing(&observation, native.is_some());
         let coordinator = Arc::clone(self);
         let capabilities = Arc::clone(capabilities);
@@ -113,11 +112,12 @@ impl RepositoryCoordinator {
 
     /// Marks the established native watcher broken, as the platform does.
     ///
-    /// Recovery runs through exactly the same flag and the same top-of-loop
-    /// retirement that a real `notify` failure uses.
+    /// Recovery runs through exactly the same flag, the same wake and the same
+    /// top-of-loop retirement that a real `notify` failure uses.
     #[cfg(test)]
     pub(in crate::service::git) fn fail_native_watcher_for_test(&self) {
         self.native_failed.store(true, Ordering::Release);
+        self.native_broken.notify_one();
     }
 
     pub(in crate::service::git) fn stop_watcher(&self) {
@@ -152,9 +152,10 @@ impl RepositoryCoordinator {
         let root = self.key.root.clone();
         let token = self.key.root_token.clone();
         let failed = Arc::clone(&self.native_failed);
+        let broken = Arc::clone(&self.native_broken);
         let observation = Arc::clone(&self.observation);
         tokio::task::spawn_blocking(move || {
-            start_repository_watcher(&capabilities, &root, &token, failed, observation)
+            start_repository_watcher(&capabilities, &root, &token, failed, broken, observation)
         })
         .await
         .ok()
@@ -244,11 +245,22 @@ impl RepositoryCoordinator {
             let Some(receiver) = signals.as_mut() else {
                 continue;
             };
+            // The failure notify stores a permit, so a watcher flagged broken
+            // while this task was elsewhere still wakes it. That is why there
+            // is no periodic health poll here: an idle repository costs nothing.
+            let broken = self.native_broken.notified();
+            let stopping = observation.wake.notified();
+            tokio::pin!(broken, stopping);
+            broken.as_mut().enable();
+            stopping.as_mut().enable();
+            if self.native_failed.load(Ordering::Acquire) {
+                continue;
+            }
             let signal = tokio::select! {
                 signal = receiver.recv() => signal,
-                _ = observation.wake.notified() => break,
+                () = &mut stopping => break,
                 // The top of the loop retires a watcher flagged broken.
-                _ = tokio::time::sleep(WATCH_HEALTH_RECHECK) => continue,
+                () = &mut broken => continue,
             };
             match signal {
                 Some(WatchSignal::Changed) => {
@@ -309,7 +321,8 @@ impl RepositoryCoordinator {
                 }
             }
             Err(error) => {
-                self.publish_error(error.to_string()).await;
+                self.publish_error(error.to_string(), self.next_publication())
+                    .await;
                 if polling {
                     *fallback = next_fallback(*fallback, false);
                 }
@@ -390,6 +403,7 @@ pub(in crate::service::git) fn start_repository_watcher(
     logical_root: &str,
     root_token: &str,
     failed: Arc<AtomicBool>,
+    broken: Arc<tokio::sync::Notify>,
     observation: Arc<GitObservation>,
 ) -> anyhow::Result<EstablishedWatcher> {
     let root = capabilities.try_clone_root()?;
@@ -409,6 +423,7 @@ pub(in crate::service::git) fn start_repository_watcher(
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
     failed.store(false, Ordering::Release);
     let callback_failed = Arc::clone(&failed);
+    let callback_broken = Arc::clone(&broken);
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(event) if signals_change(&event.kind) => {
@@ -417,6 +432,10 @@ pub(in crate::service::git) fn start_repository_watcher(
             Ok(_) => {}
             Err(_) => {
                 callback_failed.store(true, Ordering::Release);
+                // A permit, not a wakeup: the one-slot signal channel may
+                // already be full, and a dropped failure notice would leave the
+                // observer waiting on a stream that will never speak again.
+                callback_broken.notify_one();
                 let _ = sender.try_send(WatchSignal::Failed);
             }
         })?;

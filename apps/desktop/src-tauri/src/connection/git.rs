@@ -219,7 +219,9 @@ fn status_entry_json(value: &v1::GitStatusEntry) -> Value {
 fn diff_json(value: &v1::GitDiff) -> Value {
     json!({ "repository": value.repository.as_ref().map(repository_json), "target": diff_target_name(value.target),
         "path": value.path, "originalPath": value.original_path, "displayPath": value.display_path,
-        "oldContent": value.old_content, "newContent": value.new_content, "patch": value.patch,
+        // The patch is deliberately not serialized: only hunk mutation needs
+        // it, and the host re-derives it there in process.
+        "oldContent": value.old_content, "newContent": value.new_content,
         "sourceGeneration": value.source_generation, "binary": value.binary, "tooLarge": value.too_large,
         "oldMissing": value.old_missing, "newMissing": value.new_missing, "hunkCount": value.hunk_count,
         "oldContentRef": value.old_content_ref.as_ref().map(content_ref_json),
