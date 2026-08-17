@@ -163,7 +163,7 @@ export function ExplorerTree(props: Props) {
     globalThis.requestAnimationFrame(() => treeRef.current?.querySelector<HTMLElement>(`[data-tree-index="${next}"]`)?.focus());
   };
 
-  const navigateEntry = (event: KeyboardEvent<HTMLDivElement>, index: number, depth: number, entry: FileEntry) => {
+  const navigateEntry = (event: KeyboardEvent<HTMLElement>, index: number, depth: number, entry: FileEntry) => {
     if (event.target !== event.currentTarget) return;
     // Every file action is on the context menu, so the keyboard needs a way to
     // open it or a keyboard-only user cannot rename, move or delete anything.
@@ -212,7 +212,7 @@ export function ExplorerTree(props: Props) {
       focusRow(index);
       setMenu({ ...(entry ? { entry } : {}), anchor });
     },
-    keyDown: (event, index, depth, entry) => navigateEntry(event as KeyboardEvent<HTMLDivElement>, index, depth, entry),
+    keyDown: (event, index, depth, entry) => navigateEntry(event, index, depth, entry),
     loadMore: (directory) => props.onLoadMore(directory),
     moreKeyDown: (event, index) => {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }

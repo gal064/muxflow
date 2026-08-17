@@ -9,7 +9,16 @@ import {
 } from "../transfers/transferState";
 
 export interface WireMetadata {
-  path: string; name: string; kind: string; size: string; modifiedUnixMillis: string; mode: number;
+  path: string; name: string; kind: string; size: string;
+  /**
+   * A JSON *number*, unlike `size` and `generation` beside it.
+   *
+   * The host serializes it from an `int64` that cannot exceed what a double
+   * represents exactly for any time this century, while the two u64 fields are
+   * strings precisely because they can. Declared as it is actually sent, so
+   * the coercion in `mapEntry` is a conversion rather than a repair.
+   */
+  modifiedUnixMillis: number; mode: number;
   symlink: boolean; symlinkTarget: string; expandable: boolean; generation: string; mime: string; imagePreviewEligible: boolean;
   symlinkTargetKind?: string;
 }

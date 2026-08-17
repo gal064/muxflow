@@ -750,6 +750,96 @@ describe("useWorkspaceFiles", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it("holds the Phase 14 paginated Explorer lane to one bootstrap, one prefetch, and no list per change", async () => {
+    // The size class the 4,096-entry lane cannot see. The host's page is 4,096
+    // entries, so a larger directory arrives incomplete and stays incomplete —
+    // and the rule that decided whether a precise change could be applied
+    // locally used to require a *complete* listing. Every single-file change
+    // in a directory of this size therefore cost a recovery list and then a
+    // full re-pagination: the exact list storm this package exists to remove,
+    // in the directories where it costs most.
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const PAGE = 4_096;
+    const all = Array.from({ length: 8_192 }, (_, index) => entry(`/repo/wide/file-${String(index).padStart(5, "0")}`));
+    const pageOf = (token: string | undefined) => {
+      const start = token === undefined ? 0 : Number(token);
+      const slice = all.slice(start, start + PAGE);
+      const next = start + PAGE;
+      return {
+        rootToken: "root", directory: "/repo/wide", revision: "7", entries: slice,
+        recoveredFromOverflow: false,
+        complete: next >= all.length,
+        ...(next < all.length ? { nextPageToken: String(next) } : {}),
+      };
+    };
+    const listed: string[] = [];
+    let listener: ((event: WorkspaceEvent) => void) | undefined;
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async (scope) => ({ ...root, paneId: scope.paneId })),
+      listDirectory: vi.fn(async (_scope, active, directory, options) => {
+        listed.push(`${directory}${options?.pageToken ? `@${options.pageToken}` : ""}`);
+        if (directory !== "/repo/wide") return listing(active.token, directory, []);
+        return pageOf(options?.pageToken);
+      }),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({
+        fresh: true,
+        snapshot: directory === "/repo/wide"
+          ? pageOf(undefined)
+          : listing(active.token, directory, [entry("/repo/wide", { directory: true })]),
+        release: () => undefined,
+      })),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
+    };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    vi.useFakeTimers();
+    try {
+      await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { current?.toggleDirectory("/repo/wide"); await Promise.resolve(); });
+      for (let turn = 0; turn < 4; turn += 1) await act(async () => { await Promise.resolve(); });
+      // The bootstrap is page one; exactly one further page is prefetched.
+      const afterExpand = listed.length;
+      const expandedRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+
+      // One external create, inside the rows the tree is holding.
+      const created = entry("/repo/wide/file-00000a", { generation: "2" });
+      await act(async () => {
+        listener?.({ kind: "fileChanged", rootToken: "root", path: created.path, generation: "2", entry: created });
+        await Promise.resolve();
+      });
+      // And one external delete, of a row it is holding.
+      await act(async () => {
+        listener?.({ kind: "fileDeleted", rootToken: "root", path: "/repo/wide/file-00001" });
+        await Promise.resolve();
+      });
+      // Well past any recovery window: a list scheduled by either event would
+      // have gone out by now.
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      const changeLists = listed.length - afterExpand;
+      const afterChangeRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+
+      expect(expandedRows, "the bootstrap and one prefetched page").toBe(2 * PAGE);
+      expect(afterExpand, "expanding cost more than the one prefetched page").toBe(1);
+      expect(changeLists, "a single-file change in a paginated directory cost a list").toBe(0);
+      expect(afterChangeRows, "the patches did not both land").toBe(2 * PAGE);
+      console.log(`PHASE14_METRIC ${JSON.stringify({
+        lane: "explorerPaginatedWatchTraffic",
+        entries: all.length,
+        hostPageSize: PAGE,
+        expandDirectoryListRequests: afterExpand,
+        expandedRows,
+        changeDirectoryListRequests: changeLists,
+        externalChangeRows: afterChangeRows,
+      })}`);
+      await act(async () => { renderer.unmount(); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("retains an ongoing connection-owned download across pane/session/root switch through published completion", async () => {
     const root = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
     const listeners: Array<(event: WorkspaceEvent) => void> = [];

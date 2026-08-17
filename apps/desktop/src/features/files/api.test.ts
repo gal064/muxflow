@@ -21,7 +21,7 @@ describe("TauriFileWorkspaceClient", () => {
     const directory = {
       watchId: "watch", root: "/repo", path: "/repo", generation: "12", overflowed: false,
       authoritative: true, nextPageToken: "", complete: true,
-      entries: [{ path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "1", mime: "text/plain", imagePreviewEligible: false }],
+      entries: [{ path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: 1, mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "1", mime: "text/plain", imagePreviewEligible: false }],
     };
     invokeMock
       .mockResolvedValueOnce({ operationId: "list", directory })
@@ -154,14 +154,14 @@ describe("TauriFileWorkspaceClient", () => {
 
   it("maps lazy directory pages including collapsed protected entries", async () => {
     invokeMock.mockResolvedValueOnce({ operationId: "op", directory: { watchId: "", root: "/repo", path: "/repo", generation: "12", authoritative: true, nextPageToken: "opaque", complete: false, entries: [
-      { path: "/repo/.git", name: ".git", kind: "directory", size: "4096", modifiedUnixMillis: "1", mode: 0o755, symlink: false, symlinkTarget: "", expandable: false, generation: "18446744073709551615", mime: "", imagePreviewEligible: false },
+      { path: "/repo/.git", name: ".git", kind: "directory", size: "4096", modifiedUnixMillis: 1, mode: 0o755, symlink: false, symlinkTarget: "", expandable: false, generation: "18446744073709551615", mime: "", imagePreviewEligible: false },
     ] } });
     const listing = await new TauriFileWorkspaceClient().listDirectory(scope, root, "/repo");
     expect(listing).toMatchObject({ rootToken: "token", nextPageToken: "opaque", complete: false, entries: [{ name: ".git", expandable: false, sizeBytes: "4096" }] });
   });
 
   it("passes destructive confirmations and encodes CRLF text atomically", async () => {
-    const metadata = { path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "3", mime: "", imagePreviewEligible: false };
+    const metadata = { path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: 1, mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "3", mime: "", imagePreviewEligible: false };
     invokeMock.mockImplementation(async (command, args) => {
       if (command === "file_request") return { operationId: "delete", metadata };
       if (command === "start_file_write") {
@@ -180,7 +180,7 @@ describe("TauriFileWorkspaceClient", () => {
   });
 
   it("reassembles sequenced text chunks from the independent bulk lane", async () => {
-    const metadata = { path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "18446744073709551615", mime: "text/plain", imagePreviewEligible: false };
+    const metadata = { path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: 1, mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "18446744073709551615", mime: "text/plain", imagePreviewEligible: false };
     invokeMock.mockImplementation(async (command, args) => {
       expect(command).toBe("start_file_read");
       const channel = (args as { onEvent: { onmessage?: (value: ArrayBuffer) => void } }).onEvent;
@@ -216,7 +216,7 @@ describe("TauriFileWorkspaceClient", () => {
     // Settling the promise does not close the Tauri channel, so a purely local
     // refusal used to leave the host streaming the rest of a file — up to
     // 25 MiB — into something nobody was reading.
-    const metadata = { path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "3", mime: "text/plain", imagePreviewEligible: false };
+    const metadata = { path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: 1, mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "3", mime: "text/plain", imagePreviewEligible: false };
     invokeMock.mockImplementation(async (command, args) => {
       if (command === "cancel_file_io") return undefined;
       const channel = (args as { onEvent: { onmessage?: (value: ArrayBuffer) => void } }).onEvent;
@@ -238,8 +238,8 @@ describe("TauriFileWorkspaceClient", () => {
     const events: unknown[] = [];
     await client.subscribe(scope, (event) => events.push(event));
     client.publishWireEvent({ operationId: "", rootToken: "token", watchId: "w", directory: { watchId: "w", root: "/repo", path: "/repo", generation: "2", entries: [], authoritative: true, nextPageToken: "", complete: true }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
-    client.publishWireEvent({ operationId: "agent", rootToken: "token", metadata: { path: "/repo/a", name: "a", kind: "file", size: "1", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "99", mime: "", imagePreviewEligible: false }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
-    client.publishWireEvent({ operationId: "delete", rootToken: "token", deleted: true, metadata: { path: "/repo/gone", name: "gone", kind: "file", size: "1", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "100", mime: "", imagePreviewEligible: false }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
+    client.publishWireEvent({ operationId: "agent", rootToken: "token", metadata: { path: "/repo/a", name: "a", kind: "file", size: "1", modifiedUnixMillis: 1, mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "99", mime: "", imagePreviewEligible: false }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
+    client.publishWireEvent({ operationId: "delete", rootToken: "token", deleted: true, metadata: { path: "/repo/gone", name: "gone", kind: "file", size: "1", modifiedUnixMillis: 1, mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "100", mime: "", imagePreviewEligible: false }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
     expect(events).toEqual([
       {
         kind: "directorySnapshot",
@@ -269,7 +269,7 @@ describe("TauriFileWorkspaceClient", () => {
       directory: {
         watchId: "w", root: "/repo", path: "/repo", generation: "9", authoritative: true,
         nextPageToken: "", complete: true,
-        entries: [{ path: "/repo/kept", name: "kept", kind: "file", size: "2", modifiedUnixMillis: "5", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "77", mime: "", imagePreviewEligible: false }],
+        entries: [{ path: "/repo/kept", name: "kept", kind: "file", size: "2", modifiedUnixMillis: 5, mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "77", mime: "", imagePreviewEligible: false }],
       },
       transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "",
     });
@@ -285,14 +285,14 @@ describe("TauriFileWorkspaceClient", () => {
     await client.subscribe(scope, (event) => events.push(event));
     client.publishWireEvent({
       operationId: "", rootToken: "token",
-      metadata: { path: "/repo/unmapped", name: "", kind: "unspecified", size: "0", modifiedUnixMillis: "0", mode: 0, symlink: false, symlinkTarget: "", expandable: false, generation: "0", mime: "", imagePreviewEligible: false },
+      metadata: { path: "/repo/unmapped", name: "", kind: "unspecified", size: "0", modifiedUnixMillis: 0, mode: 0, symlink: false, symlinkTarget: "", expandable: false, generation: "0", mime: "", imagePreviewEligible: false },
       transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "",
     });
     expect(events).toEqual([{ kind: "fileChanged", rootToken: "token", path: "/repo/unmapped", generation: "0" }]);
   });
 
   it("opens an eligible image in one bulk request, with no separate text probe", async () => {
-    const metadata = { path: "/repo/logo.png", name: "logo.png", kind: "file", size: "3", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "12", mime: "image/png", imagePreviewEligible: true };
+    const metadata = { path: "/repo/logo.png", name: "logo.png", kind: "file", size: "3", modifiedUnixMillis: 1, mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "12", mime: "image/png", imagePreviewEligible: true };
     invokeMock.mockImplementation(async (command, args) => {
       expect(command).toBe("start_file_read");
       expect(args).not.toHaveProperty("purpose");

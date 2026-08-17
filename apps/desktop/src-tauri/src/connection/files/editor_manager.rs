@@ -681,3 +681,204 @@ fn emit_file_chunk(channel: &Channel<InvokeResponseBody>, offset: u64, data: &[u
     frame.extend_from_slice(data);
     channel.send(InvokeResponseBody::Raw(frame)).is_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::TerminalClient;
+    use std::sync::atomic::Ordering;
+
+    fn job() -> FileReadJob {
+        let client = Arc::new(TerminalClient::new());
+        client.ready.store(true, Ordering::Release);
+        client.terminal_epoch.store(7, Ordering::Release);
+        *client.server_identity.lock().unwrap() = "server".into();
+        FileReadJob {
+            transfer_id: "read".into(),
+            connection: ConnectionSpec::Local,
+            root: "/repo".into(),
+            root_token: "token".into(),
+            path: "/repo/a.txt".into(),
+            binding: BulkBinding::capture(client, "server".into(), 7).unwrap(),
+            cancellation: Arc::new(CancelState::new()),
+            channel: Channel::new(|_| Ok(())),
+        }
+    }
+
+    fn header(bytes: &[u8], streaming: bool) -> v1::FileStreamHeader {
+        v1::FileStreamHeader {
+            metadata: Some(v1::FileMetadata {
+                path: "/repo/a.txt".into(),
+                generation: 5,
+                ..Default::default()
+            }),
+            content_kind: v1::FileContentKind::Text.into(),
+            generation: 5,
+            total_bytes: bytes.len() as u64,
+            content_streaming: streaming,
+        }
+    }
+
+    fn body(offset: u64, data: &[u8], eof: bool, digest: &str) -> v1::FileStreamFrame {
+        v1::FileStreamFrame {
+            operation_id: "open".into(),
+            header: None,
+            offset,
+            data: data.to_vec(),
+            eof,
+            blake3: digest.to_owned(),
+        }
+    }
+
+    fn content(generation: u64, kind: v1::FileContentKind) -> v1::FileContent {
+        v1::FileContent {
+            metadata: None,
+            kind: kind.into(),
+            content: Vec::new(),
+            generation,
+        }
+    }
+
+    /// The exchange this whole operation exists to make one round trip.
+    #[test]
+    fn a_header_a_body_and_an_agreeing_response_are_accepted() {
+        let job = job();
+        let deadline = job.cancellation.arm_inactivity_deadline();
+        let mut stream = FileReadStream::new(&job, &deadline);
+        let bytes = b"hello";
+        let digest = blake3::hash(bytes).to_hex().to_string();
+        stream
+            .accept(v1::FileStreamFrame {
+                header: Some(header(bytes, true)),
+                ..Default::default()
+            })
+            .unwrap();
+        stream.accept(body(0, bytes, true, &digest)).unwrap();
+        stream
+            .finish(&content(5, v1::FileContentKind::Text))
+            .unwrap();
+    }
+
+    /// Every refusal in the state machine, each named by what it protects.
+    ///
+    /// The whole point of the type is that content, identity, and byte count
+    /// provably belong together; without these the desktop would publish a
+    /// file assembled from frames that never agreed with each other.
+    #[test]
+    fn a_stream_that_disagrees_with_itself_is_refused_rather_than_published() {
+        let bytes = b"hello";
+        let digest = blake3::hash(bytes).to_hex().to_string();
+        /// One way a stream can contradict itself, and its name.
+        type Contradiction = (
+            &'static str,
+            Box<dyn Fn(&mut FileReadStream<'_>) -> Result<(), String>>,
+        );
+        let cases: Vec<Contradiction> = vec![
+            (
+                "a body with no header",
+                Box::new(move |stream| stream.accept(body(0, b"hello", true, ""))),
+            ),
+            (
+                "a second header",
+                Box::new(|stream| {
+                    stream.accept(v1::FileStreamFrame {
+                        header: Some(header(b"hello", true)),
+                        ..Default::default()
+                    })?;
+                    stream.accept(v1::FileStreamFrame {
+                        header: Some(header(b"hello", true)),
+                        ..Default::default()
+                    })
+                }),
+            ),
+            (
+                "a body frame out of sequence",
+                Box::new(|stream| {
+                    stream.accept(v1::FileStreamFrame {
+                        header: Some(header(b"hello", true)),
+                        ..Default::default()
+                    })?;
+                    stream.accept(body(8, b"lo", false, ""))
+                }),
+            ),
+            (
+                "more bytes than the header declared",
+                Box::new(|stream| {
+                    stream.accept(v1::FileStreamFrame {
+                        header: Some(header(b"hi", true)),
+                        ..Default::default()
+                    })?;
+                    stream.accept(body(0, b"far too many", false, ""))
+                }),
+            ),
+            (
+                "a digest that does not describe the body",
+                Box::new(|stream| {
+                    stream.accept(v1::FileStreamFrame {
+                        header: Some(header(b"hello", true)),
+                        ..Default::default()
+                    })?;
+                    stream.accept(body(0, b"hello", true, "0000"))
+                }),
+            ),
+            (
+                "a body cut short of its declared length",
+                Box::new(move |stream| {
+                    stream.accept(v1::FileStreamFrame {
+                        header: Some(header(b"hello", true)),
+                        ..Default::default()
+                    })?;
+                    stream.accept(body(0, b"hel", false, ""))?;
+                    let taken =
+                        std::mem::replace(stream, FileReadStream::new(stream.job, stream.deadline));
+                    taken.finish(&content(5, v1::FileContentKind::Text))
+                }),
+            ),
+        ];
+        for (name, run) in cases {
+            let job = job();
+            let deadline = job.cancellation.arm_inactivity_deadline();
+            let mut stream = FileReadStream::new(&job, &deadline);
+            assert!(run(&mut stream).is_err(), "{name} was published anyway");
+        }
+
+        // And a terminal response that describes a different file than the
+        // header did, which is the cross-check the two generations exist for.
+        for wrong in [
+            content(6, v1::FileContentKind::Text),
+            content(5, v1::FileContentKind::Binary),
+        ] {
+            let job = job();
+            let deadline = job.cancellation.arm_inactivity_deadline();
+            let mut stream = FileReadStream::new(&job, &deadline);
+            stream
+                .accept(v1::FileStreamFrame {
+                    header: Some(header(bytes, true)),
+                    ..Default::default()
+                })
+                .unwrap();
+            stream.accept(body(0, bytes, true, &digest)).unwrap();
+            assert!(
+                stream.finish(&wrong).is_err(),
+                "a response describing another file was published"
+            );
+        }
+    }
+
+    /// A classification-only open owes no body at all.
+    #[test]
+    fn a_metadata_only_open_finishes_without_content() {
+        let job = job();
+        let deadline = job.cancellation.arm_inactivity_deadline();
+        let mut stream = FileReadStream::new(&job, &deadline);
+        stream
+            .accept(v1::FileStreamFrame {
+                header: Some(header(&[], false)),
+                ..Default::default()
+            })
+            .unwrap();
+        stream
+            .finish(&content(5, v1::FileContentKind::Text))
+            .unwrap();
+    }
+}
