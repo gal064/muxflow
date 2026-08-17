@@ -103,7 +103,11 @@ impl OperationRegistry {
     pub(super) fn bind(&self, claim: &OperationClaim, request_id: u64) -> Bound {
         let mut slots = self.slots.lock().unwrap();
         let Some(slot) = slots.get_mut(&claim.key) else {
-            return Bound::Ready;
+            // The registry was cleared under this claim, which happens when the
+            // connection it belongs to goes away. Reporting it ready would
+            // dispatch onto a torn-down bridge with nothing left that could
+            // ever cancel it.
+            return Bound::Cancelled;
         };
         if slot.cancelled {
             return Bound::Cancelled;
@@ -213,6 +217,19 @@ mod tests {
             registry.cancel(OperationLane::File, &format!("abandoned-{index}"));
         }
         assert!(registry.len() <= MAX_TOMBSTONES);
+    }
+
+    /// A cleared registry is a connection that has gone.
+    #[test]
+    fn a_claim_whose_registry_was_cleared_is_refused_rather_than_dispatched() {
+        let registry = Arc::new(OperationRegistry::default());
+        let claim = registry.claim(OperationLane::File, "op").unwrap();
+        registry.clear();
+        assert!(
+            matches!(registry.bind(&claim, 5), Bound::Cancelled),
+            "a request was dispatched onto a connection nothing can cancel it on"
+        );
+        drop(claim);
     }
 
     #[test]
