@@ -559,24 +559,38 @@ fn active_root_probe_round_trips_a_known_capability_and_its_unchanged_answer() {
 ///
 /// The daemon lives on a host the user upgrades separately from the app, so
 /// "this helper predates the operation" is a real state. It is answered by
-/// refusing the connection and reporting the exact missing bits — not by a
-/// second, unexercised code path for opening files.
+/// refusing the connection and reporting the exact missing capability by name —
+/// not by a second, unexercised code path for opening files.
 #[test]
 fn single_request_file_opens_are_a_required_capability() {
-    use tmux_agent_protocol::{CAP_FILE_STREAM, CAP_TERMINAL_OUTPUT_CREDIT, HOST_CAPABILITIES};
+    use tmux_agent_protocol::{
+        CAP_FILE_STREAM, CAP_TERMINAL_OUTPUT_CREDIT, HOST_CAPABILITIES, capability_names,
+        missing_host_capabilities,
+    };
     assert_eq!(CAP_FILE_STREAM, 1 << 15);
     // Append-only: every previously assigned bit keeps its position.
     assert_eq!(CAP_TERMINAL_OUTPUT_CREDIT, 1 << 14);
 
-    // The rule the desktop's handshake applies, stated here so the capability
-    // and the admission decision cannot drift apart.
-    let admits = |advertised: u64| HOST_CAPABILITIES & !advertised == 0;
-    assert!(admits(HOST_CAPABILITIES));
-    assert!(
-        !admits(HOST_CAPABILITIES & !CAP_FILE_STREAM),
+    // The rule the desktop's handshake applies — called, not restated. A copy
+    // of it here would pass whatever the handshake did, which is the opposite
+    // of what a drift test is for.
+    assert_eq!(missing_host_capabilities(HOST_CAPABILITIES), 0);
+    let outdated = HOST_CAPABILITIES & !CAP_FILE_STREAM;
+    assert_eq!(
+        missing_host_capabilities(outdated),
+        CAP_FILE_STREAM,
         "a helper that cannot serve a single-request open must be refused"
     );
-    // And the refusal names it rather than reporting an empty difference.
-    let missing = HOST_CAPABILITIES & !(HOST_CAPABILITIES & !CAP_FILE_STREAM);
-    assert_eq!(missing, CAP_FILE_STREAM);
+    // And the refusal names it, rather than reporting a hex mask nobody outside
+    // the protocol crate can read.
+    assert_eq!(
+        capability_names(missing_host_capabilities(outdated)),
+        vec!["fileStream"]
+    );
+    // Every required bit has a name, so no refusal can be unexplainable.
+    assert!(!capability_names(HOST_CAPABILITIES).contains(&"unknown"));
+    assert_eq!(
+        capability_names(HOST_CAPABILITIES).len(),
+        HOST_CAPABILITIES.count_ones() as usize
+    );
 }
