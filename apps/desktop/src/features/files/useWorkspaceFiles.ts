@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { keyForScope, keyForTransferConnection, sameRoot } from "./api";
+import { keyForScope, sameRoot } from "./api";
 import { measurePerfOutcome, recordPerfCounter } from "../../perf/probe";
 import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
-import { isTerminalTransferState, mergeCanonicalTransfer } from "../transfers/transferState";
 import { DirectoryListingCache } from "./directoryCache";
 import {
   appendPage,
@@ -13,50 +12,27 @@ import {
   removeEntry,
   type RecoveryReason,
 } from "./listingModel";
+import {
+  EMPTY_LISTINGS,
+  NO_RECOVERIES,
+  installListing,
+  onDirectory,
+  oweRecovery,
+  patchListing,
+  pruneSubtree,
+  withoutPath,
+  type WorkspaceFilesState,
+} from "./directoryState";
+import { useConnectionTransfers } from "./useConnectionTransfers";
 import { DirectoryWatchLeases } from "./watchLeases";
 import type {
   ActiveRoot,
   DirectoryListing,
   FileWorkspaceClient,
   FileWorkspaceScope,
-  TransferStatus,
   WorkspaceEvent,
 } from "./types";
 
-interface WorkspaceFilesState {
-  scopeKey: string;
-  transferConnectionKey: string;
-  root?: ActiveRoot;
-  listings: ReadonlyMap<string, DirectoryListing>;
-  expanded: ReadonlySet<string>;
-  loading: ReadonlySet<string>;
-  /** Reads a person asked for and has not yet been answered. See `refresh`. */
-  requestedReads: number;
-  /**
-   * Directories that owe a remote read, and what kind.
-   *
-   * Recorded in state rather than acted on inside the updater that discovered
-   * it: an updater must stay pure, and one directory named by twenty events in
-   * one batch owes exactly one read.
-   */
-  recoveries: ReadonlyMap<string, RecoveryAction>;
-  transfers: readonly TransferStatus[];
-  error?: string;
-}
-
-/**
- * What a directory owes after an event its cached listing could not answer.
- *
- * `restorePages` exists because an authoritative rescan carries only the
- * directory's first page: replacing a listing the user has paged further into
- * would delete rows they can see, so the pages they had are fetched back.
- */
-type RecoveryAction =
-  | { kind: "list"; reason: RecoveryReason }
-  | { kind: "restorePages"; entries: number };
-
-const EMPTY = new Map<string, DirectoryListing>();
-const NO_RECOVERIES: ReadonlyMap<string, RecoveryAction> = new Map();
 /** Pages one truncated listing may fetch back before it gives up. */
 const MAX_RESTORED_PAGES = 8;
 const EXTERNAL_CHANGE_PAINT = ["explorer.externalChangeToPaint"] as const;
@@ -110,14 +86,14 @@ export const DIRECTORY_REFRESH_COALESCE_MS = 150;
 export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorkspaceScope | undefined) {
   const [state, setState] = useState<WorkspaceFilesState>({
     scopeKey: "",
-    transferConnectionKey: "",
-    listings: EMPTY,
+    listings: EMPTY_LISTINGS,
     expanded: new Set(),
     loading: new Set(),
     requestedReads: 0,
     recoveries: NO_RECOVERIES,
-    transfers: [],
   });
+  const downloads = useConnectionTransfers(scope);
+  const recordTransfer = downloads.record;
   const stateRef = useRef(state);
   stateRef.current = state;
   const scopeEpoch = useRef(0);
@@ -133,7 +109,6 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const cache = useRef(new DirectoryListingCache());
   const leases = useRef(new DirectoryWatchLeases());
   const scopeKey = scope ? keyForScope(scope) : "";
-  const transferConnectionKey = scope ? keyForTransferConnection(scope) : "";
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
 
@@ -160,43 +135,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     options: { append?: boolean } = {},
   ) => {
     if (listing.rootToken !== root.token) return;
-    setState((current) => {
-      if (!sameRoot(current.root, root)) return current;
-      // Only directories the tree is actually showing. A snapshot that races a
-      // collapse, or a recovery list whose directory was deleted underneath it,
-      // must not put rows back into a tree that no longer reaches them.
-      if (!current.expanded.has(directory)) return current;
-      const held = current.listings.get(directory);
-      const loading = withoutPath(current.loading, directory);
-      if (options.append) {
-        // A page continues one listing, and every page of one listing reports
-        // the revision that listing started with. A page whose revision no
-        // longer matches is a slice of a directory that has since been
-        // re-listed: merging it would put rows the rescan removed back on
-        // screen and roll the listing's own revision backwards.
-        if (!held || held.revision !== listing.revision) return { ...current, loading };
-        const listings = new Map(current.listings).set(directory, appendPage(held, listing));
-        return { ...current, listings, loading, error: undefined };
-      }
-      // Revisions are the host's own ordering fact for one directory, and
-      // three producers write this slot: the native rescan task, the polling
-      // fallback, and client reads. All of them mint a revision before a
-      // blocking scan and publish after it, so arrival order is not freshness
-      // order and a late older snapshot would otherwise replace newer rows.
-      if (held && olderRevision(listing, held)) return { ...current, loading };
-      // An authoritative rescan only ever carries the directory's first page.
-      // Replacing a listing the user has paged further into would delete rows
-      // they can see and clamp their keyboard focus to the shorter tree, so
-      // the rows they have stay exactly as they are and the recovery queue
-      // re-reads the whole depth before anything on screen moves.
-      if (held && !listing.complete && held.entries.length > listing.entries.length) {
-        const recoveries = new Map(current.recoveries)
-          .set(directory, { kind: "restorePages", entries: held.entries.length } as const);
-        return { ...current, loading, recoveries };
-      }
-      const listings = new Map(current.listings).set(directory, listing);
-      return { ...current, listings, loading, error: undefined };
-    });
+    setState((current) => onDirectory(current, root, directory,
+      (held) => installListing(held, directory, listing, options)));
     if (!options.append) {
       // A listing that has been replaced outright supersedes any page read
       // still in flight for it: that page describes the directory as it was.
@@ -344,26 +284,16 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   ) => {
     const paint = createPaintTicket(EXTERNAL_CHANGE_PAINT, scopeEpoch.current);
     const before = stateRef.current.listings.get(directory);
-    setState((current) => {
-      if (!sameRoot(current.root, root)) return current;
-      // An event about a directory the tree is not showing is not a gap in
-      // anything: there is no listing to patch and none is owed. Recovering
-      // here would list directories the user cannot see, including the parent
-      // of the root itself for an event about the root.
-      if (!current.expanded.has(directory)) return current;
-      const patched = patch(current.listings.get(directory));
-      if (isRecoveryReason(patched)) {
-        // A pending page restore is a follow-up fetch, not an answer to a gap:
-        // a genuine gap must still be listed, and the list supersedes it.
-        if (current.recoveries.get(directory)?.kind === "list") return current;
-        const recoveries = new Map(current.recoveries);
-        recoveries.set(directory, { kind: "list", reason: patched });
-        return { ...current, recoveries };
-      }
-      const listings = new Map(current.listings);
-      listings.set(directory, patched);
-      return { ...current, listings };
-    });
+    // An event about a directory the tree is not showing is not a gap in
+    // anything: there is no listing to patch and none is owed. Recovering here
+    // would list directories the user cannot see, including the parent of the
+    // root itself for an event about the root.
+    setState((current) => onDirectory(current, root, directory, (held) => {
+      const patched = patch(held.listings.get(directory));
+      return isRecoveryReason(patched)
+        ? oweRecovery(held, directory, patched)
+        : patchListing(held, directory, patched);
+    }));
     // Committed state decides whether anything actually moved, so a no-op
     // patch neither publishes a paint measurement nor counts as one.
     paint.afterPaint((ticket) => ticket.lifecycleGeneration === scopeEpoch.current
@@ -440,9 +370,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       return;
     }
     if (event.kind === "transfer") {
-      if (event.transfer.scopeKey !== transferConnectionKey || !scopeRef.current
-        || keyForTransferConnection(scopeRef.current) !== transferConnectionKey) return;
-      setState((value) => ({ ...value, transfers: upsertTransfer(value.transfers, event.transfer) }));
+      recordTransfer(event.transfer);
       return;
     }
     const root = current.root;
@@ -478,7 +406,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     setState((value) => pruneSubtree(value, event.path));
     abortListing((path) => path === event.path || path.startsWith(`${event.path}/`));
     applyPrecise(root, directory, (listing) => removeEntry(listing, event.path));
-  }, [abortListing, applyListing, applyPrecise, transferConnectionKey]);
+  }, [abortListing, applyListing, applyPrecise, recordTransfer]);
 
   // Remote reads are issued here rather than from inside a state updater, so
   // one directory owes at most one read however many events named it.
@@ -500,26 +428,21 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     abortListing(() => true);
     if (!scope) {
       cache.current.clear();
-      setState((current) => ({
-        scopeKey: "", transferConnectionKey: "", listings: new Map(), expanded: new Set(), loading: new Set(),
+      setState({
+        scopeKey: "", listings: new Map(), expanded: new Set(), loading: new Set(),
         requestedReads: 0,
         recoveries: NO_RECOVERIES,
-        transfers: current.transfers.map(staleTransferOnScopeReplacement),
-      }));
+      });
       return;
     }
-    setState((current) => ({
+    setState({
       scopeKey,
-      transferConnectionKey,
       listings: new Map(),
       expanded: new Set(),
       loading: new Set(),
       requestedReads: 0,
       recoveries: NO_RECOVERIES,
-      transfers: !current.transferConnectionKey || current.transferConnectionKey === transferConnectionKey
-        ? current.transfers
-        : current.transfers.map(staleTransferOnScopeReplacement),
-    }));
+    });
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
     const epoch = scopeEpoch.current;
@@ -631,7 +554,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // `scope` is deliberately not a dependency: `scopeKey` is its exact
     // identity, and an unmemoized caller object would otherwise tear this
     // subscription down and rebuild it on every render.
-  }, [abortListing, applyEvent, client, scopeKey, transferConnectionKey]);
+  }, [abortListing, applyEvent, client, scopeKey]);
 
   /**
    * The connection and root capability the watch set belongs to.
@@ -819,11 +742,6 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     });
   }, [loadDirectory]);
 
-  const recordTransfer = useCallback((transfer: TransferStatus) => {
-    if (transfer.scopeKey !== transferConnectionKey) return;
-    setState((current) => ({ ...current, transfers: upsertTransfer(current.transfers, transfer) }));
-  }, [transferConnectionKey]);
-
   const loadMore = useCallback((directory: string) => {
     const root = stateRef.current.root;
     const held = stateRef.current.listings.get(directory);
@@ -836,31 +754,13 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   // where scopeKey changes so Explorer never flashes or acts on the old root.
   const visible = state.scopeKey === scopeKey ? state : {
     scopeKey,
-    transferConnectionKey,
-    listings: EMPTY,
+    listings: EMPTY_LISTINGS,
     expanded: new Set<string>(),
     loading: new Set<string>(),
     requestedReads: 0,
     recoveries: NO_RECOVERIES,
-    transfers: state.transferConnectionKey === transferConnectionKey
-      ? state.transfers
-      : state.transfers.map(staleTransferOnScopeReplacement),
   };
-  return { ...visible, toggleDirectory, refresh, recordTransfer, loadMore };
-}
-
-/**
- * Whether a listing is older than the one already held.
- *
- * Revisions are decimal u64 strings, so they are compared as numbers when both
- * parse and never compared at all when either does not — an unparseable
- * revision must not silently order as zero and discard a real listing.
- */
-function olderRevision(incoming: DirectoryListing, held: DirectoryListing): boolean {
-  const next = Number(incoming.revision);
-  const current = Number(held.revision);
-  if (!Number.isSafeInteger(next) || !Number.isSafeInteger(current)) return false;
-  return next < current;
+  return { ...visible, transfers: downloads.transfers, toggleDirectory, refresh, recordTransfer, loadMore };
 }
 
 /** The connection and root capability a cached listing belongs to. */
@@ -870,43 +770,4 @@ function cacheScope(scope: FileWorkspaceScope, root: ActiveRoot) {
 
 function cacheKey(scope: FileWorkspaceScope, root: ActiveRoot, directory: string) {
   return { ...cacheScope(scope, root), directory };
-}
-
-function withoutPath(paths: ReadonlySet<string>, path: string): Set<string> {
-  const next = new Set(paths);
-  next.delete(path);
-  return next;
-}
-
-/** Drops a deleted directory and everything the tree cached beneath it. */
-function pruneSubtree(state: WorkspaceFilesState, path: string): WorkspaceFilesState {
-  const prefix = `${path}/`;
-  const covered = (candidate: string) => candidate === path || candidate.startsWith(prefix);
-  if (![...state.listings.keys()].some(covered) && ![...state.expanded].some(covered)) return state;
-  const listings = new Map(state.listings);
-  const expanded = new Set(state.expanded);
-  const loading = new Set(state.loading);
-  for (const key of [...listings.keys()]) if (covered(key)) listings.delete(key);
-  for (const key of [...expanded]) if (covered(key)) expanded.delete(key);
-  for (const key of [...loading]) if (covered(key)) loading.delete(key);
-  return { ...state, listings, expanded, loading };
-}
-
-function staleTransferOnScopeReplacement(transfer: TransferStatus): TransferStatus {
-  if (isTerminalTransferState(transfer.state)) return transfer;
-  return {
-    ...transfer,
-    state: "failed",
-    outcome: transfer.state === "verifying" ? "unknown" : "notPublished",
-    failureKind: "staleScope",
-    error: "Transfer scope was replaced before its authoritative terminal event arrived.",
-  };
-}
-
-function upsertTransfer(transfers: readonly TransferStatus[], next: TransferStatus): TransferStatus[] {
-  const index = transfers.findIndex((item) => item.id === next.id);
-  if (index < 0) return [next, ...transfers].slice(0, 100);
-  const copy = [...transfers];
-  copy[index] = mergeCanonicalTransfer(copy[index], next);
-  return copy;
 }

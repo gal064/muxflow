@@ -1,11 +1,11 @@
-import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
-import { useModalDialog } from "../../commands/useModalDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { DownloadIntent } from "./downloadFlow";
 import { DownloadTransfers } from "./DownloadTransfers";
+import { ExplorerMutationDialog, type PendingMutation } from "./ExplorerMutationDialog";
 import { ExplorerEntryRow, ExplorerMoreRow, type ExplorerRowActions } from "./ExplorerRow";
 import { DEFAULT_ROW_HEIGHT, mountedRowCount, rowWindow, scrollOffsetForRow } from "./explorerWindow";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
@@ -66,27 +66,17 @@ const INERT_ROW_ACTIONS: ExplorerRowActions = {
   moreKeyDown: () => undefined,
 };
 
-type PendingAction = { action: "newFile" | "newDirectory" | "rename" | "move" | "duplicate" | "delete"; rootToken: string; scopeIdentity: string; entry?: FileEntry };
-
 export function ExplorerTree(props: Props) {
   // One right-click menu replaces the per-row `•••` button that used to appear
   // on hover, and the three header buttons above it. Nothing in this tree is a
   // resting control any more.
   const [menu, setMenu] = useState<{ entry?: FileEntry; anchor: ContextMenuAnchor }>();
-  const [pending, setPending] = useState<PendingAction>();
-  const [value, setValue] = useState("");
-  const [overwrite, setOverwrite] = useState(false);
-  const [nonEmptyOverwrite, setNonEmptyOverwrite] = useState(false);
-  const [dialogError, setDialogError] = useState<string>();
+  const [pending, setPending] = useState<PendingMutation>();
   const [focusIndex, setFocusIndex] = useState(0);
   // VS Code's escape hatch, and the reason hiding them is safe: the rule is
   // reversible from the tree itself, without a settings trip.
   const [showIgnored, setShowIgnored] = useState(false);
   const treeRef = useRef<HTMLDivElement>(null);
-  const composing = useRef(false);
-  const dialogTitleId = useId();
-  const closeDialog = () => setPending(undefined);
-  const dialogRef = useModalDialog<HTMLFormElement>(closeDialog, Boolean(pending));
   const rootName = props.root?.path.split("/").filter(Boolean).at(-1) ?? props.root?.path ?? "No active root";
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
@@ -201,13 +191,9 @@ export function ExplorerTree(props: Props) {
   };
   useLayoutEffect(() => { liveRowActions.current = committedRowActions; });
 
-  const begin = (action: PendingAction["action"], entry?: FileEntry) => {
+  const begin = (action: PendingMutation["action"], entry?: FileEntry) => {
     if (!props.root) return;
     setPending({ action, entry, rootToken: props.root.token, scopeIdentity: props.scopeIdentity });
-    setOverwrite(false);
-    setNonEmptyOverwrite(false);
-    setDialogError(undefined);
-    setValue(action === "rename" || action === "duplicate" ? entry?.path ?? "" : "");
     setMenu(undefined);
   };
 
@@ -258,31 +244,6 @@ export function ExplorerTree(props: Props) {
     run: (commandId) => runRowCommand.current(commandId),
   }, [focusedEntry, rootName, rowActions]);
   usePublishedRowCommands("files", rowSource);
-
-  const submit = async () => {
-    if (!pending || !props.root) return;
-    if (pending.rootToken !== props.root.token || pending.scopeIdentity !== props.scopeIdentity || props.disabled) {
-      setDialogError("This file action was cancelled because its host or active root changed.");
-      return;
-    }
-    try {
-      const entry = pending.entry;
-      if ((pending.action === "newFile" || pending.action === "newDirectory") && value.trim()) {
-        await props.onMutate({ kind: pending.action === "newFile" ? "createFile" : "createDirectory", parent: entry?.kind === "directory" ? entry.path : props.root.path, name: value.trim() });
-      } else if (entry && pending.action === "rename" && value.trim()) {
-        await props.onMutate({ kind: "rename", path: entry.path, destination: value.trim(), overwrite, confirmedNonEmpty: nonEmptyOverwrite });
-      } else if (entry && pending.action === "move" && value.trim()) {
-        await props.onMutate({ kind: "move", path: entry.path, destination: value.trim(), overwrite, confirmedNonEmpty: nonEmptyOverwrite });
-      } else if (entry && pending.action === "duplicate" && value.trim()) {
-        await props.onMutate({ kind: "duplicate", path: entry.path, destination: value.trim(), overwrite, confirmedNonEmpty: nonEmptyOverwrite });
-      } else if (entry && pending.action === "delete") {
-        await props.onMutate({ kind: "delete", path: entry.path, confirmedNonEmpty: entry.kind === "directory" });
-      }
-      setPending(undefined);
-    } catch (error) {
-      setDialogError(String(error));
-    }
-  };
 
   // Offered only when git has actually told us something to hide: without an
   // authoritative status the tree already shows everything, and a toggle that
@@ -388,7 +349,7 @@ export function ExplorerTree(props: Props) {
         ? [
           ...(menu.entry.kind === "directory" ? [] : [{ id: "open", label: "Open", run: () => props.onOpen(menu.entry!, { preview: false }) }]),
           { id: "rename", label: "Rename…", disabled: props.disabled, run: () => begin("rename", menu.entry) },
-          { id: "move", label: "Move…", disabled: props.disabled, run: () => { setValue(""); begin("move", menu.entry); } },
+          { id: "move", label: "Move…", disabled: props.disabled, run: () => begin("move", menu.entry) },
           { id: "duplicate", label: "Duplicate…", disabled: props.disabled, run: () => begin("duplicate", menu.entry) },
           { id: "download", label: menu.entry.kind === "directory" ? "Download folder…" : "Download…", run: () => void props.onDownload({ path: menu.entry!.path, kind: menu.entry!.kind === "directory" ? "folder" : "file" }) },
           "separator" as const,
@@ -409,17 +370,14 @@ export function ExplorerTree(props: Props) {
       onClose={() => setMenu(undefined)}
     />}
     <DownloadTransfers onCancelTransfer={props.onCancelTransfer} transfers={props.transfers} />
-    {pending && <div className="modal-backdrop" role="presentation"><form aria-labelledby={dialogTitleId} aria-modal="true" className="file-dialog confirmation" onSubmit={(event) => { event.preventDefault(); if (!composing.current) void submit(); }} ref={dialogRef} role="dialog">
-      <h2 id={dialogTitleId}>{labelForAction(pending.action)}</h2>
-      {pending.action === "delete" ? <p>Delete <code>{pending.entry?.path}</code>? {pending.entry?.kind === "directory" && "Non-empty directories require this confirmation."}</p> : <label>
-        {pending.action.startsWith("new") ? "Name" : "Destination path"}
-        <input autoFocus onChange={(event) => setValue(event.target.value)} onCompositionEnd={() => { composing.current = false; }} onCompositionStart={() => { composing.current = true; }} value={value} />
-      </label>}
-      {["rename", "move", "duplicate"].includes(pending.action) && <label className="overwrite"><input checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} type="checkbox" /> Allow overwrite after confirmation</label>}
-      {["rename", "move", "duplicate"].includes(pending.action) && overwrite && <label className="overwrite"><input checked={nonEmptyOverwrite} onChange={(event) => setNonEmptyOverwrite(event.target.checked)} type="checkbox" /> Also replace a non-empty destination directory</label>}
-      {dialogError && <SurfaceError detail={dialogError} />}
-      <div className="dialog-actions"><button onClick={() => setPending(undefined)} type="button">Cancel</button><button className={pending.action === "delete" ? "danger" : "primary"} type="submit">{pending.action === "delete" ? "Delete" : "Apply"}</button></div>
-    </form></div>}
+    {pending && <ExplorerMutationDialog
+      disabled={props.disabled}
+      onClose={() => setPending(undefined)}
+      onMutate={props.onMutate}
+      pending={pending}
+      root={props.root}
+      scopeIdentity={props.scopeIdentity}
+    />}
   </div>;
 }
 
@@ -518,6 +476,3 @@ function useTreeViewport(ref: RefObject<HTMLDivElement | null>, rowCount: number
   };
 }
 
-function labelForAction(action: PendingAction["action"]): string {
-  return ({ newFile: "Create file", newDirectory: "Create folder", rename: "Rename", move: "Move", duplicate: "Duplicate", delete: "Delete" } as const)[action];
-}
