@@ -531,24 +531,35 @@ async fn an_authoritative_listing_claims_recovery_only_when_events_were_lost() {
 /// at all: `is_native()` stays true, so the target is excluded from the polling
 /// fallback and is watched by nobody, forever. The ordinary native-retry
 /// backoff puts the healthy ones back.
-#[test]
-fn a_failed_native_watcher_puts_every_target_back_on_polling() {
+#[tokio::test]
+async fn a_failed_native_watcher_puts_every_target_back_on_polling() {
     let root_path = std::env::temp_dir().join(format!("ade-watch-degrade-{}", Uuid::new_v4()));
     fs::create_dir_all(&root_path).unwrap();
     let service = Arc::new(FileService::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let (sender, _receiver) = mpsc::channel(8);
+    // A real native watcher, or the degrade has nothing to degrade *from* and
+    // every assertion below holds against a service that never implemented it.
+    service.spawn_watcher(
+        Arc::clone(&closed),
+        sender,
+        Arc::new(AtomicBool::new(false)),
+    );
     service
         .watch_directory(root_path.to_str().unwrap(), "", "watch-degrade")
         .unwrap();
-    let native_before = service.fallback_watches().is_empty();
+    assert!(
+        service.fallback_watches().is_empty(),
+        "this host has no native watcher, so the degrade cannot be exercised here"
+    );
 
     service.degrade_all_to_polling();
 
-    assert!(
-        !service.fallback_watches().is_empty(),
+    assert_eq!(
+        service.fallback_watches().len(),
+        1,
         "a target the native watcher stopped covering is polled by nobody"
     );
-    // Only meaningful on a host that had a native watcher in the first place;
-    // where there is none the target was already polling and stays polling.
-    assert!(native_before || !service.fallback_watches().is_empty());
+    closed.store(true, Ordering::Release);
     fs::remove_dir_all(root_path).unwrap();
 }

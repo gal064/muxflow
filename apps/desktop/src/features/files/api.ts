@@ -488,16 +488,25 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     const abort = cancellable?.signal;
     if (abort?.aborted) throw new DOMException("Directory read was cancelled.", "AbortError");
     const operationId = cancellable?.operationId;
+    // Abandoning answers the caller *now*, and stops the host as well. Merely
+    // telling the host to stop and then going on awaiting it made the whole
+    // abort path invisible to the caller: the promise resolved with whatever
+    // the host had already produced, and a listing could still be installed
+    // into a directory the tree had since collapsed.
+    let abandon: ((reason: unknown) => void) | undefined;
+    const abandoned = new Promise<never>((_, reject) => { abandon = reject; });
     const stopRemoteWork = () => {
       recordPerfCounter("explorer.listCancellations");
       void invoke("cancel_file_request", { clientId: scope.clientId, operationId }).catch(() => undefined);
+      abandon?.(new DOMException("Directory read was cancelled.", "AbortError"));
     };
     if (abort) abort.addEventListener("abort", stopRemoteWork, { once: true });
     try {
-      return await measurePerfRequest(metricName, "file", boundary, async (requestBoundary) => {
+      const answered = measurePerfRequest(metricName, "file", boundary, async (requestBoundary) => {
         const response = await invoke<WireResponse>("file_request", requestBoundary);
         return validate(response);
       });
+      return await (abort ? Promise.race([answered, abandoned]) : answered);
     } finally {
       abort?.removeEventListener("abort", stopRemoteWork);
     }

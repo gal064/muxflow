@@ -317,8 +317,11 @@ describe("TauriFileWorkspaceClient", () => {
     const operationId = (invokeMock.mock.calls[0][1] as { command: { operationId: string } }).command.operationId;
     abort.abort();
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("cancel_file_request", { clientId: "client", operationId }));
+    // And the caller is answered now rather than when the host gets round to
+    // it: a read that resolved anyway could still install rows into a
+    // directory the tree had already collapsed.
+    await expect(listing).rejects.toMatchObject({ name: "AbortError" });
     settle();
-    await listing;
   });
 
   it("uses the canonical verifying/unknown outcome schema and preserves cleanup failure", async () => {

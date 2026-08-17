@@ -90,6 +90,9 @@ struct Upload {
     permissions: fs::Permissions,
 }
 
+/// How many editor opens one connection holds file content for at once.
+pub(super) const MAX_CONCURRENT_OPENS: usize = 4;
+
 pub(super) struct FileService {
     generation: AtomicU64,
     watches: Mutex<HashMap<String, Watch>>,
@@ -103,6 +106,15 @@ pub(super) struct FileService {
     /// Ordered point-in-time directory views, so a later page slices one
     /// instead of re-stating the whole remote directory.
     pages: DirectoryPageCache,
+    /// How many editor opens this connection holds file content for at once.
+    ///
+    /// Classification buffers the file it is classifying, so without a bound
+    /// one desktop's peak host memory is "however many opens it asked for"
+    /// times the 25 MiB ceiling. Deliberately per connection: a process-wide
+    /// bound would let one slow link's four opens stall every other
+    /// connection's, which is a far worse failure than a queue of one
+    /// desktop's own opens.
+    pub(super) open_permits: tokio::sync::Semaphore,
 }
 
 impl FileService {
@@ -116,6 +128,7 @@ impl FileService {
             native_watcher: Mutex::new(None),
             fallback_signal: tokio::sync::Notify::new(),
             pages: DirectoryPageCache::default(),
+            open_permits: tokio::sync::Semaphore::new(MAX_CONCURRENT_OPENS),
         }
     }
 

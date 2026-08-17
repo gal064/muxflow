@@ -3,6 +3,8 @@ import type { DirectoryListing, DirectoryWatchLease } from "./types";
 /** First wait after a refused watch, doubled on each further refusal. */
 export const WATCH_RETRY_BASE_MS = 1_000;
 export const WATCH_RETRY_MAX_MS = 30_000;
+/** How many refused directories are remembered once they close. */
+const MAX_TRACKED_REFUSALS = 64;
 
 export interface WatchLeaseHost {
   acquire(directory: string, signal: AbortSignal): Promise<DirectoryWatchLease>;
@@ -63,18 +65,40 @@ export class DirectoryWatchLeases {
   /** The last set asked for, so a backoff can expire without user activity. */
   #desired: readonly string[] = [];
   #host: WatchLeaseHost | undefined;
-  #retry: ReturnType<typeof setTimeout> | undefined;
+  #retry: { timer: ReturnType<typeof setTimeout>; at: number } | undefined;
+  readonly #now: () => number;
+
+  /**
+   * `now` is injected so tests can place a refusal in time. Production reads
+   * the real clock — and reads it *when each thing happens*, which is the
+   * whole point: a single timestamp taken at the start of a sync described the
+   * moment the request went out, not the moment it was refused, so a refusal
+   * that took a few seconds to arrive on a remote link produced a deadline
+   * already in the past and backed off by nothing at all.
+   */
+  constructor(now: () => number = () => Date.now()) {
+    this.#now = now;
+  }
 
   /** Acquires watches for directories that gained one and releases the rest. */
-  sync(desired: readonly string[], host: WatchLeaseHost, now = Date.now()): void {
+  sync(desired: readonly string[], host: WatchLeaseHost): void {
+    const now = this.#now();
     this.#desired = desired;
     this.#host = host;
     const wanted = new Set(desired);
     for (const [directory, record] of [...this.#leases]) {
       if (!wanted.has(directory)) this.#retire(directory, record);
     }
-    for (const directory of [...this.#refused.keys()]) {
-      if (!wanted.has(directory)) this.#refused.delete(directory);
+    // Refusals deliberately survive a directory being closed and reopened.
+    // Forgetting them there made the backoff trivially avoidable — collapse,
+    // expand, and the host is asked again — which is the storm it exists to
+    // stop. They are bounded instead, and expire on their own.
+    for (const [directory, refusal] of [...this.#refused]) {
+      if (now >= refusal.until && !wanted.has(directory)) this.#refused.delete(directory);
+    }
+    while (this.#refused.size > MAX_TRACKED_REFUSALS) {
+      const [oldest] = [...this.#refused.entries()].sort((left, right) => left[1].until - right[1].until);
+      this.#refused.delete(oldest[0]);
     }
     let soonest: number | undefined;
     for (const directory of wanted) {
@@ -102,7 +126,8 @@ export class DirectoryWatchLeases {
           (this.#refused.get(directory)?.wait ?? WATCH_RETRY_BASE_MS / 2) * 2,
           WATCH_RETRY_MAX_MS,
         );
-        this.#refused.set(directory, { until: now + wait, wait });
+        // The clock at the moment of refusal, not at the moment of asking.
+        this.#refused.set(directory, { until: this.#now() + wait, wait });
         this.#schedule(wait);
         host.onError(directory, error);
       });
@@ -115,7 +140,7 @@ export class DirectoryWatchLeases {
     this.#refused.clear();
     this.#desired = [];
     this.#host = undefined;
-    if (this.#retry !== undefined) clearTimeout(this.#retry);
+    if (this.#retry) clearTimeout(this.#retry.timer);
     this.#retry = undefined;
   }
 
@@ -133,12 +158,17 @@ export class DirectoryWatchLeases {
    * of inotify budget is indistinguishable from the Explorer being broken.
    */
   #schedule(delay: number): void {
-    if (this.#retry !== undefined) return;
-    this.#retry = setTimeout(() => {
+    const at = this.#now() + Math.max(1, delay);
+    // The soonest pending retry wins. Keeping whichever was armed first left a
+    // directory whose backoff was one second waiting out another one's thirty.
+    if (this.#retry && this.#retry.at <= at) return;
+    if (this.#retry) clearTimeout(this.#retry.timer);
+    const timer = setTimeout(() => {
       this.#retry = undefined;
       const host = this.#host;
       if (host && this.#desired.length > 0) this.sync(this.#desired, host);
     }, Math.max(1, delay));
+    this.#retry = { timer, at };
   }
 
   #retire(directory: string, record: LeaseRecord): void {

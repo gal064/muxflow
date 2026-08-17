@@ -170,7 +170,12 @@ export type WorkspaceEvent =
 
 export interface ListDirectoryOptions {
   pageToken?: string;
-  /** Aborting propagates a real cancellation to the bounded host scan. */
+  /**
+   * Aborting propagates a real cancellation to the bounded host scan *and*
+   * rejects this call with an `AbortError`, like every other read on this
+   * interface. A read that resolved anyway could still install rows into a
+   * directory the tree had already given up on.
+   */
   signal?: AbortSignal;
 }
 

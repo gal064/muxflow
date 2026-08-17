@@ -566,19 +566,26 @@ async fn reconcile_internal_tmux_change(
     Ok(())
 }
 
+/// Queues one ordered event, reporting whether it was actually queued.
+///
+/// A caller that consumed the flag which *caused* this event needs the answer:
+/// a dropped snapshot leaves the desktop believing a subtree is current when
+/// the host already knows it is not.
 fn emit_event(
     sender: &mpsc::Sender<SequencerControl>,
     overflowed: &AtomicBool,
     event: v1::HostEvent,
-) {
+) -> bool {
     match sender.try_send(SequencerControl::OrderedEvent(event)) {
-        Ok(()) => {}
+        Ok(()) => true,
         Err(mpsc::error::TrySendError::Full(_)) => {
             crate::diagnostics::record_event_queue_overflow();
             overflowed.store(true, Ordering::Release);
+            false
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             overflowed.store(true, Ordering::Release);
+            false
         }
     }
 }

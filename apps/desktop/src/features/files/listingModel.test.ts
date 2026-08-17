@@ -47,15 +47,35 @@ describe("listingModel", () => {
     expect(patched.entries[1]).toMatchObject({ sizeBytes: "99", generation: "7" });
   });
 
-  it("refuses to patch anything but a complete listing", () => {
+  it("patches a paginated listing inside the rows it holds, and ignores what is past them", () => {
+    // The host's page is 4,096 entries, so requiring a *complete* listing here
+    // meant every single-file change in any larger directory fell through to a
+    // recovery list and then a full re-pagination — the list storm this
+    // package exists to remove, in the directories where it costs most.
     expect(patchEntry(undefined, entry("/r/a.txt"))).toBe("missing");
     expect(removeEntry(undefined, "/r/a.txt")).toBe("missing");
-    const partial = listing([entry("/r/a.txt")], { complete: false, nextPageToken: "opaque" });
-    expect(isPatchable(partial)).toBe(false);
-    // A page boundary hides entries on both sides of it: an insert would be
-    // drawn as though the tree had reached it, and an absence proves nothing.
-    expect(patchEntry(partial, entry("/r/z.txt"))).toBe("incomplete");
-    expect(removeEntry(partial, "/r/a.txt")).toBe("incomplete");
+    const partial = listing([entry("/r/a.txt"), entry("/r/m.txt")], { complete: false, nextPageToken: "opaque" });
+    expect(isPatchable(partial), "a partial listing is still not worth caching").toBe(false);
+
+    // Pages are a contiguous prefix of the host's order, so a change at or
+    // before the last row held belongs on screen.
+    const inserted = patchEntry(partial, entry("/r/b.txt"));
+    if (isRecoveryReason(inserted)) throw new Error("expected a patch");
+    expect(inserted.entries.map((item) => item.name)).toEqual(["a.txt", "b.txt", "m.txt"]);
+    expect(inserted.complete, "patching must not claim the directory is finished").toBe(false);
+    expect(inserted.nextPageToken).toBe("opaque");
+
+    // Past the last row held: it belongs to a page nobody asked for, so there
+    // is nothing on screen to correct and nothing to fetch.
+    expect(patchEntry(partial, entry("/r/z.txt"))).toBe(partial);
+
+    // A row it does hold is updated in place and removed on delete.
+    const updated = patchEntry(partial, { ...entry("/r/a.txt"), generation: "99" });
+    if (isRecoveryReason(updated)) throw new Error("expected a patch");
+    expect(updated.entries[0].generation).toBe("99");
+    const removed = removeEntry(partial, "/r/a.txt");
+    if (isRecoveryReason(removed)) throw new Error("expected a removal");
+    expect(removed.entries.map((item) => item.name)).toEqual(["m.txt"]);
   });
 
   it("removes a deleted entry and treats an absent one as already applied", () => {

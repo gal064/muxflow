@@ -197,6 +197,37 @@ export function AppTabSurface(props: Props) {
     }
   };
 
+  // Declared before the read below, because effects run in the order they are
+  // written: the listener has to exist before the read starts, or a change
+  // landing between the two is described to nobody and the tab shows content
+  // it will never be told is stale.
+  useEffect(() => {
+    if (!props.scope) return;
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void props.client.subscribe(props.scope, (event) => {
+      if (disposed || !root) return;
+      if (event.kind === "directorySnapshot" && event.rootToken === root.token && event.listing.directory === parentPath(props.tab.resource)) {
+        // An authoritative rescan carries the directory's contents, so it can
+        // say whether *this* file moved. Re-reading because some other entry
+        // changed is a remote round trip for nothing. Never let a generic
+        // self-save echo replace a newer dirty edit either; the precise path
+        // events below retain last-writer order.
+        const generation = listingOpinion(event.listing);
+        if (generation !== undefined && generation !== shownGeneration()) reloadFromDisk();
+        return;
+      }
+      if (!(event.kind === "fileChanged" || event.kind === "fileDeleted") || event.path !== props.tab.resource) return;
+      if (event.kind === "fileDeleted") {
+        setError("The file was deleted externally. The tab remains open.");
+        return;
+      }
+      if (event.generation && event.generation === shownGeneration()) return;
+      void load({ externalOperationId: event.operationId });
+    }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });
+    return () => { disposed = true; stop?.(); };
+  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
+
   useEffect(() => {
     surfaceLifecycle.current += 1;
     setLoading(true);
@@ -337,43 +368,31 @@ export function AppTabSurface(props: Props) {
     if (!props.scope || !root) return;
     let disposed = false;
     let release: (() => void) | undefined;
+    // The bootstrap *is* a full directory listing, so a tab closed while it is
+    // in flight must stop it rather than pay for it and throw it away. Only
+    // this subscriber is abandoned: the watch itself survives for whoever else
+    // holds it.
+    const abandon = new AbortController();
     reconciliation.current = { kind: "pending" };
-    void props.client.acquireDirectoryWatch(props.scope, root, parentPath(props.tab.resource)).then((next) => {
+    void props.client.acquireDirectoryWatch(props.scope, root, parentPath(props.tab.resource), {
+      signal: abandon.signal,
+    }).then((next) => {
       if (disposed) next.release();
       else {
         release = next.release;
         reconcileBootstrap(next);
       }
-    }).catch((watchError) => { if (!disposed) props.onStatus(`File watch unavailable: ${String(watchError)}`); });
-    return () => { disposed = true; release?.(); };
+    }).catch((watchError) => {
+      if (disposed || (watchError instanceof DOMException && watchError.name === "AbortError")) return;
+      props.onStatus(`File watch unavailable: ${String(watchError)}`);
+    });
+    return () => {
+      disposed = true;
+      if (release) release();
+      else abandon.abort();
+    };
   }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
 
-  useEffect(() => {
-    if (!props.scope) return;
-    let disposed = false;
-    let stop: (() => void) | undefined;
-    void props.client.subscribe(props.scope, (event) => {
-      if (disposed || !root) return;
-      if (event.kind === "directorySnapshot" && event.rootToken === root.token && event.listing.directory === parentPath(props.tab.resource)) {
-        // An authoritative rescan carries the directory's contents, so it can
-        // say whether *this* file moved. Re-reading because some other entry
-        // changed is a remote round trip for nothing. Never let a generic
-        // self-save echo replace a newer dirty edit either; the precise path
-        // events below retain last-writer order.
-        const generation = listingOpinion(event.listing);
-        if (generation !== undefined && generation !== shownGeneration()) reloadFromDisk();
-        return;
-      }
-      if (!(event.kind === "fileChanged" || event.kind === "fileDeleted") || event.path !== props.tab.resource) return;
-      if (event.kind === "fileDeleted") {
-        setError("The file was deleted externally. The tab remains open.");
-        return;
-      }
-      if (event.generation && event.generation === shownGeneration()) return;
-      void load({ externalOperationId: event.operationId });
-    }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });
-    return () => { disposed = true; stop?.(); };
-  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
 
   if (!props.scope || !root) return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
   if (loading) return <EmptyTab tab={props.tab} detail="Loading file…" />;

@@ -72,7 +72,13 @@ export function ExplorerTree(props: Props) {
   // resting control any more.
   const [menu, setMenu] = useState<{ entry?: FileEntry; anchor: ContextMenuAnchor }>();
   const [pending, setPending] = useState<PendingMutation>();
-  const [focusIndex, setFocusIndex] = useState(0);
+  // Which *row* has the keyboard, not which position. A precise external
+  // change inserts or removes one row without re-listing anything, so a
+  // position moved the user's cursor to a different file every time an agent
+  // touched the directory they were navigating — and deleting the focused row
+  // silently dropped DOM focus to the document body.
+  const [focusKey, setFocusKey] = useState<string>();
+  const lastFocusIndex = useRef(0);
   // VS Code's escape hatch, and the reason hiding them is safe: the rule is
   // reversible from the tree itself, without a settings trip.
   const [showIgnored, setShowIgnored] = useState(false);
@@ -80,6 +86,11 @@ export function ExplorerTree(props: Props) {
   const rootName = props.root?.path.split("/").filter(Boolean).at(-1) ?? props.root?.path ?? "No active root";
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
+  const heldIndex = focusKey === undefined ? -1 : rows.findIndex((row) => rowKey(row) === focusKey);
+  // The row is gone — deleted, collapsed away, filtered out. Focus stays where
+  // the user put it rather than jumping to the top, and the effect below hands
+  // the element there the real DOM focus.
+  const focusIndex = heldIndex >= 0 ? heldIndex : Math.min(lastFocusIndex.current, Math.max(0, rows.length - 1));
   const viewport = useTreeViewport(treeRef, rows.length);
   const mounted = rowWindow({
     rowCount: rows.length,
@@ -98,7 +109,17 @@ export function ExplorerTree(props: Props) {
     // Counts, not the slice: the slice is a fresh array on every render, and
     // depending on it would run this on every render for no new information.
   }, [renderedRowCount, rows.length]);
-  useEffect(() => setFocusIndex((current) => Math.min(current, Math.max(0, rows.length - 1))), [rows.length]);
+  useLayoutEffect(() => { lastFocusIndex.current = focusIndex; }, [focusIndex]);
+  useEffect(() => {
+    if (heldIndex >= 0 || focusKey === undefined) return;
+    const replacement = rows[focusIndex];
+    if (!replacement) return;
+    // Only when this tree already had the keyboard: adopting focus because a
+    // row vanished somewhere else would steal it from whatever does.
+    const owned = treeRef.current?.contains(document.activeElement) ?? false;
+    setFocusKey(rowKey(replacement));
+    if (owned) treeRef.current?.querySelector<HTMLElement>(`[data-tree-index="${focusIndex}"]`)?.focus();
+  }, [focusIndex, focusKey, heldIndex, rows]);
   // A new root is a new repository, and the toggle is not offered when that
   // repository has nothing ignored — so a `true` carried across would leave
   // ignored files showing with no visible reason and no way to put them back.
@@ -122,7 +143,10 @@ export function ExplorerTree(props: Props) {
 
   const focusRow = (index: number) => {
     const next = Math.max(0, Math.min(rows.length - 1, index));
-    setFocusIndex(next);
+    const row = rows[next];
+    if (!row) return;
+    setFocusKey(rowKey(row));
+    lastFocusIndex.current = next;
     // Bring the row into view before asking for focus. The window always keeps
     // the focused row mounted, so this is about what the user can see rather
     // than about whether the element exists.
@@ -178,7 +202,12 @@ export function ExplorerTree(props: Props) {
   const committedRowActions: ExplorerRowActions = {
     toggle: (path) => props.onToggle(path),
     open: (entry, options) => props.onOpen(entry, options),
-    focus: (index) => setFocusIndex(index),
+    focus: (index) => {
+      const row = rows[index];
+      if (!row) return;
+      setFocusKey(rowKey(row));
+      lastFocusIndex.current = index;
+    },
     contextMenu: (entry, anchor, index) => {
       focusRow(index);
       setMenu({ ...(entry ? { entry } : {}), anchor });
@@ -415,6 +444,11 @@ function flattenTree(
   };
   visit(root, 0);
   return rows;
+}
+
+/** One row's stable identity, which is what the keyboard actually holds. */
+function rowKey(row: ExplorerRowModel): string {
+  return row.kind === "entry" ? row.entry.path : `${row.directory}\u0000more`;
 }
 
 type ExplorerRowModel =

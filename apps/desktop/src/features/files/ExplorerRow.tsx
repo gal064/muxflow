@@ -94,13 +94,19 @@ interface MoreRowProps {
 export const ExplorerMoreRow = memo(function ExplorerMoreRow(props: MoreRowProps) {
   const { actions, depth, directory, disabled, focused, index } = props;
   return <button
+    // `aria-disabled`, never `disabled`. A disabled button is removed from the
+    // tab order and cannot hold DOM focus, so pressing this row — which is
+    // what sets `loading`, which is what disables it — dropped focus to the
+    // document body mid-interaction and left arrow-key navigation of the whole
+    // tree dead until the user clicked something.
+    aria-disabled={disabled || undefined}
     aria-level={depth + 1}
     aria-posinset={props.positionInSet}
+    aria-selected={focused}
     aria-setsize={props.setSize}
     className="load-more-files"
     data-tree-index={index}
-    disabled={disabled}
-    onClick={() => actions.loadMore(directory)}
+    onClick={() => { if (!disabled) actions.loadMore(directory); }}
     onFocus={() => actions.focus(index)}
     onKeyDown={(event) => actions.moreKeyDown(event, index)}
     role="treeitem"

@@ -3,6 +3,7 @@ import { keyForScope, sameRoot } from "./api";
 import { measurePerfOutcome, recordPerfCounter } from "../../perf/probe";
 import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
 import { DirectoryListingCache } from "./directoryCache";
+import { DirectoryRequests } from "./directoryRequests";
 import {
   appendPage,
   isRecoveryReason,
@@ -98,8 +99,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   stateRef.current = state;
   const scopeEpoch = useRef(0);
   const rootProbeSerial = useRef(0);
-  const directorySerial = useRef(new Map<string, number>());
-  const listAborts = useRef(new Map<string, AbortController>());
+  const requests = useRef(new DirectoryRequests());
   const refreshTimers = useRef(new Map<string, { timer: ReturnType<typeof setTimeout>; paint: PaintTicket }>());
   const paintGenerations = useRef(new Map<string, number>());
   /** Expansions whose paint is owed by a watch bootstrap that has not landed. */
@@ -114,11 +114,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
 
   /** Stops bounded remote work for reads nothing will read any more. */
   const abortListing = useCallback((predicate: (path: string) => boolean) => {
-    for (const [path, controller] of [...listAborts.current]) {
-      if (!predicate(path)) continue;
-      listAborts.current.delete(path);
-      controller.abort();
-    }
+    requests.current.abort(predicate);
   }, []);
 
   /**
@@ -132,18 +128,23 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     root: ActiveRoot,
     directory: string,
     listing: DirectoryListing,
-    options: { append?: boolean } = {},
+    options: { append?: boolean; restored?: boolean } = {},
   ) => {
-    if (listing.rootToken !== root.token) return;
+    if (listing.rootToken !== root.token) {
+      // Not this root's listing, and not a silent no-op either: the row that
+      // was waiting for it still owes the user its wait state back, or
+      // `aria-busy` stays set on an empty folder with no error, forever.
+      setState((current) => ({ ...current, loading: withoutPath(current.loading, directory) }));
+      return;
+    }
     setState((current) => onDirectory(current, root, directory,
       (held) => installListing(held, directory, listing, options)));
     if (!options.append) {
-      // A listing that has been replaced outright supersedes any page read
-      // still in flight for it: that page describes the directory as it was.
-      directorySerial.current.set(directory, (directorySerial.current.get(directory) ?? 0) + 1);
-      abortListing((candidate) => candidate === directory);
+      // A listing that has been replaced outright supersedes any read still in
+      // flight for it: that read describes the directory as it was.
+      requests.current.supersede(directory);
     }
-  }, [abortListing]);
+  }, []);
 
   /**
    * Reads one directory, against the root the caller was authorised for.
@@ -170,11 +171,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // React has committed it, and reading ambiently made that a silent no-op.
     const pageToken = append?.pageToken;
     const epoch = scopeEpoch.current;
-    const serial = (directorySerial.current.get(path) ?? 0) + 1;
-    directorySerial.current.set(path, serial);
-    const controller = new AbortController();
-    listAborts.current.get(path)?.abort();
-    listAborts.current.set(path, controller);
+    const slot = requests.current.open(path, pageToken ? "page" : "list");
     setState((current) => ({ ...current, loading: new Set(current.loading).add(path), error: undefined }));
     try {
       // What a directory read costs on this link, when `ADE_PERF_LOG` is set and
@@ -184,12 +181,12 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
         pageToken ? "files.listDirectory.page" : "files.listDirectory",
         () => client.listDirectory(activeScope, root, path, {
           ...(pageToken ? { pageToken } : {}),
-          signal: controller.signal,
+          signal: slot.signal,
         }),
       );
-      if (listAborts.current.get(path) === controller) listAborts.current.delete(path);
+      slot.close();
       const superseded = epoch !== scopeEpoch.current
-        || directorySerial.current.get(path) !== serial
+        || !slot.current()
         || keyForScope(activeScope) !== scopeKey
         || !sameRoot(stateRef.current.root, root)
         || listing.rootToken !== root.token;
@@ -209,8 +206,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       applyListing(root, path, listing, { append: Boolean(pageToken) });
       return "applied";
     } catch (error) {
-      if (listAborts.current.get(path) === controller) listAborts.current.delete(path);
-      const aborted = controller.signal.aborted;
+      slot.close();
+      const aborted = slot.signal.aborted;
       setState((current) => {
         const loading = new Set(current.loading);
         loading.delete(path);
@@ -331,29 +328,40 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const activeScope = scopeRef.current;
     if (!activeScope) return;
     const epoch = scopeEpoch.current;
-    const serial = (directorySerial.current.get(directory) ?? 0) + 1;
-    directorySerial.current.set(directory, serial);
+    // A read like any other: registered, cancellable, and visible as a wait.
+    // Left outside the ledger it was the one list path a collapse, a root
+    // replacement, or a closing pane could not stop — up to eight sequential
+    // remote round trips for a directory nobody was looking at any more.
+    const slot = requests.current.open(directory, "restore");
+    setState((current) => ({ ...current, loading: new Set(current.loading).add(directory) }));
     let assembled: DirectoryListing | undefined;
     try {
       for (let page = 0; page < MAX_RESTORED_PAGES; page += 1) {
         const pageToken = assembled?.nextPageToken;
         if (assembled && (assembled.complete || !pageToken)) break;
-        const next = await client.listDirectory(activeScope, root, directory,
-          pageToken ? { pageToken } : {});
-        if (epoch !== scopeEpoch.current || directorySerial.current.get(directory) !== serial) return;
+        const next = await client.listDirectory(activeScope, root, directory, {
+          ...(pageToken ? { pageToken } : {}),
+          signal: slot.signal,
+        });
+        if (epoch !== scopeEpoch.current || !slot.current()) return;
         if (next.rootToken !== root.token) return;
         assembled = assembled ? appendPage(assembled, next) : next;
         if (assembled.entries.length >= entries) break;
       }
     } catch {
-      // A failed restore leaves the rows the tree already had; the next
-      // authoritative event asks again.
+      // A failed or abandoned restore leaves the rows the tree already had;
+      // the next authoritative event asks again.
       return;
+    } finally {
+      slot.close();
+      setState((current) => ({ ...current, loading: withoutPath(current.loading, directory) }));
     }
-    // Applied once, whole. Applying each page as it arrives would put the
-    // truncation back: the tree would drop to one page and re-grow, taking the
-    // keyboard focus down with it.
-    if (assembled) applyListing(root, directory, assembled);
+    // Applied once, whole, and marked as the restore it is. Applying each page
+    // as it arrives would put the truncation back — the tree would drop to one
+    // page and re-grow, taking the keyboard focus with it — and applying it
+    // unmarked would let a restore that could not reach the length it started
+    // from queue *itself* again, forever.
+    if (assembled) applyListing(root, directory, assembled, { restored: true });
   }, [applyListing, client]);
 
   const applyEvent = useCallback((event: WorkspaceEvent) => {
@@ -403,7 +411,11 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // must never paint from what the old one held.
     const activeScope = scopeRef.current;
     if (activeScope) cache.current.invalidateSubtree(cacheScope(activeScope, root), event.path);
-    setState((value) => pruneSubtree(value, event.path));
+    // Except the root, which is not a row in anything and whose expansion is
+    // what makes the tree exist at all. Pruning it left a tree that refused
+    // every subsequent transition — including the listing that would have
+    // shown the directory coming back — until the root itself was re-resolved.
+    if (event.path !== root.path) setState((value) => pruneSubtree(value, event.path));
     abortListing((path) => path === event.path || path.startsWith(`${event.path}/`));
     applyPrecise(root, directory, (listing) => removeEntry(listing, event.path));
   }, [abortListing, applyListing, applyPrecise, recordTransfer]);
@@ -546,7 +558,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       }
       refreshTimers.current.clear();
       paintGenerations.current.clear();
-      directorySerial.current.clear();
+      requests.current.clear();
       for (const pending of pendingExpandPaints.current.values()) pending.paint.abandon();
       pendingExpandPaints.current.clear();
       unsubscribe?.();

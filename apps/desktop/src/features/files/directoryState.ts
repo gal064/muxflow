@@ -75,7 +75,7 @@ export function installListing(
   current: WorkspaceFilesState,
   directory: string,
   listing: DirectoryListing,
-  options: { append?: boolean } = {},
+  options: { append?: boolean; restored?: boolean } = {},
 ): WorkspaceFilesState {
   const held = current.listings.get(directory);
   const loading = withoutPath(current.loading, directory);
@@ -95,7 +95,10 @@ export function installListing(
   // can see and clamp their keyboard focus to the shorter tree, so the rows
   // they have stay exactly as they are and the recovery queue re-reads the
   // whole depth before anything on screen moves.
-  if (held && !listing.complete && held.entries.length > listing.entries.length) {
+  // `restored` is the answer to that guard rather than another instance of it:
+  // a restore that could not reach the length it started from would otherwise
+  // queue itself again on its own result, forever.
+  if (!options.restored && held && !listing.complete && held.entries.length > listing.entries.length) {
     const recoveries = new Map(current.recoveries)
       .set(directory, { kind: "restorePages", entries: held.entries.length } as const);
     return { ...current, loading, recoveries };

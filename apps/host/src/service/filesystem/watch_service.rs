@@ -71,13 +71,26 @@ impl FileService {
         let service = Arc::clone(self);
         tokio::spawn(async move {
             while !closed.load(Ordering::Acquire) {
-                let first = tokio::select! {
-                    event = native_rx.recv() => event,
-                    _ = sleep(Duration::from_millis(100)) => continue,
+                // A rescan the last turn could not publish drives a turn of its
+                // own. The flag is set by failure as well as by the watcher, and
+                // a directory that goes quiet immediately afterwards produces no
+                // further wakeup — so waiting for one left the desktop painting
+                // a subtree the host already knew was stale.
+                let owed_rescan = native_rescan.load(Ordering::Acquire);
+                let woken = tokio::select! {
+                    event = native_rx.recv() => match event {
+                        Some(()) => true,
+                        None => break,
+                    },
+                    _ = sleep(Duration::from_millis(100)) => false,
                 };
-                let Some(()) = first else { break };
-                sleep(Duration::from_millis(75)).await;
-                while native_rx.try_recv().is_ok() {}
+                if !woken && !owed_rescan {
+                    continue;
+                }
+                if woken {
+                    sleep(Duration::from_millis(75)).await;
+                    while native_rx.try_recv().is_ok() {}
+                }
                 // Grouped by parent once, rather than every watch scanning the
                 // whole dirty set: with the 4,096-path cap and 128 watches that
                 // was half a million comparisons and 128 full clones per batch.
@@ -87,6 +100,7 @@ impl FileService {
                 if native_failed.swap(false, Ordering::AcqRel) {
                     service.degrade_all_to_polling();
                 }
+                let mut mapping = Vec::new();
                 for (watch_id, watch) in service.watch_entries() {
                     if all_rescan {
                         // A rescan that could not be listed must not be
@@ -133,23 +147,26 @@ impl FileService {
                         continue;
                     }
                     // `precise_file_events` stats every dirty path, which on
-                    // this host can be a slow filesystem and is now the
-                    // primary path for the whole feature. It does not belong
-                    // on a runtime worker.
-                    let mapped = {
-                        let watch = watch.clone();
-                        let watch_id = watch_id.clone();
-                        let children = children.clone();
-                        tokio::task::spawn_blocking(move || {
-                            precise_file_events(&watch_id, &watch, &children)
-                        })
-                        .await
-                    };
+                    // this host can be a slow filesystem and is now the primary
+                    // path for the whole feature. It does not belong on a
+                    // runtime worker — and with the 128-watch budget, awaiting
+                    // one directory's stats before starting the next one's put
+                    // every later batch behind all of them. They are dispatched
+                    // together and collected in order, so the work overlaps
+                    // while the events a client sees stay ordered.
+                    let watch = watch.clone();
+                    let watch_id = watch_id.clone();
+                    let children = children.clone();
+                    mapping.push(tokio::task::spawn_blocking(move || {
+                        precise_file_events(&watch_id, &watch, &children)
+                    }));
+                }
+                for mapped in mapping {
                     // A batch that never came back described changes nobody
                     // else will describe. Dropping it silently left the desktop
                     // showing rows that no longer exist, so the next turn
                     // re-lists everything instead.
-                    let Ok(mapped) = mapped else {
+                    let Ok(mapped) = mapped.await else {
                         native_rescan.store(true, Ordering::Release);
                         continue;
                     };
@@ -244,8 +261,7 @@ impl FileService {
                 }),
                 ..Default::default()
             },
-        );
-        true
+        )
     }
 
     /// Puts every native target back on polling after a watcher-level failure.
