@@ -51,8 +51,8 @@ export function GitDiffSurface(props: Props) {
   });
   const { diff, status, paint } = shared;
 
-  const decodedText = useMemo(() => diff ? decodeTextDiff(diff) : undefined, [diff]);
-  const diffUsesEditor = Boolean(diff && !diff.binary && !diff.tooLarge && decodedText);
+  const shown = useMemo(() => shownDiff(diff), [diff]);
+  const diffUsesEditor = shown.kind === "editor";
   useEffect(() => {
     if (diffUsesEditor) recordPerfMilestone("editor.monacoRequest");
   }, [diffUsesEditor]);
@@ -108,7 +108,6 @@ export function GitDiffSurface(props: Props) {
   if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" retry={refresh} />;
   if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${props.tab.gitTarget} changes.`} retry={refresh} />;
 
-  const text = decodedText;
   const currentEntry = status.entries.find((entry) => entry.path === diff.path);
   const mutationBlock = currentEntry?.submodule ? "Submodule pointer changes are read-only in v1." : currentEntry?.conflicted ? "Resolve conflicts in the terminal before using Git actions." : undefined;
   const pathChange = currentEntry && [currentEntry.indexKind, currentEntry.worktreeKind].some((kind) => kind === "renamed" || kind === "copied");
@@ -128,18 +127,18 @@ export function GitDiffSurface(props: Props) {
       {surfaceError && <SurfaceError className="git-diff-error" detail={surfaceError} />}
     </div>
     <div className="git-diff-content" ref={diffUsesEditor ? editor.bindHost : undefined}>
-      {diffUsesEditor && text
+      {shown.kind === "editor"
         ? <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>
           <GitDiffEditor
-            modified={text.modified}
+            modified={shown.text.modified}
             modifiedModelPath={modelUri(props.tab, "modified")}
             onReady={editor.onReady}
-            original={text.original}
+            original={shown.text.original}
             originalModelPath={modelUri(props.tab, "original")}
             path={diff.displayPath}
           />
         </Suspense>
-        : <GitDiffEmpty title={diff.displayPath} detail={withoutEditor(diff, text)} />}
+        : shown.kind === "blocked" ? <GitDiffEmpty title={diff.displayPath} detail={shown.detail} /> : null}
     </div>
     {hunkActions && diff.hunkCount > 0 && <aside className="git-hunk-actions" aria-label="Complete hunk actions">
       {Array.from({ length: diff.hunkCount }, (_, hunkIndex) => <div key={hunkIndex}>
@@ -161,16 +160,26 @@ export function GitDiffSurface(props: Props) {
 }
 
 /**
- * Why a diff has no editor, when it has none.
+ * What the content area of a diff tab has to show, decided once.
  *
- * Same three facts as `diffUsesEditor` a few lines above, in the same order:
- * they were two separate ladders, so a diff could be declared editable by one
- * and explained away by the other.
+ * Whether an editor is used and what to say when it is not were two ladders
+ * over the same three facts, so a fourth reason to refuse an editor would have
+ * been added to one of them and silently explained by the other's last branch.
  */
-function withoutEditor(diff: GitDiff, text: { original: string; modified: string } | undefined): string {
-  if (diff.binary) return "Binary changes cannot be displayed or edited as text.";
-  if (!text) return "This diff contains non-UTF-8 content and is shown safely as binary.";
-  return "This diff is too large for the editor. File-level Git actions remain available.";
+type ShownDiff =
+  /** Nothing to draw: the surface's own empty states have already said why. */
+  | { kind: "absent" }
+  /** Displayable, but not as text in an editor. */
+  | { kind: "blocked"; detail: string }
+  | { kind: "editor"; text: { original: string; modified: string } };
+
+function shownDiff(diff: GitDiff | undefined): ShownDiff {
+  if (!diff) return { kind: "absent" };
+  if (diff.binary) return { kind: "blocked", detail: "Binary changes cannot be displayed or edited as text." };
+  const text = decodeTextDiff(diff);
+  if (!text) return { kind: "blocked", detail: "This diff contains non-UTF-8 content and is shown safely as binary." };
+  if (diff.tooLarge) return { kind: "blocked", detail: "This diff is too large for the editor. File-level Git actions remain available." };
+  return { kind: "editor", text };
 }
 
 function decodeTextDiff(diff: GitDiff): { original: string; modified: string } | undefined {

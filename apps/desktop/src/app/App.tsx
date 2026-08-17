@@ -710,7 +710,7 @@ export function App() {
           role="tabpanel"
           tabIndex={0}
         >
-          {selectedAppTab ? <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>{selectedAppTab.kind === "gitDiff" ? <GitDiffSurface
+          {selectedAppTab ? <Suspense fallback={<p className="quiet-empty">Loading…</p>}>{selectedAppTab.kind === "gitDiff" ? <GitDiffSurface
             activeRoot={workspaceFiles.root}
             canWrite={hostState.canMutate}
             repositories={gitRepositories}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { languageForPath, requestedLanguageIds } from "./editorLanguage";
+import { LANGUAGE_BY_EXTENSION, languageForPath } from "./editorLanguage";
 
 describe("languageForPath", () => {
   it("maps the extensions the app claims to highlight", () => {
@@ -23,7 +23,7 @@ describe("languageForPath", () => {
    * one line here; shrinking it has to be argued for.
    */
   it("asks for eleven languages out of everything the editor bundles", () => {
-    expect(requestedLanguageIds()).toEqual([
+    expect([...new Set(Object.values(LANGUAGE_BY_EXTENSION))].sort()).toEqual([
       "css", "html", "ini", "javascript", "json", "markdown",
       "python", "rust", "shell", "typescript", "yaml",
     ]);

@@ -58,6 +58,36 @@ describe("createPaintReporter", () => {
     expect(reporter.pending()).toBe(replacement);
   });
 
+  /**
+   * Abandoning forgets the committed load as well as the ticket.
+   *
+   * The Git surface used to reset those two in different places — the ticket
+   * whenever a load started, the committed generation only when the shared
+   * observation was released — and one reporter now does both together. The
+   * consequence is that a surface which has abandoned owes a fresh
+   * `noteCommitted` before anything it holds afterwards can publish, which is
+   * what its render effect does on the next load. Pinned here because nothing
+   * else in the suite can see it.
+   */
+  it("publishes nothing held after an abandon until the surface commits again", async () => {
+    const { reporter } = armed(() => 1);
+    reporter.noteCommitted();
+    reporter.abandon();
+    const next = createPaintTicket(["surface.test"], 1);
+    reporter.hold(next);
+    const onPaint = vi.fn();
+    reporter.notePaintable(undefined, onPaint);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(onPaint, "a measurement published against a load nobody had committed").not.toHaveBeenCalled();
+
+    const committed = createPaintTicket(["surface.test"], 1);
+    reporter.hold(committed);
+    reporter.noteCommitted();
+    reporter.notePaintable(undefined, onPaint);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(onPaint).toHaveBeenCalledTimes(1);
+  });
+
   it("publishes nothing after the lifetime that armed it has moved on", async () => {
     let generation = 1;
     const { reporter } = armed(() => generation);
