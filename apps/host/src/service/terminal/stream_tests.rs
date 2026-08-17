@@ -461,6 +461,7 @@ fn terminal_output_waits_for_bounded_sequencer_capacity_without_marking_overflow
             "%1".into(),
             b"exact".to_vec(),
             1,
+            &AtomicBool::new(false),
             &output_credit,
         );
     });

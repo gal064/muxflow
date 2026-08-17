@@ -51,6 +51,9 @@ pub(super) struct TerminalAttachment {
     stopped: Arc<AtomicBool>,
     stream_tx: std_mpsc::Sender<StreamControl>,
     flow: Arc<FlowControl>,
+    /// The connection-wide delivery window, held so [`Self::stop`] can wake
+    /// this attachment's workers parked in [`OutputCredit::reserve`].
+    output_credit: Arc<OutputCredit>,
     workers: Vec<std::thread::JoinHandle<()>>,
     /// The last size tmux was told for *this* client, so it is not told again.
     ///
@@ -189,6 +192,10 @@ impl TerminalAttachment {
 
     pub(super) fn stop(&mut self) {
         stop_process(&self.stopped, &self.child);
+        // The store above is not a wakeup. A worker parked in `reserve`
+        // re-checks `stopped` only when the shared credit's condvar fires, and
+        // without this its join in `Drop` hangs the service thread.
+        self.output_credit.wake_waiters();
     }
 }
 
@@ -588,13 +595,14 @@ impl TerminalClients {
         let emission_order = Arc::clone(&self.emission_order);
         let _emission = emission_order.lock().unwrap();
         validate_tmux_id(pane_id, '%')?;
-        if !self
+        let stopped = match self
             .clients
             .values()
-            .any(|client| client.contains_pane(pane_id))
+            .find(|client| client.contains_pane(pane_id))
         {
-            bail!("pane has no attached session control client");
-        }
+            Some(client) => Arc::clone(&client.stopped),
+            None => bail!("pane has no attached session control client"),
+        };
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let (mut resource, requires_seed) = {
             let mut resources = self.resources.lock().unwrap();
@@ -620,7 +628,7 @@ impl TerminalClients {
                 .len()
                 .saturating_add(resource.raw_tail.len()),
         );
-        let reservation = match self.output_credit.reserve(charge) {
+        let reservation = match self.output_credit.reserve(charge, &stopped) {
             Ok(reservation) => reservation,
             Err(error) => {
                 self.resources.lock().unwrap().require_seed(

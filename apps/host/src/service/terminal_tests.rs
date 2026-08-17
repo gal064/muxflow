@@ -63,11 +63,60 @@ fn every_attachment_worker_spawn_failure_reaps_the_child_and_allows_retry() {
     retry.stop();
 }
 
+/// The per-session detach path: `stop()` and drop one attachment while the
+/// shared credit stays open for the rest of the connection. Without the wakeup
+/// in `stop()` the waiter parks forever and `Drop`'s `join_workers` hangs the
+/// service thread.
+#[test]
+fn stopping_one_attachment_unparks_its_reserve_waiter_before_the_join() {
+    let output_credit = Arc::new(OutputCredit::negotiated(true));
+    output_credit
+        .reserve(
+            OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .commit();
+    let (events, _receiver) = mpsc::channel(8);
+    let mut attachment = start_long_lived_attachment(
+        events,
+        Arc::new(Mutex::new(PaneResourceStore::with_total_limit(
+            4, 1024, 4096,
+        ))),
+        Arc::new(AtomicU64::new(0)),
+        Arc::clone(&output_credit),
+        Arc::new(Mutex::new(())),
+    )
+    .unwrap();
+    let stopped = Arc::clone(&attachment.stopped);
+    let credit = Arc::clone(&output_credit);
+    let (sender, receiver) = std_mpsc::channel();
+    std::thread::spawn(move || {
+        sender
+            .send(credit.reserve(OutputCharge::terminal(1), &stopped).is_err())
+            .unwrap();
+    });
+    assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
+    attachment.stop();
+    drop(attachment);
+    assert!(receiver.recv_timeout(Duration::from_secs(1)).unwrap());
+    // The rest of the connection still holds a live, un-closed window.
+    output_credit
+        .acknowledge(OutputCharge {
+            bytes: 1,
+            records: 1,
+        })
+        .unwrap();
+}
+
 #[test]
 fn blocked_reveal_recovery_is_admitted_before_concurrent_visible_output() {
     let output_credit = Arc::new(OutputCredit::negotiated(true));
     output_credit
-        .reserve(OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize))
+        .reserve(
+            OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
+            &AtomicBool::new(false),
+        )
         .unwrap()
         .commit();
     let mut clients = TerminalClients::new(Arc::clone(&output_credit));

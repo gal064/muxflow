@@ -763,6 +763,7 @@ impl StreamState {
                                             pane_id.clone(),
                                             seed,
                                             seed_generation,
+                                            stopped,
                                             output_credit,
                                         );
                                     }
@@ -796,6 +797,7 @@ impl StreamState {
                                                 pane_id.clone(),
                                                 output.bytes,
                                                 replay_generation,
+                                                stopped,
                                                 output_credit,
                                             );
                                         }
