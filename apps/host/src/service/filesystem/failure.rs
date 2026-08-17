@@ -14,6 +14,8 @@ pub(crate) enum FileFailure {
     StalePageToken,
     /// The file moved out from under the exact version the caller asked for.
     StaleGeneration,
+    /// The caller must say explicitly that it meant a destructive change.
+    ConfirmationRequired,
     /// Everything else the service refused.
     Rejected,
 }
@@ -24,6 +26,7 @@ impl FileFailure {
             Self::Cancelled => "cancelled",
             Self::StalePageToken => "stale_page_token",
             Self::StaleGeneration => "stale_file_generation",
+            Self::ConfirmationRequired => "confirmation_required",
             Self::Rejected => "",
         }
     }
@@ -68,4 +71,9 @@ pub(super) fn stale_page_token(detail: &str) -> anyhow::Error {
 
 pub(super) fn stale_generation(detail: &str) -> anyhow::Error {
     refuse(FileFailure::StaleGeneration, detail)
+}
+
+/// A destructive change the caller has not explicitly confirmed.
+pub(super) fn confirmation_required(detail: &str) -> anyhow::Error {
+    refuse(FileFailure::ConfirmationRequired, detail)
 }

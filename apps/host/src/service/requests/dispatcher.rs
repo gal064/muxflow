@@ -128,7 +128,6 @@ pub(crate) async fn handle_request(
                     control_tx,
                     event_tx,
                     generation,
-                    pending,
                     topology_lock,
                 },
             )

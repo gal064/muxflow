@@ -217,6 +217,12 @@ mod tests {
             registry.cancel(OperationLane::File, &format!("abandoned-{index}"));
         }
         assert!(registry.len() <= MAX_TOMBSTONES);
+        // And the newest survive: those are the ones whose claim may still be
+        // crossing the command boundary, which is the whole point of keeping
+        // any. Evicting every tombstone at once threw exactly those away.
+        let newest = format!("abandoned-{}", MAX_TOMBSTONES * 3 - 1);
+        let refused = registry.claim(OperationLane::File, &newest).unwrap();
+        assert!(matches!(registry.bind(&refused, 9), Bound::Cancelled));
     }
 
     /// A cleared registry is a connection that has gone.

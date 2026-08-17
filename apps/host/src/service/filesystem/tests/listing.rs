@@ -303,9 +303,14 @@ fn stale_root_token_rejects_same_path_replacement_before_worker_open() {
     fs::rename(&root, &displaced).unwrap();
     fs::create_dir(&root).unwrap();
     fs::write(root.join("note"), "replacement").unwrap();
-    let error = service
-        .read_file_authorized(root.to_str().unwrap(), &token, "note")
-        .unwrap_err();
+    let Err(error) = service.open_file_stream_authorized(
+        root.to_str().unwrap(),
+        &token,
+        "note",
+        &NEVER_CANCELLED,
+    ) else {
+        panic!("a replaced root answered a read against the token of the one it replaced");
+    };
     assert!(error.to_string().contains("root snapshot token"));
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(displaced).unwrap();

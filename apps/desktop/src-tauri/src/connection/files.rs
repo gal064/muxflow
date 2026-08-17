@@ -152,8 +152,14 @@ pub async fn file_request(
 /// a collapse, root replacement, or superseded preview can stop bounded remote
 /// enumeration that nothing will read — rather than paying for it and throwing
 /// the answer away.
+/// Async, and off the main thread, for the same reason `file_request` is: this
+/// reaches the control writer, which waits on a full queue and on the physical
+/// write. On the interaction path it is now issued by every collapse, root
+/// swap, and superseded preview, so a synchronous version would put a
+/// potentially multi-second stall on exactly the interactions whose budget is
+/// "no long task".
 #[tauri::command]
-pub fn cancel_file_request(
+pub async fn cancel_file_request(
     client_id: String,
     operation_id: String,
     clients: State<'_, TerminalClients>,
@@ -161,7 +167,10 @@ pub fn cancel_file_request(
     if operation_id.is_empty() {
         return Err("operation ID is required".into());
     }
-    get_client(&clients, &client_id)?.cancel_file(&operation_id)
+    let client = get_client(&clients, &client_id)?;
+    tauri::async_runtime::spawn_blocking(move || client.cancel_file(&operation_id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn operation_from_name(value: &str) -> Result<v1::Operation, String> {

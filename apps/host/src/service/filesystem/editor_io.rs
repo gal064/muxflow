@@ -2,56 +2,6 @@ use super::*;
 
 impl FileService {
     #[cfg(test)]
-    pub(crate) fn read_file(&self, root: &str, path: &str) -> anyhow::Result<v1::FileContent> {
-        let token = root_token(root)?;
-        self.read_file_authorized(root, &token, path)
-    }
-
-    pub(crate) fn read_file_authorized(
-        &self,
-        root: &str,
-        root_token: &str,
-        path: &str,
-    ) -> anyhow::Result<v1::FileContent> {
-        let root = RootCapability::validate(root, root_token)?;
-        let (logical_target, target) = root.resolve_existing(path)?;
-        if logical_target == root.logical_root() {
-            bail!("the active root itself cannot be opened as a file");
-        }
-        let (logical_opened, opened_path) = root.regular_file_target(&logical_target, &target)?;
-        let opened_anchor = root.anchor(&logical_opened)?;
-        let mut file = opened_anchor.open_file()?;
-        let metadata = file.metadata()?;
-        let mut item = metadata_for_anchored(&root.stable_root(), &target, &logical_target)?;
-        apply_effective_metadata(&mut item, &metadata);
-        if item.symlink {
-            item.symlink_target_kind = v1::FileKind::File.into();
-        }
-        let size = metadata.len();
-        let image = image_mime(&opened_path).is_some();
-        item.image_preview_eligible = image && size <= MAX_IMAGE_BYTES;
-        let kind = if image {
-            v1::FileContentKind::Image
-        } else if size > MAX_TEXT_BYTES {
-            v1::FileContentKind::TooLarge
-        } else {
-            let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or_default());
-            file.read_to_end(&mut bytes)?;
-            if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
-                v1::FileContentKind::Binary
-            } else {
-                v1::FileContentKind::Text
-            }
-        };
-        Ok(v1::FileContent {
-            generation: item.generation,
-            metadata: Some(item),
-            kind: kind.into(),
-            content: Vec::new(),
-        })
-    }
-
-    #[cfg(test)]
     pub(crate) fn begin_file_write(
         &self,
         root: &str,

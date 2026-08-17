@@ -128,10 +128,10 @@ fn safe_file_symlink_open_and_save_preserve_the_link() {
     let (root, service) = fixture();
     fs::write(root.join("target.txt"), "old").unwrap();
     std::os::unix::fs::symlink("target.txt", root.join("link.txt")).unwrap();
-    let content = service
-        .read_file(root.to_str().unwrap(), "link.txt")
+    let opened = service
+        .open_file_stream(root.to_str().unwrap(), "link.txt")
         .unwrap();
-    let metadata = content.metadata.unwrap();
+    let metadata = opened.header().metadata.clone().unwrap();
     assert!(metadata.symlink);
     assert_eq!(metadata.symlink_target_kind, v1::FileKind::File as i32);
     service

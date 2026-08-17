@@ -51,7 +51,7 @@ fn symlink_escape_and_destructive_confirmations_are_enforced() {
     std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
     assert!(
         service
-            .read_file(root.to_str().unwrap(), "escape/secret")
+            .open_file_stream(root.to_str().unwrap(), "escape/secret")
             .is_err()
     );
     fs::write(root.join("kept"), "inside").unwrap();

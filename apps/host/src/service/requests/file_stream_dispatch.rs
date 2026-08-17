@@ -434,7 +434,7 @@ mod tests {
         let mut responses = 0;
         let mut body_frames = 0;
         let mut headers = 0;
-        let mut cancelled = false;
+        let cancelled;
         loop {
             let frame = timeout(Duration::from_secs(5), read_frame(&mut peer.stream))
                 .await

@@ -102,6 +102,13 @@ struct TerminalClient {
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
     operations: Arc<OperationRegistry>,
+    /// Orders a cancellable request's dispatch against its own cancellation.
+    ///
+    /// Held only across binding an operation to its request ID and writing that
+    /// request — never across the wait for a response — so it serializes the
+    /// one window in which a cancel could otherwise overtake the request it is
+    /// cancelling.
+    dispatch: Mutex<()>,
     input_queue: Mutex<ClientInputQueue>,
     resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
@@ -133,6 +140,7 @@ impl TerminalClient {
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
             operations: Arc::new(OperationRegistry::default()),
+            dispatch: Mutex::new(()),
             input_queue: Mutex::new(ClientInputQueue::default()),
             resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
@@ -375,6 +383,13 @@ impl TerminalClient {
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = mpsc::channel();
         self.pending.lock().unwrap().insert(request_id, sender);
+        // Binding an operation to its request ID and writing that request are
+        // one step as far as cancellation is concerned. Apart, a cancel raised
+        // between them read the ID, wrote its `Cancel` first, and the host —
+        // which discards a cancel for a request it has never seen — dropped it;
+        // the request then ran with nothing able to stop it. That is the exact
+        // window this package's cancellation guarantee lives in.
+        let dispatch = operation.is_some().then(|| self.dispatch.lock().unwrap());
         if let Some(claim) = &operation
             && matches!(self.operations.bind(claim, request_id), Bound::Cancelled)
         {
@@ -390,6 +405,7 @@ impl TerminalClient {
             .and_then(|writer| {
                 writer.write(envelope(request_id, 0, Payload::Request(request)), deadline)
             });
+        drop(dispatch);
         if let Err(error) = write_result {
             self.pending.lock().unwrap().remove(&request_id);
             if let Some(claim) = &operation {
@@ -447,6 +463,10 @@ impl TerminalClient {
     }
 
     fn cancel_operation(&self, lane: OperationLane, operation_id: &str) -> Result<(), String> {
+        // Ordered against dispatch: see `request_with_timeout`. Taken before
+        // the ID is read, so a cancel either finds no request — and leaves a
+        // tombstone — or finds one the host has already been given.
+        let _dispatch = self.dispatch.lock().unwrap();
         let Some(request_id) = self.operations.cancel(lane, operation_id) else {
             // Claimed but not yet dispatched. The tombstone the registry left
             // refuses the request rather than sending it to a host that would

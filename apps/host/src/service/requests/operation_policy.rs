@@ -131,7 +131,7 @@ impl OperationPolicy {
                 Scheduling::Detached,
                 Handler::ActiveRoot,
             ),
-            v1::Operation::ListDirectory | v1::Operation::ReadFile => (
+            v1::Operation::ListDirectory => (
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Detached,
@@ -142,6 +142,17 @@ impl OperationPolicy {
             v1::Operation::OpenFileStream => (
                 Access::ReadOnly,
                 Lane::Bulk,
+                Scheduling::Detached,
+                Handler::Filesystem,
+            ),
+            // Answered with a refusal naming `OpenFileStream`, so an older
+            // desktop is told what to use rather than silently served by a
+            // second code path that had already drifted from the first. Still
+            // classified as the read it asks to be: a read-only connection
+            // must get the same answer as any other.
+            v1::Operation::ReadFile => (
+                Access::ReadOnly,
+                Lane::Control,
                 Scheduling::Detached,
                 Handler::Filesystem,
             ),

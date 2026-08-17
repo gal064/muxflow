@@ -169,25 +169,22 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::ReadFile => {
-            let Some(file) = require_rooted_file(&request, request_id, control_tx).await else {
-                return;
-            };
-            let service = Arc::clone(files);
-            let root = file.root.clone();
-            let path = file.path.clone();
-            let root_token = file.root_token.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                service.read_file_authorized(&root, &root_token, &path)
-            })
+            // The staircase this replaced: a stat, a preflight, then a chunk
+            // request per mebibyte, each of which could answer about a
+            // different file. `OpenFileStream` does all of it from one
+            // descriptor. Refused rather than kept working, because a second
+            // way to open a file that nobody exercises is how the one people
+            // do use goes quietly wrong — the two had already drifted apart on
+            // re-stat and generation.
+            send_response(
+                control_tx,
+                request_id,
+                response_error(
+                    "open_file_stream_required",
+                    "editor opens must use OpenFileStream on a bulk connection",
+                ),
+            )
             .await;
-            let response = match result {
-                Ok(Ok(content)) => {
-                    file_response(&file.operation_id, |value| value.content = Some(content))
-                }
-                Ok(Err(error)) => response_error("file_read_rejected", &error.to_string()),
-                Err(error) => response_error("file_read_task_failed", &error.to_string()),
-            };
-            send_response(control_tx, request_id, response).await;
         }
         v1::Operation::WriteFile => {
             send_response(
@@ -232,17 +229,7 @@ pub(super) async fn handle(
                         value.deleted = deleted;
                     })
                 }
-                Ok(Err(error)) => {
-                    let message = error.to_string();
-                    let code = if message.contains("cancelled") {
-                        "cancelled"
-                    } else if message.contains("confirmation_required") {
-                        "confirmation_required"
-                    } else {
-                        "file_mutation_rejected"
-                    };
-                    response_error(code, &message)
-                }
+                Ok(Err(error)) => file_failure_response("file_mutation_rejected", &error),
                 Err(error) => response_error("file_mutation_task_failed", &error.to_string()),
             };
             send_response(control_tx, request_id, response).await;
