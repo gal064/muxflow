@@ -609,6 +609,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 1px solid var(--chrome-border); border-radius: 4px;
   background: var(--chrome-raised); color: var(--chrome-dim); font-size: var(--type-meta);
 }
+/* Busy, not removed: the row keeps its place in the tree and its focus, and
+   only says it cannot be pressed again. `disabled` would take it out of the
+   tab order at the exact moment somebody is standing on it. */
+.load-more-files[aria-disabled="true"] { opacity: .6; cursor: default; }
 .transfers { max-height: 180px; padding: 7px; border-top: 1px solid var(--chrome-hairline); overflow: auto; }
 .transfers h3 { margin: 0 0 5px; color: var(--chrome-dim); font-size: var(--type-label); letter-spacing: .07em; text-transform: uppercase; }
 .transfer {

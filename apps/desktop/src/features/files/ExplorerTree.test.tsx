@@ -180,6 +180,50 @@ describe("ExplorerTree", () => {
     }
   });
 
+  it("keeps the keyboard on the row the user chose when the directory changes underneath it", async () => {
+    // Precise external changes are the branch's central mechanism: an agent
+    // creating one file patches a single row in place rather than re-listing.
+    // With focus held as a position, every such insert above the cursor moved
+    // it to a different file, and deleting the focused row dropped DOM focus
+    // to the document body — the "no scroll/focus loss" outcome, inverted by
+    // the very change that made patching cheap.
+    const rows = (names: string[]): DirectoryListing => ({
+      ...listing,
+      entries: names.map((name) => ({
+        path: `/r/${name}`, name, kind: "file" as const, sizeBytes: "1",
+        modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    });
+    const view = (entries: DirectoryListing) => <ExplorerTree root={root} scopeIdentity="focus" listings={new Map([["/r", entries]])}
+      expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+      onRefresh={vi.fn()} onLoadMore={vi.fn()} />;
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => { renderer = create(view(rows(["b.txt", "c.txt"]))); });
+      const focused = () => renderer.root.findAllByProps({ className: "file-row" })
+        .filter((row) => row.props.tabIndex === 0)
+        .map((row) => row.props["data-tree-index"]);
+      // Stand on "c.txt", the second row.
+      await act(async () => {
+        renderer.root.findByProps({ "data-tree-index": 1 }).props.onFocus();
+      });
+      expect(focused()).toEqual([1]);
+
+      // An agent creates a file that sorts above it.
+      await act(async () => { renderer.update(view(rows(["a.txt", "b.txt", "c.txt"]))); });
+      expect(focused(), "an insert above the cursor moved it to another file").toEqual([2]);
+      expect(renderer.root.findByProps({ "data-tree-index": 2 }).props["aria-selected"]).toBe(true);
+
+      // And then deletes the row the user is standing on.
+      await act(async () => { renderer.update(view(rows(["a.txt", "b.txt"]))); });
+      expect(focused(), "the tree lost its keyboard cursor entirely").toHaveLength(1);
+      expect(focused()[0]).toBe(1);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
   it("reports each row's position among its own siblings, not in the flattened walk", async () => {
     // The tree role's setsize/posinset are per level. Using the flattened index
     // makes a nested row announce a position in the whole walk, and makes

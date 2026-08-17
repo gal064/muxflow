@@ -1,16 +1,4 @@
 use super::*;
-use tokio::sync::Semaphore;
-
-/// How many opens this host holds content for at once.
-///
-/// Classification buffers the file (see [`FileStreamBody`]), so without a bound
-/// the host's peak memory would be "however many opens a desktop can ask for"
-/// times the 25 MiB ceiling. Waiting is the right answer rather than refusing:
-/// each holder is a bounded local read, so the wait is short, and a person who
-/// opens five tabs at once wants five files rather than an error. The permit is
-/// held until the body has been framed, because that is when the buffer dies.
-const MAX_CONCURRENT_OPENS: usize = 4;
-static OPEN_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_OPENS);
 
 /// Answers one `OpenFileStream` request: one descriptor-bound classification,
 /// one header frame, bounded body frames, then exactly one terminal response.
@@ -30,8 +18,12 @@ pub(super) async fn handle(
         return;
     };
     // Held for the whole exchange: the buffer this permit is bounding lives
-    // until the last body frame has been cut from it.
-    let _permit = OPEN_PERMITS.acquire().await;
+    // until the last body frame has been cut from it. Waiting is the right
+    // answer rather than refusing — each holder is a bounded local read, so the
+    // wait is short, and somebody who opens five tabs at once wants five files
+    // rather than an error. The permits belong to *this* connection, so a slow
+    // link queues only its own opens.
+    let _permit = files.open_permits.acquire().await;
     let service = Arc::clone(files);
     let work = file.clone();
     let open_cancellation = Arc::clone(&cancellation);
@@ -388,11 +380,21 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// A cancelled open ends the exchange exactly once, so the desktop's bulk
-    /// bridge is never left waiting on a response that will not come.
+    /// A cancelled open ends the exchange exactly once and never half-way.
+    ///
+    /// Whether the cancel wins the race with the read is genuinely timing —
+    /// so both outcomes are asserted, and each is only allowed to look like
+    /// itself: a refusal must be classified `cancelled` and must not have
+    /// streamed the whole file, and a success must have streamed all of it.
+    /// The earlier version checked the error code only inside `if !ok` and
+    /// bounded the frame count at exactly the uncancelled maximum, so it
+    /// passed against a host that ignored `Cancel` outright.
     #[tokio::test]
     async fn a_cancelled_open_ends_with_one_terminal_response() {
-        let (root, path, token) = text_fixture(4 * 1024 * 1024);
+        const BYTES: usize = 4 * 1024 * 1024;
+        // 1 MiB windows, so a complete body is four frames and a header.
+        const COMPLETE_BODY: usize = BYTES / (1024 * 1024);
+        let (root, path, token) = text_fixture(BYTES);
         let (mut peer, task) = BulkPeer::connect().await;
         let request_id = peer.next_request_id;
         peer.next_request_id += 1;
@@ -431,6 +433,8 @@ mod tests {
 
         let mut responses = 0;
         let mut body_frames = 0;
+        let mut headers = 0;
+        let mut cancelled = false;
         loop {
             let frame = timeout(Duration::from_secs(5), read_frame(&mut peer.stream))
                 .await
@@ -438,13 +442,17 @@ mod tests {
                 .unwrap()
                 .unwrap();
             match frame.payload {
-                Some(Payload::FileStream(_)) if frame.request_id == request_id => body_frames += 1,
+                Some(Payload::FileStream(stream)) if frame.request_id == request_id => {
+                    if stream.header.is_some() {
+                        headers += 1;
+                    } else {
+                        body_frames += 1;
+                    }
+                }
                 Some(Payload::Response(response)) if frame.request_id == request_id => {
                     responses += 1;
-                    // Either it was cancelled before it started, or it was cut
-                    // short mid-body — never a success that streamed part of a
-                    // file the desktop would then publish.
-                    if !response.ok {
+                    cancelled = !response.ok;
+                    if cancelled {
                         assert_eq!(response.error_code, "cancelled");
                     }
                     break;
@@ -453,7 +461,23 @@ mod tests {
             }
         }
         assert_eq!(responses, 1, "one exchange owes exactly one response");
-        assert!(body_frames <= 5, "a cancelled body must stay bounded");
+        assert!(headers <= 1, "one open classifies exactly once");
+        if cancelled {
+            // Cut short, or stopped before it started — never a refusal that
+            // nevertheless handed the desktop the whole file.
+            assert!(
+                body_frames < COMPLETE_BODY,
+                "a refused open streamed the entire body anyway"
+            );
+        } else {
+            // The read won the race. Then it owes the whole file: a success
+            // that streamed part of one is the outcome this exchange must
+            // never produce.
+            assert_eq!(
+                body_frames, COMPLETE_BODY,
+                "a successful open published a partial file"
+            );
+        }
         drop(peer);
         task.abort();
         let _ = task.await;

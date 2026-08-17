@@ -1,7 +1,7 @@
 import type { DirectoryListing, FileEntry } from "./types";
 
 /** Why a cached listing could not answer an event on its own. */
-export type RecoveryReason = "missing" | "incomplete" | "unmappable";
+export type RecoveryReason = "missing" | "unmappable";
 
 export function parentPath(path: string): string {
   const index = path.lastIndexOf("/");
@@ -25,15 +25,34 @@ export function compareEntries(left: FileEntry, right: FileEntry): number {
 }
 
 /**
- * Whether this listing describes the whole directory, and so can be patched
- * from a precise event instead of re-listed.
+ * Whether this listing describes the whole directory.
  *
- * A partial page cannot: an entry belonging after the page boundary would be
- * drawn as though the tree had reached it, and one before it would be
- * indistinguishable from an entry the page simply never carried.
+ * Only a complete listing is worth caching for a later revisit — a partial one
+ * would paint a directory the tree has not finished reading. Patching does
+ * *not* require it: see [`covers`].
  */
 export function isPatchable(listing: DirectoryListing | undefined): listing is DirectoryListing {
   return Boolean(listing && listing.complete && !listing.nextPageToken);
+}
+
+/**
+ * Whether this listing's rows are entitled to an opinion about `entry`.
+ *
+ * Pages are a contiguous prefix of the host's order, so an incomplete listing
+ * holds everything up to its last row and nothing after it. A change at or
+ * before that boundary belongs on screen; one after it belongs to a page the
+ * tree has not asked for, and is not a gap in anything.
+ *
+ * Requiring a *complete* listing here was the single most expensive rule in
+ * the feature: the host's page is 4,096 entries, so in any directory larger
+ * than that every single-file change fell through to a recovery list and then
+ * to a full re-pagination — the exact list storm this package exists to
+ * remove, in precisely the directories where it costs most.
+ */
+function covers(listing: DirectoryListing, entry: FileEntry): boolean {
+  if (listing.complete && !listing.nextPageToken) return true;
+  const last = listing.entries.at(-1);
+  return last !== undefined && compareEntries(entry, last) <= 0;
 }
 
 /** Applies one precise change, or reports why a recovery list is needed. */
@@ -42,13 +61,15 @@ export function patchEntry(
   entry: FileEntry,
 ): DirectoryListing | RecoveryReason {
   if (!listing) return "missing";
-  if (!isPatchable(listing)) return "incomplete";
   const index = listing.entries.findIndex((existing) => existing.path === entry.path);
   if (index >= 0) {
     const entries = [...listing.entries];
     entries[index] = entry;
     return { ...listing, entries };
   }
+  // Beyond the rows this listing holds: the entry lives in a page nobody has
+  // asked for, so there is nothing on screen to correct.
+  if (!covers(listing, entry)) return listing;
   const entries = [...listing.entries, entry].sort(compareEntries);
   return { ...listing, entries };
 }
@@ -59,7 +80,8 @@ export function removeEntry(
   path: string,
 ): DirectoryListing | RecoveryReason {
   if (!listing) return "missing";
-  if (!isPatchable(listing)) return "incomplete";
+  // A path this listing never held needs no removal, whether that is because
+  // the directory does not contain it or because it sits in a later page.
   if (!listing.entries.some((entry) => entry.path === path)) return listing;
   return { ...listing, entries: listing.entries.filter((entry) => entry.path !== path) };
 }
