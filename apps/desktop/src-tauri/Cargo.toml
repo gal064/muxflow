@@ -13,6 +13,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Compiles the perf_log measurement implementation into release builds for an
+# A/B measurement campaign (`cargo build --release --features perf-log`).
+# Debug builds always include it via debug_assertions; see src/perf_log.rs.
+perf-log = []
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }

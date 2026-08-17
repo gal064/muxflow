@@ -1,6 +1,6 @@
 use std::{
     io::Read,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, ChildStderr, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
@@ -210,7 +210,7 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
     #[cfg(debug_assertions)]
     {
         for profile in ["debug", "release"] {
-            let candidate = Path::new(env!("CARGO_MANIFEST_DIR"))
+            let candidate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../../target")
                 .join(profile)
                 .join("tmux-ide-host");
