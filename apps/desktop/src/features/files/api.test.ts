@@ -87,7 +87,7 @@ describe("TauriFileWorkspaceClient", () => {
   });
 
   it("maps lazy directory pages including collapsed protected entries", async () => {
-    invokeMock.mockResolvedValueOnce({ operationId: "op", directory: { watchId: "", root: "/repo", path: "/repo", generation: "12", overflowed: false, authoritative: true, nextPageToken: "opaque", complete: false, entries: [
+    invokeMock.mockResolvedValueOnce({ operationId: "op", directory: { watchId: "", root: "/repo", path: "/repo", generation: "12", authoritative: true, nextPageToken: "opaque", complete: false, entries: [
       { path: "/repo/.git", name: ".git", kind: "directory", size: "4096", modifiedUnixMillis: "1", mode: 0o755, symlink: false, symlinkTarget: "", expandable: false, generation: "18446744073709551615", mime: "", imagePreviewEligible: false },
     ] } });
     const listing = await new TauriFileWorkspaceClient().listDirectory(scope, root, "/repo");
@@ -152,7 +152,7 @@ describe("TauriFileWorkspaceClient", () => {
     await client.resolveActiveRoot(scope);
     const events: unknown[] = [];
     await client.subscribe(scope, (event) => events.push(event));
-    client.publishWireEvent({ operationId: "", rootToken: "token", watchId: "w", directory: { watchId: "w", root: "/repo", path: "/repo", generation: "2", entries: [], overflowed: true, authoritative: true, nextPageToken: "", complete: true }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
+    client.publishWireEvent({ operationId: "", rootToken: "token", watchId: "w", directory: { watchId: "w", root: "/repo", path: "/repo", generation: "2", entries: [], authoritative: true, nextPageToken: "", complete: true }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
     client.publishWireEvent({ operationId: "agent", rootToken: "token", metadata: { path: "/repo/a", name: "a", kind: "file", size: "1", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "99", mime: "", imagePreviewEligible: false }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
     client.publishWireEvent({ operationId: "delete", rootToken: "token", deleted: true, metadata: { path: "/repo/gone", name: "gone", kind: "file", size: "1", modifiedUnixMillis: "1", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "100", mime: "", imagePreviewEligible: false }, transferId: "", transferredBytes: "0", totalBytes: "0", state: "", error: "" });
     expect(events).toEqual([
@@ -182,7 +182,7 @@ describe("TauriFileWorkspaceClient", () => {
     client.publishWireEvent({
       operationId: "", rootToken: "token", watchId: "w",
       directory: {
-        watchId: "w", root: "/repo", path: "/repo", generation: "9", overflowed: false, authoritative: true,
+        watchId: "w", root: "/repo", path: "/repo", generation: "9", authoritative: true,
         nextPageToken: "", complete: true,
         entries: [{ path: "/repo/kept", name: "kept", kind: "file", size: "2", modifiedUnixMillis: "5", mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "77", mime: "", imagePreviewEligible: false }],
       },
@@ -242,7 +242,7 @@ describe("TauriFileWorkspaceClient", () => {
     let settle!: () => void;
     invokeMock.mockImplementation(async (command) => {
       if (command === "cancel_file_request") return undefined;
-      return new Promise((resolve) => { settle = () => resolve({ operationId: "list", directory: { watchId: "", root: "/repo", path: "/repo", generation: "1", entries: [], overflowed: false, authoritative: true, nextPageToken: "", complete: true } }); });
+      return new Promise((resolve) => { settle = () => resolve({ operationId: "list", directory: { watchId: "", root: "/repo", path: "/repo", generation: "1", entries: [], authoritative: true, nextPageToken: "", complete: true } }); });
     });
     const abort = new AbortController();
     const client = new TauriFileWorkspaceClient();

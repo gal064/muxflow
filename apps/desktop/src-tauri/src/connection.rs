@@ -32,10 +32,12 @@ use delivery_window::{DeliveryWindow, HostCharge};
 pub(crate) mod delivery_ack;
 use delivery_ack::flush_delivery_ack;
 mod dispatch;
+mod operations;
 use dispatch::{
     ClientInputDispatch, ClientInputQueue, INPUT_BYTE_BUDGET, INPUT_MESSAGE_BUDGET, ResizeQueue,
     StopSignal, TerminalSize, run_client_input_dispatch, run_client_resize_dispatch,
 };
+use operations::{Bound, OperationClaim, OperationLane, OperationRegistry};
 mod writer;
 use writer::ControlWriterHandle;
 pub(crate) mod agent;
@@ -99,10 +101,7 @@ struct TerminalClient {
     read_only: AtomicBool,
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
-    /// In-flight cancellable operations, keyed by the lane that owns the
-    /// operation id. Two lanes mint ids independently, so one map keyed by the
-    /// id alone could cancel the wrong request.
-    operations: Mutex<HashMap<(OperationLane, String), OperationSlot>>,
+    operations: Arc<OperationRegistry>,
     input_queue: Mutex<ClientInputQueue>,
     resize_queue: ResizeQueue,
     input_epoch: AtomicU64,
@@ -112,49 +111,6 @@ struct TerminalClient {
     delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
     delivery_ack_serialization: Mutex<()>,
     pending_delivery_ack: Mutex<Option<(u64, HostCharge)>>,
-}
-
-/// Which operation-id namespace an in-flight cancellable request belongs to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum OperationLane {
-    Git,
-    File,
-}
-
-impl OperationLane {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Git => "Git",
-            Self::File => "file",
-        }
-    }
-}
-
-/// One cancellable operation's slot.
-///
-/// A slot exists from the moment the renderer's command thread claims the
-/// operation ID, before any request has been written. Without that, a caller
-/// that abandoned its read faster than the worker thread could register it
-/// found nothing to cancel, and the remote scan ran to completion for an answer
-/// nobody would read.
-#[derive(Default)]
-struct OperationSlot {
-    request_id: Option<u64>,
-    /// A cancellation that arrived before the request had an id. The request is
-    /// refused rather than sent.
-    cancelled: bool,
-}
-
-/// A claimed operation ID, released when the operation finishes.
-struct OperationClaim {
-    client: Arc<TerminalClient>,
-    key: (OperationLane, String),
-}
-
-impl Drop for OperationClaim {
-    fn drop(&mut self) {
-        self.client.operations.lock().unwrap().remove(&self.key);
-    }
 }
 
 struct InitialHostState {
@@ -176,7 +132,7 @@ impl TerminalClient {
             read_only: AtomicBool::new(false),
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
-            operations: Mutex::new(HashMap::new()),
+            operations: Arc::new(OperationRegistry::default()),
             input_queue: Mutex::new(ClientInputQueue::default()),
             resize_queue: ResizeQueue::default(),
             input_epoch: AtomicU64::new(0),
@@ -377,15 +333,12 @@ impl TerminalClient {
     }
 
     fn request_git(
-        &self,
+        self: &Arc<Self>,
         request: v1::Request,
         operation_id: &str,
     ) -> Result<v1::Response, String> {
-        self.request_with_timeout(
-            request,
-            GIT_REQUEST_TIMEOUT,
-            Some((OperationLane::Git, operation_id.to_owned())),
-        )
+        let claim = self.operations.claim(OperationLane::Git, operation_id)?;
+        self.request_with_timeout(request, GIT_REQUEST_TIMEOUT, Some(claim))
     }
 
     /// A control-lane file request the renderer can cancel by operation id.
@@ -399,34 +352,14 @@ impl TerminalClient {
         request: v1::Request,
         claim: Option<OperationClaim>,
     ) -> Result<v1::Response, String> {
-        let key = claim.as_ref().map(|held| held.key.clone());
-        self.request_with_timeout(request, REQUEST_TIMEOUT, key)
-    }
-
-    /// Claims one operation ID before any request is written for it.
-    fn claim_operation(
-        self: &Arc<Self>,
-        lane: OperationLane,
-        operation_id: &str,
-    ) -> Result<OperationClaim, String> {
-        let key = (lane, operation_id.to_owned());
-        let mut operations = self.operations.lock().unwrap();
-        if operations.contains_key(&key) {
-            return Err(format!("duplicate {} operation ID", lane.label()));
-        }
-        operations.insert(key.clone(), OperationSlot::default());
-        drop(operations);
-        Ok(OperationClaim {
-            client: Arc::clone(self),
-            key,
-        })
+        self.request_with_timeout(request, REQUEST_TIMEOUT, claim)
     }
 
     fn request_with_timeout(
         &self,
         request: v1::Request,
         timeout: Duration,
-        operation: Option<(OperationLane, String)>,
+        operation: Option<OperationClaim>,
     ) -> Result<v1::Response, String> {
         let deadline = Instant::now() + timeout;
         if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
@@ -442,20 +375,11 @@ impl TerminalClient {
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = mpsc::channel();
         self.pending.lock().unwrap().insert(request_id, sender);
-        if let Some(key) = &operation {
-            let mut operations = self.operations.lock().unwrap();
-            let slot = operations.entry(key.clone()).or_default();
-            if slot.cancelled {
-                drop(operations);
-                self.pending.lock().unwrap().remove(&request_id);
-                return Err("cancelled: request was cancelled before dispatch".into());
-            }
-            if slot.request_id.is_some() {
-                drop(operations);
-                self.pending.lock().unwrap().remove(&request_id);
-                return Err(format!("duplicate {} operation ID", key.0.label()));
-            }
-            slot.request_id = Some(request_id);
+        if let Some(claim) = &operation
+            && matches!(self.operations.bind(claim, request_id), Bound::Cancelled)
+        {
+            self.pending.lock().unwrap().remove(&request_id);
+            return Err("cancelled: request was cancelled before dispatch".into());
         }
         let write_result = self
             .writer
@@ -468,8 +392,8 @@ impl TerminalClient {
             });
         if let Err(error) = write_result {
             self.pending.lock().unwrap().remove(&request_id);
-            if let Some(key) = &operation {
-                self.release_operation(key);
+            if let Some(claim) = &operation {
+                self.operations.unbind(claim);
             }
             return Err(error);
         }
@@ -501,22 +425,10 @@ impl TerminalClient {
                 )
             }
         };
-        if let Some(key) = &operation {
-            self.release_operation(key);
+        if let Some(claim) = &operation {
+            self.operations.unbind(claim);
         }
         result
-    }
-
-    /// Clears the request id but keeps a claim's slot until the claim drops, so
-    /// a cancellation racing completion still finds somewhere to land.
-    fn release_operation(&self, key: &(OperationLane, String)) {
-        let mut operations = self.operations.lock().unwrap();
-        match operations.get_mut(key) {
-            Some(slot) => slot.request_id = None,
-            None => {
-                operations.remove(key);
-            }
-        }
     }
 
     fn cancel_git(&self, operation_id: &str) -> Result<(), String> {
@@ -528,25 +440,19 @@ impl TerminalClient {
     }
 
     pub(crate) fn claim_file_operation(
-        self: &Arc<Self>,
+        &self,
         operation_id: &str,
     ) -> Result<OperationClaim, String> {
-        self.claim_operation(OperationLane::File, operation_id)
+        self.operations.claim(OperationLane::File, operation_id)
     }
 
     fn cancel_operation(&self, lane: OperationLane, operation_id: &str) -> Result<(), String> {
-        let key = (lane, operation_id.to_owned());
-        let mut operations = self.operations.lock().unwrap();
-        let slot = operations
-            .get_mut(&key)
-            .ok_or_else(|| format!("unknown or completed {} operation ID", lane.label()))?;
-        let Some(request_id) = slot.request_id else {
-            // Claimed but not yet dispatched. Leave a tombstone so the request
-            // is refused instead of sent to a host that will never be told.
-            slot.cancelled = true;
+        let Some(request_id) = self.operations.cancel(lane, operation_id)? else {
+            // Claimed but not yet dispatched. The tombstone the registry left
+            // refuses the request rather than sending it to a host that would
+            // never be told to stop.
             return Ok(());
         };
-        drop(operations);
         let writer = self
             .writer
             .lock()
@@ -566,7 +472,7 @@ impl TerminalClient {
     }
 
     fn fail_pending(&self, message: &str) {
-        self.operations.lock().unwrap().clear();
+        self.operations.clear();
         for (_, sender) in self.pending.lock().unwrap().drain() {
             let _ = sender.send(Err(message.into()));
         }

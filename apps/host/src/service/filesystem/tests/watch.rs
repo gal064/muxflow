@@ -22,14 +22,16 @@ fn native_watch_routing_is_independent_of_directory_entry_count() {
         target_directory: Arc::new(target_directory),
         fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
     };
+    // Routing is one grouping of the whole dirty batch, so a directory with a
+    // quarter of a million entries costs the same lookup as an empty one.
     let deep = watch.target.join("entry-249999");
-    assert!(watch_matches_changes(
-        &watch,
-        std::slice::from_ref(&deep),
-        false
-    ));
-    assert!(watch_matches_changes(&watch, &[], true));
-    assert!(!watch_matches_changes(&watch, &[], false));
+    let grouped = changes_by_parent([deep.clone(), PathBuf::from("/elsewhere/file")]);
+    assert_eq!(grouped.get(&watch.target), Some(&vec![deep]));
+    assert!(changes_by_parent([]).is_empty());
+    // A path that is the watched directory belongs to its parent, never to
+    // itself: the whole reason a self-event stopped becoming a row inside it.
+    let self_event = changes_by_parent([watch.target.clone()]);
+    assert!(!self_event.contains_key(&watch.target));
     fs::remove_dir_all(root_path).unwrap();
 }
 
@@ -454,10 +456,9 @@ fn an_event_about_the_watched_directory_itself_is_never_a_row_inside_it() {
         fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
     };
 
-    // The watch is still considered touched, so a rescan can be scheduled for
-    // it; what it must not do is invent an entry.
+    // Never routed to itself, and never an entry inside itself even if it were.
     let itself = std::slice::from_ref(&logical_root);
-    assert!(watch_matches_changes(&watch, itself, false));
+    assert!(!changes_by_parent([logical_root.clone()]).contains_key(&logical_root));
     assert!(precise_file_events("self", &watch, itself).is_empty());
 
     // A child of the same directory is still reported, exactly once.

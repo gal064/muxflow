@@ -239,7 +239,11 @@ impl DirectoryPageCache {
         cursor: &PageCursor,
         page_size: usize,
     ) -> Option<RetainedPage> {
-        let snapshots = self.snapshots.lock().unwrap();
+        let mut snapshots = self.snapshots.lock().unwrap();
+        // Swept on the way in, not only on the way out: a session that opens
+        // one large directory and then goes idle would otherwise keep its
+        // retained entries resident until something else inserted one.
+        snapshots.retain(|_, page| page.created.elapsed() <= SNAPSHOT_TTL);
         let page = snapshots.get(&cursor.snapshot_id)?;
         if page.binding != *binding
             || page.generation != cursor.generation

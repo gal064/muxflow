@@ -331,6 +331,10 @@ impl<'a> FileReadStream<'a> {
 
     fn accept(&mut self, frame: v1::FileStreamFrame) -> Result<(), String> {
         self.deadline.touch();
+        // Re-checked per frame, as the write path does per chunk: a read whose
+        // connection scope was replaced mid-transfer must stop rather than run
+        // to completion and publish content for a scope nobody is showing.
+        self.job.binding.validate()?;
         if let Some(header) = frame.header {
             if self.header.is_some() {
                 return Err("file open stream repeated its header".into());

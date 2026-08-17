@@ -3,7 +3,7 @@ import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope, WorkspaceEvent } from "./types";
 import { keyForTransferConnection } from "./api";
-import { useWorkspaceFiles } from "./useWorkspaceFiles";
+import { ACTIVE_ROOT_STABLE_PROBES, useWorkspaceFiles } from "./useWorkspaceFiles";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -139,13 +139,74 @@ describe("useWorkspaceFiles", () => {
     expect(fixture.released).toEqual(["/repo/src"]);
     expect(fixture.acquired).toEqual(["/repo", "/repo/src"]);
 
-    // Revisiting paints from the cache on the spot, then revalidates.
+    // Re-expanding without leaving keeps the rows it already had.
     await act(async () => { current?.toggleDirectory("/repo/src"); });
-    expect(current?.listings.get("/repo/src")?.entries, "a cached revisit did not paint locally").toHaveLength(1);
+    expect(current?.listings.get("/repo/src")?.entries).toHaveLength(1);
     expect(current?.loading.has("/repo/src")).toBe(false);
     await act(async () => { await Promise.resolve(); });
     expect(fixture.acquired).toEqual(["/repo", "/repo/src", "/repo/src"]);
     expect(fixture.listed).toEqual([]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("paints a revisited directory from the cache before its watch answers", async () => {
+    // A pane switch is the case the cache exists for: the tree's own listings
+    // are dropped with the scope, the root capability is unchanged, and the
+    // directory the user reopens must not wait out a remote round trip to show
+    // rows the app already has.
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const directories = new Map([
+      ["/repo", [entry("/repo/src", { directory: true })]],
+      ["/repo/src", [entry("/repo/src/main.ts"), entry("/repo/src/util.ts")]],
+    ]);
+    const acquired: string[] = [];
+    const listed: string[] = [];
+    let settle: (() => void) | undefined;
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async (scope) => ({ ...root, paneId: scope.paneId })),
+      listDirectory: vi.fn(async (_scope, active, directory) => {
+        listed.push(directory);
+        return listing(active.token, directory, directories.get(directory) ?? []);
+      }),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => {
+        acquired.push(directory);
+        // The second visit's watch is held open, so anything on screen before
+        // it resolves came from the cache and nowhere else.
+        if (acquired.filter((held) => held === directory).length > 1) {
+          await new Promise<void>((resolve) => { settle = resolve; });
+        }
+        return {
+          snapshot: listing(active.token, directory, directories.get(directory) ?? []),
+          release: () => undefined,
+        };
+      }),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async () => () => undefined),
+    };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness({ scope }: { scope: FileWorkspaceScope }) { current = useWorkspaceFiles(client, scope); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness scope={BASE_SCOPE} />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.listings.get("/repo/src")?.entries).toHaveLength(2);
+
+    // Switch pane: the scope resets, so the tree holds no listings at all.
+    const other: FileWorkspaceScope = { ...BASE_SCOPE, paneId: "%2" };
+    await act(async () => { renderer.update(<Harness scope={other} />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.listings.get("/repo/src")).toBeUndefined();
+
+    await act(async () => { current?.toggleDirectory("/repo/src"); });
+    expect(
+      current?.listings.get("/repo/src")?.entries,
+      "a cached revisit painted nothing before its watch answered",
+    ).toHaveLength(2);
+    expect(current?.loading.has("/repo/src"), "a directory painted from cache is not waiting").toBe(false);
+    expect(listed, "a cached revisit paid for a directory list").toEqual([]);
+    settle?.();
+    await act(async () => { await Promise.resolve(); });
     await act(async () => { renderer.unmount(); });
   });
 
@@ -325,6 +386,74 @@ describe("useWorkspaceFiles", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it("stops probing the active root once it has settled, and re-arms on activity", async () => {
+    vi.useFakeTimers();
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const resolveActiveRoot = vi.fn(async () => root);
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot,
+      listDirectory: vi.fn(async (_scope, active, directory) => listing(active.token, directory)),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({
+        snapshot: listing(active.token, directory, directory === "/repo" ? [entry("/repo/src", { directory: true })] : []),
+        release: () => undefined,
+      })),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async () => () => undefined),
+    };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    const initial = resolveActiveRoot.mock.calls.length;
+
+    // Probe until the root has proved itself unchanged, then keep waiting: an
+    // idle window must not go on asking the host anything at all.
+    for (let tick = 0; tick < ACTIVE_ROOT_STABLE_PROBES + 6; tick += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(ACTIVE_ROOT_BACKSTOP_MS + 1); });
+    }
+    const settled = resolveActiveRoot.mock.calls.length;
+    expect(settled).toBeGreaterThan(initial);
+    expect(settled - initial).toBeLessThanOrEqual(ACTIVE_ROOT_STABLE_PROBES);
+    await act(async () => { await vi.advanceTimersByTimeAsync(ACTIVE_ROOT_BACKSTOP_MS * 10) });
+    expect(resolveActiveRoot.mock.calls.length, "a settled backstop kept polling").toBe(settled);
+
+    // Touching the tree is evidence the pane may have moved, so it re-arms.
+    await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
+    expect(resolveActiveRoot.mock.calls.length).toBeGreaterThan(settled);
+    await act(async () => { renderer.unmount(); });
+    vi.useRealTimers();
+  });
+
+  it("prefetches exactly one further page for a directory that opened incomplete", async () => {
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const listed: string[] = [];
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async () => root),
+      listDirectory: vi.fn(async (_scope, active, directory) => {
+        listed.push(directory);
+        // The prefetched page finishes the directory, so nothing follows it.
+        return { ...listing(active.token, directory, [entry("/repo/b")]), complete: true };
+      }),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({
+        snapshot: { ...listing(active.token, directory, [entry("/repo/a")]), complete: false, nextPageToken: "page-2" },
+        release: () => undefined,
+      })),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async () => () => undefined),
+    };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    for (let turn = 0; turn < 5; turn += 1) await act(async () => { await Promise.resolve(); });
+    // One page, never a chain of them.
+    expect(listed).toEqual(["/repo"]);
+    expect(current?.listings.get("/repo")?.entries.map((item) => item.name)).toEqual(["a", "b"]);
+    expect(current?.listings.get("/repo")?.complete).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("replaces a listing from an authoritative rescan without asking for it again", async () => {
     vi.useFakeTimers();
     const clock = fakeClock();
@@ -392,6 +521,15 @@ describe("useWorkspaceFiles", () => {
    * unmistakable, so the counts here are the evidence that expanding, changing,
    * revisiting, and collapsing cost exactly the round trips they should.
    */
+  /**
+   * The Phase 14 wide Explorer lane, as a request ledger rather than a timing.
+   *
+   * 4,096 entries is the size at which a list-per-event or a watch rebuild is
+   * unmistakable, so the counts here are the evidence that expanding, changing,
+   * revisiting, and collapsing cost exactly the round trips they should. The
+   * revisit deliberately crosses a pane switch, which is what drops the tree's
+   * own listings and leaves the cache as the only thing that can paint.
+   */
   it("holds the Phase 14 wide Explorer lane to one watch per directory and no list at all", async () => {
     const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
     const wide = Array.from({ length: 4_096 }, (_, index) => entry(`/repo/wide/file-${index}`));
@@ -399,17 +537,42 @@ describe("useWorkspaceFiles", () => {
       ["/repo", [entry("/repo/wide", { directory: true })]],
       ["/repo/wide", wide],
     ]);
-    const fixture = watchingClient(directories, root);
+    const acquired: string[] = [];
+    const released: string[] = [];
+    const listed: string[] = [];
+    let listener: ((event: WorkspaceEvent) => void) | undefined;
+    let holdRevisit: (() => void) | undefined;
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot: vi.fn(async (scope) => ({ ...root, paneId: scope.paneId })),
+      listDirectory: vi.fn(async (_scope, active, directory) => {
+        listed.push(directory);
+        return listing(active.token, directory, directories.get(directory) ?? []);
+      }),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => {
+        acquired.push(directory);
+        // The revisit's watch is held open, so anything painted before it
+        // answers came from the cache and from nothing else.
+        if (directory === "/repo/wide" && acquired.filter((held) => held === directory).length > 1) {
+          await new Promise<void>((resolve) => { holdRevisit = resolve; });
+        }
+        return {
+          snapshot: listing(active.token, directory, directories.get(directory) ?? []),
+          release: () => released.push(directory),
+        };
+      }),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async (_scope, next) => { listener = next; return () => undefined; }),
+    };
     let current: ReturnType<typeof useWorkspaceFiles> | undefined;
-    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    function Harness({ scope }: { scope: FileWorkspaceScope }) { current = useWorkspaceFiles(client, scope); return null; }
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { renderer = create(<Harness scope={BASE_SCOPE} />); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
-    const rootWatches = fixture.acquired.length;
+    const rootWatches = acquired.length;
 
     await act(async () => { current?.toggleDirectory("/repo/wide"); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
-    const expandWatches = fixture.acquired.length - rootWatches;
+    const expandWatches = acquired.length - rootWatches;
     const expandedRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
 
     // One external create inside the 4,096-entry directory. The fake host
@@ -417,7 +580,7 @@ describe("useWorkspaceFiles", () => {
     // rather than silently undoing it.
     directories.set("/repo/wide", [...wide, entry("/repo/wide/appeared", { generation: "2" })]);
     await act(async () => {
-      fixture.publish({
+      listener?.({
         kind: "fileChanged", rootToken: "root", path: "/repo/wide/appeared",
         generation: "2", entry: entry("/repo/wide/appeared", { generation: "2" }),
       });
@@ -426,9 +589,16 @@ describe("useWorkspaceFiles", () => {
     const afterChangeRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
 
     await act(async () => { current?.toggleDirectory("/repo/wide"); await Promise.resolve(); });
-    const collapseReleases = fixture.released.length;
+    const collapseReleases = released.filter((directory) => directory === "/repo/wide").length;
+
+    // A pane switch drops every listing the tree holds; the root capability is
+    // unchanged, so the cache is the only thing that can paint the revisit.
+    await act(async () => { renderer.update(<Harness scope={{ ...BASE_SCOPE, paneId: "%2" }} />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
     await act(async () => { current?.toggleDirectory("/repo/wide"); });
     const cachedRevisitRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+    const cachedRevisitWaiting = current?.loading.has("/repo/wide") ?? true;
+    holdRevisit?.();
     await act(async () => { await Promise.resolve(); });
 
     expect(rootWatches).toBe(1);
@@ -437,18 +607,19 @@ describe("useWorkspaceFiles", () => {
     expect(afterChangeRows).toBe(4_097);
     expect(collapseReleases).toBe(1);
     expect(cachedRevisitRows).toBe(4_097);
-    expect(fixture.listed).toEqual([]);
+    expect(cachedRevisitWaiting).toBe(false);
+    expect(listed).toEqual([]);
     console.log(`PHASE14_METRIC ${JSON.stringify({
       lane: "explorerWideWatchTraffic",
       entries: 4_096,
       rootWatchRequests: rootWatches,
       expandWatchRequests: expandWatches,
-      directoryListRequests: fixture.listed.length,
+      directoryListRequests: listed.length,
       collapseWatchReleases: collapseReleases,
       expandedRows,
       externalChangeRows: afterChangeRows,
       cachedRevisitRows,
-      cachedRevisitPaintedBeforeRevalidation: cachedRevisitRows === afterChangeRows,
+      cachedRevisitPaintedBeforeRevalidation: cachedRevisitRows === afterChangeRows && !cachedRevisitWaiting,
     })}`);
     await act(async () => { renderer.unmount(); });
   });

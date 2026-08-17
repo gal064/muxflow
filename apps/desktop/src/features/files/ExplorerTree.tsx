@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { useModalDialog } from "../../commands/useModalDialog";
@@ -7,7 +7,7 @@ import { SurfaceError } from "../../ui/SurfaceError";
 import type { DownloadIntent } from "./downloadFlow";
 import { DownloadTransfers } from "./DownloadTransfers";
 import { ExplorerEntryRow, ExplorerMoreRow, type ExplorerRowActions } from "./ExplorerRow";
-import { DEFAULT_ROW_HEIGHT, rowWindow, scrollOffsetForRow } from "./explorerWindow";
+import { DEFAULT_ROW_HEIGHT, mountedRowCount, rowWindow, scrollOffsetForRow } from "./explorerWindow";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
 import { recordPerfHighWater } from "../../perf/probe";
 
@@ -91,18 +91,17 @@ export function ExplorerTree(props: Props) {
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
   const viewport = useTreeViewport(treeRef, rows.length);
-  const window_ = rowWindow({
+  const mounted = rowWindow({
     rowCount: rows.length,
     rowHeight: viewport.rowHeight,
     scrollTop: viewport.scrollTop,
     viewportHeight: viewport.height,
     focusIndex,
   });
-  // The actual slice mounted below, so the metric stays about mounted row cost
-  // rather than the logical model. Below the windowing threshold the two are
-  // the same value and the tree behaves exactly as it always has.
-  const renderedRows = rows.slice(window_.start, window_.end);
-  const renderedRowCount = renderedRows.length;
+  // The real cost the row budget is about, so the metric stays about mounted
+  // rows rather than the logical model. Below the windowing threshold this is
+  // every row and the tree behaves exactly as it always has.
+  const renderedRowCount = mountedRowCount(mounted);
   useEffect(() => {
     recordPerfHighWater("explorer.logicalRows", rows.length);
     recordPerfHighWater("explorer.renderedRows", renderedRowCount);
@@ -239,7 +238,7 @@ export function ExplorerTree(props: Props) {
   // for nothing. What the palette needs to be current is the *id list*, and
   // that is memoized above.
   const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
-  runRowCommand.current = (commandId) => {
+  const committedRowCommand = (commandId: CommandId) => {
     switch (commandId) {
       case "files.open": if (focusedEntry) props.onOpen(focusedEntry, { preview: false }); return;
       case "files.rename": begin("rename", focusedEntry); return;
@@ -252,6 +251,7 @@ export function ExplorerTree(props: Props) {
       case "files.refresh": props.onRefresh(); return;
     }
   };
+  useLayoutEffect(() => { runRowCommand.current = committedRowCommand; });
   const rowSource = useMemo<RowCommandSource | undefined>(() => rowActions.length === 0 ? undefined : {
     subject: focusedEntry?.name ?? rootName,
     available: rowActions,
@@ -322,41 +322,43 @@ export function ExplorerTree(props: Props) {
         event.preventDefault();
         setMenu({ anchor: { x: event.clientX, y: event.clientY } });
       }}
-      onScroll={(event) => viewport.setScrollTop(event.currentTarget.scrollTop)}
+      onScroll={(event) => viewport.observeScroll(event.currentTarget.scrollTop)}
       ref={treeRef}
       role="tree"
     >
-      {/* Reserved height for the rows above and below the mounted band, so the
-          scrollbar describes the whole directory rather than the slice. Both
-          are zero below the windowing threshold. */}
-      {window_.leadingHeight > 0 && <div aria-hidden="true" style={{ height: `${window_.leadingHeight}px` }} />}
-      {renderedRows.map((row, offset) => {
-        const index = window_.start + offset;
-        return row.kind === "more"
-          ? <ExplorerMoreRow
-            actions={rowActionsRef}
-            depth={row.depth}
-            directory={row.directory}
-            disabled={props.loading.has(row.directory)}
-            focused={index === focusIndex}
-            index={index}
-            key={`more:${row.directory}`}
-            positionInSet={index + 1}
-            setSize={rows.length}
-          />
-          : <ExplorerEntryRow
-            actions={rowActionsRef}
-            depth={row.depth}
-            entry={row.entry}
-            focused={index === focusIndex}
-            index={index}
-            key={row.entry.path}
-            open={props.expanded.has(row.entry.path)}
-            positionInSet={index + 1}
-            setSize={rows.length}
-          />;
-      })}
-      {window_.trailingHeight > 0 && <div aria-hidden="true" style={{ height: `${window_.trailingHeight}px` }} />}
+      {/* Reserved height stands in for the rows that are not mounted, so the
+          scrollbar describes the whole directory rather than the slice. All of
+          it is zero below the windowing threshold. */}
+      {mounted.segments.map((segment) => <Fragment key={`segment:${segment.start}`}>
+        {segment.leadingHeight > 0 && <div aria-hidden="true" style={{ height: `${segment.leadingHeight}px` }} />}
+        {rows.slice(segment.start, segment.end).map((row, offset) => {
+          const index = segment.start + offset;
+          return row.kind === "more"
+            ? <ExplorerMoreRow
+              actions={rowActionsRef}
+              depth={row.depth}
+              directory={row.directory}
+              disabled={props.loading.has(row.directory)}
+              focused={index === focusIndex}
+              index={index}
+              key={`more:${row.directory}`}
+              positionInSet={row.positionInSet}
+              setSize={row.setSize}
+            />
+            : <ExplorerEntryRow
+              actions={rowActionsRef}
+              depth={row.depth}
+              entry={row.entry}
+              focused={index === focusIndex}
+              index={index}
+              key={row.entry.path}
+              open={props.expanded.has(row.entry.path)}
+              positionInSet={row.positionInSet}
+              setSize={row.setSize}
+            />;
+        })}
+      </Fragment>)}
+      {mounted.trailingHeight > 0 && <div aria-hidden="true" style={{ height: `${mounted.trailingHeight}px` }} />}
       {/* Only until this directory has answered once — "we have no listing yet",
           not "we have no rows", so a directory that is genuinely empty does not
           swap between these two lines every time it is re-read either.
@@ -471,6 +473,7 @@ type ExplorerRowModel =
  */
 function useTreeViewport(ref: RefObject<HTMLDivElement | null>, rowCount: number) {
   const [scrollTop, setScrollTop] = useState(0);
+  const scrollFrame = useRef(0);
   const [height, setHeight] = useState(0);
   const [rowHeight, setRowHeight] = useState(DEFAULT_ROW_HEIGHT);
   useEffect(() => {
@@ -487,10 +490,26 @@ function useTreeViewport(ref: RefObject<HTMLDivElement | null>, rowCount: number
   }, [ref, rowCount]);
   // A shorter tree can leave the viewport scrolled past its own content.
   useEffect(() => { if (rowCount === 0) setScrollTop(0); }, [rowCount]);
-  return { height, rowHeight, scrollTop, setScrollTop };
+  useEffect(() => () => globalThis.cancelAnimationFrame?.(scrollFrame.current), []);
+  return {
+    height,
+    rowHeight,
+    scrollTop,
+    setScrollTop,
+    /**
+     * Coalesces scrolling to one commit per frame.
+     *
+     * A scroll event per state commit re-slices and re-renders the mounted
+     * band, which on the surface windowing exists to keep under a frame budget
+     * is the one place that cannot afford a render per event.
+     */
+    observeScroll: (offset: number) => {
+      globalThis.cancelAnimationFrame?.(scrollFrame.current);
+      scrollFrame.current = globalThis.requestAnimationFrame(() => setScrollTop(offset));
+    },
+  };
 }
 
 function labelForAction(action: PendingAction["action"]): string {
   return ({ newFile: "Create file", newDirectory: "Create folder", rename: "Rename", move: "Move", duplicate: "Duplicate", delete: "Delete" } as const)[action];
 }
-

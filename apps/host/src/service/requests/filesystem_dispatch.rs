@@ -3,7 +3,6 @@ use super::*;
 pub(super) struct FileDispatchContext<'a> {
     pub(super) control_tx: &'a mpsc::Sender<SequencerControl>,
     pub(super) event_tx: &'a mpsc::Sender<SequencerControl>,
-    pub(super) pending: &'a Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     pub(super) files: &'a Arc<FileService>,
     pub(super) bulk_connection: bool,
 }
@@ -95,10 +94,12 @@ pub(super) async fn handle(
     cancellation: Arc<AtomicBool>,
     context: FileDispatchContext<'_>,
 ) {
+    // Request deregistration belongs to the dispatcher, which does it
+    // unconditionally after this returns. Twenty copies of it here disagreed
+    // with that contract by being absent from exactly one arm.
     let FileDispatchContext {
         control_tx,
         event_tx,
-        pending,
         files,
         bulk_connection,
     } = context;
@@ -121,7 +122,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -132,7 +132,6 @@ pub(super) async fn handle(
                     response_error("invalid_root_token", &error.to_string()),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             }
             let watch = operation == v1::Operation::WatchDirectory;
@@ -182,7 +181,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let response = files.unwatch_directory(&file.watch_id).map_or_else(
@@ -199,7 +197,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -210,7 +207,6 @@ pub(super) async fn handle(
                     response_error("invalid_root_token", &error.to_string()),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             }
             let root = file.root.clone();
@@ -248,7 +244,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -259,7 +254,6 @@ pub(super) async fn handle(
                     response_error("invalid_root_token", &error.to_string()),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             }
             let work = file.clone();
@@ -312,7 +306,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -323,7 +316,6 @@ pub(super) async fn handle(
                     response_error("invalid_root_token", &error.to_string()),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             }
             let work = file.clone();
@@ -359,7 +351,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -389,7 +380,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -411,7 +401,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let response = if let Err(error) = validate_root_token(&file.root, &file.root_token) {
@@ -451,7 +440,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -483,7 +471,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -526,7 +513,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -548,7 +534,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let collision = v1::CollisionPolicy::try_from(file.collision_policy)
@@ -587,7 +572,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -627,7 +611,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -657,7 +640,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);
@@ -691,7 +673,6 @@ pub(super) async fn handle(
                     response_error("invalid_file_request", "file request payload is required"),
                 )
                 .await;
-                pending.lock().unwrap().remove(&request_id);
                 return;
             };
             let service = Arc::clone(files);

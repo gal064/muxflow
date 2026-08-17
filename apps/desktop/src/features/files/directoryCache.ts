@@ -9,6 +9,14 @@ interface CacheKey {
   clientId: string;
   /** The exact root capability. A replaced root invalidates every entry. */
   rootToken: string;
+  /**
+   * The root's generation.
+   *
+   * A capability the host reissues under the same token for a re-resolved root
+   * still carries a fresh generation, and a listing captured under the previous
+   * one describes a tree the host no longer says is current.
+   */
+  rootGeneration: string;
   directory: string;
 }
 
@@ -58,16 +66,16 @@ export class DirectoryListingCache {
    * root capability, path — is unchanged, and the cache exists precisely to
    * paint before revalidation.
    */
-  invalidateSubtree(clientId: string, rootToken: string, path: string): void {
-    const removed = identity({ clientId, rootToken, directory: path });
-    for (const key of [...this.#entries.keys()]) {
-      if (key === removed || key.startsWith(`${removed}/`)) this.#entries.delete(key);
+  invalidateSubtree(scope: Omit<CacheKey, "directory">, path: string): void {
+    const removed = identity({ ...scope, directory: path });
+    for (const held of [...this.#entries.keys()]) {
+      if (held === removed || held.startsWith(`${removed}/`)) this.#entries.delete(held);
     }
   }
 
   /** Drops everything that is not the exact live connection and root. */
-  invalidateOtherRoots(clientId: string, rootToken: string): void {
-    const prefix = `${clientId}\u0000${rootToken}\u0000`;
+  invalidateOtherRoots(clientId: string, rootToken: string, rootGeneration: string): void {
+    const prefix = `${clientId}\u0000${rootToken}\u0000${rootGeneration}\u0000`;
     for (const key of [...this.#entries.keys()]) {
       if (!key.startsWith(prefix)) this.#entries.delete(key);
     }
@@ -84,5 +92,5 @@ export class DirectoryListingCache {
 
 /** NUL cannot appear in a path, so no two distinct keys can collide. */
 function identity(key: CacheKey): string {
-  return `${key.clientId}\u0000${key.rootToken}\u0000${key.directory}`;
+  return `${key.clientId}\u0000${key.rootToken}\u0000${key.rootGeneration}\u0000${key.directory}`;
 }

@@ -104,7 +104,7 @@ pub(super) async fn handle(
 
     if header.content_streaming {
         let digest = body.digest().to_owned();
-        let mut chunks = body.into_chunks().peekable();
+        let mut chunks = body.chunks().peekable();
         let mut sent_any = false;
         while let Some((offset, chunk)) = chunks.next() {
             if cancellation.load(Ordering::Acquire) {
@@ -124,7 +124,7 @@ pub(super) async fn handle(
                 v1::FileStreamFrame {
                     operation_id: file.operation_id.clone(),
                     offset,
-                    data: chunk,
+                    data: chunk.to_vec(),
                     eof,
                     blake3: if eof { digest.clone() } else { String::new() },
                     ..Default::default()
@@ -222,8 +222,8 @@ mod tests {
                 panic!("expected a server hello")
             };
             assert!(!hello.read_only);
-            // A desktop that cannot see this bit refuses the bridge outright
-            // rather than failing one file open at a time.
+            // The desktop requires every host capability at its control
+            // handshake, so a helper that serves this operation must say so.
             assert_ne!(
                 Self::advertised_capabilities(&hello) & tmux_agent_protocol::CAP_FILE_STREAM,
                 0,

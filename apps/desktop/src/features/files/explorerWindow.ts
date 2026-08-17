@@ -6,12 +6,14 @@
  * a short list buys nothing while adding a scroll-position dependency to every
  * interaction. Above it, a 4,096-entry directory is roughly 33,000 DOM elements
  * — enough to put expand-to-paint and every subsequent focus move over budget —
- * so the tree mounts one contiguous band plus overscan and reserves the rest as
- * height.
+ * so the tree mounts what the viewport can see plus overscan, and reserves the
+ * rest as height.
  *
- * The band is deliberately contiguous and always contains the focused row, so
- * roving focus, Shift+F10, and scroll-to-item keep working against a row that
- * is really in the DOM.
+ * The focused row is mounted *in addition to* that band rather than instead of
+ * it. Moving the band to the focused row looks equivalent and is not: focus
+ * does not follow the scrollbar, so scrolling a large directory with a wheel
+ * would leave the mounted rows pinned at the top and the viewport showing
+ * nothing at all, with no row left to click.
  */
 export const WINDOW_ROW_THRESHOLD = 200;
 
@@ -33,12 +35,17 @@ export interface RowWindowInput {
   focusIndex: number;
 }
 
-export interface RowWindow {
+/** One contiguous run of mounted rows, and the height reserved before it. */
+export interface RowSegment {
   start: number;
   end: number;
-  /** Height reserved above the mounted band. */
   leadingHeight: number;
-  /** Height reserved below it. */
+}
+
+export interface RowWindow {
+  /** In index order, never overlapping. */
+  segments: readonly RowSegment[];
+  /** Height reserved after the last segment. */
   trailingHeight: number;
   windowed: boolean;
 }
@@ -46,31 +53,46 @@ export interface RowWindow {
 export function rowWindow(input: RowWindowInput): RowWindow {
   const { rowCount } = input;
   if (rowCount <= WINDOW_ROW_THRESHOLD) {
-    return { start: 0, end: rowCount, leadingHeight: 0, trailingHeight: 0, windowed: false };
+    return {
+      segments: rowCount > 0 ? [{ start: 0, end: rowCount, leadingHeight: 0 }] : [],
+      trailingHeight: 0,
+      windowed: false,
+    };
   }
   const rowHeight = input.rowHeight > 0 ? input.rowHeight : DEFAULT_ROW_HEIGHT;
   const viewportHeight = input.viewportHeight > 0 ? input.viewportHeight : DEFAULT_VIEWPORT_HEIGHT;
   const visible = Math.ceil(viewportHeight / rowHeight);
   const span = Math.min(rowCount, visible + OVERSCAN_ROWS * 2);
-  let start = Math.floor(Math.max(0, input.scrollTop) / rowHeight) - OVERSCAN_ROWS;
-  let end = start + span;
+  const start = clamp(
+    Math.floor(Math.max(0, input.scrollTop) / rowHeight) - OVERSCAN_ROWS,
+    0,
+    Math.max(0, rowCount - span),
+  );
+  const band: RowSegment = { start, end: clamp(start + span, 0, rowCount), leadingHeight: 0 };
+
   const focus = clamp(input.focusIndex, 0, rowCount - 1);
-  if (focus < start) {
-    start = focus - OVERSCAN_ROWS;
-    end = start + span;
-  } else if (focus >= end) {
-    end = focus + OVERSCAN_ROWS + 1;
-    start = end - span;
-  }
-  start = clamp(start, 0, Math.max(0, rowCount - span));
-  end = clamp(start + span, 0, rowCount);
+  const runs = focus >= band.start && focus < band.end
+    ? [band]
+    : focus < band.start
+      ? [{ start: focus, end: focus + 1, leadingHeight: 0 }, band]
+      : [band, { start: focus, end: focus + 1, leadingHeight: 0 }];
+
+  let covered = 0;
+  const segments = runs.map((run) => {
+    const segment = { ...run, leadingHeight: (run.start - covered) * rowHeight };
+    covered = run.end;
+    return segment;
+  });
   return {
-    start,
-    end,
-    leadingHeight: start * rowHeight,
-    trailingHeight: (rowCount - end) * rowHeight,
+    segments,
+    trailingHeight: (rowCount - covered) * rowHeight,
     windowed: true,
   };
+}
+
+/** Total rows a window mounts, which is the cost the row budget is about. */
+export function mountedRowCount(window: RowWindow): number {
+  return window.segments.reduce((total, segment) => total + (segment.end - segment.start), 0);
 }
 
 /**

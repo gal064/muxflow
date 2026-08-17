@@ -8,7 +8,6 @@ pub(super) struct ActiveRootContext<'a> {
     pub(super) generation: &'a Arc<AtomicU64>,
     pub(super) pending: &'a Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     pub(super) topology_lock: &'a Arc<tokio::sync::Mutex<()>>,
-    pub(super) files: &'a Arc<FileService>,
 }
 
 pub(super) async fn handle(
@@ -23,7 +22,6 @@ pub(super) async fn handle(
         generation,
         pending,
         topology_lock,
-        files,
     } = context;
     let Some(file) = request.file else {
         send_response(
@@ -35,7 +33,7 @@ pub(super) async fn handle(
         pending.lock().unwrap().remove(&request_id);
         return;
     };
-    let result = resolve(&file, &cancellation, generation, topology_lock, files).await;
+    let result = resolve(&file, &cancellation, generation, topology_lock).await;
     match result {
         Ok(active_root) => {
             let unchanged = active_root.root_token == file.known_root_token;
@@ -90,7 +88,6 @@ async fn resolve(
     cancellation: &Arc<AtomicBool>,
     generation: &Arc<AtomicU64>,
     topology_lock: &Arc<tokio::sync::Mutex<()>>,
-    files: &Arc<FileService>,
 ) -> anyhow::Result<v1::ActiveRoot> {
     let (snapshot, identity, known_generation) = discover(generation, topology_lock).await?;
     if (!file.expected_server_identity.is_empty() && file.expected_server_identity != identity)
@@ -137,7 +134,6 @@ async fn resolve(
     if !stable {
         bail!("stale active-root request: pane changed during resolution");
     }
-    let _ = files;
     Ok(v1::ActiveRoot {
         pane_id,
         root,

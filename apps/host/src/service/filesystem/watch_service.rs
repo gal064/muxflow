@@ -50,8 +50,10 @@ impl FileService {
         self.spawn_polling_fallback(Arc::clone(&closed), sender.clone(), Arc::clone(&overflowed));
         let Ok(watcher) = watcher else {
             // No native watcher at all: every registration below fails closed
-            // onto this connection's per-target fallback.
-            overflowed.store(true, Ordering::Release);
+            // onto this connection's per-target fallback. Deliberately *not* the
+            // sequencer's overflow flag — that one says ordered events were
+            // dropped and forces a connection-wide resync, and "this host has no
+            // inotify capacity" is a different fact with a different remedy.
             return;
         };
         *self.native_watcher.lock().unwrap() = Some(watcher);
@@ -65,43 +67,38 @@ impl FileService {
                 let Some(()) = first else { break };
                 sleep(Duration::from_millis(75)).await;
                 while native_rx.try_recv().is_ok() {}
-                let changed: Vec<PathBuf> = std::mem::take(&mut *native_dirty.lock().unwrap())
-                    .into_iter()
-                    .collect();
-                let watches = service.watch_entries();
+                // Grouped by parent once, rather than every watch scanning the
+                // whole dirty set: with the 4,096-path cap and 128 watches that
+                // was half a million comparisons and 128 full clones per batch.
+                let by_parent =
+                    changes_by_parent(std::mem::take(&mut *native_dirty.lock().unwrap()));
                 let all_rescan = native_rescan.swap(false, Ordering::AcqRel);
-                for (watch_id, watch) in watches
-                    .into_iter()
-                    .filter(|(_, watch)| watch_matches_changes(watch, &changed, all_rescan))
-                {
-                    if !all_rescan {
-                        // `precise_file_events` stats every dirty path, which on
-                        // this host can be a slow filesystem and is now the
-                        // primary path for the whole feature. It does not belong
-                        // on a runtime worker.
-                        let mapped = {
-                            let watch = watch.clone();
-                            let watch_id = watch_id.clone();
-                            let changed = changed.clone();
-                            tokio::task::spawn_blocking(move || {
-                                precise_file_events(&watch_id, &watch, &changed)
-                            })
-                            .await
-                        };
-                        for event in mapped.unwrap_or_default() {
-                            broadcast_control_event(event);
-                        }
+                for (watch_id, watch) in service.watch_entries() {
+                    if all_rescan {
+                        service
+                            .publish_authoritative_listing(&watch_id, &watch, &sender, &overflowed)
+                            .await;
                         continue;
                     }
-                    service
-                        .publish_authoritative_listing(
-                            &watch_id,
-                            &watch,
-                            true,
-                            &sender,
-                            &overflowed,
-                        )
-                        .await;
+                    let Some(children) = by_parent.get(&watch.target) else {
+                        continue;
+                    };
+                    // `precise_file_events` stats every dirty path, which on
+                    // this host can be a slow filesystem and is now the
+                    // primary path for the whole feature. It does not belong
+                    // on a runtime worker.
+                    let mapped = {
+                        let watch = watch.clone();
+                        let watch_id = watch_id.clone();
+                        let children = children.clone();
+                        tokio::task::spawn_blocking(move || {
+                            precise_file_events(&watch_id, &watch, &children)
+                        })
+                        .await
+                    };
+                    for event in mapped.unwrap_or_default() {
+                        broadcast_control_event(event);
+                    }
                 }
             }
         });
@@ -135,7 +132,6 @@ impl FileService {
         self: &Arc<Self>,
         watch_id: &str,
         watch: &Watch,
-        overflow_recovery: bool,
         sender: &mpsc::Sender<SequencerControl>,
         overflowed: &Arc<AtomicBool>,
     ) {
@@ -164,7 +160,11 @@ impl FileService {
         if !self.watch_is_current(watch_id, watch) {
             return;
         }
-        snapshot.recovered_from_overflow = overflow_recovery;
+        // Every caller of this is a gap: the native watcher overflowed, the
+        // fallback found a change it cannot describe entry by entry, or a
+        // target just came back to the native watcher after a polling window.
+        // In all three the client's cached subtree may have missed events.
+        snapshot.recovered_from_overflow = true;
         snapshot.authoritative = true;
         emit_event(
             sender,
@@ -215,6 +215,14 @@ impl FileService {
                         let restored = service.retry_native_registration(&watch);
                         record_native_retry(&watch.fallback, restored);
                         if restored {
+                            // The native watcher only reports what happens
+                            // next, and this target has just stopped being
+                            // scanned. Anything that changed between the last
+                            // completed scan and the registration taking effect
+                            // is reported by nobody unless it is published now.
+                            service
+                                .publish_authoritative_listing(&id, &watch, &sender, &overflowed)
+                                .await;
                             continue;
                         }
                     }
@@ -233,7 +241,7 @@ impl FileService {
                         .is_ok_and(|turn| *turn == FallbackTurn::Changed)
                     {
                         service
-                            .publish_authoritative_listing(&id, &watch, true, &sender, &overflowed)
+                            .publish_authoritative_listing(&id, &watch, &sender, &overflowed)
                             .await;
                     }
                 }
@@ -298,7 +306,6 @@ impl FileService {
         let (target, target_directory) = resolve_watch_directory(&root, path)?;
         let path_value = target.to_string_lossy().into_owned();
         let stable_target = descriptor_path(target_directory.as_raw_fd());
-        let fingerprint = watch_fingerprint(&stable_target)?;
         let mut watches = self.watches.lock().unwrap();
         if !watches.contains_key(watch_id) && watches.len() >= MAX_WATCHES {
             bail!("watch limit of {MAX_WATCHES} directories reached");
@@ -312,10 +319,14 @@ impl FileService {
             .unwrap()
             .as_mut()
             .is_some_and(|watcher| watcher.watch(&target, RecursiveMode::NonRecursive).is_ok());
+        // The fingerprint is the polling scanner's baseline, so it is computed
+        // only when this target is actually going to poll. Every accepted
+        // native watch was otherwise paying a second full directory walk — one
+        // extra stat per entry — for a number nothing would ever read.
         let fallback = Arc::new(Mutex::new(if native {
-            FallbackTarget::native(fingerprint)
+            FallbackTarget::native(0)
         } else {
-            FallbackTarget::polling(fingerprint)
+            FallbackTarget::polling(watch_fingerprint(&stable_target)?)
         }));
         let previous = watches.insert(
             watch_id.to_owned(),
@@ -357,7 +368,13 @@ impl FileService {
             Err(error) => {
                 let _ = self.unwatch_directory(watch_id);
                 if let Some(previous) = previous {
-                    if !self.retry_native_registration(&previous) {
+                    let restored = self.retry_native_registration(&previous);
+                    // Recorded either way: a target left believing it was native
+                    // while still on the polling list published duplicate
+                    // authoritative snapshots and scanned a healthy directory
+                    // every few seconds forever.
+                    record_native_retry(&previous.fallback, restored);
+                    if !restored {
                         previous.fallback.lock().unwrap().degrade_to_polling();
                         self.fallback_signal.notify_one();
                     }
@@ -390,19 +407,26 @@ impl FileService {
     }
 }
 
-/// Whether any dirty path belongs to this watch's directory.
+/// Groups dirty paths by the directory that owns them.
 ///
-/// The directory itself counts, so a change to the directory can still schedule
-/// a rescan of it — it just never becomes an entry inside itself.
-pub(super) fn watch_matches_changes(
-    watch: &Watch,
-    changed: &[PathBuf],
-    authoritative_rescan: bool,
-) -> bool {
-    authoritative_rescan
-        || changed
-            .iter()
-            .any(|path| path == &watch.target || path.parent() == Some(watch.target.as_path()))
+/// Grouped once for the whole batch rather than scanned once per watch: with
+/// the 4,096-path dirty cap and 128 registrations, the per-watch scan was half
+/// a million comparisons and a full clone of the dirty set each time.
+///
+/// A path that *is* a watched directory owns nothing inside it, which is why
+/// it groups under its own parent and never under itself — a self-event once
+/// became a row inside its own listing.
+pub(super) fn changes_by_parent(
+    changed: impl IntoIterator<Item = PathBuf>,
+) -> BTreeMap<PathBuf, Vec<PathBuf>> {
+    let mut grouped = BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    for path in changed {
+        let Some(parent) = path.parent().map(Path::to_path_buf) else {
+            continue;
+        };
+        grouped.entry(parent).or_default().push(path);
+    }
+    grouped
 }
 
 pub(super) fn precise_file_events(

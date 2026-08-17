@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { measurePerfOutcome, measurePerfRequest, recordPerfCounter, recordPerfHighWater, recordPerfJsonBytesDeferred, startPerfSpan } from "../../perf/probe";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES } from "./types";
 import type {
+  AcquireWatchOptions,
   ActiveRoot,
   BinaryFile,
   DirectoryListing,
@@ -76,7 +77,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
    * answer it was about to be handed. Callers take the lease and read
    * `snapshot`.
    */
-  async acquireDirectoryWatch(scope: FileWorkspaceScope, root: ActiveRoot, directory: string): Promise<DirectoryWatchLease> {
+  async acquireDirectoryWatch(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, options: AcquireWatchOptions = {}): Promise<DirectoryWatchLease> {
     recordPerfCounter("explorer.watchSubscribers");
     const key = watchKey(scope, root, directory);
     let record = this.#watches.get(key);
@@ -84,13 +85,14 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     else {
       recordPerfCounter("explorer.watchRequests");
       const watchId = crypto.randomUUID();
+      const operationId = crypto.randomUUID();
       const ready = this.#request(scope, this.#rootCommand(root, {
-        operation: "watchDirectory", operationId: crypto.randomUUID(), path: directory, watchId,
+        operation: "watchDirectory", operationId, path: directory, watchId,
       }), (response) => {
         if (!response.directory) throw new Error("Host omitted the watch bootstrap snapshot.");
         recordPerfCounter("explorer.watchBootstrapEntries", response.directory.entries.length);
         return mapDirectory(response.directory, root.token);
-      }, "files.watchDirectory.request");
+      }, "files.watchDirectory.request", { scope, operationId, signal: options.signal });
       record = { clientId: scope.clientId, count: 1, watchId, ready };
       this.#watches.set(key, record);
       recordPerfHighWater("explorer.activeWatches", this.#watches.size);
