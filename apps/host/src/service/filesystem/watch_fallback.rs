@@ -26,7 +26,7 @@ pub(super) struct FallbackScan {
 }
 
 impl FallbackScan {
-    fn new(initial: u64) -> Self {
+    pub(super) fn new(initial: u64) -> Self {
         Self {
             iterator: None,
             accumulator: 0,
@@ -40,9 +40,23 @@ impl FallbackScan {
 /// `native` is the whole point of the type: a target the native watcher
 /// accepted is never scanned, so healthy watches cost nothing at all and only
 /// the exact targets that failed pay for polling.
+///
+/// The scan lives behind its *own* mutex, and that separation is the point of
+/// the type. A directory scan is `metadata`, `read_dir`, and up to 2,048
+/// `symlink_metadata` calls — unbounded wall time on a slow or networked
+/// filesystem — and it used to run holding the same lock the async poller
+/// takes to ask "is this target due?", "should it retry native registration?",
+/// and "has the watcher failed wholesale?". A runtime worker could block on a
+/// filesystem call it had no interest in. The schedule below is now only ever
+/// locked for field reads; only the blocking worker touches the scan.
 pub(super) struct FallbackTarget {
     native: bool,
-    scan: FallbackScan,
+    scan: Arc<Mutex<FallbackScan>>,
+    /// Set when the schedule wants the in-progress scan thrown away.
+    ///
+    /// The alternative — reaching into the scan from the async side to reset
+    /// its iterator — is exactly the wait this split exists to remove.
+    discard_scan: bool,
     next_scan: Instant,
     scan_backoff: Duration,
     next_native_retry: Instant,
@@ -53,7 +67,8 @@ impl FallbackTarget {
     pub(super) fn native(initial_fingerprint: u64) -> Self {
         Self {
             native: true,
-            scan: FallbackScan::new(initial_fingerprint),
+            scan: Arc::new(Mutex::new(FallbackScan::new(initial_fingerprint))),
+            discard_scan: false,
             next_scan: Instant::now(),
             scan_backoff: FALLBACK_BACKOFF_BASE,
             next_native_retry: Instant::now(),
@@ -72,11 +87,20 @@ impl FallbackTarget {
         self.native
     }
 
+    /// The scan's own lock, so a test can hold it the way a scan in progress
+    /// does and prove the async side never waits on it.
+    #[cfg(test)]
+    pub(super) fn scan_lock(&self) -> Arc<Mutex<FallbackScan>> {
+        Arc::clone(&self.scan)
+    }
+
     fn restored_to_native(&mut self) {
         self.native = true;
         self.native_retry_backoff = NATIVE_RETRY_BASE;
         self.scan_backoff = FALLBACK_BACKOFF_BASE;
-        self.scan.iterator = None;
+        // Recorded rather than performed: the scan may be running right now on
+        // a blocking worker, and this call comes from the async poller.
+        self.discard_scan = true;
     }
 
     fn native_retry_failed(&mut self) {
@@ -125,13 +149,18 @@ pub(super) fn advance_target(
     stable_target: &Path,
     now: Instant,
 ) -> anyhow::Result<FallbackTurn> {
-    {
-        let state = target.lock().unwrap();
+    // The schedule lock is taken twice, briefly, and never across the scan.
+    let (scan, restart) = {
+        let mut state = target.lock().unwrap();
         if state.native || now < state.next_scan {
             return Ok(FallbackTurn::Idle);
         }
-    }
-    let shard = scan_fallback_shard(stable_target, target)?;
+        (
+            Arc::clone(&state.scan),
+            std::mem::take(&mut state.discard_scan),
+        )
+    };
+    let shard = scan_fallback_shard(stable_target, &scan, restart)?;
     let mut state = target.lock().unwrap();
     if !shard.completed {
         state.next_scan = now;
@@ -170,11 +199,13 @@ pub(super) fn record_native_retry(target: &Arc<Mutex<FallbackTarget>>, restored:
 
 fn scan_fallback_shard(
     stable_target: &Path,
-    state: &Mutex<FallbackTarget>,
+    scan: &Mutex<FallbackScan>,
+    restart: bool,
 ) -> anyhow::Result<FallbackShard> {
     scan_fallback_shard_with_limits(
         stable_target,
-        state,
+        scan,
+        restart,
         FALLBACK_SCAN_ENTRY_BUDGET,
         FALLBACK_SCAN_TIME_BUDGET,
     )
@@ -192,12 +223,17 @@ pub(super) async fn advance_target_async(
 
 pub(super) fn scan_fallback_shard_with_limits(
     stable_target: &Path,
-    state: &Mutex<FallbackTarget>,
+    scan: &Mutex<FallbackScan>,
+    restart: bool,
     entry_budget: usize,
     time_budget: Duration,
 ) -> anyhow::Result<FallbackShard> {
-    let mut state = state.lock().unwrap();
-    let scan = &mut state.scan;
+    let mut scan = scan.lock().unwrap();
+    let scan = &mut *scan;
+    if restart {
+        scan.iterator = None;
+        scan.accumulator = 0;
+    }
     if scan.iterator.is_none() {
         scan.accumulator = metadata_generation(&fs::metadata(stable_target)?);
         scan.iterator = Some(fs::read_dir(stable_target)?);
