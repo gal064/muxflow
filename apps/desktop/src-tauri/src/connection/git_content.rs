@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use super::files::bulk_pool::BulkLease;
 use super::files::scheduler::{BulkBinding, CancelState};
-use super::{ConnectionSpec, ProfileStore, TerminalClients, get_client};
+use super::{ConnectionSpec, ProfileStore, TerminalClient, TerminalClients, get_client};
 
 /// Bytes requested per round trip. Matches the file transfer chunk size, which
 /// the bulk framing and host flow control are already sized for.
@@ -111,8 +111,12 @@ pub async fn read_git_diff_content(
     profiles: State<'_, ProfileStore>,
     clients: State<'_, TerminalClients>,
 ) -> Result<String, String> {
-    let reads = get_client(&clients, &command.client_id)?.git_content_reads();
-    let job = prepare(command, on_event, &profiles, &clients)?;
+    // Resolved once: the registry that admits this read and the connection it
+    // is bound to must be the same client, not two lookups that a reconnect
+    // could land on either side of.
+    let client = get_client(&clients, &command.client_id)?;
+    let reads = client.git_content_reads();
+    let job = prepare(command, on_event, &profiles, &client)?;
     let read_id = job.read_id.clone();
     let registration = reads.register(&read_id, &job.cancellation)?;
     let reads = Arc::clone(&reads);
@@ -163,7 +167,7 @@ fn prepare(
     command: GitDiffContentCommand,
     channel: Channel<InvokeResponseBody>,
     profiles: &ProfileStore,
-    clients: &State<'_, TerminalClients>,
+    client: &Arc<TerminalClient>,
 ) -> Result<GitContentJob, String> {
     if command.root.is_empty()
         || command.root_token.is_empty()
@@ -195,11 +199,10 @@ fn prepare(
     if sides.is_empty() {
         return Err("Git diff content requires at least one deferred side".into());
     }
-    let client = get_client(clients, &command.client_id)?;
     // Every binding failure — read-only, a replaced epoch, a replaced server
     // identity — is a scope this read cannot be performed in.
     let binding = BulkBinding::capture(
-        client,
+        Arc::clone(client),
         command.expected_server_identity.clone(),
         connection_epoch,
     )?;

@@ -151,6 +151,12 @@ pub(super) struct RepositoryCoordinator {
     /// Orders publications without holding the pipeline lock across them.
     publish: tokio::sync::Mutex<u64>,
     latest: Mutex<Option<CachedStatus>>,
+    /// The most recently served deferred diff body, defined in `content`.
+    ///
+    /// It belongs here rather than on the service because it is repository
+    /// state: what it caches was read out of this worktree, under this
+    /// coordinator's capabilities, and it must not outlive them.
+    pub(super) diff_body: Mutex<Option<content::CachedDiffBody>>,
     published: Mutex<Publication>,
     subscribers: Mutex<subscribers::SubscriberRegistry>,
     watcher: Mutex<watcher::WatcherState>,
@@ -192,6 +198,7 @@ impl RepositoryCoordinator {
             refresh: tokio::sync::Mutex::new(()),
             publish: tokio::sync::Mutex::new(0),
             latest: Mutex::new(None),
+            diff_body: Mutex::new(None),
             published: Mutex::new(Publication::default()),
             subscribers: Mutex::new(subscribers::SubscriberRegistry::default()),
             watcher: Mutex::new(watcher::WatcherState::default()),
@@ -231,21 +238,20 @@ impl RepositoryCoordinator {
         let mut slot = self.capabilities.lock().await;
         let logical_root = self.key.root.clone();
         let root_token = self.key.root_token.clone();
-        if let Some(cached) = slot.as_ref() {
-            let cached = Arc::clone(cached);
+        if let Some(cached) = slot.as_ref().map(Arc::clone) {
+            let subject = Arc::clone(&cached);
             let logical = logical_root.clone();
             let token = root_token.clone();
             let revalidated = tokio::task::spawn_blocking(move || {
                 let root = WorktreeRoot::capture(&logical)?;
                 root.validate_token(&logical, &token)?;
-                cached.revalidate(&logical, root.identity()?)?;
+                subject.revalidate(&logical, root.identity()?)?;
                 Ok::<_, anyhow::Error>(())
             })
             .await
             .map_err(|error| anyhow::anyhow!("Git capability revalidation failed: {error}"))?;
             match revalidated {
                 Ok(()) => {
-                    let cached = Arc::clone(slot.as_ref().expect("checked above"));
                     // Checked on the warm path too: a cached capability proves
                     // which repository this root is, not which one the client
                     // believed it was addressing.
@@ -292,6 +298,12 @@ impl RepositoryCoordinator {
     /// point stop satisfying new readers.
     pub(super) fn invalidate(&self) -> u64 {
         self.change_ticket.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The current change stamp. Two reads returning the same value mean no
+    /// invalidation was recorded between them.
+    pub(super) fn change_ticket(&self) -> u64 {
+        self.change_ticket.load(Ordering::Acquire)
     }
 
     /// The next publication order stamp. Publications are delivered in this

@@ -96,7 +96,6 @@ struct ConfirmationBinding {
 pub(super) struct GitService {
     repositories: Mutex<HashMap<RepositoryKey, Arc<RepositoryCoordinator>>>,
     confirmations: Mutex<HashMap<String, ConfirmationBinding>>,
-    diff_body: Mutex<Option<content::CachedDiffBody>>,
     next_generation: Arc<AtomicU64>,
     /// Monotonic clock for repository eviction order.
     next_use: AtomicU64,
@@ -115,12 +114,11 @@ impl GitService {
         Self {
             repositories: Mutex::new(HashMap::new()),
             confirmations: Mutex::new(HashMap::new()),
-            diff_body: Mutex::new(None),
             next_generation: Arc::new(AtomicU64::new(0)),
             next_use: AtomicU64::new(0),
             connection_epoch,
             closed,
-            observation: Arc::new(GitObservation::default()),
+            observation: Arc::new(GitObservation::new()),
         }
     }
 
@@ -223,12 +221,14 @@ impl GitService {
     /// The desktop previously requested status and then diff, paying two round
     /// trips for one visible action.
     ///
-    /// The status is taken *after* the read, so the response states the state
-    /// the diff actually landed on rather than asserting that nothing moved
-    /// during it. For an observed repository that read costs nothing — the
-    /// coordinator answers from the snapshot it already has. What binds a
-    /// mutation is not this pair but `GitDiff::source_generation`, which
-    /// `mutate_hunk` re-derives and re-validates under the repository lock.
+    /// The status is read once, before the diff, and the repository's change
+    /// stamp is compared afterwards. An unchanged stamp means nothing
+    /// invalidated the repository while the diff was being read, so the
+    /// snapshot describes the state the diff landed on; a moved stamp is
+    /// re-read, which the coordinator coalesces with whatever refresh the
+    /// change already started. Reading status a second time unconditionally
+    /// would cost an unobserved repository two full pipelines and still prove
+    /// nothing, because that read could itself be overtaken.
     pub(in crate::service) async fn diff(
         &self,
         request: &v1::GitRequest,
@@ -243,13 +243,12 @@ impl GitService {
         {
             bail!("Git diff cancelled");
         }
-        let before = coordinator
+        let ticket = coordinator.change_ticket();
+        let status = coordinator
             .status(&capabilities, Freshness::Coalesced, cancellation.clone())
             .await?;
-        if !before.authoritative || before.oversized {
-            bail!("Git status is not authoritative");
-        }
-        let repository = before
+        require_authoritative(&status)?;
+        let repository = status
             .repository
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Git status omitted its repository identity"))?;
@@ -268,12 +267,13 @@ impl GitService {
         })
         .await
         .map_err(|error| anyhow::anyhow!("Git diff task failed: {error}"))??;
+        if coordinator.change_ticket() == ticket {
+            return Ok((read, (*status).clone()));
+        }
         let landed = coordinator
             .status(&capabilities, Freshness::Coalesced, cancellation)
             .await?;
-        if !landed.authoritative || landed.oversized {
-            bail!("Git status is not authoritative");
-        }
+        require_authoritative(&landed)?;
         Ok((read, (*landed).clone()))
     }
 
@@ -783,6 +783,14 @@ fn validate_current_target(
         bail!("directory mutation targets are ambiguous and are not supported");
     }
     Ok(entry.clone())
+}
+
+/// Rejects a status no client decision may be based on.
+fn require_authoritative(status: &v1::GitStatusSnapshot) -> anyhow::Result<()> {
+    if !status.authoritative || status.oversized {
+        bail!("Git status is not authoritative");
+    }
+    Ok(())
 }
 
 fn status_fingerprint(status: &v1::GitStatusSnapshot) -> String {

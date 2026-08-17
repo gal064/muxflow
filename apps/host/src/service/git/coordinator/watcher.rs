@@ -21,6 +21,14 @@ pub(in crate::service::git) enum WatchSignal {
 
 pub(in crate::service::git) struct RepositoryWatcher {
     _watcher: RecommendedWatcher,
+    /// The worktree descriptor the registered path names.
+    ///
+    /// `notify` stores the path it was given verbatim and re-adds from that
+    /// prefix whenever a directory appears underneath. On Linux that path is
+    /// `/proc/self/fd/N`, so dropping this descriptor would leave the watch
+    /// pointing at a number that may since have been reused — and every
+    /// directory created after that would silently go unwatched.
+    _root: WorktreeRoot,
     _capabilities: Arc<RepositoryCapabilities>,
     observation: Arc<GitObservation>,
 }
@@ -187,6 +195,9 @@ impl RepositoryCoordinator {
         observation: Arc<Observation>,
         established: Option<EstablishedWatcher>,
     ) {
+        // Whether establishment has already been attempted in this task, so the
+        // first cycle does not pay a backoff it has not earned.
+        let mut attempted = established.is_some();
         // True while a change could have happened with nobody watching.
         let mut unobserved = established.is_none();
         let (mut native, mut signals) = match established {
@@ -209,11 +220,21 @@ impl RepositoryCoordinator {
                 self.publish_observing(&observation, false);
             }
             if native.is_none() {
+                // Backed off before every attempt, not only the polling ones. A
+                // watcher that establishes and then immediately breaks — an
+                // inotify queue overflow, a watch limit — would otherwise spin
+                // establishment and a full Git pipeline with no pause at all.
+                if attempted {
+                    self.rest(&observation, fallback).await;
+                    if self.observation_stopped(&observation) {
+                        break;
+                    }
+                }
+                attempted = true;
                 match self.establish(&capabilities).await {
                     Some((watcher, receiver)) => {
                         native = Some(watcher);
                         signals = Some(receiver);
-                        fallback = FALLBACK_MIN;
                     }
                     None => {
                         native = None;
@@ -228,17 +249,10 @@ impl RepositoryCoordinator {
                     unobserved = false;
                     self.invalidate();
                     self.await_mutation_quiescence(&observation).await;
-                    self.refresh(
-                        &capabilities,
-                        &observation,
-                        &mut last_source,
-                        &mut fallback,
-                        polling,
-                    )
-                    .await;
+                    self.refresh(&capabilities, &observation, &mut last_source, &mut fallback)
+                        .await;
                 }
                 if polling {
-                    self.rest(&observation, fallback).await;
                     continue;
                 }
             }
@@ -271,10 +285,13 @@ impl RepositoryCoordinator {
                     self.rest(&observation, WATCH_DEBOUNCE).await;
                 }
                 // A failed or closed native watcher is retired at the top of the
-                // next iteration, which also re-reads once.
+                // next iteration, which also re-reads once. Doing that read here
+                // as well would make every failure cost two pipelines.
                 _ => {
                     self.native_failed.store(true, Ordering::Release);
                     self.invalidate();
+                    unobserved = true;
+                    continue;
                 }
             }
             if self.observation_stopped(&observation) {
@@ -287,14 +304,8 @@ impl RepositoryCoordinator {
             if self.observation_stopped(&observation) {
                 break;
             }
-            self.refresh(
-                &capabilities,
-                &observation,
-                &mut last_source,
-                &mut fallback,
-                false,
-            )
-            .await;
+            self.refresh(&capabilities, &observation, &mut last_source, &mut fallback)
+                .await;
         }
         self.publish_observing(&observation, false);
         drop(native);
@@ -307,7 +318,6 @@ impl RepositoryCoordinator {
         observation: &Observation,
         last_source: &mut String,
         fallback: &mut Duration,
-        polling: bool,
     ) {
         if self.observation_stopped(observation) {
             return;
@@ -319,15 +329,11 @@ impl RepositoryCoordinator {
             Ok(snapshot) => {
                 let changed = snapshot.source_generation != *last_source;
                 *last_source = snapshot.source_generation.clone();
-                if polling {
-                    *fallback = next_fallback(*fallback, changed);
-                }
+                *fallback = next_fallback(*fallback, changed);
             }
             Err(error) => {
                 self.publish_error(error.to_string(), sequence).await;
-                if polling {
-                    *fallback = next_fallback(*fallback, false);
-                }
+                *fallback = next_fallback(*fallback, false);
             }
         }
     }
@@ -457,6 +463,7 @@ pub(in crate::service::git) fn start_repository_watcher(
     Ok((
         RepositoryWatcher {
             _watcher: watcher,
+            _root: root,
             _capabilities: Arc::clone(capabilities),
             observation,
         },

@@ -22,16 +22,13 @@ pub(super) struct CachedDiffBody {
 
 /// Everything a cached body is bound to.
 ///
-/// The scope fields are in here on purpose: a cache hit skips the discovery
-/// path that would otherwise revalidate them, and a body served across a tmux
-/// server swap or a root replacement would be a body from a repository the
-/// client can no longer address. The connection's own epoch is not a dimension
-/// — this cache belongs to one connection, and that connection has one epoch.
+/// The scope a body was read under — server identity, root, root token,
+/// connection epoch — is not in here because it is the identity of the
+/// coordinator that owns the cache: reaching this entry at all means the
+/// request resolved to that same repository. What remains is what varies
+/// within one repository.
 #[derive(Clone, PartialEq, Eq)]
 struct DiffBodyKey {
-    server_identity: String,
-    root: String,
-    root_token: String,
     repository_id: String,
     path: Vec<u8>,
     original_path: Vec<u8>,
@@ -46,9 +43,6 @@ struct DiffBodyKey {
 impl DiffBodyKey {
     fn new(request: &v1::GitRequest, content: &v1::GitDiffContentRequest) -> Self {
         Self {
-            server_identity: request.expected_server_identity.clone(),
-            root: request.root.clone(),
-            root_token: request.root_token.clone(),
             repository_id: request.repository_id.clone(),
             path: request.path.clone(),
             original_path: request.original_path.clone(),
@@ -66,9 +60,6 @@ impl GitService {
         request: &v1::GitRequest,
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<v1::GitDiffContentChunk> {
-        // Checked before the cache, not only on the miss that reaches
-        // discovery: every chunk must be answered under the same identity.
-        ensure_server_identity(request)?;
         require_repository_id(request)?;
         let content = request
             .content
@@ -90,10 +81,14 @@ impl GitService {
         if content.length == 0 {
             bail!("Git diff content length must be positive");
         }
+        // Resolved before the cache is consulted, so every chunk — hit or miss
+        // — is answered under a revalidated identity, and so the cache that
+        // answers it is the one belonging to this repository.
+        let (coordinator, capabilities) = self.repository(request, cancellation.clone()).await?;
         let key = DiffBodyKey::new(request, &content);
         let key_for_release = key.clone();
         let cached = {
-            let held = self.diff_body.lock().unwrap();
+            let held = coordinator.diff_body.lock().unwrap();
             held.as_ref()
                 .filter(|entry| entry.key == key)
                 .map(|entry| Arc::clone(&entry.body))
@@ -101,14 +96,14 @@ impl GitService {
         let body = match cached {
             Some(body) => body,
             None => {
-                let body = self.read_diff_body(request, side, cancellation).await?;
+                let body = read_diff_body(request, &capabilities, side, cancellation).await?;
                 if body.len() as u64 != content.expected_size
                     || blake3::hash(&body).to_hex().as_str() != content.expected_content_digest
                 {
                     bail!("Git diff content changed since it was classified; refresh the diff");
                 }
                 let body = Arc::new(body);
-                *self.diff_body.lock().unwrap() = Some(CachedDiffBody {
+                *coordinator.diff_body.lock().unwrap() = Some(CachedDiffBody {
                     key,
                     body: Arc::clone(&body),
                 });
@@ -128,7 +123,7 @@ impl GitService {
             // re-validate rather than replay something the repository may no
             // longer contain. Released by key, because an interleaved stream
             // may have taken the slot in the meantime.
-            let mut held = self.diff_body.lock().unwrap();
+            let mut held = coordinator.diff_body.lock().unwrap();
             if held
                 .as_ref()
                 .is_some_and(|entry| entry.key == key_for_release)
@@ -143,25 +138,25 @@ impl GitService {
             total_size: body.len() as u64,
         })
     }
+}
 
-    async fn read_diff_body(
-        &self,
-        request: &v1::GitRequest,
-        side: v1::GitDiffContentSide,
-        cancellation: Option<Arc<AtomicBool>>,
-    ) -> anyhow::Result<Vec<u8>> {
-        let (_coordinator, capabilities) = self.repository(request, cancellation.clone()).await?;
-        let work = request.clone();
-        tokio::task::spawn_blocking(move || {
-            let _guard = capabilities.metadata.install();
-            read_diff_side(
-                &capabilities.stable_root(),
-                &work,
-                side,
-                cancellation.as_deref(),
-            )
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("Git diff content task failed: {error}"))?
-    }
+async fn read_diff_body(
+    request: &v1::GitRequest,
+    capabilities: &Arc<RepositoryCapabilities>,
+    side: v1::GitDiffContentSide,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> anyhow::Result<Vec<u8>> {
+    let work = request.clone();
+    let capabilities = Arc::clone(capabilities);
+    tokio::task::spawn_blocking(move || {
+        let _guard = capabilities.metadata.install();
+        read_diff_side(
+            &capabilities.stable_root(),
+            &work,
+            side,
+            cancellation.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("Git diff content task failed: {error}"))?
 }

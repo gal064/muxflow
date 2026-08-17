@@ -202,6 +202,33 @@ describe("GitRepositoryStore", () => {
     expect(calls.release).toBe(1);
   });
 
+  it("delivers a refresh published before the watch response arrived", async () => {
+    const { client, publish } = stubClient();
+    let settleWatch!: () => void;
+    vi.mocked(client.watch).mockImplementation(() => new Promise((resolve) => {
+      settleWatch = () => resolve({
+        watchId: "watch", rootToken: root.token, connectionEpoch: scope.terminalEpoch,
+        status: snapshot("1"), release: () => undefined,
+      });
+    }));
+    const store = new GitRepositoryStore(client);
+    const lease = store.acquire(scope, root);
+    await flush();
+
+    // The host registers a subscription before it reads the bootstrap status,
+    // so a change can be published while the response is still in flight. It is
+    // held until the bootstrap lands and applied after it — losing it would
+    // leave the panel showing a repository state that has already moved.
+    publish(snapshot("4"));
+    await flush();
+    expect(lease.handle.state().status).toBeUndefined();
+    settleWatch();
+    await flush();
+    expect(lease.handle.state().status?.generation).toBe("4");
+    expect(lease.handle.state().loading).toBe(false);
+    lease.release();
+  });
+
   it("ignores events belonging to another watch or another root", async () => {
     const { client, emit } = stubClient();
     const store = new GitRepositoryStore(client);
