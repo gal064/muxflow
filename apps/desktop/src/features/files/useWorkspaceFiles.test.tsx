@@ -474,7 +474,59 @@ describe("useWorkspaceFiles", () => {
     await act(async () => { renderer.unmount(); });
   });
 
-  it("stops probing the active root once it has settled, and re-arms on activity", async () => {
+  /**
+   * Collapsing a directory ends the remote work its rows were asking for —
+   * all of it, including the read that has not gone out yet.
+   *
+   * A recovery list waits out a 150 ms coalescing window before it is issued,
+   * and a collapse inside that window used to leave the timer armed: the list
+   * went out for a directory the tree no longer showed, making "collapse is one
+   * unwatch" sometimes one unwatch and one full listing. Worse, the answer then
+   * arrived for a directory every state transition refuses, so the wait state
+   * it had taken was never given back and `aria-busy` stayed set on the whole
+   * Explorer for the life of the scope with nothing on screen to explain it.
+   */
+  it("collapsing a directory cancels the recovery list it had not issued yet", async () => {
+    vi.useFakeTimers();
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const directories = new Map([
+      ["/repo", [entry("/repo/src", { directory: true })]],
+      ["/repo/src", [entry("/repo/src/a.ts")]],
+    ]);
+    const fixture = watchingClient(directories, root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
+      await act(async () => { await Promise.resolve(); });
+      expect(fixture.listed, "the bootstrap is the listing").toEqual([]);
+
+      // An event this listing cannot answer: no entry, so no patch is possible
+      // and a recovery list is owed.
+      await act(async () => {
+        fixture.publish({ kind: "fileChanged", rootToken: "root", path: "/repo/src/new.ts", generation: "2" });
+        await Promise.resolve();
+      });
+      // Collapsed inside the coalescing window, then well past it.
+      await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+      expect(fixture.listed, "a collapsed directory was listed anyway").toEqual([]);
+      expect(
+        current?.loading.has("/repo/src"),
+        "the collapsed directory was left waiting on a read that never lands",
+      ).toBe(false);
+      expect(current?.loading.size, "aria-busy would stay set on the whole Explorer").toBe(0);
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops probing the active root once it has settled, and returns to full rate on activity without probing", async () => {
     vi.useFakeTimers();
     const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
     const resolveActiveRoot = vi.fn(async () => root);
@@ -512,9 +564,23 @@ describe("useWorkspaceFiles", () => {
     const idle = resolveActiveRoot.mock.calls.length;
     expect(idle, "a settled backstop stopped checking altogether").toBe(settled + 1);
 
-    // Touching the tree is evidence the pane may have moved, so it re-arms.
+    // Working in the tree is activity, not evidence. It returns the backstop to
+    // full rate and issues nothing: expanding a folder says nothing about
+    // whether the pane's `cd` moved, and probing here put a `resolveActiveRoot`
+    // — which forks `tmux` on the host — on every expand *and* every collapse,
+    // the exact interaction path this package exists to make cheap.
     await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
-    expect(resolveActiveRoot.mock.calls.length).toBeGreaterThan(idle);
+    expect(
+      resolveActiveRoot.mock.calls.length,
+      "expanding a folder cost a remote root probe",
+    ).toBe(idle);
+    await act(async () => { await vi.advanceTimersByTimeAsync(ACTIVE_ROOT_BACKSTOP_MS + 1); });
+    expect(
+      resolveActiveRoot.mock.calls.length,
+      "activity did not take the backstop back off its settled interval",
+    ).toBe(idle + 1);
+
+    // A host root announcement *is* evidence, and still probes immediately.
     await act(async () => { renderer.unmount(); });
     vi.useRealTimers();
   });
@@ -780,7 +846,14 @@ describe("useWorkspaceFiles", () => {
     // in the directories where it costs most.
     const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
     const PAGE = 4_096;
-    const all = Array.from({ length: 8_192 }, (_, index) => entry(`/repo/wide/file-${String(index).padStart(5, "0")}`));
+    // Three pages, not two. At two the prefetched second page finishes the
+    // directory, `appendPage` carries its `complete: true` onto the assembled
+    // listing, and every subsequent patch takes `covers()`'s complete branch —
+    // the same branch the 4,096-entry lane takes. The lane then measured a
+    // size and nothing else. A third page keeps the held listing genuinely
+    // incomplete, which is the state this lane exists to exercise: the rule
+    // that used to require a *complete* listing before it would patch.
+    const all = Array.from({ length: 3 * PAGE }, (_, index) => entry(`/repo/wide/file-${String(index).padStart(5, "0")}`));
     const pageOf = (token: string | undefined) => {
       const start = token === undefined ? 0 : Number(token);
       const slice = all.slice(start, start + PAGE);
@@ -822,7 +895,11 @@ describe("useWorkspaceFiles", () => {
       for (let turn = 0; turn < 4; turn += 1) await act(async () => { await Promise.resolve(); });
       // The bootstrap is page one; exactly one further page is prefetched.
       const afterExpand = listed.length;
-      const expandedRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+      const expanded = current?.listings.get("/repo/wide");
+      const expandedRows = expanded?.entries.length ?? 0;
+      // The crux of the lane: the tree is holding two pages of a directory it
+      // has not finished reading.
+      const heldListingComplete = Boolean(expanded?.complete && !expanded.nextPageToken);
 
       // One external create, inside the rows the tree is holding.
       const created = entry("/repo/wide/file-00000a", { generation: "2" });
@@ -839,7 +916,8 @@ describe("useWorkspaceFiles", () => {
       // have gone out by now.
       await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
       const changeLists = listed.length - afterExpand;
-      const held = current?.listings.get("/repo/wide")?.entries ?? [];
+      const heldListing = current?.listings.get("/repo/wide");
+      const held = heldListing?.entries ?? [];
       const afterChangeRows = held.length;
       // The row count alone cannot tell a patched listing from an untouched
       // one: one create and one delete leave 8,192 either way, so both-applied
@@ -850,6 +928,10 @@ describe("useWorkspaceFiles", () => {
 
       expect(expandedRows, "the bootstrap and one prefetched page").toBe(2 * PAGE);
       expect(afterExpand, "expanding cost more than the one prefetched page").toBe(1);
+      expect(
+        heldListingComplete,
+        "the lane never reached the incomplete listing it is named for",
+      ).toBe(false);
       expect(changeLists, "a single-file change in a paginated directory cost a list").toBe(0);
       expect(afterChangeRows, "the patches did not both land").toBe(2 * PAGE);
       expect(createdRowPresent, "the created row was never patched into the held pages").toBe(true);
@@ -858,6 +940,7 @@ describe("useWorkspaceFiles", () => {
         lane: "explorerPaginatedWatchTraffic",
         entries: all.length,
         hostPageSize: PAGE,
+        heldListingComplete,
         expandDirectoryListRequests: afterExpand,
         expandedRows,
         changeDirectoryListRequests: changeLists,

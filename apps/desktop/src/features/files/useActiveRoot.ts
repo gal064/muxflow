@@ -62,9 +62,23 @@ interface Options {
  * when the answer changes. Kept inside the directory hook, its four pieces of
  * mutable state sat alongside six others that had nothing to do with them.
  */
-export function useActiveRoot(options: Options): { rearm: () => void } {
+export function useActiveRoot(options: Options): {
+  /** Something happened that could genuinely have moved the root. Probes now. */
+  rearm: () => void;
+  /**
+   * The user is working, so stop being settled — but issue nothing.
+   *
+   * The distinction matters because these are the two different facts callers
+   * have. Expanding a folder is activity; it is not evidence that the pane's
+   * `cd` changed, and treating it as such put a `resolveActiveRoot` — which
+   * forks `tmux` on the host — on the Explorer's own interaction path, which is
+   * the path this package exists to make cheap.
+   */
+  noteActivity: () => void;
+} {
   const probeSerial = useRef(0);
   const rearmRef = useRef<(() => void) | undefined>(undefined);
+  const activityRef = useRef<(() => void) | undefined>(undefined);
   const latest = useRef(options);
   latest.current = options;
   const { client, scopeKey } = options;
@@ -146,12 +160,16 @@ export function useActiveRoot(options: Options): { rearm: () => void } {
       if (settled && ticks % ACTIVE_ROOT_SETTLED_MULTIPLIER !== 0) return;
       void resolve();
     }, ACTIVE_ROOT_BACKSTOP_MS);
-    const rearm = () => {
+    const noteActivity = () => {
       unchangedProbes = 0;
       ticks = 0;
+    };
+    const rearm = () => {
+      noteActivity();
       if (foreground()) void resolve();
     };
     rearmRef.current = rearm;
+    activityRef.current = noteActivity;
     const onVisibility = () => { if (foreground()) rearm(); };
     document?.addEventListener?.("visibilitychange", onVisibility);
     return () => {
@@ -160,11 +178,13 @@ export function useActiveRoot(options: Options): { rearm: () => void } {
       window.clearInterval(backstop);
       document?.removeEventListener?.("visibilitychange", onVisibility);
       rearmRef.current = undefined;
+      activityRef.current = undefined;
     };
   }, [client, scopeKey]);
 
   // Stable, because callers keep it in dependency arrays and in event
   // handlers that must not be rebuilt on every render.
   const rearm = useCallback(() => rearmRef.current?.(), []);
-  return { rearm };
+  const noteActivity = useCallback(() => activityRef.current?.(), []);
+  return { rearm, noteActivity };
 }
