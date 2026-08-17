@@ -108,6 +108,7 @@ impl TerminalAttachment {
         let reader_panes = pane_ids.to_vec();
         let flow = Arc::new(FlowControl::default());
         let reader_flow = Arc::clone(&flow);
+        let reader_output_credit = Arc::clone(&output_credit);
         let reader_emission_order = Arc::clone(&emission_order);
         let reader_writer = spawn_control_writer(session_id, Arc::clone(&stdin), &mut startup)?;
         startup.spawn(
@@ -125,7 +126,7 @@ impl TerminalAttachment {
                     stopped: reader_stop_signal,
                     controls: stream_rx,
                     flow: reader_flow,
-                    output_credit,
+                    output_credit: reader_output_credit,
                     emission_order: reader_emission_order,
                 });
                 reader_stopped.store(true, Ordering::Release);
@@ -139,6 +140,7 @@ impl TerminalAttachment {
             stopped,
             stream_tx,
             flow,
+            output_credit,
             workers,
             last_size: None,
         })

@@ -31,6 +31,7 @@ pub(super) fn emit_resnapshot(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_terminal(
     sender: &mpsc::Sender<SequencerControl>,
     overflowed: &AtomicBool,
@@ -38,6 +39,7 @@ pub(super) fn emit_terminal(
     pane_id: String,
     data: Vec<u8>,
     generation: u64,
+    stopped: &AtomicBool,
     output_credit: &OutputCredit,
 ) {
     // Terminal bytes are lossless and already arrive on the dedicated control
@@ -46,8 +48,12 @@ pub(super) fn emit_terminal(
     // A nonblocking send here turned a normal 100 ms / 100 Mbit bandwidth-delay
     // window into a full-connection resync as soon as 1,024 records accumulated.
     let charge = OutputCharge::terminal(data.len());
-    let Ok(reservation) = output_credit.reserve(charge) else {
-        overflowed.store(true, Ordering::Release);
+    let Ok(reservation) = output_credit.reserve(charge, stopped) else {
+        // A stopped attachment is a deliberate local teardown; only a closed
+        // credit is a connection-wide loss worth the overflow resync.
+        if !stopped.load(Ordering::Acquire) {
+            overflowed.store(true, Ordering::Release);
+        }
         return;
     };
     if sender
@@ -100,6 +106,7 @@ impl OutputEmission<'_> {
                 pane_id,
                 data,
                 generation,
+                self.stopped,
                 self.output_credit,
             );
         }
