@@ -24,6 +24,7 @@ import {
   withoutPath,
   type WorkspaceFilesState,
 } from "./directoryState";
+import { useActiveRoot } from "./useActiveRoot";
 import { useConnectionTransfers } from "./useConnectionTransfers";
 import { DirectoryWatchLeases } from "./watchLeases";
 import type {
@@ -37,42 +38,13 @@ import type {
 /** Pages one truncated listing may fetch back before it gives up. */
 const MAX_RESTORED_PAGES = 8;
 const EXTERNAL_CHANGE_PAINT = ["explorer.externalChangeToPaint"] as const;
+
+export {
+  ACTIVE_ROOT_BACKSTOP_MS,
+  ACTIVE_ROOT_SETTLED_MULTIPLIER,
+  ACTIVE_ROOT_STABLE_PROBES,
+} from "./useActiveRoot";
 type DirectoryLoadResult = "applied" | "stale" | "failed";
-
-/**
- * How often the active root is re-checked when nothing has announced a change.
- *
- * Every event that *can* be pushed already re-resolves it immediately; this
- * covers `cd` inside the current pane, which tmux does not announce. It is a
- * backstop rather than a pipeline: a hidden window checks nothing at all, the
- * host answers an unchanged root from the caller's own capability without a
- * second authoritative discovery or a broadcast payload, and — see
- * [`ACTIVE_ROOT_SETTLED_MULTIPLIER`] — a settled root is checked far less
- * often, though never not at all.
- */
-export const ACTIVE_ROOT_BACKSTOP_MS = 15_000;
-
-/**
- * Consecutive unchanged probes after which the backstop slows down.
- *
- * A timer that never slows is a periodic request forever, which the round's
- * idle budget refuses outright. Anything that could have moved the root — the
- * window coming back to the foreground, the host announcing a different root,
- * or the person touching the Explorer — puts it back to full rate, so the cost
- * tracks activity rather than uptime.
- */
-export const ACTIVE_ROOT_STABLE_PROBES = 3;
-
-/**
- * How much longer the settled backstop waits between probes.
- *
- * Deliberately a longer wait rather than a stop. `cd` inside the pane the user
- * is already in is announced by nothing at all, so a backstop that switches
- * itself off entirely leaves a moved root undetected for as long as the person
- * does not happen to touch the Explorer or blur the window — which on a pane
- * somebody is only reading is indefinitely.
- */
-export const ACTIVE_ROOT_SETTLED_MULTIPLIER = 8;
 
 /**
  * How long one directory's *recovery* is deferred before it is re-read.
@@ -104,8 +76,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const paintGenerations = useRef(new Map<string, number>());
   /** Expansions whose paint is owed by a watch bootstrap that has not landed. */
   const pendingExpandPaints = useRef(new Map<string, { paint: PaintTicket; generation: number }>());
-  /** Re-arms the active-root backstop after it has settled. */
-  const rearmBackstop = useRef<(() => void) | undefined>(undefined);
+  /** The active-root backstop's re-arm, held so callers declared above it can use it. */
+  const rearmRoot = useRef<(() => void) | undefined>(undefined);
   const cache = useRef(new DirectoryListingCache());
   const leases = useRef(new DirectoryWatchLeases());
   const scopeKey = scope ? keyForScope(scope) : "";
@@ -374,7 +346,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       // those barriers exist to prevent. Announcing that the root may have
       // moved is still real information, so it re-arms the backstop and the
       // guarded probe decides.
-      if (!sameRoot(current.root, event.root)) rearmBackstop.current?.();
+      if (!sameRoot(current.root, event.root)) rearmRoot.current?.();
       return;
     }
     if (event.kind === "transfer") {
@@ -457,97 +429,13 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     });
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
-    const epoch = scopeEpoch.current;
     void client.subscribe(scope, applyEvent).then((stop) => {
       if (disposed) stop();
       else unsubscribe = stop;
     }).catch((error) => { if (!disposed) setState((value) => ({ ...value, error: String(error) })); });
-    let resolving = false;
-    let unchangedProbes = 0;
-    const resolve = async () => {
-      if (resolving) return;
-      resolving = true;
-      const probe = ++rootProbeSerial.current;
-      const rootPaint = createPaintTicket(["workflow.explorer.rootPaint"], epoch);
-      try {
-        const activeScope = scopeRef.current;
-        if (!activeScope || keyForScope(activeScope) !== scopeKey) {
-          rootPaint.abandon();
-          return;
-        }
-        const known = stateRef.current.root?.token;
-        const root = await client.resolveActiveRoot(activeScope, known ? { knownRootToken: known } : {});
-        if (disposed || epoch !== scopeEpoch.current || probe !== rootProbeSerial.current) {
-          rootPaint.abandon();
-          return;
-        }
-        if (sameRoot(stateRef.current.root, root)) {
-          unchangedProbes += 1;
-          rootPaint.abandon();
-          return;
-        }
-        unchangedProbes = 0;
-        // A replaced root invalidates every path, listing, and content the
-        // previous one authorised: the same path under a new capability is a
-        // different file.
-        abortListing(() => true);
-        cache.current.invalidateOtherRoots(activeScope.clientId, root.token, root.revision);
-        setState((current) => ({
-          ...current,
-          scopeKey,
-          root,
-          listings: new Map(),
-          expanded: new Set([root.path]),
-          // The root's listing arrives with its watch, and until it does the
-          // tree has nothing to draw. Without this the Explorer showed no
-          // rows, no wait, and no empty state for the whole first round trip.
-          loading: new Set([root.path]),
-          recoveries: NO_RECOVERIES,
-          error: undefined,
-        }));
-        rootPaint.afterPaint((ticket) => !disposed
-          && ticket.lifecycleGeneration === scopeEpoch.current
-          && probe === rootProbeSerial.current
-          && sameRoot(stateRef.current.root, root));
-      } catch (error) {
-        rootPaint.abandon();
-        if (!disposed && epoch === scopeEpoch.current && probe === rootProbeSerial.current) setState((current) => ({ ...current, error: String(error) }));
-      } finally {
-        resolving = false;
-      }
-    };
-    void resolve();
-    // A foreground backstop, not a pipeline. Pane and window changes rebuild
-    // this scope and re-resolve immediately, so the only thing left for a timer
-    // to catch is `cd` inside the pane the user is already in — for which tmux
-    // emits no notification at all. A hidden window checks nothing, and a
-    // window that becomes visible checks once on the transition rather than
-    // waiting out the interval.
-    const foreground = () => typeof document === "undefined" || document.visibilityState === "visible";
-    let ticks = 0;
-    const backstop = window.setInterval(() => {
-      if (!foreground()) return;
-      ticks += 1;
-      // Settled: the same check, far less often. See the multiplier's note for
-      // why this slows down rather than stopping.
-      const settled = unchangedProbes >= ACTIVE_ROOT_STABLE_PROBES;
-      if (settled && ticks % ACTIVE_ROOT_SETTLED_MULTIPLIER !== 0) return;
-      void resolve();
-    }, ACTIVE_ROOT_BACKSTOP_MS);
-    const rearm = () => {
-      unchangedProbes = 0;
-      ticks = 0;
-      if (foreground()) void resolve();
-    };
-    rearmBackstop.current = rearm;
-    const onVisibility = () => { if (foreground()) rearm(); };
-    document?.addEventListener?.("visibilitychange", onVisibility);
     return () => {
       disposed = true;
       scopeEpoch.current += 1;
-      window.clearInterval(backstop);
-      document?.removeEventListener?.("visibilitychange", onVisibility);
-      rearmBackstop.current = undefined;
       abortListing(() => true);
       // A refresh still waiting out its window belongs to the scope that is
       // going away; letting it fire would read a directory for a pane the user
@@ -568,6 +456,42 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // subscription down and rebuild it on every render.
   }, [abortListing, applyEvent, client, scopeKey]);
 
+  /**
+   * Installs a root that is genuinely different from the one on screen.
+   *
+   * A replaced root invalidates every path, listing, and content the previous
+   * one authorised: the same path under a new capability is a different file.
+   */
+  const adoptRoot = useCallback((root: ActiveRoot) => {
+    const activeScope = scopeRef.current;
+    if (!activeScope) return;
+    abortListing(() => true);
+    cache.current.invalidateOtherRoots(activeScope.clientId, root.token, root.revision);
+    setState((current) => ({
+      ...current,
+      scopeKey,
+      root,
+      listings: new Map(),
+      expanded: new Set([root.path]),
+      // The root's listing arrives with its watch, and until it does the tree
+      // has nothing to draw. Without this the Explorer showed no rows, no
+      // wait, and no empty state for the whole first round trip.
+      loading: new Set([root.path]),
+      recoveries: NO_RECOVERIES,
+      error: undefined,
+    }));
+  }, [abortListing, scopeKey]);
+
+  const { rearm } = useActiveRoot({
+    client,
+    scope: () => scopeRef.current,
+    scopeKey,
+    held: () => stateRef.current.root,
+    onRoot: adoptRoot,
+    onError: (message) => setState((current) => ({ ...current, error: message })),
+    lifecycle: () => scopeEpoch.current,
+  });
+  useEffect(() => { rearmRoot.current = rearm; }, [rearm]);
   /**
    * The connection and root capability the watch set belongs to.
    *
@@ -677,7 +601,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     ) : undefined;
     // Touching the tree is the strongest evidence available that the pane may
     // have moved, so it re-arms the settled root backstop.
-    rearmBackstop.current?.();
+    rearmRoot.current?.();
     const root = stateRef.current.root;
     const activeScope = scopeRef.current;
     // A valid cached revisit and the expansion itself are one state
@@ -747,7 +671,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const root = stateRef.current.root;
     const target = directory ?? root?.path;
     if (!root || !target) return;
-    rearmBackstop.current?.();
+    rearmRoot.current?.();
     setState((current) => ({ ...current, requestedReads: current.requestedReads + 1 }));
     void loadDirectory(root, target).finally(() => {
       setState((current) => ({ ...current, requestedReads: Math.max(0, current.requestedReads - 1) }));
