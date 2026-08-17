@@ -609,15 +609,19 @@ fn establish_control_master(
 ) -> Result<(MasterProcess, bool), String> {
     let mut command = ssh_base(config_path);
     apply_control_lane_options(&mut command);
+    // No `ControlPersist`: it makes OpenSSH daemonize once the socket is up, so
+    // the process spawned here exits immediately while the real master keeps
+    // running reparented to init. Every other part of this module treats the
+    // owned child as the master — `reap_owned_master` reads `try_wait` as proof
+    // the master died and unlinks the socket, and `dispose_process` kills it at
+    // shutdown. Under `ControlPersist` that made the app delete the socket of
+    // its own live master seconds after connecting: already-multiplexed clients
+    // survived on the open connection, so the bridge looked healthy, while any
+    // later borrower — the remote-helper install is the one users hit — failed
+    // with "OpenSSH control socket disappeared or was replaced". Staying in the
+    // foreground makes this module's ownership model true instead of assumed.
     let mut child = command
-        .args([
-            "-M",
-            "-N",
-            "-o",
-            "ControlMaster=yes",
-            "-o",
-            "ControlPersist=60",
-        ])
+        .args(["-M", "-N", "-o", "ControlMaster=yes"])
         .arg("-S")
         .arg(socket)
         .arg(target)

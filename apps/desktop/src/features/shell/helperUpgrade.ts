@@ -6,6 +6,10 @@ export interface RemoteHelperProbe {
   installed: boolean;
   helperVersion?: string;
   compatible: boolean;
+  /** The host runs a newer helper than this app carries, so the app is the side that must move. */
+  appOutdated?: boolean;
+  /** The helper version this app ships, for explaining an `appOutdated` refusal. */
+  expectedHelperVersion?: string;
   digest?: string;
   remotePath: string;
 }
