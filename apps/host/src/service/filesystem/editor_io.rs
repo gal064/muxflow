@@ -32,7 +32,7 @@ impl FileService {
         transfer_id: &str,
         operation_id: &str,
         total: u64,
-        _expected_generation: u64,
+        expected_generation: u64,
     ) -> anyhow::Result<()> {
         validate_transfer_id(transfer_id)?;
         validate_token("operation ID", operation_id)?;
@@ -48,6 +48,34 @@ impl FileService {
         let (logical_write_target, _) = root.regular_file_target(&logical_target, &target)?;
         let target_anchor = root.anchor(&logical_write_target)?;
         let metadata = target_anchor.open_file()?.metadata()?;
+        // The generation the editor opened this file at, enforced rather than
+        // accepted and dropped.
+        //
+        // This parameter arrived, was named `_expected_generation`, and was
+        // discarded — so a file changed underneath an open editor was silently
+        // clobbered on save. It reads as a guarantee to anyone who sees the
+        // signature, and the read side of this feature was rebuilt around it:
+        // `open_stream` re-stats its own descriptor and refuses a file that
+        // moved while it was being opened, precisely so the editor could carry
+        // a generation into the write. This is where that carry is redeemed.
+        //
+        // The *leaf's* generation, from the logical name the caller opened —
+        // not the write target's. For a symlink those are two different inodes,
+        // and the leaf is what every producer of an on-screen fact reports:
+        // directory listings, precise watch events, and the open the editor
+        // holds. Comparing against the resolved target instead would refuse
+        // every save of a symlinked file.
+        //
+        // Zero means the caller claimed no generation — the wire field is
+        // optional and a first write has nothing to compare — and is not a
+        // mismatch.
+        if expected_generation != 0 {
+            let leaf =
+                metadata_for_anchored(&root.stable_root(), &target, &logical_target)?.generation;
+            if leaf != expected_generation {
+                return Err(stale_generation("file changed since it was opened"));
+            }
+        }
         let temporary = target_anchor.sibling(OsString::from(format!(
             ".tmux-ide-save-{transfer_id}.partial"
         )))?;

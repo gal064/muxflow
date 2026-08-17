@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { measurePerfOutcome, measurePerfRequest, recordPerfCounter, recordPerfHighWater, recordPerfJsonBytesDeferred } from "../../perf/probe";
+import { abortable, cancelled, throwIfAborted } from "../../transport/abortable";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type {
   GitChangeKind,
@@ -52,6 +53,8 @@ const MAX_DEFERRED_BODY_BYTES = 10 * 1024 * 1024;
 /** Frame kinds, matching `apps/desktop/src-tauri/src/connection/git_content.rs`. */
 const FRAME_CHUNK = 1;
 const FRAME_COMPLETE = 2;
+const GIT_CANCELLED = "Git request was cancelled.";
+
 const SIDE_OLD = 1;
 const SIDE_NEW = 2;
 
@@ -61,9 +64,9 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   async status(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitStatusSnapshot> {
     recordPerfCounter("git.statusRequests");
     const status = await measurePerfOutcome("git.status", async () => {
-      throwIfAborted(signal);
+      throwIfGitAborted(signal);
       const operationId = crypto.randomUUID();
-      return await abortable(
+      return await abortableGit(
         this.#request(scope, root, { operation: "status", operationId }, validateStatus, "git.status.request"),
         signal,
         () => this.#cancelRequest(scope.clientId, operationId),
@@ -75,10 +78,10 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
 
   async watch(scope: FileWorkspaceScope, root: ActiveRoot, signal?: AbortSignal): Promise<GitWatchLease> {
     recordPerfCounter("git.watchRequests");
-    throwIfAborted(signal);
+    throwIfGitAborted(signal);
     const watchId = crypto.randomUUID();
     const watchOperationId = crypto.randomUUID();
-    const status = await abortable(
+    const status = await abortableGit(
       this.#request(scope, root, { operation: "watch", operationId: watchOperationId, watchId }, validateStatus, "git.watch.request"),
       signal,
       () => this.#cancelRequest(scope.clientId, watchOperationId),
@@ -116,9 +119,9 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
   ): Promise<GitDiffResult> {
     recordPerfCounter("git.diffRequests");
     const result = await measurePerfOutcome("git.diff", async () => {
-      throwIfAborted(signal);
+      throwIfGitAborted(signal);
       const operationId = crypto.randomUUID();
-      return await abortable(this.#request(scope, root, {
+      return await abortableGit(this.#request(scope, root, {
         operation: "diff", operationId, repositoryId, path: [...fromBase64(path)],
         ...(originalPath ? { originalPath: [...fromBase64(originalPath)] } : {}),
         diffTarget: target,
@@ -388,26 +391,26 @@ function toBase64(value: number[]): string {
   return btoa(binary);
 }
 
-function abortable<T>(promise: Promise<T>, signal?: AbortSignal, cancelRemote?: () => Promise<unknown>): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) {
+/**
+ * The Git lane's cancellation, bound to the shared contract.
+ *
+ * The race, the listener and the teardown live in `transport/abortable`; what
+ * belongs to this feature is only which counter a cancellation increments and
+ * what its rejection says.
+ */
+function abortableGit<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  cancelRemote: () => Promise<unknown>,
+): Promise<T> {
+  return abortable(promise, signal, () => {
     recordPerfCounter("git.cancellations");
-    void cancelRemote?.().catch(() => undefined);
-    return Promise.reject(new DOMException("Git request was cancelled.", "AbortError"));
-  }
-  return new Promise((resolve, reject) => {
-    const cancel = () => {
-      recordPerfCounter("git.cancellations");
-      void cancelRemote?.().catch(() => undefined);
-      reject(new DOMException("Git request was cancelled.", "AbortError"));
-    };
-    signal.addEventListener("abort", cancel, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", cancel));
-  });
+    void cancelRemote().catch(() => undefined);
+  }, GIT_CANCELLED);
 }
 
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new DOMException("Git request was cancelled.", "AbortError");
+function throwIfGitAborted(signal?: AbortSignal): void {
+  throwIfAborted(signal, GIT_CANCELLED);
 }
 
 /**
@@ -442,7 +445,7 @@ function readDeferredBodies(
       if (settled) return;
       recordPerfCounter("git.cancellations");
       cancelRemote();
-      finish(() => reject(new DOMException("Git diff content read was cancelled.", "AbortError")));
+      finish(() => reject(cancelled("Git diff content read was cancelled.")));
     };
     const fail = (message: string) => {
       if (settled) return;

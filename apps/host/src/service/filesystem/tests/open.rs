@@ -258,6 +258,102 @@ fn editor_commits_are_serialized_last_writer_wins() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// A save carrying the generation it opened at cannot clobber a newer file.
+///
+/// The parameter was taken and discarded, so an editor whose file had been
+/// changed underneath it — by an agent in the same pane, by a rebase, by
+/// anything — overwrote that change on the next save without a word. The read
+/// side of this feature exists to make the claim available: `open_stream`
+/// re-stats its own descriptor and refuses a file that moved while it was
+/// being opened. This is the write side honouring it.
+#[test]
+fn a_save_whose_file_moved_since_it_was_opened_is_refused_rather_than_clobbering_it() {
+    let (root, service) = fixture();
+    fs::write(root.join("note.txt"), "opened").unwrap();
+    // The generation the editor is actually handed, taken the way it takes it.
+    let opened_at = service
+        .open_file_stream(root.to_str().unwrap(), "note.txt")
+        .unwrap()
+        .header()
+        .metadata
+        .clone()
+        .unwrap()
+        .generation;
+
+    // Somebody else writes the file while the editor holds it.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    fs::write(root.join("note.txt"), "changed underneath").unwrap();
+    let moved = |service: &FileService| {
+        service
+            .open_file_stream(root.to_str().unwrap(), "note.txt")
+            .unwrap()
+            .header()
+            .metadata
+            .clone()
+            .unwrap()
+            .generation
+    };
+    assert_ne!(
+        moved(&service),
+        opened_at,
+        "the fixture did not move the file"
+    );
+
+    let refused = service
+        .begin_file_write(
+            root.to_str().unwrap(),
+            "note.txt",
+            "stale",
+            "save",
+            4,
+            opened_at,
+        )
+        .expect_err("a stale save was admitted");
+    assert!(
+        refused.to_string().contains("changed"),
+        "the refusal did not name the reason: {refused}",
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("note.txt")).unwrap(),
+        "changed underneath",
+        "a stale save overwrote the newer file",
+    );
+    assert!(!root.join(".tmux-ide-save-stale.partial").exists());
+
+    // The same save, re-read at the generation the file actually has, lands.
+    let current = moved(&service);
+    service
+        .begin_file_write(
+            root.to_str().unwrap(),
+            "note.txt",
+            "fresh",
+            "save",
+            4,
+            current,
+        )
+        .unwrap();
+    service.write_file_chunk("fresh", 0, b"mine").unwrap();
+    service
+        .commit_file_write("fresh", blake3::hash(b"mine").to_hex().as_ref())
+        .unwrap();
+    assert_eq!(fs::read_to_string(root.join("note.txt")).unwrap(), "mine");
+
+    // And a caller that claims no generation is unaffected: the wire field is
+    // optional, and a first write has nothing to compare against.
+    service
+        .begin_file_write(
+            root.to_str().unwrap(),
+            "note.txt",
+            "unclaimed",
+            "save",
+            4,
+            0,
+        )
+        .unwrap();
+    service.cancel_file_write("unclaimed").unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// One path, one generation, whichever way it was observed.
 ///
 /// The editor accepts its first read when the parent watch's listing agrees

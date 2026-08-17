@@ -140,6 +140,36 @@ export function oweRecovery(
   return { ...current, recoveries };
 }
 
+/**
+ * Drops exactly the recoveries that were just issued, and nothing else.
+ *
+ * The caller reads the queue during one render and issues a read per entry;
+ * this is what it clears afterwards. It has to be per entry, by identity,
+ * because an event can raise a new recovery in between — and clearing the map
+ * wholesale on identity is all-or-nothing: one arrival makes the map unequal,
+ * the caller's effect re-runs on a queue it has already drained, and every
+ * entry is issued a second time. `coalesceRecovery` tolerates that; a page
+ * restore does not, because the second one aborts the first and the aborted
+ * one's teardown then clears the directory's wait state while its replacement
+ * is still running.
+ *
+ * Identity is also what preserves [`oweRecovery`]'s precedence: a gap raised
+ * while a restore was in flight has replaced the action object, so it does not
+ * match, is left queued, and supersedes the read that is already running.
+ */
+export function consumeRecoveries(
+  current: WorkspaceFilesState,
+  issued: ReadonlyMap<string, RecoveryAction>,
+): WorkspaceFilesState {
+  if (current.recoveries === issued) return { ...current, recoveries: NO_RECOVERIES };
+  const recoveries = new Map(current.recoveries);
+  for (const [directory, action] of issued) {
+    if (recoveries.get(directory) === action) recoveries.delete(directory);
+  }
+  if (recoveries.size === current.recoveries.size) return current;
+  return { ...current, recoveries: recoveries.size === 0 ? NO_RECOVERIES : recoveries };
+}
+
 /** Drops a deleted directory and everything the tree cached beneath it. */
 export function pruneSubtree(current: WorkspaceFilesState, path: string): WorkspaceFilesState {
   const prefix = `${path}/`;

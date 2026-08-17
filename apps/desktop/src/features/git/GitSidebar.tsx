@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
+import { useCommittedRef } from "../../commands/useCommittedRef";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { SurfaceError } from "../../ui/SurfaceError";
@@ -79,10 +80,7 @@ export function GitSidebar(props: Props) {
   // an unrelated prop identity changed above it. Committed rather than written
   // during render, so a render React discards cannot leave these handlers
   // acting on props that were never committed.
-  const latest = useRef({ ...props, unavailable });
-  useEffect(() => {
-    latest.current = { ...props, unavailable };
-  });
+  const latest = useCommittedRef({ ...props, unavailable });
   const openDiff = useCallback((entry: GitStatusEntry, target: GitDiffTarget) => {
     latest.current.onOpenDiff(entry, target);
   }, []);
@@ -125,8 +123,11 @@ export function GitSidebar(props: Props) {
     if (mutable) ids.push(focusedRow.target === "staged" ? "git.unstage" : "git.stage", "git.discard");
     return ids;
   }, [focusedEntry, focusedRow, props.root, props.scope, props.git.status, unavailable]);
-  const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
-  runRowCommand.current = (commandId) => {
+  // Committed, not written during render: the sibling Explorer tree names the
+  // render-time write as wrong for this exact publication, and it was wrong
+  // here too — a render React discards still runs its body, and the palette
+  // would then hold a closure over a focused row that was never committed.
+  const committedRowCommand = (commandId: CommandId) => {
     if (!focusedEntry || !focusedRow) return;
     switch (commandId) {
       case "git.openDiff": props.onOpenDiff(focusedEntry, focusedRow.target); return;
@@ -139,6 +140,7 @@ export function GitSidebar(props: Props) {
         return;
     }
   };
+  const runRowCommand = useCommittedRef(committedRowCommand);
   const rowSource = useMemo<RowCommandSource | undefined>(() => rowActions.length === 0 || !focusedEntry ? undefined : {
     subject: focusedEntry.displayPath,
     available: rowActions,

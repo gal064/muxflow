@@ -18,6 +18,7 @@ import {
   NO_RECOVERIES,
   installListing,
   onDirectory,
+  consumeRecoveries,
   oweRecovery,
   patchListing,
   pruneSubtree,
@@ -431,9 +432,9 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       if (action.kind === "list") coalesceRecovery(root, directory, action.reason);
       else void restorePages(root, directory, action.entries);
     }
-    setState((current) => current.recoveries === pending
-      ? { ...current, recoveries: NO_RECOVERIES }
-      : current);
+    // Per entry, by identity: an event raised between the render that produced
+    // `pending` and this update must not make the whole queue look undrained.
+    setState((current) => consumeRecoveries(current, pending));
   }, [coalesceRecovery, restorePages, state.recoveries, state.root]);
 
   useEffect(() => {

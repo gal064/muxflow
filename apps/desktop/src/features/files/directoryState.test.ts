@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_LISTINGS,
   NO_RECOVERIES,
+  consumeRecoveries,
   installListing,
   onDirectory,
   oweRecovery,
   patchListing,
   pruneSubtree,
+  type RecoveryAction,
   type WorkspaceFilesState,
 } from "./directoryState";
 import type { ActiveRoot, DirectoryListing, FileEntry } from "./types";
@@ -136,6 +138,51 @@ describe("oweRecovery", () => {
     expect(oweRecovery(paged, "/repo", "missing").recoveries.get("/repo")).toEqual({ kind: "list", reason: "missing" });
     const listed = state({ recoveries: new Map([["/repo", { kind: "list", reason: "missing" } as const]]) });
     expect(oweRecovery(listed, "/repo", "unmappable")).toBe(listed);
+  });
+});
+
+describe("consumeRecoveries", () => {
+  const restore: RecoveryAction = { kind: "restorePages", entries: 4 };
+  const gap: RecoveryAction = { kind: "list", reason: "missing" };
+  const queue = (...entries: [string, RecoveryAction][]) => new Map<string, RecoveryAction>(entries);
+
+  it("clears the queue it was handed when nothing arrived meanwhile", () => {
+    const issued = queue(["/repo", restore]);
+    expect(consumeRecoveries(state({ recoveries: issued }), issued).recoveries).toBe(NO_RECOVERIES);
+  });
+
+  /**
+   * The exact failure: an unrelated arrival used to make the whole map look
+   * undrained, so the caller's effect re-ran and issued `/repo`'s restore a
+   * second time. The second restore aborts the first and the aborted one's
+   * teardown clears `/repo`'s wait state while its replacement is still
+   * running — up to eight sequential round trips, restarted, during the
+   * overflow burst that is the only thing producing restores.
+   */
+  it("keeps an entry raised meanwhile without re-owing the ones it just issued", () => {
+    const issued = queue(["/repo", restore]);
+    const arrived = queue(["/repo", restore], ["/repo/sub", gap]);
+    const next = consumeRecoveries(state({ recoveries: arrived }), issued);
+    expect([...next.recoveries]).toEqual([["/repo/sub", gap]]);
+  });
+
+  /**
+   * `oweRecovery`'s precedence, from the drain's side. A gap raised while the
+   * restore was in flight replaced the action object, so it does not match and
+   * stays queued — the restore it supersedes returns silently on failure or
+   * abort without re-queuing anything, so consuming it here would answer that
+   * gap with nothing at all.
+   */
+  it("leaves a directory whose action was superseded while its read was in flight", () => {
+    const issued = queue(["/repo", restore]);
+    const superseded = queue(["/repo", gap]);
+    const next = consumeRecoveries(state({ recoveries: superseded }), issued);
+    expect(next.recoveries.get("/repo")).toBe(gap);
+  });
+
+  it("returns the same state when it has nothing of its own to drop", () => {
+    const current = state({ recoveries: queue(["/repo/sub", gap]) });
+    expect(consumeRecoveries(current, queue(["/repo", restore]))).toBe(current);
   });
 });
 

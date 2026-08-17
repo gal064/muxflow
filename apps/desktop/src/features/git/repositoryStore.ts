@@ -1,3 +1,4 @@
+import { cancelled } from "../../transport/abortable";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import { recordPerfCounter, recordPerfHighWater } from "../../perf/probe";
 import type {
@@ -136,7 +137,7 @@ class SharedDiffRequest {
     return new Promise<GitDiffResult>((resolve, reject) => {
       const abandon = () => {
         settle();
-        reject(new DOMException("Git diff was cancelled.", "AbortError"));
+        reject(cancelled("Git diff was cancelled."));
       };
       const settle = () => {
         signal?.removeEventListener("abort", abandon);

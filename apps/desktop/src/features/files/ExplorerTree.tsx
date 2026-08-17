@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
+import { useCommittedRef } from "../../commands/useCommittedRef";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { DownloadIntent } from "./downloadFlow";
@@ -289,7 +290,6 @@ export function ExplorerTree(props: Props) {
   // keystroke, and rebuilding the published source that often would be churn
   // for nothing. What the palette needs to be current is the *id list*, and
   // that is memoized above.
-  const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
   const committedRowCommand = (commandId: CommandId) => {
     switch (commandId) {
       case "files.open": if (focusedEntry) props.onOpen(focusedEntry, { preview: false }); return;
@@ -303,7 +303,7 @@ export function ExplorerTree(props: Props) {
       case "files.refresh": props.onRefresh(); return;
     }
   };
-  useLayoutEffect(() => { runRowCommand.current = committedRowCommand; });
+  const runRowCommand = useCommittedRef(committedRowCommand);
   const rowSource = useMemo<RowCommandSource | undefined>(() => rowActions.length === 0 ? undefined : {
     subject: focusedEntry?.name ?? rootName,
     available: rowActions,

@@ -20,11 +20,16 @@ use super::scheduler::{BulkBinding, CancelState, DeadlineGuard};
 /// holding an SSH connection and a remote helper process open indefinitely.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Idle connections kept at once.
+/// Idle connections kept at once, across every connection.
 ///
-/// Two for the scheduler's concurrent-transfer bound plus one for the Git
-/// diff-body lane, which is bounded to a single read: this can hold what every
-/// concurrent bulk consumer left behind and never more.
+/// Two for the scheduler's concurrent-transfer bound — which is process-global,
+/// and which editor file opens go through as well — plus one for the Git
+/// diff-body lane. That lane is bounded to a single read *per connection*, so
+/// with several profiles open at once the concurrent bulk consumers are 2 + N
+/// rather than 3: this is a retention budget for the common single-connection
+/// case, not a bound on how many bulk bridges can exist. Exceeding it costs a
+/// re-dial, never correctness — a lease that finds nothing pooled opens its own
+/// bridge.
 const MAX_IDLE: usize = 3;
 
 /// The first request id a fresh connection may use. 1 is the handshake's.
