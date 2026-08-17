@@ -12,6 +12,7 @@ use super::*;
 
 mod subscribers;
 mod watcher;
+use watcher::Observation;
 
 pub(in crate::service) use subscribers::SubscriberActivation;
 #[cfg(test)]
@@ -99,12 +100,6 @@ pub(super) enum Freshness {
     /// observed the change ticket. Reads and watch refreshes use this, which is
     /// what collapses 32 simultaneous consumers into one Git status pipeline.
     Coalesced,
-    /// Invalidates first, so nothing already observed can satisfy the caller.
-    ///
-    /// This is what an explicit user refresh means: the whole point of pressing
-    /// it is to recover from a filesystem watcher that missed something, so it
-    /// must not be answered from what that watcher last reported.
-    Forced,
     /// Always runs its own pipeline. Mutation authority is never inherited.
     Exclusive,
 }
@@ -169,10 +164,8 @@ pub(super) struct RepositoryCoordinator {
     /// broken. Owned here rather than by the observe task so that whoever
     /// notices the failure and whoever acts on it are not the same code.
     native_failed: Arc<AtomicBool>,
-    native_broken: tokio::sync::Notify,
     /// When this repository was last addressed, for eviction order only.
     last_use: AtomicU64,
-    #[cfg(test)]
     observation: Arc<GitObservation>,
 }
 
@@ -181,7 +174,7 @@ impl RepositoryCoordinator {
         key: RepositoryKey,
         next_generation: Arc<AtomicU64>,
         closed: Arc<AtomicBool>,
-        #[cfg(test)] observation: Arc<GitObservation>,
+        observation: Arc<GitObservation>,
     ) -> Self {
         Self {
             key,
@@ -199,9 +192,7 @@ impl RepositoryCoordinator {
             mutations: AtomicUsize::new(0),
             mutations_idle: tokio::sync::Notify::new(),
             native_failed: Arc::new(AtomicBool::new(false)),
-            native_broken: tokio::sync::Notify::new(),
             last_use: AtomicU64::new(0),
-            #[cfg(test)]
             observation,
         }
     }
@@ -251,7 +242,6 @@ impl RepositoryCoordinator {
             }
         }
         let expected_repository_id = request.repository_id.clone();
-        #[cfg(test)]
         self.observation.discovery();
         let discovered = tokio::task::spawn_blocking(move || {
             let root = WorktreeRoot::capture(&logical_root)?;
@@ -288,12 +278,6 @@ impl RepositoryCoordinator {
         self.change_ticket.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    /// The change ticket this coordinator is currently at. A diff brackets its
-    /// read with this, so it can state which repository state it describes.
-    pub(super) fn change_ticket(&self) -> u64 {
-        self.change_ticket.load(Ordering::Acquire)
-    }
-
     pub(super) fn cached_status(&self) -> Option<Arc<v1::GitStatusSnapshot>> {
         self.latest
             .lock()
@@ -310,24 +294,20 @@ impl RepositoryCoordinator {
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<Arc<v1::GitStatusSnapshot>> {
         let arrived = Instant::now();
-        if freshness == Freshness::Forced {
-            self.invalidate();
-        }
         let required = self.change_ticket.load(Ordering::Acquire);
-        if freshness != Freshness::Exclusive
+        if freshness == Freshness::Coalesced
             && let Some(cached) = self.satisfied_by_cache(required, arrived)
         {
             return Ok(cached);
         }
         let _pipeline = self.refresh.lock().await;
-        if freshness != Freshness::Exclusive
+        if freshness == Freshness::Coalesced
             && let Some(cached) = self.satisfied_by_cache(required, arrived)
         {
             return Ok(cached);
         }
         let started_at = Instant::now();
         let observed = self.change_ticket.load(Ordering::Acquire);
-        #[cfg(test)]
         self.observation.status_pipeline();
         let capabilities = Arc::clone(capabilities);
         let snapshot = tokio::task::spawn_blocking(move || {
@@ -405,15 +385,16 @@ impl RepositoryCoordinator {
     }
 
     /// Waits until no mutation is running, or until observation is stopped.
-    async fn await_mutation_quiescence(&self, stopped: &AtomicBool) {
+    async fn await_mutation_quiescence(&self, observation: &Observation) {
         loop {
-            let notified = self.mutations_idle.notified();
-            if self.mutations.load(Ordering::Acquire) == 0 || stopped.load(Ordering::Acquire) {
+            let idle = self.mutations_idle.notified();
+            let stopping = observation.wake.notified();
+            if self.mutations.load(Ordering::Acquire) == 0 || observation.stopped() {
                 return;
             }
             tokio::select! {
-                _ = notified => {}
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                _ = idle => {}
+                _ = stopping => return,
             }
         }
     }

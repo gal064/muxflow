@@ -34,8 +34,6 @@ export interface GitRepositoryHandle {
   subscribe(listener: () => void): () => void;
   /** An explicit re-read. The host answers this one without its watch cache. */
   refresh(): Promise<void>;
-  /** Adopts an authoritative status the caller already has. */
-  accept(status: GitStatusSnapshot): void;
   /** The diff for one entry, joining an identical request already in flight. */
   diff(request: GitDiffRequest, signal?: AbortSignal): Promise<GitDiffResult>;
   /** One mutation, whose returned authoritative status is reconciled here. */
@@ -61,8 +59,22 @@ const MAX_PENDING_EVENTS = 64;
 
 const NOT_OBSERVED: GitRepositoryState = { loading: true };
 
-function scopeKey(scope: FileWorkspaceScope, root: ActiveRoot): string {
-  return [scope.clientId, scope.serverIdentity, scope.terminalEpoch, root.token, root.path].join("\0");
+/**
+ * Everything an entry's captured scope is allowed to differ by: nothing.
+ *
+ * The entry keeps the first acquirer's scope and root objects and uses them for
+ * every later request, so the key has to name every field those requests read —
+ * `hostProfileId` included, because the deferred body read is addressed by it.
+ */
+export function gitScopeKey(scope: FileWorkspaceScope, root: ActiveRoot): string {
+  return [
+    scope.clientId,
+    scope.hostProfileId,
+    scope.serverIdentity,
+    scope.terminalEpoch,
+    root.token,
+    root.path,
+  ].join("\0");
 }
 
 function diffKey(request: GitDiffRequest): string {
@@ -89,6 +101,13 @@ class SharedDiffRequest {
     this.promise.catch(() => undefined);
   }
 
+  /**
+   * One caller's view of the shared request.
+   *
+   * A departing caller always sees its own `AbortError`, whether or not peers
+   * remain: it asked to stop waiting. Only the last departure cancels the
+   * request itself.
+   */
   join(signal: AbortSignal | undefined, onIdle: () => void): Promise<GitDiffResult> {
     this.#joiners += 1;
     let departed = false;
@@ -100,10 +119,21 @@ class SharedDiffRequest {
       this.#controller.abort();
       onIdle();
     };
-    signal?.addEventListener("abort", depart, { once: true });
-    return this.promise.finally(() => {
+    const settle = () => {
       signal?.removeEventListener("abort", depart);
       depart();
+    };
+    return new Promise<GitDiffResult>((resolve, reject) => {
+      const abandon = () => {
+        settle();
+        reject(new DOMException("Git diff was cancelled.", "AbortError"));
+      };
+      if (signal?.aborted) return abandon();
+      signal?.addEventListener("abort", abandon, { once: true });
+      this.promise.then(
+        (result) => { settle(); resolve(result); },
+        (cause) => { settle(); reject(cause); },
+      );
     });
   }
 
@@ -179,17 +209,19 @@ class RepositoryEntry {
   accept(status: GitStatusSnapshot): void {
     if (this.#disposed) return;
     const current = this.#state.status;
-    const settled = this.#state.loading || this.#state.error !== undefined;
     if (current && current.repository.id === status.repository.id) {
-      // Equal state is not a status transition. Bailing here is what stops a
-      // mutation that already delivered its status in its response from
-      // re-rendering every row when the shared watch echoes the same snapshot.
-      // Settling still has to happen: an identical snapshot is the normal
-      // answer to an explicit refresh, and it is also how an error clears.
+      // An older snapshot is not evidence of anything; drop it whole.
+      if (BigInt(status.generation) < BigInt(current.generation)) return;
+      // The identical snapshot is not a status transition, and re-publishing it
+      // would re-render every row for nothing — a mutation delivers its status
+      // in its own response and the shared watch then echoes the same one. It
+      // is still an answer, though: it settles `loading` and clears an error.
       const identical = current.generation === status.generation
         && current.sourceGeneration === status.sourceGeneration;
-      if (identical || BigInt(status.generation) < BigInt(current.generation)) {
-        if (settled) this.#publish({ status: current, loading: false });
+      if (identical) {
+        if (this.#state.loading || this.#state.error !== undefined) {
+          this.#publish({ status: current, loading: false });
+        }
         return;
       }
     }
@@ -200,6 +232,10 @@ class RepositoryEntry {
     if (this.#disposed) return;
     if (this.#refreshing) return this.#refreshing;
     this.#publish({ ...this.#state, loading: true, error: undefined });
+    // A bootstrap that failed left this entry without a watch, and the entry is
+    // shared — so the explicit refresh is also how every consumer of this
+    // repository gets its observation back.
+    if (!this.#lease) this.#start();
     const inFlight = (async () => {
       try {
         this.accept(await this.#client.status(this.#scope, this.#root, this.#abort.signal));
@@ -208,11 +244,6 @@ class RepositoryEntry {
         this.#publish({ ...this.#state, loading: false, error: String(cause) });
       } finally {
         this.#refreshing = undefined;
-        // A refresh that changed nothing still has to stop saying it is
-        // loading; `accept` deliberately suppresses the state transition.
-        if (!this.#disposed && this.#state.loading) {
-          this.#publish({ ...this.#state, loading: false });
-        }
       }
     })();
     this.#refreshing = inFlight;
@@ -261,6 +292,7 @@ class RepositoryEntry {
   }
 
   #start(): void {
+    this.#stopEvents?.();
     this.#stopEvents = this.#client.subscribe((event) => {
       if (this.#disposed || event.rootToken !== this.#root.token) return;
       if (!this.#lease) {
@@ -332,7 +364,7 @@ export class GitRepositoryStore {
   }
 
   acquire(scope: FileWorkspaceScope, root: ActiveRoot): GitRepositoryHandle {
-    const key = scopeKey(scope, root);
+    const key = gitScopeKey(scope, root);
     let entry = this.#entries.get(key);
     if (entry) {
       recordPerfCounter("git.sharedRepositoryReuses");
@@ -352,7 +384,6 @@ export class GitRepositoryStore {
       state: () => owner.state,
       subscribe: (listener) => owner.subscribe(listener),
       refresh: () => owner.refresh(),
-      accept: (status) => owner.accept(status),
       diff: (request, signal) => owner.diff(request, signal),
       mutate: (repositoryId, request) => owner.mutate(repositoryId, request),
       prepareDiscard: (repositoryId, request) => owner.prepareDiscard(repositoryId, request),
@@ -374,7 +405,7 @@ export class GitRepositoryStore {
    * between publications, which is what makes it safe as a store snapshot.
    */
   peek(scope: FileWorkspaceScope, root: ActiveRoot): GitRepositoryState {
-    const key = scopeKey(scope, root);
+    const key = gitScopeKey(scope, root);
     return this.#entries.get(key)?.state ?? this.#remembered.get(key) ?? NOT_OBSERVED;
   }
 

@@ -126,6 +126,33 @@ describe("GitDiffSurface", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it("recovers a file the shared observation wrongly believes is unchanged", async () => {
+    const client = mockClient();
+    // The shared observation says this file has no unstaged change, so the tab
+    // shows its empty state and no diff request is worth sending.
+    const clean = {
+      ...status,
+      generation: "6",
+      sourceGeneration: "clean",
+      entries: [{ ...status.entries[0], worktreeKind: "none" as const, worktreeStatus: "." }],
+    };
+    vi.mocked(client.watch).mockImplementation(async (activeScope, activeRoot) => ({ watchId: "diff-watch", rootToken: activeRoot.token, connectionEpoch: activeScope.terminalEpoch, status: clean, release: vi.fn() }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
+    expect(JSON.stringify(renderer.toJSON())).toContain("no longer has unstaged changes");
+    expect(client.diff).not.toHaveBeenCalled();
+
+    // Retry is the person asking again. It must reach the host, not re-read the
+    // very snapshot that produced the empty state.
+    vi.mocked(client.status).mockResolvedValue(status);
+    const retry = renderer.root.findAllByType("button").find((button) => button.props.children === "Retry");
+    await act(async () => { retry?.props.onClick(); await settle(); await settle(); });
+    expect(client.status).toHaveBeenCalledTimes(1);
+    expect(client.diff).toHaveBeenCalledTimes(1);
+    expect(renderer.root.findByProps({ "data-original": "old\n" }).props["data-modified"]).toBe("new\n");
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("presents binary changes safely without constructing a text diff", async () => {
     const client = mockClient();
     vi.mocked(client.diff).mockResolvedValueOnce({ diff: { ...diff, binary: true, oldContent: undefined, newContent: undefined }, status });

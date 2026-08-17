@@ -1,29 +1,21 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
-import type { GitCommandResult, GitMutationRequest, GitStatusSnapshot } from "./types";
-import type { GitRepositoryHandle, GitRepositoryState, GitRepositoryStore } from "./repositoryStore";
+import { gitScopeKey, type GitRepositoryHandle, type GitRepositoryState, type GitRepositoryStore } from "./repositoryStore";
 import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
 
-export interface WorkspaceGitState {
-  status?: GitStatusSnapshot;
-  loading: boolean;
-  error?: string;
+/**
+ * What the panel renders, and the observation it acts through.
+ *
+ * The handle is exposed rather than re-wrapped: every method a consumer needs
+ * is already on it, and a second forwarding layer would only add a way for the
+ * two to disagree. It is absent exactly while there is no repository to observe.
+ */
+export interface WorkspaceGitState extends GitRepositoryState {
+  handle?: GitRepositoryHandle;
   refresh(): Promise<void>;
-  accept(status: GitStatusSnapshot): void;
-  mutate(repositoryId: string, request: GitMutationRequest): Promise<GitCommandResult>;
-  prepareDiscard(repositoryId: string, request: GitMutationRequest): Promise<string>;
-  commit(repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult>;
 }
 
 const IDLE: GitRepositoryState = { loading: false };
-
-/** Runs against the live observation, or refuses because there is not one. */
-function observed<T>(
-  handle: GitRepositoryHandle | undefined,
-  run: (owner: GitRepositoryHandle) => Promise<T>,
-): Promise<T> {
-  return handle ? run(handle) : Promise.reject(new Error("This repository is no longer observed."));
-}
 
 /**
  * The sidebar's view of the shared repository observation.
@@ -41,9 +33,7 @@ export function useWorkspaceGit(
 ): WorkspaceGitState {
   const observable = Boolean(scope && root?.gitWorktree);
   const bound = observable && scope && root ? { scope, root } : undefined;
-  const identity = bound
-    ? `${bound.scope.clientId}\0${bound.scope.serverIdentity}\0${bound.scope.terminalEpoch}\0${bound.root.token}\0${bound.root.path}`
-    : "";
+  const identity = bound ? gitScopeKey(bound.scope, bound.root) : "";
   const handle = useRef<GitRepositoryHandle | undefined>(undefined);
 
   // Acquisition and subscription are one lifetime, so the entry is held for
@@ -95,33 +85,12 @@ export function useWorkspaceGit(
   const refresh = useCallback(async () => {
     await handle.current?.refresh();
   }, []);
-  const accept = useCallback((status: GitStatusSnapshot) => {
-    handle.current?.accept(status);
-  }, []);
-  const mutate = useCallback(
-    (repositoryId: string, request: GitMutationRequest) =>
-      observed(handle.current, (owner) => owner.mutate(repositoryId, request)),
-    [],
-  );
-  const prepareDiscard = useCallback(
-    (repositoryId: string, request: GitMutationRequest) =>
-      observed(handle.current, (owner) => owner.prepareDiscard(repositoryId, request)),
-    [],
-  );
-  const commit = useCallback(
-    (repositoryId: string, expectedStatusGeneration: string, message: string) =>
-      observed(handle.current, (owner) => owner.commit(repositoryId, expectedStatusGeneration, message)),
-    [],
-  );
 
   return {
     status: state.status,
     loading: observable ? state.loading : false,
     error: state.error,
+    handle: handle.current,
     refresh,
-    accept,
-    mutate,
-    prepareDiscard,
-    commit,
   };
 }

@@ -7,12 +7,12 @@
 //! number, and "exactly one watcher for 32 consumers" is precisely the fact
 //! this package exists to prove.
 
-use std::{
-    ffi::OsStr,
-    os::unix::ffi::OsStrExt,
-    sync::{Mutex, OnceLock},
-};
+use std::sync::Mutex;
 
+#[cfg(test)]
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt, sync::OnceLock};
+
+#[cfg(test)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GitProcessMeasurements {
@@ -24,13 +24,16 @@ pub(super) struct GitProcessMeasurements {
     pub active_processes_high_water: usize,
 }
 
+#[cfg(test)]
 fn processes() -> &'static Mutex<GitProcessMeasurements> {
     static VALUE: OnceLock<Mutex<GitProcessMeasurements>> = OnceLock::new();
     VALUE.get_or_init(|| Mutex::new(GitProcessMeasurements::default()))
 }
 
+#[cfg(test)]
 pub(super) struct GitProcessMeasurement;
 
+#[cfg(test)]
 pub(super) fn phase14_git_process_started(command: &OsStr) -> GitProcessMeasurement {
     let mut value = processes().lock().unwrap();
     value.git_processes += 1;
@@ -47,6 +50,7 @@ pub(super) fn phase14_git_process_started(command: &OsStr) -> GitProcessMeasurem
     GitProcessMeasurement
 }
 
+#[cfg(test)]
 impl Drop for GitProcessMeasurement {
     fn drop(&mut self) {
         let mut value = processes().lock().unwrap();
@@ -54,6 +58,7 @@ impl Drop for GitProcessMeasurement {
     }
 }
 
+#[cfg(test)]
 pub(super) fn phase14_git_process_snapshot() -> GitProcessMeasurements {
     processes().lock().unwrap().clone()
 }
@@ -109,6 +114,8 @@ impl GitObservation {
         self.0.lock().unwrap().status_pipelines += 1;
     }
 
+    /// Only tests read these back; production only ever records into them.
+    #[cfg(test)]
     pub(super) fn snapshot(&self) -> GitObservationCounts {
         self.0.lock().unwrap().clone()
     }

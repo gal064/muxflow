@@ -2,7 +2,6 @@ import { useMemo } from "react";
 import type { TauriFileWorkspaceClient } from "../features/files/api";
 import type { FileWorkspaceScope } from "../features/files/types";
 import { useWorkspaceFiles } from "../features/files/useWorkspaceFiles";
-import type { TauriGitWorkspaceClient } from "../features/git/api";
 import { useWorkspaceGit } from "../features/git/useWorkspaceGit";
 import type { GitRepositoryStore } from "../features/git/repositoryStore";
 import { appTabsForWorkspace, workspaceUiRecord } from "../features/shell/model";
@@ -19,7 +18,6 @@ type WorkspaceDomainArguments = {
   currentHostProfileId: string;
   fileClient: TauriFileWorkspaceClient;
   generation: number;
-  gitClient: TauriGitWorkspaceClient;
   gitRepositories: GitRepositoryStore;
   serverIdentity?: string;
   snapshot: TmuxSnapshot;
@@ -30,7 +28,7 @@ type WorkspaceDomainArguments = {
 export function useWorkspaceDomainController(arguments_: WorkspaceDomainArguments) {
   const {
     activeSessionId, activeWindowId, appState, clientId, connection,
-    currentHostProfileId, fileClient, generation, gitClient, gitRepositories, serverIdentity,
+    currentHostProfileId, fileClient, generation, gitRepositories, serverIdentity,
     snapshot, terminalEpoch, windows,
   } = arguments_;
   const panes = useMemo(

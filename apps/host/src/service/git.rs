@@ -53,10 +53,10 @@ mod diff;
 use diff::{DiffAudience, read_diff};
 mod mutation;
 use mutation::{discard_file, mutate_hunk, unstage_file};
-#[cfg(test)]
 mod measurements;
+use measurements::GitObservation;
 #[cfg(test)]
-use measurements::{GitObservation, phase14_git_process_started};
+use measurements::phase14_git_process_started;
 mod path;
 use path::WorktreeRoot;
 mod parser;
@@ -102,8 +102,6 @@ struct ConfirmationBinding {
 /// all of it instead of each running their own discovery and their own watcher.
 pub(super) struct GitService {
     repositories: Mutex<HashMap<RepositoryKey, Arc<RepositoryCoordinator>>>,
-    /// Which coordinator owns each live watch id, so `unwatch` needs no scan.
-    watches: Mutex<HashMap<String, Arc<RepositoryCoordinator>>>,
     confirmations: Mutex<HashMap<String, ConfirmationBinding>>,
     diff_body: Mutex<Option<content::CachedDiffBody>>,
     next_generation: Arc<AtomicU64>,
@@ -113,7 +111,9 @@ pub(super) struct GitService {
     /// from any individual request.
     connection_epoch: u64,
     closed: Arc<AtomicBool>,
-    #[cfg(test)]
+    /// Deterministic observation counters for this connection. Always present:
+    /// a conditionally compiled field would give test and release builds
+    /// different shapes for the same code.
     observation: Arc<GitObservation>,
 }
 
@@ -121,14 +121,12 @@ impl GitService {
     pub(super) fn new(closed: Arc<AtomicBool>, connection_epoch: u64) -> Self {
         Self {
             repositories: Mutex::new(HashMap::new()),
-            watches: Mutex::new(HashMap::new()),
             confirmations: Mutex::new(HashMap::new()),
             diff_body: Mutex::new(None),
             next_generation: Arc::new(AtomicU64::new(0)),
             next_use: AtomicU64::new(0),
             connection_epoch,
             closed,
-            #[cfg(test)]
             observation: Arc::new(GitObservation::default()),
         }
     }
@@ -176,7 +174,6 @@ impl GitService {
                     key,
                     Arc::clone(&self.next_generation),
                     Arc::clone(&self.closed),
-                    #[cfg(test)]
                     Arc::clone(&self.observation),
                 ))
             }));
@@ -193,8 +190,8 @@ impl GitService {
         }
     }
 
-    /// Drops a coordinator that can no longer describe its root, so the next
-    /// request rediscovers instead of inheriting a broken one.
+    /// Drops an unwatched coordinator, so the next request rediscovers rather
+    /// than inheriting one whose root it could no longer describe.
     fn retire(&self, coordinator: &Arc<RepositoryCoordinator>) {
         let mut repositories = self.repositories.lock().unwrap();
         if repositories
@@ -211,17 +208,18 @@ impl GitService {
     ///
     /// Every automatic refresh now arrives through the shared watch, so a
     /// client asking for status is a person asking for it — usually because
-    /// something looked wrong. Answering that from the snapshot the watcher
-    /// last produced would remove the only recovery there is from a filesystem
-    /// watcher that silently missed an event.
+    /// something looked wrong. Invalidating first is what makes that a real
+    /// re-read: answering from the snapshot the watcher last produced would
+    /// remove the only recovery there is from a watcher that missed an event.
     pub(in crate::service) async fn status(
         &self,
         request: &v1::GitRequest,
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<v1::GitStatusSnapshot> {
         let (coordinator, capabilities) = self.repository(request, cancellation.clone()).await?;
+        coordinator.invalidate();
         let status = coordinator
-            .status(&capabilities, Freshness::Forced, cancellation)
+            .status(&capabilities, Freshness::Coalesced, cancellation)
             .await?;
         Ok((*status).clone())
     }
@@ -232,10 +230,10 @@ impl GitService {
     /// trips for one visible action. The status is carried here because the
     /// service already has it: for a watched repository it costs nothing.
     ///
-    /// The pair is bracketed by the coordinator's change ticket rather than by
-    /// a second status pipeline. Nothing may have invalidated the repository
-    /// between taking the status and reading the diff, or the response would be
-    /// stating a status the diff was not read against.
+    /// The pair is bracketed by re-taking the status after the read. For an
+    /// observed repository that costs nothing — the coordinator answers from
+    /// the same snapshot — and it is the only thing that actually proves the
+    /// status this response states is the one the diff was read against.
     pub(in crate::service) async fn diff(
         &self,
         request: &v1::GitRequest,
@@ -256,7 +254,6 @@ impl GitService {
             if !status.authoritative || status.oversized {
                 bail!("Git status is not authoritative");
             }
-            let before = coordinator.change_ticket();
             let repository = status
                 .repository
                 .clone()
@@ -276,7 +273,10 @@ impl GitService {
             })
             .await
             .map_err(|error| anyhow::anyhow!("Git diff task failed: {error}"))??;
-            if coordinator.change_ticket() == before {
+            let after = coordinator
+                .status(&capabilities, Freshness::Coalesced, cancellation.clone())
+                .await?;
+            if after.generation == status.generation {
                 return Ok((read, (*status).clone()));
             }
         }
@@ -383,10 +383,14 @@ impl GitService {
         let (coordinator, capabilities) = self
             .repository(&request, Some(Arc::clone(&cancellation)))
             .await?;
-        let _mutation = coordinator.begin_mutation();
+        // The repository lock is process-global, so waiting for it can mean
+        // waiting on another connection's five-minute commit hook. Suppressing
+        // this connection's watcher only starts once this mutation actually
+        // owns the repository.
         let _guard = repository_lock(&capabilities.identity.repository_id)
             .lock_owned()
             .await;
+        let _mutation = coordinator.begin_mutation();
         if cancellation.load(Ordering::Acquire) {
             bail!("cancelled before mutation");
         }
@@ -500,10 +504,10 @@ impl GitService {
         let (coordinator, capabilities) = self
             .repository(&request, Some(Arc::clone(&cancellation)))
             .await?;
-        let _mutation = coordinator.begin_mutation();
         let _guard = repository_lock(&capabilities.identity.repository_id)
             .lock_owned()
             .await;
+        let _mutation = coordinator.begin_mutation();
         if cancellation.load(Ordering::Acquire) {
             bail!("cancelled before commit");
         }
@@ -610,7 +614,6 @@ impl Drop for GitService {
             coordinator.stop_watcher();
             coordinator.drop_all_subscribers();
         }
-        self.watches.get_mut().unwrap().clear();
     }
 }
 

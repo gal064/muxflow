@@ -13,6 +13,13 @@ use std::path::{Path, PathBuf};
 const FALLBACK_MIN: Duration = Duration::from_millis(750);
 /// Ceiling for the fallback poll interval.
 const FALLBACK_MAX: Duration = Duration::from_secs(30);
+/// How often a waiting observer rechecks its watcher's health.
+///
+/// The `notify` callback raises `native_failed` and then `try_send`s a signal,
+/// and that send can be dropped when the one-slot channel is already full. So a
+/// broken watcher can be flagged with no signal ever arriving, and waiting on
+/// that stream alone would wait forever.
+const WATCH_HEALTH_RECHECK: Duration = Duration::from_secs(1);
 
 pub(in crate::service::git) enum WatchSignal {
     Changed,
@@ -22,13 +29,11 @@ pub(in crate::service::git) enum WatchSignal {
 pub(in crate::service::git) struct RepositoryWatcher {
     _watcher: RecommendedWatcher,
     _capabilities: Arc<RepositoryCapabilities>,
-    #[cfg(test)]
     observation: Arc<GitObservation>,
 }
 
 impl Drop for RepositoryWatcher {
     fn drop(&mut self) {
-        #[cfg(test)]
         self.observation.watcher_dropped();
     }
 }
@@ -39,16 +44,20 @@ impl Drop for RepositoryWatcher {
 /// leave during that await. Stamping the generation is what stops the departing
 /// generation's task from later publishing `observing` on behalf of a watcher
 /// that has since been replaced.
-struct Observation {
+pub(super) struct Observation {
     generation: u64,
     stopped: Arc<AtomicBool>,
-    wake: Arc<tokio::sync::Notify>,
+    pub(super) wake: Arc<tokio::sync::Notify>,
 }
 
 impl Observation {
     fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.wake.notify_waiters();
+    }
+
+    pub(super) fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
     }
 }
 
@@ -103,10 +112,12 @@ impl RepositoryCoordinator {
     }
 
     /// Marks the established native watcher broken, as the platform does.
+    ///
+    /// Recovery runs through exactly the same flag and the same top-of-loop
+    /// retirement that a real `notify` failure uses.
     #[cfg(test)]
     pub(in crate::service::git) fn fail_native_watcher_for_test(&self) {
         self.native_failed.store(true, Ordering::Release);
-        self.native_broken.notify_waiters();
     }
 
     pub(in crate::service::git) fn stop_watcher(&self) {
@@ -130,7 +141,7 @@ impl RepositoryCoordinator {
     }
 
     fn observation_stopped(&self, observation: &Observation) -> bool {
-        observation.stopped.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire)
+        observation.stopped() || self.closed.load(Ordering::Acquire)
     }
 
     async fn establish(
@@ -141,28 +152,31 @@ impl RepositoryCoordinator {
         let root = self.key.root.clone();
         let token = self.key.root_token.clone();
         let failed = Arc::clone(&self.native_failed);
-        #[cfg(test)]
         let observation = Arc::clone(&self.observation);
         tokio::task::spawn_blocking(move || {
-            start_repository_watcher(
-                &capabilities,
-                &root,
-                &token,
-                failed,
-                #[cfg(test)]
-                observation,
-            )
+            start_repository_watcher(&capabilities, &root, &token, failed, observation)
         })
         .await
         .ok()
         .and_then(Result::ok)
     }
 
-    /// Sleeps, unless observation is stopped first.
+    /// Sleeps, unless observation is already stopped or stops during it.
+    ///
+    /// The stop check comes first: `Notify::notify_waiters` stores no permit,
+    /// so a stop landing between awaits would otherwise be missed and the task
+    /// would sleep out its whole fallback interval before noticing.
     async fn rest(&self, observation: &Observation, duration: Duration) {
+        if self.observation_stopped(observation) {
+            return;
+        }
+        let stopping = observation.wake.notified();
+        if self.observation_stopped(observation) {
+            return;
+        }
         tokio::select! {
             _ = tokio::time::sleep(duration) => {}
-            _ = observation.wake.notified() => {}
+            _ = stopping => {}
         }
     }
 
@@ -212,7 +226,7 @@ impl RepositoryCoordinator {
                 if unobserved || polling {
                     unobserved = false;
                     self.invalidate();
-                    self.await_mutation_quiescence(&observation.stopped).await;
+                    self.await_mutation_quiescence(&observation).await;
                     self.refresh(
                         &capabilities,
                         &observation,
@@ -233,8 +247,8 @@ impl RepositoryCoordinator {
             let signal = tokio::select! {
                 signal = receiver.recv() => signal,
                 _ = observation.wake.notified() => break,
-                // A watcher marked broken elsewhere must not be waited on.
-                _ = self.native_broken.notified() => continue,
+                // The top of the loop retires a watcher flagged broken.
+                _ = tokio::time::sleep(WATCH_HEALTH_RECHECK) => continue,
             };
             match signal {
                 Some(WatchSignal::Changed) => {
@@ -257,7 +271,7 @@ impl RepositoryCoordinator {
             // A mutation's own writes wake this watcher. Waiting for the
             // mutation to publish its post-command refresh means that refresh
             // is the one authoritative read, not the first of two.
-            self.await_mutation_quiescence(&observation.stopped).await;
+            self.await_mutation_quiescence(&observation).await;
             if self.observation_stopped(&observation) {
                 break;
             }
@@ -376,7 +390,7 @@ pub(in crate::service::git) fn start_repository_watcher(
     logical_root: &str,
     root_token: &str,
     failed: Arc<AtomicBool>,
-    #[cfg(test)] observation: Arc<GitObservation>,
+    observation: Arc<GitObservation>,
 ) -> anyhow::Result<EstablishedWatcher> {
     let root = capabilities.try_clone_root()?;
     let root_identity = root.identity()?;
@@ -418,13 +432,11 @@ pub(in crate::service::git) fn start_repository_watcher(
     if current.identity()? != root_identity {
         bail!("repository root changed while establishing Git watch");
     }
-    #[cfg(test)]
     observation.watcher_created(targets.len() as u64);
     Ok((
         RepositoryWatcher {
             _watcher: watcher,
             _capabilities: Arc::clone(capabilities),
-            #[cfg(test)]
             observation,
         },
         receiver,
