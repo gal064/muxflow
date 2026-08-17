@@ -9,19 +9,48 @@ export function parentPath(path: string): string {
 }
 
 /**
+ * What `to_string_lossy` leaves behind for bytes that are not UTF-8.
+ *
+ * A mapped name containing one is a name whose raw bytes the renderer never
+ * sees, so its position in the host's order cannot be computed here. A file
+ * genuinely *named* U+FFFD is treated the same way, which costs one recovery
+ * list in a case that essentially never occurs — the safe direction.
+ */
+const REPLACEMENT_CHARACTER = "�";
+
+/**
  * The host's own entry order: directories first, then name.
  *
- * It ranks on the raw name bytes, which a renderer cannot see; comparing the
- * mapped strings agrees for every name that survives UTF-8 and differs only in
- * the position of a name that does not. That is a cosmetic ordering difference
- * in a locally patched listing, and the next authoritative snapshot replaces it
- * outright.
+ * The host ranks on the raw name bytes (`listing_page.rs`, `entry_key`), and
+ * UTF-8 byte order is code *point* order — which is not what JavaScript's `<`
+ * gives you. `<` compares UTF-16 code units, so every astral-plane name (emoji,
+ * CJK extension, older scripts) sorts *below* `U+E000..U+FFFF` rather than
+ * above it. Comparing code points reproduces the host's order exactly for every
+ * name that survives UTF-8; [`orderIsKnowable`] covers the names that do not.
  */
 export function compareEntries(left: FileEntry, right: FileEntry): number {
   const leftRank = left.kind === "directory" ? 0 : 1;
   const rightRank = right.kind === "directory" ? 0 : 1;
   if (leftRank !== rightRank) return leftRank - rightRank;
-  return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+  return compareNames(left.name, right.name);
+}
+
+/** Code-point order, which is byte order for UTF-8. */
+function compareNames(left: string, right: string): number {
+  const shared = Math.min(left.length, right.length);
+  for (let index = 0; index < shared; index += 1) {
+    const leftPoint = left.codePointAt(index)!;
+    const rightPoint = right.codePointAt(index)!;
+    if (leftPoint !== rightPoint) return leftPoint < rightPoint ? -1 : 1;
+    // Both sides consumed the same surrogate pair, so the indices stay aligned.
+    if (leftPoint > 0xFFFF) index += 1;
+  }
+  return left.length - right.length;
+}
+
+/** Whether both names' positions in the host's raw-byte order are computable. */
+function orderIsKnowable(left: string, right: string): boolean {
+  return !left.includes(REPLACEMENT_CHARACTER) && !right.includes(REPLACEMENT_CHARACTER);
 }
 
 /**
@@ -48,11 +77,18 @@ export function isPatchable(listing: DirectoryListing | undefined): listing is D
  * than that every single-file change fell through to a recovery list and then
  * to a full re-pagination — the exact list storm this package exists to
  * remove, in precisely the directories where it costs most.
+ *
+ * `"unmappable"` rather than `false` when the boundary comparison cannot be
+ * trusted: a wrong answer here does not misplace a row, it *loses* one, because
+ * "after the last page I hold" means "nothing on screen to correct" and nothing
+ * is scheduled to find out otherwise.
  */
-function covers(listing: DirectoryListing, entry: FileEntry): boolean {
+function covers(listing: DirectoryListing, entry: FileEntry): boolean | RecoveryReason {
   if (listing.complete && !listing.nextPageToken) return true;
   const last = listing.entries.at(-1);
-  return last !== undefined && compareEntries(entry, last) <= 0;
+  if (last === undefined) return false;
+  if (!orderIsKnowable(entry.name, last.name)) return "unmappable";
+  return compareEntries(entry, last) <= 0;
 }
 
 /** Applies one precise change, or reports why a recovery list is needed. */
@@ -69,7 +105,9 @@ export function patchEntry(
   }
   // Beyond the rows this listing holds: the entry lives in a page nobody has
   // asked for, so there is nothing on screen to correct.
-  if (!covers(listing, entry)) return listing;
+  const covered = covers(listing, entry);
+  if (isRecoveryReason(covered)) return covered;
+  if (!covered) return listing;
   const entries = [...listing.entries, entry].sort(compareEntries);
   return { ...listing, entries };
 }
@@ -86,7 +124,7 @@ export function removeEntry(
   return { ...listing, entries: listing.entries.filter((entry) => entry.path !== path) };
 }
 
-export function isRecoveryReason(value: DirectoryListing | RecoveryReason): value is RecoveryReason {
+export function isRecoveryReason<T>(value: T | RecoveryReason): value is RecoveryReason {
   return typeof value === "string";
 }
 
