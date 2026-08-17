@@ -139,6 +139,51 @@ pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_TERMINAL_OUTPUT_CREDIT
     | CAP_FILE_STREAM;
 
+/// Every required capability, with the name a refusal reports it by.
+const CAPABILITY_NAMES: [(u64, &str); 16] = [
+    (CAP_SNAPSHOTS, "snapshots"),
+    (CAP_ORDERED_EVENTS, "orderedEvents"),
+    (CAP_CANCELLATION, "cancellation"),
+    (CAP_TERMINAL_STREAM, "terminalStream"),
+    (CAP_RESYNC, "resync"),
+    (CAP_TMUX_ACTIONS, "tmuxActions"),
+    (CAP_TERMINAL_RESOURCES, "terminalResources"),
+    (CAP_ACTIVE_ROOT, "activeRoot"),
+    (CAP_FILE_SERVICE, "fileService"),
+    (CAP_TEXT_EDITOR, "textEditor"),
+    (CAP_BULK_DOWNLOAD, "bulkDownload"),
+    (CAP_GIT, "git"),
+    (CAP_AGENTS, "agents"),
+    (CAP_TERMINAL_UPLOAD, "terminalUpload"),
+    (CAP_TERMINAL_OUTPUT_CREDIT, "terminalOutputCredit"),
+    (CAP_FILE_STREAM, "fileStream"),
+];
+
+/// Which required capabilities `advertised` does not carry.
+///
+/// The admission rule itself, in one place. Restating it — even in a comment
+/// beside a test — is how a helper that cannot serve an operation ends up
+/// admitted by one copy of the rule and refused by another.
+pub fn missing_host_capabilities(advertised: u64) -> u64 {
+    HOST_CAPABILITIES & !advertised
+}
+
+/// Names the capabilities in `mask`, so a refusal can say what is missing.
+///
+/// A bare hex mask names the *bit*, which is not a fact anyone outside this
+/// file can act on.
+pub fn capability_names(mask: u64) -> Vec<&'static str> {
+    let mut named: Vec<&'static str> = CAPABILITY_NAMES
+        .iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    if mask & !CAPABILITY_NAMES.iter().fold(0, |all, (bit, _)| all | bit) != 0 {
+        named.push("unknown");
+    }
+    named
+}
+
 #[derive(Debug, Error)]
 pub enum FrameError {
     #[error("frame I/O failed: {0}")]
