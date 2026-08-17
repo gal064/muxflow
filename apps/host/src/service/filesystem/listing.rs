@@ -227,8 +227,23 @@ fn scan_ordered_entries(
         if is_always_hidden(&name) {
             continue;
         }
-        let entry = AnchoredPath::in_directory(directory, name.clone())?;
-        let metadata = metadata_for_directory_entry(&entry, &logical_target.join(&name))?;
+        // An entry that vanished between `readdir` and its stat is simply not
+        // in this listing. Failing the whole directory over it makes listing
+        // one that an agent or a build is writing into a coin flip — and this
+        // is the path every Explorer expansion takes, while the two places that
+        // already got the rule right (`watch_fingerprint` and the fallback
+        // scan) are the ones nobody is waiting on. `NotFound` only: every other
+        // error is still a real failure.
+        let entry = match AnchoredPath::in_directory(directory, name.clone()) {
+            Ok(entry) => entry,
+            Err(error) if entry_vanished(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        let metadata = match metadata_for_directory_entry(&entry, &logical_target.join(&name)) {
+            Ok(metadata) => metadata,
+            Err(error) if entry_vanished(&error) => continue,
+            Err(error) => return Err(error),
+        };
         let key = entry_key(&metadata, &name);
         if resume_after.is_some_and(|resume_after| key <= *resume_after) {
             continue;
@@ -282,4 +297,16 @@ fn ensure_enterable(root: &RootCapability, logical_target: &Path) -> anyhow::Res
         );
     }
     Ok(())
+}
+
+/// Whether an error means "that entry is no longer there".
+///
+/// The one rule three different places in this service need — `readdir` names
+/// an entry, something unlinks it, the stat that follows fails. Stated once,
+/// because the two copies that had it and the one that did not is exactly how
+/// the path users wait on ended up with the wrong answer.
+pub(super) fn entry_vanished(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == ErrorKind::NotFound)
 }

@@ -1,6 +1,6 @@
 use super::watch_fallback::{
     FALLBACK_TICK, FallbackTurn, advance_target_async, native_retry_due, record_native_retry,
-    scan_due,
+    record_publish, scan_due,
 };
 use super::*;
 
@@ -70,6 +70,15 @@ impl FileService {
         *self.native_watcher.lock().unwrap() = Some(watcher);
         let service = Arc::clone(self);
         tokio::spawn(async move {
+            // How many consecutive turns re-armed the rescan flag because they
+            // could not publish. A rescan that fails for a durable reason — the
+            // watched directory was deleted or made unreadable while its
+            // registration is still live — re-arms the flag it just consumed,
+            // and the next turn re-lists *every* watch on the connection, one
+            // blocking listing at a time. Nothing clears that condition, so
+            // without a backoff the watcher becomes a ten-per-second re-list of
+            // up to 128 directories for as long as the connection lives.
+            let mut failed_rescans: u32 = 0;
             while !closed.load(Ordering::Acquire) {
                 // A rescan the last turn could not publish drives a turn of its
                 // own. The flag is set by failure as well as by the watcher, and
@@ -77,6 +86,16 @@ impl FileService {
                 // further wakeup — so waiting for one left the desktop painting
                 // a subtree the host already knew was stale.
                 let owed_rescan = native_rescan.load(Ordering::Acquire);
+                if owed_rescan && failed_rescans > 0 {
+                    // Doubling from 250 ms to 8 s, and never in front of a real
+                    // watcher event: the `select!` below still wakes on one.
+                    let backoff = RESCAN_RETRY_BASE
+                        * 2_u32.saturating_pow(failed_rescans.saturating_sub(1).min(5));
+                    tokio::select! {
+                        event = native_rx.recv() => if event.is_none() { break },
+                        _ = sleep(backoff.min(RESCAN_RETRY_MAX)) => {}
+                    }
+                }
                 let woken = tokio::select! {
                     event = native_rx.recv() => match event {
                         Some(()) => true,
@@ -97,6 +116,7 @@ impl FileService {
                 let by_parent =
                     changes_by_parent(std::mem::take(&mut *native_dirty.lock().unwrap()));
                 let all_rescan = native_rescan.swap(false, Ordering::AcqRel);
+                let mut rescan_failed = false;
                 if native_failed.swap(false, Ordering::AcqRel) {
                     service.degrade_all_to_polling();
                 }
@@ -119,6 +139,7 @@ impl FileService {
                             .await
                         {
                             native_rescan.store(true, Ordering::Release);
+                            rescan_failed = true;
                         }
                         continue;
                     }
@@ -173,6 +194,16 @@ impl FileService {
                     for event in mapped {
                         broadcast_control_event(event);
                     }
+                }
+                if all_rescan {
+                    // Counted per sweep, not per watch: one deleted directory
+                    // among a hundred healthy ones must not push the backoff
+                    // out, and a sweep in which everything published clears it.
+                    failed_rescans = if rescan_failed {
+                        failed_rescans.saturating_add(1)
+                    } else {
+                        0
+                    };
                 }
             }
         });
@@ -309,7 +340,7 @@ impl FileService {
                             // scanned. Anything that changed between the last
                             // completed scan and the registration taking effect
                             // is reported by nobody unless it is published now.
-                            service
+                            if !service
                                 .publish_authoritative_listing(
                                     &id,
                                     &watch,
@@ -317,7 +348,18 @@ impl FileService {
                                     &overflowed,
                                     true,
                                 )
-                                .await;
+                                .await
+                            {
+                                // The target is native as of a moment ago, so
+                                // nothing would ever scan it again — and the
+                                // snapshot that was supposed to cover the gap
+                                // did not go out. Put it back on polling, owing
+                                // a publish, rather than leave a directory that
+                                // believes it is watched and reports nothing.
+                                watch.fallback.lock().unwrap().degrade_to_polling();
+                                record_publish(&watch.fallback, false);
+                                service.fallback_signal.notify_one();
+                            }
                             continue;
                         }
                     }
@@ -335,9 +377,14 @@ impl FileService {
                         .as_ref()
                         .is_ok_and(|turn| *turn == FallbackTurn::Changed)
                     {
-                        service
+                        // The result is read, not discarded. The scan's own
+                        // fingerprint baseline has already moved past this
+                        // change, so a publish that silently failed left it
+                        // described by nobody: the next scan compares equal.
+                        let published = service
                             .publish_authoritative_listing(&id, &watch, &sender, &overflowed, false)
                             .await;
+                        record_publish(&watch.fallback, published);
                     }
                 }
             }

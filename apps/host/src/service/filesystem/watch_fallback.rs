@@ -52,11 +52,21 @@ impl FallbackScan {
 pub(super) struct FallbackTarget {
     native: bool,
     scan: Arc<Mutex<FallbackScan>>,
-    /// Set when the schedule wants the in-progress scan thrown away.
+    /// Set when the schedule wants a scan it could not reach thrown away.
     ///
-    /// The alternative — reaching into the scan from the async side to reset
-    /// its iterator — is exactly the wait this split exists to remove.
+    /// Only ever set when the scan lock is already held by a blocking worker;
+    /// otherwise the reset happens immediately, because leaving it for a scan
+    /// that may never run again pins an open `ReadDir` for the life of the
+    /// watch.
     discard_scan: bool,
+    /// A completed scan whose snapshot the caller could not publish.
+    ///
+    /// The fingerprint baseline moves inside the scan, before anything is
+    /// published, so a publish that fails leaves the next scan comparing equal
+    /// and the change described by nobody at all. This makes the next completed
+    /// scan report `Changed` regardless, and only a successful publish clears
+    /// it.
+    publish_owed: bool,
     next_scan: Instant,
     scan_backoff: Duration,
     next_native_retry: Instant,
@@ -69,6 +79,7 @@ impl FallbackTarget {
             native: true,
             scan: Arc::new(Mutex::new(FallbackScan::new(initial_fingerprint))),
             discard_scan: false,
+            publish_owed: false,
             next_scan: Instant::now(),
             scan_backoff: FALLBACK_BACKOFF_BASE,
             next_native_retry: Instant::now(),
@@ -98,9 +109,25 @@ impl FallbackTarget {
         self.native = true;
         self.native_retry_backoff = NATIVE_RETRY_BASE;
         self.scan_backoff = FALLBACK_BACKOFF_BASE;
-        // Recorded rather than performed: the scan may be running right now on
-        // a blocking worker, and this call comes from the async poller.
-        self.discard_scan = true;
+        // Released now if the scan is idle, which it is on every path the
+        // poller takes — it runs one target at a time. Only a blocking worker
+        // holding the lock defers this, and only then is the flag worth
+        // leaving: a native target is never scanned, so `advance_target`
+        // returns `Idle` before it would consume the flag, and an unreleased
+        // `ReadDir` would stay open for the life of the watch.
+        match self.scan.try_lock() {
+            Ok(mut scan) => {
+                scan.iterator = None;
+                scan.accumulator = 0;
+                self.discard_scan = false;
+            }
+            Err(_) => self.discard_scan = true,
+        }
+    }
+
+    /// Records whether the snapshot a completed scan produced was published.
+    fn publish_settled(&mut self, published: bool) {
+        self.publish_owed = !published;
     }
 
     fn native_retry_failed(&mut self) {
@@ -150,7 +177,7 @@ pub(super) fn advance_target(
     now: Instant,
 ) -> anyhow::Result<FallbackTurn> {
     // The schedule lock is taken twice, briefly, and never across the scan.
-    let (scan, restart) = {
+    let (scan, restart, owed) = {
         let mut state = target.lock().unwrap();
         if state.native || now < state.next_scan {
             return Ok(FallbackTurn::Idle);
@@ -158,6 +185,7 @@ pub(super) fn advance_target(
         (
             Arc::clone(&state.scan),
             std::mem::take(&mut state.discard_scan),
+            state.publish_owed,
         )
     };
     let shard = scan_fallback_shard(stable_target, &scan, restart)?;
@@ -166,7 +194,10 @@ pub(super) fn advance_target(
         state.next_scan = now;
         return Ok(FallbackTurn::Scanning);
     }
-    if shard.changed {
+    // `owed` is the change a previous scan found and nobody managed to send.
+    // The scan's own baseline has already moved past it, so without this the
+    // next comparison is equal and the change is reported by nobody.
+    if shard.changed || owed {
         state.scan_backoff = FALLBACK_BACKOFF_BASE;
         state.next_scan = now + state.scan_backoff;
         return Ok(FallbackTurn::Changed);
@@ -186,6 +217,11 @@ pub(super) fn scan_due(target: &Arc<Mutex<FallbackTarget>>, now: Instant) -> boo
 pub(super) fn native_retry_due(target: &Arc<Mutex<FallbackTarget>>, now: Instant) -> bool {
     let state = target.lock().unwrap();
     !state.native && now >= state.next_native_retry
+}
+
+/// Records whether the snapshot a `Changed` turn produced actually went out.
+pub(super) fn record_publish(target: &Arc<Mutex<FallbackTarget>>, published: bool) {
+    target.lock().unwrap().publish_settled(published);
 }
 
 pub(super) fn record_native_retry(target: &Arc<Mutex<FallbackTarget>>, restored: bool) {

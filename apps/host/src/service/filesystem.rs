@@ -59,6 +59,14 @@ const IDLE_PARK: Duration = Duration::from_millis(500);
 /// Beyond this the directory is re-listed once instead. The ordered event queue
 /// is counted in messages, and overflowing it is a connection-wide resync.
 const MAX_PRECISE_EVENTS_PER_BATCH: usize = 64;
+/// Backoff between rescan sweeps that could not publish.
+///
+/// A rescan re-arms its own flag when a listing fails, so a durable failure —
+/// the watched directory deleted or made unreadable while its registration is
+/// still live — otherwise turns the watcher into a re-list of every watch on
+/// the connection, ten times a second, forever.
+const RESCAN_RETRY_BASE: Duration = Duration::from_millis(250);
+const RESCAN_RETRY_MAX: Duration = Duration::from_secs(8);
 
 struct Transfer {
     source: TransferSource,
