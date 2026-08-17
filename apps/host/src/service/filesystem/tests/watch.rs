@@ -77,13 +77,14 @@ fn fallback_fingerprint_covers_in_place_edits_beyond_4096_entries() {
         fs::write(root.join(format!("entry-{index:04}")), b"a").unwrap();
     }
     let before = watch_fingerprint(&root).unwrap();
-    let scan = Mutex::new(FallbackTarget::polling(before));
+    let scan = Mutex::new(FallbackScan::new(before));
     fs::write(root.join("entry-4096"), b"changed beyond old bound").unwrap();
     assert_ne!(before, watch_fingerprint(&root).unwrap());
     let mut shards = 0;
     loop {
         let shard =
-            scan_fallback_shard_with_limits(&root, &scan, 64, Duration::from_secs(1)).unwrap();
+            scan_fallback_shard_with_limits(&root, &scan, false, 64, Duration::from_secs(1))
+                .unwrap();
         assert!(shard.processed <= 64);
         shards += 1;
         if shard.completed {
@@ -150,6 +151,53 @@ async fn fallback_filesystem_scan_never_blocks_the_async_control_worker() {
     );
     assert!(scan_task.await.unwrap().is_ok());
     holder.join().unwrap();
+    fs::remove_dir(root).unwrap();
+}
+
+/// The lock a scan in progress holds is not the lock the async poller takes.
+///
+/// The test above proves the *scan* runs off the runtime thread, which is a
+/// weaker claim than its name: it exercises none of the async-side locks. A
+/// scan is `metadata`, `read_dir`, and up to 2,048 `symlink_metadata` calls,
+/// and while it ran it used to hold the same mutex `scan_due`,
+/// `native_retry_due`, `fallback_watches`, and `degrade_all_to_polling` take
+/// from the async watcher and poller tasks. Every one of those is asked here
+/// while a scan holds its lock.
+#[tokio::test(flavor = "current_thread")]
+async fn the_async_poller_never_waits_on_a_scan_in_progress() {
+    let root = std::env::temp_dir().join(format!("ade-fallback-locks-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let target = Arc::new(Mutex::new(FallbackTarget::polling(
+        watch_fingerprint(&root).unwrap(),
+    )));
+    let scan = target.lock().unwrap().scan_lock();
+    let ready = Arc::new(std::sync::Barrier::new(2));
+    let held_ready = Arc::clone(&ready);
+    let scanning = std::thread::spawn(move || {
+        // Exactly what the blocking worker holds, for exactly as long as a slow
+        // filesystem would make it.
+        let _guard = scan.lock().unwrap();
+        held_ready.wait();
+        std::thread::sleep(Duration::from_millis(200));
+    });
+    ready.wait();
+
+    let now = Instant::now();
+    let answered = tokio::time::timeout(Duration::from_millis(30), async {
+        let due = super::watch_fallback::scan_due(&target, now);
+        let retry = super::watch_fallback::native_retry_due(&target, now);
+        let native = target.lock().unwrap().is_native();
+        target.lock().unwrap().degrade_to_polling();
+        super::watch_fallback::record_native_retry(&target, false);
+        (due, retry, native)
+    })
+    .await;
+    let (due, _retry, native) =
+        answered.expect("an async control task waited on a filesystem scan");
+    assert!(due, "a polling target past its backoff is due");
+    assert!(!native, "a polling target is not native");
+
+    scanning.join().unwrap();
     fs::remove_dir(root).unwrap();
 }
 
@@ -266,6 +314,60 @@ fn independent_watch_ids_are_reference_counted_per_directory() {
             .lock()
             .unwrap()
             .contains_key("editor-parent")
+    );
+    service.unwatch_directory("editor-parent").unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Releasing one of two watches on the same directory leaves the *native
+/// registration* alone — not merely the other map entry.
+///
+/// Map membership was all this was ever asserted about, and map membership is
+/// not the invariant: a surviving watch whose registration was torn down by
+/// its neighbour's release believes it is native, is therefore excluded from
+/// the polling fallback, and silently stops reporting anything at all. The
+/// only proof is a real event arriving after the release, which is what this
+/// asks for.
+#[tokio::test]
+async fn releasing_one_of_two_watches_on_a_directory_keeps_the_survivor_reporting() {
+    let root = std::env::temp_dir().join(format!("ade-watch-shared-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let service = Arc::new(FileService::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let (sender, mut receiver) = mpsc::channel(8);
+    let _registration = crate::service::register_control_event_sink(sender.clone());
+    service.spawn_watcher(Arc::clone(&closed), sender, overflowed);
+    service
+        .watch_directory(root.to_str().unwrap(), "", "explorer")
+        .unwrap();
+    service
+        .watch_directory(root.to_str().unwrap(), "", "editor-parent")
+        .unwrap();
+    service.unwatch_directory("explorer").unwrap();
+
+    fs::write(root.join("after-release"), "event").unwrap();
+    let expected = fs::canonicalize(&root)
+        .unwrap()
+        .join("after-release")
+        .to_string_lossy()
+        .into_owned();
+    let observed = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(message) = receiver.recv().await {
+            if matches!(message, SequencerControl::OrderedEvent(v1::HostEvent { kind, scope, .. })
+                if kind == v1::EventKind::FileChanged as i32 && scope == expected)
+            {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    closed.store(true, Ordering::Release);
+    assert_eq!(
+        observed,
+        Ok(true),
+        "releasing one watch tore down the native registration the other still held"
     );
     service.unwatch_directory("editor-parent").unwrap();
     fs::remove_dir_all(root).unwrap();
