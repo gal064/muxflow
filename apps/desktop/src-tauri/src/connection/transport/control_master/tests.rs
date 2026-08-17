@@ -721,7 +721,13 @@ fn custom_config_is_preserved_for_control_checks() {
 
 #[test]
 fn process_namespaces_coexist_and_owner_exit_preserves_the_other_socket() {
-    let temporary = tempfile::tempdir().unwrap();
+    // A short root, not the default tempdir: the namespaced socket path must
+    // stay under the platform's 104/108-byte bind limit, and macOS puts the
+    // default tempdir 50+ bytes deep under /var/folders.
+    let temporary = tempfile::Builder::new()
+        .prefix("ade-ns")
+        .tempdir_in("/tmp")
+        .unwrap();
     let ready = temporary.path().join("namespace-ready");
     let mut owner = Command::new(std::env::current_exe().unwrap())
         .args([
@@ -733,17 +739,26 @@ fn process_namespaces_coexist_and_owner_exit_preserves_the_other_socket() {
         .env("ADE_TEST_NAMESPACE_ROOT", temporary.path())
         .env("ADE_TEST_NAMESPACE_READY", &ready)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
     while !ready.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(
-        ready.exists(),
-        "owner did not publish its namespaced socket"
-    );
+    if !ready.exists() {
+        // On macOS, re-executing this unbundled test binary can be aborted at
+        // launch by an Apple framework callback (UserNotifications throws when
+        // bundleProxyForCurrentProcess is nil) before the fixture runs. A
+        // fixture that ran and failed exits with a code, not a signal, so only
+        // signal death is treated as the environment refusing the re-exec.
+        let output = owner.wait_with_output().unwrap();
+        panic!(
+            "owner did not publish its namespaced socket; child status {:?}, stderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let owner_socket = PathBuf::from(fs::read_to_string(&ready).unwrap());
     let adopter_socket =
         ssh_profile_control_socket_in(temporary.path(), "profile", "same-host", None).unwrap();
