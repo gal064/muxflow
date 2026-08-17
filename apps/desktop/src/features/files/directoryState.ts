@@ -99,6 +99,14 @@ export function installListing(
   // a restore that could not reach the length it started from would otherwise
   // queue itself again on its own result, forever.
   if (!options.restored && held && !listing.complete && held.entries.length > listing.entries.length) {
+    // A pending gap outranks a page restore — the invariant [`oweRecovery`]
+    // states, which this used to run backwards. Overwriting does not merely
+    // delay the gap: `restorePages` returns silently on failure or abort
+    // without re-queuing anything, so an unmappable event answered by a failed
+    // restore is answered by nothing at all. The restore is not lost either —
+    // the recovery list installs a first page and this same guard queues it
+    // then.
+    if (current.recoveries.get(directory)?.kind === "list") return { ...current, loading };
     const recoveries = new Map(current.recoveries)
       .set(directory, { kind: "restorePages", entries: held.entries.length } as const);
     return { ...current, loading, recoveries };

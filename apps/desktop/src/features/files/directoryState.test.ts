@@ -92,6 +92,27 @@ describe("installListing", () => {
     expect(next.recoveries.get("/repo")).toEqual({ kind: "restorePages", entries: 4 });
   });
 
+  it("never replaces a pending gap with a page restore", () => {
+    // The precedence `oweRecovery` states, from the other side — it used to run
+    // backwards here, and not harmlessly: a page restore returns silently on
+    // failure or abort without re-queuing anything, so a gap it overwrote was
+    // answered by nothing at all.
+    const held = listing("/repo", ["a", "b", "c", "d"]);
+    const current = state({
+      listings: new Map([["/repo", held]]),
+      recoveries: new Map([["/repo", { kind: "list", reason: "unmappable" } as const]]),
+      loading: new Set(["/repo"]),
+    });
+    const rescan = listing("/repo", ["a", "b"], { complete: false, nextPageToken: "p2" });
+    const next = installListing(current, "/repo", rescan);
+    expect(next.listings.get("/repo"), "rows the user can see were deleted").toBe(held);
+    expect(
+      next.recoveries.get("/repo"),
+      "a page restore swallowed a gap that was already owed",
+    ).toEqual({ kind: "list", reason: "unmappable" });
+    expect(next.loading.has("/repo"), "the directory was left waiting on nothing").toBe(false);
+  });
+
   it("refuses a page that continues a listing the tree no longer holds", () => {
     const held = listing("/repo", ["a"], { revision: "9" });
     const current = state({ listings: new Map([["/repo", held]]) });

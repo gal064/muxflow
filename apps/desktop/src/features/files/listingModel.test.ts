@@ -91,6 +91,47 @@ describe("listingModel", () => {
     expect(sorted.map((item) => item.name)).toEqual(["lib", "a.txt", "z.txt"]);
   });
 
+  it("orders names the way the host's raw bytes do, not the way UTF-16 does", () => {
+    // The host ranks on raw name bytes, and UTF-8 byte order is code *point*
+    // order. JavaScript's `<` compares UTF-16 code units, which puts every
+    // astral-plane name below `U+E000..U+FFFF` instead of above it — so a
+    // create near a page boundary landed on the wrong side of the last row
+    // held, and `patchEntry` then dropped it silently.
+    const emoji = "\u{1F600}.txt";   // U+1F600, above U+FFFF
+    const private_use = ".txt"; // U+E000, below it
+    expect(
+      emoji < private_use,
+      "the premise: UTF-16 comparison disagrees with the host here",
+    ).toBe(true);
+    expect(compareEntries(entry(`/r/${emoji}`), entry(`/r/${private_use}`))).toBeGreaterThan(0);
+
+    // And the consequence: the row is not lost off the end of a held page.
+    const partial = listing([entry("/r/a.txt"), entry(`/r/${private_use}`)], {
+      complete: false, nextPageToken: "opaque",
+    });
+    expect(
+      patchEntry(partial, entry(`/r/${emoji}`)),
+      "a name the host would put on a later page was inserted into this one",
+    ).toBe(partial);
+  });
+
+  it("asks for a recovery list when a mapped name has no computable position", () => {
+    // `to_string_lossy` replaces bytes that are not UTF-8, so the renderer
+    // cannot know where such a name sits in the host's raw-byte order. Guessing
+    // "it is past the last row I hold" loses the row with nothing scheduled to
+    // find out otherwise, so the uncertainty is reported instead.
+    const partial = listing([entry("/r/a.txt"), entry("/r/m�.txt")], {
+      complete: false, nextPageToken: "opaque",
+    });
+    expect(patchEntry(partial, entry("/r/z.txt"))).toBe("unmappable");
+    // A complete listing needs no boundary comparison at all, so it still
+    // patches.
+    const whole = listing([entry("/r/a.txt"), entry("/r/m�.txt")]);
+    const patched = patchEntry(whole, entry("/r/z.txt"));
+    if (isRecoveryReason(patched)) throw new Error("expected a patch");
+    expect(patched.entries.map((item) => item.name)).toEqual(["a.txt", "m�.txt", "z.txt"]);
+  });
+
   it("appends a later page without losing the rows already shown", () => {
     const first = listing([entry("/r/a.txt")], { complete: false, nextPageToken: "one" });
     const second = listing([entry("/r/b.txt")], { complete: true, recoveredFromOverflow: true });
