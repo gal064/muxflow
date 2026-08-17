@@ -645,13 +645,6 @@ describe("useWorkspaceFiles", () => {
    *
    * 4,096 entries is the size at which a list-per-event or a watch rebuild is
    * unmistakable, so the counts here are the evidence that expanding, changing,
-   * revisiting, and collapsing cost exactly the round trips they should.
-   */
-  /**
-   * The Phase 14 wide Explorer lane, as a request ledger rather than a timing.
-   *
-   * 4,096 entries is the size at which a list-per-event or a watch rebuild is
-   * unmistakable, so the counts here are the evidence that expanding, changing,
    * revisiting, and collapsing cost exactly the round trips they should. The
    * revisit deliberately crosses a pane switch, which is what drops the tree's
    * own listings and leaves the cache as the only thing that can paint.
@@ -720,6 +713,10 @@ describe("useWorkspaceFiles", () => {
       await Promise.resolve();
     });
     const afterChangeRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+    // Named, not just counted: 4,097 rows proves a row arrived, not that it is
+    // the one the event described.
+    const createdRowPresent = (current?.listings.get("/repo/wide")?.entries ?? [])
+      .some((row) => row.path === "/repo/wide/appeared");
     // Read here, before the pane switch below: a paint measurement belongs to
     // the lifecycle that raised it, and switching panes abandons it — which is
     // the correct behaviour and would otherwise look like a missing span.
@@ -747,6 +744,7 @@ describe("useWorkspaceFiles", () => {
     expect(expandWatches).toBe(1);
     expect(expandedRows).toBe(4_096);
     expect(afterChangeRows).toBe(4_097);
+    expect(createdRowPresent, "the extra row was not the one the event named").toBe(true);
     expect(collapseReleases).toBe(1);
     expect(cachedRevisitRows).toBe(4_097);
     expect(cachedRevisitWaiting).toBe(false);
@@ -764,6 +762,7 @@ describe("useWorkspaceFiles", () => {
       collapseWatchReleases: collapseReleases,
       expandedRows,
       externalChangeRows: afterChangeRows,
+      externalChangeRowPath: createdRowPresent ? "/repo/wide/appeared" : null,
       cachedRevisitRows,
       cachedRevisitPaintedBeforeRevalidation: cachedRevisitRows === afterChangeRows && !cachedRevisitWaiting,
     })}`);
@@ -840,12 +839,21 @@ describe("useWorkspaceFiles", () => {
       // have gone out by now.
       await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
       const changeLists = listed.length - afterExpand;
-      const afterChangeRows = current?.listings.get("/repo/wide")?.entries.length ?? 0;
+      const held = current?.listings.get("/repo/wide")?.entries ?? [];
+      const afterChangeRows = held.length;
+      // The row count alone cannot tell a patched listing from an untouched
+      // one: one create and one delete leave 8,192 either way, so both-applied
+      // and neither-applied score identically. The identity of the two rows is
+      // the assertion; the count is only the sanity check beside it.
+      const createdRowPresent = held.some((row) => row.path === created.path);
+      const deletedRowAbsent = held.every((row) => row.path !== "/repo/wide/file-00001");
 
       expect(expandedRows, "the bootstrap and one prefetched page").toBe(2 * PAGE);
       expect(afterExpand, "expanding cost more than the one prefetched page").toBe(1);
       expect(changeLists, "a single-file change in a paginated directory cost a list").toBe(0);
       expect(afterChangeRows, "the patches did not both land").toBe(2 * PAGE);
+      expect(createdRowPresent, "the created row was never patched into the held pages").toBe(true);
+      expect(deletedRowAbsent, "the deleted row was still on screen").toBe(true);
       console.log(`PHASE14_METRIC ${JSON.stringify({
         lane: "explorerPaginatedWatchTraffic",
         entries: all.length,
@@ -854,6 +862,8 @@ describe("useWorkspaceFiles", () => {
         expandedRows,
         changeDirectoryListRequests: changeLists,
         externalChangeRows: afterChangeRows,
+        createdRowPath: createdRowPresent ? created.path : null,
+        deletedRowPath: deletedRowAbsent ? "/repo/wide/file-00001" : null,
       })}`);
       await act(async () => { renderer.unmount(); });
     } finally {
