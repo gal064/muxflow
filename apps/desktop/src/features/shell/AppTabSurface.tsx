@@ -133,6 +133,14 @@ export function AppTabSurface(props: Props) {
       }
       setOpened(next);
       shownBinaryGeneration.current = next.kind === "binary" ? next.file.generation : undefined;
+      if (next.kind !== "text") {
+        // A file that stopped being text has no editor and no autosave state.
+        // Leaving the previous controller in place would make it the answer to
+        // "what generation is on screen" forever after.
+        controller.current?.dispose();
+        controller.current = undefined;
+        setView(undefined);
+      }
       // The watch bootstrap can land while the first read is still in flight.
       // It is the authoritative directory listing, so a difference here is a
       // real change rather than a reason to re-read on principle. The reload is
@@ -214,7 +222,11 @@ export function AppTabSurface(props: Props) {
       controller.current?.dispose();
       controller.current = undefined;
     };
-  }, [props.client, props.scope?.clientId, props.tab.resource, root?.token]);
+    // The read, the parent watch, and the event subscription all belong to one
+    // connection generation. Leaving `terminalEpoch` out of this one meant an
+    // epoch bump re-armed the watch and its reconciliation against a read that
+    // had never restarted.
+  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
 
   useEffect(() => {
     if (loading || error || !opened) return;
@@ -294,7 +306,21 @@ export function AppTabSurface(props: Props) {
       return;
     }
     reconciliation.current = { kind: "done" };
-    if (generation !== undefined && generation !== shown) void load();
+    if (generation !== undefined && generation !== shown) reloadFromDisk();
+  };
+
+  /**
+   * Re-reads the file because an authoritative listing says it moved.
+   *
+   * One guard, one caller shape: a buffer the person is still typing into, or
+   * one whose save is in flight, is never replaced by disk. The reload path
+   * hands the content to `AutosaveController.external`, which overwrites the
+   * view outright, so an unguarded caller silently discards unsaved work.
+   */
+  const reloadFromDisk = () => {
+    const state = controller.current?.current().state;
+    if (state === "dirty" || state === "saving") return;
+    void load();
   };
 
   useEffect(() => {
@@ -324,10 +350,8 @@ export function AppTabSurface(props: Props) {
         // changed is a remote round trip for nothing. Never let a generic
         // self-save echo replace a newer dirty edit either; the precise path
         // events below retain last-writer order.
-        const state = controller.current?.current().state;
-        if (state === "dirty" || state === "saving") return;
         const generation = listingOpinion(event.listing);
-        if (generation !== undefined && generation !== shownGeneration()) void load();
+        if (generation !== undefined && generation !== shownGeneration()) reloadFromDisk();
         return;
       }
       if (!(event.kind === "fileChanged" || event.kind === "fileDeleted") || event.path !== props.tab.resource) return;
@@ -339,7 +363,7 @@ export function AppTabSurface(props: Props) {
       void load({ externalOperationId: event.operationId });
     }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });
     return () => { disposed = true; stop?.(); };
-  }, [props.client, props.scope?.clientId, props.tab.resource, root?.token]);
+  }, [props.client, props.scope?.clientId, props.scope?.terminalEpoch, props.tab.resource, root?.token]);
 
   if (!props.scope || !root) return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
   if (loading) return <EmptyTab tab={props.tab} detail="Loading file…" />;

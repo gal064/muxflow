@@ -63,16 +63,26 @@ const EXTERNAL_CHANGE_PAINT = ["explorer.externalChangeToPaint"] as const;
 type DirectoryLoadResult = "applied" | "stale" | "failed";
 
 /**
- * How often the active root is re-checked when nothing has announced a change,
- * and only while this window is in the foreground.
+ * How often the active root is re-checked when nothing has announced a change.
  *
  * Every event that *can* be pushed already re-resolves it immediately; this
  * covers `cd` inside the current pane, which tmux does not announce. It is a
- * backstop rather than a pipeline: a hidden window checks nothing at all, and
- * the host answers an unchanged root from the caller's own capability without a
- * second authoritative discovery or a broadcast payload.
+ * backstop rather than a pipeline: a hidden window checks nothing at all, the
+ * host answers an unchanged root from the caller's own capability without a
+ * second authoritative discovery or a broadcast payload, and — see
+ * [`ACTIVE_ROOT_STABLE_PROBES`] — it stops entirely once the root has settled.
  */
 export const ACTIVE_ROOT_BACKSTOP_MS = 15_000;
+
+/**
+ * Consecutive unchanged probes after which the backstop stops.
+ *
+ * A timer that never stops is a periodic request forever, which the round's
+ * idle budget refuses outright. Anything that could have moved the root — the
+ * window coming back to the foreground, or the person touching the Explorer —
+ * re-arms it, so the cost is bounded to activity rather than to uptime.
+ */
+export const ACTIVE_ROOT_STABLE_PROBES = 3;
 
 /**
  * How long one directory's *recovery* is deferred before it is re-read.
@@ -105,6 +115,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const paintGenerations = useRef(new Map<string, number>());
   /** Expansions whose paint is owed by a watch bootstrap that has not landed. */
   const pendingExpandPaints = useRef(new Map<string, { paint: PaintTicket; generation: number }>());
+  /** Re-arms the active-root backstop after it has settled. */
+  const rearmBackstop = useRef<(() => void) | undefined>(undefined);
   const cache = useRef(new DirectoryListingCache());
   const leases = useRef(new DirectoryWatchLeases());
   const scopeKey = scope ? keyForScope(scope) : "";
@@ -128,7 +140,12 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
    * root-token guard cannot drift apart between the watch bootstrap, an
    * authoritative rescan, and a recovery list.
    */
-  const applyListing = useCallback((root: ActiveRoot, directory: string, listing: DirectoryListing) => {
+  const applyListing = useCallback((
+    root: ActiveRoot,
+    directory: string,
+    listing: DirectoryListing,
+    options: { append?: boolean } = {},
+  ) => {
     if (listing.rootToken !== root.token) return;
     setState((current) => {
       if (!sameRoot(current.root, root)) return current;
@@ -137,6 +154,19 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       // must not put rows back into a tree that no longer reaches them.
       if (!current.expanded.has(directory)) return current;
       const held = current.listings.get(directory);
+      // Revisions are the host's own ordering fact for one directory, and
+      // three producers write this slot: the native rescan task, the polling
+      // fallback, and client reads. All of them mint a revision before a
+      // blocking scan and publish after it, so arrival order is not freshness
+      // order and a late older snapshot would otherwise replace newer rows.
+      if (held && !options.append && olderRevision(listing, held)) return current;
+      if (options.append) {
+        if (!held) return current;
+        const listings = new Map(current.listings).set(directory, appendPage(held, listing));
+        const loading = new Set(current.loading);
+        loading.delete(directory);
+        return { ...current, listings, loading, error: undefined };
+      }
       // An authoritative rescan only ever carries the directory's first page.
       // Replacing a listing the user has paged further into would delete rows
       // they can see, so the pages are restored instead — the recovery queue
@@ -170,13 +200,15 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const loadDirectory = useCallback(async (
     root: ActiveRoot,
     path: string,
-    append = false,
+    append?: { pageToken: string },
   ): Promise<DirectoryLoadResult> => {
     const activeScope = scopeRef.current;
     if (!activeScope || keyForScope(activeScope) !== scopeKey) return "stale";
     if (!sameRoot(stateRef.current.root, root)) return "stale";
-    const previous = stateRef.current.listings.get(path);
-    if (append && (!previous?.nextPageToken || previous.complete)) return "stale";
+    // The page token is a parameter rather than something read back out of
+    // state: a prefetch fires from the listing that has just arrived, before
+    // React has committed it, and reading ambiently made that a silent no-op.
+    const pageToken = append?.pageToken;
     const epoch = scopeEpoch.current;
     const serial = (directorySerial.current.get(path) ?? 0) + 1;
     directorySerial.current.set(path, serial);
@@ -189,16 +221,32 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       // nothing otherwise. The flicker this hook was reported for is only ever
       // visible when this number is large, and until now nothing measured it.
       const listing = await measurePerfOutcome(
-        append ? "files.listDirectory.page" : "files.listDirectory",
+        pageToken ? "files.listDirectory.page" : "files.listDirectory",
         () => client.listDirectory(activeScope, root, path, {
-          ...(append && previous?.nextPageToken ? { pageToken: previous.nextPageToken } : {}),
+          ...(pageToken ? { pageToken } : {}),
           signal: controller.signal,
         }),
       );
       if (listAborts.current.get(path) === controller) listAborts.current.delete(path);
-      if (epoch !== scopeEpoch.current || directorySerial.current.get(path) !== serial || keyForScope(activeScope) !== scopeKey) return "stale";
-      if (!sameRoot(stateRef.current.root, root) || listing.rootToken !== root.token) return "stale";
-      applyListing(root, path, append && previous ? appendPage(previous, listing) : listing);
+      const superseded = epoch !== scopeEpoch.current
+        || directorySerial.current.get(path) !== serial
+        || keyForScope(activeScope) !== scopeKey
+        || !sameRoot(stateRef.current.root, root)
+        || listing.rootToken !== root.token;
+      if (superseded) {
+        // A read whose answer is no longer wanted still owes the row its wait
+        // state back; `aria-busy` would otherwise stay set forever.
+        setState((current) => {
+          if (!current.loading.has(path)) return current;
+          return { ...current, loading: withoutPath(current.loading, path) };
+        });
+        return "stale";
+      }
+      // Merged inside the state transition, against whatever the tree holds
+      // now. Merging onto the listing captured before the round trip
+      // reinstated rows a rescan or a delete had removed while the page was in
+      // flight — and then cached them.
+      applyListing(root, path, listing, { append: Boolean(pageToken) });
       return "applied";
     } catch (error) {
       if (listAborts.current.get(path) === controller) listAborts.current.delete(path);
@@ -285,7 +333,9 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       if (!current.expanded.has(directory)) return current;
       const patched = patch(current.listings.get(directory));
       if (isRecoveryReason(patched)) {
-        if (current.recoveries.has(directory)) return current;
+        // A pending page restore is a follow-up fetch, not an answer to a gap:
+        // a genuine gap must still be listed, and the list supersedes it.
+        if (current.recoveries.get(directory)?.kind === "list") return current;
         const recoveries = new Map(current.recoveries);
         recoveries.set(directory, { kind: "list", reason: patched });
         return { ...current, recoveries };
@@ -304,6 +354,24 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   }, []);
 
   /**
+   * Reads one bounded, high-confidence target ahead of being asked for it.
+   *
+   * Exactly two things qualify, and both are already in hand when a directory
+   * opens: the selected workspace root and a just-opened directory's first
+   * page arrive with their watch bootstrap, so neither costs a speculative
+   * request. What remains is the *second* page of a directory whose first page
+   * did not finish it — one page, never more, and abandoned outright if the
+   * connection, root, or the directory's own place in the tree changes before
+   * it lands. Speculating any further would be the list storm this whole change
+   * exists to remove.
+   */
+  const prefetchNextPage = useCallback((root: ActiveRoot, directory: string, listing: DirectoryListing) => {
+    if (listing.complete || !listing.nextPageToken) return;
+    recordPerfCounter("explorer.prefetchedPages");
+    void loadDirectory(root, directory, { pageToken: listing.nextPageToken });
+  }, [loadDirectory]);
+
+  /**
    * Fetches back the pages an authoritative first-page rescan replaced.
    *
    * Bounded twice over: it stops as soon as the listing is at least as long as
@@ -312,8 +380,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const restorePages = useCallback(async (root: ActiveRoot, directory: string, entries: number) => {
     for (let page = 0; page < MAX_RESTORED_PAGES; page += 1) {
       const held = stateRef.current.listings.get(directory);
-      if (!held || held.complete || held.entries.length >= entries) return;
-      if (await loadDirectory(root, directory, true) !== "applied") return;
+      if (!held?.nextPageToken || held.complete || held.entries.length >= entries) return;
+      if (await loadDirectory(root, directory, { pageToken: held.nextPageToken }) !== "applied") return;
     }
   }, [loadDirectory]);
 
@@ -345,7 +413,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
         recordPerfCounter("explorer.overflowRecoveries");
         const activeScope = scopeRef.current;
         if (activeScope) {
-          cache.current.invalidateSubtree(activeScope.clientId, root.token, event.listing.directory);
+          cache.current.invalidateSubtree(cacheScope(activeScope, root), event.listing.directory);
         }
       }
       applyListing(root, event.listing.directory, event.listing);
@@ -361,7 +429,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // well as on screen: a path recreated later is a different directory and
     // must never paint from what the old one held.
     const activeScope = scopeRef.current;
-    if (activeScope) cache.current.invalidateSubtree(activeScope.clientId, root.token, event.path);
+    if (activeScope) cache.current.invalidateSubtree(cacheScope(activeScope, root), event.path);
     setState((value) => pruneSubtree(value, event.path));
     abortListing((path) => path === event.path || path.startsWith(`${event.path}/`));
     applyPrecise(root, directory, (listing) => removeEntry(listing, event.path));
@@ -415,6 +483,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       else unsubscribe = stop;
     }).catch((error) => { if (!disposed) setState((value) => ({ ...value, error: String(error) })); });
     let resolving = false;
+    let unchangedProbes = 0;
     const resolve = async () => {
       if (resolving) return;
       resolving = true;
@@ -433,21 +502,26 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
           return;
         }
         if (sameRoot(stateRef.current.root, root)) {
+          unchangedProbes += 1;
           rootPaint.abandon();
           return;
         }
+        unchangedProbes = 0;
         // A replaced root invalidates every path, listing, and content the
         // previous one authorised: the same path under a new capability is a
         // different file.
         abortListing(() => true);
-        cache.current.invalidateOtherRoots(activeScope.clientId, root.token);
+        cache.current.invalidateOtherRoots(activeScope.clientId, root.token, root.revision);
         setState((current) => ({
           ...current,
           scopeKey,
           root,
           listings: new Map(),
           expanded: new Set([root.path]),
-          loading: new Set(),
+          // The root's listing arrives with its watch, and until it does the
+          // tree has nothing to draw. Without this the Explorer showed no
+          // rows, no wait, and no empty state for the whole first round trip.
+          loading: new Set([root.path]),
           recoveries: NO_RECOVERIES,
           error: undefined,
         }));
@@ -470,14 +544,26 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // window that becomes visible checks once on the transition rather than
     // waiting out the interval.
     const foreground = () => typeof document === "undefined" || document.visibilityState === "visible";
-    const backstop = window.setInterval(() => { if (foreground()) void resolve(); }, ACTIVE_ROOT_BACKSTOP_MS);
-    const onVisibility = () => { if (foreground()) void resolve(); };
+    const backstop = window.setInterval(() => {
+      if (!foreground()) return;
+      // Settled: nothing periodic remains until something happens that could
+      // have moved the root.
+      if (unchangedProbes >= ACTIVE_ROOT_STABLE_PROBES) return;
+      void resolve();
+    }, ACTIVE_ROOT_BACKSTOP_MS);
+    const rearm = () => {
+      unchangedProbes = 0;
+      if (foreground()) void resolve();
+    };
+    rearmBackstop.current = rearm;
+    const onVisibility = () => { if (foreground()) rearm(); };
     document?.addEventListener?.("visibilitychange", onVisibility);
     return () => {
       disposed = true;
       scopeEpoch.current += 1;
       window.clearInterval(backstop);
       document?.removeEventListener?.("visibilitychange", onVisibility);
+      rearmBackstop.current = undefined;
       abortListing(() => true);
       // A refresh still waiting out its window belongs to the scope that is
       // going away; letting it fire would read a directory for a pane the user
@@ -488,6 +574,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       }
       refreshTimers.current.clear();
       paintGenerations.current.clear();
+      directorySerial.current.clear();
       for (const pending of pendingExpandPaints.current.values()) pending.paint.abandon();
       pendingExpandPaints.current.clear();
       unsubscribe?.();
@@ -529,13 +616,18 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     if (!activeScope || !activeRoot || keyForScope(activeScope) !== scopeKey) return;
     const root = activeRoot;
     leases.current.sync(watchTargets, {
-      acquire: (directory) => client.acquireDirectoryWatch(activeScope, root, directory),
-      onBootstrap: (directory, listing) => applyListing(root, directory, listing),
+      acquire: (directory, signal) => client.acquireDirectoryWatch(activeScope, root, directory, { signal }),
+      onBootstrap: (directory, listing) => {
+        applyListing(root, directory, listing);
+        prefetchNextPage(root, directory, listing);
+      },
       // A watch we could not arm must not also mean a directory with no
       // contents: the bootstrap is the listing, so without this one refused
       // registration — the host's watch limit, an exhausted inotify budget —
       // leaves that directory, or the whole tree, permanently empty.
       onError: (directory, error) => {
+        // An abandoned expansion is not a failure to report or to list again.
+        if (error instanceof DOMException && error.name === "AbortError") return;
         recordPerfCounter("explorer.watchFallbackLists");
         void loadDirectory(root, directory).then((result) => {
           if (result !== "failed") return;
@@ -548,7 +640,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // `watchTargets` is derived from `watchTargetKey`, which is the exact
     // identity of the set; depending on the array itself would re-sync on every
     // render that rebuilt an identical list.
-  }, [activeRoot, applyListing, client, loadDirectory, scopeKey, watchTargetKey]);
+  }, [activeRoot, applyListing, client, loadDirectory, prefetchNextPage, scopeKey, watchTargetKey]);
 
   /**
    * One owner for what the cache holds.
@@ -562,7 +654,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const activeScope = scopeRef.current;
     if (!activeScope || !activeRoot) return;
     for (const [directory, listing] of state.listings) {
-      cache.current.set({ clientId: activeScope.clientId, rootToken: activeRoot.token, directory }, listing);
+      cache.current.set(cacheKey(activeScope, activeRoot, directory), listing);
     }
   }, [activeRoot, state.listings]);
 
@@ -573,44 +665,48 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const paint = expanding ? createPaintTicket(
       ["explorer.expandToPaint", "workflow.explorer.directoryExpandPaint"], generation,
     ) : undefined;
+    // Touching the tree is the strongest evidence available that the pane may
+    // have moved, so it re-arms the settled root backstop.
+    rearmBackstop.current?.();
     const root = stateRef.current.root;
     const activeScope = scopeRef.current;
-    // A valid cached revisit paints now; the watch bootstrap revalidates it.
-    let painted = stateRef.current.listings.has(path);
-    if (expanding && root && activeScope && !painted) {
-      const cached = cache.current.get({ clientId: activeScope.clientId, rootToken: root.token, directory: path });
-      if (cached) {
-        recordPerfCounter("explorer.cacheHits");
-        painted = true;
-        applyListing(root, path, cached);
-      } else {
-        recordPerfCounter("explorer.cacheMisses");
-      }
+    // A valid cached revisit and the expansion itself are one state
+    // transition. Applying the listing separately meant it was applied against
+    // a state where this directory was not expanded yet — and every path into
+    // the listings map refuses a directory the tree is not showing — so the
+    // cached rows were silently dropped and the "paint locally, revalidate
+    // behind it" promise was never actually kept.
+    const cached = expanding && root && activeScope && !stateRef.current.listings.has(path)
+      ? cache.current.get(cacheKey(activeScope, root, path))
+      : undefined;
+    if (expanding && root && activeScope && !stateRef.current.listings.has(path)) {
+      recordPerfCounter(cached ? "explorer.cacheHits" : "explorer.cacheMisses");
     }
     setState((current) => {
       const expanded = new Set(current.expanded);
       if (expanded.has(path)) expanded.delete(path);
       else expanded.add(path);
+      const listings = cached && expanded.has(path) && sameRoot(current.root, root)
+        ? new Map(current.listings).set(path, cached)
+        : current.listings;
       const loading = new Set(current.loading);
       if (!expanded.has(path)) loading.delete(path);
-      else if (!current.listings.has(path) && !painted) loading.add(path);
-      return { ...current, expanded, loading };
+      else if (!listings.has(path)) loading.add(path);
+      return { ...current, expanded, listings, loading };
     });
     if (!expanding) {
       // Collapsing stops the work its rows were asking for. The watch itself is
       // released by the sync effect, which is one unwatch for this directory.
       abortListing((candidate) => candidate === path || candidate.startsWith(`${path}/`));
-    }
-    if (painted || !expanding) {
-      paint?.afterPaint((ticket) => ticket.lifecycleGeneration === paintGenerations.current.get(path)
-        && sameRoot(stateRef.current.root, root)
-        && stateRef.current.expanded.has(path));
+      paint?.abandon();
       return;
     }
-    // Nothing local to paint: the watch bootstrap this expansion triggers is
-    // the listing, so the paint ticket resolves when that arrives.
+    // The paint is owed by whatever puts rows on screen: the cached listing
+    // above, or the watch bootstrap this expansion triggers. The predicate
+    // requires the listing rather than the expansion flag, so an expansion that
+    // painted nothing cannot publish an instant expand-to-paint measurement.
     if (paint) pendingExpandPaints.current.set(path, { paint, generation });
-  }, [abortListing, applyListing]);
+  }, [abortListing]);
 
   useEffect(() => {
     for (const [path, pending] of [...pendingExpandPaints.current]) {
@@ -622,7 +718,8 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       if (!state.listings.has(path)) continue;
       pendingExpandPaints.current.delete(path);
       pending.paint.afterPaint((ticket) => ticket.lifecycleGeneration === paintGenerations.current.get(path)
-        && stateRef.current.expanded.has(path));
+        && stateRef.current.expanded.has(path)
+        && stateRef.current.listings.has(path));
     }
   }, [state.expanded, state.listings]);
 
@@ -640,6 +737,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const root = stateRef.current.root;
     const target = directory ?? root?.path;
     if (!root || !target) return;
+    rearmBackstop.current?.();
     setState((current) => ({ ...current, requestedReads: current.requestedReads + 1 }));
     void loadDirectory(root, target).finally(() => {
       setState((current) => ({ ...current, requestedReads: Math.max(0, current.requestedReads - 1) }));
@@ -653,7 +751,10 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
 
   const loadMore = useCallback((directory: string) => {
     const root = stateRef.current.root;
-    if (root) void loadDirectory(root, directory, true);
+    const held = stateRef.current.listings.get(directory);
+    if (root && held?.nextPageToken && !held.complete) {
+      void loadDirectory(root, directory, { pageToken: held.nextPageToken });
+    }
   }, [loadDirectory]);
 
   // Effects run after paint. Mask the prior pane synchronously on the render
@@ -671,6 +772,29 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       : state.transfers.map(staleTransferOnScopeReplacement),
   };
   return { ...visible, toggleDirectory, refresh, recordTransfer, loadMore };
+}
+
+/**
+ * Whether a listing is older than the one already held.
+ *
+ * Revisions are decimal u64 strings, so they are compared as numbers when both
+ * parse and never compared at all when either does not — an unparseable
+ * revision must not silently order as zero and discard a real listing.
+ */
+function olderRevision(incoming: DirectoryListing, held: DirectoryListing): boolean {
+  const next = Number(incoming.revision);
+  const current = Number(held.revision);
+  if (!Number.isSafeInteger(next) || !Number.isSafeInteger(current)) return false;
+  return next < current;
+}
+
+/** The connection and root capability a cached listing belongs to. */
+function cacheScope(scope: FileWorkspaceScope, root: ActiveRoot) {
+  return { clientId: scope.clientId, rootToken: root.token, rootGeneration: root.revision };
+}
+
+function cacheKey(scope: FileWorkspaceScope, root: ActiveRoot, directory: string) {
+  return { ...cacheScope(scope, root), directory };
 }
 
 function withoutPath(paths: ReadonlySet<string>, path: string): Set<string> {

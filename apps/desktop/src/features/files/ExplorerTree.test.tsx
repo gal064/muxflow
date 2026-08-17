@@ -112,6 +112,50 @@ describe("ExplorerTree", () => {
     }
   });
 
+  it("reports each row's position among its own siblings, not in the flattened walk", async () => {
+    // The tree role's setsize/posinset are per level. Using the flattened index
+    // makes a nested row announce a position in the whole walk, and makes
+    // setsize change on every insertion anywhere — which also invalidates every
+    // memoized row the extraction exists to keep still.
+    const nested: DirectoryListing = {
+      ...listing,
+      entries: [
+        { path: "/r/lib", name: "lib", kind: "directory", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: true },
+        { path: "/r/a.txt", name: "a.txt", kind: "file", sizeBytes: "1", modifiedMillis: "1", generation: "1", executable: false, expandable: false },
+      ],
+    };
+    const child: DirectoryListing = {
+      rootToken: "root-1", directory: "/r/lib", revision: "2", recoveredFromOverflow: false, complete: true,
+      entries: ["one", "two", "three"].map((name) => ({
+        path: `/r/lib/${name}`, name, kind: "file" as const, sizeBytes: "1",
+        modifiedMillis: "1", generation: "1", executable: false, expandable: false,
+      })),
+    };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<ExplorerTree root={root} scopeIdentity="nested" listings={new Map([["/r", nested], ["/r/lib", child]])}
+        expanded={new Set(["/r", "/r/lib"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+        onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()}
+        onRefresh={vi.fn()} onLoadMore={vi.fn()} />);
+    });
+    const rows = renderer.root.findAllByProps({ className: "file-row" });
+    const reported = rows.map((row) => ({
+      level: row.props["aria-level"],
+      position: row.props["aria-posinset"],
+      size: row.props["aria-setsize"],
+    }));
+    // Two top-level rows, three inside `lib` — five rows in the walk, but each
+    // level counts only itself.
+    expect(reported).toEqual([
+      { level: 1, position: 1, size: 2 },
+      { level: 2, position: 1, size: 3 },
+      { level: 2, position: 2, size: 3 },
+      { level: 2, position: 3, size: 3 },
+      { level: 1, position: 2, size: 2 },
+    ]);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("keeps roving focus, selection, and the row context menu on the row the keyboard reached", async () => {
     // Every one of these handlers now crosses a memo boundary and a forwarding
     // ref, so the interactions the plan names by name are asserted here rather

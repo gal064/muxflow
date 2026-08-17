@@ -94,10 +94,16 @@ export function reachableWatchTargets(
   expanded: ReadonlySet<string>,
 ): string[] {
   const targets = [rootPath];
+  // Visited, because the walk descends into whatever the host said a directory
+  // contains. A listing that named an ancestor — a link resolved to one, a
+  // malformed entry — would otherwise be an unbounded descent rather than a
+  // wrong row.
+  const seen = new Set([rootPath]);
   const visit = (directory: string) => {
     const listing = listings.get(directory);
     for (const entry of listing?.entries ?? []) {
-      if (!entry.expandable || !expanded.has(entry.path)) continue;
+      if (!entry.expandable || !expanded.has(entry.path) || seen.has(entry.path)) continue;
+      seen.add(entry.path);
       targets.push(entry.path);
       visit(entry.path);
     }

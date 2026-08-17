@@ -434,6 +434,13 @@ fn event_follows_snapshot_barrier(frame: &v1::Envelope, accepted_sequence: u64) 
     matches!(&frame.payload, Some(Payload::Event(_))) && frame.sequence > accepted_sequence
 }
 
+/// Whether this helper may serve the app at all.
+///
+/// Every capability the desktop needs is required here, including the
+/// single-request file open: a helper that cannot serve one is refused at the
+/// handshake, with the missing bits named, rather than accepted and then found
+/// wanting one operation at a time. The daemon lives on a host the user
+/// upgrades separately from the app, so this is a real state.
 pub(super) fn handshake_allows_snapshot(envelope_major: u32, hello: &v1::ServerHello) -> bool {
     envelope_major == PROTOCOL_MAJOR
         && !hello.read_only

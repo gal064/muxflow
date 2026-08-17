@@ -356,7 +356,14 @@ fn watch_fingerprint(path: &Path) -> anyhow::Result<u64> {
     // detection.
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        let metadata = fs::symlink_metadata(entry.path())?;
+        // An entry that vanished between `read_dir` and the stat is simply not
+        // in this fingerprint. Failing the whole registration for it made
+        // watching a directory something is actively writing into a coin flip.
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         if let Some(entry_value) = watch_entry_fingerprint(&entry.file_name(), &metadata) {
             value = value.wrapping_add(entry_value);
         }

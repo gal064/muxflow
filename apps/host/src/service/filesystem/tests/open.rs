@@ -23,7 +23,10 @@ fn one_open_classifies_and_carries_exactly_the_content_policy_allows() {
     let header = text.header().clone();
     let metadata = header.metadata.as_ref().unwrap();
     assert_eq!(metadata.generation, header.generation);
-    let body: Vec<u8> = text.into_chunks().flat_map(|(_, chunk)| chunk).collect();
+    let body: Vec<u8> = text
+        .chunks()
+        .flat_map(|(_, chunk)| chunk.to_vec())
+        .collect();
     assert_eq!(body, b"hello");
 
     // A binary file is classified and never streamed: the editor cannot show
@@ -36,7 +39,7 @@ fn one_open_classifies_and_carries_exactly_the_content_policy_allows() {
         v1::FileContentKind::Binary as i32
     );
     assert!(!binary.header().content_streaming);
-    assert_eq!(binary.into_chunks().count(), 0);
+    assert_eq!(binary.chunks().count(), 0);
 
     // An empty file still streams: zero bytes is content, not an absence.
     let empty = service
@@ -44,7 +47,7 @@ fn one_open_classifies_and_carries_exactly_the_content_policy_allows() {
         .unwrap();
     assert!(empty.header().content_streaming);
     assert_eq!(empty.header().total_bytes, 0);
-    assert_eq!(empty.into_chunks().count(), 0);
+    assert_eq!(empty.chunks().count(), 0);
 
     // An eligible image is streamed by the same one request that classified
     // it, so no second "was that an image?" probe is ever needed.
@@ -90,7 +93,7 @@ fn an_oversized_text_file_is_classified_without_being_read() {
     );
     assert!(!opened.header().content_streaming);
     assert_eq!(opened.header().total_bytes, 0);
-    assert_eq!(opened.into_chunks().count(), 0);
+    assert_eq!(opened.chunks().count(), 0);
     fs::remove_dir_all(root).unwrap();
 }
 

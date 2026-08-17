@@ -163,6 +163,18 @@ export interface ListDirectoryOptions {
   signal?: AbortSignal;
 }
 
+export interface AcquireWatchOptions {
+  /**
+   * Aborting stops the bootstrap listing on the host.
+   *
+   * The bootstrap *is* the expansion's listing, so a folder opened and closed
+   * again on a slow link must stop the enumeration it started rather than pay
+   * for it and discard the answer. Only the caller that starts a shared watch
+   * can cancel it; a later subscriber joins an answer already in flight.
+   */
+  signal?: AbortSignal;
+}
+
 export interface ResolveRootOptions {
   /**
    * The root capability the caller already holds. The host answers an
@@ -175,7 +187,7 @@ export interface ResolveRootOptions {
 export interface FileWorkspaceClient {
   resolveActiveRoot(scope: FileWorkspaceScope, options?: ResolveRootOptions): Promise<ActiveRoot>;
   listDirectory(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, options?: ListDirectoryOptions): Promise<DirectoryListing>;
-  acquireDirectoryWatch(scope: FileWorkspaceScope, root: ActiveRoot, directory: string): Promise<DirectoryWatchLease>;
+  acquireDirectoryWatch(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, options?: AcquireWatchOptions): Promise<DirectoryWatchLease>;
   openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile>;
   writeText(scope: FileWorkspaceScope, root: ActiveRoot, request: WriteTextRequest): Promise<WriteTextResult>;
   mutate(scope: FileWorkspaceScope, root: ActiveRoot, mutation: FileMutation): Promise<void>;

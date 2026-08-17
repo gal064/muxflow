@@ -5,7 +5,7 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    CAP_FILE_STREAM, FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope,
+    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope,
     v1::{self, envelope::Payload},
 };
 
@@ -137,12 +137,6 @@ impl<'a> BulkProtocolClient<'a> {
                 "bulk bridge handshake did not match its control identity/epoch binding".into(),
             );
         }
-        if hello.capabilities & CAP_FILE_STREAM == 0 {
-            // Refuse the bridge rather than discover it one open at a time.
-            return Err(
-                "host helper does not support single-request file opens; upgrade the helper".into(),
-            );
-        }
         binding.validate()?;
         Ok(())
     }
@@ -249,10 +243,9 @@ impl<'a> BulkProtocolClient<'a> {
     ) -> Result<v1::Response, RequestFailure> {
         let request_id = self.take_request_id();
         let outcome = self.request_framed(request_id, request, cancellation, deadline, on_frame);
-        if matches!(
-            outcome,
-            Err(RequestFailure::Transport(_) | RequestFailure::Cancelled)
-        ) {
+        // A cancellation that read its terminal response left the stream exactly
+        // where the next request expects it; only an abandoned exchange did not.
+        if matches!(outcome, Err(RequestFailure::Transport(_))) {
             *self.clean = false;
         }
         outcome
@@ -271,8 +264,9 @@ impl<'a> BulkProtocolClient<'a> {
             cancellation,
             deadline,
         )?;
+        let mut cancel_sent = false;
         loop {
-            if cancellation.is_some_and(CancelState::is_cancelled) {
+            if !cancel_sent && cancellation.is_some_and(CancelState::is_cancelled) {
                 let cancel = encode_frame(&envelope(
                     0,
                     0,
@@ -282,7 +276,14 @@ impl<'a> BulkProtocolClient<'a> {
                 ))
                 .map_err(|error| RequestFailure::Transport(error.to_string()))?;
                 let _ = self.stdin.write(&cancel);
-                return Err(RequestFailure::Cancelled);
+                let _ = self.stdin.flush();
+                cancel_sent = true;
+                // Deliberately not returning here. The host answers every
+                // request with exactly one terminal response, cancelled or not,
+                // and leaving it unread would abandon the bridge mid-exchange —
+                // so every superseded preview would cost a fresh SSH child and
+                // handshake on the next open. The loop below reads through to
+                // that response, then reports the cancellation.
             }
             if let Some(frame) = self
                 .decoder
@@ -306,6 +307,11 @@ impl<'a> BulkProtocolClient<'a> {
                     Some(Payload::Response(response)) => response,
                     _ => continue,
                 };
+                if cancel_sent {
+                    // The exchange is complete, so the bridge is reusable; the
+                    // caller still learns it was cancelled.
+                    return Err(RequestFailure::Cancelled);
+                }
                 return if response.ok {
                     Ok(response)
                 } else {
@@ -363,6 +369,10 @@ impl<'a> BulkProtocolClient<'a> {
         let mut offset = 0;
         while offset < bytes.len() {
             if cancellation.is_some_and(CancelState::is_cancelled) {
+                // Abandoned mid-frame, so the peer's parser is left expecting
+                // bytes that will never come. Unlike a cancellation that read
+                // its terminal response, this one really does poison the lane.
+                *self.clean = false;
                 return Err(RequestFailure::Cancelled);
             }
             match self.stdin.write(&bytes[offset..]) {

@@ -120,10 +120,17 @@ pub async fn file_request(
         ..Default::default()
     };
     let client = get_client(&clients, &client_id)?;
+    // Reads only. A mutation that could be cancelled mid-flight would leave the
+    // caller unable to say whether it happened, and this app never lets a
+    // remote mutation reach an unknown outcome it could have avoided.
+    let cancellable = matches!(
+        operation,
+        v1::Operation::ListDirectory | v1::Operation::WatchDirectory
+    );
     // Claimed here, on the command thread, before anything is dispatched: a
     // caller that abandons its read in the same tick must find something to
     // cancel rather than a slot the worker has not created yet.
-    let claim = (!request.operation_id.is_empty())
+    let claim = (cancellable && !request.operation_id.is_empty())
         .then(|| client.claim_file_operation(&request.operation_id))
         .transpose()?;
     let request = v1::Request {
@@ -164,7 +171,6 @@ fn operation_from_name(value: &str) -> Result<v1::Operation, String> {
         "watchDirectory" => Ok(v1::Operation::WatchDirectory),
         "unwatchDirectory" => Ok(v1::Operation::UnwatchDirectory),
         "mutate" => Ok(v1::Operation::FileMutation),
-        "readFile" => Ok(v1::Operation::ReadFile),
         "writeFile" => Err("writeFile bodies must use start_file_write on the bulk route".into()),
         _ => Err(format!("unsupported file operation {value}")),
     }
@@ -256,6 +262,25 @@ mod tests {
     fn cancelling_an_unknown_file_operation_is_reported_rather_than_silently_ignored() {
         let client = Arc::new(TerminalClient::new());
         assert!(client.cancel_file("never-claimed").is_err());
+    }
+
+    /// Requests that never reach a host must still leave the registry empty:
+    /// one retained entry per request is unbounded growth on a long session.
+    #[test]
+    fn refused_requests_leave_no_operation_behind_on_either_lane() {
+        let client = Arc::new(TerminalClient::new());
+        for round in 0..32 {
+            let id = format!("op-{round}");
+            let claim = client.claim_file_operation(&id).unwrap();
+            // Not ready, so the request is refused before it is written.
+            assert!(
+                client
+                    .request_file(v1::Request::default(), Some(claim))
+                    .is_err()
+            );
+            assert!(client.request_git(v1::Request::default(), &id).is_err());
+        }
+        assert_eq!(client.operations.len(), 0);
     }
 
     #[test]

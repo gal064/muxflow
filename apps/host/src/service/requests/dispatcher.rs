@@ -76,7 +76,6 @@ pub(crate) async fn handle_request(
                 super::filesystem_dispatch::FileDispatchContext {
                     control_tx,
                     event_tx,
-                    pending,
                     files,
                     bulk_connection,
                 },
@@ -131,7 +130,6 @@ pub(crate) async fn handle_request(
                     generation,
                     pending,
                     topology_lock,
-                    files,
                 },
             )
             .await;

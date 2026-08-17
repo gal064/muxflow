@@ -556,9 +556,11 @@ fn active_root_probe_round_trips_a_known_capability_and_its_unchanged_answer() {
 
 /// Single-request file opens are negotiated, not assumed.
 ///
-/// The daemon lives on a host the user upgrades separately from the app, so a
-/// desktop that finds this bit missing must refuse the connection rather than
-/// handshake cleanly and then fail every file open it is asked for.
+/// The daemon lives on a host the user upgrades separately from the app. The
+/// bit is part of `HOST_CAPABILITIES`, which the desktop requires in full at
+/// the control handshake, so a helper without it is refused there — named in
+/// the missing-capability report — rather than accepted and then found wanting
+/// one operation at a time.
 #[test]
 fn single_request_file_opens_are_a_negotiated_capability() {
     use tmux_agent_protocol::{CAP_FILE_STREAM, CAP_TERMINAL_OUTPUT_CREDIT, HOST_CAPABILITIES};

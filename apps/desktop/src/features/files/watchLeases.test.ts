@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DirectoryListingCache } from "./directoryCache";
-import { DirectoryWatchLeases } from "./watchLeases";
+import { DirectoryWatchLeases, WATCH_RETRY_BASE_MS } from "./watchLeases";
 import type { DirectoryListing, DirectoryWatchLease } from "./types";
 
 function listing(rootToken: string, directory: string, overrides: Partial<DirectoryListing> = {}): DirectoryListing {
@@ -14,9 +13,11 @@ function recorder() {
   const errors: string[] = [];
   let settle: ((directory: string) => void) | undefined;
   const pending = new Map<string, (lease: DirectoryWatchLease) => void>();
+  const aborted: string[] = [];
   const host = {
-    acquire: (directory: string) => {
+    acquire: (directory: string, signal: AbortSignal) => {
       acquired.push(directory);
+      signal.addEventListener("abort", () => aborted.push(directory), { once: true });
       return new Promise<DirectoryWatchLease>((resolve) => {
         pending.set(directory, resolve);
       });
@@ -29,7 +30,7 @@ function recorder() {
     pending.delete(directory);
     resolve?.({ snapshot: listing("root", directory), release: () => released.push(directory) });
   };
-  return { acquired, bootstrapped, errors, host, released, settle };
+  return { aborted, acquired, bootstrapped, errors, host, released, settle };
 }
 
 describe("DirectoryWatchLeases", () => {
@@ -55,16 +56,31 @@ describe("DirectoryWatchLeases", () => {
     expect(leases.held).toBe(1);
   });
 
-  it("releases a watch that arrives after the directory stopped being wanted", async () => {
+  it("stops a bootstrap the tree stopped wanting, and releases one that beat it", async () => {
     const leases = new DirectoryWatchLeases();
     const fixture = recorder();
     leases.sync(["/r"], fixture.host);
+    // Collapsed before the bootstrap answered: the listing it is fetching is
+    // the expansion's listing, so the remote read is stopped rather than paid
+    // for and discarded.
     leases.sync([], fixture.host);
+    expect(fixture.aborted).toEqual(["/r"]);
     fixture.settle("/r");
     await Promise.resolve();
     expect(fixture.released).toEqual(["/r"]);
     expect(fixture.bootstrapped).toEqual([]);
     expect(leases.held).toBe(0);
+  });
+
+  it("releases rather than aborts a watch that had already arrived", async () => {
+    const leases = new DirectoryWatchLeases();
+    const fixture = recorder();
+    leases.sync(["/r"], fixture.host);
+    fixture.settle("/r");
+    await Promise.resolve();
+    leases.sync([], fixture.host);
+    expect(fixture.released).toEqual(["/r"]);
+    expect(fixture.aborted, "an armed watch is unwatched, never aborted").toEqual([]);
   });
 
   it("releases everything exactly once on teardown", async () => {
@@ -79,67 +95,40 @@ describe("DirectoryWatchLeases", () => {
     expect(fixture.released).toEqual(["/r", "/r/src"]);
   });
 
-  it("reports a failed acquisition and forgets it, so a later sync can retry", async () => {
+  it("backs a refused watch off instead of retrying it on every toggle", async () => {
+    // A refusal used to be retried on every expand or collapse anywhere in the
+    // tree, and each retry cost a fallback directory list. Twenty refused
+    // directories turned one keystroke into forty remote round trips.
     const leases = new DirectoryWatchLeases();
     const errors: string[] = [];
     const acquire = vi.fn()
       .mockRejectedValueOnce(new Error("watch limit reached"))
-      .mockResolvedValueOnce({ snapshot: listing("root", "/r"), release: () => undefined });
+      .mockRejectedValueOnce(new Error("watch limit reached"))
+      .mockResolvedValue({ snapshot: listing("root", "/r"), release: () => undefined });
     const host = { acquire, onBootstrap: () => undefined, onError: (directory: string) => errors.push(directory) };
-    leases.sync(["/r"], host);
+    leases.sync(["/r"], host, 0);
     await Promise.resolve();
     await Promise.resolve();
     expect(errors).toEqual(["/r"]);
     expect(leases.held).toBe(0);
-    leases.sync(["/r"], host);
+
+    // Every unrelated toggle in the next second asks for nothing.
+    for (let toggle = 0; toggle < 20; toggle += 1) leases.sync(["/r"], host, 10 * toggle);
+    expect(acquire).toHaveBeenCalledTimes(1);
+
+    // After the wait it tries once more, and backs off further when refused.
+    leases.sync(["/r"], host, Date.now() + WATCH_RETRY_BASE_MS + 1);
+    await Promise.resolve();
     await Promise.resolve();
     expect(acquire).toHaveBeenCalledTimes(2);
-  });
-});
+    leases.sync(["/r"], host, Date.now() + WATCH_RETRY_BASE_MS + 1);
+    expect(acquire, "the second refusal did not lengthen the wait").toHaveBeenCalledTimes(2);
 
-describe("DirectoryListingCache", () => {
-  it("retains only complete listings bound to the exact connection and root", () => {
-    const cache = new DirectoryListingCache();
-    const key = { clientId: "c", rootToken: "root", directory: "/r" };
-    cache.set(key, listing("root", "/r", { complete: false, nextPageToken: "opaque" }));
-    expect(cache.get(key), "a partial page would paint a directory smaller than it is").toBeUndefined();
-    cache.set(key, listing("other", "/r"));
-    expect(cache.get(key), "a listing from another root capability is a different file tree").toBeUndefined();
-    cache.set(key, listing("root", "/r"));
-    expect(cache.get(key)).toBeDefined();
-    expect(cache.get({ ...key, clientId: "reconnected" })).toBeUndefined();
-  });
-
-  it("drops everything a replaced root no longer authorises", () => {
-    const cache = new DirectoryListingCache();
-    cache.set({ clientId: "c", rootToken: "root", directory: "/r" }, listing("root", "/r"));
-    cache.set({ clientId: "c", rootToken: "root", directory: "/r/src" }, listing("root", "/r/src"));
-    cache.set({ clientId: "c", rootToken: "next", directory: "/other" }, listing("next", "/other"));
-    cache.invalidateOtherRoots("c", "next");
-    expect(cache.size).toBe(1);
-    expect(cache.get({ clientId: "c", rootToken: "next", directory: "/other" })).toBeDefined();
-  });
-
-  it("drops a deleted directory and everything cached beneath it", () => {
-    const cache = new DirectoryListingCache();
-    for (const directory of ["/r", "/r/src", "/r/src/deep", "/r/srcfile"]) {
-      cache.set({ clientId: "c", rootToken: "root", directory }, listing("root", directory));
-    }
-    cache.invalidateSubtree("c", "root", "/r/src");
-    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r/src" })).toBeUndefined();
-    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r/src/deep" })).toBeUndefined();
-    // A sibling that merely shares a prefix is a different directory.
-    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r/srcfile" })).toBeDefined();
-    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r" })).toBeDefined();
-  });
-
-  it("bounds itself by evicting the least recently used directory", () => {
-    const cache = new DirectoryListingCache();
-    for (let index = 0; index < 300; index += 1) {
-      cache.set({ clientId: "c", rootToken: "root", directory: `/r/${index}` }, listing("root", `/r/${index}`));
-    }
-    expect(cache.size).toBe(256);
-    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r/0" })).toBeUndefined();
-    expect(cache.get({ clientId: "c", rootToken: "root", directory: "/r/299" })).toBeDefined();
+    // A directory that stops being wanted forgets its refusal outright.
+    leases.sync([], host, Date.now());
+    leases.sync(["/r"], host, Date.now());
+    await Promise.resolve();
+    expect(acquire).toHaveBeenCalledTimes(3);
+    expect(leases.held).toBe(1);
   });
 });

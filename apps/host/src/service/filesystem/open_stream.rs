@@ -23,28 +23,19 @@ impl FileStreamBody {
         &self.digest
     }
 
-    /// The body as bounded `(offset, chunk)` windows, in order, consuming it.
+    /// The body as bounded `(offset, chunk)` windows, in order.
     ///
-    /// Consuming rather than borrowing so the dispatcher moves each window into
-    /// its frame instead of copying it: a 25 MiB image was otherwise resident
-    /// twice, once as the body and once as the frame being written.
+    /// Borrowed so each frame is one copy of its own window and nothing more.
+    /// Draining the buffer instead looked like it saved a copy and cost a
+    /// front-memmove of the whole remainder per window — quadratic in the file.
     ///
     /// Empty when the classification carries no content, so a binary, oversized,
     /// or ineligible open is exactly one header frame and its response.
-    pub(crate) fn into_chunks(self) -> impl Iterator<Item = (u64, Vec<u8>)> {
-        let mut content = self.content;
-        let mut offset = 0_u64;
-        std::iter::from_fn(move || {
-            if content.is_empty() {
-                return None;
-            }
-            let taken = content.len().min(MAX_TRANSFER_CHUNK);
-            // Drains from the front, so the buffer shrinks as frames leave.
-            let chunk: Vec<u8> = content.drain(..taken).collect();
-            let at = offset;
-            offset += taken as u64;
-            Some((at, chunk))
-        })
+    pub(crate) fn chunks(&self) -> impl Iterator<Item = (u64, &[u8])> {
+        self.content
+            .chunks(MAX_TRANSFER_CHUNK)
+            .enumerate()
+            .map(|(index, chunk)| ((index * MAX_TRANSFER_CHUNK) as u64, chunk))
     }
 }
 
