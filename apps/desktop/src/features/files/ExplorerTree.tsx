@@ -52,12 +52,6 @@ interface Props {
 }
 
 /**
- * What a row's actions do before the first commit: nothing.
- *
- * A real object rather than a cast, because the ref is not optional — it is
- * uninitialized for exactly one render, during which no event can reach a row.
- */
-/**
  * The zero-width probe the spacer model measures its row height from.
  *
  * Both row kinds — `.file-row` and `.load-more-files` — take their height from
@@ -67,6 +61,12 @@ interface Props {
  */
 const ROW_METRIC_CLASS = "file-row-metric";
 
+/**
+ * What a row's actions do before the first commit: nothing.
+ *
+ * A real object rather than a cast, because the ref is not optional — it is
+ * uninitialized for exactly one render, during which no event can reach a row.
+ */
 const INERT_ROW_ACTIONS: ExplorerRowActions = {
   toggle: () => undefined,
   open: () => undefined,

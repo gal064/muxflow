@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MutableRefObject } from "react";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { GitCommandResult, GitDiff, GitStatusSnapshot } from "./types";
 import { gitScopeKey, type GitRepositoryHandle, type GitRepositoryStore } from "./repositoryStore";
 import { createPaintTicket, type PaintTicket } from "../../perf/paintTicket";
+import { useCommittedRef } from "../../commands/useCommittedRef";
 
 interface Params {
   repositories: GitRepositoryStore;
@@ -16,17 +16,44 @@ interface Params {
 }
 
 /**
- * The paint ticket a rendered diff has to finish.
+ * What the rendering surface knows about the editor it is painting into.
  *
- * The measurement starts when the request does and ends when the pixels land,
- * so it necessarily spans the two halves of this feature. Rather than pretend
- * otherwise, the request half hands the render half exactly the three values it
- * needs: the ticket, the load it belongs to, and the load React has committed.
+ * Live readers rather than captured numbers: a surface can remount between the
+ * measurement being armed and the pixels landing, and the decision has to see
+ * the generation that is mounted *then*, not the one that was mounted when the
+ * surface last spoke.
+ */
+export interface EditorSurfaceFacts {
+  /** The generation this surface will mount into if it has not yet. */
+  expected: number;
+  /** The generation mounted right now, if any. */
+  mounted(): number | undefined;
+  /** The generation that has reported itself ready to paint, if any. */
+  ready(): number | undefined;
+}
+
+/**
+ * The measurement that spans this feature's two halves.
+ *
+ * It necessarily spans them — it starts when the request does and ends when the
+ * pixels land — but only one half gets to decide anything. This one exports the
+ * ticket, the load it belongs to and the load React has committed as three raw
+ * mutable refs, so the rendering surface reconciled the hook's own request
+ * supersession counter on its behalf, in a hook whose contract says the surface
+ * owns none of it. It reports facts now; the decision stays here.
  */
 export interface DiffPaint {
-  pending: MutableRefObject<PaintTicket | undefined>;
-  lifecycle: MutableRefObject<number>;
-  committed: MutableRefObject<number>;
+  /** React has committed the load the surface is currently rendering. */
+  noteCommitted(): void;
+  /**
+   * The surface has reached a state it believes is paintable.
+   *
+   * `editor` is absent for a surface that renders no editor at all. Whether
+   * this actually finishes the pending measurement is not the caller's
+   * question: a ticket for a superseded load, or for a surface generation that
+   * is not the mounted one, is simply left pending.
+   */
+  notePaintable(editor?: EditorSurfaceFacts, onPaint?: () => void): void;
 }
 
 export interface SharedGitDiff {
@@ -168,8 +195,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
   // observation's, and the diff this tab wants can change without the
   // repository changing. Reading the current `load` through a ref is what keeps
   // those two lifetimes independent without ever invoking a stale one.
-  const currentLoad = useRef(load);
-  currentLoad.current = load;
+  const currentLoad = useCommittedRef(load);
 
   // The shared repository observation. Acquiring it is what makes a matching
   // diff tab free: it joins the sidebar's watch rather than opening its own.
@@ -253,6 +279,29 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
     }
   }, [load]);
 
+  const paint = useMemo<DiffPaint>(() => ({
+    noteCommitted: () => {
+      committedLoadSerial.current = serial.current;
+    },
+    notePaintable: (editor, onPaint) => {
+      const ticket = pendingDiffPaint.current;
+      if (!ticket) return;
+      if (editor) {
+        // Recorded before the bail, not after: a measurement armed while the
+        // editor is still mounting has to name the generation it is waiting
+        // for, or the mount that follows cannot recognise its own ticket.
+        ticket.expectSurface(editor.mounted() ?? editor.expected);
+        if (ticket.surfaceGeneration !== editor.mounted()
+          || editor.ready() !== editor.mounted()) return;
+      }
+      pendingDiffPaint.current = undefined;
+      ticket.afterPaint((held) => held.lifecycleGeneration === serial.current
+        && held.lifecycleGeneration === committedLoadSerial.current
+        && (!editor || held.surfaceGeneration === editor.mounted()),
+      onPaint);
+    },
+  }), []);
+
   return {
     diff,
     status,
@@ -262,7 +311,7 @@ export function useSharedGitDiff(params: Params): SharedGitDiff {
     refresh,
     command,
     fail: setError,
-    paint: { pending: pendingDiffPaint, lifecycle: serial, committed: committedLoadSerial },
+    paint,
   };
 }
 

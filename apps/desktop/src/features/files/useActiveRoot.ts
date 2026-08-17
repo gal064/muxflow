@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { keyForScope, sameRoot } from "./api";
 import { createPaintTicket } from "../../perf/paintTicket";
+import { useCommittedRef } from "../../commands/useCommittedRef";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope } from "./types";
 
 /**
@@ -79,8 +80,8 @@ export function useActiveRoot(options: Options): {
   const probeSerial = useRef(0);
   const rearmRef = useRef<(() => void) | undefined>(undefined);
   const activityRef = useRef<(() => void) | undefined>(undefined);
-  const latest = useRef(options);
-  latest.current = options;
+  // Read only from the probe, which runs long after the render that set it.
+  const latest = useCommittedRef(options);
   const { client, scopeKey } = options;
 
   useEffect(() => {

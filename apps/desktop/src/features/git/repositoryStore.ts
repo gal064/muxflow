@@ -1,4 +1,4 @@
-import { cancelled } from "../../transport/abortable";
+import { abortable } from "../../transport/abortable";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import { recordPerfCounter, recordPerfHighWater } from "../../perf/probe";
 import type {
@@ -134,22 +134,10 @@ class SharedDiffRequest {
       this.#controller.abort();
       onIdle();
     };
-    return new Promise<GitDiffResult>((resolve, reject) => {
-      const abandon = () => {
-        settle();
-        reject(cancelled("Git diff was cancelled."));
-      };
-      const settle = () => {
-        signal?.removeEventListener("abort", abandon);
-        depart();
-      };
-      if (signal?.aborted) return abandon();
-      signal?.addEventListener("abort", abandon, { once: true });
-      this.promise.then(
-        (result) => { settle(); resolve(result); },
-        (cause) => { settle(); reject(cause); },
-      );
-    });
+    // `abortable` departs on the abort path; `finally` departs on the settle
+    // path. `depart` is idempotent, so the two cannot double-count, and the
+    // shared request is only cancelled by the last caller to leave either way.
+    return abortable(this.promise, signal, depart, "Git diff was cancelled.").finally(depart);
   }
 
   abandon(): void {
