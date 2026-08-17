@@ -10,11 +10,18 @@ interface CacheKey {
   /** The exact root capability. A replaced root invalidates every entry. */
   rootToken: string;
   /**
-   * The root's generation.
+   * The root's generation, as the host reports it.
    *
-   * A capability the host reissues under the same token for a re-resolved root
-   * still carries a fresh generation, and a listing captured under the previous
-   * one describes a tree the host no longer says is current.
+   * Redundant today, and named as such rather than left looking load-bearing.
+   * The host derives it as `blake3(rootToken)` (`filesystem.rs`,
+   * `root_generation`), so the same token always answers with the same
+   * generation and this field cannot distinguish two entries `rootToken` does
+   * not already separate. It is kept because it is the identity the wire
+   * carries and the host is free to make it independent later — not because it
+   * is invalidating anything now. An earlier comment here claimed a capability
+   * reissued under the same token carries a fresh generation. It does not, and
+   * a false invariant guarding cache invalidation is worse than a redundant
+   * field.
    */
   rootGeneration: string;
   directory: string;
