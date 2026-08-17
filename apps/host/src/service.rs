@@ -10,8 +10,8 @@ use std::{
 
 use anyhow::{Context, bail};
 use tmux_agent_protocol::{
-    CAP_TERMINAL_OUTPUT_CREDIT, FrameError, HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR,
-    envelope, read_frame,
+    CAP_BULK_DOWNLOAD, CAP_TERMINAL_OUTPUT_CREDIT, FrameError, HELPER_VERSION, HOST_CAPABILITIES,
+    PROTOCOL_MAJOR, envelope, read_frame,
     v1::{self, envelope::Payload},
     write_frame,
 };
@@ -350,7 +350,16 @@ pub async fn serve_with_shutdown(
                         files: Arc::clone(&files),
                         git: Arc::clone(&git),
                         bulk_connection: client_hello.bulk_connection,
-                        bulk_available: !read_only,
+                        // Both halves, because the comment on the field
+                        // states a capability fact and `!read_only` alone is a
+                        // proxy for it: a read-only host refuses a bulk
+                        // connection outright, *and* a client that never asked
+                        // for the bulk capability will not open one. Guessing
+                        // from read-only alone hands any other non-read-only
+                        // control client a diff body reference it cannot
+                        // fetch, and an empty diff with it.
+                        bulk_available: !read_only
+                            && client_hello.requested_capabilities & CAP_BULK_DOWNLOAD != 0,
                         connection_epoch: client_hello.connection_epoch,
                         closed: Arc::clone(&closed),
                     },

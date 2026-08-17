@@ -3,8 +3,11 @@ use super::*;
 /// Answers one `OpenFileStream` request: one descriptor-bound classification,
 /// one header frame, bounded body frames, then exactly one terminal response.
 ///
-/// Every exit through here writes a response for `request_id`, so a desktop
-/// waiting on this exchange is never left holding the bulk bridge.
+/// Every exit that anyone is still waiting on writes a response for
+/// `request_id`, so a desktop holding the bulk bridge is never left without an
+/// answer. The exceptions are the frame-send failures, which return without
+/// responding precisely because they mean the sequencer channel has closed —
+/// there is no longer a connection to answer.
 pub(super) async fn handle(
     request_id: u64,
     request: v1::Request,

@@ -691,9 +691,7 @@ fn validate_status_generation(
     request: &v1::GitRequest,
     status: &v1::GitStatusSnapshot,
 ) -> anyhow::Result<()> {
-    if !status.authoritative || status.oversized {
-        bail!("Git status is not authoritative");
-    }
+    require_authoritative(status)?;
     if request.expected_status_generation == 0
         || request.expected_status_generation != status.generation
     {

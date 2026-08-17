@@ -283,6 +283,13 @@ impl RepositoryCoordinator {
                     // be served a stale snapshot.
                     self.invalidate();
                     self.rest(&observation, WATCH_DEBOUNCE).await;
+                    // Drained after the settle, which is what makes the debounce
+                    // a coalescer rather than a delay. The signal channel holds
+                    // one permit, so an event arriving inside the window queues
+                    // a wakeup that fires the instant this refresh returns and
+                    // the burst costs two full pipelines instead of one — the
+                    // opposite of what `WATCH_DEBOUNCE` is documented to buy.
+                    while receiver.try_recv().is_ok() {}
                 }
                 // A failed or closed native watcher is retired at the top of the
                 // next iteration, which also re-reads once. Doing that read here

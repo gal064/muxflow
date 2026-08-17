@@ -118,11 +118,21 @@ impl GitService {
             .min(body.len().saturating_sub(offset));
         let end = offset.saturating_add(length);
         if end >= body.len() {
-            // This stream is finished. Releasing it bounds retention to one
-            // in-progress body and makes a later request re-read and
-            // re-validate rather than replay something the repository may no
-            // longer contain. Released by key, because an interleaved stream
-            // may have taken the slot in the meantime.
+            // This stream is finished, so release it: a later request re-reads
+            // and re-validates rather than replaying something the repository
+            // may no longer contain. Released by key, because an interleaved
+            // stream may have taken the slot in the meantime.
+            //
+            // This is *not* a retention bound, and an earlier comment here said
+            // it was. A read the desktop abandons — cancelled, superseded, its
+            // connection replaced — never reaches this line, and a coordinator
+            // with a live subscriber is never evicted, so the last body stays
+            // resident until another one replaces it or the repository is
+            // released. The true bound is one body per tracked repository:
+            // `MAX_TRACKED_REPOSITORIES` × `MAX_DIFF_CONTENT`. That is finite
+            // and is why this is not a leak, but it is a much weaker statement
+            // than "one in-progress body" and the difference is the whole point
+            // of writing it down.
             let mut held = coordinator.diff_body.lock().unwrap();
             if held
                 .as_ref()
