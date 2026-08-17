@@ -154,7 +154,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
     // span. Not while the read is still in flight, though: that is the one
     // state where the editor is still expected.
     if (!loading) paint.abandon();
-  }, [editorRequested, loading, paint, tabId]);
+  }, [editorRequested, loading, paint]);
 
   useEffect(() => {
     const enteringEditor = !previousEditorVisible.current && editorVisible;
