@@ -175,14 +175,14 @@ impl OperationPolicy {
                 Handler::Git,
             ),
             // Diff bodies are the only Git payload large enough to matter to
-            // terminal latency, so they normally take the independent bulk
-            // lane. `Either` because a read-only host refuses a bulk connection
-            // outright, and a large diff must still be viewable there.
-            // Detached so a body read cannot block the connection's frame loop,
-            // including the `Cancel` frame that would stop it.
+            // terminal latency, so they alone take the independent bulk lane. A
+            // connection that has no bulk lane never sees one of these: its
+            // diffs are inlined instead. Detached so a body read cannot block
+            // the connection's frame loop, including the `Cancel` frame that
+            // would stop it.
             v1::Operation::GitDiffContent => (
                 Access::ReadOnly,
-                Lane::Either,
+                Lane::Bulk,
                 Scheduling::Detached,
                 Handler::Git,
             ),
@@ -294,7 +294,7 @@ mod tests {
             ActiveRoot as AR, Agent as AH, Daemon as DH, Filesystem as FH, Git as GH,
             Snapshot as SH, Terminal as TH, Test as XH, TmuxAction as MH, Unsupported as UH,
         };
-        use Lane::{Bulk as B, Control as C, Either as E};
+        use Lane::{Bulk as B, Control as C};
         use Scheduling::{Detached as Dd, Inline as I};
         use v1::Operation::*;
 
@@ -328,7 +328,7 @@ mod tests {
         assert_policy(WatchGit, M, C, Dd, GH);
         assert_policy(UnwatchGit, M, C, Dd, GH);
         assert_policy(GitDiff, R, C, Dd, GH);
-        assert_policy(GitDiffContent, R, E, Dd, GH);
+        assert_policy(GitDiffContent, R, B, Dd, GH);
         assert_policy(PrepareGitDiscard, M, C, Dd, GH);
         assert_policy(GitMutation, M, C, Dd, GH);
         assert_policy(GitCommit, M, C, Dd, GH);

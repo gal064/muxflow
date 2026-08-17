@@ -35,11 +35,27 @@ pub(super) enum DiffAudience {
     /// The desktop editor. No patch; large bodies are referenced for the bulk
     /// lane rather than sent on the control lane.
     Client,
+    /// The editor on a connection that has no bulk lane to defer to.
+    ///
+    /// A read-only host refuses a bulk connection outright, so referencing a
+    /// body there would describe something the client cannot fetch. Inlining is
+    /// what the base did for every diff, and it keeps large diffs viewable.
+    ControlOnlyClient,
     /// A hunk mutation re-deriving its own patch, on the host, in process.
     Mutation,
 }
 
 impl DiffAudience {
+    /// The editor's audience for a connection that may or may not have a bulk
+    /// lane available to it.
+    pub(super) fn for_client(bulk_available: bool) -> Self {
+        if bulk_available {
+            Self::Client
+        } else {
+            Self::ControlOnlyClient
+        }
+    }
+
     fn includes_patch(self) -> bool {
         self == Self::Mutation
     }
@@ -48,7 +64,7 @@ impl DiffAudience {
     fn inline_body_limit(self) -> usize {
         match self {
             Self::Client => INLINE_DIFF_BODY_LIMIT,
-            Self::Mutation => usize::MAX,
+            Self::ControlOnlyClient | Self::Mutation => usize::MAX,
         }
     }
 }
@@ -265,6 +281,12 @@ pub(super) fn read_diff_side(
         bail!("Git diff content side is required");
     }
     validate_git_path(&request.path)?;
+    if !request.original_path.is_empty() {
+        // `read_side` resolves a staged rename through `original_path`, so it
+        // reaches an object spec exactly as `path` does and is validated the
+        // same way. The inline read does this at its own entry point.
+        validate_git_path(&request.original_path)?;
+    }
     Ok(read_side(root, request, target, side, cancellation)?.0)
 }
 

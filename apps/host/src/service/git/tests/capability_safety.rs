@@ -94,6 +94,7 @@ async fn stable_root_capability_survives_same_path_repository_replacement_and_id
             &request.root,
             &request.root_token,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(tokio::sync::Notify::new()),
             Arc::new(measurements::GitObservation::default()),
         )
         .is_err()

@@ -5,6 +5,9 @@ pub(super) struct GitDispatchContext<'a> {
     pub(super) event_tx: &'a mpsc::Sender<SequencerControl>,
     pub(super) git: &'a Arc<super::super::git::GitService>,
     pub(super) connection_epoch: u64,
+    /// Whether this connection can open the independent bulk lane at all. A
+    /// read-only host cannot, so its diff bodies must be inlined.
+    pub(super) bulk_available: bool,
 }
 
 pub(super) async fn handle(
@@ -38,7 +41,11 @@ pub(super) async fn handle(
         // desktop no longer pays a status round trip before every diff.
         v1::Operation::GitDiff => match context
             .git
-            .diff(&git_request, Some(Arc::clone(&cancellation)))
+            .diff(
+                &git_request,
+                context.bulk_available,
+                Some(Arc::clone(&cancellation)),
+            )
             .await
         {
             Ok((diff, status)) => git_response(&operation_id, |v| {

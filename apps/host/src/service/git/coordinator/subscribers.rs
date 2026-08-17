@@ -183,17 +183,23 @@ impl RepositoryCoordinator {
 
     /// Fans one authoritative snapshot out to every consumer, at most once per
     /// distinct repository state.
+    ///
+    /// `sequence` is the order its pipeline ran in. Publications are serialized
+    /// on that rather than on the pipeline lock, so a stalled consumer delays
+    /// only publication and never the repository's status pipeline — nor,
+    /// through a mutation, the process-global repository lock.
     pub(in crate::service::git) async fn publish_status(
         self: &Arc<Self>,
         snapshot: &Arc<v1::GitStatusSnapshot>,
+        sequence: u64,
     ) {
-        let next = Publication::Status(snapshot.source_generation.clone());
-        {
-            let mut published = self.published.lock().unwrap();
-            if *published == next {
-                return;
-            }
-            *published = next;
+        let ordered = self.publish.lock().await;
+        if !self.claim_publication(
+            ordered,
+            sequence,
+            Publication::Status(snapshot.source_generation.clone()),
+        ) {
+            return;
         }
         self.fan_out(|watch_id, root_token| v1::GitEvent {
             watch_id: watch_id.to_owned(),
@@ -205,14 +211,14 @@ impl RepositoryCoordinator {
     }
 
     /// Reports a refresh failure once, not once per failing cycle.
-    pub(in crate::service::git) async fn publish_error(self: &Arc<Self>, error: String) {
-        let next = Publication::Error(error.clone());
-        {
-            let mut published = self.published.lock().unwrap();
-            if *published == next {
-                return;
-            }
-            *published = next;
+    pub(in crate::service::git) async fn publish_error(
+        self: &Arc<Self>,
+        error: String,
+        sequence: u64,
+    ) {
+        let ordered = self.publish.lock().await;
+        if !self.claim_publication(ordered, sequence, Publication::Error(error.clone())) {
+            return;
         }
         self.fan_out(|watch_id, root_token| v1::GitEvent {
             watch_id: watch_id.to_owned(),
@@ -221,6 +227,26 @@ impl RepositoryCoordinator {
             ..Default::default()
         })
         .await;
+    }
+
+    /// Whether this publication is both newer than the last and different from
+    /// it. Consumes the ordering guard, which is held for the caller's fan-out.
+    fn claim_publication(
+        &self,
+        mut ordered: tokio::sync::MutexGuard<'_, u64>,
+        sequence: u64,
+        next: Publication,
+    ) -> bool {
+        if sequence <= *ordered {
+            return false;
+        }
+        *ordered = sequence;
+        let mut published = self.published.lock().unwrap();
+        if *published == next {
+            return false;
+        }
+        *published = next;
+        true
     }
 
     async fn fan_out(self: &Arc<Self>, event: impl Fn(&str, &str) -> v1::GitEvent) {

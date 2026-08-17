@@ -276,12 +276,11 @@ function rowHandlers(renderer: ReturnType<typeof create>) {
  * so the test double is that observation rather than a protocol client.
  */
 function gitState(overrides: Partial<WorkspaceGitState & GitRepositoryHandle> = {}): WorkspaceGitState {
-  const { status: snapshot, loading, error, refresh, ...handle } = overrides;
+  const { status: snapshot, loading, error, ...handle } = overrides;
   return {
     status: "status" in overrides ? snapshot : status(),
     loading: loading ?? false,
     ...(error !== undefined ? { error } : {}),
-    refresh: refresh ?? vi.fn(async () => undefined),
     handle: {
       state: vi.fn(() => ({ loading: false })),
       subscribe: vi.fn(() => () => undefined),
@@ -290,7 +289,6 @@ function gitState(overrides: Partial<WorkspaceGitState & GitRepositoryHandle> = 
       mutate: vi.fn(async () => applied()),
       prepareDiscard: vi.fn(async () => "confirmed"),
       commit: vi.fn(async () => applied()),
-      release: vi.fn(),
       ...handle,
     },
   };

@@ -38,6 +38,9 @@ struct DiffBodyKey {
     diff_target: i32,
     side: i32,
     digest: String,
+    /// Part of the key, so a cache hit can never be addressed with a different
+    /// size than the one its bounds were checked against.
+    size: u64,
 }
 
 impl DiffBodyKey {
@@ -53,6 +56,7 @@ impl DiffBodyKey {
             diff_target: request.diff_target,
             side: content.side,
             digest: content.expected_content_digest.clone(),
+            size: content.expected_size,
         }
     }
 }
@@ -84,6 +88,9 @@ impl GitService {
         if content.offset > content.expected_size {
             bail!("Git diff content offset is outside the described body");
         }
+        if content.length == 0 {
+            bail!("Git diff content length must be positive");
+        }
         let key = DiffBodyKey::new(request, &content);
         let key_for_release = key.clone();
         let cached = {
@@ -109,7 +116,9 @@ impl GitService {
                 body
             }
         };
-        let offset = content.offset as usize;
+        // The key carries the size the offset was checked against, so this
+        // cannot address past the body — the clamp is belt and braces.
+        let offset = (content.offset as usize).min(body.len());
         let length = (content.length as usize)
             .min(GIT_CONTENT_CHUNK)
             .min(body.len().saturating_sub(offset));

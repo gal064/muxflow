@@ -153,6 +153,19 @@ describe("GitDiffSurface", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it("surfaces a failed shared bootstrap instead of loading forever", async () => {
+    const client = mockClient();
+    vi.mocked(client.watch).mockRejectedValue(new Error("watch refused: not a worktree"));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
+    const rendered = JSON.stringify(renderer.toJSON());
+    expect(rendered).toContain("watch refused");
+    expect(rendered).not.toContain("Loading Git diff");
+    // And the way out is offered, not just the reason.
+    expect(renderer.root.findAllByType("button").some((button) => button.props.children === "Retry")).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("presents binary changes safely without constructing a text diff", async () => {
     const client = mockClient();
     vi.mocked(client.diff).mockResolvedValueOnce({ diff: { ...diff, binary: true, oldContent: undefined, newContent: undefined }, status });

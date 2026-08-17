@@ -6,23 +6,6 @@
 
 use super::*;
 
-/// Which coordinator, if any, a release pass must leave alone.
-trait RetainedCoordinator {
-    fn retains(&self, candidate: &Arc<RepositoryCoordinator>) -> bool;
-}
-
-impl RetainedCoordinator for Arc<RepositoryCoordinator> {
-    fn retains(&self, candidate: &Arc<RepositoryCoordinator>) -> bool {
-        Arc::ptr_eq(self, candidate)
-    }
-}
-
-impl RetainedCoordinator for Option<Arc<RepositoryCoordinator>> {
-    fn retains(&self, _candidate: &Arc<RepositoryCoordinator>) -> bool {
-        false
-    }
-}
-
 pub(in crate::service) struct GitWatchBootstrap {
     pub(in crate::service) status: v1::GitStatusSnapshot,
     /// Withholds this subscription's events until its bootstrap response has
@@ -61,7 +44,7 @@ impl GitService {
         // so a reconnecting consumer never drops the subscriber count to zero
         // and tears the shared watcher down underneath its peers.
         let activate = coordinator.subscribe(&request, sender)?;
-        self.release_watch_elsewhere(&request.watch_id, &coordinator);
+        self.release_watch_elsewhere(&request.watch_id, Some(&coordinator));
         coordinator.ensure_watcher(&capabilities).await;
         let status = match coordinator
             .status(
@@ -117,14 +100,18 @@ impl GitService {
     /// of that fact, and every path that forgot to update it would leak. There
     /// are at most `MAX_TRACKED_REPOSITORIES` coordinators to ask.
     pub(in crate::service::git) fn release_watch(&self, watch_id: &str) -> bool {
-        self.release_watch_elsewhere(watch_id, &None)
+        self.release_watch_elsewhere(watch_id, None)
     }
 
     /// Releases a watch id from every coordinator except one.
     ///
     /// `retained` is the coordinator that has just taken ownership of the id,
     /// which must not have its brand-new subscription removed by the same pass.
-    fn release_watch_elsewhere(&self, watch_id: &str, retained: &impl RetainedCoordinator) -> bool {
+    fn release_watch_elsewhere(
+        &self,
+        watch_id: &str,
+        retained: Option<&Arc<RepositoryCoordinator>>,
+    ) -> bool {
         let coordinators: Vec<_> = self
             .repositories
             .lock()
@@ -134,13 +121,14 @@ impl GitService {
             .collect();
         let mut removed = false;
         for coordinator in coordinators {
-            if retained.retains(&coordinator) {
+            if retained.is_some_and(|kept| Arc::ptr_eq(kept, &coordinator)) {
                 continue;
             }
-            if coordinator.unsubscribe(watch_id) {
-                removed = true;
-                self.retire(&coordinator);
-            }
+            // Unsubscribing stops the shared watcher when the last consumer
+            // leaves, but the discovered identity, metadata capability and
+            // last status stay: reopening the panel must not re-run discovery.
+            // The bounded LRU decides when a repository is actually forgotten.
+            removed |= coordinator.unsubscribe(watch_id);
         }
         removed
     }

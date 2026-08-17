@@ -350,6 +350,7 @@ pub async fn serve_with_shutdown(
                         files: Arc::clone(&files),
                         git: Arc::clone(&git),
                         bulk_connection: client_hello.bulk_connection,
+                        bulk_available: !read_only,
                         connection_epoch: client_hello.connection_epoch,
                         closed: Arc::clone(&closed),
                     },

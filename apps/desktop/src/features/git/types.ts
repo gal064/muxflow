@@ -62,11 +62,6 @@ export interface GitDiff {
   displayPath: string;
   oldContent?: Uint8Array;
   newContent?: Uint8Array;
-  /**
-   * Only hunk mutation needs the raw patch, and the host re-derives it there.
-   * The control response never carries it.
-   */
-  patch?: Uint8Array;
   oldContentRef?: GitDiffContentRef;
   newContentRef?: GitDiffContentRef;
   sourceGeneration: string;
