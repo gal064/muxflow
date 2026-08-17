@@ -115,25 +115,10 @@ pub(super) async fn handle(
             .await;
         }
         v1::Operation::ListDirectory | v1::Operation::WatchDirectory => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_rooted_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
-            if let Err(error) = validate_root_token(&file.root, &file.root_token) {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_root_token", &error.to_string()),
-                )
-                .await;
-                return;
-            }
             let watch = operation == v1::Operation::WatchDirectory;
             let root = file.root.clone();
             let root_token = file.root_token.clone();
@@ -174,13 +159,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::UnwatchDirectory => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let response = files.unwatch_directory(&file.watch_id).map_or_else(
@@ -190,25 +169,10 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::ReadFile => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_rooted_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
-            if let Err(error) = validate_root_token(&file.root, &file.root_token) {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_root_token", &error.to_string()),
-                )
-                .await;
-                return;
-            }
             let root = file.root.clone();
             let path = file.path.clone();
             let root_token = file.root_token.clone();
@@ -237,25 +201,10 @@ pub(super) async fn handle(
             .await;
         }
         v1::Operation::FileMutation => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_rooted_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
-            if let Err(error) = validate_root_token(&file.root, &file.root_token) {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_root_token", &error.to_string()),
-                )
-                .await;
-                return;
-            }
             let work = file.clone();
             let mutation_cancellation = Arc::clone(&cancellation);
             let result = tokio::task::spawn_blocking(move || {
@@ -299,25 +248,10 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::StartDownload => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_rooted_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
-            if let Err(error) = validate_root_token(&file.root, &file.root_token) {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_root_token", &error.to_string()),
-                )
-                .await;
-                return;
-            }
             let work = file.clone();
             let result = await_file_task(
                 tokio::task::spawn_blocking(move || {
@@ -344,13 +278,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::ReadDownloadChunk => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -373,13 +301,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::CancelDownload => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -394,13 +316,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::BeginFileWrite => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let response = if let Err(error) = validate_root_token(&file.root, &file.root_token) {
@@ -433,13 +349,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::WriteFileChunk => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -464,13 +374,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::CommitFileWrite => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -506,13 +410,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::CancelFileWrite => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -527,13 +425,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::PrepareTerminalUpload => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let collision = v1::CollisionPolicy::try_from(file.collision_policy)
@@ -565,13 +457,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::WriteTerminalUploadChunk => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -604,13 +490,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::CommitTerminalUpload => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -633,13 +513,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::CancelTerminalUpload => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -666,13 +540,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::ReconcileTerminalUpload => {
-            let Some(file) = request.file else {
-                send_response(
-                    control_tx,
-                    request_id,
-                    response_error("invalid_file_request", "file request payload is required"),
-                )
-                .await;
+            let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -696,6 +564,50 @@ pub(super) async fn handle(
         }
         _ => unreachable!("non-file operation routed to filesystem dispatcher"),
     }
+}
+
+/// The file payload every filesystem operation starts from.
+///
+/// Extracted because it was written out at every arm of the match below, and a
+/// refusal that is copied fourteen times is fourteen chances for one of them to
+/// answer with a different code, or with nothing at all — and an arm that
+/// answers with nothing leaves the desktop holding the request forever.
+async fn require_file(
+    request: &v1::Request,
+    request_id: u64,
+    control_tx: &mpsc::Sender<SequencerControl>,
+) -> Option<v1::FileServiceRequest> {
+    match request.file.clone() {
+        Some(file) => Some(file),
+        None => {
+            send_response(
+                control_tx,
+                request_id,
+                response_error("invalid_file_request", "file request payload is required"),
+            )
+            .await;
+            None
+        }
+    }
+}
+
+/// The same payload, admitted only against the root capability it names.
+pub(super) async fn require_rooted_file(
+    request: &v1::Request,
+    request_id: u64,
+    control_tx: &mpsc::Sender<SequencerControl>,
+) -> Option<v1::FileServiceRequest> {
+    let file = require_file(request, request_id, control_tx).await?;
+    if let Err(error) = validate_root_token(&file.root, &file.root_token) {
+        send_response(
+            control_tx,
+            request_id,
+            response_error("invalid_root_token", &error.to_string()),
+        )
+        .await;
+        return None;
+    }
+    Some(file)
 }
 
 #[cfg(test)]

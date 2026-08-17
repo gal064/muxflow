@@ -193,6 +193,22 @@ fn a_page_token_is_bound_to_its_exact_server_root_and_directory() {
     // identity, so renaming the message cannot silently reclassify it.
     assert_eq!(FileFailure::of(&crossed), FileFailure::StalePageToken);
     assert_eq!(FileFailure::StalePageToken.code(), "stale_page_token");
+    // Every field the token carries is covered by its digest, not just the
+    // binding. An edited position addresses a window of a listing the client
+    // was never handed, which is a page skipped or repeated in its tree.
+    let fields: Vec<&str> = left.next_page_token.split(':').collect();
+    for (index, replacement) in [(3, "0"), (4, "1"), (5, "0"), (6, "00")] {
+        let mut edited = fields.clone();
+        if edited[index] == replacement {
+            continue;
+        }
+        edited[index] = replacement;
+        let tampered = edited.join(":");
+        let rejected = service
+            .list_directory_page(root.to_str().unwrap(), "left", "page", &tampered, 2)
+            .expect_err("an edited page token was answered");
+        assert_eq!(FileFailure::of(&rejected), FileFailure::StalePageToken);
+    }
     for malformed in ["bad", "p1:deadbeefdeadbeef", "p1::::"] {
         let rejected = service
             .list_directory_page(root.to_str().unwrap(), "left", "page", malformed, 2)
