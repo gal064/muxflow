@@ -78,15 +78,32 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const pendingExpandPaints = useRef(new Map<string, { paint: PaintTicket; generation: number }>());
   /** The active-root backstop's re-arm, held so callers declared above it can use it. */
   const rearmRoot = useRef<(() => void) | undefined>(undefined);
+  const noteRootActivity = useRef<(() => void) | undefined>(undefined);
   const cache = useRef(new DirectoryListingCache());
   const leases = useRef(new DirectoryWatchLeases());
   const scopeKey = scope ? keyForScope(scope) : "";
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
 
-  /** Stops bounded remote work for reads nothing will read any more. */
+  /**
+   * Stops remote read work for directories nothing will read any more.
+   *
+   * Both halves, because a read has two states and only one of them is in
+   * flight. Aborting the controllers alone left a recovery still waiting out
+   * its 150 ms coalescing window, which then issued a full `listDirectory` for
+   * a directory the tree had already collapsed — "collapse is one unwatch",
+   * plus sometimes one list.
+   */
   const abortListing = useCallback((predicate: (path: string) => boolean) => {
     requests.current.abort(predicate);
+    for (const [key, pending] of [...refreshTimers.current]) {
+      // The key is `${rootToken}\0${path}`; the predicate is about paths.
+      const path = key.slice(key.indexOf("\0") + 1);
+      if (!predicate(path)) continue;
+      clearTimeout(pending.timer);
+      pending.paint.abandon();
+      refreshTimers.current.delete(key);
+    }
   }, []);
 
   /**
@@ -109,8 +126,20 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       setState((current) => ({ ...current, loading: withoutPath(current.loading, directory) }));
       return;
     }
-    setState((current) => onDirectory(current, root, directory,
-      (held) => installListing(held, directory, listing, options)));
+    setState((current) => {
+      // The wait state comes back whatever the transition decides, settled here
+      // rather than inside each of the transition's branches because every exit
+      // owes it. `onDirectory` refuses a directory the tree is no longer
+      // showing — a listing still in flight when the user collapsed the folder
+      // — by returning the state unchanged, which left that path in `loading`
+      // for the life of the scope and `aria-busy` set on the whole Explorer
+      // with nothing on screen to explain it.
+      const settled = current.loading.has(directory)
+        ? { ...current, loading: withoutPath(current.loading, directory) }
+        : current;
+      return onDirectory(settled, root, directory,
+        (held) => installListing(held, directory, listing, options));
+    });
     if (!options.append) {
       // A listing that has been replaced outright supersedes any read still in
       // flight for it: that read describes the directory as it was.
@@ -482,7 +511,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     }));
   }, [abortListing, scopeKey]);
 
-  const { rearm } = useActiveRoot({
+  const { rearm, noteActivity } = useActiveRoot({
     client,
     scope: () => scopeRef.current,
     scopeKey,
@@ -492,6 +521,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     lifecycle: () => scopeEpoch.current,
   });
   useEffect(() => { rearmRoot.current = rearm; }, [rearm]);
+  useEffect(() => { noteRootActivity.current = noteActivity; }, [noteActivity]);
   /**
    * The connection and root capability the watch set belongs to.
    *
@@ -599,9 +629,13 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     const paint = expanding ? createPaintTicket(
       ["explorer.expandToPaint", "workflow.explorer.directoryExpandPaint"], generation,
     ) : undefined;
-    // Touching the tree is the strongest evidence available that the pane may
-    // have moved, so it re-arms the settled root backstop.
-    rearmRoot.current?.();
+    // Activity, not evidence. Working in the tree means the settled backstop
+    // should go back to full rate — but expanding a folder says nothing about
+    // whether the pane's `cd` moved, and probing for it here put a
+    // `resolveActiveRoot` (a `tmux` fork on the host) on every expand *and*
+    // every collapse, which is the interaction path this package exists to
+    // make cheap.
+    noteRootActivity.current?.();
     const root = stateRef.current.root;
     const activeScope = scopeRef.current;
     // A valid cached revisit and the expansion itself are one state
