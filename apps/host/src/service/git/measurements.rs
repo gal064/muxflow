@@ -6,11 +6,13 @@
 //! too would mean any two tests running in parallel could not assert an exact
 //! number, and "exactly one watcher for 32 consumers" is precisely the fact
 //! this package exists to prove.
-
-use std::sync::Mutex;
+//!
+//! Everything here compiles to nothing unless measurement is enabled. A shipped
+//! build must not take a lock on a watcher install or a status pipeline to
+//! maintain a number nobody can read.
 
 #[cfg(test)]
-use std::{ffi::OsStr, os::unix::ffi::OsStrExt, sync::OnceLock};
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt, sync::Mutex, sync::OnceLock};
 
 #[cfg(test)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -63,6 +65,7 @@ pub(super) fn phase14_git_process_snapshot() -> GitProcessMeasurements {
     processes().lock().unwrap().clone()
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GitObservationCounts {
@@ -82,10 +85,16 @@ pub(super) struct GitObservationCounts {
 }
 
 /// One connection's observation counters, shared by its coordinators.
+#[cfg(test)]
 #[derive(Default)]
 pub(super) struct GitObservation(Mutex<GitObservationCounts>);
 
+#[cfg(test)]
 impl GitObservation {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
     pub(super) fn watcher_created(&self, registrations: u64) {
         let mut value = self.0.lock().unwrap();
         value.native_watcher_creations += 1;
@@ -114,9 +123,30 @@ impl GitObservation {
         self.0.lock().unwrap().status_pipelines += 1;
     }
 
-    /// Only tests read these back; production only ever records into them.
-    #[cfg(test)]
     pub(super) fn snapshot(&self) -> GitObservationCounts {
         self.0.lock().unwrap().clone()
     }
+}
+
+/// The same surface with nothing behind it, so the call sites read identically
+/// and cost nothing.
+#[cfg(not(test))]
+#[derive(Default)]
+pub(super) struct GitObservation;
+
+#[cfg(not(test))]
+impl GitObservation {
+    pub(super) fn new() -> Self {
+        Self
+    }
+
+    pub(super) fn watcher_created(&self, _registrations: u64) {}
+
+    pub(super) fn watcher_dropped(&self) {}
+
+    pub(super) fn subscribers_changed(&self, _delta: isize) {}
+
+    pub(super) fn discovery(&self) {}
+
+    pub(super) fn status_pipeline(&self) {}
 }

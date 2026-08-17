@@ -342,6 +342,68 @@ async fn an_untouched_watched_repository_runs_no_further_status_pipelines() {
 }
 
 #[tokio::test]
+async fn a_directory_created_after_the_watch_is_observed() {
+    let fixture = Fixture::new("watch-new-directory");
+    fixture.write("file", b"base\n");
+    fixture.git(&["add", "file"]);
+    fixture.git(&["commit", "-qm", "base"]);
+    let closed = Arc::new(AtomicBool::new(false));
+    let service = Arc::new(GitService::new(Arc::clone(&closed), 0));
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut watch = fixture.request();
+    watch.watch_id = "new-directory".into();
+    service.watch_activated(watch, sender).await.unwrap();
+
+    // The watch is registered against a path naming the worktree descriptor.
+    // If that descriptor were released once registration returned, the path
+    // would name a closed — and possibly reused — file descriptor, and the
+    // watch on this new directory could never be added. An empty directory is
+    // not a Git change, so nothing is published for it; the file written inside
+    // it afterwards is only seen if the directory itself is watched.
+    fs::create_dir(fixture.root.join("added")).unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    fixture.write("added/file", b"new\n");
+    let status = next_status(&mut receiver).await.expect("a status refresh");
+    assert!(
+        status
+            .entries
+            .iter()
+            .any(|entry| entry.path == b"added/file"),
+        "the file created in a new directory must appear in status"
+    );
+    service.unwatch("new-directory").unwrap();
+    closed.store(true, Ordering::Release);
+}
+
+#[tokio::test]
+async fn a_diff_reads_status_once_on_an_unobserved_repository() {
+    let fixture = Fixture::new("diff-one-pipeline");
+    fixture.write("file", b"base\n");
+    fixture.git(&["add", "file"]);
+    fixture.git(&["commit", "-qm", "base"]);
+    fixture.write("file", b"changed\n");
+    let closed = Arc::new(AtomicBool::new(false));
+    let service = Arc::new(GitService::new(Arc::clone(&closed), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
+    let before = service.observation().status_pipelines;
+    let mut request = fixture.request();
+    request.repository_id = status.repository.unwrap().repository_id;
+    request.path = b"file".to_vec();
+    request.diff_target = v1::GitDiffTarget::Unstaged.into();
+    let (_diff, landed) = service.diff(&request, true, None).await.unwrap();
+    assert!(landed.authoritative);
+    // Nothing invalidated the repository during the read, so the status the
+    // diff was read against is the status it landed on. Reading it again would
+    // be a second full pipeline that proves nothing.
+    assert_eq!(
+        service.observation().status_pipelines - before,
+        1,
+        "one diff must cost one status pipeline"
+    );
+    closed.store(true, Ordering::Release);
+}
+
+#[tokio::test]
 #[ignore = "Phase 14 opt-in 32-consumer measurement fixture"]
 async fn phase14_thirty_two_consumers_report_native_watchers_and_status_processes() {
     let fixture = Fixture::new("phase14-32-consumers");

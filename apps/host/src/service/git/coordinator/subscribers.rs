@@ -24,11 +24,15 @@ struct Subscriber {
     /// response. Re-delivering it as an event would be a second, identical
     /// transition for a consumer that has not seen anything yet.
     bootstrap_source: String,
+    /// Distinguishes this registration from any later one reusing its watch id,
+    /// so a cancelled bootstrap can only ever cancel its own.
+    slot: u64,
 }
 
 #[derive(Default)]
 pub(super) struct SubscriberRegistry {
     entries: HashMap<String, Subscriber>,
+    next_slot: u64,
 }
 
 impl SubscriberRegistry {
@@ -44,6 +48,7 @@ impl SubscriberRegistry {
 pub(in crate::service) struct SubscriberActivation {
     coordinator: Arc<RepositoryCoordinator>,
     watch_id: String,
+    slot: u64,
     settled: bool,
 }
 
@@ -51,28 +56,29 @@ impl SubscriberActivation {
     pub(in crate::service::git) fn new(
         coordinator: Arc<RepositoryCoordinator>,
         watch_id: String,
+        slot: u64,
     ) -> Self {
         Self {
             coordinator,
             watch_id,
+            slot,
             settled: false,
         }
     }
-}
 
-impl SubscriberActivation {
     pub(in crate::service) fn activate(mut self) {
         self.settled = true;
         let coordinator = Arc::clone(&self.coordinator);
         let watch_id = std::mem::take(&mut self.watch_id);
-        tokio::spawn(async move { coordinator.flush_deferred(&watch_id).await });
+        let slot = self.slot;
+        tokio::spawn(async move { coordinator.flush_deferred(&watch_id, slot).await });
     }
 }
 
 impl Drop for SubscriberActivation {
     fn drop(&mut self) {
         if !self.settled {
-            self.coordinator.unsubscribe(&self.watch_id);
+            self.coordinator.unsubscribe_slot(&self.watch_id, self.slot);
         }
     }
 }
@@ -88,8 +94,10 @@ impl RepositoryCoordinator {
         if request.watch_id.is_empty() {
             bail!("Git watch ID is required");
         }
-        {
+        let slot = {
             let mut subscribers = self.subscribers.lock().unwrap();
+            subscribers.next_slot += 1;
+            let slot = subscribers.next_slot;
             let replaced = subscribers.entries.insert(
                 request.watch_id.clone(),
                 Subscriber {
@@ -99,23 +107,41 @@ impl RepositoryCoordinator {
                     activated: false,
                     deferred: None,
                     bootstrap_source: String::new(),
+                    slot,
                 },
             );
             if replaced.is_none() {
                 self.observation.subscribers_changed(1);
             }
-        }
+            slot
+        };
         Ok(SubscriberActivation::new(
             Arc::clone(self),
             request.watch_id.clone(),
+            slot,
         ))
     }
 
     /// Removes one consumer, stopping the shared watcher with the last of them.
     pub(in crate::service::git) fn unsubscribe(self: &Arc<Self>, watch_id: &str) -> bool {
+        self.remove_subscriber(watch_id, None)
+    }
+
+    /// Removes one consumer only if it is still the registration identified by
+    /// `slot`, so an abandoned bootstrap cannot cancel the watch that replaced
+    /// it.
+    fn unsubscribe_slot(self: &Arc<Self>, watch_id: &str, slot: u64) -> bool {
+        self.remove_subscriber(watch_id, Some(slot))
+    }
+
+    fn remove_subscriber(self: &Arc<Self>, watch_id: &str, slot: Option<u64>) -> bool {
         let (removed, remaining) = {
             let mut subscribers = self.subscribers.lock().unwrap();
-            let removed = subscribers.entries.remove(watch_id).is_some();
+            let matches = subscribers
+                .entries
+                .get(watch_id)
+                .is_some_and(|subscriber| slot.is_none_or(|slot| subscriber.slot == slot));
+            let removed = matches && subscribers.entries.remove(watch_id).is_some();
             if removed {
                 self.observation.subscribers_changed(-1);
             }
@@ -152,10 +178,21 @@ impl RepositoryCoordinator {
         self.subscribers.lock().unwrap().len()
     }
 
-    async fn flush_deferred(self: &Arc<Self>, watch_id: &str) {
+    /// Releases what one newly activated subscriber missed.
+    ///
+    /// Held under the publication guard, so a withheld snapshot cannot overtake
+    /// or be overtaken by a fan-out that is already running: this subscriber
+    /// either receives the deferred event first and the live one after, or is
+    /// activated in time to receive the live one directly.
+    async fn flush_deferred(self: &Arc<Self>, watch_id: &str, slot: u64) {
+        let _ordered = self.publish.lock().await;
         let deferred = {
             let mut subscribers = self.subscribers.lock().unwrap();
-            let Some(subscriber) = subscribers.entries.get_mut(watch_id) else {
+            let Some(subscriber) = subscribers
+                .entries
+                .get_mut(watch_id)
+                .filter(|subscriber| subscriber.slot == slot)
+            else {
                 return;
             };
             subscriber.activated = true;

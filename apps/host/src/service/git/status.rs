@@ -38,22 +38,17 @@ pub(super) fn discover_repository(
     if worktree_root.as_bytes() != logical_root.as_bytes() {
         bail!("active root is not the requested Git worktree root");
     }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(logical_root.as_bytes());
-    hasher.update(&root_identity.0.to_le_bytes());
-    hasher.update(&root_identity.1.to_le_bytes());
-    hasher.update(&[0]);
-    hasher.update(&git_dir);
     let git_identity = directory_identity(&git_dir)?;
-    hasher.update(&git_identity.0.to_le_bytes());
-    hasher.update(&git_identity.1.to_le_bytes());
-    hasher.update(&[0]);
-    hasher.update(&common_dir);
     let common_identity = directory_identity(&common_dir)?;
-    hasher.update(&common_identity.0.to_le_bytes());
-    hasher.update(&common_identity.1.to_le_bytes());
     Ok(RepositoryIdentity {
-        repository_id: hasher.finalize().to_hex().to_string(),
+        repository_id: repository_identity(
+            logical_root,
+            root_identity,
+            &git_dir,
+            git_identity,
+            &common_dir,
+            common_identity,
+        ),
         worktree_root,
         git_dir,
         common_dir,
@@ -125,6 +120,35 @@ fn directory_identity(path: &[u8]) -> anyhow::Result<(u64, u64)> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
+/// The repository identity, derived in exactly one place.
+///
+/// Discovery computes it and capability validation recomputes it to prove the
+/// metadata directories did not change underneath. Two hand-written copies of
+/// this derivation that drifted apart would accept a capability describing a
+/// different repository, so there is only ever one.
+fn repository_identity(
+    logical_root: &str,
+    root_identity: (u64, u64),
+    git_dir: &[u8],
+    git_identity: (u64, u64),
+    common_dir: &[u8],
+    common_identity: (u64, u64),
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(logical_root.as_bytes());
+    hasher.update(&root_identity.0.to_le_bytes());
+    hasher.update(&root_identity.1.to_le_bytes());
+    hasher.update(&[0]);
+    hasher.update(git_dir);
+    hasher.update(&git_identity.0.to_le_bytes());
+    hasher.update(&git_identity.1.to_le_bytes());
+    hasher.update(&[0]);
+    hasher.update(common_dir);
+    hasher.update(&common_identity.0.to_le_bytes());
+    hasher.update(&common_identity.1.to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
 pub(super) fn validate_metadata_capability(
     logical_root: &str,
     root_identity: (u64, u64),
@@ -132,19 +156,15 @@ pub(super) fn validate_metadata_capability(
     capability: &GitMetadataCapability,
 ) -> anyhow::Result<()> {
     let (git_identity, common_identity) = capability.identities()?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(logical_root.as_bytes());
-    hasher.update(&root_identity.0.to_le_bytes());
-    hasher.update(&root_identity.1.to_le_bytes());
-    hasher.update(&[0]);
-    hasher.update(&repository.git_dir);
-    hasher.update(&git_identity.0.to_le_bytes());
-    hasher.update(&git_identity.1.to_le_bytes());
-    hasher.update(&[0]);
-    hasher.update(&repository.common_dir);
-    hasher.update(&common_identity.0.to_le_bytes());
-    hasher.update(&common_identity.1.to_le_bytes());
-    if hasher.finalize().to_hex().as_str() != repository.repository_id {
+    let recomputed = repository_identity(
+        logical_root,
+        root_identity,
+        &repository.git_dir,
+        git_identity,
+        &repository.common_dir,
+        common_identity,
+    );
+    if recomputed != repository.repository_id {
         bail!("Git metadata directories changed while capturing repository capability");
     }
     Ok(())
