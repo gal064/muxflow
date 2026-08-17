@@ -69,17 +69,34 @@ impl PageBinding {
         })
     }
 
-    /// The binding's identity, including the generation the token continues.
+    /// The whole token's identity: this binding *and* every field the token
+    /// carries beside it.
     ///
-    /// Generation is inside the digest rather than beside it so a token cannot
-    /// be edited to claim a different listing revision than the one it was
-    /// issued for.
-    fn digest(&self, generation: u64) -> String {
-        let mut hasher = blake3::Hasher::new();
+    /// All of them are inside the digest rather than merely next to it, so no
+    /// part of a token can be edited — not the generation it claims, not the
+    /// snapshot it names, and not the position it resumes at. A token with an
+    /// edited index or resume key addresses a window of a listing the client
+    /// was never given, which is a page skipped or repeated in somebody's
+    /// tree; only a re-issued token can move the cursor.
+    ///
+    /// Keyed, not plain: every other input is something the client already
+    /// knows or can guess, so an unkeyed hash would rest entirely on the
+    /// directory's inode being secret. The key lives for the process, which is
+    /// also exactly as long as any snapshot a token can name.
+    fn digest(
+        &self,
+        snapshot_id: &str,
+        index: usize,
+        generation: u64,
+        resume_after: &EntryKey,
+    ) -> String {
+        let mut hasher = blake3::Hasher::new_keyed(token_key());
         for part in [
             self.server_identity.as_bytes(),
             self.root_token.as_bytes(),
             self.logical_path.as_slice(),
+            snapshot_id.as_bytes(),
+            resume_after.1.as_slice(),
         ] {
             hasher.update(&(part.len() as u64).to_le_bytes());
             hasher.update(part);
@@ -87,8 +104,22 @@ impl PageBinding {
         hasher.update(&self.device.to_le_bytes());
         hasher.update(&self.inode.to_le_bytes());
         hasher.update(&generation.to_le_bytes());
+        hasher.update(&(index as u64).to_le_bytes());
+        hasher.update(&[resume_after.0]);
         hasher.finalize().to_hex()[..16].to_owned()
     }
+}
+
+/// This process's page-token key. Random once, then constant.
+fn token_key() -> &'static [u8; 32] {
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        *Uuid::new_v4()
+            .as_bytes()
+            .repeat(2)
+            .first_chunk::<32>()
+            .unwrap()
+    })
 }
 
 /// Where a requested page resumes from.
@@ -116,7 +147,7 @@ pub(super) fn encode_page_token(
 ) -> String {
     format!(
         "{TOKEN_PREFIX}:{}:{snapshot_id}:{index}:{generation}:{}:{}",
-        binding.digest(generation),
+        binding.digest(snapshot_id, index, generation, resume_after),
         resume_after.0,
         hex_encode(&resume_after.1),
     )
@@ -144,19 +175,20 @@ pub(super) fn decode_page_token(
     let index = index.parse::<usize>().map_err(|_| invalid())?;
     let generation = generation.parse::<u64>().map_err(|_| invalid())?;
     let rank = rank.parse::<u8>().map_err(|_| invalid())?;
-    if digest != binding.digest(generation) {
-        return Err(stale_page_token(
-            "directory page token belongs to another server, root, directory, or listing",
-        ));
-    }
     if rank > 1 || snapshot_id.len() > 64 {
         return Err(invalid());
+    }
+    let resume_after = (rank, hex_decode(name)?);
+    if digest != binding.digest(snapshot_id, index, generation, &resume_after) {
+        return Err(stale_page_token(
+            "directory page token belongs to another server, root, directory, listing, or position",
+        ));
     }
     Ok(Some(PageCursor {
         snapshot_id: snapshot_id.to_owned(),
         index,
         generation,
-        resume_after: Some((rank, hex_decode(name)?)),
+        resume_after: Some(resume_after),
     }))
 }
 
@@ -240,9 +272,12 @@ impl DirectoryPageCache {
         page_size: usize,
     ) -> Option<RetainedPage> {
         let mut snapshots = self.snapshots.lock().unwrap();
-        // Swept on the way in, not only on the way out: a session that opens
-        // one large directory and then goes idle would otherwise keep its
-        // retained entries resident until something else inserted one.
+        // Swept on the way in as well as on the way out, so a page read
+        // expires what a previous listing left behind. Nothing sweeps while
+        // the connection is idle — an expired snapshot stays resident until
+        // this connection lists something again — which is deliberate: the
+        // resident set is bounded by `MAX_RETAINED_SNAPSHOTS` regardless, and
+        // a timer per connection to reclaim it is worth less than it costs.
         snapshots.retain(|_, page| page.created.elapsed() <= SNAPSHOT_TTL);
         let page = snapshots.get(&cursor.snapshot_id)?;
         if page.binding != *binding

@@ -8,6 +8,17 @@ use super::*;
 /// questions (stat, preflight, then a chunk request per mebibyte), each of
 /// which could answer about a different file and each of which cost a round
 /// trip on the remote link.
+///
+/// The content is *buffered*, not piped: it is read in bounded, cancellable
+/// windows into one buffer, and the frames are then cut from that buffer. This
+/// is not an oversight, and it is the reason the body can be framed at all —
+/// "is this text?" is a question about the whole file (a NUL byte or an invalid
+/// UTF-8 sequence anywhere makes it binary), so a header cannot honestly
+/// declare a classification it has not finished checking. The cost is one
+/// file's bytes held while it is answered, bounded by `MAX_TEXT_BYTES` /
+/// `MAX_IMAGE_BYTES` per open and by the dispatcher's open permits across
+/// them; the benefit is that time-to-first-byte is one round trip instead of
+/// one per mebibyte.
 pub(crate) struct FileStreamBody {
     header: v1::FileStreamHeader,
     content: Vec<u8>,

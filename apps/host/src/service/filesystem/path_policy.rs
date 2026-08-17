@@ -146,20 +146,35 @@ impl AnchoredMetadata {
         self.kind() == libc::S_IFLNK
     }
 
+    // Already the target type on Linux, a narrower and sometimes signed one
+    // elsewhere. See `device`.
+    #[allow(clippy::unnecessary_cast)]
     pub(super) fn device(&self) -> u64 {
-        lossless_stat_component(self.stat.st_dev)
+        // Widened, never validated. These three are identity components, not
+        // quantities: what has to survive is the bits. Platforms disagree
+        // about the sign and width of every one of them — `dev_t` is a signed
+        // 32-bit value on macOS and unsigned 64-bit on Linux — so a conversion
+        // that refused a negative device number panicked on the listing hot
+        // path for a value that platform considers perfectly ordinary.
+        self.stat.st_dev as u64
     }
 
+    // Already the target type on Linux, a narrower and sometimes signed one
+    // elsewhere. See `device`.
+    #[allow(clippy::unnecessary_cast)]
     pub(super) fn inode(&self) -> u64 {
-        lossless_stat_component(self.stat.st_ino)
+        self.stat.st_ino as u64
     }
 
     pub(super) fn len(&self) -> u64 {
         self.stat.st_size.max(0) as u64
     }
 
+    // Already the target type on Linux, a narrower and sometimes signed one
+    // elsewhere. See `device`.
+    #[allow(clippy::unnecessary_cast)]
     pub(super) fn mode(&self) -> u32 {
-        lossless_stat_component(self.stat.st_mode)
+        self.stat.st_mode as u32
     }
 
     pub(super) fn permissions(&self) -> Permissions {
@@ -184,16 +199,6 @@ impl AnchoredMetadata {
 
     fn kind(&self) -> libc::mode_t {
         self.stat.st_mode & libc::S_IFMT
-    }
-}
-
-fn lossless_stat_component<T, U>(value: T) -> U
-where
-    T: TryInto<U>,
-{
-    match value.try_into() {
-        Ok(value) => value,
-        Err(_) => panic!("platform stat component does not fit its canonical representation"),
     }
 }
 

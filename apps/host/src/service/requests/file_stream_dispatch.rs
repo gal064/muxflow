@@ -1,4 +1,16 @@
 use super::*;
+use tokio::sync::Semaphore;
+
+/// How many opens this host holds content for at once.
+///
+/// Classification buffers the file (see [`FileStreamBody`]), so without a bound
+/// the host's peak memory would be "however many opens a desktop can ask for"
+/// times the 25 MiB ceiling. Waiting is the right answer rather than refusing:
+/// each holder is a bounded local read, so the wait is short, and a person who
+/// opens five tabs at once wants five files rather than an error. The permit is
+/// held until the body has been framed, because that is when the buffer dies.
+const MAX_CONCURRENT_OPENS: usize = 4;
+static OPEN_PERMITS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_OPENS);
 
 /// Answers one `OpenFileStream` request: one descriptor-bound classification,
 /// one header frame, bounded body frames, then exactly one terminal response.
@@ -12,24 +24,14 @@ pub(super) async fn handle(
     control_tx: &mpsc::Sender<SequencerControl>,
     files: &Arc<FileService>,
 ) {
-    let Some(file) = request.file else {
-        send_response(
-            control_tx,
-            request_id,
-            response_error("invalid_file_request", "file request payload is required"),
-        )
-        .await;
+    let Some(file) =
+        super::filesystem_dispatch::require_rooted_file(&request, request_id, control_tx).await
+    else {
         return;
     };
-    if let Err(error) = validate_root_token(&file.root, &file.root_token) {
-        send_response(
-            control_tx,
-            request_id,
-            response_error("invalid_root_token", &error.to_string()),
-        )
-        .await;
-        return;
-    }
+    // Held for the whole exchange: the buffer this permit is bounding lives
+    // until the last body frame has been cut from it.
+    let _permit = OPEN_PERMITS.acquire().await;
     let service = Arc::clone(files);
     let work = file.clone();
     let open_cancellation = Arc::clone(&cancellation);
