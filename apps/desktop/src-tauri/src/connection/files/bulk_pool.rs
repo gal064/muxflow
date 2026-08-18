@@ -51,6 +51,17 @@ struct BulkKey {
     connection_epoch: u64,
 }
 
+impl BulkKey {
+    fn new(connection: &ConnectionSpec, binding: &BulkBinding) -> Self {
+        Self {
+            client_scope: binding.client.bulk_scope,
+            connection: connection.clone(),
+            server_identity: binding.expected_server_identity.clone(),
+            connection_epoch: binding.connection_epoch,
+        }
+    }
+}
+
 /// The pool's whole policy, over any payload.
 ///
 /// Generic so that taking, expiring and evicting can be exercised without an
@@ -113,6 +124,15 @@ impl<T> IdlePool<T> {
         Some(self.idle_timeout.saturating_sub(now.duration_since(oldest)))
     }
 
+    /// Whether a bridge for `key` is sitting idle right now.
+    ///
+    /// Deliberately does not expire first: this only ever decides whether to
+    /// skip a pre-warm, and treating a not-yet-reaped entry as warm costs one
+    /// missed pre-warm, while expiring here would make a read mutate the pool.
+    fn holds(&self, key: &BulkKey) -> bool {
+        self.entries.iter().any(|(entry, _, _)| entry == key)
+    }
+
     fn drain_matching(&mut self, mut matches: impl FnMut(&BulkKey) -> bool) -> Vec<T> {
         let (drained, kept): (Vec<_>, Vec<_>) =
             self.entries.drain(..).partition(|(key, _, _)| matches(key));
@@ -163,6 +183,10 @@ impl<T> SharedPool<T> {
 
     fn drain_matching(&self, matches: impl FnMut(&BulkKey) -> bool) -> Vec<T> {
         self.idle.lock().unwrap().drain_matching(matches)
+    }
+
+    fn holds(&self, key: &BulkKey) -> bool {
+        self.idle.lock().unwrap().holds(key)
     }
 
     /// Blocks until at least one entry has timed out, and hands them over.
@@ -383,12 +407,7 @@ impl BulkLease {
         spawn: impl FnOnce(&ConnectionSpec, &dyn Fn() -> bool) -> Result<Child, String>,
     ) -> Result<Self, String> {
         let cancellation = Arc::clone(cancellation);
-        let key = BulkKey {
-            client_scope: binding.client.bulk_scope,
-            connection: connection.clone(),
-            server_identity: binding.expected_server_identity.clone(),
-            connection_epoch: binding.connection_epoch,
-        };
+        let key = BulkKey::new(connection, binding);
         let (mut pooled, _expired) = pool().take(&key);
         if let Some(bridge) = pooled.as_mut()
             && !bridge.reusable()
@@ -501,6 +520,88 @@ impl Drop for BulkLease {
         }
         // The retired entries are closed here, outside the lock, by dropping.
         let _retired = pool().release(self.key.clone(), bridge);
+    }
+}
+
+/// What a pre-warm attempt did, for the tests and for nobody else.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Prewarm {
+    /// A bridge was established and left idle in the pool.
+    Warmed,
+    /// One was already idle for this key; nothing to do.
+    AlreadyWarm,
+}
+
+/// Establishes one idle bulk bridge ahead of the first file operation.
+///
+/// Every first-of-session file open paid for a fresh bridge — a local
+/// `ssh -O check`, an `ssh` fork, a new SSH channel, a remote `tmux-ide-host`
+/// fork and a ClientHello round trip — before the first byte of the file moved.
+/// `leaseReuse` was false on every measured first open, at 245–325 ms, and it
+/// grows with RTT because the handshake is multi-round-trip
+/// (tests/phase15/decomposition.md). Doing it once at connect moves that cost
+/// off the click and onto a moment when nobody is waiting.
+///
+/// This is the same work an ordinary lease does, in the same order, and it
+/// leaves the bridge in the pool by dropping the lease: `BulkLease::drop`
+/// already returns a clean, live, uncancelled bridge. There is no second
+/// establishment path to keep in step with the first.
+///
+/// **Only ever for a settled writable connection.** `BulkBinding::validate` is
+/// the gate, and it is the whole reason this takes a binding rather than the
+/// parts of one: a connection that is read-only or still settling fails it with
+/// "bulk job is not bound to a writable live control connection" — the exact
+/// error that replaced a painted editor in decomposition.md's "Observed once".
+/// A pre-warm has no user behind it, so it must never turn that state into
+/// anything the user can see; it gives up silently instead.
+fn prewarm_with_spawn(
+    connection: &ConnectionSpec,
+    binding: &BulkBinding,
+    spawn: impl FnOnce(&ConnectionSpec, &dyn Fn() -> bool) -> Result<Child, String>,
+) -> Result<Prewarm, String> {
+    binding.validate()?;
+    let key = BulkKey::new(connection, binding);
+    if pool().holds(&key) {
+        return Ok(Prewarm::AlreadyWarm);
+    }
+    let cancellation = Arc::new(CancelState::new());
+    let deadline = cancellation.arm_inactivity_deadline();
+    let lease = BulkLease::acquire_with_spawn(
+        connection,
+        binding,
+        &cancellation,
+        &deadline,
+        AcquisitionMode::Request,
+        spawn,
+    );
+    // Completed whatever happened: the guard owns a timer thread, and an early
+    // return that left it armed would keep firing at a connection that has
+    // nothing in flight.
+    deadline.complete();
+    // Dropping the lease is what pools the bridge.
+    drop(lease?);
+    Ok(Prewarm::Warmed)
+}
+
+/// Pre-warms one bulk bridge for a connection that has just gone live.
+///
+/// On its own thread because establishing a bridge is several hundred
+/// milliseconds of ssh and handshake, and the caller is the terminal bridge's
+/// own reader loop — the thread that carries every keystroke and every frame of
+/// output. Blocking it to make a later file open faster would trade the
+/// common interaction for the rare one.
+///
+/// Failures are dropped rather than reported. Nothing is waiting on this: if it
+/// does not happen, the first file open pays what it pays today, which is
+/// exactly the behaviour that shipped before this existed.
+pub(crate) fn prewarm_bulk_bridge(connection: ConnectionSpec, binding: BulkBinding) {
+    let started = thread::Builder::new()
+        .name("bulk-pool-prewarm".into())
+        .spawn(move || {
+            let _ = prewarm_with_spawn(&connection, &binding, spawn_bulk_bridge);
+        });
+    if let Err(error) = started {
+        eprintln!("bulk pool pre-warm could not start: {error}");
     }
 }
 
@@ -743,6 +844,164 @@ mod tests {
         assert_ne!(lease.process_id(), 0);
         drop(lease);
         deadline.complete();
+    }
+
+    /// A live, writable, settled control client — what a pre-warm requires.
+    fn settled_client(identity: &str, epoch: u64) -> Arc<crate::connection::TerminalClient> {
+        let client = Arc::new(crate::connection::TerminalClient::new());
+        client
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
+        client
+            .terminal_epoch
+            .store(epoch, std::sync::atomic::Ordering::Release);
+        *client.server_identity.lock().unwrap() = identity.into();
+        client
+    }
+
+    /// A helper that answers one ServerHello and then goes quiet, like a real
+    /// idle bulk bridge: silent, alive, and holding its stream open.
+    fn hello_spawn(
+        identity: &str,
+        epoch: u64,
+    ) -> impl FnOnce(&ConnectionSpec, &dyn Fn() -> bool) -> Result<Child, String> {
+        let response = tmux_agent_protocol::encode_frame(&tmux_agent_protocol::envelope(
+            1,
+            0,
+            tmux_agent_protocol::v1::envelope::Payload::ServerHello(
+                tmux_agent_protocol::v1::ServerHello {
+                    server_identity: identity.into(),
+                    connection_epoch: epoch,
+                    capabilities: tmux_agent_protocol::HOST_CAPABILITIES,
+                    ..Default::default()
+                },
+            ),
+        ))
+        .unwrap();
+        let escaped = response
+            .iter()
+            .map(|byte| format!("\\{byte:03o}"))
+            .collect::<String>();
+        move |_, _| {
+            Command::new("sh")
+                .args([
+                    "-c",
+                    "printf '%b' \"$1\"; exec sleep 30",
+                    "bulk-fixture",
+                    &escaped,
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    /// The whole point of the pre-warm, stated as the thing the measurement
+    /// showed was false: the first lease of a session reuses a pooled bridge
+    /// instead of paying for a spawn and a handshake.
+    #[test]
+    fn a_prewarmed_connection_hands_the_first_lease_a_reused_bridge() {
+        let _guard = super::super::scheduler::engine_test_lock();
+        let client = settled_client("prewarm-a", 11);
+        let binding = BulkBinding::capture(Arc::clone(&client), "prewarm-a".into(), 11).unwrap();
+
+        assert_eq!(
+            prewarm_with_spawn(&ConnectionSpec::Local, &binding, hello_spawn("prewarm-a", 11))
+                .unwrap(),
+            Prewarm::Warmed,
+        );
+
+        let cancellation = Arc::new(CancelState::new());
+        let deadline = cancellation.arm_inactivity_deadline();
+        let lease = BulkLease::acquire_with_spawn(
+            &ConnectionSpec::Local,
+            &binding,
+            &cancellation,
+            &deadline,
+            AcquisitionMode::Request,
+            |_, _| Err("the first open must not have to spawn anything".into()),
+        )
+        .expect("the pre-warmed bridge should have satisfied this lease");
+        assert!(lease.reused(), "leaseReuse was false after a pre-warm");
+        drop(lease);
+        deadline.complete();
+        close_pooled_bulk_bridges(client.bulk_scope);
+    }
+
+    /// The pool floor is one *per connection*, not one per pre-warm call.
+    #[test]
+    fn a_second_prewarm_does_not_open_a_second_bridge() {
+        let _guard = super::super::scheduler::engine_test_lock();
+        let client = settled_client("prewarm-b", 12);
+        let binding = BulkBinding::capture(Arc::clone(&client), "prewarm-b".into(), 12).unwrap();
+        prewarm_with_spawn(&ConnectionSpec::Local, &binding, hello_spawn("prewarm-b", 12)).unwrap();
+
+        assert_eq!(
+            prewarm_with_spawn(&ConnectionSpec::Local, &binding, |_, _| Err(
+                "a connection that is already warm must not spawn again".into()
+            ))
+            .unwrap(),
+            Prewarm::AlreadyWarm,
+        );
+        close_pooled_bulk_bridges(client.bulk_scope);
+    }
+
+    /// decomposition.md's "Observed once": a connection that is read-only while
+    /// it settles is the state a pre-warm must refuse, not the state it
+    /// hurries into. Captured while writable and flipped afterwards, because
+    /// that is the real race — the binding is taken on the bridge thread and
+    /// validated again on the pre-warm thread.
+    #[test]
+    fn a_connection_that_went_read_only_is_not_prewarmed() {
+        let _guard = super::super::scheduler::engine_test_lock();
+        let client = settled_client("prewarm-c", 13);
+        let binding = BulkBinding::capture(Arc::clone(&client), "prewarm-c".into(), 13).unwrap();
+        client
+            .read_only
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let error = prewarm_with_spawn(&ConnectionSpec::Local, &binding, |_, _| {
+            panic!("a read-only connection must never reach a spawn")
+        })
+        .expect_err("a read-only connection must not be pre-warmed");
+        assert!(error.contains("writable live control connection"), "{error}");
+    }
+
+    /// The same refusal for a connection that has not finished settling.
+    #[test]
+    fn a_connection_that_is_not_ready_yet_is_not_prewarmed() {
+        let _guard = super::super::scheduler::engine_test_lock();
+        let client = settled_client("prewarm-d", 14);
+        let binding = BulkBinding::capture(Arc::clone(&client), "prewarm-d".into(), 14).unwrap();
+        client
+            .ready
+            .store(false, std::sync::atomic::Ordering::Release);
+
+        let error = prewarm_with_spawn(&ConnectionSpec::Local, &binding, |_, _| {
+            panic!("a settling connection must never reach a spawn")
+        })
+        .expect_err("a connection that is not ready must not be pre-warmed");
+        assert!(error.contains("writable live control connection"), "{error}");
+    }
+
+    /// A pre-warm from a replaced epoch must not leave a bridge that a live
+    /// job could pick up, since the key it would be pooled under is stale.
+    #[test]
+    fn a_prewarm_from_a_replaced_epoch_is_refused() {
+        let _guard = super::super::scheduler::engine_test_lock();
+        let client = settled_client("prewarm-e", 15);
+        let binding = BulkBinding::capture(Arc::clone(&client), "prewarm-e".into(), 15).unwrap();
+        client
+            .terminal_epoch
+            .store(16, std::sync::atomic::Ordering::Release);
+
+        let error = prewarm_with_spawn(&ConnectionSpec::Local, &binding, |_, _| {
+            panic!("a stale epoch must never reach a spawn")
+        })
+        .expect_err("a replaced epoch must not be pre-warmed");
+        assert!(error.contains("epoch was replaced"), "{error}");
     }
 
     #[test]
