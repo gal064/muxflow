@@ -329,6 +329,19 @@ fn run_bridge_once(
         control_writer.close();
         return Err("terminal bridge stopped before becoming ready".into());
     }
+    // Only now: `ready` is set and `read_only` is settled just above, and
+    // `BulkBinding::capture` refuses anything else. Before this point the
+    // capture would fail — which is the state that must never be pre-warmed
+    // into, not merely a state where pre-warming is pointless.
+    if !read_only
+        && let Ok(binding) = super::files::scheduler::BulkBinding::capture(
+            Arc::clone(client),
+            hello.server_identity.clone(),
+            terminal_epoch,
+        )
+    {
+        super::files::bulk_pool::prewarm_bulk_bridge(connection.clone(), binding);
+    }
     super::flush_delivery_ack(client)?;
     *connected_at = Some(Instant::now());
     read_protocol_stream(
