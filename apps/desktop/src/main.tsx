@@ -7,6 +7,7 @@ import "./tokens.css";
 import "./styles.css";
 import { App } from "./app/App";
 import { bootstrapPerfProbe } from "./perf/bootstrap";
+import { scheduleEditorPreload } from "./startup/editorPreload";
 import { waitForTerminalFonts } from "./startup/fontGate";
 import { recordPerfMilestone } from "./perf/probe";
 
@@ -36,6 +37,11 @@ function mount(): void {
       <App />
     </StrictMode>,
   );
+  // After the render call, so the shell's own work is queued ahead of it, and
+  // on an idle callback so it lands behind the first paint rather than in front
+  // of it. See `editorPreload.ts` for why this is bootstrap's job and not a
+  // surface's.
+  scheduleEditorPreload();
 }
 
 // Rendering is never conditional on the font check succeeding: a rejection
