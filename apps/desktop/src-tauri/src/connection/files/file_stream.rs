@@ -25,17 +25,20 @@ use super::transfer_event::{CleanupStatus, TransferOutcome, TransferState};
 /// descriptor, so the cost is one round trip plus transfer time and the
 /// metadata, generation, and bytes provably belong together.
 pub(super) fn run_file_read(job: &FileJob) -> Result<(), String> {
+    job.perf.mark_started();
     job.binding.validate()?;
     // Not `_deadline`: it is refreshed by every frame and chunk below, so an
     // underscore would have said the opposite of what it does.
     let deadline = job.cancellation.arm_inactivity_deadline();
     let mut lease =
         BulkLease::acquire(&job.connection, &job.binding, &job.cancellation, &deadline)?;
+    job.perf.mark_lease(lease.reused());
     // A guard: dropping it unbinds. Named for that rather than for being
     // unread.
     let _process_binding_guard = job.cancellation.bind_process(lease.process_id())?;
     let mut protocol = lease.client();
     let mut state = FileReadStream::new(job, &deadline);
+    job.perf.mark_request();
     let response = protocol
         .request_classified(
             v1::Request {
@@ -147,6 +150,8 @@ impl<'a> FileReadStream<'a> {
         if frame.offset != self.offset {
             return Err("file open stream chunks arrived out of sequence".into());
         }
+        // First-write-wins, so calling it on every body frame marks the first.
+        self.job.perf.mark_first_byte();
         self.hasher.update(&frame.data);
         // The renderer's channel going away means the rest of this body has no
         // reader. Failing here ends the exchange — and, because the caller
@@ -175,6 +180,8 @@ impl<'a> FileReadStream<'a> {
             }),
         );
         if frame.eof {
+            // Before verification: a failed digest still transferred the bytes.
+            self.job.perf.mark_last_byte();
             if self.offset != header.total_bytes
                 || frame.blake3 != self.hasher.finalize().to_hex().to_string()
             {
@@ -257,6 +264,7 @@ mod tests {
             cancellation: Arc::new(CancelState::new()),
             channel: Channel::new(|_| Ok(())),
             kind: FileJobKind::Read,
+            perf: crate::perf_log::FileOpenTiming::inert(),
         }
     }
 

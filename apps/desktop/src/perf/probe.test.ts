@@ -145,6 +145,21 @@ describe("performance operation snapshots", () => {
       .every((line) => new TextEncoder().encode(line).byteLength <= perfLogContract.maxLineBytes)).toBe(true);
   });
 
+  it("stamps correlation fields onto the emitted sample record only", async () => {
+    const append = vi.fn(async (_lines: string[]) => undefined);
+    enablePerfProbe(append);
+    recordPerfSample("file.open.segment.queueWait", 12.5, { operationId: "open-1" });
+
+    await flushPerfProbe();
+
+    const records = append.mock.calls.flatMap(([lines]) => lines).map((line) => JSON.parse(line));
+    expect(records).toContainEqual(expect.objectContaining({
+      name: "file.open.segment.queueWait", ms: 12.5, operationId: "open-1",
+    }));
+    // The summary aggregates by name alone; correlation never forks a series.
+    expect(perfSummary().map(({ name }) => name)).toEqual(["file.open.segment.queueWait"]);
+  });
+
   it("keeps global and domain request outcomes on one invariant", async () => {
     enablePerfProbe(async () => undefined);
     await expect(measurePerfRequest(

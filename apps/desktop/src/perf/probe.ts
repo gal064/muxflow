@@ -172,14 +172,18 @@ export function perfHighWaterSnapshot(): Record<string, number> {
   return Object.fromEntries([...highWater.entries()].sort(([left], [right]) => left.localeCompare(right)));
 }
 
-export function recordPerfSample(name: string, milliseconds: number): void {
+/**
+ * `fields` are stamped onto the emitted record only — an `operationId` lets
+ * the segments of one operation be joined — and never join the summary key.
+ */
+export function recordPerfSample(name: string, milliseconds: number, fields?: Record<string, unknown>): void {
   if (!enabled || !Number.isFinite(milliseconds) || milliseconds < 0) return;
   const bucket = samples.get(name) ?? [];
   bucket.push(milliseconds);
   if (bucket.length > MAX_SAMPLES) bucket.shift();
   samples.set(name, bucket);
   summarySnapshotDirty = true;
-  enqueueLine(JSON.stringify({ t: Date.now(), name, ms: Math.round(milliseconds * 1000) / 1000 }));
+  enqueueLine(JSON.stringify({ t: Date.now(), name, ms: Math.round(milliseconds * 1000) / 1000, ...fields }));
   scheduleFlush();
 }
 

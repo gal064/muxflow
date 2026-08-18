@@ -79,6 +79,36 @@ pub(crate) mod operations {
         Rejected,
     }
 
+    /// Zero-sized: the real per-open segment marks compile out with the rest.
+    pub(crate) struct FileOpenTiming;
+
+    impl FileOpenTiming {
+        #[inline(always)]
+        pub(crate) fn begin(_operation_id: &str) -> Self {
+            Self
+        }
+
+        #[inline(always)]
+        pub(crate) fn inert() -> Self {
+            Self
+        }
+
+        #[inline(always)]
+        pub(crate) fn mark_started(&self) {}
+
+        #[inline(always)]
+        pub(crate) fn mark_lease(&self, _reused: bool) {}
+
+        #[inline(always)]
+        pub(crate) fn mark_request(&self) {}
+
+        #[inline(always)]
+        pub(crate) fn mark_first_byte(&self) {}
+
+        #[inline(always)]
+        pub(crate) fn mark_last_byte(&self) {}
+    }
+
     #[inline(always)]
     pub(crate) fn record_remote_operation(_operation: RemoteOperation) {}
 
