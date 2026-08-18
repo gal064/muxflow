@@ -56,6 +56,32 @@ describe("application shell model", () => {
     expect(combined[2]).toMatchObject({ key: "app:a", canMoveLeft: false });
   });
 
+  it("shows a pending placeholder last, and retires it when its window arrives", () => {
+    const windows: TmuxWindow[] = [
+      { id: "@1", sessionId: "$1", index: 1, name: "first", active: true, layout: "" },
+    ];
+    const pending = { key: "create-window:1", sessionId: "$1", title: "New window" };
+
+    // Last: a placeholder that pushed the existing tabs sideways would move
+    // the targets under a waiting person's cursor.
+    expect(combineWorkspaceTabs(windows, [], undefined, pending).map((tab) => tab.key))
+      .toEqual(["terminal:@1", "pending:create-window:1"]);
+
+    // Named by the ack but not yet in a snapshot: still shown, because
+    // dropping it here blinks the strip empty until the snapshot lands.
+    expect(combineWorkspaceTabs(windows, [], undefined, { ...pending, windowId: "@2" }).map((tab) => tab.key))
+      .toEqual(["terminal:@1", "pending:create-window:1"]);
+
+    // The real window arrived, so the placeholder retires rather than sitting
+    // alongside the tab it stood in for.
+    const settled: TmuxWindow[] = [
+      ...windows,
+      { id: "@2", sessionId: "$1", index: 2, name: "second", active: false, layout: "" },
+    ];
+    expect(combineWorkspaceTabs(settled, [], undefined, { ...pending, windowId: "@2" }).map((tab) => tab.key))
+      .toEqual(["terminal:@1", "terminal:@2"]);
+  });
+
   it("keeps replaced servers isolated and requires explicit unambiguous app-tab recovery", () => {
     const migrated = reconcileWorkspaceIdentity(tabs, "local", "server-b", [{ ...sessions[1], id: "$99" }]);
     expect(migrated).toEqual(tabs);

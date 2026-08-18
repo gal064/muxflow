@@ -6,7 +6,39 @@ import type { AgentAttentionRollup } from "../agents/types";
 
 export type CombinedTab =
   | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"] }
-  | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean };
+  | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean }
+  | { key: `pending:${string}`; kind: "pending"; title: string };
+
+/**
+ * A tab that has been asked for but does not exist on the host yet.
+ *
+ * Creating a window is a round trip, and until it came back the strip showed
+ * nothing at all: the click had no visible effect, which reads as a dropped
+ * click rather than as waiting. This is the placeholder that occupies the gap.
+ *
+ * Deliberately not an optimistic tab. Nothing is reconciled onto it and it
+ * never carries a temporary id that later has to become a real one — it is a
+ * picture of a request in flight, and it retires when the real window arrives
+ * in a snapshot or the request fails.
+ */
+export interface PendingShellTab {
+  /** Distinguishes one create from the next; also the React key. */
+  key: string;
+  /**
+   * Whose strip it belongs in. Unset until a create-session round trip comes
+   * back, because before that there is no workspace to draw it in — drawing it
+   * in the workspace being navigated *away* from would be a lie.
+   */
+  sessionId?: string;
+  /**
+   * The real window, once the ack has named it. The placeholder outlives the
+   * ack on purpose: the ack is not the snapshot, and retiring on the ack alone
+   * would blink the strip back to empty until the snapshot carrying the new
+   * window lands.
+   */
+  windowId?: string;
+  title: string;
+}
 
 export interface AgentShellItem {
   id: string;
@@ -41,10 +73,22 @@ export function appTabsForWorkspace(
     .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
 }
 
+/**
+ * Whether a placeholder still has a gap to fill.
+ *
+ * Retires the moment its window exists, so the strip never shows the
+ * placeholder and the real tab side by side for the frame between the snapshot
+ * arriving and anything else noticing.
+ */
+function pendingTabStillOpen(pending: PendingShellTab, windows: readonly TmuxWindow[]): boolean {
+  return !pending.windowId || !windows.some((window) => window.id === pending.windowId);
+}
+
 export function combineWorkspaceTabs(
   windows: readonly TmuxWindow[],
   appTabs: readonly AppOwnedTab[],
   attentionByWindow?: ReadonlyMap<string, AgentAttentionRollup>,
+  pending?: PendingShellTab,
 ): CombinedTab[] {
   const terminalTabs: CombinedTab[] = [...windows]
     .sort((left, right) => left.index - right.index || left.id.localeCompare(right.id))
@@ -74,7 +118,13 @@ export function combineWorkspaceTabs(
       canMoveLeft: index > 0,
       canMoveRight: index < ordered.length - 1,
     }));
-  return [...terminalTabs, ...ownedTabs];
+  const pendingTabs: CombinedTab[] = pending && pendingTabStillOpen(pending, windows)
+    ? [{ key: `pending:${pending.key}`, kind: "pending", title: pending.title }]
+    : [];
+  // Last, because it is the newest thing asked for and because a placeholder
+  // that pushed the existing tabs sideways would move the targets under a
+  // person's cursor while they waited.
+  return [...terminalTabs, ...ownedTabs, ...pendingTabs];
 }
 
 export function workspaceUiRecord(

@@ -6,6 +6,9 @@ import { fileIcon } from "../files/fileIcons";
 import type { CombinedTab } from "../shell/model";
 import type { HostScopeToken } from "../shell/hostScope";
 
+/** A tab that exists on the host, and so has something to act on. */
+type ActionableTab = Exclude<CombinedTab, { kind: "pending" }>;
+
 interface TabStripProps {
   tabs: readonly CombinedTab[];
   activeKey?: string;
@@ -53,7 +56,10 @@ function TabGlyph({ tab }: { tab: Extract<CombinedTab, { kind: "app" }> }) {
  * nothing away.
  */
 export function TabStrip(props: TabStripProps) {
-  const [menu, setMenu] = useState<{ tab: CombinedTab; anchor: ContextMenuAnchor; scope: HostScopeToken }>();
+  // Never a placeholder: the pending branch renders no context-menu handler
+  // and no key handler, and none of this menu's items — rename, reorder,
+  // close — exist for a window the host has not created yet.
+  const [menu, setMenu] = useState<{ tab: ActionableTab; anchor: ContextMenuAnchor; scope: HostScopeToken }>();
   const tabs = useRef<HTMLDivElement>(null);
   // The strip scrolls rather than pushing its neighbours, which means the tab
   // that just became active can be outside it. Measured with the right panel
@@ -68,7 +74,7 @@ export function TabStrip(props: TabStripProps) {
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [props.activeKey, props.tabs]);
 
-  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: CombinedTab, index: number) => {
+  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: ActionableTab, index: number) => {
     if (isContextMenuKey(event)) {
       event.preventDefault();
       setMenu({ tab, anchor: anchorForElement(event.currentTarget), scope: props.commandScope });
@@ -91,6 +97,25 @@ export function TabStrip(props: TabStripProps) {
   return <div className="tabstrip">
     <div aria-label="Terminal tabs and documents" className="tabstrip-tabs" ref={tabs} role="tablist">
       {props.tabs.map((tab, index) => {
+        // A create that has not come back yet. Rendered as a real tab so the
+        // strip still reads as "tab N of M" while it is there, but disabled
+        // and out of the roving tabindex: there is nothing on the host to
+        // select, rename, close or reorder, and every one of those handlers
+        // would need an id it does not have.
+        if (tab.kind === "pending") {
+          return <div className="tab tab-pending" key={tab.key} role="presentation">
+            <span
+              aria-disabled="true"
+              aria-selected={false}
+              className="tab-select"
+              id={workspaceTabDomId(tab.key)}
+              role="tab"
+            >
+              <span aria-hidden="true" className="tab-pending-dot" />
+              <span className="tab-title">{tab.title}</span>
+            </span>
+          </div>;
+        }
         const active = tab.key === props.activeKey;
         // `role="presentation"`: a generic element between a tablist and its
         // tabs breaks ownership, and assistive technology then cannot say

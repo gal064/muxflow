@@ -225,6 +225,7 @@ function mountNavigation(overrides: Partial<ShellNavigationOptions> = {}) {
   const setActiveSessionId = vi.fn();
   const setActiveWindowId = vi.fn();
   const setAppTab = vi.fn();
+  const setPendingTab = vi.fn();
   const setStatus = vi.fn();
   const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => ({ topologyGeneration: 2 }));
   let navigation!: ReturnType<typeof useShellNavigation>;
@@ -239,6 +240,7 @@ function mountNavigation(overrides: Partial<ShellNavigationOptions> = {}) {
     setActiveSessionId,
     setActiveWindowId,
     setAppTab,
+    setPendingTab,
     setStatus,
     windows,
     ...overrides,
@@ -262,6 +264,7 @@ function mountNavigation(overrides: Partial<ShellNavigationOptions> = {}) {
     setActiveSessionId,
     setActiveWindowId,
     setAppTab,
+    setPendingTab,
   };
 }
 
@@ -743,6 +746,132 @@ describe("shell navigation hook cross-kind ownership", () => {
     await flush();
     expect(performAction.mock.calls[0]?.[0]).toEqual({ kind: "createWindow", sessionId: "$1" });
     expect(harness.setAppTab).toHaveBeenLastCalledWith("$1", "notes");
+    await act(async () => renderer.unmount());
+  });
+});
+
+describe("pending tab placeholder on create", () => {
+  it("puts a placeholder up before the create round trip is answered", async () => {
+    const created = deferred<TmuxActionResult | undefined>();
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind === "createWindow") return created.promise;
+      return { topologyGeneration: 3 };
+    });
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createWindow("$1"));
+    const placeholder = harness.setPendingTab.mock.calls[0]?.[0];
+    expect(
+      placeholder,
+      "the strip has to change in the same frame as the click, not a round trip later",
+    ).toMatchObject({ sessionId: "$1" });
+    expect(placeholder?.windowId, "there is no window to name until the ack").toBeUndefined();
+
+    created.resolve({ sessionId: "$1", windowId: "@9", topologyGeneration: 2 });
+    await flush();
+    await act(async () => renderer.unmount());
+  });
+
+  it("upgrades the placeholder with the real window id rather than dropping it on the ack", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind === "createWindow") return { sessionId: "$1", windowId: "@9", topologyGeneration: 2 };
+      return { topologyGeneration: 3 };
+    });
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createWindow("$1"));
+    await flush();
+
+    // Not `undefined`: the ack names the window but the snapshot containing it
+    // has not arrived, and withdrawing here blinks the strip empty in between.
+    expect(harness.setPendingTab).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sessionId: "$1", windowId: "@9" }),
+    );
+    await act(async () => renderer.unmount());
+  });
+
+  it("rolls the placeholder back when the create is refused", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind === "createWindow") return undefined;
+      return { topologyGeneration: 3 };
+    });
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createWindow("$1"));
+    await flush();
+
+    expect(harness.setPendingTab).toHaveBeenLastCalledWith(undefined);
+    await act(async () => renderer.unmount());
+  });
+
+  it("rolls the placeholder back when the create throws", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind === "createWindow") throw new Error("host went away");
+      return { topologyGeneration: 3 };
+    });
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createWindow("$1"));
+    await flush();
+
+    expect(harness.setPendingTab).toHaveBeenLastCalledWith(undefined);
+    await act(async () => renderer.unmount());
+  });
+
+  it("does not let an older create's failure withdraw a newer create's placeholder", async () => {
+    const first = deferred<TmuxActionResult | undefined>();
+    // Never answered, so the only thing that can touch the placeholder after
+    // this point is the *older* create's failure. Letting the second create
+    // succeed instead would republish its own placeholder over the top and the
+    // assertion would hold whether the guard existed or not.
+    const second = deferred<TmuxActionResult | undefined>();
+    let seen = 0;
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind !== "createWindow") return { topologyGeneration: 3 };
+      seen += 1;
+      return seen === 1 ? first.promise : second.promise;
+    });
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createWindow("$1"));
+    act(() => harness.navigation.createWindow("$1"));
+    const newer = harness.setPendingTab.mock.calls.at(-1)?.[0];
+    // The first request loses its race and answers second, with a refusal.
+    first.resolve(undefined);
+    await flush();
+    await flush();
+
+    expect(
+      harness.setPendingTab.mock.calls.at(-1)?.[0],
+      "the stale create cleared the placeholder the newer one had put up",
+    ).toEqual(newer);
+    await act(async () => renderer.unmount());
+  });
+
+  it("draws no placeholder for a new session until its ack names the workspace", async () => {
+    const created = deferred<TmuxActionResult | undefined>();
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind === "createSession") return created.promise;
+      return { topologyGeneration: 3 };
+    });
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createSession("work"));
+    // A placeholder with no session is drawn nowhere: App only renders it into
+    // the strip whose session it names, and before the ack there is none.
+    expect(harness.setPendingTab.mock.calls[0]?.[0]?.sessionId).toBeUndefined();
+
+    created.resolve({ sessionId: "$7", topologyGeneration: 2 });
+    await flush();
+    expect(harness.setPendingTab).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sessionId: "$7" }),
+    );
     await act(async () => renderer.unmount());
   });
 });
