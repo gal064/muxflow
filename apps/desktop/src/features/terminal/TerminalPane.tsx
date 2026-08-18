@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { closePanePaintSpans, recordPerfMilestone } from "../../perf/probe";
+import { afterNextPaint, closePanePaintSpans, recordPerfMilestone } from "../../perf/probe";
 import { createPaintTicket } from "../../perf/paintTicket";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import type { Pane } from "../../app/types";
@@ -226,13 +226,24 @@ export function TerminalPane({
       establishesEpoch = false,
     ) => {
       if (!commitRendered(generation, terminalEpoch, establishesEpoch)) return;
+      // The perceived-latency spans (create.*, window.switch, pane.split) end
+      // at the frame that shows this pane's content, so they are closed apart
+      // from the startup ticket below: that ticket publishes once per mount,
+      // which left any span whose content arrived as a later seed or restore
+      // on the same instance permanently open — the abandonment Phase 15
+      // measured (tests/phase15/comparability.md). The guard is only "these
+      // pixels are still this pane's": a superseded or torn-down instance
+      // never painted what it parsed, and its successor reports instead.
+      afterNextPaint(() => {
+        if (!rendererActive || paneLifecycleVersions.get(pane.id) !== lifecycle) return;
+        closePanePaintSpans(clientIdRef.current, pane.id);
+      });
       initialPaint.afterPaint(
         (ticket) => ticket.lifecycleGeneration === lifecycle
           && rendererActive
           && paneLifecycleVersions.get(pane.id) === lifecycle,
         () => {
           recordPerfMilestone("startup.terminalPaint");
-          closePanePaintSpans(clientId, pane.id);
         },
       );
     };
