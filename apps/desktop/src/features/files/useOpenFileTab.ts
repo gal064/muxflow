@@ -293,6 +293,22 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
         return;
       }
       if (event.generation && event.generation === shownGeneration()) return;
+      if (shownGeneration() === undefined) {
+        // Same rule as the rescan branch above: nothing on screen means the
+        // read that will put it there is in flight, and reloading here aborts
+        // it — once per change event, forever, on a file whose read outlives
+        // the gap between events. The host echoing this client's own reads as
+        // changes (a kernel access event is not a change) was one measured way
+        // to produce exactly that stream. The notice is parked, not dropped:
+        // the read reconciles against it when it lands, and re-reads once if
+        // the file really did move underneath it.
+        reconciliation.current = {
+          kind: "bootstrap",
+          generation: event.generation || undefined,
+          serial: loadSerial.current,
+        };
+        return;
+      }
       recordPerfCounter("file.reload.fileChanged");
       void load({ externalOperationId: event.operationId });
     }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });

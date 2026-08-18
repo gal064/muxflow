@@ -35,6 +35,8 @@ impl FileService {
                 Ok(event) => {
                     if event.need_rescan() {
                         callback_rescan.store(true, Ordering::Release);
+                    } else if !marks_watch_dirty(&event.kind) {
+                        return;
                     }
                     let mut dirty = callback_dirty.lock().unwrap();
                     for path in event.paths {
@@ -567,6 +569,25 @@ impl FileService {
         }
         Ok(())
     }
+}
+
+/// Whether a native notification can describe a change at all.
+///
+/// The kernel reports this connection's own reads back to it: serving an
+/// OpenFileStream opens the target, which raises IN_OPEN / IN_ACCESS /
+/// IN_CLOSE_NOWRITE on the watched parent, and `notify` delivers all three as
+/// `Access` events. Marking those dirty turned every remote read into a
+/// broadcast FileChanged for the very file being read — which the desktop
+/// answered by restarting the read, whose open the kernel then reported
+/// again. A file whose read outlived one event round trip never finished
+/// opening at all (tests/phase15/large-file-open-bug.md: 355 of 356 read
+/// attempts in one session were re-reads triggered this way, captured against
+/// a raw inotify log that held nothing but open/access/close-no-write).
+///
+/// An access is never a change. Everything else — content, metadata, create,
+/// remove, rename, and the kinds `notify` cannot classify — still marks dirty.
+pub(super) fn marks_watch_dirty(kind: &notify::EventKind) -> bool {
+    !matches!(kind, notify::EventKind::Access(_))
 }
 
 /// Groups dirty paths by the directory that owns them.

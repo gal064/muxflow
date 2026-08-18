@@ -665,3 +665,30 @@ async fn a_failed_native_watcher_puts_every_target_back_on_polling() {
     closed.store(true, Ordering::Release);
     fs::remove_dir_all(root_path).unwrap();
 }
+
+#[test]
+fn reads_never_mark_a_watch_dirty_but_every_change_kind_does() {
+    use notify::event::{AccessKind, AccessMode, CreateKind, EventKind, ModifyKind, RemoveKind};
+    // The kernel echoes this connection's own reads (open, access,
+    // close-no-write) into the watched parent; treating them as dirty made
+    // every read broadcast a FileChanged for the file being read, and a read
+    // that outlived one event round trip was restarted forever.
+    for access in [
+        EventKind::Access(AccessKind::Open(AccessMode::Read)),
+        EventKind::Access(AccessKind::Read),
+        EventKind::Access(AccessKind::Close(AccessMode::Read)),
+        EventKind::Access(AccessKind::Any),
+    ] {
+        assert!(!super::watch_service::marks_watch_dirty(&access), "{access:?}");
+    }
+    for change in [
+        EventKind::Any,
+        EventKind::Create(CreateKind::File),
+        EventKind::Modify(ModifyKind::Any),
+        EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any)),
+        EventKind::Remove(RemoveKind::File),
+        EventKind::Other,
+    ] {
+        assert!(super::watch_service::marks_watch_dirty(&change), "{change:?}");
+    }
+}
