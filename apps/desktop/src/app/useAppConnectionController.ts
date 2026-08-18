@@ -11,7 +11,7 @@ import { requestTerminalSeed, startTerminal, stopTerminal, terminalBridgeKey, te
 import { terminalStateCache } from "../features/terminal/TerminalStateCache";
 import { connectionReducer, denormalizeSnapshot, initialHostState } from "../state/connectionReducer";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
-import { resolveActiveWindowId } from "./windowSelection";
+import { resolveActiveWindowId, type OptimisticWindowSwitch } from "./windowSelection";
 import { resolveSelectedSession } from "../features/shell/model";
 import type { HostScopeToken } from "../features/shell/hostScope";
 
@@ -149,9 +149,30 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   const windows = useMemo(() => snapshot.windows
     .filter((tmuxWindow) => tmuxWindow.sessionId === activeSessionId)
     .sort((a, b) => a.index - b.index), [activeSessionId, snapshot.windows]);
+  /**
+   * A window switch that has been committed locally and is still catching up.
+   *
+   * Owned here because this is where snapshots decide the active window, and
+   * written by `useShellNavigation`, which is the only thing that knows a
+   * switch is outstanding. See `OptimisticWindowSwitch`.
+   */
+  const optimisticWindow = useRef<OptimisticWindowSwitch | undefined>(undefined);
   useEffect(() => {
-    setActiveWindowId((current) => resolveActiveWindowId(windows, current));
-  }, [activeSessionId, snapshot.windows]);
+    const pending = optimisticWindow.current;
+    if (pending) {
+      // Released once the host has caught up: a snapshot at or past the
+      // generation the select-window action returned is one that has seen the
+      // switch, so from here the host's own answer is the better one — and an
+      // unreleased guard would leave the shell ignoring tmux forever.
+      const settled = pending.throughGeneration !== undefined
+        && hostState.generation >= pending.throughGeneration;
+      if (settled || pending.sessionId !== activeSessionId) optimisticWindow.current = undefined;
+    }
+    const preferred = optimisticWindow.current?.sessionId === activeSessionId
+      ? optimisticWindow.current?.windowId
+      : undefined;
+    setActiveWindowId((current) => resolveActiveWindowId(windows, current, preferred));
+  }, [activeSessionId, hostState.generation, snapshot.windows]);
 
   const bridgeKey = terminalBridgeKey(connection, connectionEpoch);
   useEffect(() => {
@@ -248,6 +269,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
+    optimisticWindow,
     profiles, profilesHydrated, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
     setProfileRecovery, setProfiles, setSelectedProfileId, setSshConfigPath, setSshTarget,

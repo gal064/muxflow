@@ -12,6 +12,22 @@ describe("authoritative window selection", () => {
     expect(resolveActiveWindowId(windows("@2"), "@1")).toBe("@2");
   });
 
+  it("holds an optimistic switch against a snapshot that still names the old window", () => {
+    // The snapshot says @1; the switch to @2 is committed locally and its
+    // request is still in flight. Following the snapshot here is exactly the
+    // snap-back the guard exists to stop.
+    expect(resolveActiveWindowId(windows("@1"), "@1", "@2")).toBe("@2");
+  });
+
+  it("ignores an optimistic target that no longer exists", () => {
+    // A window closed under the switch is not somewhere the shell can sit.
+    expect(resolveActiveWindowId(windows("@1"), "@1", "@9")).toBe("@1");
+  });
+
+  it("follows the host again once no switch is outstanding", () => {
+    expect(resolveActiveWindowId(windows("@2"), "@1", undefined)).toBe("@2");
+  });
+
   it("moves left and right relative to adjacent stable window IDs", () => {
     const unordered = [windows("@1")[1], windows("@1")[0]];
     expect(relativeWindowReorderAction(unordered, "@2", "left")).toEqual({
