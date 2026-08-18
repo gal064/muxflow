@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useCommittedRef } from "../../commands/useCommittedRef";
 import { createPaintTicket } from "../../perf/paintTicket";
-import { recordPerfMilestone } from "../../perf/probe";
+import { recordPerfCounter, recordPerfMilestone } from "../../perf/probe";
 import { createPaintReporter, type SurfacePaint } from "../../perf/surfacePaint";
 import { AutosaveController, type AutosaveView } from "./autosave";
 import { editorFlushRegistry } from "./editorFlushRegistry";
@@ -204,7 +204,11 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
       if (arrived.kind === "bootstrap" && arrived.serial === serial) {
         reconciliation.current = { kind: "done" };
         if (arrived.generation !== undefined && arrived.generation !== next.file.generation) {
-          queueMicrotask(() => { if (serial === loadSerial.current) void load(options); });
+          queueMicrotask(() => {
+            if (serial !== loadSerial.current) return;
+            recordPerfCounter("file.reload.reconcileQueued");
+            void load(options);
+          });
         }
       }
       setError(undefined);
@@ -277,7 +281,10 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
           reconciliation.current = { kind: "bootstrap", generation, serial: loadSerial.current };
           return;
         }
-        if (generation !== shown) reloadFromDisk();
+        if (generation !== shown) {
+          recordPerfCounter("file.reload.rescanMismatch");
+          reloadFromDisk();
+        }
         return;
       }
       if (!(event.kind === "fileChanged" || event.kind === "fileDeleted") || event.path !== resource) return;
@@ -286,6 +293,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
         return;
       }
       if (event.generation && event.generation === shownGeneration()) return;
+      recordPerfCounter("file.reload.fileChanged");
       void load({ externalOperationId: event.operationId });
     }).then((unsubscribe) => { if (disposed) unsubscribe(); else stop = unsubscribe; });
     return () => { disposed = true; stop?.(); };
@@ -300,6 +308,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
     setView(undefined);
     controller.current?.dispose();
     controller.current = undefined;
+    recordPerfCounter("file.reload.surfaceMount");
     void load({ measureEditorPaint: true });
     return () => {
       surfaceLifecycle.current += 1;
@@ -387,7 +396,10 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
       return;
     }
     reconciliation.current = { kind: "done" };
-    if (generation !== undefined && generation !== shown) reloadFromDisk();
+    if (generation !== undefined && generation !== shown) {
+      recordPerfCounter("file.reload.bootstrapMismatch");
+      reloadFromDisk();
+    }
   };
 
   /**
