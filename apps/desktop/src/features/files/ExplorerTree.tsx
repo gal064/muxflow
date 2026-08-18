@@ -10,7 +10,7 @@ import { ExplorerMutationDialog, type PendingMutation } from "./ExplorerMutation
 import { ExplorerEntryRow, ExplorerMoreRow, type ExplorerRowActions } from "./ExplorerRow";
 import { DEFAULT_ROW_HEIGHT, mountedRowCount, rowWindow, scrollOffsetForRow } from "./explorerWindow";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
-import { recordPerfHighWater } from "../../perf/probe";
+import { recordPerfHighWater, recordPerfMilestone } from "../../perf/probe";
 
 interface Props {
   root?: ActiveRoot;
@@ -233,7 +233,14 @@ export function ExplorerTree(props: Props) {
 
   const committedRowActions: ExplorerRowActions = {
     toggle: (path) => props.onToggle(path),
-    open: (entry, options) => props.onOpen(entry, options),
+    open: (entry, options) => {
+      // The renderer's first act on a file activation, before any state
+      // update: everything between the input event and
+      // file.open.segment.dispatchToInvoke is tab creation and mounting,
+      // everything before this is input delivery.
+      recordPerfMilestone("file.openIntent");
+      props.onOpen(entry, options);
+    },
     focus: (index) => {
       const row = rows[index];
       if (!row) return;
