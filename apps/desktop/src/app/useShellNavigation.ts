@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from "react";
 import type { Pane, Session, Window as TmuxWindow } from "./types";
 import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
+import type { OptimisticWindowSwitch } from "./windowSelection";
 import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 import type { TmuxActionExecution } from "./useTmuxActionPerformer";
 import { shellNavigationMode, type PendingShellTab } from "../features/shell/model";
@@ -51,6 +52,12 @@ export interface ShellNavigationOptions {
    * `undefined` to withdraw it. See `PendingShellTab`.
    */
   setPendingTab?(pending: PendingShellTab | undefined): void;
+  /**
+   * The snap-back guard for an optimistic window switch, owned by
+   * `useAppConnectionController` because that is where snapshots decide the
+   * active window. Absent means switches stay ack-gated.
+   */
+  optimisticWindow?: MutableRefObject<OptimisticWindowSwitch | undefined>;
 }
 
 export class ShellNavigationSupersededError extends Error {
@@ -158,17 +165,28 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     scope: HostScopeToken,
     precondition?: Precondition,
     measureWindowPaint = true,
+    /**
+     * Where to plan the transition *from*.
+     *
+     * Defaults to the shell's current location, which is right for every
+     * ack-gated caller. An optimistic switch has to pass it explicitly: it has
+     * already moved the shell to the destination, so planning from the shell
+     * would conclude there is nowhere to go and send nothing at all — the UI
+     * would show the new window while tmux still sat on the old one.
+     */
+    origin?: { sessionId?: string; windowId?: string },
   ): Promise<NavigationOutcome> => {
     if (!scopeCurrent(scope)) return { kind: "unknown", reason: "scope" };
     if (!scope.serverIdentity) return { kind: "unknown", reason: "request" };
     const target = destinationLocation(destination);
-    const targetSessionAlreadyActive = target.sessionId === activeSessionIdRef.current;
+    const from = origin ?? { sessionId: activeSessionIdRef.current, windowId: activeWindowIdRef.current };
+    const targetSessionAlreadyActive = target.sessionId === from.sessionId;
     const targetWindowAlreadyActive = Boolean(target.windowId)
       && windowsRef.current.some((item) => item.id === target.windowId && item.active);
-    const currentLocation: NavigationOutcome | undefined = !predecessor && activeSessionIdRef.current
+    const currentLocation: NavigationOutcome | undefined = !predecessor && from.sessionId
       ? {
         kind: "partial",
-        location: { sessionId: activeSessionIdRef.current, windowId: activeWindowIdRef.current },
+        location: { sessionId: from.sessionId, windowId: from.windowId },
         generation: scope.generation,
         generationSource: "snapshot",
       }
@@ -284,20 +302,64 @@ export function useShellNavigation(options: ShellNavigationOptions) {
 
   const selectWindowDestination = useCallback((destination: Extract<ShellDestination, { kind: "window" }>) => {
     const scope = scopeRef.current;
+    const alreadyThere = destination.windowId === activeWindowIdRef.current
+      && destination.sessionId === activeSessionIdRef.current;
+    // Read before the optimistic commit moves them. This is where the host
+    // still is, and so what the transition has to be planned from.
+    const origin = { sessionId: activeSessionIdRef.current, windowId: activeWindowIdRef.current };
+    const commit = () => {
+      if (!scopeCurrent(scope)) return;
+      activeSessionIdRef.current = destination.sessionId;
+      activeWindowIdRef.current = destination.windowId;
+      optionsRef.current.setAppTab(destination.sessionId, undefined);
+      optionsRef.current.setActiveSessionId(destination.sessionId);
+      optionsRef.current.setActiveWindowId(destination.windowId);
+    };
+    // The switch is painted now and the request reconciles behind it. Only
+    // where the guard exists to hold it: without something to stop the next
+    // snapshot naming the *old* window as active, an optimistic commit is
+    // reverted within one snapshot, which is worse than waiting.
+    const guard = optionsRef.current.optimisticWindow;
+    const optimistic = Boolean(guard) && !alreadyThere && scopeCurrent(scope);
+    if (optimistic && guard) {
+      guard.current = { sessionId: destination.sessionId, windowId: destination.windowId };
+      commit();
+    }
+    /** Puts the shell back where the host actually is, after a switch that failed. */
+    const rollback = () => {
+      if (!guard) return;
+      guard.current = undefined;
+      if (!scopeCurrent(scope)) return;
+      // Actively, not by waiting: a refused switch changes nothing on the
+      // host, so there may be no further snapshot to correct the UI with.
+      const authoritative = windowsRef.current.find((window) => window.active);
+      if (!authoritative) return;
+      activeSessionIdRef.current = authoritative.sessionId;
+      activeWindowIdRef.current = authoritative.id;
+      optionsRef.current.setActiveSessionId(authoritative.sessionId);
+      optionsRef.current.setActiveWindowId(authoritative.id);
+    };
     return coordinator.navigate({
       destination,
-      request: async (predecessor, isCurrent) => (await requestLocation(
-        destination, predecessor, isCurrent, scope, destination.precondition,
-      )),
-      commit: () => {
-        if (!scopeCurrent(scope)) return;
-        activeSessionIdRef.current = destination.sessionId;
-        activeWindowIdRef.current = destination.windowId;
-        optionsRef.current.setAppTab(destination.sessionId, undefined);
-        optionsRef.current.setActiveSessionId(destination.sessionId);
-        optionsRef.current.setActiveWindowId(destination.windowId);
+      request: async (predecessor, isCurrent) => {
+        const result = await requestLocation(
+          destination, predecessor, isCurrent, scope, destination.precondition, true,
+          optimistic ? origin : undefined,
+        );
+        if (optimistic && guard) {
+          if (result.kind === "reached" || result.kind === "partial") {
+            // Held until a snapshot has caught up: the ack is not the
+            // snapshot, and releasing on the ack alone reopens the very gap
+            // this guard exists to cover.
+            if (guard.current?.windowId === destination.windowId) {
+              guard.current = { ...guard.current, throughGeneration: result.generation };
+            }
+          } else rollback();
+        }
+        return result;
       },
-    }, destination.windowId === activeWindowIdRef.current && destination.sessionId === activeSessionIdRef.current
+      commit,
+    }, alreadyThere
       ? { kind: "reached", destination, generation: scope.generation, generationSource: "snapshot" }
       : undefined);
   }, [coordinator, requestLocation, scopeCurrent]);

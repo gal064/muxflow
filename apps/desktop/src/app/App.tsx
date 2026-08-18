@@ -101,7 +101,7 @@ export function App() {
   const {
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionMode, currentHostProfileId,
-    currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
+    currentHostScope, dispatchHost, hostScopeRef, hostState, hub, optimisticWindow, profileRecovery,
     profiles, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
     setProfileRecovery, setProfiles, setSelectedProfileId, setSshConfigPath, setSshTarget,
@@ -232,6 +232,7 @@ export function App() {
     setActiveSessionId,
     setActiveWindowId,
     setAppTab: setNavigationAppTab,
+    optimisticWindow,
     setPendingTab,
     setStatus,
     windows: snapshot.windows,

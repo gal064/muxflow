@@ -2,6 +2,7 @@
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import type { TmuxActionResult } from "../features/tmux/actions";
+import type { OptimisticWindowSwitch } from "./windowSelection";
 import {
   commitScopedAppTabClose,
   RemoteNavigationCoordinator,
@@ -872,6 +873,144 @@ describe("pending tab placeholder on create", () => {
     expect(harness.setPendingTab).toHaveBeenLastCalledWith(
       expect.objectContaining({ sessionId: "$7" }),
     );
+    await act(async () => renderer.unmount());
+  });
+});
+
+describe("optimistic terminal window switch", () => {
+  /** The guard `useAppConnectionController` owns, as the hook sees it. */
+  const guard = () => ({ current: undefined as OptimisticWindowSwitch | undefined });
+
+  it("paints the switch before the host has answered", async () => {
+    const selected = deferred<TmuxActionResult | undefined>();
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => selected.promise);
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectWindow("@1"));
+    expect(
+      harness.setActiveWindowId,
+      "the switch waited for the ack, which is the whole thing this removes",
+    ).toHaveBeenCalledWith("@1");
+    expect(optimisticWindow.current).toMatchObject({ sessionId: "$1", windowId: "@1" });
+
+    selected.resolve({ topologyGeneration: 4 });
+    await flush();
+    await act(async () => renderer.unmount());
+  });
+
+  it("still sends the request it painted ahead of", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => ({ topologyGeneration: 4 }));
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectWindow("@1"));
+    await flush();
+
+    expect(
+      performAction.mock.calls.some(([action]) => action.kind === "selectWindow" && action.windowId === "@1"),
+      "an optimistic switch that never told tmux is a UI lying about where input goes",
+    ).toBe(true);
+    await act(async () => renderer.unmount());
+  });
+
+  it("holds the guard past the ack, until a snapshot can have caught up", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => ({ topologyGeneration: 7 }));
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectWindow("@1"));
+    await flush();
+
+    // Released by generation, not by the ack: the ack is not the snapshot.
+    expect(optimisticWindow.current).toMatchObject({ windowId: "@1", throughGeneration: 7 });
+    await act(async () => renderer.unmount());
+  });
+
+  it("rolls back to the host's window when the switch is refused", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => undefined);
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectWindow("@1"));
+    await flush();
+
+    // Actively, not by waiting for a snapshot: a refused switch changes
+    // nothing on the host, so no further snapshot need arrive to correct it.
+    expect(optimisticWindow.current, "a stuck guard leaves the shell ignoring tmux").toBeUndefined();
+    expect(harness.setActiveWindowId).toHaveBeenLastCalledWith("@0");
+    await act(async () => renderer.unmount());
+  });
+
+  it("rolls back when the switch throws", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => { throw new Error("gone"); });
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectWindow("@1"));
+    await flush();
+
+    expect(optimisticWindow.current).toBeUndefined();
+    expect(harness.setActiveWindowId).toHaveBeenLastCalledWith("@0");
+    await act(async () => renderer.unmount());
+  });
+
+  it("stays ack-gated where no guard is supplied", async () => {
+    const selected = deferred<TmuxActionResult | undefined>();
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => selected.promise);
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectWindow("@1"));
+    // Without somewhere to hold the switch against the next snapshot, painting
+    // early would be reverted within one snapshot — worse than waiting.
+    expect(harness.setActiveWindowId).not.toHaveBeenCalledWith("@1");
+
+    selected.resolve({ topologyGeneration: 4 });
+    await flush();
+    expect(harness.setActiveWindowId).toHaveBeenCalledWith("@1");
+    await act(async () => renderer.unmount());
+  });
+
+  it("does not arm the guard for a window that is already showing", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => ({ topologyGeneration: 4 }));
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectWindow("@0"));
+    await flush();
+
+    expect(optimisticWindow.current, "nothing is outstanding, so nothing needs holding").toBeUndefined();
+    await act(async () => renderer.unmount());
+  });
+
+  it("leaves the newest switch armed when two are made in a row", async () => {
+    const first = deferred<TmuxActionResult | undefined>();
+    let seen = 0;
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind !== "selectWindow") return { topologyGeneration: 3 };
+      seen += 1;
+      return seen === 1 ? first.promise : { topologyGeneration: 9 };
+    });
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectWindow("@1"));
+    act(() => harness.navigation.selectWindow("@0"));
+    first.resolve({ topologyGeneration: 5 });
+    await flush();
+    await flush();
+
+    // The stale answer must not stamp its generation onto the newer switch's
+    // guard, which would release it early against a snapshot that predates it.
+    expect(optimisticWindow.current?.windowId ?? "@0").toBe("@0");
     await act(async () => renderer.unmount());
   });
 });
