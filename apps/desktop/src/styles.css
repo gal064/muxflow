@@ -416,6 +416,22 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* A preview tab is the one the next single click will replace. Italic is how
    VS Code says so, and the strip is on the sans stack, so it just works. */
 .tab-title-preview { font-style: italic; }
+/* A tab whose window the host has not created yet. Dimmed rather than
+   skeleton-shaped: the strip is one row of short labels, so a shimmering block
+   would be more motion than the thing it stands in for is worth. The pulse is
+   the only thing saying "still waiting", so it is what carries the state. */
+.tab-pending .tab-select { color: var(--chrome-faint); cursor: default; }
+.tab-pending .tab-title { font-style: italic; }
+.tab-pending-dot {
+  width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%;
+  background: var(--chrome-faint); animation: tab-pending-pulse 1.2s ease-in-out infinite;
+}
+@keyframes tab-pending-pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+/* Reduced motion still needs the tab to read as pending, so the dot stays and
+   only its animation goes. */
+@media (prefers-reduced-motion: reduce) {
+  .tab-pending-dot { animation: none; opacity: 0.6; }
+}
 .tab-zoom { display: inline-flex; color: var(--chrome-faint); }
 .tab-dot {
   display: inline-flex; align-items: center; justify-content: center;

@@ -3,7 +3,7 @@ import type { Pane, Session, Window as TmuxWindow } from "./types";
 import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 import type { TmuxActionExecution } from "./useTmuxActionPerformer";
-import { shellNavigationMode } from "../features/shell/model";
+import { shellNavigationMode, type PendingShellTab } from "../features/shell/model";
 import {
   destinationLocation,
   RemoteNavigationCoordinator,
@@ -46,6 +46,11 @@ export interface ShellNavigationOptions {
   setStatus(status: string): void;
   windows: readonly TmuxWindow[];
   acknowledgeHostSessionSelection?(sessionId: string): void;
+  /**
+   * Publishes the placeholder tab for a create that is still in flight, or
+   * `undefined` to withdraw it. See `PendingShellTab`.
+   */
+  setPendingTab?(pending: PendingShellTab | undefined): void;
 }
 
 export class ShellNavigationSupersededError extends Error {
@@ -103,6 +108,15 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     windowId?: string;
     lastObservation?: { generation: number; windowId?: string };
   } | undefined>(undefined);
+  /**
+   * The create whose placeholder is on screen, if any.
+   *
+   * Keyed so that a slow create failing cannot withdraw the placeholder a
+   * newer create has already put up: two clicks in quick succession is the
+   * ordinary case, and the older request's answer arriving second is exactly
+   * when a bare boolean would clear the wrong one.
+   */
+  const pendingTabKey = useRef<string | undefined>(undefined);
   scopeRef.current = optionsRef.current.currentScope;
   activeSessionIdRef.current = optionsRef.current.activeSessionId;
   activeWindowIdRef.current = optionsRef.current.activeWindowId;
@@ -112,12 +126,31 @@ export function useShellNavigation(options: ShellNavigationOptions) {
   useEffect(() => {
     coordinator.invalidate();
     protectedAppTab.current = undefined;
-  }, [connectionEpoch, connectionKey, coordinator, hostProfileId, serverIdentity]);
+    // A create against the previous connection can never be answered now, so
+    // its placeholder would sit in the strip forever.
+    if (pendingTabKey.current !== undefined) {
+      pendingTabKey.current = undefined;
+      optionsRef.current.setPendingTab?.(undefined);
+    }
+  }, [connectionEpoch, connectionKey, coordinator, hostProfileId, serverIdentity, optionsRef]);
 
   const scopeCurrent = useCallback(
     (scope: HostScopeToken) => sameHostConnection(scope, scopeRef.current),
     [],
   );
+
+  const publishPendingTab = useCallback((scope: HostScopeToken, pending: PendingShellTab) => {
+    if (!sameHostConnection(scope, scopeRef.current)) return;
+    pendingTabKey.current = pending.key;
+    optionsRef.current.setPendingTab?.(pending);
+  }, [optionsRef]);
+
+  /** Withdraws the placeholder only if it is still the one this create put up. */
+  const withdrawPendingTab = useCallback((key: string) => {
+    if (pendingTabKey.current !== key) return;
+    pendingTabKey.current = undefined;
+    optionsRef.current.setPendingTab?.(undefined);
+  }, [optionsRef]);
   const requestLocation = useCallback(async (
     destination: ShellDestination,
     predecessor: NavigationOutcome | undefined,
@@ -302,17 +335,28 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     const key = `create-window:${++creationVersion.current}`;
     let created: TmuxActionResult | undefined;
     let createdSessionId = sessionId;
+    // Before the request, not after: the whole point is that the strip changes
+    // in the same frame as the click rather than a round trip later.
+    publishPendingTab(scope, { key, sessionId, title: "New window" });
     void coordinator.navigate({
       destination: { kind: "operation", key },
       request: async () => {
         try {
           created = await optionsRef.current.performAction({ kind: "createWindow", sessionId });
         } catch (error) {
+          withdrawPendingTab(key);
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope", error };
         }
         if (!created?.windowId || !scopeCurrent(scope)) {
+          withdrawPendingTab(key);
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope" };
         }
+        // Upgraded rather than withdrawn: the ack names the window but the
+        // snapshot that contains it has not arrived, and dropping the
+        // placeholder here would blink the strip empty in between.
+        publishPendingTab(scope, {
+          key, sessionId: created.sessionId ?? sessionId, windowId: created.windowId, title: "New window",
+        });
         createdSessionId = created.sessionId ?? sessionId;
         optionsRef.current.acknowledgeHostSessionSelection?.(createdSessionId);
         return {
@@ -331,7 +375,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         optionsRef.current.setActiveWindowId(created.windowId);
       },
     });
-  }, [beginTerminalIntent, coordinator, scopeCurrent]);
+  }, [beginTerminalIntent, coordinator, publishPendingTab, scopeCurrent, withdrawPendingTab]);
 
   const selectLocalAppTab = useCallback((
     sessionId: string,
@@ -462,17 +506,25 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     const scope = scopeRef.current;
     const key = `create-session:${++creationVersion.current}`;
     let created: TmuxActionResult | undefined;
+    // No `sessionId` yet, so nothing is drawn until the ack names the new
+    // workspace. A placeholder in the workspace being left behind would point
+    // at the wrong strip; the gap this closes is the one *after* the switch,
+    // where the new workspace is on screen and its snapshot has not landed.
+    publishPendingTab(scope, { key, title: name || "New session" });
     void coordinator.navigate({
       destination: { kind: "operation", key },
       request: async () => {
         try {
           created = await optionsRef.current.performAction({ kind: "createSession", name });
         } catch (error) {
+          withdrawPendingTab(key);
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope", error };
         }
         if (!created?.sessionId || !scopeCurrent(scope)) {
+          withdrawPendingTab(key);
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope" };
         }
+        publishPendingTab(scope, { key, sessionId: created.sessionId, title: name || "New session" });
         optionsRef.current.acknowledgeHostSessionSelection?.(created.sessionId);
         return {
           kind: "reached",
@@ -490,7 +542,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         optionsRef.current.setActiveWindowId(undefined);
       },
     });
-  }, [beginTerminalIntent, coordinator, scopeCurrent]);
+  }, [beginTerminalIntent, coordinator, publishPendingTab, scopeCurrent, withdrawPendingTab]);
 
   const observeAuthoritativeWindow = useCallback((sessionId: string, windowId: string | undefined, generation: number) => {
     const protection = protectedAppTab.current;

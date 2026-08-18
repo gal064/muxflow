@@ -10,6 +10,18 @@ import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
 import { relativeWindowReorderAction } from "../../app/windowSelection";
 import { reorderAppTab, type CombinedTab } from "./model";
 import type { AppOwnedTab, PersistedAppState } from "./types";
+
+/**
+ * The app tab behind a selection, when it is one that can be reordered.
+ *
+ * The lookup is by key, so a placeholder can never match it; the narrowing is
+ * what lets the reorder flags be read without the union claiming a pending tab
+ * might turn up here.
+ */
+function movableAppTab(tabs: readonly CombinedTab[], appTabId: string) {
+  const found = tabs.find((tab) => tab.key === `app:${appTabId}`);
+  return found?.kind === "app" ? found : undefined;
+}
 import { sameHostConnection, type HostScopeToken } from "./hostScope";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { shellAfterSidebarCommand } from "./responsiveShell";
@@ -345,10 +357,10 @@ export function useShellCommands(options: ShellCommandOptions): {
     canMoveSessionUp: Boolean(options.activeSession && [...options.snapshot.sessions].sort((left, right) => (left.order ?? 0) - (right.order ?? 0)).findIndex((session) => session.id === options.activeSession!.id) > 0),
     canMoveSessionDown: Boolean(options.activeSession && [...options.snapshot.sessions].sort((left, right) => (left.order ?? 0) - (right.order ?? 0)).findIndex((session) => session.id === options.activeSession!.id) < options.snapshot.sessions.length - 1),
     canMoveTabLeft: options.selectedAppTab
-      ? Boolean(options.combinedTabs.find((tab) => tab.key === `app:${options.selectedAppTab!.id}`)?.canMoveLeft)
+      ? Boolean(movableAppTab(options.combinedTabs, options.selectedAppTab.id)?.canMoveLeft)
       : Boolean(options.activeWindow && relativeWindowReorderAction(options.windows, options.activeWindow.id, "left")),
     canMoveTabRight: options.selectedAppTab
-      ? Boolean(options.combinedTabs.find((tab) => tab.key === `app:${options.selectedAppTab!.id}`)?.canMoveRight)
+      ? Boolean(movableAppTab(options.combinedTabs, options.selectedAppTab.id)?.canMoveRight)
       : Boolean(options.activeWindow && relativeWindowReorderAction(options.windows, options.activeWindow.id, "right")),
     hasHostProfile: Boolean(options.deletableHostProfile),
     rowCommands: options.rowCommands,

@@ -51,6 +51,7 @@ import {
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
   type CombinedTab,
+  type PendingShellTab,
 } from "../features/shell/model";
 import { useContextMenusOpen } from "../ui/ContextMenu";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
@@ -215,6 +216,10 @@ export function App() {
     if (!session || !scope.serverIdentity) return;
     setAppState((current) => selectAppTab(current, scope.hostProfileId, scope.serverIdentity!, session, appTabId));
   }, [setAppState]);
+  // The placeholder for a create that has not come back. Held here rather than
+  // in the navigation hook because the strip is what draws it, and the hook
+  // does not own any rendered state.
+  const [pendingTab, setPendingTab] = useState<PendingShellTab | undefined>(undefined);
   const shellNavigation = useShellNavigation({
     activeSessionId,
     activeWindowId,
@@ -227,6 +232,7 @@ export function App() {
     setActiveSessionId,
     setActiveWindowId,
     setAppTab: setNavigationAppTab,
+    setPendingTab,
     setStatus,
     windows: snapshot.windows,
   });
@@ -332,9 +338,13 @@ export function App() {
   }, [agentRuntime.agents, appState.shell.agentSort, sidebarRows, snapshot.panes, snapshot.windows]);
   const unread = useMemo(() => unreadCount(agentRows), [agentRows]);
 
+  // Only in its own workspace's strip: a create-session placeholder has no
+  // session until its ack names one, and drawing it anywhere before that would
+  // put it in the workspace being navigated away from.
+  const pendingTabHere = pendingTab && pendingTab.sessionId === activeSessionId ? pendingTab : undefined;
   const combinedTabs = useMemo(
-    () => combineWorkspaceTabs(windows, workspaceAppTabs, agentRuntime.rollups.byWindow),
-    [agentRuntime.rollups.byWindow, windows, workspaceAppTabs],
+    () => combineWorkspaceTabs(windows, workspaceAppTabs, agentRuntime.rollups.byWindow, pendingTabHere),
+    [agentRuntime.rollups.byWindow, pendingTabHere, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
   const grid = useMemo(() => windowGrid(panes), [panes]);
@@ -393,6 +403,10 @@ export function App() {
   }, [notificationActivation, shellNavigation]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
+    // A placeholder stands for a window that does not exist yet: there is
+    // nothing to select, and inventing a selection here is precisely the
+    // temp-id reconciliation this placeholder exists to avoid.
+    if (tab.kind === "pending") return;
     if (tab.kind === "terminal") selectWindow(tab.id);
     // No status: the tab the user asked for is now the tab on screen. The
     // message that used to be written here reached nobody either way — the
@@ -560,6 +574,9 @@ export function App() {
   }, [shellNavigation]);
 
   const closeCombinedTab = (tab: CombinedTab, scope: HostScopeToken) => {
+    // Nothing on the host to close yet; the create's own failure path
+    // withdraws the placeholder.
+    if (tab.kind === "pending") return;
     void runCommand("window.close", { kind: tab.kind === "app" ? "appTab" : "terminalTab", id: tab.id, scope });
   };
 
@@ -594,6 +611,7 @@ export function App() {
   });
 
   const moveCombinedTab = (tab: CombinedTab, direction: "left" | "right", scope: HostScopeToken) => {
+    if (tab.kind === "pending") return;
     void runCommand(direction === "left" ? "window.moveLeft" : "window.moveRight", {
       kind: tab.kind === "app" ? "appTab" : "terminalTab",
       id: tab.id,
