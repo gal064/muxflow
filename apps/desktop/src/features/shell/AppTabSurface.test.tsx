@@ -210,6 +210,51 @@ describe("AppTabSurface", () => {
     await act(async () => { surface.renderer.unmount(); });
   });
 
+  it("never restarts a read that has not landed yet, however often the directory is rescanned", async () => {
+    // The large-file loop, in miniature (tests/phase15/large-file-open-bug.md).
+    // A 5.2 MB file's read outlives the interval between directory snapshots,
+    // so it is still in flight when the next one arrives. Nothing has been
+    // shown yet, so `shownGeneration()` is undefined and every rescan looked
+    // like a generation mismatch -- aborting the read that was making progress
+    // and starting another that would be aborted in turn. 171 attempts, zero
+    // successes, forever.
+    const surface = await mount({
+      bootstrap: listing([entry("/repo/note.txt", "g1")]),
+      generations: ["g1", "g5"],
+      holdOpens: true,
+      holdWatch: true,
+    });
+    expect(surface.opens, "the read is deliberately still in flight").toHaveLength(0);
+    expect(surface.signals).toHaveLength(1);
+
+    for (const generation of ["g2", "g3", "g4"]) {
+      await act(async () => {
+        surface.publish({
+          kind: "directorySnapshot",
+          rootToken: "root",
+          listing: listing([entry("/repo/note.txt", generation)]),
+        });
+        await Promise.resolve();
+      });
+    }
+
+    expect(
+      surface.signals[0]?.aborted,
+      "a rescan aborted the in-flight read, which is the loop this file documents",
+    ).toBe(false);
+    expect(
+      surface.signals,
+      "every rescan started another read on top of the one already running",
+    ).toHaveLength(1);
+
+    // The deferred opinion is still honoured: once the read lands it is
+    // compared against the newest listing, and re-read once because it moved.
+    await act(async () => { surface.settleOpens(); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(surface.opens[0]).toBe("g1");
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
   it("keeps a tab whose file a listing simply does not mention", async () => {
     // Absence from a listing is not authority to declare a deletion: a page
     // boundary, a name the host never reports, or a path spelled differently

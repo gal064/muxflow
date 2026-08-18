@@ -259,7 +259,25 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
         // self-save echo replace a newer dirty edit either; the precise path
         // events below retain last-writer order.
         const generation = listingOpinion(event.listing);
-        if (generation !== undefined && generation !== shownGeneration()) reloadFromDisk();
+        if (generation === undefined) return;
+        const shown = shownGeneration();
+        if (shown === undefined) {
+          // Nothing is on screen yet, so the read that will put it there is
+          // still in flight — and it is already fetching this generation or a
+          // newer one. Reloading here aborts it, and on a file whose read
+          // takes longer than the gap between rescans it aborts *every*
+          // attempt: the read restarts once per rescan and never advances.
+          // That is the 5.2 MB file that never opened
+          // (tests/phase15/large-file-open-bug.md) — 171 attempts, 0
+          // successes. "Nothing shown" is not "stale"; it is "not yet".
+          //
+          // The opinion is parked rather than dropped, so the read is still
+          // reconciled against it once it lands. Exactly what
+          // `reconcileBootstrap` does with the same question.
+          reconciliation.current = { kind: "bootstrap", generation, serial: loadSerial.current };
+          return;
+        }
+        if (generation !== shown) reloadFromDisk();
         return;
       }
       if (!(event.kind === "fileChanged" || event.kind === "fileDeleted") || event.path !== resource) return;
