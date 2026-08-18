@@ -315,6 +315,9 @@ pub(crate) struct BulkLease {
     key: BulkKey,
     bridge: Option<Bridge>,
     cancellation: Arc<CancelState>,
+    /// Whether this lease reused an idle pooled bridge rather than paying for
+    /// a fresh spawn and handshake. A fact for measurement, never for policy.
+    reused: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -403,6 +406,7 @@ impl BulkLease {
                 key,
                 bridge: Some(bridge),
                 cancellation,
+                reused: true,
             });
         }
 
@@ -450,7 +454,13 @@ impl BulkLease {
             key,
             bridge: Some(bridge),
             cancellation,
+            reused: false,
         })
+    }
+
+    /// Whether this lease came from the idle pool. See the field.
+    pub(crate) fn reused(&self) -> bool {
+        self.reused
     }
 
     /// The process id a cancellation kills. See `CancelState::bind_process`.

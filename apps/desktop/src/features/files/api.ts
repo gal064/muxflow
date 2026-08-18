@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { measurePerfOutcome, measurePerfRequest, recordPerfCounter, recordPerfHighWater, recordPerfJsonBytesDeferred, startPerfSpan } from "../../perf/probe";
+import { measurePerfOutcome, measurePerfRequest, perfProbeEnabled, recordPerfCounter, recordPerfHighWater, recordPerfJsonBytesDeferred, recordPerfSample, startPerfSpan } from "../../perf/probe";
 import { abortable, cancelled, throwIfAborted } from "../../transport/abortable";
 import { IMAGE_PREVIEW_LIMIT_BYTES, TEXT_FILE_LIMIT_BYTES } from "./types";
 import type {
@@ -35,6 +35,24 @@ import {
 export type { WireFileEvent } from "./wire";
 
 interface OpenedFile { metadata: WireMetadata; contentKind: WireContent["kind"]; bytes?: Uint8Array; generation: string }
+
+/**
+ * The renderer-side timestamps of one measured editor open.
+ *
+ * The layered read path fills these in as it passes them down, and the two
+ * renderer segments are published against the transfer id the native side
+ * stamps on every open frame — the same id its own segments carry, so one
+ * open's segments join across the process boundary. Only ever allocated while
+ * the perf probe is on.
+ */
+interface OpenPerfMarks {
+  /** The open was dispatched by the surface, before any admission work. */
+  dispatchedAt: number;
+  /** The terminal completed frame reached the renderer's channel. */
+  publishedAt?: number;
+  /** The transfer id, learned from the completion frame itself. */
+  transferId?: string;
+}
 
 /** One host watch, shared by every surface that asked for the same directory. */
 interface WatchRecord {
@@ -225,11 +243,21 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
    */
   openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile> {
     recordPerfCounter("file.openRequests");
-    return measurePerfOutcome("file.open", () => this.#openFile(scope, root, path, signal));
+    const marks = perfProbeEnabled() ? { dispatchedAt: performance.now() } : undefined;
+    return measurePerfOutcome("file.open", () => this.#openFile(scope, root, path, signal, marks));
   }
 
-  async #openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenFile> {
-    const opened = await this.#readOpenedFile(scope, root, path, signal);
+  async #openFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal, marks?: OpenPerfMarks): Promise<OpenFile> {
+    const opened = await this.#readOpenedFile(scope, root, path, signal, marks);
+    // Closes the publish-to-content segment: terminal completed frame received
+    // to a decoded file the surface can show, which is the local serialization
+    // the network segments cannot see.
+    const published = (file: OpenFile): OpenFile => {
+      if (marks?.transferId && marks.publishedAt !== undefined) {
+        recordPerfSample("file.open.segment.publishToContent", performance.now() - marks.publishedAt, { operationId: marks.transferId });
+      }
+      return file;
+    };
     if (opened.contentKind === "text" && opened.bytes) {
       let value: string;
       try { value = fatalDecoder.decode(opened.bytes); } catch { throw new Error("Host returned invalid UTF-8 for a text file."); }
@@ -241,7 +269,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
         lineEnding: detectLineEnding(value),
         encoding: "utf-8",
       };
-      return { kind: "text", file };
+      return published({ kind: "text", file });
     }
     const file: BinaryFile = {
       path: opened.metadata.path,
@@ -251,7 +279,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       previewKind: opened.contentKind === "image" ? "image" : "binary",
       ...(opened.bytes ? { previewBytes: opened.bytes } : {}),
     };
-    return { kind: "binary", file };
+    return published({ kind: "binary", file });
   }
 
   async writeText(scope: FileWorkspaceScope, root: ActiveRoot, request: WriteTextRequest): Promise<WriteTextResult> {
@@ -367,7 +395,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   #publish(event: WorkspaceEvent): void { for (const listener of this.#listeners) listener(event); }
 
   /** One bulk request, one classification, one continuous body. */
-  async #readOpenedFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal): Promise<OpenedFile> {
+  async #readOpenedFile(scope: FileWorkspaceScope, root: ActiveRoot, path: string, signal?: AbortSignal, marks?: OpenPerfMarks): Promise<OpenedFile> {
     const chunks: Uint8Array[] = [];
     let expectedOffset = 0n;
     const firstContent = startPerfSpan("file.timeToFirstContent");
@@ -386,7 +414,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       expectedOffset += BigInt(chunk.byteLength);
       if (expectedOffset > BigInt(IMAGE_PREVIEW_LIMIT_BYTES)) throw new Error("Bulk file content exceeded the 25 MiB limit.");
       chunks.push(chunk);
-    }, signal);
+    }, signal, marks);
     if (!sawContent) firstContent();
     if (!completed.metadata || !completed.contentKind) throw new Error("Host omitted file content metadata.");
     const total = completed.totalBytes === undefined ? expectedOffset : BigInt(completed.totalBytes);
@@ -405,6 +433,7 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
     args: Record<string, unknown>,
     onChunk?: (offset: bigint, chunk: Uint8Array) => void,
     signal?: AbortSignal,
+    marks?: OpenPerfMarks,
   ): Promise<WireFileIoEvent> {
     recordPerfCounter("file.ioRequestAttempts");
     return new Promise((resolve, reject) => {
@@ -465,18 +494,26 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
             settled = true;
             signal?.removeEventListener("abort", abort);
             recordPerfCounter("file.ioRequestSuccesses");
+            if (marks) {
+              // The completion frame names its own transfer, so the segment is
+              // correlated even when the admission answer has not landed yet.
+              marks.publishedAt = performance.now();
+              marks.transferId ??= event.transferId;
+            }
             resolve({ ...event, ...(metadata ? { metadata } : {}), ...(contentKind ? { contentKind } : {}) });
           }
         } catch (error) { finishError(error); }
       };
       if (signal?.aborted) { abort(); return; }
       const boundary = { ...args, onEvent: channel };
+      const invokedAt = marks ? performance.now() : 0;
       measurePerfRequest("file.ioAdmission", "file", boundary, async (requestBoundary) => {
         const id = await invoke<string>(command, requestBoundary);
         if (!id) throw new Error("Native file I/O admission omitted its transfer ID.");
         return id;
       }, { byteCounters: ["file.ioRequestBytes"] }).then((id) => {
         transferId = id;
+        if (marks) recordPerfSample("file.open.segment.dispatchToInvoke", invokedAt - marks.dispatchedAt, { operationId: id });
         // The ID can land after the read has already given up — the frames and
         // the admission answer are two channels. Whatever ended it, the host is
         // still holding a transfer nobody will read.

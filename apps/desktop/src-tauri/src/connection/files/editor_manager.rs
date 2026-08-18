@@ -39,6 +39,9 @@ pub(super) struct FileJob {
     pub(super) cancellation: Arc<CancelState>,
     pub(super) channel: Channel<InvokeResponseBody>,
     pub(super) kind: FileJobKind,
+    /// Per-open segment marks, keyed by this job's transfer id. Inert for
+    /// writes and whenever the perf log is not enabled for the process.
+    pub(super) perf: crate::perf_log::FileOpenTiming,
 }
 
 /// The three values a write needs and a read does not.
@@ -91,6 +94,7 @@ pub fn start_file_read(
         cancellation,
         channel: on_event,
         kind: FileJobKind::Read,
+        perf: crate::perf_log::FileOpenTiming::begin(&transfer_id),
     })?;
     Ok(transfer_id)
 }
@@ -143,6 +147,7 @@ pub fn start_file_write(
             file_generation: parse_optional_u64("fileGeneration", &file_generation)?,
             content: Arc::from(content),
         }),
+        perf: crate::perf_log::FileOpenTiming::inert(),
     })?;
     Ok(transfer_id)
 }

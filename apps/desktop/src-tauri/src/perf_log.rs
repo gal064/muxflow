@@ -26,8 +26,8 @@ pub(crate) use stub::{bridge, operations, sink};
 
 pub(crate) use bridge::{quiesce_bridge_measurement, send_bridge_frame};
 pub(crate) use operations::{
-    RemoteOperation, TransferAdmission, record_remote_operation, record_transfer_admission,
-    record_transfer_completion, record_transfer_state,
+    FileOpenTiming, RemoteOperation, TransferAdmission, record_remote_operation,
+    record_transfer_admission, record_transfer_completion, record_transfer_state,
 };
 
 #[cfg(test)]

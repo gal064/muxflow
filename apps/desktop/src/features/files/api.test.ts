@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { enablePerfProbe, perfCounterSnapshot, perfHighWaterSnapshot, resetPerfProbe } from "../../perf/probe";
+import { enablePerfProbe, flushPerfProbe, perfCounterSnapshot, perfHighWaterSnapshot, resetPerfProbe } from "../../perf/probe";
 import { TauriFileWorkspaceClient } from "./api";
 import type { ActiveRoot, FileWorkspaceScope, WorkspaceEvent } from "./types";
 
@@ -195,6 +195,32 @@ describe("TauriFileWorkspaceClient", () => {
       kind: "text", file: { path: "/repo/a", content: "a\r\nb", generation: metadata.generation, sizeBytes: "4", lineEnding: "crlf", encoding: "utf-8" },
     });
     expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes both renderer open segments against the open's transfer id", async () => {
+    const append = vi.fn(async (_lines: string[]) => undefined);
+    enablePerfProbe(append);
+    const metadata = { path: "/repo/a", name: "a", kind: "file", size: "4", modifiedUnixMillis: 1, mode: 0o644, symlink: false, symlinkTarget: "", expandable: false, generation: "3", mime: "text/plain", imagePreviewEligible: false };
+    invokeMock.mockImplementation(async (command, args) => {
+      expect(command).toBe("start_file_read");
+      const channel = (args as { onEvent: { onmessage?: (value: ArrayBuffer) => void } }).onEvent;
+      queueMicrotask(() => {
+        channel.onmessage?.(jsonFrame(1, { transferId: "read", state: "metadata", metadata, contentKind: "text" }));
+        channel.onmessage?.(chunkFrame(0n, new TextEncoder().encode("a\r\nb")));
+        channel.onmessage?.(jsonFrame(3, { transferId: "read", state: "completed", totalBytes: "4", generation: "3", blake3: "verified" }));
+      });
+      return "read";
+    });
+
+    await new TauriFileWorkspaceClient().openFile(scope, root, "/repo/a");
+    await flushPerfProbe();
+
+    const records = append.mock.calls.flatMap(([lines]) => lines).map((line) => JSON.parse(line as string));
+    for (const name of ["file.open.segment.dispatchToInvoke", "file.open.segment.publishToContent"]) {
+      expect(records, `${name} missing or uncorrelated`).toContainEqual(
+        expect.objectContaining({ name, operationId: "read" }),
+      );
+    }
   });
 
   it("cancels an obsolete bulk read when its editor load is superseded", async () => {
