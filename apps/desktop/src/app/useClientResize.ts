@@ -159,7 +159,10 @@ export function useClientResize({
 
   useEffect(() => {
     if (!surface) {
-      // The surface unmounts whenever an app tab is showing. Forgetting its box
+      // Nothing to measure yet, or nothing left to measure. An app tab no
+      // longer takes the surface away — it is covered, not unmounted, so its
+      // box stays valid and this stops churning to `undefined` and back on
+      // every tab switch. Forgetting the box when the element really does go
       // keeps a stale measurement from being sent as if it were current.
       setBox(undefined);
       return;

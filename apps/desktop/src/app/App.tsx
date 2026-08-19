@@ -88,6 +88,25 @@ const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then(
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
 
 /**
+ * The tab's frame, drawn while its chunk is still being fetched.
+ *
+ * The gap before a lazy surface resolves used to be a centred "Loading…" line,
+ * so opening a file walked through a centred line, then a centred card, then
+ * the editor frame: three layouts for one tab. This is the same silhouette the
+ * surface itself settles into — an opaque section with the toolbar bar across
+ * the top — so the chunk arriving fills the frame instead of replacing it.
+ */
+function AppTabFrame({ tab }: { tab: AppOwnedTab }) {
+  return tab.kind === "gitDiff"
+    ? <section aria-label={tab.title} className="git-diff-surface" role="tabpanel">
+      <header className="editor-toolbar git-diff-toolbar" />
+    </section>
+    : <section aria-label={tab.title} className="file-tab-surface" role="tabpanel">
+      <header className="editor-toolbar" />
+    </section>;
+}
+
+/**
  * What a bulk close is actually about to destroy.
  *
  * Only the terminal windows are named: closing a document tab throws nothing
@@ -375,8 +394,8 @@ export function App() {
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
   const grid = useMemo(() => windowGrid(panes), [panes]);
   const mountedPanes = useMemo(
-    () => mountedTerminalPanes(snapshot.panes, activeWindowId, Boolean(selectedAppTab), Boolean(activeWindow?.zoomed)),
-    [activeWindow?.zoomed, activeWindowId, selectedAppTab, snapshot.panes],
+    () => mountedTerminalPanes(snapshot.panes, activeWindowId, Boolean(activeWindow?.zoomed)),
+    [activeWindow?.zoomed, activeWindowId, snapshot.panes],
   );
   const lastAuthoritativeWindow = useRef(new Map<string, string>());
 
@@ -606,6 +625,30 @@ export function App() {
     void shellNavigation.selectPane(pane, { kind: "silent" });
   }, [shellNavigation]);
 
+  /**
+   * Hands the keyboard back when an app tab stops covering the terminal.
+   *
+   * A pane focuses itself once, in its mount effect, and leaving a file tab
+   * used to remount every pane — which is what put the caret back in the
+   * terminal. The panes now stay mounted underneath, so nothing remounts and
+   * nothing would focus: the covering surface unmounts and focus falls to the
+   * document body. Only the uncovering transition is acted on; a plain window
+   * switch still mounts fresh panes that focus themselves.
+   */
+  const appTabWasSelected = useRef(Boolean(selectedAppTab));
+  useEffect(() => {
+    if (selectedAppTab) {
+      appTabWasSelected.current = true;
+      return;
+    }
+    if (!appTabWasSelected.current) return;
+    // Held, not dropped, until a pane is there to receive it: the tab can be
+    // cleared a render before the window it returns to has an active pane.
+    if (!activePane) return;
+    appTabWasSelected.current = false;
+    controllers.current.get(activePane.id)?.focus();
+  }, [activePane, selectedAppTab]);
+
   const closeCombinedTab = (tab: CombinedTab, scope: HostScopeToken) => {
     // Nothing on the host to close yet; the create's own failure path
     // withdraws the placeholder.
@@ -825,7 +868,47 @@ export function App() {
           role="tabpanel"
           tabIndex={0}
         >
-          {selectedAppTab ? <Suspense fallback={<p className="quiet-empty">Loading…</p>}>{selectedAppTab.kind === "gitDiff" ? <GitDiffSurface
+          {/*
+            Two layers, not a swap. The terminal layer keeps the active window's
+            panes mounted while a file or diff tab is on top of it, so coming
+            back is a repaint rather than a rebuild: no drain/serialize, no
+            visibility round trip, no restore-from-cache, no reveal handshake.
+            It is hidden with `visibility`, never `display`, so its box, xterm's
+            fit and the tmux client measurement all stay valid underneath.
+
+            The accepted trade-off: a covered pane is still `setTerminalVisibility(true)`
+            and still streams output into a terminal nobody is looking at. That
+            is deliberate and bounded — only the *active window's* panes are
+            ever mounted, which is the same set that was live a moment ago.
+          */}
+          <div
+            className={selectedAppTab ? "terminal-layer terminal-layer-covered" : "terminal-layer"}
+            inert={selectedAppTab ? true : undefined}
+          >
+            <TerminalWorkspaceSurface
+              activePane={activePane}
+              activeWindow={activeWindow}
+              appFocused={appFocused}
+              beginDividerDrag={beginDividerDrag}
+              clientId={clientId}
+              controllers={controllers}
+              focusPane={focusTerminalPane}
+              onMeasurements={onMeasurements}
+              grid={grid}
+              handleInput={handleInput}
+              hub={hub}
+              mountedPanes={mountedPanes}
+              paneAttention={agentRuntime.rollups.byPane}
+              panes={panes}
+              performAction={performAction}
+              setStatus={setStatus}
+              surfaceRef={surfaceRef}
+              terminalTransferClient={terminalTransferClient}
+              terminalTransferRegistry={terminalTransferRegistry}
+              terminalTransferScope={terminalTransferScope}
+            />
+          </div>
+          {selectedAppTab && <Suspense fallback={<AppTabFrame tab={selectedAppTab} />}>{selectedAppTab.kind === "gitDiff" ? <GitDiffSurface
             activeRoot={workspaceFiles.root}
             canWrite={hostState.canMutate}
             repositories={gitRepositories}
@@ -844,28 +927,7 @@ export function App() {
             scope={fileScope}
             tab={selectedAppTab}
             key={`${selectedAppTab.hostProfileId}\0${selectedAppTab.serverIdentity}\0${selectedAppTab.sessionId}\0${selectedAppTab.id}\0${selectedAppTab.resource}`}
-          />}</Suspense> : <TerminalWorkspaceSurface
-            activePane={activePane}
-            activeWindow={activeWindow}
-            appFocused={appFocused}
-            beginDividerDrag={beginDividerDrag}
-            clientId={clientId}
-            controllers={controllers}
-            focusPane={focusTerminalPane}
-            onMeasurements={onMeasurements}
-            grid={grid}
-            handleInput={handleInput}
-            hub={hub}
-            mountedPanes={mountedPanes}
-            paneAttention={agentRuntime.rollups.byPane}
-            panes={panes}
-            performAction={performAction}
-            setStatus={setStatus}
-            surfaceRef={surfaceRef}
-            terminalTransferClient={terminalTransferClient}
-            terminalTransferRegistry={terminalTransferRegistry}
-            terminalTransferScope={terminalTransferScope}
-          />}
+          />}</Suspense>}
         </div>
       </section>
       {panelOpen && <AppRightPanel

@@ -110,7 +110,18 @@ export function GitDiffSurface(props: Props) {
   // An error outranks a spinner: a surface still claiming to load while it
   // holds a failure is a surface with no way out of it.
   if (surfaceError && !diff) return <GitDiffEmpty title={props.tab.title} detail={surfaceError} retry={refresh} />;
-  if (loading && !diff) return <GitDiffEmpty title={props.tab.title} detail="Loading Git diff…" retry={refresh} />;
+  // The frame the diff is about to appear in, not a card in the middle of the
+  // tab. The failures above stay cards — they are terminal states with an
+  // action — but a read that is merely in flight must not change the tab's
+  // shape on its way to the content.
+  if (loading && !diff) return <section className="git-diff-surface" role="tabpanel" aria-label={`${props.tab.gitTarget} diff ${tabDisplayPath(props.tab)}`}>
+    <header className="editor-toolbar git-diff-toolbar">
+      <span className={`git-target ${props.tab.gitTarget}`}>{props.tab.gitTarget}</span>
+      <code title={tabDisplayPath(props.tab)}>{tabDisplayPath(props.tab)}</code>
+    </header>
+    <div className="git-diff-errors" />
+    <div className="git-diff-content"><p className="quiet-empty">Loading Git diff…</p></div>
+  </section>;
   if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${props.tab.gitTarget} changes.`} retry={refresh} />;
 
   const currentEntry = status.entries.find((entry) => entry.path === diff.path);
@@ -188,6 +199,18 @@ function decodeTextDiff(diff: GitDiff): { original: string; modified: string } |
   try {
     return { original: diff.oldMissing ? "" : decoder.decode(diff.oldContent ?? new Uint8Array()), modified: diff.newMissing ? "" : decoder.decode(diff.newContent ?? new Uint8Array()) };
   } catch { return undefined; }
+}
+
+/**
+ * The path this tab is about, before any diff has arrived to say it.
+ *
+ * A saved diff tab carries `${target}:${displayPath}` as its resource, which is
+ * how the toolbar can name the file while the read is still in flight. Anything
+ * that does not carry the prefix is shown whole rather than guessed at.
+ */
+function tabDisplayPath(tab: AppOwnedTab): string {
+  const prefix = `${tab.gitTarget}:`;
+  return tab.gitTarget && tab.resource.startsWith(prefix) ? tab.resource.slice(prefix.length) : tab.resource;
 }
 
 function GitDiffEmpty({ title, detail, retry }: { title: string; detail: string; retry?: () => void }) {

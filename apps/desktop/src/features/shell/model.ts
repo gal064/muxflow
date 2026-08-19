@@ -521,13 +521,22 @@ export function resolveSelectedSession(
     ?? ordered[0];
 }
 
+/**
+ * The panes that are worth holding a live renderer for.
+ *
+ * Only the active window's, and only the ones that window actually draws — a
+ * zoomed window draws one. A file or diff tab does *not* subtract from this:
+ * its surface is drawn over the terminal layer rather than in place of it, so
+ * coming back to a terminal tab is a repaint instead of a teardown, an async
+ * drain/serialize, a visibility round trip and a rebuild. Changing window or
+ * workspace still unmounts, which is where that cost belongs.
+ */
 export function mountedTerminalPanes(
   panes: readonly Pane[],
   activeWindowId: string | undefined,
-  appTabSelected: boolean,
   zoomed: boolean,
 ): Pane[] {
-  if (!activeWindowId || appTabSelected) return [];
+  if (!activeWindowId) return [];
   return renderedPanes(panes.filter((pane) => pane.windowId === activeWindowId), zoomed);
 }
 
