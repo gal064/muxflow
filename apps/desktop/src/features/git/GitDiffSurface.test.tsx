@@ -25,6 +25,9 @@ describe("GitDiffSurface", () => {
     expect(renderer.root.findByProps({ "data-original": "old\n" }).props["data-modified"]).toBe("new\n");
     expect(renderer.root.findAllByProps({ "aria-label": "Complete hunk actions" })).toHaveLength(1);
     expect(JSON.stringify(renderer.toJSON())).toContain('"Hunk ","2"');
+    // Whole-file stage, unstage, discard and refresh belong to the Source
+    // Control row now; the toolbar keeps only what names the diff.
+    expect(fileLevelButtons(renderer)).toHaveLength(0);
     expect(client.diff).toHaveBeenCalledTimes(1);
     expect(client.status).not.toHaveBeenCalled();
     expect(client.watch).toHaveBeenCalledTimes(1);
@@ -71,8 +74,7 @@ describe("GitDiffSurface", () => {
       .mockImplementationOnce(() => new Promise((resolve) => { resolveReload = resolve; }));
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
-    const stage = renderer.root.findAllByType("button").find((button) => button.props.children === "Stage file");
-    await act(async () => { stage?.props.onClick(); await settle(); });
+    await act(async () => { hunkButton(renderer, "Stage")?.props.onClick(); await settle(); });
     expect(renderer.root.findAllByProps({ "data-original": "old\n" })).toHaveLength(0);
     expect(JSON.stringify(renderer.toJSON())).toContain("Loading Git diff");
     await act(async () => { resolveReload({ diff, status: stillChanged }); await settle(); });
@@ -93,10 +95,9 @@ describe("GitDiffSurface", () => {
     });
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
-    const stage = renderer.root.findAllByType("button").find((button) => button.props.children === "Stage file");
-    await act(async () => { stage?.props.onClick(); await settle(); await settle(); });
+    await act(async () => { hunkButton(renderer, "Stage")?.props.onClick(); await settle(); await settle(); });
     expect(JSON.stringify(renderer.toJSON())).toContain("no longer has unstaged changes");
-    expect(renderer.root.findAllByType("button").filter((button) => button.props.children === "Stage file")).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ "aria-label": "Complete hunk actions" })).toHaveLength(0);
     expect(client.mutate).toHaveBeenCalledTimes(1);
     // The mutation's own status showed the file has no unstaged change left, so
     // the reload needs no request at all.
@@ -260,7 +261,7 @@ describe("GitDiffSurface", () => {
     await act(async () => { renderer.unmount(); });
   });
 
-  it("keeps submodule diffs visible but disables every mutation", async () => {
+  it("keeps submodule diffs visible but offers no mutation at all", async () => {
     const client = mockClient();
     const submoduleStatus = { ...status, entries: [{ ...status.entries[0], submodule: true, submoduleState: "S.M." }] };
     vi.mocked(client.watch).mockImplementation(async (activeScope, activeRoot) => ({ watchId: "diff-watch", rootToken: activeRoot.token, connectionEpoch: activeScope.terminalEpoch, status: submoduleStatus, release: vi.fn() }));
@@ -268,13 +269,12 @@ describe("GitDiffSurface", () => {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
     expect(JSON.stringify(renderer.toJSON())).toContain("Submodule pointer changes are read-only in v1");
-    for (const button of renderer.root.findAllByType("button").filter((candidate) => ["Stage file", "Discard file…", "Stage", "Discard…"].includes(String(candidate.props.children)))) {
-      expect(button.props.disabled).toBe(true);
-    }
+    expect(renderer.root.findAllByProps({ "aria-label": "Complete hunk actions" })).toHaveLength(0);
+    expect(fileLevelButtons(renderer)).toHaveLength(0);
     await act(async () => { renderer.unmount(); });
   });
 
-  it("preserves rename provenance for staged diff content and whole-file actions while omitting hunks", async () => {
+  it("preserves rename provenance for staged diff content while omitting hunk and file actions", async () => {
     const client = mockClient();
     const renameStatus = { ...status, entries: [{ ...status.entries[0], indexKind: "renamed" as const, indexStatus: "R", originalPath: "b2xk", displayOriginalPath: "old" }] };
     const renameDiff = { ...diff, target: "staged" as const, originalPath: "b2xk", oldContent: new TextEncoder().encode("old path\n"), newContent: new TextEncoder().encode("new path\n") };
@@ -285,14 +285,15 @@ describe("GitDiffSurface", () => {
     await act(async () => { renderer = create(<GitDiffSurface {...props(client)} tab={renameTab} />); await settle(); });
     expect(client.diff).toHaveBeenCalledWith(scope, expect.objectContaining({ token: "root" }), "repo", "YQ==", "b2xk", "staged", expect.any(AbortSignal));
     expect(renderer.root.findByProps({ "data-original": "old path\n" }).props["data-modified"]).toBe("new path\n");
+    // A renamed path has no hunk actions, and whole-file unstage is the row's
+    // job now, so this surface offers nothing to press.
     expect(renderer.root.findAllByProps({ "aria-label": "Complete hunk actions" })).toHaveLength(0);
-    const unstage = renderer.root.findAllByType("button").find((button) => button.props.children === "Unstage file");
-    await act(async () => { unstage?.props.onClick(); await settle(); });
-    expect(client.mutate).toHaveBeenCalledWith(scope, expect.objectContaining({ token: "root" }), "repo", expect.objectContaining({ kind: "unstageFile", path: "YQ==", originalPath: "b2xk" }));
+    expect(fileLevelButtons(renderer)).toHaveLength(0);
+    expect(client.mutate).not.toHaveBeenCalled();
     await act(async () => { renderer.unmount(); });
   });
 
-  it("preserves copy provenance for an unstaged diff and whole-file action", async () => {
+  it("preserves copy provenance on the diff request while omitting hunk and file actions", async () => {
     const client = mockClient();
     const copyStatus = { ...status, entries: [{ ...status.entries[0], worktreeKind: "copied" as const, worktreeStatus: "C", originalPath: "b2xk", displayOriginalPath: "old" }] };
     vi.mocked(client.watch).mockImplementation(async (activeScope, activeRoot) => ({ watchId: "diff-watch", rootToken: activeRoot.token, connectionEpoch: activeScope.terminalEpoch, status: copyStatus, release: vi.fn() }));
@@ -300,13 +301,23 @@ describe("GitDiffSurface", () => {
     const copyTab = { ...tab, gitOriginalPath: "b2xk" };
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitDiffSurface {...props(client)} tab={copyTab} />); await settle(); });
-    const stage = renderer.root.findAllByType("button").find((button) => button.props.children === "Stage file");
-    await act(async () => { stage?.props.onClick(); await settle(); });
-    expect(client.mutate).toHaveBeenCalledWith(scope, expect.objectContaining({ token: "root" }), "repo", expect.objectContaining({ kind: "stageFile", originalPath: "b2xk" }));
+    expect(client.diff).toHaveBeenCalledWith(scope, expect.objectContaining({ token: "root" }), "repo", "YQ==", "b2xk", "unstaged", expect.any(AbortSignal));
     expect(renderer.root.findAllByProps({ "aria-label": "Complete hunk actions" })).toHaveLength(0);
+    expect(fileLevelButtons(renderer)).toHaveLength(0);
     await act(async () => { renderer.unmount(); });
   });
 });
+
+/** The first button carrying `label` inside the complete-hunk rail. */
+function hunkButton(renderer: ReturnType<typeof create>, label: string) {
+  return renderer.root.findByProps({ "aria-label": "Complete hunk actions" })
+    .findAllByType("button").find((button) => button.props.children === label);
+}
+/** What the toolbar used to carry and must not carry again. */
+function fileLevelButtons(renderer: ReturnType<typeof create>) {
+  return renderer.root.findAllByType("button")
+    .filter((button) => ["Refresh", "Stage file", "Unstage file", "Discard file…"].includes(String(button.props.children)));
+}
 
 const scope: FileWorkspaceScope = { clientId: "c", hostProfileId: "local", serverIdentity: "s", generation: 1, terminalEpoch: 1, sessionId: "$1", paneId: "%1" };
 const root: ActiveRoot = { token: "root", path: "/repo", cwd: "/repo", paneId: "%1", gitWorktree: true, revision: "1" };

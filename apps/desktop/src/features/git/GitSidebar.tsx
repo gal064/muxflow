@@ -4,7 +4,9 @@ import { usePublishedRowCommands, type RowCommandSource } from "../../commands/r
 import { useCommittedRef } from "../../commands/useCommittedRef";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
+import { Icon } from "../../ui/Icon";
 import { SurfaceError } from "../../ui/SurfaceError";
+import { fileIcon } from "../files/fileIcons";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import { GitCommitForm } from "./GitCommitForm";
 import type { WorkspaceGitState } from "./useWorkspaceGit";
@@ -29,9 +31,12 @@ type PendingDiscard = { entry: GitStatusEntry; target: GitDiffTarget; status: Gi
 export function GitSidebar(props: Props) {
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
   const onRefresh = () => void props.git.handle?.refresh();
-  // Stage / unstage / discard used to be a cluster of hover buttons on every
-  // row. They are one right-click menu now, which is also the only way they can
-  // carry a readable label instead of `+`, `−` and `↶`.
+  // Stage / unstage / discard are hover buttons on the row again, by product
+  // decision: the panel is VS Code's Source Control list, and there the two
+  // icons that take the status letter's place on hover are how a change is
+  // staged or thrown away. The right-click menu stays as the labeled path — it
+  // is what carries words instead of `+`, `−` and `↶`, and it is the only way
+  // in from the keyboard.
   // Deliberately no `actionable` flag in here. Whether a mutation is offered
   // depends on the connection, and the connection can drop while the menu is
   // open; a flag frozen at open time left the item enabled with `props.scope`
@@ -96,6 +101,25 @@ export function GitSidebar(props: Props) {
     focusRow(entry, target);
     setMenu({ entry, target, anchor });
   }, [focusRow]);
+  // The hover buttons act on the row they sit on rather than on whatever the
+  // palette calls "the selected change", so they need their own committed
+  // handler — same shape as the palette's, one entry further along.
+  const committedRowAction = (entry: GitStatusEntry, target: GitDiffTarget, action: "stage" | "unstage" | "discard") => {
+    switch (action) {
+      case "stage": void mutateFile(entry, "unstaged", "stageFile"); return;
+      case "unstage": void mutateFile(entry, "staged", "unstageFile"); return;
+      case "discard":
+        // The same availability the context menu's discard checks. A connection
+        // can drop between the row being drawn and the button being pressed.
+        if (!unavailable && props.scope && props.root && props.git.status) {
+          setPendingDiscard({ entry, target, status: props.git.status, rootToken: props.root.token, connectionEpoch: props.scope.terminalEpoch });
+        }
+    }
+  };
+  const runRowAction = useCommittedRef(committedRowAction);
+  const stageRow = useCallback((entry: GitStatusEntry) => runRowAction.current(entry, "unstaged", "stage"), []);
+  const unstageRow = useCallback((entry: GitStatusEntry) => runRowAction.current(entry, "staged", "unstage"), []);
+  const discardRow = useCallback((entry: GitStatusEntry, target: GitDiffTarget) => runRowAction.current(entry, target, "discard"), []);
   const commit = useCallback(async (message: string) => {
     const { git } = latest.current;
     const status = git.status;
@@ -116,8 +140,7 @@ export function GitSidebar(props: Props) {
     : undefined;
   const rowActions = useMemo<readonly CommandId[]>(() => {
     if (!focusedEntry || !focusedRow) return [];
-    const ids: CommandId[] = [];
-    if (!focusedEntry.ignored) ids.push("git.openDiff");
+    const ids: CommandId[] = ["git.openDiff"];
     const mutable = !unavailable && !focusedEntry.conflicted && !focusedEntry.submodule
       && Boolean(props.scope) && Boolean(props.root) && Boolean(props.git.status);
     if (mutable) ids.push(focusedRow.target === "staged" ? "git.unstage" : "git.stage", "git.discard");
@@ -158,18 +181,22 @@ export function GitSidebar(props: Props) {
   const stagedCount = groups.staged.length;
   return <section className="git-sidebar" aria-label="Source Control">
     <header className="git-sidebar-header">
-      <strong>{props.git.status.repository.headName || (props.git.status.repository.initial ? "Initial repository" : "Detached HEAD")}</strong>
-      <small title={props.git.status.repository.worktreeRoot}>{props.git.status.repository.worktreeRoot}</small>
+      <span className="git-sidebar-identity">
+        <strong>{props.git.status.repository.headName || (props.git.status.repository.initial ? "Initial repository" : "Detached HEAD")}</strong>
+        <small title={props.git.status.repository.worktreeRoot}>{props.git.status.repository.worktreeRoot}</small>
+      </span>
+      {/* Refresh left the diff toolbar, where it re-read one file. Here it is
+          the panel's own control and re-reads the repository. */}
+      <button aria-label="Refresh Git status" className="bar-button" onClick={onRefresh} title="Refresh Git status" type="button"><Icon name="refresh" /></button>
     </header>
     {props.git.error && <SurfaceError detail={props.git.error} />}
     {props.git.status.copyDetectionIncomplete && <div className="surface-note" role="status">Copy detection was bounded for this large change set; some copies may appear as additions.</div>}
     {!props.git.status.authoritative && <div className="surface-error" role="alert">Git status is resynchronizing. Mutations are disabled.</div>}
     <div className="git-status-groups">
-      <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
-      <GitGroup title="Staged" entries={groups.staged} target="staged" pending={pending} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
-      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" pending={pending} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
-      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" pending={pending} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} />
-      <GitGroup title="Ignored" entries={groups.ignored} target="unstaged" onFocusEntry={focusRow} onOpen={openDiff} />
+      <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" mutable={!unavailable} onDiscard={discardRow} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
+      <GitGroup title="Staged" entries={groups.staged} target="staged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
+      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
+      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
       {props.git.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
     </div>
     {/* The commit form is not permanent chrome any more: it exists exactly when
@@ -178,7 +205,7 @@ export function GitSidebar(props: Props) {
     {menu && <ContextMenu
       anchor={menu.anchor}
       items={[
-        { id: "open", label: "Open diff", disabled: menu.entry.ignored, run: () => props.onOpenDiff(menu.entry, menu.target) },
+        { id: "open", label: "Open diff", run: () => props.onOpenDiff(menu.entry, menu.target) },
         ...(!unavailable && !menu.entry.conflicted && props.scope && props.root && props.git.status ? [
           menu.target === "staged"
             ? { id: "unstage", label: "Unstage", disabled: menu.entry.submodule, run: () => void mutateFile(menu.entry, "staged", "unstageFile") }
@@ -217,52 +244,85 @@ export function GitSidebar(props: Props) {
 
 const GitGroup = memo(function GitGroup(props: {
   title: string; entries: GitStatusEntry[]; target: GitDiffTarget; pending?: ReadonlyMap<string, string>;
+  /** Whether this repository can be written to at all; a row decides the rest. */
+  mutable?: boolean;
   onOpen(entry: GitStatusEntry, target: GitDiffTarget): void;
   onFocusEntry(entry: GitStatusEntry, target: GitDiffTarget): void;
   onMenu?(entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor): void;
+  onStage?(entry: GitStatusEntry): void;
+  onUnstage?(entry: GitStatusEntry): void;
+  onDiscard?(entry: GitStatusEntry, target: GitDiffTarget): void;
 }) {
   const [limit, setLimit] = useState(200);
   if (!props.entries.length) return null;
   const visible = props.entries.slice(0, limit);
+  const staged = props.target === "staged";
   return <section className="git-group">
     <h3 className="section-label">{props.title} · {props.entries.length}</h3>
     <ul>
-      {visible.map((entry) => <li key={`${props.target}\0${entry.path}`} className={entry.conflicted ? "conflicted" : ""}>
-        <button
-          aria-busy={props.pending?.has(entry.path) ?? false}
-          className="git-file"
-          disabled={entry.ignored}
-          onClick={() => props.onOpen(entry, props.target)}
-          // What "the selected change" means for the palette and for a bound
-          // shortcut: whichever row the keyboard or the pointer last landed on.
-          // Both are needed — macOS WebKit does not focus a button on click.
-          onFocus={() => props.onFocusEntry(entry, props.target)}
-          onPointerDown={() => props.onFocusEntry(entry, props.target)}
-          onContextMenu={(event) => {
-            if (!props.onMenu) return;
-            event.preventDefault();
-            props.onMenu(entry, props.target, { x: event.clientX, y: event.clientY });
-          }}
-          // Stage, unstage and discard live only on that menu, so the keyboard
-          // gets the same way in.
-          onKeyDown={(event) => {
-            if (!props.onMenu || !isContextMenuKey(event)) return;
-            event.preventDefault();
-            props.onMenu(entry, props.target, anchorForElement(event.currentTarget));
-          }}
-          title={`${entry.displayPath} · ${statusTitle(entry, props.target)}`}
-          type="button"
-        >
-          <span className={`git-state ${statusTitle(entry, props.target)}`}>{statusCode(entry, props.target)}</span>
-          <span className="git-path">{entry.displayPath}</span>
-        </button>
-        {props.pending?.get(entry.path) && <small className="git-entry-note">{props.pending.get(entry.path)}</small>}
-        {entry.submodule && <small className="git-entry-note">submodule {entry.submoduleState} · actions unavailable</small>}
-        {entry.displayOriginalPath && <small className="git-entry-note">{entry.indexKind === "copied" || entry.worktreeKind === "copied" ? "copied" : "renamed"} from {entry.displayOriginalPath}</small>}
-        {entry.symlink && <small className="git-entry-note">symbolic link</small>}
-        {entry.binary && <small className="git-entry-note">binary</small>}
-        {entry.conflicted && <small className="git-entry-note">conflict {entry.conflictCode}</small>}
-      </li>)}
+      {visible.map((entry) => {
+        // The row is a filename first, the way VS Code's is: the basename in
+        // full, the directory beside it as dimmed context that is allowed to be
+        // the part that gets truncated.
+        const slash = entry.displayPath.lastIndexOf("/");
+        const name = slash < 0 ? entry.displayPath : entry.displayPath.slice(slash + 1);
+        const dir = slash < 0 ? "" : entry.displayPath.slice(0, slash);
+        const glyph = fileIcon({ name, kind: "file" });
+        // A conflict has to be resolved elsewhere, and a submodule pointer is
+        // read-only, so neither offers the buttons at all rather than offering
+        // them disabled.
+        const offersActions = Boolean(props.mutable) && !entry.conflicted && !entry.submodule;
+        return <li key={`${props.target}\0${entry.path}`} className={entry.conflicted ? "conflicted" : ""}>
+          <button
+            aria-busy={props.pending?.has(entry.path) ?? false}
+            className="git-file"
+            onClick={() => props.onOpen(entry, props.target)}
+            // What "the selected change" means for the palette and for a bound
+            // shortcut: whichever row the keyboard or the pointer last landed on.
+            // Both are needed — macOS WebKit does not focus a button on click.
+            onFocus={() => props.onFocusEntry(entry, props.target)}
+            onPointerDown={() => props.onFocusEntry(entry, props.target)}
+            onContextMenu={(event) => {
+              if (!props.onMenu) return;
+              event.preventDefault();
+              props.onMenu(entry, props.target, { x: event.clientX, y: event.clientY });
+            }}
+            // The hover buttons are a pointer affordance, so the menu is how the
+            // keyboard reaches the same three actions.
+            onKeyDown={(event) => {
+              if (!props.onMenu || !isContextMenuKey(event)) return;
+              event.preventDefault();
+              props.onMenu(entry, props.target, anchorForElement(event.currentTarget));
+            }}
+            title={`${entry.displayPath} · ${statusTitle(entry, props.target)}`}
+            type="button"
+          >
+            <span className="git-file-icon" style={{ color: glyph.color }}><Icon name={glyph.icon} size={12} /></span>
+            <span className="git-file-name">{name}</span>
+            {dir !== "" && <span className="git-file-dir">{dir}</span>}
+            <span className={`git-state ${statusTitle(entry, props.target)}`}>{statusCode(entry, props.target)}</span>
+          </button>
+          {offersActions && <span className="git-row-actions">
+            <button
+              aria-label={staged ? "Unstage file" : "Stage file"}
+              onClick={() => (staged ? props.onUnstage : props.onStage)?.(entry)}
+              title={staged ? "Unstage file" : "Stage file"}
+              type="button"
+            ><Icon name={staged ? "minus" : "plus"} size={12} /></button>
+            <button
+              aria-label={entry.untracked ? "Delete untracked file" : "Discard changes"}
+              onClick={() => props.onDiscard?.(entry, props.target)}
+              title={entry.untracked ? "Delete untracked file" : "Discard changes"}
+              type="button"
+            ><Icon name="discard" size={12} /></button>
+          </span>}
+          {props.pending?.get(entry.path) && <small className="git-entry-note">{props.pending.get(entry.path)}</small>}
+          {entry.submodule && <small className="git-entry-note">submodule {entry.submoduleState} · actions unavailable</small>}
+          {entry.displayOriginalPath && <small className="git-entry-note">{entry.indexKind === "copied" || entry.worktreeKind === "copied" ? "copied" : "renamed"} from {entry.displayOriginalPath}</small>}
+          {entry.symlink && <small className="git-entry-note">symbolic link</small>}
+          {entry.conflicted && <small className="git-entry-note">conflict {entry.conflictCode}</small>}
+        </li>;
+      })}
       {visible.length < props.entries.length && <li className="git-show-more"><button onClick={() => setLimit((current) => Math.min(current + 500, props.entries.length))} type="button">Show {Math.min(500, props.entries.length - visible.length)} more…</button></li>}
     </ul>
   </section>;
@@ -282,7 +342,6 @@ function groupEntries(entries: GitStatusEntry[]) {
     staged: visible.filter((entry) => !entry.conflicted && entry.indexKind !== "none"),
     unstaged: visible.filter((entry) => !entry.conflicted && !entry.untracked && entry.worktreeKind !== "none"),
     untracked: visible.filter((entry) => entry.untracked),
-    ignored: entries.filter((entry) => entry.ignored),
   };
 }
 

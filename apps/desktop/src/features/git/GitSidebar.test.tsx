@@ -11,13 +11,24 @@ import { GitSidebar } from "./GitSidebar";
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 /**
- * Per-row stage/discard buttons became one right-click menu in Phase 11, so
- * every row action is reached the way a user reaches it: open the row's menu,
- * then pick the item out of it.
+ * Row actions have two ways in — the hover buttons and the right-click menu —
+ * and both are reached here the way a user reaches them, through the row.
  */
 function gitRow(renderer: ReturnType<typeof create>, displayPath: string) {
   return renderer.root.findAll((node) => node.props.className === "git-file"
     && typeof node.props.title === "string" && node.props.title.startsWith(`${displayPath} ·`))[0];
+}
+
+/** The `<li>` a row lives in, which is what carries its hover buttons. */
+function gitRowItem(renderer: ReturnType<typeof create>, displayPath: string) {
+  let node = gitRow(renderer, displayPath).parent;
+  while (node && node.type !== "li") node = node.parent;
+  if (!node) throw new Error(`no row for ${displayPath}`);
+  return node;
+}
+
+function rowActionButton(renderer: ReturnType<typeof create>, displayPath: string, label: string) {
+  return gitRowItem(renderer, displayPath).findByProps({ "aria-label": label });
 }
 
 async function rowMenuItem(renderer: ReturnType<typeof create>, displayPath: string, itemId: string) {
@@ -27,15 +38,89 @@ async function rowMenuItem(renderer: ReturnType<typeof create>, displayPath: str
 }
 
 describe("GitSidebar", () => {
-  it("groups staged, unstaged, untracked, conflict and ignored entries with exact counts", async () => {
+  it("groups staged, unstaged, untracked and conflict entries, and shows nothing ignored", async () => {
+    const value = status();
+    value.entries.push(entry("image.png", { binary: true }));
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<GitSidebar {...baseProps(gitState({ status: status() }))} />); });
+    await act(async () => { renderer = create(<GitSidebar {...baseProps(gitState({ status: value }))} />); });
     const text = JSON.stringify(renderer.toJSON());
     expect(text).toContain("Staged");
     expect(text).toContain("Changes");
     expect(text).toContain("Untracked");
     expect(text).toContain("Merge changes");
-    expect(text).toContain("Ignored");
+    // An ignored file is not a change, so the panel does not carry a section
+    // for it, and "binary" is not a status worth a second line under the row.
+    expect(text).not.toContain("Ignored");
+    expect(text).not.toContain("ignored.log");
+    expect(text).not.toContain("binary");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("renders a row as file icon, name, dimmed directory and a trailing status letter", async () => {
+    const value = { ...status(), entries: [entry("src/app/main.rs")] };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...baseProps(gitState({ status: value }))} />); });
+    const row = gitRow(renderer, "src/app/main.rs");
+    expect(row.findByProps({ className: "git-file-icon" }).props.style).toEqual({ color: "var(--term-1)" });
+    expect(row.findByProps({ className: "git-file-name" }).children).toEqual(["main.rs"]);
+    expect(row.findByProps({ className: "git-file-dir" }).children).toEqual(["src/app"]);
+    // The status letter is last, so CSS can push it to the right edge and the
+    // hover buttons can take exactly its place.
+    const last = row.children[row.children.length - 1];
+    expect(typeof last === "string" ? last : last.props.className).toBe("git-state modified");
+    expect(typeof last === "string" ? last : last.children).toEqual(["M"]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("stages and unstages from the row's hover buttons", async () => {
+    const props = baseProps();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { rowActionButton(renderer, "changed.txt", "Stage file").props.onClick(); await settle(); });
+    expect(props.git.handle!.mutate).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "stageFile", target: "unstaged" }));
+
+    // The staged copy of a path offers the opposite direction, in the same spot.
+    await act(async () => { rowActionButton(renderer, "staged.txt", "Unstage file").props.onClick(); await settle(); });
+    expect(props.git.handle!.mutate).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "unstageFile", target: "staged" }));
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("routes the row's discard button through the same confirmation the menu uses", async () => {
+    const props = baseProps();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { rowActionButton(renderer, "changed.txt", "Discard changes").props.onClick(); });
+    expect(renderer.root.findAllByProps({ role: "alertdialog" })).toHaveLength(1);
+    expect(props.git.handle!.prepareDiscard).not.toHaveBeenCalled();
+    const confirm = renderer.root.findAllByType("button").find((button) => button.props.children === "Discard");
+    await act(async () => { confirm?.props.onClick(); await settle(); });
+    expect(props.git.handle!.prepareDiscard).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "discardFile", target: "unstaged" }));
+    expect(props.git.handle!.mutate).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "discardFile", confirmationToken: "confirmed" }));
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("offers no hover buttons where the mutation does not exist", async () => {
+    const value = status();
+    value.entries.push(entry("module", { submodule: true, submoduleState: "S.M.", worktreeKind: "modified" }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...baseProps(gitState({ status: value }))} />); });
+    // An untracked file is deleted rather than reverted, so its button says so.
+    expect(rowActionButton(renderer, "new.txt", "Delete untracked file")).toBeTruthy();
+    expect(gitRowItem(renderer, "module").findAllByProps({ "aria-label": "Stage file" })).toHaveLength(0);
+    expect(gitRowItem(renderer, "conflict.txt").findAllByProps({ className: "git-row-actions" })).toHaveLength(0);
+
+    // A resynchronizing status disables every mutation, hover buttons included.
+    await act(async () => { renderer.update(<GitSidebar {...baseProps(gitState({ status: { ...value, authoritative: false } }))} />); });
+    expect(renderer.root.findAllByProps({ className: "git-row-actions" })).toHaveLength(0);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("re-reads the repository from the panel header", async () => {
+    const props = baseProps();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Refresh Git status" }).props.onClick(); });
+    expect(props.git.handle!.refresh).toHaveBeenCalledTimes(1);
     await act(async () => { renderer.unmount(); });
   });
 

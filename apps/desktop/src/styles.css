@@ -679,9 +679,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 .git-sidebar { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .git-sidebar-header {
-  display: grid; gap: 1px; padding: 7px 12px;
+  display: flex; align-items: center; gap: 6px; padding: 7px 12px;
   border-bottom: 1px solid var(--chrome-hairline);
 }
+.git-sidebar-identity { display: grid; gap: 1px; flex: 1; min-width: 0; }
 .git-sidebar-header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .git-sidebar-header small {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -693,18 +694,46 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .git-group li { position: relative; }
 .git-group li.conflicted { box-shadow: inset 2px 0 var(--danger); }
 .git-file {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 6px;
   width: 100%; padding: 3px 12px; border: 0; background: transparent;
   color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px; text-align: left;
 }
-.git-file:hover:not(:disabled) { background: var(--chrome-hover); }
-.git-state { width: 10px; flex: 0 0 auto; text-align: center; font-weight: 600; color: var(--chrome-faint); }
+/* The row, not the button: the hover actions sit outside the button but inside
+   the row, so pointing at one must not make the row look un-hovered. */
+.git-group li:hover .git-file, .git-group li:focus-within .git-file { background: var(--chrome-hover); }
+/* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
+   inline color, so there is no rule here per language. */
+.git-file-icon { flex: 0 0 auto; display: inline-flex; }
+/* The basename gets the space it needs; the directory beside it is the part
+   allowed to be truncated. */
+.git-file-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-file-dir {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--chrome-faint); font-size: var(--type-meta);
+}
+.git-state { margin-left: auto; width: 10px; flex: 0 0 auto; text-align: center; font-weight: 600; color: var(--chrome-faint); }
 .git-state.modified { color: var(--state-working); }
 .git-state.added, .git-state.copied { color: var(--term-2); }
 .git-state.deleted { color: var(--danger); }
 .git-state.untracked { color: var(--term-4); }
 .git-state.renamed, .git-state.typeChanged { color: var(--term-5); }
-.git-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+/* Stage and discard take the status letter's place on hover, the way VS Code's
+   Source Control rows do. The letter is hidden rather than removed, so the row
+   below does not shift when the pointer crosses it. */
+.git-row-actions {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  display: none; gap: 2px; padding: 0 2px;
+  border-radius: var(--radius-control); background: var(--chrome-hover);
+}
+.git-group li:hover .git-row-actions, .git-group li:focus-within .git-row-actions { display: inline-flex; }
+.git-group li:hover .git-state, .git-group li:focus-within .git-state { visibility: hidden; }
+.git-row-actions button {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: var(--radius-control);
+  background: transparent; color: var(--chrome-dim);
+}
+.git-row-actions button:hover { background: var(--chrome-selected); color: var(--chrome-ink); }
 .git-entry-note { display: block; padding: 0 12px 3px 30px; color: var(--chrome-faint); font-size: var(--type-meta); }
 .git-show-more { padding: 4px 12px; }
 .git-show-more button {
@@ -778,7 +807,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   color: var(--chrome-dim); font-size: var(--type-label); text-transform: uppercase;
 }
 .git-target.staged { color: var(--term-2); }
-.git-diff-toolbar .danger, .git-hunk-actions .danger { color: var(--danger-ink); }
+.git-hunk-actions .danger { color: var(--danger-ink); }
 .git-diff-error { padding: 5px 8px; border-bottom: 1px solid var(--danger); background: var(--danger-wash); color: var(--danger-ink); font-size: 11px; }
 /* The editor's own rejection banner. It had no rule at all before — it
    inherited whatever the tab header left behind — and now that it carries a
