@@ -58,7 +58,11 @@ type DirectoryLoadResult = "applied" | "stale" | "failed";
  */
 export const DIRECTORY_REFRESH_COALESCE_MS = 150;
 
-export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorkspaceScope | undefined) {
+export function useWorkspaceFiles(
+  client: FileWorkspaceClient,
+  scope: FileWorkspaceScope | undefined,
+  selectionKey = scope ? keyForScope(scope) : "",
+) {
   const [state, setState] = useState<WorkspaceFilesState>({
     scopeKey: "",
     listings: EMPTY_LISTINGS,
@@ -84,7 +88,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   const noteRootActivity = useRef<(() => void) | undefined>(undefined);
   const cache = useRef(new DirectoryListingCache());
   const leases = useRef(new DirectoryWatchLeases());
-  const scopeKey = scope ? keyForScope(scope) : "";
+  const liveScopeKey = scope ? keyForScope(scope) : "";
   const scopeRef = useCommittedRef(scope);
 
   /**
@@ -167,7 +171,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     append?: { pageToken: string },
   ): Promise<DirectoryLoadResult> => {
     const activeScope = scopeRef.current;
-    if (!activeScope || keyForScope(activeScope) !== scopeKey) return "stale";
+    if (!activeScope || keyForScope(activeScope) !== liveScopeKey) return "stale";
     if (!sameRoot(stateRef.current.root, root)) return "stale";
     // The page token is a parameter rather than something read back out of
     // state: a prefetch fires from the listing that has just arrived, before
@@ -190,7 +194,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       slot.close();
       const superseded = epoch !== scopeEpoch.current
         || !slot.current()
-        || keyForScope(activeScope) !== scopeKey
+        || keyForScope(activeScope) !== liveScopeKey
         || !sameRoot(stateRef.current.root, root)
         || listing.rootToken !== root.token;
       if (superseded) {
@@ -219,7 +223,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       });
       return aborted ? "stale" : "failed";
     }
-  }, [applyListing, client, scopeKey]);
+  }, [applyListing, client, liveScopeKey]);
 
   /**
    * Re-reads a directory whose cached listing could not answer an event, at
@@ -438,26 +442,48 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     setState((current) => consumeRecoveries(current, pending));
   }, [coalesceRecovery, restorePages, state.recoveries, state.root]);
 
+  // Logical navigation owns what may remain visible. A transport reconnect
+  // replaces the live scope below, but the same host/server/session/pane keeps
+  // its last authoritative tree on screen while writes are frozen.
   useEffect(() => {
+    if (stateRef.current.scopeKey === selectionKey) return;
     scopeEpoch.current += 1;
     abortListing(() => true);
-    if (!scope) {
-      cache.current.clear();
-      setState({
-        scopeKey: "", listings: new Map(), expanded: new Set(), loading: new Set(),
-        requestedReads: 0,
-        recoveries: NO_RECOVERIES,
-      });
-      return;
-    }
     setState({
-      scopeKey,
+      scopeKey: selectionKey,
       listings: new Map(),
       expanded: new Set(),
       loading: new Set(),
       requestedReads: 0,
       recoveries: NO_RECOVERIES,
     });
+  }, [abortListing, selectionKey, stateRef]);
+
+  // Transport ownership is shorter-lived than the visible workspace. Stop
+  // every request/watch from the retiring epoch, retain the painted tree, and
+  // let the active-root resolver revalidate it when the `connected` scope
+  // appears. In particular, no request is issued from the snapshot-before-
+  // ready window during bridge startup.
+  useEffect(() => {
+    scopeEpoch.current += 1;
+    abortListing(() => true);
+    if (!scope) {
+      setState((current) => current.scopeKey === selectionKey ? {
+        ...current,
+        loading: new Set(),
+        requestedReads: 0,
+        recoveries: NO_RECOVERIES,
+        error: undefined,
+      } : current);
+      return;
+    }
+    setState((current) => current.scopeKey === selectionKey ? {
+      ...current,
+      loading: new Set(),
+      requestedReads: 0,
+      recoveries: NO_RECOVERIES,
+      error: undefined,
+    } : current);
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
     void client.subscribe(scope, applyEvent).then((stop) => {
@@ -482,10 +508,10 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       pendingExpandPaints.current.clear();
       unsubscribe?.();
     };
-    // `scope` is deliberately not a dependency: `scopeKey` is its exact
+    // `scope` is deliberately not a dependency: `liveScopeKey` is its exact
     // identity, and an unmemoized caller object would otherwise tear this
     // subscription down and rebuild it on every render.
-  }, [abortListing, applyEvent, client, scopeKey]);
+  }, [abortListing, applyEvent, client, liveScopeKey, selectionKey]);
 
   /**
    * Installs a root that is genuinely different from the one on screen.
@@ -500,7 +526,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     cache.current.invalidateOtherRoots(activeScope.clientId, root.token, root.revision);
     setState((current) => ({
       ...current,
-      scopeKey,
+      scopeKey: selectionKey,
       root,
       listings: new Map(),
       expanded: new Set([root.path]),
@@ -511,12 +537,12 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
       recoveries: NO_RECOVERIES,
       error: undefined,
     }));
-  }, [abortListing, scopeKey]);
+  }, [abortListing, selectionKey]);
 
   const { rearm, noteActivity } = useActiveRoot({
     client,
     scope: () => scopeRef.current,
-    scopeKey,
+    scopeKey: liveScopeKey,
     held: () => stateRef.current.root,
     onRoot: adoptRoot,
     onError: (message) => setState((current) => ({ ...current, error: message })),
@@ -532,7 +558,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
    * the previous root under the new scope arms and immediately releases one
    * watch per open directory on every pane switch.
    */
-  const activeRoot = state.scopeKey === scopeKey ? state.root : undefined;
+  const activeRoot = state.scopeKey === selectionKey ? state.root : undefined;
   /**
    * Exactly the directories the tree can currently reach, and therefore exactly
    * the watches it should hold. The watch bootstrap is the directory's listing,
@@ -546,14 +572,14 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   // lease set — connection, root capability, and directories. Every part is in
   // the key deliberately: release and acquire must key on the same identity, or
   // a root replaced at the same path releases every watch and re-acquires none.
-  const watchTargetKey = [scopeKey, activeRoot?.token ?? "", ...watchTargets].join("\u0000");
+  const watchTargetKey = [liveScopeKey, activeRoot?.token ?? "", ...watchTargets].join("\u0000");
   useEffect(() => {
     const held = leases.current;
     return () => held.releaseAll();
-  }, [activeRoot?.token, scopeKey]);
+  }, [activeRoot?.token, liveScopeKey]);
   useEffect(() => {
     const activeScope = scopeRef.current;
-    if (!activeScope || !activeRoot || keyForScope(activeScope) !== scopeKey) return;
+    if (!activeScope || !activeRoot || keyForScope(activeScope) !== liveScopeKey) return;
     const root = activeRoot;
     leases.current.sync(watchTargets, {
       acquire: (directory, signal) => client.acquireDirectoryWatch(activeScope, root, directory, { signal }),
@@ -609,7 +635,7 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
     // `watchTargets` is derived from `watchTargetKey`, which is the exact
     // identity of the set; depending on the array itself would re-sync on every
     // render that rebuilt an identical list.
-  }, [activeRoot, applyListing, client, loadDirectory, prefetchNextPage, scopeKey, watchTargetKey]);
+  }, [activeRoot, applyListing, client, liveScopeKey, loadDirectory, prefetchNextPage, watchTargetKey]);
 
   /**
    * One owner for what the cache holds.
@@ -733,9 +759,10 @@ export function useWorkspaceFiles(client: FileWorkspaceClient, scope: FileWorksp
   }, [loadDirectory]);
 
   // Effects run after paint. Mask the prior pane synchronously on the render
-  // where scopeKey changes so Explorer never flashes or acts on the old root.
-  const visible = state.scopeKey === scopeKey ? state : {
-    scopeKey,
+  // where the logical selection changes so Explorer never flashes or acts on
+  // another pane's old root. A live-scope-only change deliberately retains it.
+  const visible = state.scopeKey === selectionKey ? state : {
+    scopeKey: selectionKey,
     listings: EMPTY_LISTINGS,
     expanded: new Set<string>(),
     loading: new Set<string>(),

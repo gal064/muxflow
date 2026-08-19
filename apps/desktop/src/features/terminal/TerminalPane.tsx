@@ -101,6 +101,7 @@ export interface TerminalPaneController {
 }
 
 interface Props {
+  appFocused?: boolean;
   clientId?: string;
   pane: Pane;
   hub: TerminalEventHub;
@@ -119,6 +120,7 @@ interface Props {
 }
 
 export function TerminalPane({
+  appFocused = true,
   clientId,
   pane,
   hub,
@@ -147,6 +149,7 @@ export function TerminalPane({
   const controllerRef = useRef(onController);
   const diagnosticRef = useRef(onDiagnostic);
   const clientIdRef = useRef(clientId);
+  const appFocusedRef = useRef(appFocused);
   const rendererEpochRef = useRef<number | undefined>(undefined);
   const lastRevealKeyRef = useRef<string | undefined>(undefined);
   const revealStateRef = useRef<PaneRevealState>({ ready: false, hasLocalState: false });
@@ -539,6 +542,17 @@ export function TerminalPane({
     if (pane.active) rendererRef.current?.focus();
   }, [pane.active]);
 
+  useEffect(() => {
+    const regainedFocus = appFocused && !appFocusedRef.current;
+    appFocusedRef.current = appFocused;
+    // WebKit may leave xterm's hidden textarea unfocused when a foreground
+    // window returns. A tab round-trip fixes it only because remounting calls
+    // `focus`; do the same on the actual foreground transition. This runs
+    // before a pointer's own focus action, so clicking a sidebar control still
+    // leaves that control focused.
+    if (regainedFocus && pane.active) rendererRef.current?.focus();
+  }, [appFocused, pane.active]);
+
   // tmux resized this pane (a split, a zoom, another client attaching). Follow
   // it immediately rather than at the next ResizeObserver callback, which a
   // pane whose CSS box did not change never gets.
@@ -567,6 +581,7 @@ export function TerminalPane({
       data-terminal-surface="true"
       data-local-selection-modifier="Shift"
       onMouseDownCapture={(event) => {
+        rendererRef.current?.focus();
         if (isForcedLocalSelection(event.nativeEvent)) event.currentTarget.dataset.localSelectionActive = "true";
       }}
       onMouseUpCapture={(event) => { delete event.currentTarget.dataset.localSelectionActive; }}

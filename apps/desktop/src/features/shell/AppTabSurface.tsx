@@ -68,7 +68,10 @@ export function AppTabSurface(props: Props) {
     if (canWrite) editFile(typed);
   }, [canWrite, editFile]);
 
-  if (!props.scope || !root) return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
+  if (!root) return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
+  if (!props.scope && content.kind === "loading") {
+    return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
+  }
   const download = () => props.onDownload(props.tab.resource, "file", root);
   switch (content.kind) {
     case "loading": return <EmptyTab tab={props.tab} detail="Loading file…" />;

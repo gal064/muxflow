@@ -30,6 +30,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
   class FakeRenderer {
     writes: string[] = [];
     disposed = false;
+    focusCalls = 0;
     restoredSerialized: string | undefined;
     #pendingRendered: Array<() => void> = [];
 
@@ -39,7 +40,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     setGrid(): { kind: "unchanged" } { return { kind: "unchanged" }; }
     onInput(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
-    focus(): void {}
+    focus(): void { this.focusCalls += 1; }
     hasSelection(): boolean { return false; }
     getSelection(): string { return ""; }
     search(): boolean { return false; }
@@ -143,10 +144,16 @@ async function awaitPaint(): Promise<void> {
   });
 }
 
-async function mountPane(pane: Pane, hub: FakeHub, clientId = "client-a"): Promise<ReactTestRenderer> {
+async function mountPane(
+  pane: Pane,
+  hub: FakeHub,
+  clientId = "client-a",
+  appFocused = true,
+): Promise<ReactTestRenderer> {
   let renderer!: ReactTestRenderer;
   await act(async () => {
     renderer = create(<TerminalPane
+      appFocused={appFocused}
       clientId={clientId}
       pane={pane}
       hub={hub.asHub()}
@@ -175,6 +182,30 @@ describe("TerminalPane pane-paint span lifecycle", () => {
   afterEach(() => {
     resetPerfProbe();
     terminalStateCache.clear();
+  });
+
+  it("restores the active pane keyboard target when the app returns to the foreground", async () => {
+    const pane = fixturePane("%focus");
+    const hub = new FakeHub();
+    const mounted = await mountPane(pane, hub, "client-a", false);
+    const renderer = renderers.created[0];
+    expect(renderer.focusCalls).toBe(2);
+
+    await act(async () => {
+      mounted.update(<TerminalPane
+        appFocused
+        clientId="client-a"
+        pane={pane}
+        hub={hub.asHub()}
+        onInput={() => undefined}
+        onFocus={() => undefined}
+        onMeasurements={() => undefined}
+        onController={() => undefined}
+      />);
+    });
+
+    expect(renderer.focusCalls).toBe(3);
+    await act(async () => { mounted.unmount(); });
   });
 
   it("closes a create span when the freshly mounted pane paints its seed", async () => {

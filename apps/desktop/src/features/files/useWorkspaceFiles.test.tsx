@@ -88,6 +88,36 @@ function deferred<T>() {
 }
 
 describe("useWorkspaceFiles", () => {
+  it("keeps the authoritative tree through a transport gap and revalidates it once connected", async () => {
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    const selectionKey = "local\0s\0$1\0%1";
+    const replacement: FileWorkspaceScope = { ...BASE_SCOPE, clientId: "next", terminalEpoch: 42 };
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness({ scope }: { scope?: FileWorkspaceScope }) {
+      current = useWorkspaceFiles(fixture.client, scope, selectionKey);
+      return null;
+    }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness scope={BASE_SCOPE} />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.root).toEqual(root);
+    expect(current?.listings.get("/repo")?.entries).toHaveLength(1);
+
+    await act(async () => { renderer.update(<Harness />); await Promise.resolve(); });
+    expect(current?.root, "the reconnect blanked the root").toEqual(root);
+    expect(current?.listings.get("/repo")?.entries, "the reconnect blanked the tree").toHaveLength(1);
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
+
+    await act(async () => { renderer.update(<Harness scope={replacement} />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(2);
+    expect(fixture.client.resolveActiveRoot).toHaveBeenLastCalledWith(replacement, { knownRootToken: "root" });
+    expect(current?.listings.get("/repo")?.entries).toHaveLength(1);
+    expect(fixture.acquired).toEqual(["/repo", "/repo"]);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("rejects a late root from the previously active pane while existing callers can retain their root token", async () => {
     const first = deferred<ActiveRoot>();
     const second = deferred<ActiveRoot>();

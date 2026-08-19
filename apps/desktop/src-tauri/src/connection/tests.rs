@@ -11,14 +11,14 @@ fn incompatible_or_disconnected_client_rejects_mutation_without_queueing() {
         .unwrap_err();
     // Coded, so the frontend leads with a sentence and keeps the internal
     // state list behind a disclosure rather than printing it as a banner.
-    assert!(error.starts_with("mutation_rejected: "), "{error}");
-    assert!(error.contains("not writable"));
+    assert!(error.starts_with("connection_unavailable: "), "{error}");
+    assert!(error.contains("reconciling"));
     assert!(client.pending.lock().unwrap().is_empty());
 
     client.ready.store(true, Ordering::Release);
     client.read_only.store(true, Ordering::Release);
     let error = client.request(v1::Request::default()).unwrap_err();
-    assert!(error.contains("read-only"));
+    assert!(error.starts_with("connection_read_only: "), "{error}");
     assert!(client.pending.lock().unwrap().is_empty());
 }
 

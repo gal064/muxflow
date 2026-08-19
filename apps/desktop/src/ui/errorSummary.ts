@@ -38,6 +38,8 @@ const CODE_SUMMARY: readonly (readonly [RegExp, string])[] = [
   [/^tmux_unavailable$/, "The tmux server is not reachable right now."],
   [/^terminal_.*_rejected$/, "The terminal connection refused that request."],
   [/^mutation_rejected$/, "The connection to the host is not accepting changes right now."],
+  [/^connection_unavailable$/, "The connection to the host is still reconnecting."],
+  [/^connection_read_only$/, "The host helper connection is read-only."],
   [/^confirmation_required$/, "That change needs an explicit confirmation first."],
   [/^cancelled$/, "That request was cancelled."],
 ];
@@ -62,8 +64,9 @@ const REASON_SUMMARY: readonly (readonly [RegExp, string])[] = [
   [/directory not empty|os error 66/i, "That folder still has files in it; confirm the non-empty replacement to continue."],
   [/nul byte/i, "That name contains a character the filesystem cannot store."],
   [/timed out|timeout/i, "The host did not answer in time. Check the connection and try again."],
+  [/disconnected or reconciling/i, "The connection to the host is still reconnecting."],
   [/server is unavailable|connection (closed|lost)|not connected/i, "The connection to the host is down. Reconnect and try again."],
-  [/not writable|read-only/i, "The connection is read-only while it settles, so that change was not sent. Try again once the link is live."],
+  [/not writable|read-only/i, "The host helper connection is read-only."],
 ];
 
 /** How much of an unmapped message reads as a summary before it is a wall. */

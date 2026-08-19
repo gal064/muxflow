@@ -20,6 +20,7 @@ describe("TerminalWorkspaceSurface", () => {
   it("does not revisit live panes for an unrelated root notice render", async () => {
     terminal.renders = 0;
     const props = {
+      appFocused: true,
       activePane: pane,
       activeWindow: { id: "@1", sessionId: "$1", index: 0, name: "shell", active: true, layout: "" },
       beginDividerDrag: vi.fn(),

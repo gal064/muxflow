@@ -14,6 +14,7 @@ import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
 import { resolveActiveWindowId, type OptimisticWindowSwitch } from "./windowSelection";
 import { resolveSelectedSession } from "../features/shell/model";
 import type { HostScopeToken } from "../features/shell/hostScope";
+import { recordPerfCounter } from "../perf/probe";
 
 type ControllerArguments = {
   agentClient: TauriAgentClient;
@@ -94,6 +95,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     {},
     undefined,
     (message) => {
+      recordPerfCounter("connection.reconnect.observerFailure");
       setConnectionDetail(message);
       setStatus(message);
       setConnectionEpoch((value) => value + 1);
@@ -102,6 +104,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
 
   useDesktopResumeRecovery(() => {
     if (!profilesHydrated) return;
+    recordPerfCounter("connection.reconnect.desktopResume");
     setConnectionDetail("System resumed; reconnecting for an authoritative state refresh.");
     setStatus("System resumed; reconnecting…");
     setConnectionEpoch((value) => value + 1);
@@ -121,6 +124,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   useEffect(() => {
     if (hostState.resyncRequested && !frontendResyncActive.current) {
       frontendResyncActive.current = true;
+      recordPerfCounter("connection.reconnect.sequenceGap");
       setConnectionEpoch((value) => value + 1);
     } else if (!hostState.resyncRequested) {
       frontendResyncActive.current = false;
@@ -179,6 +183,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     if (!profilesHydrated) return;
     let disposed = false;
     let startedClient: string | undefined;
+    let recoveringFlowStall = false;
     const scope = terminalBridgeScope();
     void startTerminal(scope.sessionId, scope.paneIds, connection, (event) => {
       if (disposed) return;
@@ -190,16 +195,20 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
         } else if (event.kind === "topologyDirty") {
           setStatus("Topology changed; reconciling…");
         } else if (event.kind === "flowStalled") {
-          // Deliberately not "recovering it". The host has asked for a seed, so
-          // the pane repaints — but that seed no longer carries a resume, and
-          // it cannot: the host has established that this pane's resume is
-          // refused, and attaching another is what made the recovery re-trigger
-          // itself. So the screen comes back and the *stream* may not, and a
-          // message promising recovery would be the second time this defect
-          // told the user something untrue. The pane id stays out of it too;
-          // `%7` names nothing anyone can see.
           terminalStateCache.delete(event.paneId);
-          setStatus("A terminal stopped receiving live output; its last screen was restored.");
+          // The host already tried the only in-place tmux resume twice. Its
+          // fallback seed can repaint the last screen, but cannot restart the
+          // stream after that budget is exhausted — exactly the pane that
+          // appears frozen until a tab remount changes its attachment. Replace
+          // the attachment authoritatively instead. One bridge may report more
+          // than one affected pane, so collapse all of them into one reconnect.
+          if (!recoveringFlowStall) {
+            recoveringFlowStall = true;
+            recordPerfCounter("connection.reconnect.terminalFlowStall");
+            setConnectionDetail("A terminal output stream stalled; reconnecting it now.");
+            setStatus("Terminal output stalled; reconnecting…");
+            setConnectionEpoch((value) => value + 1);
+          }
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
           setConnectionDetail(detail);

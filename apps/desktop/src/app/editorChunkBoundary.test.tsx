@@ -164,6 +164,41 @@ describe("the editor chunk boundary", () => {
     await act(async () => { surface.renderer.unmount(); });
   });
 
+  it("keeps loaded and dirty editor content mounted across a reconnect", async () => {
+    const host = fileClient(textFile("hello"));
+    const nextScope = { ...scope, clientId: "next", terminalEpoch: 42 };
+    const render = (liveScope: FileWorkspaceScope | undefined, canWrite: boolean) => <AppTabSurface
+      canWrite={canWrite}
+      client={host.client}
+      activeRoot={root}
+      onDirty={vi.fn()}
+      onDownload={vi.fn()}
+      onStatus={vi.fn()}
+      onViewMode={vi.fn()}
+      scope={liveScope}
+      tab={markdownTab}
+    />;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(render(scope, true)); });
+    await turnLoop(() => renderer.root.findAllByType(EditorStub).length > 0, 10_000);
+    vi.useFakeTimers();
+    try {
+      await act(async () => { renderer.root.findByType(EditorStub).props.onChange("local draft"); });
+      await act(async () => { renderer.update(render(undefined, false)); });
+      expect(renderer.root.findByType(EditorStub).props.value).toBe("local draft");
+      expect(JSON.stringify(renderer.toJSON())).toContain("Unsaved");
+      expect(host.client.openFile).toHaveBeenCalledTimes(1);
+
+      await act(async () => { renderer.update(render(nextScope, true)); await Promise.resolve(); });
+      expect(renderer.root.findByType(EditorStub).props.value).toBe("local draft");
+      expect(host.client.openFile, "reconnect replaced painted content with an eager reread").toHaveBeenCalledTimes(1);
+      expect(host.client.acquireDirectoryWatch).toHaveBeenCalledTimes(2);
+      await act(async () => { renderer.unmount(); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps a dirty buffer and its pending save when the editor unmounts", async () => {
     // Autosave state lives above the lazy boundary. Held inside it, the editor
     // going away — a Markdown view switched to preview, a chunk transition —

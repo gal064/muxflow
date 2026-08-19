@@ -173,7 +173,7 @@ export function App() {
     activePane, activeSession, activeWindow, fileScope, panes, selectedAppTab,
     terminalTransferScope, workspaceAppTabs, workspaceFiles, workspaceGit,
   } = useWorkspaceDomainController({
-    activeSessionId, activeWindowId, appState, clientId, connection,
+    activeSessionId, activeWindowId, appState, clientId, connected: hostState.phase === "connected", connection,
     currentHostProfileId, fileClient, generation: hostState.generation, gitRepositories,
     serverIdentity: hostState.serverIdentity, snapshot, terminalEpoch, windows,
   });
@@ -751,6 +751,7 @@ export function App() {
           />}</Suspense> : <TerminalWorkspaceSurface
             activePane={activePane}
             activeWindow={activeWindow}
+            appFocused={appFocused}
             beginDividerDrag={beginDividerDrag}
             clientId={clientId}
             controllers={controllers}
