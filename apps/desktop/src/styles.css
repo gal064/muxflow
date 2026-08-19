@@ -51,6 +51,16 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   margin: 0; padding: 10px 12px;
   color: var(--chrome-faint); font-size: var(--type-secondary);
 }
+/* A loading line that costs nothing to be wrong about: present from the first
+   frame, but invisible until the load has lasted long enough to be worth
+   saying. `forwards` is what keeps it up once it has appeared, and is also why
+   the global reduced-motion override below — which shortens durations but
+   leaves delays alone — still reveals it, just without the fade. */
+.loading-delayed {
+  opacity: 0;
+  animation: loading-delayed-appear 200ms linear 150ms forwards;
+}
+@keyframes loading-delayed-appear { to { opacity: 1; } }
 .inline-action {
   padding: 0; border: 0; background: none;
   color: var(--accent); font-size: inherit; text-decoration: underline;

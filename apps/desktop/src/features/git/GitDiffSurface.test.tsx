@@ -76,7 +76,12 @@ describe("GitDiffSurface", () => {
     await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
     await act(async () => { hunkButton(renderer, "Stage")?.props.onClick(); await settle(); });
     expect(renderer.root.findAllByProps({ "data-original": "old\n" })).toHaveLength(0);
-    expect(JSON.stringify(renderer.toJSON())).toContain("Loading Git diff");
+    const pending = JSON.stringify(renderer.toJSON());
+    expect(pending).toContain("Loading…");
+    // Delayed, not immediate: the line is in the DOM from the first frame but
+    // stays invisible until the reload has lasted long enough to be worth
+    // saying, so a fast reload shows the frame and then the diff, nothing else.
+    expect(pending).toContain("loading-delayed");
     await act(async () => { resolveReload({ diff, status: stillChanged }); await settle(); });
     expect(renderer.root.findAllByProps({ "data-original": "old\n" })).toHaveLength(1);
     await act(async () => { renderer.unmount(); });
@@ -167,7 +172,7 @@ describe("GitDiffSurface", () => {
     await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
     const rendered = JSON.stringify(renderer.toJSON());
     expect(rendered).toContain("watch refused");
-    expect(rendered).not.toContain("Loading Git diff");
+    expect(rendered).not.toContain("Loading…");
     // And the way out is offered, not just the reason.
     expect(renderer.root.findAllByType("button").some((button) => button.props.children === "Retry")).toBe(true);
     await act(async () => { renderer.unmount(); });

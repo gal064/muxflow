@@ -146,6 +146,27 @@ describe("AppTabSurface", () => {
   // runner takes to transform a file.
   beforeAll(async () => { await import("../files/FileEditor"); });
 
+  it("waits before it says it is loading, and says it the same way the editor stage does", async () => {
+    const surface = await mount({ bootstrap: listing([entry("/repo/note.txt", "g1")]), holdOpens: true });
+    const pending = JSON.stringify(surface.renderer.toJSON());
+    expect(pending).toContain("Loading…");
+    // The delay is the point, and it is the class that carries it: the line is
+    // in the DOM from the first frame and invisible until the read has lasted
+    // long enough to be worth explaining, so a fast open shows the frame and
+    // then the file with no text in between.
+    expect(pending).toContain("loading-delayed");
+    // Stage-specific wording would give away that two indicators handed off.
+    expect(pending, "the read stage named itself instead of matching the editor stage").not.toContain("Loading file");
+
+    await act(async () => { surface.settleOpens(); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(
+      JSON.stringify(surface.renderer.toJSON()),
+      "the indicator outlived the content it was standing in for",
+    ).not.toContain("Loading…");
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
   it("accepts the first read when the watch bootstrap agrees, rather than re-reading on principle", async () => {
     const surface = await mount({ bootstrap: listing([entry("/repo/note.txt", "g1")]) });
     expect(surface.opens, "the watch bootstrap triggered a second full open").toEqual(["g1"]);
