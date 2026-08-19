@@ -90,6 +90,21 @@ export function useWorkspaceFiles(
   const leases = useRef(new DirectoryWatchLeases());
   const liveScopeKey = scope ? keyForScope(scope) : "";
   const scopeRef = useCommittedRef(scope);
+  const selectionRef = useCommittedRef(selectionKey);
+  /**
+   * Whether what is on screen is this selection's own tree.
+   *
+   * False for the changeover window: from the moment the logical selection
+   * moves until the new selection's root has been resolved, the Explorer goes
+   * on painting the previous selection's tree rather than blanking (see the
+   * reset effect and the `stale` flag below). Everything a person can trigger
+   * asks this first, because a row they can see during that window belongs to
+   * the tree behind them, not to the pane in front of them.
+   */
+  const paintsSelection = useCallback(
+    () => stateRef.current.scopeKey === selectionRef.current,
+    [selectionRef, stateRef],
+  );
 
   /**
    * Stops remote read work for directories nothing will read any more.
@@ -442,20 +457,55 @@ export function useWorkspaceFiles(
     setState((current) => consumeRecoveries(current, pending));
   }, [coalesceRecovery, restorePages, state.recoveries, state.root]);
 
-  // Logical navigation owns what may remain visible. A transport reconnect
-  // replaces the live scope below, but the same host/server/session/pane keeps
-  // its last authoritative tree on screen while writes are frozen.
+  /**
+   * A logical selection change stops the old selection's work — and keeps its
+   * tree on screen.
+   *
+   * Blanking here was the single largest source of Explorer and Git flicker:
+   * the selection key carries `paneId`, so focusing a pane, switching a
+   * terminal tab, or switching workspace emptied the whole tree and dropped
+   * `root` to `undefined`, which took the Git rail to IDLE with it — every
+   * time, including the overwhelmingly common case where both panes sit in the
+   * same worktree and the tree that came back was identical.
+   *
+   * So the state is *kept*, still carrying the previous selection's
+   * `scopeKey`, which is exactly what makes it recognisably stale: `stale` is
+   * published from that mismatch, every interactive entry point refuses while
+   * it holds (see `paintsSelection`), and `activeRoot` below withholds the
+   * watch set so nothing is armed or read against a selection that has not
+   * resolved its root yet. What *is* dropped is everything transient the
+   * retiring selection owned — its in-flight reads, its wait state, its owed
+   * recoveries, and its error — because none of those describe the tree, and
+   * an aborted read must not leave `aria-busy` set behind it.
+   *
+   * `adoptRoot` ends the window: same root capability, and the painted tree is
+   * adopted under the new key without repainting; a different one, and it is
+   * replaced, which is a genuine root change and correctly does clear.
+   *
+   * No selection at all is not a changeover — there is nothing to keep the
+   * tree painted *for* — so that alone still blanks.
+   */
   useEffect(() => {
     if (stateRef.current.scopeKey === selectionKey) return;
     scopeEpoch.current += 1;
     abortListing(() => true);
-    setState({
-      scopeKey: selectionKey,
-      listings: new Map(),
-      expanded: new Set(),
+    if (!selectionKey) {
+      setState({
+        scopeKey: "",
+        listings: new Map(),
+        expanded: new Set(),
+        loading: new Set(),
+        requestedReads: 0,
+        recoveries: NO_RECOVERIES,
+      });
+      return;
+    }
+    setState((current) => current.scopeKey === selectionKey ? current : {
+      ...current,
       loading: new Set(),
       requestedReads: 0,
       recoveries: NO_RECOVERIES,
+      error: undefined,
     });
   }, [abortListing, selectionKey, stateRef]);
 
@@ -514,14 +564,33 @@ export function useWorkspaceFiles(
   }, [abortListing, applyEvent, client, liveScopeKey, selectionKey]);
 
   /**
-   * Installs a root that is genuinely different from the one on screen.
+   * Installs the root the current selection resolved to, and ends the
+   * changeover window the reset effect above opened.
    *
-   * A replaced root invalidates every path, listing, and content the previous
-   * one authorised: the same path under a new capability is a different file.
+   * Two outcomes, and the root capability decides which. The host derives a
+   * root token from the server identity and the root path alone
+   * (`filesystem.rs`, `root_token`), so an identical token *is* an identical
+   * worktree — the pane it was resolved for is not part of it. Two panes
+   * sitting in the same repository therefore resolve the same capability, and
+   * the tree already on screen is the new selection's tree as much as it was
+   * the old one's: it is adopted under the new key with nothing cleared, which
+   * is what makes a pane or tab switch across one worktree cost no repaint at
+   * all. `revision` is compared beside the token because the two together are
+   * the cache scope these listings were stored under.
+   *
+   * A different token is a genuinely different root, and invalidates every
+   * path, listing, and content the previous one authorised: the same path
+   * under a new capability is a different file. That case clears, and a brief
+   * empty tree while the new root's first listing arrives is correct.
    */
   const adoptRoot = useCallback((root: ActiveRoot) => {
     const activeScope = scopeRef.current;
     if (!activeScope) return;
+    const held = stateRef.current.root;
+    if (held && held.token === root.token && held.revision === root.revision) {
+      setState((current) => ({ ...current, scopeKey: selectionKey, root, error: undefined }));
+      return;
+    }
     abortListing(() => true);
     cache.current.invalidateOtherRoots(activeScope.clientId, root.token, root.revision);
     setState((current) => ({
@@ -551,12 +620,18 @@ export function useWorkspaceFiles(
   useEffect(() => { rearmRoot.current = rearm; }, [rearm]);
   useEffect(() => { noteRootActivity.current = noteActivity; }, [noteActivity]);
   /**
-   * The connection and root capability the watch set belongs to.
+   * The connection and root capability the *watch set* belongs to — which is
+   * the selection's own root, never a stale-painted one.
    *
-   * Read from the *masked* view rather than raw state: on the render where the
-   * scope changes, the reset has not been committed yet, and acquiring against
-   * the previous root under the new scope arms and immediately releases one
-   * watch per open directory on every pane switch.
+   * The tree below goes on painting the previous selection's rows through the
+   * changeover window; the watches deliberately do not follow it there. A
+   * watch armed against the previous root during that window is given back the
+   * moment the new root lands — `releaseAll` keys on the live scope — so it
+   * would be one unwatch and one watch per open directory on every pane
+   * switch, and its bootstrap would arrive addressed to a root object the tree
+   * had already replaced and be dropped on the floor. Withholding the set
+   * instead means the watches are armed once, against the adopted root, and
+   * their bootstraps land as the revalidation of what is already painted.
    */
   const activeRoot = state.scopeKey === selectionKey ? state.root : undefined;
   /**
@@ -661,6 +736,11 @@ export function useWorkspaceFiles(
   }, [activeRoot, state.listings, watchTargetKey]);
 
   const toggleDirectory = useCallback((path: string) => {
+    // A row clicked during the changeover window belongs to the tree behind
+    // the user, not the pane in front of them: expanding it would read the
+    // previous selection's directory and graft it into a tree that is about to
+    // be answered by a different root.
+    if (!paintsSelection()) return;
     const expanding = !stateRef.current.expanded.has(path);
     const generation = (paintGenerations.current.get(path) ?? 0) + 1;
     paintGenerations.current.set(path, generation);
@@ -712,7 +792,7 @@ export function useWorkspaceFiles(
     // requires the listing rather than the expansion flag, so an expansion that
     // painted nothing cannot publish an instant expand-to-paint measurement.
     if (paint) pendingExpandPaints.current.set(path, { paint, generation });
-  }, [abortListing]);
+  }, [abortListing, paintsSelection]);
 
   useEffect(() => {
     for (const [path, pending] of [...pendingExpandPaints.current]) {
@@ -740,6 +820,16 @@ export function useWorkspaceFiles(
    * first one's completion clear the second one's signal.
    */
   const refresh = useCallback((directory?: string) => {
+    // Nothing is *read* against a tree that is on its way out: the root such a
+    // read would be authorised by is the previous selection's, and its answer
+    // would land in whatever replaces it. Re-checking the root is a different
+    // thing and is exactly how the changeover window closes, so it still
+    // happens — otherwise the one control a person reaches for when the
+    // Explorer looks stuck is the one that does nothing.
+    if (!paintsSelection()) {
+      rearmRoot.current?.();
+      return;
+    }
     const root = stateRef.current.root;
     const target = directory ?? root?.path;
     if (!root || !target) return;
@@ -748,28 +838,42 @@ export function useWorkspaceFiles(
     void loadDirectory(root, target).finally(() => {
       setState((current) => ({ ...current, requestedReads: Math.max(0, current.requestedReads - 1) }));
     });
-  }, [loadDirectory]);
+  }, [loadDirectory, paintsSelection]);
 
   const loadMore = useCallback((directory: string) => {
+    // Another page of a listing the tree is about to stop showing, charged to
+    // the pane the user has already left.
+    if (!paintsSelection()) return;
     const root = stateRef.current.root;
     const held = stateRef.current.listings.get(directory);
     if (root && held?.nextPageToken && !held.complete) {
       void loadDirectory(root, directory, { pageToken: held.nextPageToken });
     }
-  }, [loadDirectory]);
+  }, [loadDirectory, paintsSelection]);
 
-  // Effects run after paint. Mask the prior pane synchronously on the render
-  // where the logical selection changes so Explorer never flashes or acts on
-  // another pane's old root. A live-scope-only change deliberately retains it.
-  const visible = state.scopeKey === selectionKey ? state : {
-    scopeKey: selectionKey,
-    listings: EMPTY_LISTINGS,
-    expanded: new Set<string>(),
-    loading: new Set<string>(),
-    requestedReads: 0,
-    recoveries: NO_RECOVERIES,
-  };
-  return { ...visible, transfers: downloads.transfers, toggleDirectory, refresh, recordTransfer, loadMore };
+  /**
+   * Stale-painted for continuity, interaction-gated for safety.
+   *
+   * Effects run after paint, so on the render where the logical selection
+   * moves this is the only place that can decide what the Explorer shows for
+   * it. It used to mask the previous selection away to an empty tree, which
+   * kept the Explorer from acting on another pane's root by giving it nothing
+   * to act on — and made every pane focus, terminal tab switch and workspace
+   * switch blank the tree and the Git rail and repaint them a moment later.
+   *
+   * The tree is published as it stands instead, `stale` alongside it, and the
+   * safety it used to buy is bought by the gates rather than by the blank: no
+   * interactive entry point does anything while `stale` holds, and no watch is
+   * armed for a root the selection has not resolved. What survives is
+   * continuity — the rows, the expansion, and in particular `root`, whose flap
+   * to `undefined` was what took `useWorkspaceGit` to IDLE and blanked the
+   * whole Git panel on a switch between two panes of the same repository.
+   *
+   * A live-scope-only change — a transport reconnect — is not a selection
+   * change at all and was never masked; it still is not.
+   */
+  const stale = state.scopeKey !== selectionKey;
+  return { ...state, stale, transfers: downloads.transfers, toggleDirectory, refresh, recordTransfer, loadMore };
 }
 
 /** The connection and root capability a cached listing belongs to. */

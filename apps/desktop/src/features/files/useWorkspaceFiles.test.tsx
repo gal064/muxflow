@@ -181,65 +181,167 @@ describe("useWorkspaceFiles", () => {
     await act(async () => { renderer.unmount(); });
   });
 
-  it("paints a revisited directory from the cache before its watch answers", async () => {
-    // A pane switch is the case the cache exists for: the tree's own listings
-    // are dropped with the scope, the root capability is unchanged, and the
-    // directory the user reopens must not wait out a remote round trip to show
-    // rows the app already has.
+  /**
+   * The pane-switch fixture the three staleness lanes share.
+   *
+   * The second pane's root resolution is deliberately held open, because the
+   * window between "the selection moved" and "the new root landed" is the
+   * whole subject: it is what the Explorer used to spend showing an empty
+   * tree, and what `stale` now names.
+   */
+  function paneSwitchFixture(second: Promise<ActiveRoot>) {
     const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
     const directories = new Map([
       ["/repo", [entry("/repo/src", { directory: true })]],
       ["/repo/src", [entry("/repo/src/main.ts"), entry("/repo/src/util.ts")]],
     ]);
     const acquired: string[] = [];
+    const released: string[] = [];
     const listed: string[] = [];
-    let settle: (() => void) | undefined;
     const client: FileWorkspaceClient = {
-      resolveActiveRoot: vi.fn(async (scope) => ({ ...root, paneId: scope.paneId })),
+      resolveActiveRoot: vi.fn((scope) => scope.paneId === "%1" ? Promise.resolve(root) : second),
       listDirectory: vi.fn(async (_scope, active, directory) => {
         listed.push(directory);
         return listing(active.token, directory, directories.get(directory) ?? []);
       }),
       acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => {
         acquired.push(directory);
-        // The second visit's watch is held open, so anything on screen before
-        // it resolves came from the cache and nowhere else.
-        if (acquired.filter((held) => held === directory).length > 1) {
-          await new Promise<void>((resolve) => { settle = resolve; });
-        }
         return {
           fresh: true,
           snapshot: listing(active.token, directory, directories.get(directory) ?? []),
-          release: () => undefined,
+          release: () => released.push(directory),
         };
       }),
       openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
       subscribe: vi.fn(async () => () => undefined),
     };
+    return { acquired, client, directories, listed, released, root };
+  }
+
+  it("keeps the previous pane's tree painted across a same-root pane switch, and adopts it", async () => {
+    // The dominant Explorer flicker, and the contract that replaced it. The
+    // selection key carries `paneId`, so this transition used to empty the
+    // whole tree and drop `root` to `undefined` — which took the Git rail to
+    // IDLE with it — before repainting the identical tree a round trip later.
+    const second = deferred<ActiveRoot>();
+    const fixture = paneSwitchFixture(second.promise);
     let current: ReturnType<typeof useWorkspaceFiles> | undefined;
-    function Harness({ scope }: { scope: FileWorkspaceScope }) { current = useWorkspaceFiles(client, scope); return null; }
+    const seen: Array<{ rows: number; root: boolean }> = [];
+    function Harness({ scope }: { scope: FileWorkspaceScope }) {
+      current = useWorkspaceFiles(fixture.client, scope);
+      seen.push({ rows: current.listings.size, root: Boolean(current.root) });
+      return null;
+    }
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness scope={BASE_SCOPE} />); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
     await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
     expect(current?.listings.get("/repo/src")?.entries).toHaveLength(2);
+    expect(current?.stale).toBe(false);
 
-    // Switch pane: the scope resets, so the tree holds no listings at all.
+    // The switch itself. Nothing has resolved for the new pane yet.
+    seen.length = 0;
     const other: FileWorkspaceScope = { ...BASE_SCOPE, paneId: "%2" };
     await act(async () => { renderer.update(<Harness scope={other} />); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
-    expect(current?.listings.get("/repo/src")).toBeUndefined();
+    expect(current?.stale, "the changeover window was not published as stale").toBe(true);
+    expect(current?.listings.get("/repo/src")?.entries, "the tree blanked on a pane switch").toHaveLength(2);
+    expect(current?.root, "the root flapped, which is what blanks the Git rail").toEqual(fixture.root);
 
-    await act(async () => { current?.toggleDirectory("/repo/src"); });
-    expect(
-      current?.listings.get("/repo/src")?.entries,
-      "a cached revisit painted nothing before its watch answered",
-    ).toHaveLength(2);
-    expect(current?.loading.has("/repo/src"), "a directory painted from cache is not waiting").toBe(false);
-    expect(listed, "a cached revisit paid for a directory list").toEqual([]);
-    settle?.();
+    // The same worktree under the new pane: the same capability token, and a
+    // `paneId` that is the only thing about it that moved.
+    await act(async () => {
+      second.resolve({ ...fixture.root, paneId: "%2" });
+      await Promise.resolve();
+    });
     await act(async () => { await Promise.resolve(); });
+    expect(current?.stale).toBe(false);
+    expect(current?.root?.paneId).toBe("%2");
+    expect(current?.root?.token).toBe("root");
+    expect(current?.listings.get("/repo/src")?.entries, "the adopted tree was rebuilt from empty").toHaveLength(2);
+    expect(current?.expanded.has("/repo/src")).toBe(true);
+    expect(
+      seen.every((frame) => frame.rows === 2 && frame.root),
+      "the tree or the root emptied for at least one commit during the switch",
+    ).toBe(true);
+    expect(fixture.listed, "the switch paid for a directory list").toEqual([]);
+    // The watches follow the selection rather than the paint: they are given
+    // back when the pane changes and armed again against the adopted root, so
+    // the tree that stayed on screen is live again once the window closes.
+    expect(fixture.released).toEqual(["/repo", "/repo/src"]);
+    expect(fixture.acquired).toEqual(["/repo", "/repo/src", "/repo", "/repo/src"]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("paints the previous tree until a genuinely different root resolves, then swaps to it", async () => {
+    const second = deferred<ActiveRoot>();
+    const fixture = paneSwitchFixture(second.promise);
+    fixture.directories.set("/elsewhere", [entry("/elsewhere/readme.md")]);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness({ scope }: { scope: FileWorkspaceScope }) { current = useWorkspaceFiles(fixture.client, scope); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness scope={BASE_SCOPE} />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.listings.get("/repo")?.entries).toHaveLength(1);
+
+    await act(async () => { renderer.update(<Harness scope={{ ...BASE_SCOPE, paneId: "%2" }} />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.stale).toBe(true);
+    expect(current?.listings.get("/repo")?.entries, "the tree blanked before it knew it had to").toHaveLength(1);
+
+    // A different capability is a different worktree. Everything the previous
+    // one authorised goes with it, and a brief empty tree here is correct.
+    await act(async () => {
+      second.resolve({ token: "elsewhere", paneId: "%2", cwd: "/elsewhere", path: "/elsewhere", gitWorktree: true, revision: "2" });
+      await Promise.resolve();
+    });
+    expect(current?.stale).toBe(false);
+    expect(current?.root?.token).toBe("elsewhere");
+    expect(current?.listings.get("/repo"), "a replaced root kept the previous root's listings").toBeUndefined();
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.listings.get("/elsewhere")?.entries.map((row) => row.name)).toEqual(["readme.md"]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("refuses every interaction while the painted tree is not the selection's own", async () => {
+    // The blank used to be the safety: an Explorer with no rows could not be
+    // asked to act on another pane's root. The rows are on screen now, so the
+    // refusal has to be stated where the interaction enters.
+    const second = deferred<ActiveRoot>();
+    const fixture = paneSwitchFixture(second.promise);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness({ scope }: { scope: FileWorkspaceScope }) { current = useWorkspaceFiles(fixture.client, scope); return null; }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness scope={BASE_SCOPE} />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { renderer.update(<Harness scope={{ ...BASE_SCOPE, paneId: "%2" }} />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.stale).toBe(true);
+    const acquiredBefore = fixture.acquired.length;
+
+    await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
+    await act(async () => { current?.refresh("/repo"); await Promise.resolve(); });
+    await act(async () => { current?.loadMore("/repo"); await Promise.resolve(); });
+    expect(current?.expanded.has("/repo/src"), "a stale expansion changed the tree").toBe(false);
+    expect(fixture.listed, "a stale interaction issued a remote read").toEqual([]);
+    expect(fixture.acquired.length, "a stale expansion armed a watch").toBe(acquiredBefore);
+    expect(current?.requestedReads, "a stale refresh showed the user a wait it never owed them").toBe(0);
+    // Refresh is not inert, though: it re-checks the root, which is the one
+    // thing that ends the window a person pressing it is trying to escape.
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledWith(
+      expect.objectContaining({ paneId: "%2" }),
+      { knownRootToken: "root" },
+    );
+
+    await act(async () => { second.resolve({ ...fixture.root, paneId: "%2" }); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.stale).toBe(false);
+    // And the same interaction, once the window has closed, is answered.
+    await act(async () => { current?.toggleDirectory("/repo/src"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.expanded.has("/repo/src")).toBe(true);
+    expect(current?.listings.get("/repo/src")?.entries).toHaveLength(2);
     await act(async () => { renderer.unmount(); });
   });
 
@@ -742,8 +844,9 @@ describe("useWorkspaceFiles", () => {
    * 4,096 entries is the size at which a list-per-event or a watch rebuild is
    * unmistakable, so the counts here are the evidence that expanding, changing,
    * revisiting, and collapsing cost exactly the round trips they should. The
-   * revisit deliberately crosses a pane switch, which is what drops the tree's
-   * own listings and leaves the cache as the only thing that can paint.
+   * revisit deliberately crosses a pane switch, which is the transition the
+   * whole lane is most sensitive to: it changes the scope key, releases every
+   * watch, and re-arms them against the adopted root.
    */
   it("holds the Phase 14 wide Explorer lane to one watch per directory and no list at all", async () => {
     // The paint spans this feature is budgeted on are published from here, and
@@ -826,8 +929,12 @@ describe("useWorkspaceFiles", () => {
     await act(async () => { current?.toggleDirectory("/repo/wide"); await Promise.resolve(); });
     const collapseReleases = released.filter((directory) => directory === "/repo/wide").length;
 
-    // A pane switch drops every listing the tree holds; the root capability is
-    // unchanged, so the cache is the only thing that can paint the revisit.
+    // A pane switch across the same root capability. The lane's field names
+    // predate the change that made this an *adoption* rather than a cache
+    // paint — the tree is no longer dropped here at all, so the listings the
+    // revisit paints from are its own — and are kept because what they assert
+    // is unchanged and still the point: the revisit shows its rows before any
+    // revalidation of them lands, and pays no list for the privilege.
     await act(async () => { renderer.update(<Harness scope={{ ...BASE_SCOPE, paneId: "%2" }} />); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
     await act(async () => { current?.toggleDirectory("/repo/wide"); });
