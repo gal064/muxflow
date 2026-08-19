@@ -507,6 +507,17 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    height. Everything a pane can expose is the terminal background. */
 .terminal-pane { width: 100%; height: 100%; background: var(--term-bg); }
 .terminal-pane .xterm { height: 100%; background: var(--term-bg); }
+/* xterm parses what it is handed on a later task and draws it on a later frame,
+   so the frame right after `open` is an empty grid with a block cursor at
+   (0,0) — every remount (a window or tab switch remounts every pane) flashed
+   that before the content arrived. Only the `.xterm` child is hidden: the pane
+   and its frame already paint `--term-bg`, so what shows in the gap is the
+   terminal background with no cursor in it, at exactly the same layout.
+   `opacity`, never `visibility: hidden`: xterm's keyboard target is a hidden
+   textarea inside this element, and a `visibility: hidden` ancestor makes it
+   unfocusable — the pane focuses itself on mount, so that would drop whatever
+   the user typed into the gap. */
+.terminal-pane[data-painted="false"] .xterm { opacity: 0; }
 .terminal-pane .xterm .xterm-viewport,
 .terminal-pane .xterm .xterm-screen { background-color: var(--term-bg); }
 .terminal-pane[data-local-selection-active="true"] { box-shadow: inset 0 0 0 1px var(--chrome-dim); }

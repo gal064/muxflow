@@ -27,17 +27,31 @@ vi.mock("./api", async (importOriginal) => ({
 }));
 
 const { FakeRenderer, renderers } = vi.hoisted(() => {
+  type Size = { columns: number; rows: number };
+  // What `measure()` answers from the moment the pane opens the renderer, which
+  // is before a test can reach the instance.
+  const config: { measured?: Size } = {};
   class FakeRenderer {
     writes: string[] = [];
     disposed = false;
     focusCalls = 0;
     restoredSerialized: string | undefined;
+    measured = config.measured;
+    /** Mirrors the real renderer: `setGrid` is the only writer of cols/rows. */
+    grid: Size = { columns: 80, rows: 24 };
+    resizes: Size[] = [];
     #pendingRendered: Array<() => void> = [];
 
     open(): void {}
-    measure(): undefined { return undefined; }
+    measure(): Size | undefined { return this.measured; }
     measurements(): undefined { return undefined; }
-    setGrid(): { kind: "unchanged" } { return { kind: "unchanged" }; }
+    setGrid(size: Size): { kind: "applied"; size: Size } | { kind: "unchanged" } | { kind: "rejected"; reason: string } {
+      if (size.columns < 2 || size.rows < 2) return { kind: "rejected", reason: `${size.columns}x${size.rows} is unusable` };
+      if (this.grid.columns === size.columns && this.grid.rows === size.rows) return { kind: "unchanged" };
+      this.grid = size;
+      this.resizes.push(size);
+      return { kind: "applied", size };
+    }
     onInput(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
     focus(): void { this.focusCalls += 1; }
@@ -71,7 +85,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       for (const rendered of pending) rendered();
     }
   }
-  return { FakeRenderer, renderers: { created: [] as InstanceType<typeof FakeRenderer>[] } };
+  return { FakeRenderer, renderers: { config, created: [] as InstanceType<typeof FakeRenderer>[] } };
 });
 
 vi.mock("./TerminalRenderer", async (importOriginal) => ({
@@ -144,6 +158,30 @@ async function awaitPaint(): Promise<void> {
   });
 }
 
+// The pane hides and reveals its terminal by writing an attribute straight to
+// the DOM, so its host element has to be a real one rather than a stub.
+const paneNodes: HTMLElement[] = [];
+function paneNode(): HTMLElement {
+  const node = paneNodes.at(-1);
+  if (!node) throw new Error("No terminal pane element was mounted");
+  return node;
+}
+
+const resizeCallbacks: Array<() => void> = [];
+
+function paneElement(pane: Pane, hub: FakeHub, clientId: string, appFocused: boolean) {
+  return <TerminalPane
+    appFocused={appFocused}
+    clientId={clientId}
+    pane={pane}
+    hub={hub.asHub()}
+    onInput={() => undefined}
+    onFocus={() => undefined}
+    onMeasurements={() => undefined}
+    onController={() => undefined}
+  />;
+}
+
 async function mountPane(
   pane: Pane,
   hub: FakeHub,
@@ -152,38 +190,47 @@ async function mountPane(
 ): Promise<ReactTestRenderer> {
   let renderer!: ReactTestRenderer;
   await act(async () => {
-    renderer = create(<TerminalPane
-      appFocused={appFocused}
-      clientId={clientId}
-      pane={pane}
-      hub={hub.asHub()}
-      onInput={() => undefined}
-      onFocus={() => undefined}
-      onMeasurements={() => undefined}
-      onController={() => undefined}
-    />, { createNodeMock: () => ({ addEventListener: () => undefined, removeEventListener: () => undefined }) });
+    renderer = create(paneElement(pane, hub, clientId, appFocused), {
+      createNodeMock: (element) => {
+        const node = document.createElement("div");
+        if ((element.props as Record<string, unknown>)["data-terminal-surface"]) paneNodes.push(node);
+        return node;
+      },
+    });
   });
   return renderer;
 }
 
-describe("TerminalPane pane-paint span lifecycle", () => {
-  beforeEach(() => {
-    resetPerfProbe();
-    enablePerfProbe(async () => undefined);
-    terminalStateCache.clear();
-    renderers.created.length = 0;
-    api.setTerminalVisibility.mockClear();
-    api.requestTerminalSeed.mockClear();
-    Object.assign(globalThis, {
-      IS_REACT_ACT_ENVIRONMENT: true,
-      ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
-    });
-  });
-  afterEach(() => {
-    resetPerfProbe();
-    terminalStateCache.clear();
-  });
+/** A fresh tmux topology for an already-mounted pane. */
+async function updatePane(mounted: ReactTestRenderer, pane: Pane, hub: FakeHub): Promise<void> {
+  await act(async () => { mounted.update(paneElement(pane, hub, "client-a", true)); });
+}
 
+beforeEach(() => {
+  resetPerfProbe();
+  enablePerfProbe(async () => undefined);
+  terminalStateCache.clear();
+  renderers.created.length = 0;
+  renderers.config.measured = undefined;
+  paneNodes.length = 0;
+  resizeCallbacks.length = 0;
+  api.setTerminalVisibility.mockClear();
+  api.requestTerminalSeed.mockClear();
+  Object.assign(globalThis, {
+    IS_REACT_ACT_ENVIRONMENT: true,
+    ResizeObserver: class {
+      constructor(callback: () => void) { resizeCallbacks.push(callback); }
+      observe() {} unobserve() {} disconnect() {}
+    },
+  });
+});
+afterEach(() => {
+  resetPerfProbe();
+  terminalStateCache.clear();
+  vi.useRealTimers();
+});
+
+describe("TerminalPane pane-paint span lifecycle", () => {
   it("restores the active pane keyboard target when the app returns to the foreground", async () => {
     const pane = fixturePane("%focus");
     const hub = new FakeHub();
@@ -230,11 +277,52 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     const hub = new FakeHub();
     const renderer = await mountPane(fixturePane("%5"), hub);
     expect(renderers.created[0].restoredSerialized).toBe("warm-screen");
+    // Between `open` and the restored content xterm would paint an empty grid
+    // with a cursor in it. The gate hides the terminal for exactly that gap,
+    // and the restore's rendered callback is what ends it.
+    expect(paneNode().getAttribute("data-painted")).toBe("false");
     await act(async () => { renderers.created[0].flushRendered(); });
+    expect(paneNode().getAttribute("data-painted")).toBe("true");
     await awaitPaint();
 
     expect(perfSummary().map(({ name }) => name)).toContain("window.switch");
     await act(async () => renderer.unmount());
+  });
+
+  it("reveals a pane that seeds empty and waits for a fresh seed", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%await"), hub);
+    expect(paneNode().getAttribute("data-painted")).toBe("false");
+
+    // An empty screen under a diagnostic is this branch's intended visible
+    // state; it produces no rendered callback, so it must reveal itself.
+    await act(async () => {
+      hub.deliver({
+        kind: "paneResource", paneId: "%await", state: "released", requiresSeed: false,
+        recoveryReason: "Renderer state was released", generation: 4, snapshotGeneration: 4,
+        tailThroughGeneration: 4, sequence: 1,
+        serializedSnapshot: ownTerminalBytes(new Uint8Array()),
+        rawTail: ownTerminalBytes(new Uint8Array()),
+      });
+    });
+
+    expect(paneNode().getAttribute("data-painted")).toBe("true");
+    await act(async () => mounted.unmount());
+  });
+
+  it("reveals the terminal on the fallback timer when no content ever arrives", async () => {
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%quiet"), hub);
+    expect(paneNode().getAttribute("data-painted")).toBe("false");
+
+    // Nothing restores, nothing seeds, the host never answers. The safety net
+    // is the only thing that can make this pane visible.
+    act(() => { vi.advanceTimersByTime(300); });
+    expect(paneNode().getAttribute("data-painted")).toBe("true");
+
+    vi.useRealTimers();
+    await act(async () => mounted.unmount());
   });
 
   it("closes a span whose acknowledgement arrives after the paint", async () => {
@@ -288,5 +376,64 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     abandonPanePaintSpansForScope("client-a");
     await awaitPaint();
     expect(perfSummary().map(({ name }) => name)).not.toContain("create.workspace");
+  });
+});
+
+// tmux owns a pane's grid, but its answer to a resize is a debounce plus a
+// round trip away while the pane's box has already moved. These pin the handover
+// in both directions: the box may lead only while tmux has not answered for it,
+// and the moment tmux does, its numbers are what the terminal renders at.
+describe("TerminalPane grid during a resize", () => {
+  it("fits the terminal to its own box before tmux answers, then settles on tmux's grid", async () => {
+    renderers.config.measured = { columns: 80, rows: 24 };
+    const hub = new FakeHub();
+    const pane = fixturePane("%grid");
+    const mounted = await mountPane(pane, hub);
+    const renderer = renderers.created[0];
+    expect(renderer.resizes).toEqual([]);
+
+    // The splitter moved. The box re-lays-out on this frame; tmux hears about
+    // it only after the client-resize debounce and a host round trip.
+    renderer.measured = { columns: 100, rows: 30 };
+    act(() => { resizeCallbacks[0](); });
+    expect(renderer.resizes).toEqual([{ columns: 100, rows: 30 }]);
+
+    // tmux's snapshot lands on the same pixel box, so it agrees: the correcting
+    // application is a no-op resize rather than a second reflow.
+    await updatePane(mounted, { ...pane, width: 100, height: 30 }, hub);
+    expect(renderer.resizes).toEqual([{ columns: 100, rows: 30 }]);
+
+    // And the box is now the one tmux's grid was applied for, so further
+    // observer callbacks re-apply tmux's grid and change nothing.
+    act(() => { resizeCallbacks[0](); });
+    act(() => { resizeCallbacks[0](); });
+    expect(renderer.resizes).toEqual([{ columns: 100, rows: 30 }]);
+    await act(async () => mounted.unmount());
+  });
+
+  it("lets a tmux snapshot that disagrees with the box win, and does not fight back", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    renderers.config.measured = { columns: 80, rows: 24 };
+    const hub = new FakeHub();
+    const pane = fixturePane("%split");
+    const mounted = await mountPane(pane, hub);
+    const renderer = renderers.created[0];
+
+    renderer.measured = { columns: 50, rows: 24 };
+    act(() => { resizeCallbacks[0](); });
+    expect(renderer.resizes.at(-1)).toEqual({ columns: 50, rows: 24 });
+
+    // tmux spends a column on the divider: 49 is what the program in the pane
+    // addressed its cursor against, and it replaces the optimistic fit.
+    await updatePane(mounted, { ...pane, width: 49, height: 24 }, hub);
+    expect(renderer.resizes.at(-1)).toEqual({ columns: 49, rows: 24 });
+
+    // The standing box/tmux divergence must never read as a box change: with
+    // the box unmoved the observer keeps re-applying tmux's 49 forever.
+    act(() => { resizeCallbacks[0](); });
+    act(() => { resizeCallbacks[0](); });
+    expect(renderer.resizes).toEqual([{ columns: 50, rows: 24 }, { columns: 49, rows: 24 }]);
+    await act(async () => mounted.unmount());
+    warn.mockRestore();
   });
 });

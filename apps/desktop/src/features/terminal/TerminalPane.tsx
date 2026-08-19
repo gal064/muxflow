@@ -62,6 +62,43 @@ export function reconcilePaneGrid(
   return `Pane ${pane.id} measured ${measured.columns}x${measured.rows} from its box but tmux reports ${outcome.size.columns}x${outcome.size.rows}; rendering at tmux's grid.`;
 }
 
+/**
+ * Rewraps the terminal to its own box while tmux has not yet answered for it.
+ *
+ * tmux stays authoritative — `reconcilePaneGrid` above is still what decides
+ * the grid — but its answer costs a trailing debounce (`useClientResize`), a
+ * host round trip and a topology rediscovery, and `.pane-frame` clips: for that
+ * whole window a shrinking pane has its text cut off and a growing one shows a
+ * dead band where the old grid ran out. The box itself re-lays-out on the drag
+ * frame, so fitting to it locally is what makes a drag look continuous.
+ *
+ * `gridForBox` is the measurement tmux's current grid was applied for. While
+ * the box still measures that, tmux's numbers *are* the numbers for this box
+ * and are re-applied unchanged, so the routine divergence this file exists for
+ * (a divider column, a rounded percentage) never triggers a local fit — and a
+ * drag that ends back where it started restores tmux's grid rather than keeping
+ * an intermediate one.
+ *
+ * It cannot oscillate with `reconcilePaneGrid`: applying a grid resizes the
+ * terminal inside the box and never the box, so a local fit cannot provoke the
+ * observer callback that produced it, and the caller re-anchors `gridForBox`
+ * only where tmux's grid is applied.
+ */
+export function refitPaneGridToBox(
+  renderer: Pick<TerminalRenderer, "setGrid">,
+  pane: Pane,
+  measured: TerminalSize | undefined,
+  gridForBox: TerminalSize | undefined,
+): string | undefined {
+  if (measured && gridForBox && (measured.columns !== gridForBox.columns || measured.rows !== gridForBox.rows)) {
+    // A box that measures nothing usable is not an argument against tmux's
+    // grid, so a refused fit falls through to it rather than leaving the pane
+    // at whatever it happened to be showing.
+    if (renderer.setGrid(measured).kind !== "rejected") return undefined;
+  }
+  return reconcilePaneGrid(renderer, pane, measured);
+}
+
 function visibleSeedDiagnostic(message: string | undefined): string | undefined {
   // These are expected capability limits on supported tmux versions. Keep the
   // pane-scoped diagnostic in the event stream without permanently covering
@@ -151,6 +188,10 @@ export function TerminalPane({
   const clientIdRef = useRef(clientId);
   const appFocusedRef = useRef(appFocused);
   const rendererEpochRef = useRef<number | undefined>(undefined);
+  // What the box measured when tmux's grid was last applied to it. The anchor
+  // `refitPaneGridToBox` compares against; written only where tmux's grid is
+  // applied, so an optimistic fit can never move it.
+  const gridForBoxRef = useRef<TerminalSize | undefined>(undefined);
   const lastRevealKeyRef = useRef<string | undefined>(undefined);
   const revealStateRef = useRef<PaneRevealState>({ ready: false, hasLocalState: false });
   const deferredOutputRef = useRef(new DeferredTerminalOutputQueue());
@@ -223,11 +264,28 @@ export function TerminalPane({
       hub.markRendered(pane.id, generation, terminalEpoch);
       return true;
     };
+    // xterm defers the parse of whatever it is handed to a timeout and the draw
+    // to a later frame, so the frame right after `open` is a fully visible
+    // empty grid with a block cursor at (0,0) — a pane that is about to show a
+    // screenful of text flashes an empty one first on every remount (a window
+    // or tab switch remounts every pane). `data-painted="false"` keeps the
+    // terminal itself hidden until content lands; the pane's background is
+    // painted by CSS either way, so nothing moves and nothing goes black.
+    const revealTerminal = () => {
+      container.current?.setAttribute("data-painted", "true");
+    };
     const publishInitialPaint = (
       generation: number,
       terminalEpoch: number | undefined,
       establishesEpoch = false,
     ) => {
+      // First, unconditionally, and straight at the DOM. This runs from the
+      // renderer's rendered callback — the same task as the write that queued
+      // the content draw — so the reveal lands on the frame the content does.
+      // `useState` would be batched into a later frame, which is one more frame
+      // of the empty grid, and the probe helpers below are no-ops when the perf
+      // probe is off, so the reveal cannot live inside them either.
+      revealTerminal();
       if (!commitRendered(generation, terminalEpoch, establishesEpoch)) return;
       // The perceived-latency spans (create.*, window.switch, pane.split) end
       // at the frame that shows this pane's content, so they are closed apart
@@ -252,6 +310,10 @@ export function TerminalPane({
     };
     rendererRef.current = renderer;
     const terminalContainer = container.current;
+    // Re-asserted rather than left to the JSX default: this element outlives a
+    // remount that reuses the DOM node, and a node still carrying "true" from
+    // the previous renderer would show the new one's empty first frame.
+    terminalContainer.setAttribute("data-painted", "false");
     renderer.open(terminalContainer);
     const reportGrid = (message: string | undefined) => {
       // Divergence is the norm, not a fault the user can act on, so it goes to
@@ -259,7 +321,9 @@ export function TerminalPane({
       if (message) console.warn(message);
     };
     // Before any content: everything below is parsed against this grid.
-    reportGrid(reconcilePaneGrid(renderer, pane, renderer.measure()));
+    const measuredAtOpen = renderer.measure();
+    reportGrid(reconcilePaneGrid(renderer, pane, measuredAtOpen));
+    gridForBoxRef.current = measuredAtOpen;
     const interceptPaste = (event: ClipboardEvent) => {
       // Native Edit > Paste bypasses the app command and targets xterm's
       // textarea. Own plain text in capture phase so xterm cannot wrap it in a
@@ -342,6 +406,10 @@ export function TerminalPane({
         clearDeferredOutput();
         renderer.seed(ownTerminalBytes(new Uint8Array()));
         setRendererDiagnostic(`${effect.reason}; waiting for a fresh terminal seed…`);
+        // An empty pane under a diagnostic banner is this branch's intended
+        // visible state, and it never reaches `publishInitialPaint`, so it
+        // reveals itself rather than waiting for the fallback timer.
+        revealTerminal();
         if (effect.requestSeed) requestFreshSeed(effect.reason);
       } else if (effect.kind === "restore") {
         const markRecoveryRendered = () => {
@@ -386,7 +454,13 @@ export function TerminalPane({
       if (measurements) measurementsRef.current(measurements);
     };
     const observer = new ResizeObserver(() => {
-      reportGrid(reconcilePaneGrid(renderer, paneRef.current, renderer.measure()));
+      // A drag moves this box every frame while tmux is still a debounce and a
+      // round trip away from hearing about it, so re-applying tmux's grid here
+      // is a no-op that leaves the pane clipped or short for the whole drag.
+      // The refit prefers the box only while the box has moved away from the
+      // measurement tmux's grid was applied for; the topology effect below
+      // hands authority back the moment tmux answers.
+      reportGrid(refitPaneGridToBox(renderer, paneRef.current, renderer.measure(), gridForBoxRef.current));
       // Re-read rather than report once: xterm rounds a cell to whole device
       // pixels, so moving the window between displays of different pixel
       // ratios changes it with no remount.
@@ -412,9 +486,17 @@ export function TerminalPane({
     controllerRef.current(pane.id, controller);
     reportMeasurements();
     if (pane.active) renderer.focus();
+    // The safety net, not the mechanism: content reveals the terminal through
+    // `publishInitialPaint`, and the paths that produce no content at all (a
+    // restore the renderer refused, a host that never answers the seed request)
+    // would otherwise leave this pane's terminal hidden indefinitely. Long
+    // enough that a warm restore always wins the race and reveals on its own
+    // frame, short enough that a stuck pane still shows its cursor.
+    const revealFallback = setTimeout(revealTerminal, 300);
 
     return () => {
       rendererActive = false;
+      clearTimeout(revealFallback);
       initialPaint.abandon();
       lastRevealKeyRef.current = undefined;
       observer.disconnect();
@@ -562,7 +644,13 @@ export function TerminalPane({
     // The measurement is passed so the "tmux has no usable grid" fallback is
     // available here too; without it that case silently leaves the pane on
     // xterm's default 80x24 and says nothing.
-    const report = reconcilePaneGrid(renderer, pane, renderer.measure());
+    const measured = renderer.measure();
+    const report = reconcilePaneGrid(renderer, pane, measured);
+    // tmux has now answered for this box: any fit made optimistically while its
+    // answer was in flight is superseded here, and re-anchoring means the next
+    // box change is judged against this measurement instead of the pre-drag
+    // one. This is the only other place the anchor moves.
+    gridForBoxRef.current = measured;
     if (report) console.warn(report);
   }, [pane.id, pane.width, pane.height]);
 
@@ -578,6 +666,9 @@ export function TerminalPane({
       ref={container}
       aria-label={`Terminal pane ${pane.id}, ${pane.currentCommand}`}
       data-pane-id={pane.id}
+      // Hides the terminal, not the pane, until it has content to show. The
+      // mount effect flips it, and re-asserts this value on the way in.
+      data-painted="false"
       data-terminal-surface="true"
       data-local-selection-modifier="Shift"
       onMouseDownCapture={(event) => {
