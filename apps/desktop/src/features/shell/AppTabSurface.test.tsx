@@ -232,7 +232,7 @@ describe("AppTabSurface", () => {
   });
 
   it("never restarts a read that has not landed yet, however often the directory is rescanned", async () => {
-    // The large-file loop, in miniature (tests/phase15/large-file-open-bug.md).
+    // The large-file loop, in miniature (tests/performance/benchmark/large-file-open-bug.md).
     // A 5.2 MB file's read outlives the interval between directory snapshots,
     // so it is still in flight when the next one arrives. Nothing has been
     // shown yet, so `shownGeneration()` is undefined and every rescan looked

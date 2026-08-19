@@ -314,7 +314,7 @@ export function TerminalPane({
       // from the startup ticket below: that ticket publishes once per mount,
       // which left any span whose content arrived as a later seed or restore
       // on the same instance permanently open — the abandonment Phase 15
-      // measured (tests/phase15/comparability.md). The guard is only "these
+      // measured (tests/performance/benchmark/comparability.md). The guard is only "these
       // pixels are still this pane's": a superseded or torn-down instance
       // never painted what it parsed, and its successor reports instead.
       afterNextPaint(() => {

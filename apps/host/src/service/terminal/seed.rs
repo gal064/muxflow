@@ -56,7 +56,7 @@ pub(super) fn capture_metadata(
 /// an agent TUI's visible frame into the hidden normal buffer and the stale
 /// shell scrollback into the buffer the user sees — every seed of a
 /// claude/codex pane came up blank or stale until the program repainted
-/// (P12-U003, found by `tests/phase12/run-vt-parity.sh`).
+/// (P12-U003, found by `tests/performance/runtime/run-vt-parity.sh`).
 pub(super) fn build_seed_with_metadata(
     visible_lines: Vec<Vec<u8>>,
     saved_normal_lines: Vec<Vec<u8>>,

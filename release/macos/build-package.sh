@@ -8,11 +8,12 @@ cd "$repo"
 [[ $(uname -m) == arm64 ]] || { echo "this internal package is Apple Silicon only" >&2; exit 69; }
 
 helpers="$repo/apps/desktop/src-tauri/binaries/linux-helpers"
-mkdir -p "$helpers" "$repo/tmp/work/phase10"
+work_dir="$repo/tmp/work/macos-package"
+mkdir -p "$helpers" "$work_dir"
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-package_targets="$repo/tmp/work/phase10/.package-targets-$run_id"
+package_targets="$work_dir/.package-targets-$run_id"
 cleanup() {
-  [[ "$package_targets" == "$repo/tmp/work/phase10/.package-targets-$run_id" ]] || return
+  [[ "$package_targets" == "$work_dir/.package-targets-$run_id" ]] || return
   # Finder can create .DS_Store concurrently in browsed directories. The
   # hidden per-run parent avoids that normal path and bounded retries keep an
   # exact late write from making an otherwise successful package build fail.
@@ -60,7 +61,8 @@ app="$repo/target/release/bundle/macos/tmux Agent IDE.app"
 /usr/libexec/PlistBuddy -c 'Delete :LSRequiresCarbon' "$app/Contents/Info.plist" 2>/dev/null || true
 codesign --force --sign - "$app"
 "$repo/release/macos/verify-package.sh" "$app"
-dmg="$repo/target/release/bundle/dmg/tmux Agent IDE_0.1.0_aarch64.dmg"
+version=$(node -e 'process.stdout.write(require("./apps/desktop/src-tauri/tauri.conf.json").version)')
+dmg="$repo/target/release/bundle/dmg/tmux Agent IDE_${version}_aarch64.dmg"
 mkdir -p "$(dirname "$dmg")"
 hdiutil create -volname 'tmux Agent IDE' -srcfolder "$app" -ov -format UDZO "$dmg"
 

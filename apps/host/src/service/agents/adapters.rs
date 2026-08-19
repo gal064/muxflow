@@ -416,7 +416,7 @@ mod tests {
         let blocked = codex
             .parse_hook(
                 &serde_json::from_slice(include_bytes!(
-                    "../../../../../tests/phase6/fixtures/codex-permission.json"
+                    "../../../../../tests/integration/agents/fixtures/codex-permission.json"
                 ))
                 .unwrap(),
             )
@@ -426,7 +426,7 @@ mod tests {
         let idle = claude
             .parse_hook(
                 &serde_json::from_slice(include_bytes!(
-                    "../../../../../tests/phase6/fixtures/claude-stop.json"
+                    "../../../../../tests/integration/agents/fixtures/claude-stop.json"
                 ))
                 .unwrap(),
             )

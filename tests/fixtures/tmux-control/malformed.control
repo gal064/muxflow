@@ -1,0 +1,4 @@
+%output not-a-pane invalid
+%output %1 malformed\xescape
+%begin missing-command-tag
+partial-disconnect-boundary

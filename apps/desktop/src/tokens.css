@@ -14,7 +14,7 @@
  *    /Applications/Ghostty.app/Contents/Resources/ghostty/themes on this
  *    machine, ANSI 0-15 included.
  *  - chrome surfaces + accent + destructive: derived from that palette. Phase 11
- *    took them from plan/phases-11-12.md's cmux table instead — a near-black
+ *    took them from docs/history/plan/phases-11-12.md's cmux table instead — a near-black
  *    `#101114` ramp under a `#282c34` terminal — which put a hard seam down every
  *    edge where chrome met a pane. The chrome now starts *at* the terminal
  *    background and steps lighter, and the accent and the destructive colour are

@@ -588,8 +588,8 @@ export class XtermRenderer implements TerminalRenderer {
    * not on this multiplier. A re-application that changes the line height
    * without changing that box — a late measurement, a display change — leaves
    * tmux sized from the previous cell until the next resize. Recorded in
-   * `tests/phase12/evidence/phase12-11/review-round-3-deferred.md` rather than
-   * fixed here: the fix belongs in the observer, which is the protected resize
+   * `docs/history/qa/review-round-3-deferred.md` rather than fixed here: the
+   * fix belongs in the observer, which is the protected resize
    * path. (A display change now re-applies this; see
    * `#watchDevicePixelRatio`.)
    *
