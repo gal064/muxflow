@@ -5,6 +5,7 @@ import {
   closeAppTab,
   combineWorkspaceTabs,
   discardServerAppState,
+  mountedAppTabIds,
   mountedTerminalPanes,
   openFileTab,
   openGitDiffTab,
@@ -284,6 +285,34 @@ describe("application shell model", () => {
     expect(mountedTerminalPanes(panes, "@50", true).map((pane) => pane.id)).toEqual(["%4"]);
     // A window with no identity is the only thing that mounts nothing.
     expect(mountedTerminalPanes(panes, undefined, false)).toEqual([]);
+  });
+
+  it("keeps the last few selected document tabs mounted, most recent first", () => {
+    // Selection promotes, and a re-selection is idempotent — this runs during
+    // render, so the second call of a double render must not reorder anything.
+    expect(mountedAppTabIds([], "a", 4)).toEqual(["a"]);
+    expect(mountedAppTabIds(["a"], "b", 4)).toEqual(["b", "a"]);
+    expect(mountedAppTabIds(["b", "a"], "a", 4)).toEqual(["a", "b"]);
+    expect(mountedAppTabIds(["a", "b"], "a", 4)).toEqual(["a", "b"]);
+
+    // The cap drops the least recently selected, never the selected one.
+    expect(mountedAppTabIds(["d", "c", "b", "a"], "e", 4)).toEqual(["e", "d", "c", "b"]);
+    expect(mountedAppTabIds(["b", "a"], "c", 1)).toEqual(["c"]);
+    // A nonsensical limit still cannot unmount the tab being looked at.
+    expect(mountedAppTabIds(["b", "a"], "c", 0)).toEqual(["c"]);
+
+    // A terminal tab is selected: the documents already mounted stay mounted,
+    // which is what makes going back to one a repaint.
+    expect(mountedAppTabIds(["b", "a"], undefined, 4)).toEqual(["b", "a"]);
+
+    // Ids the caller has already filtered — a closed or evicted tab — simply
+    // are not there; the rule never re-adds them.
+    expect(mountedAppTabIds(["b", "a"].filter((id) => id !== "b"), undefined, 4)).toEqual(["a"]);
+
+    // The input is never mutated: it is the previous render's list.
+    const previous = ["a", "b"];
+    mountedAppTabIds(previous, "c", 2);
+    expect(previous).toEqual(["a", "b"]);
   });
 
   it("surfaces a terminal only for a real authoritative focus transition", () => {

@@ -280,6 +280,36 @@ export function selectAppTab(
   return { ...state, workspaceUi };
 }
 
+/**
+ * The document tabs that stay mounted, most recently selected first.
+ *
+ * The shell keeps the last few selected file and diff surfaces in the tree so
+ * that returning to one is a repaint rather than a rebuild — no second remote
+ * read, no second Monaco. This is only the bookkeeping: which ids are entitled
+ * to a mounted surface, in selection order.
+ *
+ * Two rules and nothing else. The selected tab is always retained and always
+ * first, so the tab a person is looking at can never be the one evicted; and
+ * the list is cut to `limit`, which drops the least recently selected. Ids that
+ * no longer name a live tab are the caller's to filter out *before* calling —
+ * a closed tab must not occupy a slot, and only the caller knows the tab list.
+ *
+ * Idempotent by construction: calling it again with the same selection returns
+ * the same order, which is what lets it run during render.
+ */
+export function mountedAppTabIds(
+  previous: readonly string[],
+  selectedId: string | undefined,
+  limit: number,
+): string[] {
+  const promoted = selectedId
+    ? [selectedId, ...previous.filter((id) => id !== selectedId)]
+    : [...previous];
+  // At least one, whatever the limit says: a limit that could evict the
+  // selected tab would unmount the surface being looked at.
+  return promoted.slice(0, Math.max(1, limit));
+}
+
 function fileTabTitle(resource: string): string {
   return resource.split("/").filter(Boolean).at(-1) ?? resource;
 }
