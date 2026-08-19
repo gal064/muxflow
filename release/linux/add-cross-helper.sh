@@ -7,7 +7,7 @@ repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 source_date_epoch=${SOURCE_DATE_EPOCH:-1704067200}
 release/linux/verify-package.sh "$archive" >/dev/null
 release/linux/verify-package.sh "$other_archive" >/dev/null
-work=$(mktemp -d "$repo_root/tmp/phase8-cross-helper.XXXXXX")
+work=$(mktemp -d "$repo_root/tmp/linux-cross-helper.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/target" "$work/other"
 tar -xzf "$archive" -C "$work/target"

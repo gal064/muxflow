@@ -539,7 +539,7 @@ pub(crate) enum Prewarm {
 /// fork and a ClientHello round trip — before the first byte of the file moved.
 /// `leaseReuse` was false on every measured first open, at 245–325 ms, and it
 /// grows with RTT because the handshake is multi-round-trip
-/// (tests/phase15/decomposition.md). Doing it once at connect moves that cost
+/// (tests/performance/benchmark/decomposition.md). Doing it once at connect moves that cost
 /// off the click and onto a moment when nobody is waiting.
 ///
 /// This is the same work an ordinary lease does, in the same order, and it

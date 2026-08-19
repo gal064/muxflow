@@ -38,6 +38,7 @@ pnpm-debug.log*
 
 # Temporary files and directories (at any depth)
 **/tmp/
+tests/**/evidence/
 *.tmp
 *.temp
 

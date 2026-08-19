@@ -1,0 +1,758 @@
+diff --git a/apps/host/src/service.rs b/apps/host/src/service.rs
+index 79b36b3..607baea 100644
+--- a/apps/host/src/service.rs
++++ b/apps/host/src/service.rs
+@@ -46,6 +46,36 @@ use events::{
+ pub(crate) const EVENT_QUEUE: usize = 128;
+ pub(crate) const TERMINAL_INPUT_QUEUE: usize = 256;
+ 
++// SPIKE (ADE_SPIKE_TRACE=1): stderr phase timers for the tmux-action path.
++pub(crate) fn spike_trace_enabled() -> bool {
++    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var("ADE_SPIKE_TRACE").as_deref() == Ok("1"))
++}
++
++pub(crate) fn spike_trace(label: &str, started: std::time::Instant) {
++    if !spike_trace_enabled() {
++        return;
++    }
++    let line = format!(
++        "ADE_SPIKE_TRACE {label} {:.3}\n",
++        started.elapsed().as_secs_f64() * 1000.0
++    );
++    // The daemon runs with stderr closed, so route the trace to a file.
++    match std::env::var("ADE_SPIKE_TRACE_FILE") {
++        Ok(path) => {
++            use std::io::Write as _;
++            if let Ok(mut file) = std::fs::OpenOptions::new()
++                .create(true)
++                .append(true)
++                .open(path)
++            {
++                let _ = file.write_all(line.as_bytes());
++            }
++        }
++        Err(_) => eprint!("{line}"),
++    }
++}
++
+ pub async fn serve_with_shutdown(
+     mut stream: UnixStream,
+     shutdown: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+@@ -364,8 +394,11 @@ fn reconcile_terminal_clients_locked(
+     event_sender: &mpsc::Sender<SequencerControl>,
+     overflowed: &Arc<AtomicBool>,
+ ) {
++    let spike_reconcile_started = std::time::Instant::now();
+     terminal.reconcile(snapshot);
++    spike_trace("reconcile.stale_client_sweep", spike_reconcile_started);
+     for session in &snapshot.sessions {
++        let spike_attach_started = std::time::Instant::now();
+         let pane_ids: Vec<_> = snapshot
+             .panes
+             .iter()
+@@ -393,6 +426,7 @@ fn reconcile_terminal_clients_locked(
+                 },
+             );
+         }
++        spike_trace("reconcile.attach_one_session", spike_attach_started);
+     }
+ }
+ 
+diff --git a/apps/host/src/service/requests.rs b/apps/host/src/service/requests.rs
+index aabb739..fe9e619 100644
+--- a/apps/host/src/service/requests.rs
++++ b/apps/host/src/service/requests.rs
+@@ -18,7 +18,7 @@ use super::{
+     EVENT_QUEUE, SequencerControl, TerminalClients, broadcast_control_event, emit_event,
+     lock_topology_generation, reconcile_internal_tmux_change, reconcile_terminal_clients,
+     response_error, response_ok, response_snapshot, same_action_topology, send_response,
+-    send_snapshot_response, snapshot_from_identity, testing_enabled, tmux_actions,
++    send_snapshot_response, snapshot_from_identity, spike_trace, testing_enabled, tmux_actions,
+ };
+ 
+ mod active_root_dispatch;
+diff --git a/apps/host/src/service/requests/tmux_action_dispatch.rs b/apps/host/src/service/requests/tmux_action_dispatch.rs
+index ecc9559..4b9595c 100644
+--- a/apps/host/src/service/requests/tmux_action_dispatch.rs
++++ b/apps/host/src/service/requests/tmux_action_dispatch.rs
+@@ -34,8 +34,13 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
+                 pending.lock().unwrap().remove(&request_id);
+                 return;
+             };
++            // SPIKE (ADE_SPIKE_TRACE=1) phase timers.
++            let spike_request_started = std::time::Instant::now();
++            let mut spike_phase = std::time::Instant::now();
+             let (_topology_guard, known_generation) =
+                 lock_topology_generation(topology_lock, generation).await;
++            spike_trace("dispatch.topology_lock", spike_phase);
++            spike_phase = std::time::Instant::now();
+             let cached_baseline = topology_baseline.lock().unwrap().clone();
+             // Resolving the baseline has to know the action kind: creating the
+             // first session is allowed to run with no tmux server, and every
+@@ -44,6 +49,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
+             let fresh =
+                 tokio::task::spawn_blocking(move || tmux_actions::discover_for_action(action_kind))
+                     .await;
++            spike_trace("dispatch.discover_for_action", spike_phase);
++            spike_phase = std::time::Instant::now();
+             let (fresh_snapshot, fresh_identity) = match fresh {
+                 Ok(Ok(value)) => value,
+                 Ok(Err(error)) => {
+@@ -67,6 +74,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
+                     return;
+                 }
+             };
++            spike_trace("dispatch.baseline_clone_and_match_start", spike_phase);
++            spike_phase = std::time::Instant::now();
+             let same_identity = cached_baseline
+                 .as_ref()
+                 .is_some_and(|(_, identity)| identity.as_str() == fresh_identity);
+@@ -101,7 +110,11 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
+                 pending.lock().unwrap().remove(&request_id);
+                 return;
+             }
++            spike_trace("dispatch.same_action_topology_compare", spike_phase);
++            spike_phase = std::time::Instant::now();
+             let flush_result = { terminal.lock().unwrap().flush_input() };
++            spike_trace("dispatch.flush_input", spike_phase);
++            spike_phase = std::time::Instant::now();
+             if let Err(error) = flush_result {
+                 send_response(
+                     control_tx,
+@@ -116,18 +129,26 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
+                 tmux_actions::execute(action, known_generation, fresh_snapshot, fresh_identity)
+             })
+             .await;
++            spike_trace("dispatch.tmux_actions_execute", spike_phase);
++            spike_phase = std::time::Instant::now();
+             match result {
+                 Ok(Ok(mut outcome)) => {
+                     let next_generation = generation.fetch_add(1, Ordering::AcqRel) + 1;
+                     outcome.result.topology_generation = next_generation;
+                     *topology_baseline.lock().unwrap() =
+                         Some((outcome.snapshot.clone(), outcome.server_identity.clone()));
++                    spike_trace("dispatch.baseline_store", spike_phase);
++                    spike_phase = std::time::Instant::now();
+                     reconcile_terminal_clients(terminal, &outcome.snapshot, event_tx, overflowed);
++                    spike_trace("dispatch.reconcile_terminal_clients", spike_phase);
++                    spike_phase = std::time::Instant::now();
+                     let snapshot = snapshot_from_identity(
+                         outcome.snapshot,
+                         next_generation,
+                         outcome.server_identity,
+                     );
++                    spike_trace("dispatch.snapshot_from_identity", spike_phase);
++                    spike_phase = std::time::Instant::now();
+                     let _ = event_tx
+                         .send(SequencerControl::OrderedEvent(v1::HostEvent {
+                             kind: v1::EventKind::TopologySnapshot.into(),
+@@ -136,6 +157,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
+                             ..Default::default()
+                         }))
+                         .await;
++                    spike_trace("dispatch.topology_event_send", spike_phase);
++                    spike_trace("dispatch.TOTAL", spike_request_started);
+                     let selection_error = (action_kind == v1::TmuxActionKind::SelectSession)
+                         .then(|| {
+                             terminal
+diff --git a/apps/host/src/service/snapshot.rs b/apps/host/src/service/snapshot.rs
+index 87f0d6b..d2a2ea8 100644
+--- a/apps/host/src/service/snapshot.rs
++++ b/apps/host/src/service/snapshot.rs
+@@ -76,7 +76,100 @@ pub(super) fn snapshot_from_identity(
+     }
+ }
+ 
++// ---------------------------------------------------------------------------
++// SPIKE (ADE_SPIKE_BATCH_DISCOVERY=1): `discover_consistent` costs five tmux
++// forks (identity, list-sessions, list-windows, list-panes, identity again).
++// On macOS one tmux client fork costs ~6 ms, so discovery alone is ~30 ms and
++// every tmux action pays it twice or three times. tmux accepts several commands
++// in one client invocation, so the same data can be fetched with a single fork.
++// The before/after identity race check becomes unnecessary: one client
++// invocation is bound to one server for its whole lifetime.
++// ---------------------------------------------------------------------------
++const SPIKE_SESSION_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{session_name}__ADE_TMUX_FIELD_9C71__#{session_windows}__ADE_TMUX_FIELD_9C71__#{session_attached}";
++const SPIKE_WINDOW_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{window_index}__ADE_TMUX_FIELD_9C71__#{window_name}__ADE_TMUX_FIELD_9C71__#{window_active}__ADE_TMUX_FIELD_9C71__#{window_layout}__ADE_TMUX_FIELD_9C71__#{window_zoomed_flag}";
++const SPIKE_PANE_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}";
++
++pub(super) fn spike_batch_discovery_enabled() -> bool {
++    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var("ADE_SPIKE_BATCH_DISCOVERY").as_deref() == Ok("1"))
++}
++
++fn discover_consistent_batched() -> anyhow::Result<(TmuxSnapshot, String)> {
++    let mut command = tmux_command();
++    command.args([
++        "display-message",
++        "-p",
++        "__ADE_ID__#{socket_path}",
++        ";",
++        "list-sessions",
++        "-F",
++        &format!("__ADE_S__{SPIKE_SESSION_FORMAT}"),
++        ";",
++        "list-windows",
++        "-a",
++        "-F",
++        &format!("__ADE_W__{SPIKE_WINDOW_FORMAT}"),
++        ";",
++        "list-panes",
++        "-a",
++        "-F",
++        &format!("__ADE_P__{SPIKE_PANE_FORMAT}"),
++    ]);
++    let output = command.output().context("batched tmux discovery")?;
++    if !output.status.success() {
++        bail!("tmux server is unavailable");
++    }
++    let text = String::from_utf8_lossy(&output.stdout).into_owned();
++    let mut identity_raw = None;
++    let (mut sessions, mut windows, mut panes) = (Vec::new(), Vec::new(), Vec::new());
++    for line in text.lines() {
++        if let Some(rest) = line.strip_prefix("__ADE_ID__") {
++            identity_raw = Some(rest.to_owned());
++        } else if let Some(rest) = line.strip_prefix("__ADE_S__") {
++            sessions.push(rest.to_owned());
++        } else if let Some(rest) = line.strip_prefix("__ADE_W__") {
++            windows.push(rest.to_owned());
++        } else if let Some(rest) = line.strip_prefix("__ADE_P__") {
++            panes.push(rest.to_owned());
++        }
++    }
++    let identity_raw = identity_raw.context("batched discovery lost the server identity")?;
++    let identity = socket_server_identity(&tmux_socket_path(identity_raw.trim_end()))
++        .unwrap_or_else(|_| "tmux:none".into());
++    if identity == "tmux:none" {
++        bail!("tmux server is unavailable");
++    }
++    // Replay the already-fetched lines through the shared parser so record
++    // parsing stays identical to the unbatched path.
++    let mut value = tmux_control::discover_with(|args| {
++        let bucket = match args.first().map(String::as_str) {
++            Some("list-sessions") => &sessions,
++            Some("list-windows") => &windows,
++            _ => &panes,
++        };
++        let mut stdout = bucket.join("\n").into_bytes();
++        if !stdout.is_empty() {
++            stdout.push(b'\n');
++        }
++        Ok(std::process::Output {
++            status: batched_success_status(),
++            stdout,
++            stderr: Vec::new(),
++        })
++    })?;
++    overlay_session_order(&mut value, &identity)?;
++    Ok((value, identity))
++}
++
++fn batched_success_status() -> std::process::ExitStatus {
++    use std::os::unix::process::ExitStatusExt as _;
++    std::process::ExitStatus::from_raw(0)
++}
++
+ pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
++    if spike_batch_discovery_enabled() {
++        return discover_consistent_batched();
++    }
+     let before = server_identity();
+     if before == "tmux:none" {
+         bail!("tmux server is unavailable");
+diff --git a/apps/host/src/service/terminal.rs b/apps/host/src/service/terminal.rs
+index fc533d7..513decf 100644
+--- a/apps/host/src/service/terminal.rs
++++ b/apps/host/src/service/terminal.rs
+@@ -110,9 +110,10 @@ impl TerminalAttachment {
+ 
+         let stopped = Arc::new(AtomicBool::new(false));
+         let (input_tx, input_rx) = std_mpsc::sync_channel(TERMINAL_INPUT_QUEUE);
++        let input_stdin = Arc::clone(&stdin);
+         std::thread::Builder::new()
+             .name(format!("host-tmux-input-{session_id}"))
+-            .spawn(move || run_input_dispatch(input_rx))?;
++            .spawn(move || run_input_dispatch(input_rx, input_stdin))?;
+         let (stream_tx, stream_rx) = std_mpsc::channel();
+         let reader_stopped = Arc::clone(&stopped);
+         let reader_stop_signal = Arc::clone(&stopped);
+diff --git a/apps/host/src/service/terminal/input.rs b/apps/host/src/service/terminal/input.rs
+index 71f980b..51eed5b 100644
+--- a/apps/host/src/service/terminal/input.rs
++++ b/apps/host/src/service/terminal/input.rs
+@@ -1,7 +1,7 @@
+ use std::{
+     io::Write,
+-    process::Stdio,
+-    sync::{OnceLock, mpsc},
++    process::{ChildStdin, Stdio},
++    sync::{Arc, Mutex, OnceLock, mpsc},
+ };
+ 
+ use tmux_control::HOST_INPUT_COALESCE_BYTES;
+@@ -10,6 +10,54 @@ use uuid::Uuid;
+ use super::super::snapshot::tmux_command;
+ use super::validate_tmux_id;
+ 
++// ---------------------------------------------------------------------------
++// SPIKE (ADE_SPIKE_INBAND_INPUT=1): write `send-keys -H` in-band through the
++// already-open tmux -C control client instead of forking three tmux processes
++// per input request. Throwaway experiment code; not production shaped.
++// ---------------------------------------------------------------------------
++
++/// Largest payload the in-band path accepts. Bigger requests keep the atomic
++/// load-buffer/paste-buffer commit path.
++pub(super) const SPIKE_INBAND_MAX_BYTES: usize = 1024;
++
++pub(super) fn spike_inband_enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var("ADE_SPIKE_INBAND_INPUT").as_deref() == Ok("1"))
++}
++
++pub(super) fn spike_trace_enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var("ADE_SPIKE_TRACE").as_deref() == Ok("1"))
++}
++
++fn send_input_inband(
++    stdin: &Arc<Mutex<ChildStdin>>,
++    pane_id: &str,
++    data: &[u8],
++) -> Result<(), String> {
++    validate_tmux_id(pane_id, '%').map_err(|error| error.to_string())?;
++    // `send-keys -H` takes one hex literal per byte, so the whole request is a
++    // single tmux command executed atomically in receive order.
++    let mut line = String::with_capacity(16 + data.len() * 3);
++    line.push_str("send-keys -H -t ");
++    line.push_str(pane_id);
++    for byte in data {
++        line.push(' ');
++        line.push_str(&format!("{byte:02x}"));
++    }
++    line.push('\n');
++    let mut writer = stdin
++        .lock()
++        .map_err(|_| "tmux control stdin is poisoned".to_owned())?;
++    writer
++        .write_all(line.as_bytes())
++        .map_err(|error| format!("in-band tmux input write failed: {error}"))?;
++    writer
++        .flush()
++        .map_err(|error| format!("in-band tmux input flush failed: {error}"))?;
++    Ok(())
++}
++
+ pub(super) enum InputDispatch {
+     Bytes {
+         pane_id: String,
+@@ -20,8 +68,21 @@ pub(super) enum InputDispatch {
+     Stop,
+ }
+ 
+-pub(super) fn run_input_dispatch(receiver: mpsc::Receiver<InputDispatch>) {
+-    run_input_dispatch_with(receiver, send_input_batch)
++pub(super) fn run_input_dispatch(
++    receiver: mpsc::Receiver<InputDispatch>,
++    control_stdin: Arc<Mutex<ChildStdin>>,
++) {
++    if spike_inband_enabled() {
++        run_input_dispatch_with(receiver, move |pane_id, data| {
++            if data.len() <= SPIKE_INBAND_MAX_BYTES {
++                send_input_inband(&control_stdin, pane_id, data)
++            } else {
++                send_input_batch(pane_id, data)
++            }
++        })
++    } else {
++        run_input_dispatch_with(receiver, send_input_batch)
++    }
+ }
+ 
+ fn run_input_dispatch_with(
+diff --git a/apps/host/src/service/terminal/stream.rs b/apps/host/src/service/terminal/stream.rs
+index 6b2aecb..df4af22 100644
+--- a/apps/host/src/service/terminal/stream.rs
++++ b/apps/host/src/service/terminal/stream.rs
+@@ -40,6 +40,13 @@ pub(super) enum StreamControl {
+     },
+ }
+ 
++const SPIKE_COALESCE_MAX_BYTES: usize = 32 * 1024;
++
++fn spike_coalesce_enabled() -> bool {
++    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var("ADE_SPIKE_COALESCE_OUTPUT").as_deref() == Ok("1"))
++}
++
+ pub(super) fn read_control_stream(context: ControlStreamReader) {
+     let ControlStreamReader {
+         stdout,
+@@ -64,25 +71,67 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
+                     state.apply_control(control);
+                 }
+                 parser.push(&buffer[..length]);
++                // SPIKE (ADE_SPIKE_COALESCE_OUTPUT=1): merge consecutive
++                // same-pane %output records that arrived in one read() into one
++                // event frame. The coalescing window is the read chunk itself,
++                // so no timer is needed and no latency is added.
++                let mut pending: Option<(String, Vec<u8>)> = None;
+                 while let Some(record) = parser.next_record() {
++                    let mut runtime = || StreamRuntime {
++                        stdin: &stdin,
++                        sender: &event_tx,
++                        overflowed: &overflowed,
++                        resources: &resources,
++                        terminal_generation: &terminal_generation,
++                        stopped: &stopped,
++                    };
+                     match record {
+-                        Ok(record) => state.handle(
+-                            record,
+-                            StreamRuntime {
+-                                stdin: &stdin,
+-                                sender: &event_tx,
+-                                overflowed: &overflowed,
+-                                resources: &resources,
+-                                terminal_generation: &terminal_generation,
+-                                stopped: &stopped,
+-                            },
+-                        ),
++                        Ok(ControlRecord::Output { pane_id, data }) if spike_coalesce_enabled() => {
++                            match &mut pending {
++                                Some((held_pane, held_data))
++                                    if *held_pane == pane_id
++                                        && held_data.len() + data.len()
++                                            <= SPIKE_COALESCE_MAX_BYTES =>
++                                {
++                                    held_data.extend_from_slice(&data);
++                                }
++                                _ => {
++                                    if let Some((pane_id, data)) = pending.take() {
++                                        state
++                                            .handle(ControlRecord::Output { pane_id, data }, runtime());
++                                    }
++                                    pending = Some((pane_id, data));
++                                }
++                            }
++                        }
++                        Ok(record) => {
++                            if let Some((pane_id, data)) = pending.take() {
++                                state.handle(ControlRecord::Output { pane_id, data }, runtime());
++                            }
++                            state.handle(record, runtime())
++                        }
+                         Err(error) => {
++                            if let Some((pane_id, data)) = pending.take() {
++                                state.handle(ControlRecord::Output { pane_id, data }, runtime());
++                            }
+                             emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
+                             state.resnapshot_all(&stdin);
+                         }
+                     }
+                 }
++                if let Some((pane_id, data)) = pending.take() {
++                    state.handle(
++                        ControlRecord::Output { pane_id, data },
++                        StreamRuntime {
++                            stdin: &stdin,
++                            sender: &event_tx,
++                            overflowed: &overflowed,
++                            resources: &resources,
++                            terminal_generation: &terminal_generation,
++                            stopped: &stopped,
++                        },
++                    );
++                }
+             }
+             Err(_) => break,
+         }
+diff --git a/apps/host/src/service/tmux_actions.rs b/apps/host/src/service/tmux_actions.rs
+index ec977b9..2a9e084 100644
+--- a/apps/host/src/service/tmux_actions.rs
++++ b/apps/host/src/service/tmux_actions.rs
+@@ -19,16 +19,36 @@ pub(super) fn execute(
+     expected_snapshot: tmux_control::TmuxSnapshot,
+     expected_identity: String,
+ ) -> anyhow::Result<ActionOutcome> {
++    // SPIKE (ADE_SPIKE_TRACE=1) phase timers.
++    use super::spike_trace;
++    let mut spike_phase = std::time::Instant::now();
+     let kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
+-    let bootstrapping = bootstraps_server(kind, &server_identity());
++    // SPIKE (ADE_SPIKE_SKIP_REDUNDANT_DISCOVERY=1): the dispatcher already ran
++    // `discover_for_action` under the same topology lock immediately before
++    // this call and proved the result equals the cached baseline. Re-running a
++    // full discovery here (plus an extra `server_identity` fork) repeats ~6
++    // tmux forks for no new information.
++    let spike_skip_redundant =
++        std::env::var("ADE_SPIKE_SKIP_REDUNDANT_DISCOVERY").as_deref() == Ok("1");
++    let bootstrapping = if spike_skip_redundant {
++        bootstraps_server(kind, &expected_identity)
++    } else {
++        bootstraps_server(kind, &server_identity())
++    };
++    spike_trace("execute.server_identity_probe", spike_phase);
++    spike_phase = std::time::Instant::now();
+     let (mut before, identity) = if bootstrapping {
+         (
+             tmux_control::TmuxSnapshot::default(),
+             "tmux:none".to_owned(),
+         )
++    } else if spike_skip_redundant {
++        (expected_snapshot.clone(), expected_identity.clone())
+     } else {
+         discover_consistent()?
+     };
++    spike_trace("execute.discover_before_redundant", spike_phase);
++    spike_phase = std::time::Instant::now();
+     if identity != expected_identity || !super::same_action_topology(&before, &expected_snapshot) {
+         bail!("stale topology: external tmux structural mutation occurred before action execution");
+     }
+@@ -44,6 +64,8 @@ pub(super) fn execute(
+     let postcondition_action = action.clone();
+     let postcondition_before = before.clone();
+ 
++    spike_trace("execute.stale_checks_and_clone", spike_phase);
++    spike_phase = std::time::Instant::now();
+     let mut result = v1::TmuxActionResult::default();
+     let mut command = tmux_command();
+     match kind {
+@@ -171,8 +193,12 @@ pub(super) fn execute(
+         v1::TmuxActionKind::Unspecified => bail!("tmux action kind is required"),
+     }
+ 
++    spike_trace("execute.mutating_tmux_fork", spike_phase);
++    spike_phase = std::time::Instant::now();
+     let (snapshot, server_identity) =
+         normalize_post_action(kind, discover_consistent(), &server_identity())?;
++    spike_trace("execute.discover_after", spike_phase);
++    spike_phase = std::time::Instant::now();
+     let identity_preserved =
+         identity_transition_allowed(kind, bootstrapping, &identity, &server_identity);
+     if !identity_preserved
+@@ -188,6 +214,7 @@ pub(super) fn execute(
+             "outcome unknown: tmux accepted the action but its identity-relative authoritative postcondition failed"
+         );
+     }
++    spike_trace("execute.postcondition", spike_phase);
+     Ok(ActionOutcome {
+         result,
+         snapshot,
+diff --git a/tests/integration/protocol/protocol-driver/src/main.rs b/tests/integration/protocol/protocol-driver/src/main.rs
+index ac491b6..ac81da7 100644
+--- a/tests/integration/protocol/protocol-driver/src/main.rs
++++ b/tests/integration/protocol/protocol-driver/src/main.rs
+@@ -448,6 +448,21 @@ impl ProtocolClient {
+         Ok(started.elapsed())
+     }
+ 
++    /// SPIKE: blocks on the event stream until the pane echoes `needle`. This
++    /// is the honest on-screen latency, unlike a fire-and-forget ack.
++    fn wait_for_terminal(&mut self, needle: &[u8]) -> Result<()> {
++        let deadline = Instant::now() + Duration::from_secs(10);
++        while !self.observations.contains_terminal(needle) {
++            if Instant::now() > deadline {
++                bail!("timed out waiting for pane echo of {:?}", needle);
++            }
++            let frame = read_frame_sync(&mut self.reader)?
++                .context("bridge closed while awaiting pane echo")?;
++            self.observations.track(frame);
++        }
++        Ok(())
++    }
++
+     fn request_seed(&mut self, pane_id: &str) -> Result<()> {
+         let response = self.request(
+             v1::Operation::RequestTerminalSeed,
+@@ -1318,6 +1333,182 @@ fn run_daemon_reconnect(transport: Transport, primary_name: &str) -> Result<()>
+     Ok(())
+ }
+ 
++// --------------------------------------------------------------------------
++// SPIKE scenario: repeatable A/B measurement of (a) per-keystroke input cost
++// and (b) end-to-end tmux action latency, against an isolated fixture.
++// --------------------------------------------------------------------------
++fn percentile(sorted: &[f64], fraction: f64) -> f64 {
++    if sorted.is_empty() {
++        return 0.0;
++    }
++    let index = ((sorted.len() - 1) as f64 * fraction).round() as usize;
++    sorted[index]
++}
++
++fn stats(mut samples: Vec<f64>) -> serde_json::Value {
++    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
++    let sum: f64 = samples.iter().sum();
++    json!({
++        "n": samples.len(),
++        "meanMs": (sum / samples.len() as f64 * 1000.0).round() / 1000.0,
++        "p50Ms": (percentile(&samples, 0.5) * 1000.0).round() / 1000.0,
++        "p95Ms": (percentile(&samples, 0.95) * 1000.0).round() / 1000.0,
++        "minMs": (samples.first().copied().unwrap_or_default() * 1000.0).round() / 1000.0,
++        "maxMs": (samples.last().copied().unwrap_or_default() * 1000.0).round() / 1000.0,
++    })
++}
++
++fn run_spike(transport: Transport, primary_name: &str) -> Result<()> {
++    let mut client = ProtocolClient::connect(&transport)?;
++    let initial = client.subscribe()?;
++    let primary = session(&initial, primary_name)?.clone();
++    let original_window = initial
++        .windows
++        .iter()
++        .find(|window| window.session_id == primary.id)
++        .context("primary session has no window")?
++        .clone();
++    let original_pane = initial
++        .panes
++        .iter()
++        .find(|pane| pane.window_id == original_window.id)
++        .context("primary window has no pane")?
++        .clone();
++    client.attach(&initial, &primary.id)?;
++
++    // (a) Per-keystroke input: single-byte requests, one at a time, so each
++    // sample is a full desktop->host->tmux->ack round trip for one keystroke.
++    let mut single: Vec<f64> = Vec::new();
++    for index in 0..80 {
++        let started = Instant::now();
++        client.input(&original_pane.id, b"#")?;
++        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
++        if index >= 10 {
++            single.push(elapsed);
++        }
++    }
++    // (b) The Phase 2 burst shape: 128 keystrokes pipelined + Enter.
++    let mut burst: Vec<f64> = Vec::new();
++    for _ in 0..5 {
++        let mut chunks: Vec<&[u8]> = vec![b"#"; 128];
++        chunks.push(b"\r");
++        burst.push(client.pipeline_input(&original_pane.id, &chunks)?.as_secs_f64() * 1000.0);
++    }
++    let burst_per_op: Vec<f64> = burst.iter().map(|value| value / 129.0).collect();
++
++    // (c) tmux action latency, measured client side, request write -> response.
++    let mut create_window: Vec<f64> = Vec::new();
++    let mut close_window: Vec<f64> = Vec::new();
++    for index in 0..6 {
++        let snapshot = client.snapshot()?;
++        let mut create = action(v1::TmuxActionKind::CreateWindow);
++        create.session_id = primary.id.clone();
++        create.name = format!("spike-window-{index}");
++        let started = Instant::now();
++        let response = client.action_with_snapshot(&snapshot, create)?;
++        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
++        ensure!(
++            response.ok,
++            "spike create window failed: {} ({})",
++            response.error_code,
++            response.display_message
++        );
++        create_window.push(elapsed);
++        let window_id = response
++            .tmux_action_result
++            .context("create window omitted result")?
++            .window_id;
++        let snapshot = client.snapshot()?;
++        let mut close = action(v1::TmuxActionKind::CloseWindow);
++        close.window_id = window_id;
++        close.confirmed = true;
++        let started = Instant::now();
++        let response = client.action_with_snapshot(&snapshot, close)?;
++        ensure!(response.ok, "spike close window failed");
++        close_window.push(started.elapsed().as_secs_f64() * 1000.0);
++    }
++
++    let mut create_session: Vec<f64> = Vec::new();
++    let mut close_session: Vec<f64> = Vec::new();
++    for index in 0..6 {
++        let snapshot = client.snapshot()?;
++        let mut create = action(v1::TmuxActionKind::CreateSession);
++        create.name = format!("spike-session-{index}");
++        let started = Instant::now();
++        let response = client.action_with_snapshot(&snapshot, create)?;
++        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
++        ensure!(
++            response.ok,
++            "spike create session failed: {} ({})",
++            response.error_code,
++            response.display_message
++        );
++        create_session.push(elapsed);
++        let session_id = response
++            .tmux_action_result
++            .context("create session omitted result")?
++            .session_id;
++        let snapshot = client.snapshot()?;
++        let mut close = action(v1::TmuxActionKind::CloseSession);
++        close.session_id = session_id;
++        close.confirmed = true;
++        let started = Instant::now();
++        let response = client.action_with_snapshot(&snapshot, close)?;
++        ensure!(response.ok, "spike close session failed");
++        close_session.push(started.elapsed().as_secs_f64() * 1000.0);
++    }
++
++    // Correctness probe: the keystrokes above must land in order, exactly once.
++    let marker = format!("SPIKE_ORDER_{}", std::process::id());
++    client.request_seed(&original_pane.id)?;
++    client.pump_until(|observations| observations.seeded_panes.contains(&original_pane.id))?;
++    client.input(&original_pane.id, b"\x15")?;
++    let ordered = "abcdefghijklmnopqrstuvwxyz0123456789";
++    for byte in ordered.as_bytes() {
++        client.input(&original_pane.id, &[*byte])?;
++    }
++    client.input(
++        &original_pane.id,
++        format!("printf '{marker}_%s\\n' \"$(echo -n)\"\r").as_bytes(),
++    )?;
++    thread::sleep(Duration::from_millis(400));
++    let _ = client.snapshot()?;
++    let ordered_intact = client.observations.contains_terminal(ordered.as_bytes());
++    let ordered_occurrences = client.observations.terminal_occurrences(ordered.as_bytes());
++
++    // Control-byte fidelity: Ctrl-C must arrive as byte 0x03, not as text.
++    client.input(&original_pane.id, b"\x03")?;
++    thread::sleep(Duration::from_millis(200));
++    let _ = client.snapshot()?;
++
++    let resync_events = client
++        .observations
++        .event_count(v1::EventKind::ResyncRequired)
++        + client
++            .observations
++            .event_count(v1::EventKind::TerminalResnapshotRequired);
++
++    println!(
++        "{}",
++        serde_json::to_string_pretty(&json!({
++            "inbandInput": std::env::var("ADE_SPIKE_INBAND_INPUT").unwrap_or_default(),
++            "singleKeystrokeRoundTrip": stats(single),
++            "eventCounts": client.observations.event_counts.clone(),
++            "burst129Total": stats(burst),
++            "burst129PerOp": stats(burst_per_op),
++            "createWindow": stats(create_window),
++            "closeWindow": stats(close_window),
++            "createSession": stats(create_session),
++            "closeSession": stats(close_session),
++            "orderedKeystrokesIntact": ordered_intact,
++            "orderedKeystrokeOccurrences": ordered_occurrences,
++            "resyncRequiredEvents": resync_events,
++            "sequenceGapObserved": client.observations.gap,
++        }))?
++    );
++    Ok(())
++}
++
+ fn value_after(arguments: &[String], name: &str) -> Result<String> {
+     arguments
+         .windows(2)
+@@ -1352,6 +1543,7 @@ fn main() -> Result<()> {
+             &value_after(&arguments, "--ordinary-client")?,
+         ),
+         "daemon-reconnect" => run_daemon_reconnect(transport, &primary),
++        "spike" => run_spike(transport, &primary),
+         _ => bail!("unknown scenario {scenario:?}"),
+     }
+ }

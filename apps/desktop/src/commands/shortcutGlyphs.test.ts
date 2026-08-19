@@ -4,7 +4,7 @@ import { shortcutGlyphs, shortcutSpoken } from "./shortcutGlyphs";
 
 describe("platform shortcut rendering", () => {
   it("renders macOS shortcuts as unseparated glyphs in the mock's modifier order", () => {
-    // Every one of these appears in plan/phase11-ui-mock.html, which fixes the
+    // Every one of these appears in docs/history/plan/phase11-ui-mock.html, which fixes the
     // order at ⌃⌥⌘⇧ — Command before Shift.
     expect(shortcutGlyphs("Meta+Shift+P", "mac")).toBe("⌘⇧P");
     expect(shortcutGlyphs("Meta+K", "mac")).toBe("⌘K");

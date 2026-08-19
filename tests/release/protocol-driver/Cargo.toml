@@ -1,0 +1,11 @@
+[package]
+name = "release-test-driver"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde_json = "1"
+tmux-agent-protocol = { path = "../../../crates/protocol" }
+uuid = { version = "1", features = ["v4"] }
+
+[workspace]

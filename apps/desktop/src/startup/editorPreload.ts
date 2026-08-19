@@ -18,7 +18,7 @@ export const EDITOR_PRELOAD_TIMEOUT_MS = 3_000;
  * text to put in it, so the fetch, the eval and the mount are serialized behind
  * the read instead of overlapping it. Measured at ~490 ms on the first open of
  * a session, plus up to 100 ms of content gate, and paid once per launch
- * (tests/phase15/decomposition.md).
+ * (tests/performance/benchmark/decomposition.md).
  *
  * This is deliberately a dynamic import and not a static one. A static import
  * would fold Monaco into the entry chunk — 1.0 MB to ~5 MB — which every

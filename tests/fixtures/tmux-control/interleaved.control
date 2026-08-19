@@ -1,0 +1,8 @@
+%begin 1712345678 40 1
+first command line
+%output %1 live\033[31moutput
+%layout-change @1 b25d,80x24,0,0,0
+second command line
+%end 1712345678 40 1
+%begin 1712345679 41 1
+%error 1712345679 41 1

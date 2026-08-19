@@ -320,7 +320,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     fs::create_dir_all(settings.parent().unwrap()).unwrap();
     let original = fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/phase13/fixtures/claude-settings-orca.json"
+        "/../../tests/integration/agent-status/fixtures/claude-settings-orca.json"
     ))
     .unwrap();
     fs::write(&settings, &original).unwrap();

@@ -1346,8 +1346,9 @@ mod tests {
             .join(format!("phase13-hook-merge-{}", uuid::Uuid::new_v4()));
         let path = home.join(".claude/settings.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let original =
-            include_bytes!("../../../../../tests/phase13/fixtures/claude-settings-orca.json");
+        let original = include_bytes!(
+            "../../../../../tests/integration/agent-status/fixtures/claude-settings-orca.json"
+        );
         fs::write(&path, original).unwrap();
         let manager = HookManager::for_home(&home);
         let adapter = adapters::adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();

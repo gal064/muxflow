@@ -277,7 +277,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
           // takes longer than the gap between rescans it aborts *every*
           // attempt: the read restarts once per rescan and never advances.
           // That is the 5.2 MB file that never opened
-          // (tests/phase15/large-file-open-bug.md) — 171 attempts, 0
+          // (tests/performance/benchmark/large-file-open-bug.md) — 171 attempts, 0
           // successes. "Nothing shown" is not "stale"; it is "not yet".
           //
           // The opinion is parked rather than dropped, so the read is still

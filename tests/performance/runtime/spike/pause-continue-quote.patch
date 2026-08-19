@@ -1,0 +1,16 @@
+diff --git a/apps/host/src/service/terminal.rs b/apps/host/src/service/terminal.rs
+index 57e7189..b19091f 100644
+--- a/apps/host/src/service/terminal.rs
++++ b/apps/host/src/service/terminal.rs
+@@ -609,7 +609,10 @@ fn write_capture_request_resuming<W: Write>(
+         .lock()
+         .map_err(|_| anyhow::anyhow!("tmux control stdin is poisoned"))?;
+     if resume_first {
+-        writeln!(writer, "refresh-client -A {pane_id}:continue")?;
++        // SPIKE-12.9: tmux's command lexer treats an unquoted word starting
++        // with `%` as a %if-style conditional unless it is all digits, so
++        // `%0:continue` is a parse error. The quotes are load-bearing.
++        writeln!(writer, "refresh-client -A '{pane_id}:continue'")?;
+     }
+     queue_capture(&mut *writer, pane_id)?;
+     writer.flush()?;

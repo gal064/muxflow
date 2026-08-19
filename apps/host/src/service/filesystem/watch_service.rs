@@ -580,7 +580,7 @@ impl FileService {
 /// broadcast FileChanged for the very file being read — which the desktop
 /// answered by restarting the read, whose open the kernel then reported
 /// again. A file whose read outlived one event round trip never finished
-/// opening at all (tests/phase15/large-file-open-bug.md: 355 of 356 read
+/// opening at all (tests/performance/benchmark/large-file-open-bug.md: 355 of 356 read
 /// attempts in one session were re-reads triggered this way, captured against
 /// a raw inotify log that held nothing but open/access/close-no-write).
 ///

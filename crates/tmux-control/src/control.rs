@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn recorded_interleaving_fixture_preserves_output_and_command_correlation() {
-        let fixture = include_bytes!("../../../fixtures/tmux-control/interleaved.control");
+        let fixture = include_bytes!("../../../tests/fixtures/tmux-control/interleaved.control");
         let mut parser = ControlParser::default();
         let mut dispatcher = ControlDispatcher::default();
         let mut events = Vec::new();
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn malformed_fixture_has_one_recovery_event_per_bad_record() {
-        let fixture = include_bytes!("../../../fixtures/tmux-control/malformed.control");
+        let fixture = include_bytes!("../../../tests/fixtures/tmux-control/malformed.control");
         let mut parser = ControlParser::default();
         let mut dispatcher = ControlDispatcher::default();
         parser.push(fixture);
@@ -675,8 +675,10 @@ mod tests {
     #[test]
     fn tmux_33_and_37_capture_corpus_survives_every_split_boundary() {
         for fixture in [
-            include_bytes!("../../../fixtures/tmux-control/tmux-3.3a-capture.control").as_slice(),
-            include_bytes!("../../../fixtures/tmux-control/tmux-3.7-capture.control").as_slice(),
+            include_bytes!("../../../tests/fixtures/tmux-control/tmux-3.3a-capture.control")
+                .as_slice(),
+            include_bytes!("../../../tests/fixtures/tmux-control/tmux-3.7-capture.control")
+                .as_slice(),
         ] {
             for split in 0..=fixture.len() {
                 let mut parser = ControlParser::default();

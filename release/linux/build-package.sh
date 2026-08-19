@@ -43,7 +43,7 @@ case "$work_fstype" in
 esac
 export TMPDIR="$work_root/system-tmp"
 export CARGO_INCREMENTAL=0
-build_root=$(mktemp -d "$work_root/package-builds/phase8-package.XXXXXX")
+build_root=$(mktemp -d "$work_root/package-builds/linux-package.XXXXXX")
 trap 'rm -rf "$build_root"' EXIT
 target_root=${CARGO_TARGET_DIR:-"$repo_root/target"}
 [[ "$target_root" == /* ]] || target_root="$repo_root/$target_root"

@@ -1,0 +1,16 @@
+[package]
+name = "performance-test-driver"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+tmux-agent-protocol = { path = "../../../../crates/protocol" }
+# The vt parity lane (stage 12.9 item 4) needs a terminal emulator to render
+# both sides of the comparison — what the host delivered, and what tmux itself
+# has — into screens that can be diffed cell by cell.
+vt100 = "0.16.2"
