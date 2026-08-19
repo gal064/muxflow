@@ -115,6 +115,28 @@ const SMOOTH_SCROLL_DURATION_MS = 80;
 const SMOOTH_SCROLL_SUSPEND_BYTES = 256 * 1024;
 
 /**
+ * Closes a background bleed in xterm's serialize addon before it can paint.
+ *
+ * The addon ends the normal buffer by replaying the terminal's *live* pen and
+ * then switches to the alternate screen with that pen still active. xterm
+ * activates the alternate buffer with background-color-erase, so a pen caught
+ * mid-frame holding an explicit background pre-fills the whole alternate
+ * screen with it — and the replay skips blank runs rather than erasing them,
+ * so the pre-fill survives in every cell the serializer chose not to write.
+ * On restore that reads as two interleaved dark backgrounds split along
+ * "written vs skipped" cells: banding that hugs the text and skips lines,
+ * appearing exactly after the stall-recovery reseeds where restores happen.
+ *
+ * Resetting the pen immediately before the switch makes the pre-fill use the
+ * default background, which is indistinguishable from the screen around it.
+ * Applied at restore time rather than serialize time so states already sitting
+ * in the cache are cleaned too.
+ */
+export function sanitizeSerializedScreen(serialized: string): string {
+  return serialized.replaceAll("\u001b[?1049h", "\u001b[0m\u001b[?1049h");
+}
+
+/**
  * Whether a cached or host-owned screen may replace what this terminal shows.
  *
  * A restore replaces the screen wholesale — including bytes still queued for
@@ -317,7 +339,11 @@ export class XtermRenderer implements TerminalRenderer {
       return false;
     }
     this.#newOutput = false;
-    this.#scheduler.replace(new TextEncoder().encode(serialized), false, this.#enqueued(generation, onRendered));
+    this.#scheduler.replace(
+      new TextEncoder().encode(sanitizeSerializedScreen(serialized)),
+      false,
+      this.#enqueued(generation, onRendered),
+    );
     this.#emitViewport();
     return true;
   }

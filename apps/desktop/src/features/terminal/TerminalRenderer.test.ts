@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { restoreDecision, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
+import { restoreDecision, sanitizeSerializedScreen, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
 import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan, reconcilePaneGrid } from "./TerminalPane";
 import type { Pane } from "../../app/types";
@@ -867,5 +867,17 @@ describe("pane resource recovery", () => {
     expect(paneRecoveryPlan({ ...resource, state: "released", requiresSeed: true, recoveryReason: "evicted" }))
       .toEqual({ kind: "awaitSeed", reason: "evicted" });
     expect(paneRecoveryPlan({ ...resource, serializedSnapshot: copyTerminalBytes(Uint8Array.of(0xff)) }).kind).toBe("awaitSeed");
+  });
+});
+
+describe("sanitizeSerializedScreen", () => {
+  it("resets the pen before every alternate-screen switch, so a mid-frame background cannot pre-fill it", () => {
+    const serialized = "hello\u001b[48;5;236m\u001b[?1049hALT";
+    expect(sanitizeSerializedScreen(serialized)).toBe("hello\u001b[48;5;236m\u001b[0m\u001b[?1049hALT");
+  });
+
+  it("leaves a screen with no alternate buffer untouched", () => {
+    const serialized = "plain screen \u001b[31mred\u001b[0m";
+    expect(sanitizeSerializedScreen(serialized)).toBe(serialized);
   });
 });
