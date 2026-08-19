@@ -6,6 +6,7 @@ import { renderSafeSvg } from "../files/markdown";
 import { useOpenFileTab } from "../files/useOpenFileTab";
 import { IMAGE_PREVIEW_LIMIT_BYTES, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
 import { SurfaceError } from "../../ui/SurfaceError";
+import type { SaveState } from "../files/autosave";
 import type { AppOwnedTab } from "./types";
 import { useEditorPaint } from "../../perf/surfacePaint";
 
@@ -73,8 +74,29 @@ export function AppTabSurface(props: Props) {
     return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
   }
   const download = () => props.onDownload(props.tab.resource, "file", root);
+  const toolbar = (state: SaveState | undefined) => <EditorToolbar
+    download={download}
+    mode={mode}
+    onViewMode={props.onViewMode}
+    saveState={state}
+    tab={props.tab}
+  />;
   switch (content.kind) {
-    case "loading": return <EmptyTab tab={props.tab} detail="Loading file…" />;
+    // The frame the file is about to appear in, not a card in the middle of
+    // the tab. Reading a file used to move the tab through a centred card and
+    // then into this frame, so every open flickered through two layouts; the
+    // toolbar is the real one, and only the content area is still empty.
+    case "loading": return <section
+      aria-label={props.tab.title}
+      className="file-tab-surface"
+      data-view-mode={props.tab.kind === "markdown" ? mode : undefined}
+      role="tabpanel"
+    >
+      {toolbar(undefined)}
+      {/* `quiet-empty` is already the one line a surface shows at the top-left
+          of its content area; the loading card it replaces was centred. */}
+      <p className="quiet-empty">Loading file…</p>
+    </section>;
     case "failed": return <EmptyTab tab={props.tab} detail={content.detail} download={download} />;
     case "changed": return <EmptyTab tab={props.tab} detail={`The file changed or became unavailable: ${content.detail}`} download={download} />;
     case "unavailable": return <EmptyTab tab={props.tab} detail="File unavailable." />;
@@ -96,14 +118,7 @@ export function AppTabSurface(props: Props) {
     data-view-mode={props.tab.kind === "markdown" ? mode : undefined}
     role="tabpanel"
   >
-    <header className="editor-toolbar">
-      <code title={props.tab.resource}>{props.tab.resource}</code>
-      <span className={`save-state ${view?.state ?? "saved"}`} role="status">{view?.state === "saving" ? "Saving…" : view?.state === "dirty" ? "Unsaved" : view?.state === "error" ? "Save failed" : "Saved"}</span>
-      {props.tab.kind === "markdown" && <div aria-label="Markdown view" className="markdown-modes" role="group">
-        {(["source", "preview", "split"] as const).map((item) => <button aria-pressed={mode === item} key={item} onClick={() => props.onViewMode(item)} type="button">{item}</button>)}
-      </div>}
-      <button onClick={download} type="button">Download…</button>
-    </header>
+    {toolbar(view?.state ?? "saved")}
     {view?.error && <SurfaceError className="editor-error" detail={view.error} />}
     {editorRequested && <div className="monaco-host" ref={editor.bindHost}>
       <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>
@@ -120,6 +135,32 @@ export function AppTabSurface(props: Props) {
     </div>}
     {props.tab.kind === "markdown" && mode !== "source" && <MarkdownPreview source={source} onStatus={props.onStatus} />}
   </section>;
+}
+
+/**
+ * The bar across the top of a file tab, drawn the same whether the file has
+ * arrived or not.
+ *
+ * `saveState` undefined means the file is still being read: the chip holds its
+ * place in the row without claiming a state the tab cannot know yet.
+ */
+function EditorToolbar({ download, mode, onViewMode, saveState, tab }: {
+  download(): void;
+  mode: "source" | "preview" | "split";
+  onViewMode(mode: "source" | "preview" | "split"): void;
+  saveState: SaveState | undefined;
+  tab: AppOwnedTab;
+}) {
+  return <header className="editor-toolbar">
+    <code title={tab.resource}>{tab.resource}</code>
+    {saveState
+      ? <span className={`save-state ${saveState}`} role="status">{saveState === "saving" ? "Saving…" : saveState === "dirty" ? "Unsaved" : saveState === "error" ? "Save failed" : "Saved"}</span>
+      : <span className="save-state" aria-hidden="true" />}
+    {tab.kind === "markdown" && <div aria-label="Markdown view" className="markdown-modes" role="group">
+      {(["source", "preview", "split"] as const).map((item) => <button aria-pressed={mode === item} key={item} onClick={() => onViewMode(item)} type="button">{item}</button>)}
+    </div>}
+    <button onClick={download} type="button">Download…</button>
+  </header>;
 }
 
 function MarkdownPreview({ source, onStatus }: { source: string; onStatus(message: string): void }) {

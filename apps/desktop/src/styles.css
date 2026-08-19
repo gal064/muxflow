@@ -386,6 +386,18 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .workspace-content { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .workspace-content:focus-visible { outline-offset: -2px; }
+/* The terminal layer stays in the tree under a file or diff tab, which draws
+   over it. `inset: 0` reproduces exactly what `.terminal-window` already had:
+   it is `position: absolute; inset: 4px` against the nearest positioned
+   ancestor, and this layer is that ancestor now instead of `.workspace-content`
+   — same box, same 4px. */
+.terminal-layer { position: absolute; inset: 0; }
+/* `visibility`, never `display: none`. The layer must keep its box: xterm's fit
+   is computed from it, the ResizeObserver in `useClientResize` measures it to
+   size the tmux client, and each pane reports its own cell metrics from it. A
+   layer collapsed to zero would report a zero-sized terminal to tmux and make
+   every pane re-fit on the way back — the flicker this removes. */
+.terminal-layer-covered { visibility: hidden; }
 
 /* ── Tab strip ─────────────────────────────────────────────────────────── */
 
@@ -754,9 +766,13 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 /* ── Document surfaces ─────────────────────────────────────────────────── */
 
+/* Every document surface paints its own background. They are drawn over a
+   terminal layer that is still in the tree, and a translucent one would let a
+   hidden pane's chrome read through on any future theme where the two
+   backgrounds differ. */
 .app-tab-surface {
   position: absolute; inset: 0; display: grid; align-content: center; justify-items: center;
-  gap: 8px; padding: 32px; color: var(--chrome-dim); text-align: center;
+  gap: 8px; padding: 32px; background: var(--chrome-bg); color: var(--chrome-dim); text-align: center;
 }
 .app-tab-surface h1 { margin: 0; color: var(--chrome-ink); font-size: 16px; }
 .app-tab-surface code {
@@ -814,7 +830,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    disclosure it needs the same treatment as every other one. */
 .editor-error { padding: 5px 10px; background: var(--danger-wash); color: var(--danger-ink); font-size: 11px; overflow-wrap: anywhere; }
 .git-diff-content { min-width: 0; min-height: 0; }
-.git-diff-empty { min-height: 0; display: grid; align-content: center; justify-items: center; padding: 30px; color: var(--chrome-dim); text-align: center; }
+.git-diff-empty { min-height: 0; display: grid; align-content: center; justify-items: center; padding: 30px; background: var(--chrome-bg); color: var(--chrome-dim); text-align: center; }
 .git-diff-empty h1 { margin: 10px 0 3px; color: var(--chrome-ink); font-size: 15px; }
 .git-hunk-actions {
   display: flex; gap: 6px; overflow-x: auto; padding: 5px 8px;
@@ -841,7 +857,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .markdown-preview blockquote { margin-left: 0; padding-left: 14px; border-left: 3px solid var(--chrome-border); color: var(--chrome-dim); }
 .binary-surface {
   position: absolute; inset: 0; display: grid; align-content: center; justify-items: center;
-  gap: 10px; padding: 28px; overflow: auto; color: var(--chrome-dim); text-align: center;
+  gap: 10px; padding: 28px; overflow: auto; background: var(--chrome-bg); color: var(--chrome-dim); text-align: center;
 }
 .binary-surface img { max-width: min(900px, 90%); max-height: min(650px, 65vh); border: 1px solid var(--chrome-border); object-fit: contain; }
 .binary-surface h1 { margin: 0; color: var(--chrome-ink); }

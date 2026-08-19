@@ -264,7 +264,7 @@ describe("application shell model", () => {
     expect(resolveAgentShellDestination(snapshot, item, "local", "server-b")).toBeUndefined();
   });
 
-  it("keeps large rails and tab sets deterministic and mounts no terminal resources behind app tabs", () => {
+  it("keeps large rails and tab sets deterministic and keeps the active window's panes mounted behind app tabs", () => {
     const largeSessions = Array.from({ length: 20 }, (_, index): Session => ({
       id: `$${index}`, name: `session-${String(index).padStart(2, "0")}`, windowCount: 5, attachedClients: 0, order: 19 - index,
     }));
@@ -278,8 +278,12 @@ describe("application shell model", () => {
       id: `%${index}`, sessionId: "$1", windowId: "@50", index, active: index === 4,
       width: 10, height: 10, left: index * 10, top: 0, currentPath: "/r", currentCommand: "bash",
     }));
-    expect(mountedTerminalPanes(panes, "@50", true, false)).toEqual([]);
-    expect(mountedTerminalPanes(panes, "@50", false, true).map((pane) => pane.id)).toEqual(["%4"]);
+    // An app tab covers the terminal layer rather than replacing it, so the
+    // active window's panes stay mounted underneath it.
+    expect(mountedTerminalPanes(panes, "@50", false)).toHaveLength(50);
+    expect(mountedTerminalPanes(panes, "@50", true).map((pane) => pane.id)).toEqual(["%4"]);
+    // A window with no identity is the only thing that mounts nothing.
+    expect(mountedTerminalPanes(panes, undefined, false)).toEqual([]);
   });
 
   it("surfaces a terminal only for a real authoritative focus transition", () => {
