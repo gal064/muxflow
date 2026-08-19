@@ -16,6 +16,8 @@ import {
 import type { OwnedTerminalBytes } from "./TerminalBytes";
 import { TerminalGenerationWatermark } from "./TerminalGenerationWatermark";
 import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
+import { settleWithin } from "./timeBound";
+import { recordPerfCounter } from "../../perf/probe";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
@@ -44,7 +46,19 @@ export interface TerminalRendererOptions {
    * whose request never went out is not left permanently unable to ask again.
    */
   onResnapshotRequired?: (reason: string) => void | Promise<void>;
+  /**
+   * How long `drainAndSerialize` waits for xterm before giving up on it. Exposed
+   * for tests; every production caller takes the default.
+   */
+  drainTimeoutMs?: number;
 }
+
+/**
+ * A hide drain that xterm never completes used to be permanent: the memoized
+ * promise never settled, the pane's handoff never resolved, and the reveal that
+ * waits behind that handoff never ran again.
+ */
+export const DEFAULT_DRAIN_TIMEOUT_MS = 2_000;
 
 /** Why a grid was not applied, or the size that now governs the terminal. */
 export type GridOutcome =
@@ -147,6 +161,7 @@ export class XtermRenderer implements TerminalRenderer {
   #lastViewport?: TerminalViewportState;
   #seedRequested = false;
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
+  #drainAbandoned = false;
   #disposed = false;
 
   constructor(options: TerminalRendererOptions = {}) {
@@ -427,12 +442,34 @@ export class XtermRenderer implements TerminalRenderer {
     return this.#serialize.serialize({ scrollback: 10_000 });
   }
 
+  /**
+   * Serializes this terminal once xterm has finished with everything it was
+   * given — or, if xterm never answers, once the bound expires.
+   *
+   * A timed-out drain still returns a usable snapshot: `serialize` reads the
+   * buffer as it stands, and the generation reported is the *applied* one, so
+   * the checkpoint built from it claims only what xterm actually rendered and
+   * the rest stays the host's to resend. What it must not do is let a
+   * completion that arrives afterwards move that watermark: the checkpoint has
+   * already been published by then, and a late advance would tell the next
+   * reveal that output nobody displayed had been displayed. `#drainAbandoned`
+   * freezes the watermark at exactly the number this snapshot reported.
+   */
   drainAndSerialize(): Promise<DrainedTerminalSnapshot> {
-    this.#drainPromise ??= this.#scheduler.sealAndDrain().then(() => ({
-      serialized: this.serialize(),
-      outputGeneration: this.#generations.appliedGeneration,
-    }));
+    this.#drainPromise ??= settleWithin(
+      this.#scheduler.sealAndDrain().then(() => this.#snapshot()),
+      this.#options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS,
+      () => {
+        this.#drainAbandoned = true;
+        recordPerfCounter("terminal.renderer.drainTimeouts");
+        return this.#snapshot();
+      },
+    );
     return this.#drainPromise;
+  }
+
+  #snapshot(): DrainedTerminalSnapshot {
+    return { serialized: this.serialize(), outputGeneration: this.#generations.appliedGeneration };
   }
 
   disposeGpuRenderer(): void {
@@ -457,7 +494,14 @@ export class XtermRenderer implements TerminalRenderer {
   /// Records what the terminal was handed, and returns the completion that
   /// records what it applied.
   #enqueued(generation: number, onRendered?: () => void): () => void {
-    return this.#generations.enqueued(generation, onRendered);
+    const applied = this.#generations.enqueued(generation, onRendered);
+    return () => {
+      // The hide checkpoint has already been published from an abandoned drain.
+      // These pixels were never shown to anyone, so they may not be reported as
+      // rendered after the fact.
+      if (this.#drainAbandoned) return;
+      applied();
+    };
   }
 
   /**
