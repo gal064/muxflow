@@ -48,6 +48,7 @@ import {
 import {
   combineWorkspaceTabs,
   closeAppTab,
+  mountedAppTabIds,
   mountedTerminalPanes,
   openFileTab,
   openGitDiffTab,
@@ -86,6 +87,35 @@ import { AppRightPanel } from "./AppRightPanel";
 
 const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then((module) => ({ default: module.AppTabSurface })));
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
+
+/**
+ * How many document tabs keep a mounted surface at once.
+ *
+ * Switching between two open file tabs used to unmount one surface and mount
+ * the other, which re-read the file from the host and rebuilt Monaco for a tab
+ * that had been on screen a moment ago — one framed blank frame per switch.
+ * The recently used ones stay in the tree instead, hidden the way the terminal
+ * layer is, so the switch is a visibility flip.
+ *
+ * Bounded because each retained tab is a live read, a directory watch lease, an
+ * autosave controller and a Monaco instance. Four is the working set a person
+ * moves between; the fifth costs a rebuild, exactly as every switch did before.
+ */
+const MOUNTED_APP_TAB_LIMIT = 4;
+
+/**
+ * What makes a mounted document surface a *different* surface.
+ *
+ * The same key material the single rendered surface carried, moved out onto the
+ * layer that wraps it: identity plus the thing it is showing, so a tab that is
+ * repointed at another file or another diff rebuilds, and nothing else does.
+ */
+function appTabLayerKey(tab: AppOwnedTab): string {
+  const identity = `${tab.hostProfileId}\0${tab.serverIdentity}\0${tab.sessionId}\0${tab.id}`;
+  return tab.kind === "gitDiff"
+    ? `${identity}\0${tab.gitRepositoryId}\0${tab.gitPath}\0${tab.gitTarget}`
+    : `${identity}\0${tab.resource}`;
+}
 
 /**
  * The tab's frame, drawn while its chunk is still being fetched.
@@ -223,6 +253,40 @@ export function App() {
   });
   const selectedAppTabRef = useRef(selectedAppTab);
   selectedAppTabRef.current = selectedAppTab;
+  /**
+   * Which document tabs keep a mounted surface, and for which workspace.
+   *
+   * Scoped to the workspace whose strip is on screen — host profile, server and
+   * session — and reset when that changes, because `workspaceAppTabs` is
+   * already scoped the same way: an id from the workspace being left could
+   * never be mounted again, and leaving it in the list would only spend a slot
+   * belonging to the workspace being entered.
+   *
+   * Updated during render rather than in an effect. `mountedAppTabIds` is
+   * idempotent, and a tab that has just been selected must be mounted in the
+   * same commit that selects it — an effect would mount it one render late,
+   * which is the blank frame this removes.
+   */
+  const retainedAppTabs = useRef<{ workspace: string; ids: string[] }>({ workspace: "", ids: [] });
+  const appTabWorkspace = activeSession && hostState.serverIdentity
+    ? `${currentHostProfileId}\0${hostState.serverIdentity}\0${activeSession.id}`
+    : "";
+  if (retainedAppTabs.current.workspace !== appTabWorkspace) {
+    retainedAppTabs.current = { workspace: appTabWorkspace, ids: [] };
+  }
+  const liveAppTabIds = new Set(workspaceAppTabs.map((tab) => tab.id));
+  retainedAppTabs.current.ids = mountedAppTabIds(
+    // Closed and evicted tabs drop out here rather than inside the rule: a tab
+    // the strip no longer has must not hold a slot open for itself.
+    retainedAppTabs.current.ids.filter((id) => liveAppTabIds.has(id)),
+    selectedAppTab?.id,
+    MOUNTED_APP_TAB_LIMIT,
+  );
+  const retainedAppTabIds = retainedAppTabs.current.ids;
+  // In tab-strip order, never selection order: React reconciles the layers by
+  // key, and a list that reordered on every selection would move the DOM of
+  // surfaces that did not change.
+  const mountedAppTabs = workspaceAppTabs.filter((tab) => retainedAppTabIds.includes(tab.id));
   /** Where the files controller and the git controller meet; the rule itself is `ignoredPathsFromStatus`. */
   const ignoredPaths = useMemo(() => ignoredPathsFromStatus(workspaceGit.status), [workspaceGit.status]);
 
@@ -908,26 +972,44 @@ export function App() {
               terminalTransferScope={terminalTransferScope}
             />
           </div>
-          {selectedAppTab && <Suspense fallback={<AppTabFrame tab={selectedAppTab} />}>{selectedAppTab.kind === "gitDiff" ? <GitDiffSurface
-            activeRoot={workspaceFiles.root}
-            canWrite={hostState.canMutate}
-            repositories={gitRepositories}
-            onMessage={setStatus}
-            scope={fileScope}
-            tab={selectedAppTab}
-            key={`${selectedAppTab.hostProfileId}\0${selectedAppTab.serverIdentity}\0${selectedAppTab.sessionId}\0${selectedAppTab.id}\0${selectedAppTab.gitRepositoryId}\0${selectedAppTab.gitPath}\0${selectedAppTab.gitTarget}`}
-          /> : <AppTabSurface
-            activeRoot={workspaceFiles.root}
-            canWrite={hostState.canMutate}
-            client={fileClient}
-            onDownload={(path, kind, root) => void startDownloadFlow({ path, kind }, root)}
-            onDirty={() => pinOpenTab(selectedAppTab.id)}
-            onStatus={setStatus}
-            onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, selectedAppTab.id, viewMode))}
-            scope={fileScope}
-            tab={selectedAppTab}
-            key={`${selectedAppTab.hostProfileId}\0${selectedAppTab.serverIdentity}\0${selectedAppTab.sessionId}\0${selectedAppTab.id}\0${selectedAppTab.resource}`}
-          />}</Suspense>}
+          {/*
+            The same trade the terminal layer makes, for documents. The last
+            few selected file and diff tabs stay mounted and the unselected ones
+            are covered, so switching back to one is a repaint: no second read
+            of a file that is already in hand, no second Monaco, and no framed
+            blank frame in between. `MOUNTED_APP_TAB_LIMIT` bounds what that
+            costs; the first open of a tab still shows the frame, which is the
+            only time it means anything.
+
+            A covered tab is still live — it still watches its file, still
+            revalidates and still autosaves. That is deliberate: a hidden tab
+            can be dirty, and a dirty tab that stopped saving itself because it
+            was not on screen would be the worse bargain.
+          */}
+          {mountedAppTabs.map((tab) => <div
+            className={tab.id === selectedAppTab?.id ? "app-tab-layer" : "app-tab-layer app-tab-layer-covered"}
+            inert={tab.id === selectedAppTab?.id ? undefined : true}
+            key={appTabLayerKey(tab)}
+          >
+            <Suspense fallback={<AppTabFrame tab={tab} />}>{tab.kind === "gitDiff" ? <GitDiffSurface
+              activeRoot={workspaceFiles.root}
+              canWrite={hostState.canMutate}
+              repositories={gitRepositories}
+              onMessage={setStatus}
+              scope={fileScope}
+              tab={tab}
+            /> : <AppTabSurface
+              activeRoot={workspaceFiles.root}
+              canWrite={hostState.canMutate}
+              client={fileClient}
+              onDownload={(path, kind, root) => void startDownloadFlow({ path, kind }, root)}
+              onDirty={() => pinOpenTab(tab.id)}
+              onStatus={setStatus}
+              onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, tab.id, viewMode))}
+              scope={fileScope}
+              tab={tab}
+            />}</Suspense>
+          </div>)}
         </div>
       </section>
       {panelOpen && <AppRightPanel

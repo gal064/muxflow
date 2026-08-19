@@ -408,6 +408,22 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    layer collapsed to zero would report a zero-sized terminal to tmux and make
    every pane re-fit on the way back — the flicker this removes. */
 .terminal-layer-covered { visibility: hidden; }
+/* One layer per recently used document tab, over the terminal layer and each
+   other. `inset: 0` reproduces the box the surfaces already had: every one of
+   them is `position: absolute; inset: 0` against the nearest positioned
+   ancestor, which is this layer now instead of `.workspace-content`. They come
+   after the terminal layer in the DOM and are positioned siblings in the same
+   stacking context, so paint order alone puts them on top — no `z-index`. */
+.app-tab-layer { position: absolute; inset: 0; }
+/* `visibility`, never `display: none`, for the same reason as the terminal
+   layer: the box has to survive being hidden. Monaco is laid out from the host
+   box's measured size (`editorLayout.ts`, plus its own `automaticLayout`), and
+   a layer collapsed to zero would hand it a zero box — which that module's
+   zero-box guard exists to refuse, and which would cost a full re-layout on the
+   way back. `visibility: hidden` keeps the box, keeps the ResizeObserver quiet,
+   and takes the covered tab out of the accessibility tree; `inert` takes it out
+   of the tab order and out of reach of the pointer. */
+.app-tab-layer-covered { visibility: hidden; }
 
 /* ── Tab strip ─────────────────────────────────────────────────────────── */
 
