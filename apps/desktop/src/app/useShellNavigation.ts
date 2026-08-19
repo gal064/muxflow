@@ -638,7 +638,12 @@ export function useShellNavigation(options: ShellNavigationOptions) {
           withdrawPendingTab(key);
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope" };
         }
-        publishPendingTab(scope, { key, sessionId: created.sessionId, title: name || "New session" });
+        // The ack's window id is what lets this placeholder retire: the retire
+        // rule is "the window I stand in for exists in the snapshot", and a
+        // placeholder without one waits forever.
+        publishPendingTab(scope, {
+          key, sessionId: created.sessionId, windowId: created.windowId, title: name || "New session",
+        });
         optionsRef.current.acknowledgeHostSessionSelection?.(created.sessionId);
         return {
           kind: "reached",
@@ -650,10 +655,13 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       commit: () => {
         if (!scopeCurrent(scope) || !created?.sessionId) return;
         activeSessionIdRef.current = created.sessionId;
-        activeWindowIdRef.current = undefined;
+        // The ack names the new session's one window, so the workspace and its
+        // window commit together — the same single-paint rule the optimistic
+        // switch follows.
+        activeWindowIdRef.current = created.windowId;
         optionsRef.current.setAppTab(created.sessionId, undefined);
         optionsRef.current.setActiveSessionId(created.sessionId);
-        optionsRef.current.setActiveWindowId(undefined);
+        optionsRef.current.setActiveWindowId(created.windowId);
       },
     });
   }, [beginTerminalIntent, coordinator, publishPendingTab, scopeCurrent, withdrawPendingTab]);

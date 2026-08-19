@@ -61,15 +61,20 @@ pub(super) fn execute(
     let mut command = tmux_command();
     match kind {
         v1::TmuxActionKind::CreateSession => {
-            command.args(["new-session", "-d", "-P", "-F", "#{session_id} #{pane_id}"]);
+            // The window id rides along so the desktop can retire the pending
+            // placeholder the moment the snapshot names this window — without
+            // it, a session-create placeholder had no window to wait for and
+            // sat in the strip forever.
+            command.args(["new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}"]);
             if !action.name.is_empty() {
                 validate_name(&action.name)?;
                 command.args(["-s", &action.name]);
             }
             command.arg(command::APP_SHELL);
-            let ids = run_for_ids(command, &['$', '%'])?;
+            let ids = run_for_ids(command, &['$', '@', '%'])?;
             result.session_id = ids[0].clone();
-            result.pane_id = ids[1].clone();
+            result.window_id = ids[1].clone();
+            result.pane_id = ids[2].clone();
         }
         v1::TmuxActionKind::RenameSession => {
             validate_name(&action.name)?;
