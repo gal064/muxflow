@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
+import { DelayedLoading } from "../../ui/DelayedLoading";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { GitCommandResult, GitDiff, GitMutationKind, GitMutationRequest, GitStatusSnapshot } from "./types";
 import type { GitRepositoryStore } from "./repositoryStore";
@@ -120,7 +121,7 @@ export function GitDiffSurface(props: Props) {
       <code title={tabDisplayPath(props.tab)}>{tabDisplayPath(props.tab)}</code>
     </header>
     <div className="git-diff-errors" />
-    <div className="git-diff-content"><p className="quiet-empty">Loading Git diff…</p></div>
+    <div className="git-diff-content"><DelayedLoading detail="Loading…" /></div>
   </section>;
   if (!diff || !status) return <GitDiffEmpty title={props.tab.title} detail={`This file no longer has ${props.tab.gitTarget} changes.`} retry={refresh} />;
 
@@ -140,7 +141,7 @@ export function GitDiffSurface(props: Props) {
     </div>
     <div className="git-diff-content" ref={diffUsesEditor ? editor.bindHost : undefined}>
       {shown.kind === "editor"
-        ? <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>
+        ? <Suspense fallback={<DelayedLoading detail="Loading…" />}>
           <GitDiffEditor
             modified={shown.text.modified}
             modifiedModelPath={modelUri(props.tab, "modified")}

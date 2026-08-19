@@ -5,6 +5,7 @@ import { useSanitizedMarkdown } from "../files/markdownPreview";
 import { renderSafeSvg } from "../files/markdown";
 import { useOpenFileTab } from "../files/useOpenFileTab";
 import { IMAGE_PREVIEW_LIMIT_BYTES, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
+import { DelayedLoading } from "../../ui/DelayedLoading";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { SaveState } from "../files/autosave";
 import type { AppOwnedTab } from "./types";
@@ -93,9 +94,11 @@ export function AppTabSurface(props: Props) {
       role="tabpanel"
     >
       {toolbar(undefined)}
-      {/* `quiet-empty` is already the one line a surface shows at the top-left
-          of its content area; the loading card it replaces was centred. */}
-      <p className="quiet-empty">Loading file…</p>
+      {/* Top-left of the content area, the same spot the editor stage's own
+          fallback uses: a read that resolves fast shows nothing at all, and a
+          slow one shows a single line that does not move when the read
+          finishes and the editor chunk takes over the waiting. */}
+      <DelayedLoading detail="Loading…" />
     </section>;
     case "failed": return <EmptyTab tab={props.tab} detail={content.detail} download={download} />;
     case "changed": return <EmptyTab tab={props.tab} detail={`The file changed or became unavailable: ${content.detail}`} download={download} />;
@@ -121,7 +124,7 @@ export function AppTabSurface(props: Props) {
     {toolbar(view?.state ?? "saved")}
     {view?.error && <SurfaceError className="editor-error" detail={view.error} />}
     {editorRequested && <div className="monaco-host" ref={editor.bindHost}>
-      <Suspense fallback={<p className="quiet-empty">Loading editor…</p>}>
+      <Suspense fallback={<DelayedLoading detail="Loading…" />}>
         <FileEditor
           modelPath={modelPath(props.tab)}
           onChange={onEditorChange}
