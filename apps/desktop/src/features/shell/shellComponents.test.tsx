@@ -82,9 +82,10 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('aria-current="true"');
     expect(html).toContain("A very long workspace name");
     expect(html).toContain("codex · blocked");
-    // The branch, and only the branch. The working directory used to be fused
-    // onto this line and is now ⌘P's business alone.
-    expect(html).toContain('class="workspace-meta">main*<');
+    // Neither the branch nor the working directory: a workspace holds many
+    // tabs in many directories, so both are ⌘P's business alone now.
+    expect(html).not.toContain('class="workspace-meta"');
+    expect(html).not.toContain("main*");
     expect(html).not.toContain("~/dev/muxflow");
     // The one control in the agents header names both its state and its effect.
     expect(html).toContain("Agent ordering: workspace. Switch to status.");
@@ -96,7 +97,7 @@ describe("application shell accessibility contracts", () => {
   it("badges only the workspaces and agents that are waiting on a human", () => {
     // The badge itself is decorative, so the count has to be in the row's own
     // accessible name or a screen reader never hears it.
-    expect(sidebar()).toContain('aria-label="A very long workspace name, codex · blocked, 2 agents waiting, main*"');
+    expect(sidebar()).toContain('aria-label="A very long workspace name, codex · blocked, 2 agents waiting"');
     expect(sidebar()).toContain("Codex one, blocked, waiting, work, tab 1");
     const quiet = sidebar({
       agents: buildAgentRows([agent({ displayName: "Claude", lifecycle: "working" })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "workspace"),
@@ -118,7 +119,7 @@ describe("application shell accessibility contracts", () => {
     expect(busy).toContain("…2 more");
     // Four lines, one announcement: the label names the loudest and counts the
     // rest rather than reading every line of one list item.
-    expect(busy).toContain('aria-label="A very long workspace name, codex · blocked, 5 agents, 2 agents waiting, main*"');
+    expect(busy).toContain('aria-label="A very long workspace name, codex · blocked, 5 agents, 2 agents waiting"');
     // Nothing to count means nothing is said about counting.
     expect(sidebar()).not.toContain("more");
   });
