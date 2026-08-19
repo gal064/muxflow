@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { afterNextPaint, closePanePaintSpans, recordPerfMilestone } from "../../perf/probe";
+import { afterNextPaint, closePanePaintSpans, recordPerfCounter, recordPerfMilestone } from "../../perf/probe";
 import { createPaintTicket } from "../../perf/paintTicket";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import type { Pane } from "../../app/types";
@@ -17,6 +17,8 @@ import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./P
 import { prepareTerminalSnapshot, requestTerminalSeed, setTerminalVisibility } from "./api";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { DeferredTerminalOutputQueue } from "./DeferredTerminalOutputQueue";
+import { describePaneDegradation, PaneDegradedWatchdog } from "./PaneDegradedWatchdog";
+import { awaitWithin } from "./timeBound";
 import { TerminalTransferSurface, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
 import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
@@ -27,6 +29,16 @@ export { paneRecoveryPlan } from "./PaneRecovery";
 const pendingPaneHandoffs = new Map<string, Promise<void>>();
 const paneLifecycleVersions = new Map<string, number>();
 let nextTransferRenderLifetime = 0;
+
+/**
+ * How long a reveal waits behind the previous instance's handoff.
+ *
+ * The wait exists so a late hide cannot overtake a new reveal, and it was
+ * unbounded: a single xterm write completion that never fires left the pane out
+ * of the visibility protocol forever. See `revealForCurrentEpoch` for why
+ * proceeding after the bound is safe.
+ */
+const PANE_HANDOFF_TIMEOUT_MS = 2_000;
 
 /**
  * Renders a pane at the grid tmux says it has, not the one its CSS box measures.
@@ -193,6 +205,13 @@ export function TerminalPane({
   // applied, so an optimistic fit can never move it.
   const gridForBoxRef = useRef<TerminalSize | undefined>(undefined);
   const lastRevealKeyRef = useRef<string | undefined>(undefined);
+  // Bumped only by an explicit re-assertion. The reveal is otherwise still once
+  // per (client, epoch); this is what lets the watchdog step past that latch
+  // without weakening it, and what makes an in-flight reveal stand down when a
+  // newer one supersedes it.
+  const revealAttemptRef = useRef(0);
+  const reassertVisibilityRef = useRef<(() => void) | undefined>(undefined);
+  const watchdogRef = useRef<PaneDegradedWatchdog | undefined>(undefined);
   const revealStateRef = useRef<PaneRevealState>({ ready: false, hasLocalState: false });
   const deferredOutputRef = useRef(new DeferredTerminalOutputQueue());
   const seedDiagnosticForNextSeedRef = useRef(false);
@@ -238,6 +257,9 @@ export function TerminalPane({
       // which reopens its latch so the pane can ask again.
       onResnapshotRequired: async (reason) => {
         if (!rendererActive) return;
+        // The renderer asks once and then latches. Record it so the pane keeps
+        // asking on a bound if that one request produces nothing.
+        watchdogRef.current?.note("rendererReseed");
         terminalStateCache.delete(pane.id);
         const currentClientId = clientIdRef.current;
         if (!currentClientId) throw new Error(`${reason} No connection to request a seed through.`);
@@ -372,6 +394,27 @@ export function TerminalPane({
       });
     };
 
+    // The time bound on every one-shot recovery latch this pane can be caught
+    // in. It arms only while the pane is degraded, so a pane that is working
+    // runs no timers at all.
+    const watchdog = new PaneDegradedWatchdog((reason, attempt) => {
+      if (!rendererActive) return;
+      recordPerfCounter("terminal.pane.watchdogReseeds");
+      // Once per episode, not once per retry: the point is that a stuck pane
+      // stops being silent, not that it becomes noisy.
+      if (attempt === 0) {
+        setRendererDiagnostic(`${describePaneDegradation(reason)}; retrying…`);
+      }
+      // Reopen the hub's single-shot conflict latch as part of asking again, so
+      // a later conflicting handoff is still able to request recovery.
+      hub.retryPaneSeed(pane.id);
+      requestFreshSeed(`Pane ${pane.id} stayed degraded (${reason}) past its recovery bound`);
+      // A seed cannot help a pane the host believes is hidden, so the other half
+      // of a retry is re-asserting visibility.
+      reassertVisibilityRef.current?.();
+    });
+    watchdogRef.current = watchdog;
+
     const unsubscribeInput = renderer.onInput((input) => inputRef.current(pane.id, input));
     const unsubscribeViewport = renderer.onViewportChange(setViewport);
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
@@ -383,6 +426,10 @@ export function TerminalPane({
       if (effect.kind === "seed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
+        // An authoritative screen is what every degraded state here was waiting
+        // for: this pane is working again, and the next fault starts over at the
+        // shortest retry delay rather than inheriting this episode's backoff.
+        watchdog.noteHealthy();
         renderer.seed(effect.data, () => {
           publishInitialPaint(generation, eventEpoch, true);
         }, generation);
@@ -390,6 +437,8 @@ export function TerminalPane({
         if (seedDiagnosticForNextSeedRef.current) seedDiagnosticForNextSeedRef.current = false;
         else setSeedDiagnostic(undefined);
       } else if (effect.kind === "output") {
+        // Output reaching the renderer is proof the pane is not frozen.
+        watchdog.noteHealthy();
         renderer.write(effect.data, () => commitRendered(generation, eventEpoch), generation);
       } else if (effect.kind === "deferOutput") {
         const admission = deferredOutputRef.current.enqueue({
@@ -399,11 +448,18 @@ export function TerminalPane({
         });
         if (admission === "overflow") {
           revealStateRef.current = { ready: false, hasLocalState: false };
+          // The queue now refuses everything until it is reset, and the reset is
+          // driven by the seed this asks for — one request, no retry, until now.
+          watchdog.note("deferredOverflow");
           requestFreshSeed("Output arrived before pane recovery exceeded its byte or record budget");
         }
       } else if (effect.kind === "awaitSeed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
+        // Nobody on this side requests the seed when the host said it owns the
+        // request (`requestSeed` false). That is exactly the case where a
+        // suppressed host seed freezes the pane, so bound the wait either way.
+        watchdog.note("paneAwaitingSeed");
         renderer.seed(ownTerminalBytes(new Uint8Array()));
         setRendererDiagnostic(`${effect.reason}; waiting for a fresh terminal seed…`);
         // An empty pane under a diagnostic banner is this branch's intended
@@ -434,6 +490,8 @@ export function TerminalPane({
             renderer.write(effect.rawTail, markRecoveryRendered, effect.tailThroughGeneration);
           }
           flushDeferredOutput(effect.tailThroughGeneration);
+          // Recovery material laid a real screen down; the pane is whole again.
+          watchdog.noteHealthy();
           setRendererDiagnostic(undefined);
         }
       } else if (effect.kind === "diagnostic") {
@@ -444,6 +502,14 @@ export function TerminalPane({
       } else if (transition.state.ready) {
         flushDeferredOutput();
       }
+    }, (health) => {
+      // The hub's two latches, mirrored. While `awaitingSeed` stands the hub
+      // drops this pane's events instead of delivering them, so this callback is
+      // the only way the pane can find out it has been silenced.
+      if (health.awaitingSeed) watchdog.note("hubAwaitingSeed");
+      else watchdog.clear("hubAwaitingSeed");
+      if (health.conflictReseedRequested) watchdog.note("hubConflictReseed");
+      else watchdog.clear("hubConflictReseed");
     });
     // Render-side only, plus the terminal's own metrics. This observer once
     // computed the tmux client size from this pane's box and its share of the
@@ -498,6 +564,8 @@ export function TerminalPane({
       rendererActive = false;
       clearTimeout(revealFallback);
       initialPaint.abandon();
+      watchdog.stop();
+      if (watchdogRef.current === watchdog) watchdogRef.current = undefined;
       lastRevealKeyRef.current = undefined;
       observer.disconnect();
       unsubscribeEvents();
@@ -574,11 +642,31 @@ export function TerminalPane({
     const revealForCurrentEpoch = () => {
       const checkpoint = hub.visibilityCheckpoint(pane.id);
       if (!checkpoint) return;
-      const revealKey = `${clientId}:${checkpoint.terminalEpoch}`;
+      const revealKey = `${clientId}:${checkpoint.terminalEpoch}:${revealAttemptRef.current}`;
       if (lastRevealKeyRef.current === revealKey) return;
       lastRevealKeyRef.current = revealKey;
       void (async () => {
-        await pendingPaneHandoffs.get(pane.id)?.catch(() => undefined);
+        const handoff = pendingPaneHandoffs.get(pane.id);
+        if (handoff && (await awaitWithin(handoff, PANE_HANDOFF_TIMEOUT_MS)) === "timeout") {
+          // Proceeding is safe, and waiting longer is not. A pending handoff
+          // belongs to a *previous* instance of this pane — it is created by the
+          // mount effect's cleanup, and React runs that cleanup before the new
+          // instance's effects — so its own guard
+          // (`paneLifecycleVersions.get(pane.id) !== lifecycle`) already makes
+          // everything it does after the drain a no-op: it writes no
+          // `terminalStateCache` entry and sends no hide. That guard is what
+          // rules out the two things this wait was protecting against, a late
+          // hide overtaking this reveal and a stale serialize landing in the
+          // cache under this pane's id — the cache is keyed by pane id alone,
+          // with the epoch only carried as a field, so a stale `set` would be
+          // indistinguishable from a fresh one if it ever ran. The one case
+          // where the handoff is still current is a pane that really did go
+          // away, and then `active` is false and this reveal stops below.
+          // Dropping the map entry keeps the *next* reveal from queueing behind
+          // the same wedged promise.
+          if (pendingPaneHandoffs.get(pane.id) === handoff) pendingPaneHandoffs.delete(pane.id);
+          recordPerfCounter("terminal.pane.handoffTimeouts");
+        }
         if (!active || lastRevealKeyRef.current !== revealKey) return;
         const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
         if (!currentCheckpoint || currentCheckpoint.terminalEpoch !== checkpoint.terminalEpoch) return;
@@ -595,8 +683,14 @@ export function TerminalPane({
             new Uint8Array(),
             rendererMatchesEpoch ? currentCheckpoint : { ...currentCheckpoint, outputGeneration: 0 },
           );
+          watchdogRef.current?.clear("revealFailed");
         } catch (error) {
           if (lastRevealKeyRef.current === revealKey) lastRevealKeyRef.current = undefined;
+          // Clearing the latch is not a retry: nothing re-runs this unless the
+          // epoch changes, so the host can be left believing a mounted pane is
+          // hidden and no output is ever sent for it. The watchdog is what turns
+          // that into a bounded series of re-assertions.
+          watchdogRef.current?.note("revealFailed");
           diagnosticRef.current?.(`Could not mark ${pane.id} visible: ${String(error)}`);
           if (clientIdRef.current === clientId && hub.generationEpoch === currentCheckpoint.terminalEpoch) {
             void requestTerminalSeed(clientId, pane.id).catch((seedError) => {
@@ -605,6 +699,14 @@ export function TerminalPane({
           }
         }
       })();
+    };
+    reassertVisibilityRef.current = () => {
+      // Stepping the attempt is what gets past the once-per-(client, epoch)
+      // latch, and it also supersedes any reveal still in flight: that one's key
+      // no longer matches, so it stands down at its own guard rather than racing
+      // this one to the host.
+      revealAttemptRef.current += 1;
+      revealForCurrentEpoch();
     };
     revealForCurrentEpoch();
     const unsubscribe = hub.subscribeEpoch(() => {
@@ -616,6 +718,7 @@ export function TerminalPane({
     });
     return () => {
       active = false;
+      reassertVisibilityRef.current = undefined;
       unsubscribe();
     };
   }, [clientId, hub, pane.id]);

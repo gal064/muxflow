@@ -6,6 +6,36 @@ type EpochListener = (event: EpochEvent) => void;
 type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" }>;
 type PaneListener = (event: PaneEvent) => void;
 
+/**
+ * The degraded states this hub holds a pane in.
+ *
+ * Both are one-shot latches whose only exit is an authoritative seed, and the
+ * pane's own consumer cannot see either of them: while `awaitingSeed` stands the
+ * hub drops that pane's events rather than delivering them, so the consumer is
+ * told nothing at all. Exposing them is what lets the pane put a time bound on
+ * a recovery signal that may never arrive.
+ */
+export interface PaneHealth {
+  /** Output is being dropped until an authoritative seed re-establishes the pane. */
+  awaitingSeed: boolean;
+  /** A stale or conflicting handoff was rejected and one reseed was requested. */
+  conflictReseedRequested: boolean;
+}
+
+type PaneHealthListener = (health: PaneHealth) => void;
+
+function paneHealthOf(pane: PaneStreamState | undefined): PaneHealth {
+  return {
+    awaitingSeed: pane?.awaitingSeed ?? false,
+    conflictReseedRequested: pane?.conflictReseedRequested ?? false,
+  };
+}
+
+function samePaneHealth(left: PaneHealth, right: PaneHealth): boolean {
+  return left.awaitingSeed === right.awaitingSeed
+    && left.conflictReseedRequested === right.conflictReseedRequested;
+}
+
 const DEFAULT_MAX_PANE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_BUFFERED_PANES = 32;
@@ -62,6 +92,7 @@ export type TerminalEventAdmission =
 export class TerminalEventHub {
   readonly #epochListeners = new Set<EpochListener>();
   readonly #paneListeners = new Map<string, PaneListener>();
+  readonly #paneHealthListeners = new Map<string, PaneHealthListener>();
   readonly #activePaneStates = new Map<string, PaneStreamState>();
   readonly #dormantPaneStates = new Map<string, PaneStreamState>();
   readonly #evictedSeedDebt = new Map<string, true>();
@@ -128,6 +159,24 @@ export class TerminalEventHub {
     const hadEvictedSeedDebt = this.#evictedSeedDebt.delete(event.paneId);
     const requiresConservativeSeed = !wasTracked && this.#unknownPanesRequireSeed;
     const pane = this.#touchPane(event.paneId);
+    // Everything below can latch this pane into a degraded state and then leave
+    // through any of a dozen early returns. Compare the health once around the
+    // whole thing so no exit can silently strand the pane's consumer.
+    const healthBefore = paneHealthOf(pane);
+    try {
+      return this.#publishToPane(event, pane, admission, hadEvictedSeedDebt, requiresConservativeSeed);
+    } finally {
+      this.#notifyHealthChange(event.paneId, healthBefore);
+    }
+  }
+
+  #publishToPane(
+    event: PaneEvent,
+    pane: PaneStreamState,
+    admission: TerminalEventAdmission,
+    hadEvictedSeedDebt: boolean,
+    requiresConservativeSeed: boolean,
+  ): TerminalEventAdmission {
     if (hadEvictedSeedDebt || requiresConservativeSeed) {
       const alreadyAwaiting = pane.awaitingSeed;
       pane.awaitingSeed = true;
@@ -217,7 +266,13 @@ export class TerminalEventHub {
     return () => this.#epochListeners.delete(listener);
   }
 
-  subscribePane(paneId: string, listener: PaneListener): () => void {
+  /**
+   * `onHealthChange` is how a mounted pane learns it has been latched into a
+   * degraded state. It is called once with the pane's current health as part of
+   * subscribing — a pane can mount straight into seed debt inherited from its
+   * dormant state — and again on every later change.
+   */
+  subscribePane(paneId: string, listener: PaneListener, onHealthChange?: PaneHealthListener): () => void {
     // Pane payload allocations are transferred to their renderer. A second
     // consumer would turn that move into mutable aliasing, so fail at the
     // ownership boundary instead of silently multicasting branded bytes.
@@ -228,6 +283,7 @@ export class TerminalEventHub {
     this.#dormantPaneStates.delete(paneId);
     this.#activePaneStates.set(paneId, pane);
     this.#paneListeners.set(paneId, listener);
+    if (onHealthChange) this.#paneHealthListeners.set(paneId, onHealthChange);
     const backlog = pane?.backlog;
     if (backlog) {
       this.#deleteBacklog(pane);
@@ -242,6 +298,7 @@ export class TerminalEventHub {
         // back before surfacing the exception and require one authoritative
         // replacement instead of replaying an ambiguous suffix.
         this.#paneListeners.delete(paneId);
+        this.#paneHealthListeners.delete(paneId);
         this.#activePaneStates.delete(paneId);
         const alreadyAwaiting = pane.awaitingSeed;
         pane.awaitingSeed = true;
@@ -254,13 +311,39 @@ export class TerminalEventHub {
       }
       this.measurements?.add("terminal.hub.backlogDequeues", backlog.entries.length);
     }
+    this.#notifyHealth(paneId);
     return () => {
       if (this.#paneListeners.get(paneId) !== listener) return;
       this.#paneListeners.delete(paneId);
+      this.#paneHealthListeners.delete(paneId);
       const active = this.#activePaneStates.get(paneId);
       this.#activePaneStates.delete(paneId);
       if (active) this.#retainDormantPane(paneId, active);
     };
+  }
+
+  /** What this hub currently believes about a pane, mounted or not. */
+  paneHealth(paneId: string): PaneHealth {
+    return paneHealthOf(this.#activePaneStates.get(paneId) ?? this.#dormantPaneStates.get(paneId));
+  }
+
+  /**
+   * Reopens the one-shot conflict-reseed latch.
+   *
+   * The hub asks for exactly one reseed per conflicting handoff, which is the
+   * right rate limit and the wrong failure mode: if that seed never arrives, no
+   * later conflict can ask again. The pane's watchdog calls this as part of
+   * re-requesting the seed itself, so the latch bounds a *storm* rather than
+   * bounding recovery to a single attempt. `awaitingSeed` is deliberately not
+   * reopened: only an authoritative seed may clear that, or incremental output
+   * would splice onto a screen the hub cannot prove.
+   */
+  retryPaneSeed(paneId: string): void {
+    const pane = this.#activePaneStates.get(paneId) ?? this.#dormantPaneStates.get(paneId);
+    if (!pane?.conflictReseedRequested) return;
+    const healthBefore = paneHealthOf(pane);
+    pane.conflictReseedRequested = false;
+    this.#notifyHealthChange(paneId, healthBefore);
   }
 
   clearPane(paneId: string): void {
@@ -275,6 +358,7 @@ export class TerminalEventHub {
       this.#activePaneStates.delete(paneId);
     }
     this.#evictedSeedDebt.delete(paneId);
+    this.#notifyHealth(paneId);
   }
 
   clear(): void {
@@ -334,6 +418,10 @@ export class TerminalEventHub {
     this.#retainedPaneCount = 0;
     this.#evictedSeedDebt.clear();
     this.#unknownPanesRequireSeed = false;
+    // Every mounted pane just had its seed debt discarded along with the state
+    // that recorded it. A pane whose watchdog is armed on that debt has to hear
+    // about it, or it keeps re-requesting a seed nobody owes it any more.
+    for (const paneId of this.#paneHealthListeners.keys()) this.#notifyHealth(paneId);
   }
 
   #buffer(pane: PaneStreamState, event: PaneEvent): void {
@@ -539,6 +627,24 @@ export class TerminalEventHub {
     if (pane.conflictReseedRequested) return;
     pane.conflictReseedRequested = true;
     this.#requestSeed(paneId, "stale or conflicting terminal visibility handoff");
+  }
+
+  #notifyHealthChange(paneId: string, before: PaneHealth): void {
+    if (!this.#paneHealthListeners.has(paneId)) return;
+    if (samePaneHealth(before, this.paneHealth(paneId))) return;
+    this.#notifyHealth(paneId);
+  }
+
+  #notifyHealth(paneId: string): void {
+    const listener = this.#paneHealthListeners.get(paneId);
+    if (!listener) return;
+    try {
+      listener(this.paneHealth(paneId));
+    } catch (error) {
+      // Contained like every other observer here: a health report is a hint for
+      // recovery, and it must never be able to break the delivery it rides on.
+      this.#reportObserverFailure("terminal pane health observer", error);
+    }
   }
 
   #requestSeed(paneId: string, reason: string): void {

@@ -503,6 +503,85 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(hub.trackedPaneCount).toBe(1);
   });
 
+  // A pane's own consumer used to be unable to see either of the hub's degraded
+  // latches: while `awaitingSeed` stands the hub drops that pane's events
+  // instead of delivering them, so a lost recovery signal was indistinguishable
+  // from a quiet pane. Both latches are now visible and the conflict one is
+  // retriable, which is what lets the pane put a time bound on them.
+  it("reports the degraded state it is holding a pane in", () => {
+    const hub = new TerminalEventHub();
+    const health: Array<{ awaitingSeed: boolean; conflictReseedRequested: boolean }> = [];
+    hub.subscribePane("%1", () => undefined, (value) => health.push(value));
+    expect(health).toEqual([{ awaitingSeed: false, conflictReseedRequested: false }]);
+
+    hub.publish(resource(1, 1, {
+      state: "released", requiresSeed: true, recoveryReason: "host recovery pending",
+      serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array(),
+    }));
+    expect(hub.paneHealth("%1")).toEqual({ awaitingSeed: true, conflictReseedRequested: false });
+    expect(health.at(-1)).toEqual({ awaitingSeed: true, conflictReseedRequested: false });
+
+    // Dropped output while awaiting a seed is not a change, and must not turn
+    // into a notification per chunk.
+    hub.publish(output(2, 2));
+    expect(health).toHaveLength(2);
+
+    hub.publish(seed(3, 3));
+    expect(hub.paneHealth("%1")).toEqual({ awaitingSeed: false, conflictReseedRequested: false });
+    expect(health.at(-1)).toEqual({ awaitingSeed: false, conflictReseedRequested: false });
+  });
+
+  it("reports a pane mounting straight into inherited seed debt", () => {
+    const hub = new TerminalEventHub();
+    hub.publish(resource(1, 1, {
+      state: "released", requiresSeed: true, recoveryReason: "host recovery pending",
+      serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array(),
+    }));
+    const health: Array<{ awaitingSeed: boolean }> = [];
+    hub.subscribePane("%1", () => undefined, (value) => health.push(value));
+    expect(health).toEqual([{ awaitingSeed: true, conflictReseedRequested: false }]);
+  });
+
+  it("makes the one-shot conflict reseed retriable", () => {
+    const requests: string[] = [];
+    const hub = new TerminalEventHub((paneId) => requests.push(paneId));
+    const health: Array<{ conflictReseedRequested: boolean }> = [];
+    hub.subscribePane("%1", () => undefined, (value) => health.push(value));
+    hub.publish(output(1, 7));
+    hub.publish(seed(2, 3));
+    expect(requests).toEqual(["%1"]);
+    expect(hub.paneHealth("%1").conflictReseedRequested).toBe(true);
+
+    // Unchanged: a second stale seed is still rate-limited to nothing.
+    hub.publish(seed(3, 4));
+    expect(requests).toEqual(["%1"]);
+
+    // The pane's watchdog is re-requesting the seed itself, so the latch that
+    // exists to bound a storm reopens rather than ending recovery outright.
+    hub.retryPaneSeed("%1");
+    expect(hub.paneHealth("%1").conflictReseedRequested).toBe(false);
+    expect(health.at(-1)?.conflictReseedRequested).toBe(false);
+    hub.publish(seed(4, 5));
+    expect(requests).toEqual(["%1", "%1"]);
+    // Retrying a pane that owes nothing is inert.
+    hub.publish(seed(5, 9));
+    hub.retryPaneSeed("%1");
+    hub.retryPaneSeed("%unknown");
+    expect(requests).toEqual(["%1", "%1"]);
+  });
+
+  it("contains a failing pane health observer like every other observer", () => {
+    const failures: string[] = [];
+    const hub = new TerminalEventHub(undefined, {}, undefined, (message) => failures.push(message));
+    const received: TerminalEvent[] = [];
+    hub.subscribePane("%1", (event) => received.push(event), () => {
+      throw new Error("watchdog rejected a health report");
+    });
+    expect(hub.publish(seed(1, 1))).toEqual({ kind: "accepted" });
+    expect(received).toEqual([seed(1, 1)]);
+    expect(failures.at(-1)).toContain("terminal pane health observer failed");
+  });
+
   it.each([
     ["seed", seed(4, 3, "%1")],
     ["recovery material", resource(4, 3, { paneId: "%1" })],

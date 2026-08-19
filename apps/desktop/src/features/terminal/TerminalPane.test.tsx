@@ -11,14 +11,15 @@ import {
   abandonPanePaintSpansForScope,
   enablePerfProbe,
   openPanePaintSpan,
+  perfCounterSnapshot,
   perfSummary,
   resetPerfProbe,
   targetPanePaintSpan,
 } from "../../perf/probe";
 
 const api = vi.hoisted(() => ({
-  setTerminalVisibility: vi.fn(async () => undefined),
-  requestTerminalSeed: vi.fn(async () => undefined),
+  setTerminalVisibility: vi.fn(async (..._args: unknown[]) => undefined),
+  requestTerminalSeed: vi.fn(async (..._args: unknown[]) => undefined),
 }));
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
@@ -30,7 +31,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
   type Size = { columns: number; rows: number };
   // What `measure()` answers from the moment the pane opens the renderer, which
   // is before a test can reach the instance.
-  const config: { measured?: Size } = {};
+  const config: { measured?: Size; wedgeDrain?: boolean } = {};
   class FakeRenderer {
     writes: string[] = [];
     disposed = false;
@@ -63,6 +64,9 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     disposeGpuRenderer(): void {}
     dispose(): void { this.disposed = true; }
     async drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number }> {
+      // A wedged xterm write completion is what leaves the real renderer's
+      // memoized drain pending forever, and the pane's next reveal waits on it.
+      if (config.wedgeDrain) return new Promise<never>(() => undefined);
       return { serialized: "cached-screen", outputGeneration: 3 };
     }
     seed(bytes: Uint8Array, onRendered?: () => void): void {
@@ -102,18 +106,48 @@ import { TerminalPane } from "./TerminalPane";
 import { prepareTerminalSnapshot, type TerminalEvent } from "./api";
 import { terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
-import type { TerminalEventHub } from "./TerminalEventHub";
+import type { PaneHealth, TerminalEventHub } from "./TerminalEventHub";
 
 type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" }>;
 
 class FakeHub {
   generationEpoch: number | undefined = 7;
   rendered: Array<{ paneId: string; generation: number; terminalEpoch: number | undefined }> = [];
+  seedRetries: string[] = [];
   #paneListeners = new Map<string, (event: PaneEvent) => void>();
+  #healthListeners = new Map<string, (health: PaneHealth) => void>();
+  #health = new Map<string, PaneHealth>();
 
-  subscribePane(paneId: string, listener: (event: PaneEvent) => void): () => void {
+  subscribePane(
+    paneId: string,
+    listener: (event: PaneEvent) => void,
+    onHealthChange?: (health: PaneHealth) => void,
+  ): () => void {
     this.#paneListeners.set(paneId, listener);
-    return () => this.#paneListeners.delete(paneId);
+    if (onHealthChange) {
+      this.#healthListeners.set(paneId, onHealthChange);
+      onHealthChange(this.paneHealth(paneId));
+    }
+    return () => {
+      this.#paneListeners.delete(paneId);
+      this.#healthListeners.delete(paneId);
+    };
+  }
+
+  paneHealth(paneId: string): PaneHealth {
+    return this.#health.get(paneId) ?? { awaitingSeed: false, conflictReseedRequested: false };
+  }
+
+  /** Drives the hub's degraded-state surface the way `publish` would. */
+  setPaneHealth(paneId: string, health: PaneHealth): void {
+    this.#health.set(paneId, health);
+    this.#healthListeners.get(paneId)?.(health);
+  }
+
+  retryPaneSeed(paneId: string): void {
+    this.seedRetries.push(paneId);
+    const health = this.paneHealth(paneId);
+    if (health.conflictReseedRequested) this.setPaneHealth(paneId, { ...health, conflictReseedRequested: false });
   }
 
   subscribeEpoch(): () => void { return () => undefined; }
@@ -169,6 +203,28 @@ function paneNode(): HTMLElement {
 
 const resizeCallbacks: Array<() => void> = [];
 
+/** Reveals only: the hide half of the protocol passes `false` here. */
+function revealCalls(): number {
+  return api.setTerminalVisibility.mock.calls.filter((call) => call[2] === true).length;
+}
+
+function paneDiagnostic(mounted: ReactTestRenderer): string {
+  return mounted.root
+    .findAll((node) => node.props.className === "renderer-diagnostic")
+    .flatMap((node) => node.children.filter((child): child is string => typeof child === "string"))
+    .join("");
+}
+
+function awaitSeedResource(paneId: string, hostOwnsTheRequest: boolean): PaneEvent {
+  return {
+    kind: "paneResource", paneId, state: "released", requiresSeed: hostOwnsTheRequest,
+    recoveryReason: "Host recovery pending", generation: 4, snapshotGeneration: 4,
+    tailThroughGeneration: 4, sequence: 1,
+    serializedSnapshot: ownTerminalBytes(new Uint8Array()),
+    rawTail: ownTerminalBytes(new Uint8Array()),
+  };
+}
+
 function paneElement(pane: Pane, hub: FakeHub, clientId: string, appFocused: boolean) {
   return <TerminalPane
     appFocused={appFocused}
@@ -212,6 +268,7 @@ beforeEach(() => {
   terminalStateCache.clear();
   renderers.created.length = 0;
   renderers.config.measured = undefined;
+  renderers.config.wedgeDrain = false;
   paneNodes.length = 0;
   resizeCallbacks.length = 0;
   api.setTerminalVisibility.mockClear();
@@ -435,5 +492,141 @@ describe("TerminalPane grid during a resize", () => {
     expect(renderer.resizes).toEqual([{ columns: 50, rows: 24 }, { columns: 49, rows: 24 }]);
     await act(async () => mounted.unmount());
     warn.mockRestore();
+  });
+});
+
+// Every degraded state a pane can be latched into has exactly one recovery
+// signal — one seed request, one reseed, one reveal — and no time bound. When
+// that signal is lost the pane is frozen until it is remounted, which is the
+// "one terminal pane frozen forever" bug. These pin the bound.
+describe("TerminalPane degraded-state watchdog", () => {
+  it("keeps asking for the seed a stuck pane is waiting for, with backoff", async () => {
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%stuck"), hub);
+    expect(revealCalls()).toBe(1);
+
+    // `requiresSeed` means the host owns the request, so nothing on this side
+    // ever asks. A request the host suppressed used to end the story here.
+    await act(async () => { hub.deliver(awaitSeedResource("%stuck", true)); });
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+    // A seed cannot reach a pane the host believes is hidden, so the retry
+    // re-asserts visibility as well.
+    expect(revealCalls()).toBe(2);
+    expect(paneDiagnostic(mounted)).toContain("retrying");
+
+    // The second retry is four seconds after the first, not two.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(2);
+    expect(perfCounterSnapshot()["terminal.pane.watchdogReseeds"]).toBe(2);
+
+    vi.useRealTimers();
+    await act(async () => mounted.unmount());
+  });
+
+  it("stops retrying when a seed lands and gives the next fault a short first delay", async () => {
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%recover"), hub);
+    await act(async () => {
+      hub.setPaneHealth("%recover", { awaitingSeed: true, conflictReseedRequested: false });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      hub.setPaneHealth("%recover", { awaitingSeed: false, conflictReseedRequested: false });
+      hub.deliver(seedEvent("%recover"));
+    });
+    // Healthy: no timer is left running, whatever the backoff had reached.
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+
+    // And the next episode starts at two seconds rather than inheriting the
+    // previous one's cadence.
+    await act(async () => {
+      hub.setPaneHealth("%recover", { awaitingSeed: true, conflictReseedRequested: false });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+    await act(async () => mounted.unmount());
+  });
+
+  it("reopens the hub's one-shot conflict latch as part of retrying it", async () => {
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%conflict"), hub);
+    await act(async () => {
+      hub.setPaneHealth("%conflict", { awaitingSeed: false, conflictReseedRequested: true });
+    });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(hub.seedRetries).toEqual(["%conflict"]);
+    expect(hub.paneHealth("%conflict").conflictReseedRequested).toBe(false);
+    // Withdrawing the hub's reason does not end the episode: the seed this
+    // just asked for has still not arrived.
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+    await act(async () => mounted.unmount());
+  });
+
+  it("reveals a remounted pane once a wedged handoff passes its bound", async () => {
+    renderers.config.wedgeDrain = true;
+    const hub = new FakeHub();
+    const first = await mountPane(fixturePane("%wedge"), hub);
+    expect(revealCalls()).toBe(1);
+    // The drain this unmount starts never completes, so the handoff the next
+    // reveal serializes behind stays pending forever.
+    await act(async () => first.unmount());
+
+    vi.useFakeTimers();
+    const second = await mountPane(fixturePane("%wedge"), hub);
+    expect(revealCalls()).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(revealCalls()).toBe(2);
+    expect(perfCounterSnapshot()["terminal.pane.handoffTimeouts"]).toBe(1);
+
+    vi.useRealTimers();
+    await act(async () => second.unmount());
+  });
+
+  it("re-asserts visibility the host refused instead of only clearing its latch", async () => {
+    api.setTerminalVisibility.mockImplementationOnce(async () => { throw new Error("visibility conflict"); });
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%refused"), hub);
+    // The pre-existing recovery: one seed request, and nothing that re-runs
+    // the reveal itself.
+    expect(revealCalls()).toBe(1);
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(revealCalls()).toBe(2);
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+    await act(async () => mounted.unmount());
+  });
+
+  it("arms no timer for a pane that is working", async () => {
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%healthy"), hub);
+    await act(async () => { hub.deliver(seedEvent("%healthy")); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+    expect(revealCalls()).toBe(1);
+
+    vi.useRealTimers();
+    await act(async () => mounted.unmount());
   });
 });
