@@ -112,9 +112,14 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 /* ── Titlebar ──────────────────────────────────────────────────────────── */
 
+/* The height is pinned, and `overflow: hidden` pins it again: this bar is one
+   child of a flex column whose default `min-height: auto` lets a child's own
+   content stretch it, which is how a label that appeared a beat after the first
+   paint made the whole bar jump. */
 .titlebar {
   display: flex; align-items: center; gap: 2px;
-  height: var(--bar-height); padding: 0 6px;
+  height: var(--titlebar-height, var(--bar-height)); flex: 0 0 auto; overflow: hidden;
+  padding: 0 6px;
   background: var(--chrome-bg); border-bottom: 1px solid var(--chrome-hairline);
 }
 /* macOS draws its traffic lights over this bar, because the window is
@@ -122,19 +127,18 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    src-tauri/tauri.conf.json. If that config is ever changed, this reservation
    becomes 78px of dead space beside a native title bar — the two belong
    together. */
-.titlebar-overlay { padding-left: 78px; }
+/* Taller than every other bar, and only here: the traffic lights are drawn by
+   the OS at their own size and a 28px bar clips them. `--bar-height` itself is
+   shared with the tabstrip, the panel tabs and the editor toolbars, so the
+   override is local to this bar. */
+.titlebar-overlay { --titlebar-height: 38px; padding-left: 78px; }
 .titlebar-title {
-  display: flex; align-items: baseline; gap: 7px; min-width: 0;
+  display: flex; align-items: center; gap: 7px; min-width: 0;
   margin-left: 6px;
 }
 .titlebar-workspace {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--chrome-ink); font-size: var(--type-row); font-weight: 550;
-}
-.titlebar-branch {
-  display: inline-flex; align-items: center; gap: 4px; min-width: 0;
-  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-dim);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .titlebar-spacer { flex: 1; min-width: 8px; align-self: stretch; }
 
@@ -563,9 +567,15 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* ── Right panel ───────────────────────────────────────────────────────── */
 
 .right-panel {
+  position: relative;
   display: flex; flex-direction: column;
   width: var(--panel-width); flex: 0 0 var(--panel-width); min-height: 0;
   background: var(--chrome-bg); border-left: 1px solid var(--chrome-hairline);
+}
+/* The sidebar's handle, on the other edge. */
+.panel-resize {
+  position: absolute; z-index: 8; top: 0; bottom: 0; left: -3px; width: 7px;
+  cursor: col-resize; touch-action: none;
 }
 .panel-tabs {
   display: flex; align-items: stretch; flex: 0 0 var(--bar-height); height: var(--bar-height);

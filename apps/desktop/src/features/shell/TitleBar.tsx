@@ -5,8 +5,6 @@ interface TitleBarProps {
   platform: Platform;
   /** The workspace being shown, or undefined before the first snapshot. */
   workspaceName?: string;
-  /** `main*` — branch plus a marker when the worktree is dirty. */
-  branch?: string;
   sidebarOpen: boolean;
   panelOpen: boolean;
   /** Agents waiting on a human; 0 renders no badge at all. */
@@ -19,7 +17,8 @@ interface TitleBarProps {
 }
 
 /**
- * The only full-width bar, 28px like every other bar in the app.
+ * The only full-width bar: 38px on macOS, where it has to clear the native
+ * traffic lights drawn over it, and 28px like every other bar elsewhere.
  *
  * It carries four controls. The mock also draws back/forward arrows; those did
  * not survive, because the phase's own acceptance gate caps resting chrome and
@@ -41,7 +40,6 @@ export function TitleBar(props: TitleBarProps) {
     ><Icon name="sidebarLeft" /></button>
     <div className="titlebar-title" data-tauri-drag-region>
       <span className="titlebar-workspace">{props.workspaceName ?? "No workspace"}</span>
-      {props.branch && <span className="titlebar-branch" title={`Git branch ${props.branch}`}><Icon name="branch" size={11} />{props.branch}</span>}
     </div>
     <div className="titlebar-spacer" data-tauri-drag-region />
     <button

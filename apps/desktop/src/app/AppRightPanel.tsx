@@ -22,6 +22,11 @@ interface AppRightPanelProps {
   onOpenFile: (entry: FileEntry, options: { preview: boolean }) => void;
   onSurface: (surface: ShellState["panelSurface"]) => void;
   surface: ShellState["panelSurface"];
+  /** Current panel width in CSS pixels, already clamped against the window. */
+  width: number;
+  /** The cap the caller applies — half the window. */
+  maxWidth: number;
+  onWidth: (width: number) => void;
   workspaceFiles: ReturnType<typeof useWorkspaceFiles>;
   workspaceGit: WorkspaceGitState;
 }
@@ -58,7 +63,10 @@ export function AppRightPanel(props: AppRightPanelProps) {
       root={props.workspaceFiles.root}
       scope={props.fileScope}
     />}
+    maxWidth={props.maxWidth}
     onSurface={props.onSurface}
+    onWidth={props.onWidth}
     surface={props.surface}
+    width={props.width}
   />;
 }

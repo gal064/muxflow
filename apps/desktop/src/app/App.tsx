@@ -39,7 +39,10 @@ import { sameHostConnection, type HostScopeToken } from "../features/shell/hostS
 import { useShellCommands } from "../features/shell/useShellCommands";
 import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
-import { clampedAgentsRatio, sidebarWidthForWindow, SIDEBAR_MIN_WIDTH, type HostSetupDecision, type ShellState } from "../features/shell/types";
+import {
+  clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
+  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type HostSetupDecision, type ShellState,
+} from "../features/shell/types";
 import {
   combineWorkspaceTabs,
   closeAppTab,
@@ -624,6 +627,7 @@ export function App() {
     setAppState((current) => ({ ...current, shell: { ...current.shell, ...update } }));
 
   const sidebarWidth = sidebarWidthForWindow(appState.shell.sidebarWidth, windowWidth);
+  const panelWidth = panelWidthForWindow(appState.shell.panelWidth, windowWidth);
   // Derived, never stored: see `effectiveRails`.
   const { panelOpen, sidebarOpen } = effectiveRails(appState.shell, compactViewport);
 
@@ -638,7 +642,6 @@ export function App() {
     style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
   >
     <TitleBar
-      branch={workspaceGit.status?.repository.headName}
       canMutate={hostState.canMutate}
       onBell={() => void runCommand("agents.jumpUnread")}
       onNewWorkspace={() => void runCommand("session.new")}
@@ -777,6 +780,7 @@ export function App() {
         fileClient={fileClient}
         fileScope={fileScope}
         ignoredPaths={ignoredPaths}
+        maxWidth={Math.max(PANEL_MIN_WIDTH, Math.floor(windowWidth / 2))}
         onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
         onGitDiff={(entry, target) => {
           if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
@@ -797,7 +801,9 @@ export function App() {
         onMutate={mutateFile}
         onOpenFile={openExplorerEntry}
         onSurface={(surface) => void runCommand(surface === "files" ? "view.showFiles" : "view.showGit")}
+        onWidth={(width) => updateShell({ panelWidth: panelWidthForWindow(width, windowWidth) })}
         surface={appState.shell.panelSurface}
+        width={panelWidth}
         workspaceFiles={workspaceFiles}
         workspaceGit={workspaceGit}
       />}

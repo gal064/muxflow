@@ -283,7 +283,8 @@ describe("application shell accessibility contracts", () => {
 
   it("keeps Files and Git mutually exclusive in the one right panel", () => {
     const html = renderToStaticMarkup(<RightPanel
-      files={<p>files surface</p>} git={<p>git surface</p>} onSurface={noop} surface="git"
+      files={<p>files surface</p>} git={<p>git surface</p>} maxWidth={800} onSurface={noop}
+      onWidth={noop} surface="git" width={320}
     />);
     expect(html).toContain('aria-selected="false"');
     expect(html).toContain('aria-selected="true"');
@@ -291,17 +292,22 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('id="panel-surface-git"');
     expect(html).toContain("git surface");
     expect(html).not.toContain("files surface");
+    // Resizable from its left edge, like the sidebar is from its right.
+    expect(html).toContain("--panel-width:320px");
+    expect(html).toContain('aria-label="Resize the panel"');
   });
 
   it("puts four controls and an unread count on the titlebar, and no more", () => {
     const html = renderToStaticMarkup(<TitleBar
-      branch="main*" canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="mac" sidebarOpen unread={3} workspaceName="muxflow"
     />);
     expect([...html.matchAll(/<button/gu)]).toHaveLength(4);
     expect(html).toContain("3 agents waiting; jump to the loudest");
     expect(html).toContain("muxflow");
-    expect(html).toContain("main*");
+    // The branch label is gone: it arrived a beat after the first paint and
+    // changed the bar's content height when it did.
+    expect(html).not.toContain("titlebar-branch");
     const quiet = renderToStaticMarkup(<TitleBar
       canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen={false} unread={0}
