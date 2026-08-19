@@ -9,6 +9,10 @@ export type PanelSurface = "files" | "git";
 export const SIDEBAR_MIN_WIDTH = 240;
 /** Fraction of the window a dragged sidebar may not exceed. */
 export const SIDEBAR_MAX_WINDOW_FRACTION = 1 / 3;
+/** Right panel geometry; the same rules as the sidebar, from its own edge. */
+export const PANEL_MIN_WIDTH = 240;
+/** Fraction of the window a dragged panel may not exceed. */
+export const PANEL_MAX_WINDOW_FRACTION = 1 / 2;
 /** Share of the sidebar's height the agents section takes by default. */
 export const AGENTS_SECTION_DEFAULT_RATIO = 0.42;
 export const AGENTS_SECTION_MIN_RATIO = 0.15;
@@ -62,6 +66,8 @@ export interface ShellState {
   sidebarWidth: number;
   /** ⌥⌘B. Closed by default, and it reserves no space when closed. */
   panelOpen: boolean;
+  /** Drag-resizable from its left edge; clamped against the window at render time. */
+  panelWidth: number;
   /** The agents section's one control. */
   agentSort: AgentSortMode;
   /** Position of the sidebar's internal divider, as a share of its height. */
@@ -104,6 +110,7 @@ export const defaultShellState: ShellState = {
   sidebarCollapsed: false,
   sidebarWidth: SIDEBAR_MIN_WIDTH,
   panelOpen: false,
+  panelWidth: 300,
   agentSort: "workspace",
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
@@ -145,6 +152,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       sidebarCollapsed: Boolean(shell?.sidebarCollapsed),
       sidebarWidth: clampedSidebarWidth(shell?.sidebarWidth),
       panelOpen: Boolean(shell?.panelOpen),
+      panelWidth: clampedPanelWidth(shell?.panelWidth),
       agentSort: migratedAgentSort(shell?.agentSort),
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
@@ -190,6 +198,20 @@ export function clampedSidebarWidth(value: unknown): number {
     : SIDEBAR_MIN_WIDTH;
 }
 
+/**
+ * The panel's stored width, never narrower than the token minimum; the window
+ * cap is applied at render, as it is for the sidebar.
+ *
+ * A save with no width at all falls back to the default (300px) rather than to
+ * the minimum: unlike the sidebar, whose default *is* its minimum, a panel
+ * reset to 240px here would silently narrow every panel written by a build
+ * before this field existed.
+ */
+export function clampedPanelWidth(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return defaultShellState.panelWidth;
+  return Math.min(Math.max(Math.round(value), PANEL_MIN_WIDTH), 4_000);
+}
+
 export function clampedAgentsRatio(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return AGENTS_SECTION_DEFAULT_RATIO;
   return Math.min(AGENTS_SECTION_MAX_RATIO, Math.max(AGENTS_SECTION_MIN_RATIO, value));
@@ -199,6 +221,12 @@ export function clampedAgentsRatio(value: unknown): number {
 export function sidebarWidthForWindow(width: number, windowWidth: number): number {
   const cap = Math.max(SIDEBAR_MIN_WIDTH, Math.floor(windowWidth * SIDEBAR_MAX_WINDOW_FRACTION));
   return Math.min(clampedSidebarWidth(width), cap);
+}
+
+/** The panel may never eat more than half the window; the sidebar's rule, from the other edge. */
+export function panelWidthForWindow(width: number, windowWidth: number): number {
+  const cap = Math.max(PANEL_MIN_WIDTH, Math.floor(windowWidth * PANEL_MAX_WINDOW_FRACTION));
+  return Math.min(clampedPanelWidth(width), cap);
 }
 
 function validWindowGeometry(value: unknown): value is NonNullable<PersistedAppState["shell"]["windowGeometry"]> {

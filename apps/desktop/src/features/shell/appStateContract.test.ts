@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import contract from "./persistedAppState.contract.json";
 import {
-  defaultAppState, defaultShellState, normalizePersistedAppState,
+  clampedPanelWidth, defaultAppState, defaultShellState, normalizePersistedAppState,
+  panelWidthForWindow, PANEL_MIN_WIDTH,
   type AppOwnedTab, type PersistedAppState, type WorkspaceUiRecord,
 } from "./types";
 
@@ -58,8 +59,37 @@ describe("persisted app state contract", () => {
     };
     expect(typed.shell.agentSort).toBe("status");
     expect(typed.shell.sidebarWidth).toBe(260);
+    expect(typed.shell.panelWidth).toBe(320);
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
+  });
+});
+
+describe("the right panel's stored width", () => {
+  it("keeps a saved width, and refuses one no drag could have produced", () => {
+    expect(clampedPanelWidth(420)).toBe(420);
+    expect(clampedPanelWidth(420.6)).toBe(421);
+    expect(clampedPanelWidth(120)).toBe(PANEL_MIN_WIDTH);
+    expect(clampedPanelWidth(9_000)).toBe(4_000);
+    expect(clampedPanelWidth(Number.NaN)).toBe(defaultShellState.panelWidth);
+  });
+
+  it("falls back to the default rather than the minimum when nothing was saved", () => {
+    // The sidebar's default *is* its minimum, so its fallback can be the
+    // minimum. The panel's is 300px, and resetting a save written before this
+    // field existed to 240px would narrow every panel on upgrade.
+    expect(clampedPanelWidth(undefined)).toBe(300);
+    expect(normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: {},
+    }).shell.panelWidth).toBe(300);
+  });
+
+  it("never lets the panel take more than half the window", () => {
+    expect(panelWidthForWindow(600, 1_600)).toBe(600);
+    expect(panelWidthForWindow(900, 1_600)).toBe(800);
+    // Below twice the minimum the floor wins: a panel narrower than 240px is
+    // not a panel, it is a scrollbar.
+    expect(panelWidthForWindow(300, 400)).toBe(PANEL_MIN_WIDTH);
   });
 });
 
@@ -90,13 +120,14 @@ describe("reading state the previous build wrote", () => {
       schemaVersion: 1,
       appTabs: [tab],
       workspaceUi: [contract.workspaceUi[0]],
-      shell: { agentSort: "priority", sidebarWidth: 320, panelOpen: true },
+      shell: { agentSort: "priority", sidebarWidth: 320, panelOpen: true, panelWidth: 420 },
       commands: { shortcutOverrides: { "window.new": "Ctrl+T" } },
     });
     expect(restored.shell.agentSort).toBe("status");
     expect(restored.appTabs).toEqual([tab]);
     expect(restored.workspaceUi).toHaveLength(1);
     expect(restored.shell.sidebarWidth).toBe(320);
+    expect(restored.shell.panelWidth).toBe(420);
     expect(restored.shell.panelOpen).toBe(true);
     expect(restored.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
   });

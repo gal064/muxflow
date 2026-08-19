@@ -55,6 +55,7 @@
     "sidebarCollapsed": true,
     "sidebarWidth": 260,
     "panelOpen": true,
+    "panelWidth": 320,
     "agentSort": "status",
     "agentsSectionRatio": 0.42,
     "agentStateGlyphs": true,

@@ -114,6 +114,8 @@ pub struct ShellPreferences {
     #[serde(default)]
     pub panel_open: bool,
     #[serde(default)]
+    pub panel_width: Option<f64>,
+    #[serde(default)]
     pub agent_sort: AgentSortMode,
     #[serde(default)]
     pub agents_section_ratio: Option<f64>,
@@ -523,6 +525,7 @@ mod tests {
                 sidebar_collapsed: true,
                 sidebar_width: Some(260.0),
                 panel_open: true,
+                panel_width: Some(320.0),
                 agent_sort: AgentSortMode::Status,
                 agents_section_ratio: Some(0.42),
                 agent_state_glyphs: true,
@@ -649,6 +652,7 @@ mod tests {
         assert_eq!(value.shell.panel_surface, PanelSurface::Git);
         assert_eq!(value.shell.agent_sort, AgentSortMode::Status);
         assert_eq!(value.shell.sidebar_width, Some(260.0));
+        assert_eq!(value.shell.panel_width, Some(320.0));
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
         assert!(value.shell.sidebar_collapsed && value.shell.panel_open);
         assert!(value.shell.agent_state_glyphs && value.shell.terminal_screen_reader);
