@@ -91,6 +91,46 @@ describe("useWorkspaceGit", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it("holds one observation across a pane switch within the same worktree", async () => {
+    // The panel used to blank on every pane focus and terminal tab switch, and
+    // the cause was upstream of this hook: `useWorkspaceFiles` masked its whole
+    // visible state on a selection change, so `root` flapped to `undefined`,
+    // `observable` went false, and the panel fell back to IDLE for a round trip
+    // before the identical repository came back. The files hook keeps painting
+    // its root through that window now, and this is the other half of the
+    // contract — the pane is deliberately not part of the observation's
+    // identity, so the same worktree under a different pane is the same entry.
+    const active = root("shared", "/shared");
+    const watch = vi.fn(async () => ({ watchId: "watch", rootToken: active.token, connectionEpoch: scope.terminalEpoch, status: snapshot("shared", "1"), release: vi.fn() }));
+    const client: GitWorkspaceClient = {
+      status: vi.fn(), watch, diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
+      subscribe: vi.fn(() => () => undefined),
+    };
+    const store = new GitRepositoryStore(client);
+    let current: ReturnType<typeof useWorkspaceGit> | undefined;
+    const seen: Array<string | undefined> = [];
+    function Harness({ activeScope, activeRoot }: { activeScope: FileWorkspaceScope; activeRoot: ActiveRoot }) {
+      current = useWorkspaceGit(store, activeScope, activeRoot);
+      seen.push(current.status?.repository.id);
+      return null;
+    }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness activeScope={scope} activeRoot={active} />); await Promise.resolve(); });
+    expect(current?.status?.generation).toBe("1");
+
+    // Exactly what the files hook publishes on the far side of a same-root
+    // pane switch: the same capability, a new `paneId`.
+    seen.length = 0;
+    await act(async () => {
+      renderer.update(<Harness activeScope={{ ...scope, paneId: "%2" }} activeRoot={{ ...active, paneId: "%2" }} />);
+      await Promise.resolve();
+    });
+    expect(current?.status?.repository.id, "the panel dropped to IDLE on a pane switch").toBe("shared");
+    expect(seen.every((id) => id === "shared"), "the panel blanked for at least one commit").toBe(true);
+    expect(watch, "the pane switch re-observed a repository it was already watching").toHaveBeenCalledTimes(1);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("opens a panel beside a live diff tab with no request of its own", async () => {
     const active = root("shared", "/shared");
     const watch = vi.fn(async () => ({ watchId: "watch", rootToken: active.token, connectionEpoch: scope.terminalEpoch, status: snapshot("shared", "1"), release: vi.fn() }));
