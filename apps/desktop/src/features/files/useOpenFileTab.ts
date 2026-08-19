@@ -126,6 +126,9 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
   const shownBinaryGeneration = useRef<string | undefined>(undefined);
   /** Where the read and its parent watch have got to relative to each other. */
   const reconciliation = useRef<Reconciliation>({ kind: "pending" });
+  const live = useCommittedRef({ scope, root });
+  const contentIdentity = `${root?.token ?? ""}\0${resource}`;
+  const loadedIdentity = useRef<string | undefined>(undefined);
   // Reached through a committed ref: neither belongs to the connection
   // lifetime that keys the effects calling them, and listing either as a
   // dependency would re-arm a watch and a subscription on every render.
@@ -186,6 +189,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
         return;
       }
       setOpened(next);
+      loadedIdentity.current = contentIdentity;
       shownBinaryGeneration.current = next.kind === "binary" ? next.file.generation : undefined;
       if (next.kind !== "text") {
         // A file that stopped being text has no editor and no autosave state.
@@ -223,8 +227,9 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
         }
         else {
           const autosave = new AutosaveController(snapshot, async (saving, operationId) => {
-            if (!scope || !root) throw new Error("The file host is disconnected.");
-            return client.writeText(scope, root, {
+            const current = live.current;
+            if (!current.scope || !current.root) throw new Error("The file host is disconnected.");
+            return client.writeText(current.scope, current.root, {
               path: resource,
               content: saving.content,
               baseGeneration: saving.generation,
@@ -320,12 +325,12 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
     surfaceLifecycle.current += 1;
     setLoading(true);
     setOpened(undefined);
+    loadedIdentity.current = undefined;
     shownBinaryGeneration.current = undefined;
     setView(undefined);
     controller.current?.dispose();
     controller.current = undefined;
     recordPerfCounter("file.reload.surfaceMount");
-    void load({ measureEditorPaint: true });
     return () => {
       surfaceLifecycle.current += 1;
       loadSerial.current += 1;
@@ -339,12 +344,34 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
       controller.current?.dispose();
       controller.current = undefined;
     };
-    // The read, the parent watch, and the event subscription all belong to one
-    // connection generation. Leaving `terminalEpoch` out of this one meant an
-    // epoch bump re-armed the watch and its reconciliation against a read that
-    // had never restarted.
+    // Content belongs to the file/root, not to one transport epoch. Reconnect
+    // cleanup is deliberately below: disposing the autosave controller here
+    // used to destroy a dirty buffer whenever a bridge was replaced.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, scope?.clientId, scope?.terminalEpoch, resource, root?.token]);
+  }, [client, contentIdentity]);
+
+  useEffect(() => {
+    if (!scope || !root) {
+      loadSerial.current += 1;
+      loadAbort.current?.abort();
+      return;
+    }
+    // A completed read stays painted while the new epoch's watch revalidates
+    // it. An initial read that was interrupted has no content to preserve and
+    // restarts exactly once when the live scope returns.
+    if (loadedIdentity.current !== contentIdentity) {
+      setLoading(true);
+      void load({ measureEditorPaint: true });
+    }
+    return () => {
+      loadSerial.current += 1;
+      loadAbort.current?.abort();
+    };
+    // `load` reads the committed live scope. These fields are the complete
+    // transport/content identity and prevent render-created callbacks from
+    // restarting a read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, contentIdentity, scope?.clientId, scope?.terminalEpoch]);
 
   useEffect(() => editorFlushRegistry.register(tabId, async () => {
     await controller.current?.flush();
@@ -428,7 +455,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
    */
   const reloadFromDisk = () => {
     const state = controller.current?.current().state;
-    if (state === "dirty" || state === "saving") return;
+    if (state === "dirty" || state === "saving" || state === "error") return;
     void load();
   };
 

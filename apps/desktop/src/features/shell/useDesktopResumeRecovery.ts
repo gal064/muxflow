@@ -21,21 +21,18 @@ export class ResumeGapDetector {
     this.#lastRecoveryAt = now;
     return true;
   }
+
+  /** Background throttling is not evidence of a machine suspend. */
+  reset(now: number): void {
+    if (Number.isFinite(now)) this.#lastObservedAt = now;
+  }
 }
 
 export class ResumeTransitionDetector {
-  #hidden: boolean;
   #offline: boolean;
 
-  constructor(hidden: boolean, offline: boolean) {
-    this.#hidden = hidden;
+  constructor(offline: boolean) {
     this.#offline = offline;
-  }
-
-  visibility(hidden: boolean): boolean {
-    const resumed = this.#hidden && !hidden;
-    this.#hidden = hidden;
-    return resumed;
   }
 
   network(online: boolean): boolean {
@@ -57,10 +54,7 @@ export function useDesktopResumeRecovery(onResume: () => void): void {
     if (typeof window === "undefined" || typeof document === "undefined") return;
     const monotonicNow = () => performance.now();
     const detector = new ResumeGapDetector(monotonicNow());
-    const transitions = new ResumeTransitionDetector(
-      document.visibilityState === "hidden",
-      typeof navigator !== "undefined" && !navigator.onLine,
-    );
+    const transitions = new ResumeTransitionDetector(typeof navigator !== "undefined" && !navigator.onLine);
     let lastRecoveryAt = Number.NEGATIVE_INFINITY;
     const recover = () => {
       const now = monotonicNow();
@@ -69,11 +63,17 @@ export function useDesktopResumeRecovery(onResume: () => void): void {
       callback.current();
     };
     const check = () => {
+      // WebKit may pause timers while the window is hidden, minimized, on
+      // another Space, or simply backgrounded. That gap is ordinary desktop
+      // use, not a system resume, and reconnecting here created the startup
+      // readiness race every time the person returned to the app.
+      if (document.visibilityState !== "visible" || !document.hasFocus()) {
+        detector.reset(monotonicNow());
+        return;
+      }
       if (detector.observe(monotonicNow())) recover();
     };
-    const visibilityChanged = () => {
-      if (transitions.visibility(document.visibilityState === "hidden")) recover();
-    };
+    const foregroundChanged = () => detector.reset(monotonicNow());
     const offline = () => { transitions.network(false); };
     const online = () => {
       if (transitions.network(true)) recover();
@@ -82,15 +82,19 @@ export function useDesktopResumeRecovery(onResume: () => void): void {
     const nativeResume = listen("desktop-resumed", recover).catch(() => () => undefined);
     window.addEventListener("offline", offline);
     window.addEventListener("online", online);
-    window.addEventListener("pageshow", check);
-    document.addEventListener("visibilitychange", visibilityChanged);
+    window.addEventListener("focus", foregroundChanged);
+    window.addEventListener("blur", foregroundChanged);
+    window.addEventListener("pageshow", foregroundChanged);
+    document.addEventListener("visibilitychange", foregroundChanged);
     return () => {
       window.clearInterval(timer);
       void nativeResume.then((dispose) => dispose());
       window.removeEventListener("offline", offline);
       window.removeEventListener("online", online);
-      window.removeEventListener("pageshow", check);
-      document.removeEventListener("visibilitychange", visibilityChanged);
+      window.removeEventListener("focus", foregroundChanged);
+      window.removeEventListener("blur", foregroundChanged);
+      window.removeEventListener("pageshow", foregroundChanged);
+      document.removeEventListener("visibilitychange", foregroundChanged);
     };
   }, []);
 }

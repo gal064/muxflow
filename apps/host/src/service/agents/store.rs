@@ -90,11 +90,21 @@ impl Default for StoredState {
 }
 
 pub(super) fn load(path: &Path) -> StoredState {
-    fs::read(path)
+    let mut state = fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .filter(|state: &StoredState| state.schema_version == STATE_SCHEMA_VERSION)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for record in state.agents.values_mut() {
+        // A terminal hook is proof that the turn ended. Normalize the invalid
+        // combination observed in a live schema-2 store (`hook_terminal: true`
+        // with `lifecycle: working`) so the next daemon snapshot repairs the
+        // UI immediately instead of waiting up to the stale-working TTL.
+        if record.hook_terminal {
+            record.lifecycle = tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32;
+        }
+    }
+    state
 }
 
 pub(super) fn persist(path: &Path, state: &StoredState) -> anyhow::Result<()> {
@@ -309,6 +319,57 @@ mod tests {
         assert_eq!(record.attention_kind, "completed");
         assert_eq!(record.seen_generation, 1);
         assert_eq!(record.route.pane_id, "%1");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_terminal_record_cannot_reload_as_working() {
+        let path = std::env::current_dir().unwrap().join("tmp").join(format!(
+            "terminal-working-agent-state-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut state = StoredState::default();
+        state.agents.insert(
+            "codex:field".into(),
+            StoredAgent {
+                agent_id: "codex:field".into(),
+                adapter: 1,
+                adapter_id: "codex".into(),
+                native_session_id: "session".into(),
+                display_name: "Codex".into(),
+                route: StoredRoute {
+                    host_profile_id: String::new(),
+                    server_identity: "server-a".into(),
+                    session_id: "$1".into(),
+                    session_name_fallback: "test".into(),
+                    window_id: "@1".into(),
+                    window_name_fallback: "codex".into(),
+                    pane_id: "%1".into(),
+                    pane_index_fallback: 0,
+                },
+                lifecycle: tmux_agent_protocol::v1::AgentLifecycleState::Working as i32,
+                state_generation: 1,
+                attention_generation: 1,
+                attention_kind: "completed".into(),
+                seen_generation: 1,
+                updated_at_unix_millis: 1,
+                hook_authority_expires_at_unix_millis: 1,
+                detected_manually: false,
+                source_event_ids: VecDeque::new(),
+                latest_source_generation: 0,
+                present: true,
+                hook_terminal: true,
+                lifecycle_observed_at_unix_millis: 1,
+            },
+        );
+        persist(&path, &state).unwrap();
+
+        let loaded = load(&path);
+        assert_eq!(
+            loaded.agents["codex:field"].lifecycle,
+            tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32,
+        );
         fs::remove_file(path).unwrap();
     }
 }

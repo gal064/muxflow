@@ -215,7 +215,11 @@ impl AgentRuntime {
                 "SessionStart" | "UserPromptSubmit"
             );
         let lifecycle = if terminal_late {
-            previous_lifecycle
+            // `hook_terminal` means a terminal Stop was already committed.
+            // A late tool/subagent event cannot revive that turn, and an
+            // inconsistent store written by an older build must not preserve
+            // Working forever merely because every later Stop is also "late".
+            v1::AgentLifecycleState::Idle
         } else {
             parsed.lifecycle
         };

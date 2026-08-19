@@ -15,6 +15,7 @@ import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 type TerminalWorkspaceSurfaceProps = {
   activePane?: Pane;
   activeWindow?: Window;
+  appFocused: boolean;
   clientId?: string;
   controllers: MutableRefObject<Map<string, TerminalPaneController>>;
   grid: WindowGrid;
@@ -54,6 +55,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         style={renderedPaneStyle(pane, grid, Boolean(activeWindow?.zoomed))}
       >
       <TerminalPane
+        appFocused={props.appFocused}
         clientId={props.clientId}
         pane={pane}
         hub={props.hub}

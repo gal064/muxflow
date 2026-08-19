@@ -17,9 +17,17 @@ describe("summarizeSurfaceError", () => {
     // Seen on the packaged app as a full-width red banner over the diff,
     // enumerating three internal states and naming "mutation".
     const raw = "mutation_rejected: host connection is not writable (disconnected, reconciling, or read-only)";
-    expect(summarizeSurfaceError(raw).summary)
-      .toBe("The connection is read-only while it settles, so that change was not sent. Try again once the link is live.");
+    expect(summarizeSurfaceError(raw).summary).toBe("The host helper connection is read-only.");
     expect(summarizeSurfaceError(raw).detail).toBe(raw);
+  });
+
+  it("distinguishes a settling connection from an incompatible read-only helper", () => {
+    expect(summarizeSurfaceError(
+      "connection_unavailable: host connection is disconnected or reconciling",
+    ).summary).toBe("The connection to the host is still reconnecting.");
+    expect(summarizeSurfaceError(
+      "connection_read_only: host helper connection is read-only",
+    ).summary).toBe("The host helper connection is read-only.");
   });
 
   it("never loses the diagnostic it summarizes", () => {

@@ -28,13 +28,16 @@ describe("desktop suspend/resume detection", () => {
     expect(detector.observe(10_000)).toBe(false);
   });
 
-  it("recovers after even a short hidden or offline transition", () => {
-    const detector = new ResumeTransitionDetector(false, false);
-    expect(detector.visibility(true)).toBe(false);
-    expect(detector.visibility(false)).toBe(true);
+  it("resets a background timer gap instead of treating it as a resume", () => {
+    const detector = new ResumeGapDetector(1_000);
+    detector.reset(1_000 + RESUME_GAP_MS * 4);
+    expect(detector.observe(1_000 + RESUME_GAP_MS * 4 + 1)).toBe(false);
+  });
+
+  it("recovers only after an offline-to-online transition", () => {
+    const detector = new ResumeTransitionDetector(false);
     expect(detector.network(false)).toBe(false);
     expect(detector.network(true)).toBe(true);
-    expect(detector.visibility(false)).toBe(false);
     expect(detector.network(true)).toBe(false);
   });
 });

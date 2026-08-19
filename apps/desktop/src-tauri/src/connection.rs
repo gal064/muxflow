@@ -368,15 +368,13 @@ impl TerminalClient {
         operation: Option<OperationClaim>,
     ) -> Result<v1::Response, String> {
         let deadline = Instant::now() + timeout;
-        if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
-            // Coded like the host's own refusals, so the frontend can lead with
-            // a sentence and keep this behind the disclosure (11.4.4). The
-            // uncoded form reached the user verbatim as a full-width red banner
-            // that enumerated three internal states and named "mutation".
+        if !self.ready.load(Ordering::Acquire) {
             return Err(
-                "mutation_rejected: host connection is not writable (disconnected, reconciling, or read-only)"
-                    .into(),
+                "connection_unavailable: host connection is disconnected or reconciling".into(),
             );
+        }
+        if self.read_only.load(Ordering::Acquire) {
+            return Err("connection_read_only: host helper connection is read-only".into());
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = mpsc::channel();

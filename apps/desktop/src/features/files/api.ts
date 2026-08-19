@@ -567,6 +567,13 @@ export function keyForScope(scope: FileWorkspaceScope): string {
   return [scope.clientId, scope.hostProfileId, scope.serverIdentity, scope.terminalEpoch, scope.sessionId, scope.paneId].join("\0");
 }
 
+/** Stable across reconnects, unlike `keyForScope`. */
+export function keyForWorkspaceSelection(
+  scope: Pick<FileWorkspaceScope, "hostProfileId" | "serverIdentity" | "sessionId" | "paneId">,
+): string {
+  return [scope.hostProfileId, scope.serverIdentity, scope.sessionId, scope.paneId].join("\0");
+}
+
 /** Downloads outlive Explorer pane/root/session selection within one live connection. */
 export function keyForTransferConnection(scope: FileWorkspaceScope): string {
   return [scope.clientId, scope.serverIdentity, scope.terminalEpoch].join("\0");

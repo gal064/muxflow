@@ -14,6 +14,17 @@ export interface FileWorkspaceScope {
   paneId: string;
 }
 
+/**
+ * The workspace a file surface represents, independent of a particular
+ * transport connection. A reconnect replaces `clientId` and `terminalEpoch`
+ * but does not replace this identity, so last-known content can remain visible
+ * while the new bridge becomes writable.
+ */
+export type FileWorkspaceSelection = Pick<
+  FileWorkspaceScope,
+  "hostProfileId" | "serverIdentity" | "sessionId" | "paneId"
+>;
+
 export interface ActiveRoot {
   token: string;
   paneId: string;

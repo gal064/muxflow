@@ -398,6 +398,45 @@ fn a_working_agent_that_stops_reporting_stops_claiming_to_work() {
     );
 }
 
+#[test]
+fn a_terminal_hook_can_never_preserve_an_inconsistent_working_state() {
+    let runtime = runtime("terminal-working-invariant");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    {
+        // Reproduce the live schema-2 record: an earlier terminal event was
+        // remembered while lifecycle still claimed Working.
+        let mut state = runtime.state.lock().unwrap();
+        let record = state.agents.values_mut().next().unwrap();
+        record.hook_terminal = true;
+        record.lifecycle = v1::AgentLifecycleState::Working as i32;
+    }
+
+    let stopped = runtime
+        .ingest_hook_with_context(&event("stop", 0, "Stop"), "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(stopped.lifecycle, v1::AgentLifecycleState::Idle as i32);
+
+    let late = runtime
+        .ingest_hook_with_context(
+            &event("late-tool", 0, "PostToolUse"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(late.lifecycle, v1::AgentLifecycleState::Idle as i32);
+}
+
 /// Attention that was already earned is not erased by silence: an agent
 /// that asked for a human and then went quiet is still asking.
 #[test]
