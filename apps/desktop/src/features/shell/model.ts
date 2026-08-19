@@ -127,6 +127,29 @@ export function combineWorkspaceTabs(
   return [...terminalTabs, ...ownedTabs, ...pendingTabs];
 }
 
+/**
+ * The two bulk closes, over the strip's own visual order.
+ *
+ * `tabs` **is** the display order — the array `combineWorkspaceTabs` produced —
+ * so "to the right" is a position in it and nothing else. Both refuse an anchor
+ * the strip no longer holds: a menu outlives the list it was opened over, and
+ * "close everything except a tab that is already gone" is not what the person
+ * asked for. That is the same rule `resolveCommandTarget` applies to a stale
+ * explicit target — no subject rather than a fallback subject.
+ *
+ * A placeholder is never a target: there is nothing on the host to close.
+ */
+export function tabsToCloseOthers(tabs: readonly CombinedTab[], anchorKey: string): CombinedTab[] {
+  if (!tabs.some((tab) => tab.key === anchorKey)) return [];
+  return tabs.filter((tab) => tab.kind !== "pending" && tab.key !== anchorKey);
+}
+
+export function tabsToCloseRight(tabs: readonly CombinedTab[], anchorKey: string): CombinedTab[] {
+  const anchor = tabs.findIndex((tab) => tab.key === anchorKey);
+  if (anchor < 0) return [];
+  return tabs.slice(anchor + 1).filter((tab) => tab.kind !== "pending");
+}
+
 export function workspaceUiRecord(
   state: PersistedAppState,
   currentHostProfileId: string,

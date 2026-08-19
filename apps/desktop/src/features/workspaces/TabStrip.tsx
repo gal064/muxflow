@@ -3,11 +3,12 @@ import { Icon } from "../../ui/Icon";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { StateDot } from "../../ui/StateDot";
 import { fileIcon } from "../files/fileIcons";
-import type { CombinedTab } from "../shell/model";
+import { tabsToCloseOthers, tabsToCloseRight, type CombinedTab } from "../shell/model";
 import type { HostScopeToken } from "../shell/hostScope";
 
 /** A tab that exists on the host, and so has something to act on. */
 type ActionableTab = Exclude<CombinedTab, { kind: "pending" }>;
+type AppTab = Extract<CombinedTab, { kind: "app" }>;
 
 interface TabStripProps {
   tabs: readonly CombinedTab[];
@@ -19,6 +20,12 @@ interface TabStripProps {
   stateGlyphs: boolean;
   onSelect(tab: CombinedTab): void;
   onClose(tab: CombinedTab, scope: HostScopeToken): void;
+  /** Everything in the strip except this tab; the handler decides whether to ask first. */
+  onCloseOthers(tab: ActionableTab, scope: HostScopeToken): void;
+  /** Everything after this tab in the strip's own order. */
+  onCloseRight(tab: ActionableTab, scope: HostScopeToken): void;
+  /** Saves the tab's file to the local machine; a diff is not a file, so it has no item. */
+  onDownloadTab(tab: AppTab): void;
   onMove(tab: CombinedTab, direction: "left" | "right", scope: HostScopeToken): void;
   onRenameTerminal(tab: Extract<CombinedTab, { kind: "terminal" }>, scope: HostScopeToken): void;
   /** Double-clicking a preview tab makes it permanent, as VS Code's does. */
@@ -93,6 +100,15 @@ export function TabStrip(props: TabStripProps) {
     event.preventDefault();
     event.currentTarget.closest("[role=tablist]")?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
   };
+
+  // Measured against the strip as it is now, not as it was when the menu
+  // opened: `props.tabs` is the display order, and the menu can outlive it.
+  const bulkOthers = menu ? tabsToCloseOthers(props.tabs, menu.tab.key) : [];
+  const bulkRight = menu ? tabsToCloseRight(props.tabs, menu.tab.key) : [];
+  const takesTerminals = (targets: readonly CombinedTab[]) => targets.some((tab) => tab.kind === "terminal");
+  // Nothing to close is a disabled item, and a set containing a tmux window
+  // needs the same write permission a single terminal close does.
+  const bulkDisabled = (targets: readonly CombinedTab[]) => targets.length === 0 || (takesTerminals(targets) && !props.canMutate);
 
   return <div className="tabstrip">
     <div aria-label="Terminal tabs and documents" className="tabstrip-tabs" ref={tabs} role="tablist">
@@ -193,6 +209,26 @@ export function TabStrip(props: TabStripProps) {
           disabled: menu.tab.kind === "terminal" && !props.canMutate,
           run: () => props.onClose(menu.tab, menu.scope),
         },
+        {
+          id: "closeOthers",
+          label: "Close Others",
+          destructive: takesTerminals(bulkOthers),
+          disabled: bulkDisabled(bulkOthers),
+          run: () => props.onCloseOthers(menu.tab, menu.scope),
+        },
+        {
+          id: "closeRight",
+          label: "Close Tabs to the Right",
+          destructive: takesTerminals(bulkRight),
+          disabled: bulkDisabled(bulkRight),
+          run: () => props.onCloseRight(menu.tab, menu.scope),
+        },
+        // A diff has no file behind it to save, so the item is absent rather
+        // than present-and-disabled: there is nothing the user could do to
+        // make it work.
+        ...(menu.tab.kind === "app" && menu.tab.appKind !== "gitDiff"
+          ? ["separator" as const, { id: "download", label: "Download…", run: () => props.onDownloadTab(menu.tab as AppTab) }]
+          : []),
       ]}
       label={`Actions for ${menu.tab.title}`}
       onClose={() => setMenu(undefined)}

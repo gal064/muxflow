@@ -149,7 +149,8 @@ describe("one derivation, three surfaces", () => {
     const surfaces = [
       sidebar({ agents: rows, stateGlyphs: true }),
       renderToStaticMarkup(<TabStrip
-        activeKey="terminal:@1" canMutate canSplit commandScope={commandScope} onClose={noop} onMove={noop} onNewTerminal={noop}
+        activeKey="terminal:@1" canMutate canSplit commandScope={commandScope} onClose={noop} onCloseOthers={noop}
+        onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
         onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} stateGlyphs
         tabs={combineWorkspaceTabs(
           [{ id: "@1", sessionId: "$1", index: 0, name: "claude", active: true, layout: "", zoomed: false }] as never,
