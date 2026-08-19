@@ -21,6 +21,9 @@ import {
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
   shellNavigationMode,
+  tabsToCloseOthers,
+  tabsToCloseRight,
+  type CombinedTab,
 } from "./model";
 import { defaultAppState, type PersistedAppState } from "./types";
 import type { GitStatusEntry, GitStatusSnapshot } from "../git/types";
@@ -97,6 +100,42 @@ describe("application shell model", () => {
     ]);
     expect(ambiguous).toEqual(tabs);
     expect(discardServerAppState(tabs, "local", "server-a").appTabs).toEqual([]);
+  });
+
+  it("takes bulk closes from the strip's own order, never a placeholder or the anchor", () => {
+    const windows: TmuxWindow[] = [
+      { id: "@1", sessionId: "$1", index: 1, name: "first", active: true, layout: "" },
+      { id: "@2", sessionId: "$1", index: 2, name: "second", active: false, layout: "" },
+    ];
+    const strip = combineWorkspaceTabs(
+      windows,
+      appTabsForWorkspace(tabs, "local", "server-a", sessions[1]),
+      undefined,
+      { key: "create-window:1", sessionId: "$1", title: "New window" },
+    );
+    expect(strip.map((tab) => tab.key)).toEqual(["terminal:@1", "terminal:@2", "app:a", "app:b", "pending:create-window:1"]);
+
+    // Anchored first: everything else, minus the placeholder there is nothing
+    // on the host to close.
+    expect(tabsToCloseOthers(strip, "terminal:@1").map((tab) => tab.key)).toEqual(["terminal:@2", "app:a", "app:b"]);
+    expect(tabsToCloseRight(strip, "terminal:@1").map((tab) => tab.key)).toEqual(["terminal:@2", "app:a", "app:b"]);
+    // Anchored in the middle: "right" is a position in this array, so it takes
+    // the app tabs after it and none of the terminal tabs before it.
+    expect(tabsToCloseOthers(strip, "app:a").map((tab) => tab.key)).toEqual(["terminal:@1", "terminal:@2", "app:b"]);
+    expect(tabsToCloseRight(strip, "app:a").map((tab) => tab.key)).toEqual(["app:b"]);
+    // Anchored last among real tabs: nothing to the right but the placeholder,
+    // which is not a target — so the item has nothing to do.
+    expect(tabsToCloseRight(strip, "app:b")).toEqual([]);
+    expect(tabsToCloseOthers(strip, "app:b").map((tab) => tab.key)).toEqual(["terminal:@1", "terminal:@2", "app:a"]);
+
+    // A single tab is its own anchor: neither close has a subject.
+    const alone: CombinedTab[] = [strip[0]];
+    expect(tabsToCloseOthers(alone, "terminal:@1")).toEqual([]);
+    expect(tabsToCloseRight(alone, "terminal:@1")).toEqual([]);
+    // An anchor the strip no longer holds closes nothing, rather than closing
+    // every tab because the exclusion matched none of them.
+    expect(tabsToCloseOthers(strip, "terminal:@9")).toEqual([]);
+    expect(tabsToCloseRight(strip, "terminal:@9")).toEqual([]);
   });
 
   it("prunes app state only when its session is definitively absent from the same server", () => {

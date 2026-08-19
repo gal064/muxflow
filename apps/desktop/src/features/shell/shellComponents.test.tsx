@@ -192,7 +192,8 @@ describe("application shell accessibility contracts", () => {
 
   it("renders combined terminal/app tabs as one selected tablist", () => {
     const html = renderToStaticMarkup(<TabStrip
-      activeKey="app:file" canMutate canSplit commandScope={commandScope} stateGlyphs={false} onClose={noop} onMove={noop}
+      activeKey="app:file" canMutate canSplit commandScope={commandScope} stateGlyphs={false} onClose={noop}
+      onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
       onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
       tabs={[
         { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked" },
@@ -218,7 +219,8 @@ describe("application shell accessibility contracts", () => {
     const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none" } as const;
     const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
     const element = (scope: typeof commandScope) => <TabStrip
-      activeKey={tab.key} canMutate canSplit commandScope={scope} stateGlyphs={false} onClose={onClose} onMove={noop}
+      activeKey={tab.key} canMutate canSplit commandScope={scope} stateGlyphs={false} onClose={onClose}
+      onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
       onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} tabs={[tab]}
     />;
     let renderer!: ReturnType<typeof create>;
@@ -227,6 +229,56 @@ describe("application shell accessibility contracts", () => {
     await act(async () => { renderer.update(element(replacementScope)); });
     await act(async () => renderer.root.findByProps({ "data-menu-item": "close" }).props.onClick());
     expect(onClose).toHaveBeenCalledWith(tab, commandScope);
+    await act(async () => renderer.unmount());
+  });
+
+  it("offers the bulk closes and Download only where they have something to do", async () => {
+    const onCloseOthers = vi.fn();
+    const onCloseRight = vi.fn();
+    const onDownloadTab = vi.fn();
+    const strip = [
+      { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: true, attention: "none" },
+      { key: "terminal:@2", kind: "terminal", id: "@2", title: "logs", index: 2, activeInTmux: false, zoomed: false, canMoveLeft: true, canMoveRight: false, attention: "none" },
+      { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: false, canMoveLeft: false, canMoveRight: true },
+      { key: "app:diff", kind: "app", id: "diff", title: "a.ts (staged)", appKind: "gitDiff", resource: "staged:a.ts", order: 1, preview: false, canMoveLeft: true, canMoveRight: false },
+    ] as const;
+    const element = (canMutate: boolean) => <TabStrip
+      activeKey="app:file" canMutate={canMutate} canSplit commandScope={commandScope} stateGlyphs={false}
+      onClose={noop} onCloseOthers={onCloseOthers} onCloseRight={onCloseRight} onDownloadTab={onDownloadTab}
+      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
+      tabs={[...strip]}
+    />;
+    const openMenuOn = async (renderer: ReturnType<typeof create>, index: number) => {
+      await act(async () => renderer.root.findAllByProps({ role: "tab" })[index]
+        .props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    };
+    const item = (renderer: ReturnType<typeof create>, id: string) => renderer.root.findAllByProps({ "data-menu-item": id });
+
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(element(true)); });
+    // A file tab in the middle: three others behind it, one tab to its right,
+    // and a file to save.
+    await openMenuOn(renderer, 2);
+    expect(item(renderer, "closeOthers")[0].props.disabled).toBe(false);
+    expect(item(renderer, "closeRight")[0].props.disabled).toBe(false);
+    expect(item(renderer, "download")).toHaveLength(1);
+    await act(async () => item(renderer, "closeRight")[0].props.onClick());
+    expect(onCloseRight).toHaveBeenCalledWith(strip[2], commandScope);
+
+    // The last tab, and a diff: nothing to its right, and no file behind it.
+    await openMenuOn(renderer, 3);
+    expect(item(renderer, "closeRight")[0].props.disabled).toBe(true);
+    expect(item(renderer, "closeOthers")[0].props.disabled).toBe(false);
+    expect(item(renderer, "download")).toHaveLength(0);
+
+    // Frozen writes: a set holding tmux windows needs the same permission a
+    // single terminal close does, while a set of documents does not.
+    await act(async () => { renderer.update(element(false)); });
+    await openMenuOn(renderer, 2);
+    expect(item(renderer, "closeOthers")[0].props.disabled).toBe(true);
+    expect(item(renderer, "closeRight")[0].props.disabled).toBe(false);
+    await act(async () => item(renderer, "download")[0].props.onClick());
+    expect(onDownloadTab).toHaveBeenCalledWith(strip[2]);
     await act(async () => renderer.unmount());
   });
 

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { PendingTextPrompt } from "../commands/TextInputDialog";
+import { ConfirmationDialog } from "../commands/ConfirmationDialog";
 import type { PendingTmuxConfirmation } from "../commands/destructiveConfirmation";
 import {
   commandAvailable,
@@ -24,6 +25,7 @@ import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../f
 import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
 import { emitTestNotification, notificationPermissionStatus } from "../features/agents/notifications";
 import { TauriFileWorkspaceClient } from "../features/files/api";
+import { editorFlushRegistry } from "../features/files/editorFlushRegistry";
 import { reconcileDownloadStatus, type ActiveDownloadStatus } from "../features/files/downloadStatus";
 import { ignoredPathsFromStatus } from "../features/files/ignoredPaths";
 import type { FileEntry } from "../features/files/types";
@@ -41,7 +43,7 @@ import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
-  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type HostSetupDecision, type ShellState,
+  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
 } from "../features/shell/types";
 import {
   combineWorkspaceTabs,
@@ -53,6 +55,8 @@ import {
   selectAppTab,
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
+  tabsToCloseOthers,
+  tabsToCloseRight,
   type CombinedTab,
   type PendingShellTab,
 } from "../features/shell/model";
@@ -82,6 +86,20 @@ import { AppRightPanel } from "./AppRightPanel";
 
 const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then((module) => ({ default: module.AppTabSurface })));
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
+
+/**
+ * What a bulk close is actually about to destroy.
+ *
+ * Only the terminal windows are named: closing a document tab throws nothing
+ * away, and a dialog that counted those too would ask for consent to something
+ * that needs none.
+ */
+function bulkCloseDetail(tabs: readonly CombinedTab[]): string {
+  const terminals = tabs.filter((tab) => tab.kind === "terminal").length;
+  return terminals === 1
+    ? "1 terminal window will be closed and its running processes terminated."
+    : `${terminals} terminal windows will be closed and their running processes terminated.`;
+}
 
 export function App() {
   const [status, setStatus] = useState("Discovering local tmux…");
@@ -131,6 +149,10 @@ export function App() {
     : undefined;
   const [shortcutEditorOpen, setShortcutEditorOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
+  // A bulk close waiting on its one summary dialog. Closing tabs the user is
+  // *not* looking at is not the single close's "the surface's disappearance is
+  // the confirmation" case, so it asks — once, for the whole set.
+  const [pendingBulkClose, setPendingBulkClose] = useState<{ tabs: CombinedTab[]; scope: HostScopeToken }>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
@@ -434,22 +456,29 @@ export function App() {
   // What the Explorer, Git and the agents list currently offer for the row the
   // user last pointed at — the palette's only way to name a row.
   const rowCommands = useRowCommands();
+  /**
+   * The one commit path for closing an app tab, shared by the single close and
+   * by the bulk closes. Neither reaches it through `runCommand`: that route
+   * flushes every open editor first, which for a set of tabs would replay the
+   * same flush once per tab.
+   */
+  const closeWorkspaceAppTab = (tab: AppOwnedTab, scope: HostScopeToken) => {
+    const commit = () => setAppState((current) => closeAppTab(current, currentHostProfileId, tab.id));
+    commitScopedAppTabClose({
+      activeWindowId,
+      commit,
+      currentScope: hostScopeRef.current,
+      revealTerminal: shellNavigation.revealLocalTerminal,
+      scope,
+      selectedAppTabId: selectedAppTabRef.current?.id,
+      tabId: tab.id,
+      tabSessionId: tab.sessionId,
+    });
+  };
   const { commandContext, runCommand } = useShellCommands({
     activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
 
-    closeAppTab: (tab, scope) => {
-      const commit = () => setAppState((current) => closeAppTab(current, currentHostProfileId, tab.id));
-      commitScopedAppTabClose({
-        activeWindowId,
-        commit,
-        currentScope: hostScopeRef.current,
-        revealTerminal: shellNavigation.revealLocalTerminal,
-        scope,
-        selectedAppTabId: selectedAppTabRef.current?.id,
-        tabId: tab.id,
-        tabSessionId: tab.sessionId,
-      });
-    },
+    closeAppTab: closeWorkspaceAppTab,
     combinedTabs, controllers, currentHostProfileId, deletableHostProfile: deletableProfile,
     focusDirection, generation: hostState.generation, hostScope: currentHostScope,
     isHostScopeCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
@@ -503,7 +532,7 @@ export function App() {
   // close the tab behind it.
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
-    || Boolean(confirmation) || Boolean(textPrompt)
+    || Boolean(confirmation) || Boolean(pendingBulkClose) || Boolean(textPrompt)
     || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecovery.modalOpen
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
@@ -582,6 +611,51 @@ export function App() {
     // withdraws the placeholder.
     if (tab.kind === "pending") return;
     void runCommand("window.close", { kind: tab.kind === "app" ? "appTab" : "terminalTab", id: tab.id, scope });
+  };
+
+  /**
+   * Closes a set of tabs, once the set is settled and any confirmation is past.
+   *
+   * The flush happens once for the whole set rather than per tab, and before
+   * anything is closed: a set that cannot be saved must not lose half of itself
+   * on the way to the failure message.
+   */
+  const closeTabSet = async (tabs: readonly CombinedTab[], scope: HostScopeToken) => {
+    if (!sameHostConnection(scope, hostScopeRef.current)) {
+      setStatus("Closing those tabs was cancelled because its host scope changed.");
+      return;
+    }
+    try {
+      await editorFlushRegistry.flushAll();
+    } catch (error) {
+      if (sameHostConnection(scope, hostScopeRef.current)) {
+        setStatus(`Could not close those tabs because an editor did not save: ${String(error)}`);
+      }
+      return;
+    }
+    if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    for (const tab of tabs) {
+      if (tab.kind !== "app") continue;
+      const appTab = workspaceAppTabs.find((item) => item.id === tab.id);
+      if (appTab) closeWorkspaceAppTab(appTab, scope);
+    }
+    for (const tab of tabs) {
+      if (tab.kind !== "terminal") continue;
+      const terminalWindow = windows.find((item) => item.id === tab.id);
+      // No captured precondition: each close advances the topology generation,
+      // so one stamped before the first would refuse every close after it.
+      if (terminalWindow) await performAction({
+        kind: "closeWindow", sessionId: terminalWindow.sessionId, windowId: terminalWindow.id, confirmed: true,
+      });
+      if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    }
+  };
+
+  /** Terminal windows in the set mean one dialog for the set; app tabs alone close on the spot. */
+  const bulkCloseTabs = (tabs: CombinedTab[], scope: HostScopeToken) => {
+    if (tabs.length === 0) return;
+    if (tabs.some((tab) => tab.kind === "terminal")) setPendingBulkClose({ tabs, scope });
+    else void closeTabSet(tabs, scope);
   };
 
   const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {
@@ -715,6 +789,25 @@ export function App() {
           canSplit={hostState.canMutate && Boolean(activePane) && !selectedAppTab}
           commandScope={currentHostScope}
           onClose={closeCombinedTab}
+          onCloseOthers={(tab, scope) => bulkCloseTabs(tabsToCloseOthers(combinedTabs, tab.key), scope)}
+          onCloseRight={(tab, scope) => bulkCloseTabs(tabsToCloseRight(combinedTabs, tab.key), scope)}
+          onDownloadTab={(tab) => {
+            const appTab = workspaceAppTabs.find((item) => item.id === tab.id);
+            if (!appTab) return;
+            // The tab's own root snapshot when it has one, exactly as the
+            // surface reconstructs it; the live workspace root otherwise.
+            const root = appTab.rootPath && appTab.rootToken
+              ? {
+                token: appTab.rootToken,
+                path: appTab.rootPath,
+                paneId: fileScope?.paneId ?? "",
+                cwd: appTab.rootPath,
+                gitWorktree: false,
+                revision: "0",
+              }
+              : workspaceFiles.root;
+            if (root) void startDownloadFlow({ path: appTab.resource, kind: "file" }, root);
+          }}
           onMove={moveCombinedTab}
           onNewTerminal={() => void runCommand("window.new")}
           onPin={(tab) => pinOpenTab(tab.id)}
@@ -860,6 +953,18 @@ export function App() {
       sounds={agentSounds}
       sshConfigPath={sshConfigPath}
       sshTarget={sshTarget}
+    />}
+    {pendingBulkClose && <ConfirmationDialog
+      confirmLabel="Close"
+      destructive
+      detail={bulkCloseDetail(pendingBulkClose.tabs)}
+      onCancel={() => setPendingBulkClose(undefined)}
+      onConfirm={() => {
+        const pending = pendingBulkClose;
+        setPendingBulkClose(undefined);
+        void closeTabSet(pending.tabs, pending.scope);
+      }}
+      title={`Close ${pendingBulkClose.tabs.length} ${pendingBulkClose.tabs.length === 1 ? "tab" : "tabs"}?`}
     />}
     {workspaceSwitcherOpen && <WorkspaceSwitcher
       onClose={() => setWorkspaceSwitcherOpen(false)}
