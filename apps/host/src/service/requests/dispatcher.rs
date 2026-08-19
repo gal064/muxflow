@@ -368,7 +368,16 @@ pub(crate) async fn handle_request(
             .await;
         }
         (Handler::Terminal, Some(v1::Operation::RequestTerminalSeed)) => {
-            let result = terminal.lock().unwrap().request_seed(&request.scope);
+            // The desktop asks for a seed only for a pane it is rendering, so
+            // this is also the authoritative statement that the pane is
+            // visible; `request_seed_for_render` makes the host's resource
+            // agree before the capture it queues can be suppressed for
+            // disagreeing.
+            let result = terminal.lock().unwrap().request_seed_for_render(
+                &request.scope,
+                event_tx,
+                overflowed,
+            );
             send_response(
                 control_tx,
                 request_id,

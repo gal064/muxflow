@@ -20,6 +20,7 @@ use super::OutputCredit;
 use super::correlation::{
     MarkerBlock, classify_marker_block, error_reason, marker_pane, wants_error_line,
 };
+use super::degradation::emit_pane_degradations;
 use super::flow_control::RejectedResume;
 use super::{build_seed_with_metadata, capture_metadata, validate_tmux_id};
 
@@ -732,16 +733,20 @@ impl StreamState {
                                     let seed = replay.seed;
                                     let replay_outputs = replay.replay;
                                     let diagnostics = seed_build.diagnostics;
-                                    let visible =
+                                    let (visible, degradations) =
                                         with_active_resources(resources, stopped, |resources| {
                                             resources.snapshot(
                                                 &pane_id,
                                                 seed.clone(),
                                                 seed_generation,
                                             );
-                                            !resources.is_hidden(&pane_id)
+                                            (
+                                                !resources.is_hidden(&pane_id),
+                                                resources.take_degradations(),
+                                            )
                                         })
-                                        .unwrap_or(false);
+                                        .unwrap_or((false, Vec::new()));
+                                    emit_pane_degradations(sender, overflowed, degradations);
                                     if visible {
                                         if !diagnostics.is_empty() {
                                             emit_event(
@@ -777,18 +782,20 @@ impl StreamState {
                                         // cannot discard required output.
                                         let replay_generation =
                                             terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
-                                        let visible = with_active_resources(
+                                        let (visible, degradations) = with_active_resources(
                                             resources,
                                             stopped,
                                             |resources| {
-                                                resources.record_output(
+                                                let visible = resources.record_output(
                                                     &pane_id,
                                                     &output.bytes,
                                                     replay_generation,
-                                                ) == OutputDisposition::Visible
+                                                ) == OutputDisposition::Visible;
+                                                (visible, resources.take_degradations())
                                             },
                                         )
-                                        .unwrap_or(false);
+                                        .unwrap_or((false, Vec::new()));
+                                        emit_pane_degradations(sender, overflowed, degradations);
                                         if visible {
                                             emit_terminal(
                                                 sender,

@@ -1,5 +1,6 @@
 use super::*;
 use crate::service::terminal::OutputCharge;
+use crate::service::terminal::degradation::emit_pane_degradations;
 
 pub(in crate::service::terminal) fn with_active_resources<T>(
     resources: &Arc<Mutex<PaneResourceStore>>,
@@ -90,10 +91,18 @@ impl OutputEmission<'_> {
     pub(in crate::service::terminal) fn record(self, pane_id: String, data: Vec<u8>) {
         let _emission = self.emission_order.lock().unwrap();
         let generation = self.terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let visible = with_active_resources(self.resources, self.stopped, |resources| {
-            resources.record_output(&pane_id, &data, generation) == OutputDisposition::Visible
-        })
-        .unwrap_or(false);
+        let (visible, degradations) =
+            with_active_resources(self.resources, self.stopped, |resources| {
+                let visible = resources.record_output(&pane_id, &data, generation)
+                    == OutputDisposition::Visible;
+                // Recording output is what pushes the store past its budgets,
+                // so it is also where a pane — this one or another — loses its
+                // recovery material. Taken here and reported below, with the
+                // store's lock released.
+                (visible, resources.take_degradations())
+            })
+            .unwrap_or((false, Vec::new()));
+        emit_pane_degradations(self.sender, self.overflowed, degradations);
         // Resource ownership is released before either credit or channel
         // backpressure. The emission fence stays held so a reveal transition
         // and its recovery event cannot be overtaken by output that observes

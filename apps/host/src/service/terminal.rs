@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, bail};
+#[cfg(test)]
 use tmux_agent_protocol::v1;
 #[cfg(test)]
 use tmux_control::{CommandTag, ScreenSeeder};
@@ -20,6 +21,8 @@ use tmux_control::{
 use tokio::sync::mpsc;
 
 use super::SequencerControl;
+mod degradation;
+use degradation::{pane_resource_event, report_pane_degradations};
 mod flow_control;
 use flow_control::{FlowControl, resume_command, take_injected_rejection};
 mod input;
@@ -279,6 +282,16 @@ pub(super) struct TerminalClients {
     resources: Arc<Mutex<PaneResourceStore>>,
     generation: Arc<AtomicU64>,
     input: Option<PersistentInputClient>,
+    /// Panes the host owes a seed and could not ask tmux for.
+    ///
+    /// A seed request fails when the pane's session control client is not
+    /// attached — the ordinary state during a reconnect, and precisely when a
+    /// reveal is most likely to be asked for. The reveal event has already been
+    /// sent by then, so the desktop is waiting for a screen that nobody is
+    /// going to capture, and nothing retried. Recorded here and re-attempted
+    /// the moment an attachment for that pane exists again; see
+    /// [`TerminalClients::settle_owed_seeds`].
+    owed_seeds: HashSet<String>,
     output_credit: Arc<OutputCredit>,
     /// Serializes the resource transition that decides whether bytes are
     /// visible with admission of the resulting ordered terminal event. It is
@@ -300,6 +313,7 @@ impl TerminalClients {
             ))),
             generation: Arc::new(AtomicU64::new(0)),
             input: None,
+            owed_seeds: HashSet::new(),
             output_credit,
             emission_order: Arc::new(Mutex::new(())),
         }
@@ -334,6 +348,11 @@ impl TerminalClients {
                 .collect();
             register_mounted_panes(&mut resources, pane_ids, make_visible, generation);
         }
+        // Mounting panes can push the store past its global budget, which
+        // evicts some other pane's recovery material. Reported here, with the
+        // store's lock released, for the same reason the store records instead
+        // of emitting.
+        report_pane_degradations(&self.resources, &event_tx, &overflowed);
         if committed.is_some() {
             self.ensure_input_client(session_id, &event_tx, &overflowed)?;
             let update = self
@@ -351,9 +370,16 @@ impl TerminalClients {
             if make_visible {
                 self.select_session(session_id)?;
                 for pane_id in pane_ids {
-                    self.request_seed(pane_id)?;
+                    // The same debt `set_visibility` records: this is an
+                    // internal seed request, and a pane whose request failed
+                    // must not be left waiting on a capture nobody re-asks for.
+                    if let Err(error) = self.request_seed(pane_id) {
+                        self.owe_seed(pane_id);
+                        return Err(error);
+                    }
                 }
             }
+            self.settle_owed_seeds();
             return Ok(());
         }
         let mut attachment = match TerminalAttachment::start(
@@ -399,7 +425,48 @@ impl TerminalClients {
             // nothing.
             self.size_visible_client(session_id)?;
         }
+        // A fresh control client is exactly what a pane owed a seed was waiting
+        // for. Its own startup already queues one capture per mounted pane, so
+        // this costs a write only for a pane whose debt outlived that.
+        self.settle_owed_seeds();
         Ok(())
+    }
+
+    /// Re-attempts every seed the host owes a pane whose control client exists
+    /// again.
+    ///
+    /// The retry is anchored to attachment rather than to a timer because that
+    /// is what the failure is about: a seed request fails when there is no
+    /// session control client to write it to, and no amount of waiting on the
+    /// writer thread produces one. A pane whose resource has since been
+    /// unmounted is forgotten rather than retried forever.
+    fn settle_owed_seeds(&mut self) {
+        if self.owed_seeds.is_empty() {
+            return;
+        }
+        let mut owed: Vec<_> = self.owed_seeds.iter().cloned().collect();
+        owed.sort();
+        for pane_id in owed {
+            if self.resources.lock().unwrap().get(&pane_id).is_none() {
+                self.owed_seeds.remove(&pane_id);
+                continue;
+            }
+            let attached = self.clients.values().any(|client| {
+                client.contains_pane(&pane_id) && !client.stopped.load(Ordering::Acquire)
+            });
+            if !attached {
+                continue;
+            }
+            crate::diagnostics::record_seed_request_retry();
+            if self.request_seed(&pane_id).is_ok() {
+                self.owed_seeds.remove(&pane_id);
+            }
+        }
+    }
+
+    /// Records that a pane is still owed a seed after a request for it failed.
+    fn owe_seed(&mut self, pane_id: &str) {
+        self.owed_seeds.insert(pane_id.to_owned());
     }
 
     fn ensure_input_client(
@@ -575,6 +642,44 @@ impl TerminalClients {
             .request_seed(pane_id)
     }
 
+    /// Seeds a pane because the renderer explicitly asked for its screen.
+    ///
+    /// The request is itself the statement of visibility — the desktop asks
+    /// only for panes it is drawing — so the pane's resource is forced back to
+    /// renderer ownership first. Without that, a resource left hidden or
+    /// released (by a handoff the desktop has since forgotten, or by an
+    /// eviction it was never told about) stores the completed capture and never
+    /// emits it: `stream.rs` gates seed emission on `!is_hidden`, so the
+    /// request produces nothing at all, and asking again produces nothing
+    /// again. That is one of the ways a pane freezes for the rest of a session.
+    pub(super) fn request_seed_for_render(
+        &mut self,
+        pane_id: &str,
+        sender: &mpsc::Sender<SequencerControl>,
+        overflowed: &AtomicBool,
+    ) -> anyhow::Result<()> {
+        validate_tmux_id(pane_id, '%')?;
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        // Deliberately not under the emission-order fence. That fence exists so
+        // output cannot observe a new visibility before the *event* carrying
+        // its recovery material is admitted, and this transition emits no such
+        // event: the recovery material is the seed, which is captured later and
+        // published through the fence by the reader like any other seed.
+        let forced = {
+            let mut resources = self.resources.lock().unwrap();
+            resources.reveal_for_seed_request(pane_id, generation)
+        };
+        if forced {
+            crate::diagnostics::record_seed_forced_reveal();
+        }
+        report_pane_degradations(&self.resources, sender, overflowed);
+        let requested = self.request_seed(pane_id);
+        if requested.is_err() {
+            self.owe_seed(pane_id);
+        }
+        requested
+    }
+
     pub(super) fn set_visibility(
         &mut self,
         pane_id: &str,
@@ -638,30 +743,7 @@ impl TerminalClients {
                 return Err(anyhow::Error::msg(error));
             }
         };
-        let event = v1::HostEvent {
-            kind: v1::EventKind::PaneResource.into(),
-            scope: pane_id.into(),
-            pane_resource: Some(v1::PaneResource {
-                pane_id: pane_id.into(),
-                state: match resource.state {
-                    StoredResourceState::Visible => v1::PaneResourceState::Visible.into(),
-                    StoredResourceState::HiddenBuffered => {
-                        v1::PaneResourceState::HiddenBuffered.into()
-                    }
-                    StoredResourceState::Released => v1::PaneResourceState::Released.into(),
-                },
-                serialized_snapshot: resource.serialized_snapshot,
-                raw_tail: resource.raw_tail,
-                generation: resource.generation,
-                snapshot_generation: resource.snapshot_generation,
-                tail_through_generation: resource.tail_through_generation,
-                requires_seed: resource.requires_seed,
-                recovery_reason: resource.recovery_reason,
-            }),
-            terminal_delivery_bytes: charge.bytes,
-            terminal_delivery_records: charge.records,
-            ..Default::default()
-        };
+        let event = pane_resource_event(pane_id, resource, charge);
         if sender
             .blocking_send(SequencerControl::OrderedEvent(event))
             .is_err()
@@ -675,8 +757,21 @@ impl TerminalClients {
         }
         reservation.commit();
         drop(_emission);
-        if visible && requires_seed {
-            self.request_seed(pane_id)?;
+        // Both the hide and the reveal path can push the store past its global
+        // budget and evict some *other* pane. Reported after the fence, holding
+        // neither the store nor the emission order.
+        report_pane_degradations(&self.resources, sender, overflowed);
+        if visible
+            && requires_seed
+            && let Err(error) = self.request_seed(pane_id)
+        {
+            // The recovery event is already on the wire, so the desktop is now
+            // waiting for a seed. Failing here without recording that debt is
+            // what left the pane waiting forever: the usual cause is a session
+            // control client that has not re-attached yet, and the attachment
+            // that replaces it is what settles this.
+            self.owe_seed(pane_id);
+            return Err(error);
         }
         Ok(())
     }
@@ -710,6 +805,9 @@ impl TerminalClients {
 
     pub(super) fn stop(&mut self) {
         self.output_credit.close();
+        // Nothing this connection owed a pane survives it: the next connection
+        // reseeds every pane it mounts.
+        self.owed_seeds.clear();
         if let Some(mut input) = self.input.take() {
             input.stop();
         }

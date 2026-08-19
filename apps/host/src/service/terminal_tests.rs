@@ -797,3 +797,192 @@ fn joined_capture_reconstructs_soft_wrap_at_authoritative_width() {
         .unwrap();
     assert!(wrap_enable < line);
 }
+
+/// The pane that froze forever, in one test.
+///
+/// A reveal emits its recovery event and *then* asks tmux for the seed the
+/// event says is coming. When that request fails — the ordinary case being a
+/// session control client that has not re-attached yet — the desktop is already
+/// waiting for a screen, and nothing used to ask again. The debt is recorded
+/// instead, and the attachment that replaces the broken one settles it.
+#[test]
+fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later() {
+    let output_credit = Arc::new(OutputCredit::negotiated(false));
+    let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+    clients.generation.store(1, Ordering::Release);
+    {
+        let mut resources = clients.resources.lock().unwrap();
+        resources.ensure("%1", true, 0);
+        // An omitted renderer snapshot releases the resource, so the reveal
+        // below is the one that owes the pane an authoritative seed.
+        resources
+            .hide_with_checkpoint(
+                "%1",
+                Vec::new(),
+                VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 0,
+                },
+                1,
+            )
+            .unwrap();
+    }
+    let (events, _receiver) = mpsc::channel(64);
+    let broken = start_long_lived_attachment(
+        events.clone(),
+        Arc::clone(&clients.resources),
+        Arc::clone(&clients.generation),
+        Arc::clone(&output_credit),
+        Arc::clone(&clients.emission_order),
+    )
+    .unwrap();
+    // The state a reconnect leaves behind: an attachment record that still
+    // claims the pane, and a tmux process that is gone, so every write to its
+    // stdin fails. Killing the child is what produces that; the flag is put
+    // back afterwards because the reader raises it on its way out and this test
+    // is about the seed request failing, not about a deliberate teardown.
+    let stopped = Arc::clone(&broken.stopped);
+    {
+        let mut child = broken.child.lock().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !stopped.load(Ordering::Acquire) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the reader never observed its control client dying"
+        );
+        std::thread::yield_now();
+    }
+    stopped.store(false, Ordering::Release);
+    clients.clients.insert("$1".into(), broken);
+
+    let error = clients
+        .set_visibility(
+            "%1",
+            VisibilityChange {
+                visible: true,
+                serialized_snapshot: Vec::new(),
+                checkpoint: VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 1,
+                },
+            },
+            &events,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+    assert!(
+        clients.owed_seeds.contains("%1"),
+        "a failed seed request left nothing owed: {error}"
+    );
+
+    // The replacement client is what the debt was waiting for.
+    clients.clients.remove("$1").unwrap().stop();
+    let healthy = start_long_lived_attachment(
+        events.clone(),
+        Arc::clone(&clients.resources),
+        Arc::clone(&clients.generation),
+        Arc::clone(&output_credit),
+        Arc::clone(&clients.emission_order),
+    )
+    .unwrap();
+    clients.clients.insert("$1".into(), healthy);
+    clients.settle_owed_seeds();
+    assert!(
+        clients.owed_seeds.is_empty(),
+        "the seed the host owed was never re-requested"
+    );
+    clients.stop();
+}
+
+/// An explicit seed request is the desktop saying it is drawing this pane.
+///
+/// A resource left released — by an eviction the desktop was never told about —
+/// makes `stream.rs` store the completed capture and emit nothing, so the
+/// request produces no seed however many times it is repeated.
+#[test]
+fn an_explicit_seed_request_makes_a_released_pane_emission_eligible_again() {
+    let output_credit = Arc::new(OutputCredit::negotiated(false));
+    let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+    clients
+        .resources
+        .lock()
+        .unwrap()
+        .require_seed("%1", "an eviction nobody was told about");
+    assert!(clients.resources.lock().unwrap().is_hidden("%1"));
+    let (events, _receiver) = mpsc::channel(8);
+    let attachment = start_long_lived_attachment(
+        events.clone(),
+        Arc::clone(&clients.resources),
+        Arc::clone(&clients.generation),
+        Arc::clone(&output_credit),
+        Arc::clone(&clients.emission_order),
+    )
+    .unwrap();
+    clients.clients.insert("$1".into(), attachment);
+
+    clients
+        .request_seed_for_render("%1", &events, &AtomicBool::new(false))
+        .unwrap();
+    let resources = clients.resources.lock().unwrap();
+    assert!(
+        !resources.is_hidden("%1"),
+        "the seed this pane asked for would have been suppressed"
+    );
+    assert_eq!(
+        resources.get("%1").unwrap().state,
+        StoredResourceState::Visible
+    );
+    drop(resources);
+    clients.stop();
+}
+
+/// An eviction is a decision about a pane nobody asked about, and it used to be
+/// made in silence: the pane kept rendering, its recovery material was gone,
+/// and neither side ever said so.
+#[test]
+fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
+    let resources = Arc::new(Mutex::new(PaneResourceStore::with_total_limit(4, 64, 64)));
+    {
+        let mut store = resources.lock().unwrap();
+        store.set_visible("%1", true, 0);
+        store.ensure("%2", false, 0);
+        store.snapshot("%2", vec![b'x'; 64], 1);
+        assert!(store.take_degradations().is_empty());
+    }
+    let (events, mut receiver) = mpsc::channel(8);
+    let generation = AtomicU64::new(1);
+    let stopped = AtomicBool::new(false);
+    let overflowed = AtomicBool::new(false);
+    let output_credit = OutputCredit::negotiated(false);
+    let emission_order = Mutex::new(());
+    TestOutputEmission {
+        sender: &events,
+        overflowed: &overflowed,
+        resources: &resources,
+        terminal_generation: &generation,
+        stopped: &stopped,
+        output_credit: &output_credit,
+        emission_order: &emission_order,
+    }
+    .record("%1".into(), vec![b'o'; 64]);
+
+    let SequencerControl::OrderedEvent(degraded) = receiver.try_recv().unwrap() else {
+        panic!("the eviction was not reported at all")
+    };
+    assert_eq!(
+        v1::EventKind::try_from(degraded.kind).unwrap(),
+        v1::EventKind::PaneResource
+    );
+    let resource = degraded.pane_resource.unwrap();
+    assert_eq!(resource.pane_id, "%2");
+    assert!(resource.requires_seed);
+    assert!(!resource.recovery_reason.is_empty());
+    // The pane that produced the output is still delivered, in order, after it.
+    let SequencerControl::OrderedEvent(output) = receiver.try_recv().unwrap() else {
+        panic!("visible output was not delivered")
+    };
+    assert_eq!(output.terminal.unwrap().pane_id, "%1");
+}
