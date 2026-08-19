@@ -19,6 +19,12 @@ export type IconName =
   | "panelRight"
   | "bell"
   | "plus"
+  // Source Control's row and header actions. `minus` is `plus` with one stroke
+  // taken away, so stage and unstage read as one pair; `discard` is the return
+  // arrow VS Code uses for it, and `refresh` the circular one.
+  | "minus"
+  | "discard"
+  | "refresh"
   | "splitRight"
   | "close"
   | "chevronRight"
@@ -58,6 +64,15 @@ const paths: Record<IconName, ReactElement> = {
     <path d="M6.6 13.2a1.6 1.6 0 0 0 2.8 0" />
   </>,
   plus: <path d="M8 3.75v8.5M3.75 8h8.5" />,
+  minus: <path d="M3.75 8h8.5" />,
+  discard: <>
+    <path d="M5.6 3.35 2.6 6.35l3 3" />
+    <path d="M2.6 6.35h6.15a3.6 3.6 0 1 1 0 7.2H6.2" />
+  </>,
+  refresh: <>
+    <path d="M12.6 5.9A5 5 0 1 0 13 8" />
+    <path d="M9.7 5.9h2.9V3" />
+  </>,
   splitRight: <>
     <rect height="11" rx="2" width="13" x="1.5" y="2.5" />
     <path d="M8 2.5v11" />

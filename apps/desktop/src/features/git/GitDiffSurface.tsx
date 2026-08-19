@@ -27,7 +27,12 @@ interface Props {
   onMessage(message: string): void;
 }
 
-type PendingDiscard = { kind: "discardFile" | "discardHunk"; hunkIndex?: number; diff: GitDiff; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
+/**
+ * Only a hunk is discarded from here. Stage, unstage, discard and refresh for a
+ * whole file are the Source Control row's hover buttons, so this surface no
+ * longer carries a second copy of them in its toolbar.
+ */
+type PendingDiscard = { hunkIndex: number; diff: GitDiff; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
 
 export function GitDiffSurface(props: Props) {
   const [busy, setBusy] = useState(false);
@@ -89,9 +94,9 @@ export function GitDiffSurface(props: Props) {
       return;
     }
     const request: GitMutationRequest = {
-      kind: pending.kind, path: pending.diff.path, ...(pending.diff.originalPath ? { originalPath: pending.diff.originalPath } : {}), target: pending.diff.target,
+      kind: "discardHunk", path: pending.diff.path, ...(pending.diff.originalPath ? { originalPath: pending.diff.originalPath } : {}), target: pending.diff.target,
       expectedStatusGeneration: pending.status.generation, expectedSourceGeneration: pending.diff.sourceGeneration,
-      ...(pending.hunkIndex !== undefined ? { hunkIndex: pending.hunkIndex } : {}),
+      hunkIndex: pending.hunkIndex,
     };
     await applyCommand(async () => {
       const token = await owner.prepareDiscard(repositoryId, request);
@@ -117,10 +122,6 @@ export function GitDiffSurface(props: Props) {
     <header className="editor-toolbar git-diff-toolbar">
       <span className={`git-target ${diff.target}`}>{diff.target}</span>
       <code title={diff.displayPath}>{diff.displayPath}</code>
-      <button disabled={busy} onClick={refresh} type="button">Refresh</button>
-      {diff.target === "unstaged" && <button disabled={busy || !canMutate} onClick={() => void mutate("stageFile")} type="button">Stage file</button>}
-      {diff.target === "staged" && <button disabled={busy || !canMutate} onClick={() => void mutate("unstageFile")} type="button">Unstage file</button>}
-      <button className="danger" disabled={busy || !canMutate} onClick={() => setPendingDiscard({ kind: "discardFile", diff, status, rootToken: root.token, connectionEpoch: props.scope!.terminalEpoch })} type="button">Discard file…</button>
     </header>
     <div className="git-diff-errors">
       {mutationBlock && <div className="git-diff-error" role="note">{mutationBlock}</div>}
@@ -145,16 +146,16 @@ export function GitDiffSurface(props: Props) {
         <span>Hunk {hunkIndex + 1}</span>
         {diff.target === "unstaged" ? <button disabled={busy || !canMutate} onClick={() => void mutate("stageHunk", hunkIndex)} type="button">Stage</button>
           : <button disabled={busy || !canMutate} onClick={() => void mutate("unstageHunk", hunkIndex)} type="button">Unstage</button>}
-        <button className="danger" disabled={busy || !canMutate} onClick={() => setPendingDiscard({ kind: "discardHunk", hunkIndex, diff, status, rootToken: root.token, connectionEpoch: props.scope!.terminalEpoch })} type="button">Discard…</button>
+        <button className="danger" disabled={busy || !canMutate} onClick={() => setPendingDiscard({ hunkIndex, diff, status, rootToken: root.token, connectionEpoch: props.scope!.terminalEpoch })} type="button">Discard…</button>
       </div>)}
     </aside>}
     {pendingDiscard && <ConfirmationDialog
       confirmLabel="Discard"
       destructive
-      detail={`Discard ${pendingDiscard.hunkIndex === undefined ? "all changes" : `hunk ${pendingDiscard.hunkIndex + 1}`} in ${pendingDiscard.diff.displayPath}? This cannot be undone by the app.`}
+      detail={`Discard hunk ${pendingDiscard.hunkIndex + 1} in ${pendingDiscard.diff.displayPath}? This cannot be undone by the app.`}
       onCancel={() => setPendingDiscard(undefined)}
       onConfirm={() => { const captured = pendingDiscard; setPendingDiscard(undefined); void confirmDiscard(captured); }}
-      title={pendingDiscard.hunkIndex === undefined ? "Discard file changes?" : "Discard complete hunk?"}
+      title="Discard complete hunk?"
     />}
   </section>;
 }
@@ -178,7 +179,7 @@ function shownDiff(diff: GitDiff | undefined): ShownDiff {
   if (diff.binary) return { kind: "blocked", detail: "Binary changes cannot be displayed or edited as text." };
   const text = decodeTextDiff(diff);
   if (!text) return { kind: "blocked", detail: "This diff contains non-UTF-8 content and is shown safely as binary." };
-  if (diff.tooLarge) return { kind: "blocked", detail: "This diff is too large for the editor. File-level Git actions remain available." };
+  if (diff.tooLarge) return { kind: "blocked", detail: "This diff is too large for the editor. File-level Git actions remain available on the Source Control row." };
   return { kind: "editor", text };
 }
 
