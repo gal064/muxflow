@@ -591,7 +591,18 @@ fn emit_event(
 ) -> bool {
     match sender.try_send(SequencerControl::OrderedEvent(event)) {
         Ok(()) => true,
-        Err(mpsc::error::TrySendError::Full(_)) => {
+        Err(mpsc::error::TrySendError::Full(event)) => {
+            let SequencerControl::OrderedEvent(event) = event else {
+                unreachable!("try_send returns the message it was given")
+            };
+            // A recovery event is the desktop's only instruction to repair one
+            // pane, and dropping it is how a pane stays frozen for the rest of
+            // the session. Everything else keeps the old behaviour: the drop is
+            // counted and the connection resyncs, which is a heavier repair
+            // than the event would have been.
+            if is_recovery_event(&event) && defer_recovery_event(sender, event) {
+                return true;
+            }
             crate::diagnostics::record_event_queue_overflow();
             overflowed.store(true, Ordering::Release);
             false
@@ -601,6 +612,66 @@ fn emit_event(
             false
         }
     }
+}
+
+/// Events whose loss strands a pane rather than merely delaying it.
+///
+/// Each one tells the desktop that a pane it is rendering needs an
+/// authoritative seed, or that tmux has stopped that pane's output; none of
+/// them carries state the next event supersedes, and all of them are idempotent
+/// — which is what makes a late delivery acceptable and a lost one not.
+fn is_recovery_event(event: &v1::HostEvent) -> bool {
+    matches!(
+        v1::EventKind::try_from(event.kind),
+        Ok(v1::EventKind::TerminalResnapshotRequired
+            | v1::EventKind::TerminalFlowStalled
+            | v1::EventKind::TerminalFlowPaused
+            | v1::EventKind::PaneResource)
+    )
+}
+
+/// Deferred recovery events allowed to be in flight process-wide.
+///
+/// Past this a further deferral would be a queue of its own with no bound, so
+/// the caller falls back to the connection-wide resync — which reseeds every
+/// pane and therefore subsumes whatever the refused event was asking for.
+const MAX_DEFERRED_RECOVERY_EVENTS: usize = 256;
+static DEFERRED_RECOVERY_EVENTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Hands one refused recovery event to a sender that is allowed to wait.
+///
+/// The same shape `broadcast_control_event` already uses for its saturated
+/// sinks, and for the same reason: the caller may be the control-stream reader,
+/// which must never block — it is the only thread draining tmux's output, and
+/// tmux stops reading its stdin while blocked writing to us. So the wait
+/// happens somewhere else and this returns immediately. The event arrives after
+/// the queue drains, out of order with respect to events queued behind it,
+/// which is exactly the trade named above.
+fn defer_recovery_event(sender: &mpsc::Sender<SequencerControl>, event: v1::HostEvent) -> bool {
+    if DEFERRED_RECOVERY_EVENTS
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |in_flight| {
+            (in_flight < MAX_DEFERRED_RECOVERY_EVENTS).then_some(in_flight + 1)
+        })
+        .is_err()
+    {
+        return false;
+    }
+    crate::diagnostics::record_recovery_event_deferral();
+    let sender = sender.clone();
+    let message = SequencerControl::OrderedEvent(event);
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            let _ = sender.send(message).await;
+            DEFERRED_RECOVERY_EVENTS.fetch_sub(1, Ordering::AcqRel);
+        });
+    } else {
+        std::thread::spawn(move || {
+            let _ = sender.blocking_send(message);
+            DEFERRED_RECOVERY_EVENTS.fetch_sub(1, Ordering::AcqRel);
+        });
+    }
+    true
 }
 
 async fn send_response(

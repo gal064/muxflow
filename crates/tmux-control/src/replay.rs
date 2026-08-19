@@ -104,6 +104,39 @@ pub enum OutputDisposition {
     Released,
 }
 
+/// Why a pane lost its host-side recovery material without anyone asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneDegradationCause {
+    /// The global retained-byte budget or the hidden-pane LRU evicted it.
+    GlobalBudget,
+    /// A hidden pane's raw output tail outgrew the per-pane budget.
+    HiddenTailOverflow,
+}
+
+/// One pane whose recovery material this store discarded on its own.
+///
+/// The store cannot emit protocol events — it is a pure data structure below
+/// the service — but a discard it performs silently is exactly how a pane ends
+/// up waiting forever for bytes nobody will send. Every such discard is
+/// recorded here for the owner of the store to drain and report, which is what
+/// [`PaneResourceStore::take_degradations`] exists for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneDegradation {
+    pub pane_id: String,
+    pub cause: PaneDegradationCause,
+    /// The pane's state *after* the discard.
+    pub state: PaneResourceState,
+    pub generation: u64,
+    pub reason: String,
+}
+
+/// Degradations retained while nobody drains them.
+///
+/// One entry per pane (the latest wins, because "this pane needs a seed" is
+/// idempotent), so this bound is only ever reached by a store holding more
+/// panes than any topology this host attaches to.
+const MAX_RECORDED_PANE_DEGRADATIONS: usize = 256;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisibilityCheckpoint {
     pub epoch: u64,
@@ -177,6 +210,7 @@ pub struct PaneResourceStore {
     output_journals: HashMap<String, VecDeque<BufferedOutput>>,
     output_journal_bytes: HashMap<String, usize>,
     handoff_checkpoints: HashMap<String, VisibilityCheckpoint>,
+    degradations: Vec<PaneDegradation>,
     retained_lru: Lru,
     byte_lru: Lru,
     retained_bytes: usize,
@@ -206,6 +240,7 @@ impl PaneResourceStore {
             output_journals: HashMap::new(),
             output_journal_bytes: HashMap::new(),
             handoff_checkpoints: HashMap::new(),
+            degradations: Vec::new(),
             retained_lru: Lru::default(),
             byte_lru: Lru::default(),
             retained_bytes: 0,
@@ -391,6 +426,40 @@ impl PaneResourceStore {
         Some(recovery)
     }
 
+    /// Makes a pane renderer-owned because the renderer explicitly asked for a
+    /// seed of it.
+    ///
+    /// A seed request *is* the statement of visibility: nothing asks for a
+    /// screen it is not about to draw. Without this, a pane whose resource was
+    /// hidden or released — by a renderer handoff the desktop has since
+    /// forgotten, or by an eviction it was never told about — has its completed
+    /// capture stored and never emitted, and the request produces nothing at
+    /// all, forever.
+    ///
+    /// The hidden recovery material is discarded exactly as [`Self::reveal`]
+    /// discards it: the authoritative seed that follows replaces it, and
+    /// keeping a stale snapshot beside a fresher one is what would then be
+    /// replayed twice. Returns whether the pane actually had to be forced,
+    /// which is the only part worth counting.
+    pub fn reveal_for_seed_request(&mut self, pane_id: &str, generation: u64) -> bool {
+        match self.resources.get(pane_id).map(|resource| resource.state) {
+            Some(PaneResourceState::Visible) => {
+                self.reveal(pane_id, generation);
+                false
+            }
+            Some(_) => {
+                self.reveal(pane_id, generation);
+                true
+            }
+            // A pane with no resource at all is hidden by `is_hidden`'s own
+            // definition, so its seed would be suppressed just the same.
+            None => {
+                self.ensure(pane_id, true, generation);
+                true
+            }
+        }
+    }
+
     pub fn snapshot(&mut self, pane_id: &str, snapshot: Vec<u8>, generation: u64) {
         self.ensure(pane_id, false, generation);
         let before = self.accounted_state(pane_id);
@@ -484,19 +553,34 @@ impl PaneResourceStore {
         });
         let before = self.accounted_state(pane_id);
         let resource = self.resources.get_mut(pane_id).expect("resource ensured");
-        if resource
+        const OVERFLOW_REASON: &str = "raw output tail exceeded the hidden-pane budget";
+        let released = if resource
             .serialized_snapshot
             .len()
             .saturating_add(resource.raw_tail.len())
             .saturating_add(bytes.len())
             > self.max_resource_bytes
         {
-            release(resource, "raw output tail exceeded the hidden-pane budget");
+            release(resource, OVERFLOW_REASON);
+            true
         } else {
             resource.raw_tail.extend_from_slice(bytes);
             resource.tail_through_generation = generation;
-        }
+            false
+        };
         resource.generation = generation;
+        if released {
+            // Silent until this: a hidden pane that overran its tail budget was
+            // released with nothing said, so the renderer that eventually
+            // revealed it waited on recovery material that had been discarded.
+            self.record_degradation(PaneDegradation {
+                pane_id: pane_id.to_owned(),
+                cause: PaneDegradationCause::HiddenTailOverflow,
+                state: PaneResourceState::Released,
+                generation,
+                reason: OVERFLOW_REASON.into(),
+            });
+        }
         self.refresh_accounting(pane_id, before);
         self.enforce_limits();
     }
@@ -655,7 +739,7 @@ impl PaneResourceStore {
             let before = self.accounted_state(&pane_id);
             self.output_journals.remove(&pane_id);
             self.output_journal_bytes.remove(&pane_id);
-            if let Some(resource) = self.resources.get_mut(&pane_id) {
+            let degradation = self.resources.get_mut(&pane_id).map(|resource| {
                 record_pane_resource_measurement!(|measurements: &mut PaneResourceMeasurements| {
                     measurements.evictions += 1;
                 });
@@ -672,9 +756,49 @@ impl PaneResourceStore {
                 } else {
                     release(resource, reason);
                 }
+                PaneDegradation {
+                    pane_id: pane_id.clone(),
+                    cause: PaneDegradationCause::GlobalBudget,
+                    state: resource.state,
+                    generation: resource.generation,
+                    reason: reason.into(),
+                }
+            });
+            // An eviction is a decision this store makes about a pane nobody
+            // asked it about. Recorded rather than emitted, because emitting
+            // here would mean holding this store's lock across the event path
+            // the emitter takes.
+            if let Some(degradation) = degradation {
+                self.record_degradation(degradation);
             }
             self.refresh_accounting(&pane_id, before);
         }
+    }
+
+    /// Retains one pane's latest degradation, replacing any earlier one.
+    ///
+    /// Latest-wins per pane because the signal is idempotent — "this pane needs
+    /// an authoritative seed" does not become truer by being recorded twice —
+    /// and because that is what bounds this list without a drain.
+    fn record_degradation(&mut self, degradation: PaneDegradation) {
+        if let Some(existing) = self
+            .degradations
+            .iter_mut()
+            .find(|existing| existing.pane_id == degradation.pane_id)
+        {
+            *existing = degradation;
+            return;
+        }
+        if self.degradations.len() >= MAX_RECORDED_PANE_DEGRADATIONS {
+            self.degradations.remove(0);
+        }
+        self.degradations.push(degradation);
+    }
+
+    /// Takes every degradation recorded since the last drain, for the caller to
+    /// report once it no longer holds this store.
+    pub fn take_degradations(&mut self) -> Vec<PaneDegradation> {
+        std::mem::take(&mut self.degradations)
     }
 }
 
@@ -854,6 +978,101 @@ mod tests {
         assert!(store.resources.values().any(|resource| {
             resource.state == PaneResourceState::Visible && resource.requires_seed
         }));
+    }
+
+    #[test]
+    fn evicting_a_visible_pane_surfaces_a_degradation_the_caller_can_report() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 2 * 1024);
+        for index in 0..4_u64 {
+            let pane = format!("%{index}");
+            store.ensure(&pane, true, index);
+            store.snapshot(&pane, vec![b'x'; 1024], index);
+        }
+        let degradations = store.take_degradations();
+        assert!(
+            !degradations.is_empty(),
+            "a visible pane lost its recovery material silently"
+        );
+        for degradation in &degradations {
+            assert_eq!(degradation.cause, PaneDegradationCause::GlobalBudget);
+            assert!(degradation.reason.contains("budget") || degradation.reason.contains("LRU"));
+            assert!(
+                store
+                    .get(&degradation.pane_id)
+                    .is_some_and(|resource| resource.requires_seed)
+            );
+        }
+        // Draining is what bounds the list; a second drain reports nothing new.
+        assert!(store.take_degradations().is_empty());
+    }
+
+    #[test]
+    fn hidden_tail_overflow_surfaces_its_release() {
+        let mut store = PaneResourceStore::with_total_limit(32, 16, 4096);
+        store.set_visible("%1", false, 1);
+        store.snapshot("%1", b"seed".to_vec(), 2);
+        assert!(store.take_degradations().is_empty());
+        store.append("%1", &[b'x'; 64], 3);
+        let degradations = store.take_degradations();
+        assert_eq!(degradations.len(), 1);
+        assert_eq!(degradations[0].pane_id, "%1");
+        assert_eq!(
+            degradations[0].cause,
+            PaneDegradationCause::HiddenTailOverflow
+        );
+        assert_eq!(degradations[0].state, PaneResourceState::Released);
+        assert_eq!(degradations[0].generation, 3);
+        assert_eq!(store.get("%1").unwrap().state, PaneResourceState::Released);
+    }
+
+    #[test]
+    fn an_explicit_seed_request_reveals_a_released_pane_so_its_snapshot_can_be_emitted() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        store.set_visible("%1", false, 1);
+        store.snapshot("%1", b"stale".to_vec(), 2);
+        store.require_seed("%1", "test");
+        assert_eq!(store.get("%1").unwrap().state, PaneResourceState::Released);
+        assert!(store.is_hidden("%1"));
+
+        assert!(store.reveal_for_seed_request("%1", 3));
+        assert_eq!(store.get("%1").unwrap().state, PaneResourceState::Visible);
+        assert!(!store.is_hidden("%1"));
+        // The seed capture that follows lands on a pane the emission gate now
+        // passes, and clears the debt it was requested for.
+        store.snapshot("%1", b"fresh".to_vec(), 4);
+        assert!(!store.is_hidden("%1"));
+        assert!(!store.get("%1").unwrap().requires_seed);
+        assert_eq!(store.get("%1").unwrap().serialized_snapshot, b"fresh");
+
+        // Already visible: nothing forced, and nothing counted.
+        assert!(!store.reveal_for_seed_request("%1", 5));
+        // Never mounted here at all: still forced, because an absent resource
+        // is hidden by `is_hidden`'s definition.
+        assert!(store.reveal_for_seed_request("%9", 6));
+        assert!(!store.is_hidden("%9"));
+    }
+
+    #[test]
+    fn a_hidden_pane_revealed_for_a_seed_request_discards_its_stale_recovery_material() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        store.ensure("%1", true, 1);
+        store
+            .hide_with_checkpoint(
+                "%1",
+                b"screen".to_vec(),
+                VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 1,
+                },
+                1,
+            )
+            .unwrap();
+        store.append("%1", b"tail", 2);
+        assert!(store.reveal_for_seed_request("%1", 3));
+        let resource = store.get("%1").unwrap();
+        assert_eq!(resource.state, PaneResourceState::Visible);
+        assert!(resource.serialized_snapshot.is_empty());
+        assert!(resource.raw_tail.is_empty());
     }
 
     #[test]

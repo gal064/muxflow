@@ -20,6 +20,6 @@ pub use discovery::{
 pub use input::{DESKTOP_INPUT_COALESCE_BYTES, HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
 pub use layout::{LayoutAxis, LayoutGeneration, LayoutNode, LayoutParseError, parse_layout};
 pub use replay::{
-    BufferedOutput, OutputDisposition, PaneResource, PaneResourceState, PaneResourceStore,
-    ReplayBatch, ScreenSeeder, VisibilityCheckpoint,
+    BufferedOutput, OutputDisposition, PaneDegradation, PaneDegradationCause, PaneResource,
+    PaneResourceState, PaneResourceStore, ReplayBatch, ScreenSeeder, VisibilityCheckpoint,
 };

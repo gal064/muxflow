@@ -335,3 +335,80 @@ fn external_mutation_before_poll_invalidates_cached_action_baseline() {
     ));
     assert!(baseline_changed(Some(&cached), &cached.0, "tmux:restarted"));
 }
+
+/// The counterpart to `saturated_process_wide_sink_gets_resync_instead_of_silent_drop`.
+///
+/// A resync is the right answer for an ordinary event the queue could not take:
+/// the desktop rebuilds from scratch and nothing is lost. It is the wrong answer
+/// for the events that exist *because* something already needs repairing — a
+/// dropped "this pane needs a seed" is how one pane stays frozen while the rest
+/// of the connection carries on looking healthy. Those wait for room instead.
+#[tokio::test]
+async fn a_full_queue_defers_a_recovery_event_rather_than_dropping_it() {
+    let (sender, mut receiver) = mpsc::channel(1);
+    let overflowed = AtomicBool::new(false);
+    let topology = || v1::HostEvent {
+        kind: v1::EventKind::TopologyDirty.into(),
+        scope: "topology".into(),
+        ..Default::default()
+    };
+    assert!(emit_event(&sender, &overflowed, topology()));
+
+    // Ordinary events keep the old contract exactly: refused, counted, resynced.
+    assert!(!emit_event(&sender, &overflowed, topology()));
+    assert!(overflowed.load(Ordering::Acquire));
+    overflowed.store(false, Ordering::Release);
+
+    for kind in [
+        v1::EventKind::TerminalResnapshotRequired,
+        v1::EventKind::TerminalFlowStalled,
+        v1::EventKind::TerminalFlowPaused,
+        v1::EventKind::PaneResource,
+    ] {
+        assert!(
+            emit_event(
+                &sender,
+                &overflowed,
+                v1::HostEvent {
+                    kind: kind.into(),
+                    scope: "%7".into(),
+                    detail: "pane needs a seed".into(),
+                    ..Default::default()
+                }
+            ),
+            "{kind:?} was reported as undeliverable"
+        );
+    }
+    assert!(
+        !overflowed.load(Ordering::Acquire),
+        "a deferred recovery event escalated to a connection-wide resync"
+    );
+
+    let mut delivered = Vec::new();
+    for _ in 0..5 {
+        let message = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("a deferred recovery event never arrived")
+            .unwrap();
+        let SequencerControl::OrderedEvent(event) = message else {
+            panic!("expected an ordered event")
+        };
+        delivered.push(v1::EventKind::try_from(event.kind).unwrap());
+    }
+    delivered.sort_by_key(|kind| *kind as i32);
+    assert_eq!(
+        delivered,
+        {
+            let mut expected = vec![
+                v1::EventKind::TopologyDirty,
+                v1::EventKind::TerminalResnapshotRequired,
+                v1::EventKind::TerminalFlowStalled,
+                v1::EventKind::TerminalFlowPaused,
+                v1::EventKind::PaneResource,
+            ];
+            expected.sort_by_key(|kind| *kind as i32);
+            expected
+        },
+        "a recovery event was lost"
+    );
+}

@@ -42,6 +42,34 @@ struct FlowCounters {
     /// so a state file written before this counter existed still loads.
     #[serde(default)]
     terminal_client_resize_rejections: u64,
+    /// The six counters below are the persisted half of the pane-stranding
+    /// story. Every one of them names an event that used to happen silently, on
+    /// a path whose only other record was a stderr line the daemon sends to a
+    /// file nobody reads once the process is detached. A pane that froze once,
+    /// hours ago, leaves no live state to inspect; these are what is left
+    /// afterwards. Each is a count of a host decision — never a pane id, a
+    /// path or terminal content — so they stay inside the privacy declaration.
+    ///
+    /// A pane whose recovery material the global budget discarded.
+    #[serde(default)]
+    pane_evictions: u64,
+    /// A pane whose recovery material was released outright, by that eviction
+    /// or by a hidden tail outgrowing its budget.
+    #[serde(default)]
+    pane_releases: u64,
+    /// Explicit seed requests that had to force a hidden pane back to visible.
+    #[serde(default)]
+    seed_forced_reveals: u64,
+    /// Internal seed requests re-attempted after one failed.
+    #[serde(default)]
+    seed_request_retries: u64,
+    /// Flow-control resumes tmux refused, retried or stalled.
+    #[serde(default)]
+    flow_resume_rejections: u64,
+    /// Recovery events the ordered queue could not take immediately and that
+    /// were handed to a deferred sender instead of being dropped.
+    #[serde(default)]
+    recovery_event_deferrals: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -251,6 +279,40 @@ pub fn record_terminal_input_backpressure() {
     });
 }
 
+/// Counts one pane whose recovery material the pane-resource store discarded on
+/// its own, and whether that left the pane released.
+pub fn record_pane_degradation(evicted: bool, released: bool) {
+    update_active_counter(|counters| {
+        if evicted {
+            counters.pane_evictions = counters.pane_evictions.saturating_add(1);
+        }
+        if released {
+            counters.pane_releases = counters.pane_releases.saturating_add(1);
+        }
+    });
+}
+
+/// Counts one explicit seed request that had to force its pane back to visible.
+pub fn record_seed_forced_reveal() {
+    update_active_counter(|counters| {
+        counters.seed_forced_reveals = counters.seed_forced_reveals.saturating_add(1);
+    });
+}
+
+/// Counts one re-attempt of a seed request the host owed a pane.
+pub fn record_seed_request_retry() {
+    update_active_counter(|counters| {
+        counters.seed_request_retries = counters.seed_request_retries.saturating_add(1);
+    });
+}
+
+/// Counts one recovery event deferred rather than dropped by a full queue.
+pub fn record_recovery_event_deferral() {
+    update_active_counter(|counters| {
+        counters.recovery_event_deferrals = counters.recovery_event_deferrals.saturating_add(1);
+    });
+}
+
 fn update_active_counter(update: impl FnOnce(&mut FlowCounters)) {
     let diagnostics = ACTIVE_RUNTIME
         .get_or_init(|| Mutex::new(None))
@@ -337,6 +399,9 @@ pub fn write_terminal_sizing_handoff_log(
 /// never pane content, which the reader never puts in an error detail for
 /// exactly that reason. Bounded anyway; see `bounded_log_text`.
 pub fn write_flow_resume_rejected_log(pane_id: &str, disposition: &str, reason: &str) {
+    update_active_counter(|counters| {
+        counters.flow_resume_rejections = counters.flow_resume_rejections.saturating_add(1);
+    });
     let reason = bounded_log_text(reason);
     let line = serde_json::json!({
         "subsystem": "host_daemon",
