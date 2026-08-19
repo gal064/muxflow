@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from "react";
 import type { Pane, Session, Window as TmuxWindow } from "./types";
 import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
-import type { OptimisticWindowSwitch } from "./windowSelection";
+import { windowForSession, type OptimisticWindowSwitch } from "./windowSelection";
 import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 import type { TmuxActionExecution } from "./useTmuxActionPerformer";
 import { shellNavigationMode, type PendingShellTab } from "../features/shell/model";
@@ -53,7 +53,7 @@ export interface ShellNavigationOptions {
    */
   setPendingTab?(pending: PendingShellTab | undefined): void;
   /**
-   * The snap-back guard for an optimistic window switch, owned by
+   * The snap-back guard for an optimistic window or workspace switch, owned by
    * `useAppConnectionController` because that is where snapshots decide the
    * active window. Absent means switches stay ack-gated.
    */
@@ -283,19 +283,71 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       return;
     }
     const scope = scopeRef.current;
+    const alreadyThere = sessionId === activeSessionIdRef.current;
+    // Read before the optimistic commit moves them. This is where the host
+    // still is, and so what the transition has to be planned from — and where
+    // a refused switch has to put the shell back.
+    const origin = { sessionId: activeSessionIdRef.current, windowId: activeWindowIdRef.current };
+    // Resolved here, from the same snapshot the controller's post-paint effect
+    // would read, so the workspace and the window it shows change in one
+    // commit. Leaving it to the effect paints the new workspace against the
+    // old workspace's window first, which resolves to no active window at all.
+    // Undefined where this connection has never seen the workspace's windows;
+    // the effect still resolves that one when the snapshot arrives.
+    const windowId = windowForSession(windowsRef.current, sessionId, origin.windowId);
+    const commit = () => {
+      if (!scopeCurrent(scope)) return;
+      activeSessionIdRef.current = sessionId;
+      activeWindowIdRef.current = windowId;
+      optionsRef.current.setAppTab(sessionId, undefined);
+      optionsRef.current.setActiveSessionId(sessionId);
+      optionsRef.current.setActiveWindowId(windowId);
+    };
+    // The switch is painted now and the request reconciles behind it. Only
+    // where the guard exists to hold it, for the same reason window switches
+    // need it: the snapshots arriving during the round trip still describe the
+    // workspace being left, and would resolve the window out from under it.
+    const guard = optionsRef.current.optimisticWindow;
+    const optimistic = Boolean(guard) && !alreadyThere && scopeCurrent(scope);
+    if (optimistic && guard) {
+      guard.current = { sessionId, windowId };
+      commit();
+    }
+    /** Whether the guard still holds *this* switch rather than a newer one. */
+    const owns = () => guard?.current?.sessionId === sessionId && guard.current.windowId === windowId;
+    /** Puts the shell back where the host actually is, after a switch that failed. */
+    const rollback = () => {
+      if (!guard || !owns()) return;
+      guard.current = undefined;
+      if (!scopeCurrent(scope) || !origin.sessionId) return;
+      // Actively, not by waiting: a refused switch changes nothing on the
+      // host, so there may be no further snapshot to correct the UI with. The
+      // status the user sees is the performer's, as on the window path.
+      const restored = windowForSession(windowsRef.current, origin.sessionId, origin.windowId);
+      activeSessionIdRef.current = origin.sessionId;
+      activeWindowIdRef.current = restored;
+      optionsRef.current.setActiveSessionId(origin.sessionId);
+      optionsRef.current.setActiveWindowId(restored);
+    };
     void coordinator.navigate({
       destination: { kind: "session", sessionId },
-      request: async (predecessor, isCurrent) => (await requestLocation(
-        { kind: "session", sessionId }, predecessor, isCurrent, scope,
-      )),
-      commit: () => {
-        if (!scopeCurrent(scope)) return;
-        activeSessionIdRef.current = sessionId;
-        activeWindowIdRef.current = undefined;
-        optionsRef.current.setAppTab(sessionId, undefined);
-        optionsRef.current.setActiveSessionId(sessionId);
+      request: async (predecessor, isCurrent) => {
+        const result = await requestLocation(
+          { kind: "session", sessionId }, predecessor, isCurrent, scope, undefined, true,
+          optimistic ? origin : undefined,
+        );
+        if (optimistic && guard) {
+          if (result.kind === "reached" || result.kind === "partial") {
+            // Held until a snapshot has caught up: the ack is not the
+            // snapshot, and releasing on the ack alone reopens the very gap
+            // this guard exists to cover.
+            if (owns()) guard.current = { sessionId, windowId, throughGeneration: result.generation };
+          } else rollback();
+        }
+        return result;
       },
-    }, sessionId === activeSessionIdRef.current
+      commit,
+    }, alreadyThere
       ? { kind: "reached", destination: { kind: "session", sessionId }, generation: scope.generation, generationSource: "snapshot" }
       : undefined);
   }, [beginTerminalIntent, coordinator, requestLocation, scopeCurrent]);

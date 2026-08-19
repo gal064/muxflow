@@ -52,15 +52,46 @@ export function resolveActiveWindowId(
 }
 
 /**
- * A window switch committed locally while its request is still in flight.
+ * Which window a workspace should be showing, from an unfiltered snapshot.
+ *
+ * The same rule as `resolveActiveWindowId`, applied to one session's windows
+ * without waiting for the shell's filtered view of them to exist. A workspace
+ * switch needs the answer in the same tick it commits the workspace: resolving
+ * it a paint later is what shows the new workspace against the old
+ * workspace's window for one frame.
+ *
+ * Sorted by index for the same reason the shell's window list is: the
+ * last-resort fallback is "the first window", and first has to mean the same
+ * thing in both places.
+ */
+export function windowForSession(
+  windows: readonly TmuxWindow[],
+  sessionId: string,
+  previous?: string,
+): string | undefined {
+  const owned = windows
+    .filter((window) => window.sessionId === sessionId)
+    .sort((left, right) => left.index - right.index);
+  return resolveActiveWindowId(owned, previous);
+}
+
+/**
+ * A switch committed locally while its request is still in flight.
  *
  * The shape the snap-back guard needs: which switch it is, and the generation
  * at which the host is known to have seen it. `throughGeneration` is unset
- * until the select-window action answers — before that there is no generation
- * to wait for, and the guard simply holds.
+ * until the select action answers — before that there is no generation to wait
+ * for, and the guard simply holds.
+ *
+ * Covers a workspace switch as well as a window one, because both decide the
+ * same thing — which window the shell shows — and a user can only be making
+ * one of them at a time. `windowId` is unset where a workspace switch could
+ * not name its window yet: a workspace never visited under this connection has
+ * no windows in the snapshot, so there is nothing to hold and the guard only
+ * marks the switch as outstanding.
  */
 export interface OptimisticWindowSwitch {
   sessionId: string;
-  windowId: string;
+  windowId?: string;
   throughGeneration?: number;
 }

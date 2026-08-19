@@ -154,18 +154,22 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     .filter((tmuxWindow) => tmuxWindow.sessionId === activeSessionId)
     .sort((a, b) => a.index - b.index), [activeSessionId, snapshot.windows]);
   /**
-   * A window switch that has been committed locally and is still catching up.
+   * A window or workspace switch committed locally and still catching up.
    *
    * Owned here because this is where snapshots decide the active window, and
    * written by `useShellNavigation`, which is the only thing that knows a
-   * switch is outstanding. See `OptimisticWindowSwitch`.
+   * switch is outstanding. A workspace switch resolves its own window in the
+   * same commit and records it here, so the effect below finds nothing left to
+   * change; the guard is what keeps the snapshots arriving mid-flight — which
+   * still describe the workspace being left — from changing it back. See
+   * `OptimisticWindowSwitch`.
    */
   const optimisticWindow = useRef<OptimisticWindowSwitch | undefined>(undefined);
   useEffect(() => {
     const pending = optimisticWindow.current;
     if (pending) {
       // Released once the host has caught up: a snapshot at or past the
-      // generation the select-window action returned is one that has seen the
+      // generation the select action returned is one that has seen the
       // switch, so from here the host's own answer is the better one — and an
       // unreleased guard would leave the shell ignoring tmux forever.
       const settled = pending.throughGeneration !== undefined

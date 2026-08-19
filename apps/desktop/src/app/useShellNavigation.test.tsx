@@ -1014,3 +1014,166 @@ describe("optimistic terminal window switch", () => {
     await act(async () => renderer.unmount());
   });
 });
+
+describe("optimistic workspace switch", () => {
+  const guard = () => ({ current: undefined as OptimisticWindowSwitch | undefined });
+  /** The same snapshot as `windows`, with a second workspace the host knows. */
+  const acrossWorkspaces = [
+    ...windows,
+    { id: "@5", sessionId: "$2", index: 1, name: "five", active: false, layout: "" },
+    { id: "@4", sessionId: "$2", index: 0, name: "four", active: true, layout: "" },
+  ];
+
+  it("paints the workspace and the window it shows in one commit, before the host answers", async () => {
+    const selected = deferred<TmuxActionResult | undefined>();
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => selected.promise);
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow, windows: acrossWorkspaces });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectSession("$2"));
+
+    expect(
+      harness.setActiveSessionId,
+      "the workspace waited for the ack, which is the whole thing this removes",
+    ).toHaveBeenCalledWith("$2");
+    // Both in the same handler: a frame with the new workspace and the old
+    // workspace's window resolves to no active window at all.
+    expect(harness.setActiveWindowId).toHaveBeenCalledWith("@4");
+    expect(optimisticWindow.current).toMatchObject({ sessionId: "$2", windowId: "@4" });
+
+    selected.resolve({ topologyGeneration: 4 });
+    await flush();
+    await act(async () => renderer.unmount());
+  });
+
+  it("still sends the select-session it painted ahead of", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => ({ topologyGeneration: 4 }));
+    const harness = mountNavigation({ performAction, optimisticWindow: guard(), windows: acrossWorkspaces });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectSession("$2"));
+    await flush();
+
+    expect(
+      performAction.mock.calls.some(([action]) => action.kind === "selectSession" && action.sessionId === "$2"),
+      "an optimistic switch that never told tmux is a UI lying about where input goes",
+    ).toBe(true);
+    await act(async () => renderer.unmount());
+  });
+
+  it("holds the guard past the ack, until a snapshot can have caught up", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => ({ topologyGeneration: 7 }));
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow, windows: acrossWorkspaces });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectSession("$2"));
+    await flush();
+
+    // Released by generation, not by the ack: the ack is not the snapshot.
+    expect(optimisticWindow.current).toMatchObject({ sessionId: "$2", windowId: "@4", throughGeneration: 7 });
+    await act(async () => renderer.unmount());
+  });
+
+  it("rolls back to the workspace the host is still on when the switch is refused", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => undefined);
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow, windows: acrossWorkspaces });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectSession("$2"));
+    await flush();
+
+    expect(optimisticWindow.current, "a stuck guard leaves the shell ignoring tmux").toBeUndefined();
+    expect(harness.setActiveSessionId).toHaveBeenLastCalledWith("$1");
+    expect(harness.setActiveWindowId).toHaveBeenLastCalledWith("@0");
+    await act(async () => renderer.unmount());
+  });
+
+  it("rolls back when the switch throws", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => { throw new Error("gone"); });
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow, windows: acrossWorkspaces });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectSession("$2"));
+    await flush();
+
+    expect(optimisticWindow.current).toBeUndefined();
+    expect(harness.setActiveSessionId).toHaveBeenLastCalledWith("$1");
+    expect(harness.setActiveWindowId).toHaveBeenLastCalledWith("@0");
+    await act(async () => renderer.unmount());
+  });
+
+  it("commits a workspace whose windows this connection has never seen", async () => {
+    const selected = deferred<TmuxActionResult | undefined>();
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => selected.promise);
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectSession("$2"));
+
+    // Nothing to resolve to, so the workspace still moves and the controller's
+    // effect names the window once its snapshot arrives.
+    expect(harness.setActiveSessionId).toHaveBeenCalledWith("$2");
+    expect(harness.setActiveWindowId).toHaveBeenCalledWith(undefined);
+    expect(optimisticWindow.current).toMatchObject({ sessionId: "$2" });
+    expect(optimisticWindow.current?.windowId).toBeUndefined();
+
+    selected.resolve({ topologyGeneration: 4 });
+    await flush();
+    await act(async () => renderer.unmount());
+  });
+
+  it("stays ack-gated where no guard is supplied", async () => {
+    const selected = deferred<TmuxActionResult | undefined>();
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => selected.promise);
+    const harness = mountNavigation({ performAction, windows: acrossWorkspaces });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectSession("$2"));
+    expect(harness.setActiveSessionId).not.toHaveBeenCalledWith("$2");
+
+    selected.resolve({ topologyGeneration: 4 });
+    await flush();
+    expect(harness.setActiveSessionId).toHaveBeenCalledWith("$2");
+    // Ack-gated or not, the window lands with the workspace rather than a
+    // paint later.
+    expect(harness.setActiveWindowId).toHaveBeenCalledWith("@4");
+    await act(async () => renderer.unmount());
+  });
+
+  it("does not arm the guard for the workspace already showing", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async () => ({ topologyGeneration: 4 }));
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow, windows: acrossWorkspaces });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectSession("$1"));
+    await flush();
+
+    expect(optimisticWindow.current, "nothing is outstanding, so nothing needs holding").toBeUndefined();
+    await act(async () => renderer.unmount());
+  });
+
+  it("does not let a refused workspace switch undo the window switch that superseded it", async () => {
+    const workspace = deferred<TmuxActionResult | undefined>();
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) =>
+      action.kind === "selectSession" && action.sessionId === "$2" ? workspace.promise : { topologyGeneration: 9 });
+    const optimisticWindow = guard();
+    const harness = mountNavigation({ performAction, optimisticWindow, windows: acrossWorkspaces });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.selectSession("$2"));
+    act(() => harness.navigation.selectWindow("@1"));
+    workspace.resolve(undefined);
+    await flush();
+    await flush();
+
+    // The older workspace answer must not roll back a switch it no longer owns.
+    expect(harness.setActiveWindowId).toHaveBeenLastCalledWith("@1");
+    await act(async () => renderer.unmount());
+  });
+});

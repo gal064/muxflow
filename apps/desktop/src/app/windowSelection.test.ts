@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Window as TmuxWindow } from "./types";
-import { relativeWindowReorderAction, resolveActiveWindowId } from "./windowSelection";
+import { relativeWindowReorderAction, resolveActiveWindowId, windowForSession } from "./windowSelection";
 
 const windows = (activeId: string): TmuxWindow[] => [
   { id: "@1", sessionId: "$1", index: 0, name: "one", active: activeId === "@1", layout: "" },
@@ -26,6 +26,31 @@ describe("authoritative window selection", () => {
 
   it("follows the host again once no switch is outstanding", () => {
     expect(resolveActiveWindowId(windows("@2"), "@1", undefined)).toBe("@2");
+  });
+
+  it("resolves a workspace's window from the unfiltered snapshot the shell already holds", () => {
+    const across: TmuxWindow[] = [
+      ...windows("@1"),
+      { id: "@5", sessionId: "$2", index: 1, name: "five", active: false, layout: "" },
+      { id: "@4", sessionId: "$2", index: 0, name: "four", active: true, layout: "" },
+    ];
+    // The workspace being switched *to*, not the one whose windows are filtered
+    // in — that view does not exist until a paint later.
+    expect(windowForSession(across, "$2", "@1")).toBe("@4");
+  });
+
+  it("falls back to a workspace's first window in index order, not snapshot order", () => {
+    const across: TmuxWindow[] = [
+      { id: "@5", sessionId: "$2", index: 1, name: "five", active: false, layout: "" },
+      { id: "@4", sessionId: "$2", index: 0, name: "four", active: false, layout: "" },
+    ];
+    expect(windowForSession(across, "$2")).toBe("@4");
+  });
+
+  it("names no window for a workspace this connection has never seen", () => {
+    // Never visited, so the snapshot has none of its windows: the switch still
+    // has to commit, and the authoritative effect resolves it later.
+    expect(windowForSession(windows("@1"), "$9")).toBeUndefined();
   });
 
   it("moves left and right relative to adjacent stable window IDs", () => {
