@@ -180,11 +180,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                   <span className="workspace-activity-text">…{row.agentOverflow} more</span>
                 </span>}
               </span>}
-              {/* The working directory used to be fused onto this line. It is
-                  gone from the sidebar and lives on in ⌘P's match key, where a
-                  path is something you search rather than something you read
-                  once per row. */}
-              {row.branch && <span className="workspace-meta">{row.branch}</span>}
+              {/* Neither the branch nor the working directory renders here any
+                  more: a workspace holds many tabs in many directories, so one
+                  branch per row was a lie half the time. Both live on in ⌘P's
+                  match key, where they are something you search rather than
+                  something you read once per row. */}
             </button>
             {row.unread > 0 && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
           </div>)}
@@ -406,7 +406,6 @@ function rowLabel(row: WorkspaceRowModel): string {
     row.agents[0] && agentLine(row.agents[0]),
     total > 1 ? `${total} agents` : undefined,
     row.unread > 0 ? `${row.unread} agent${row.unread === 1 ? "" : "s"} waiting` : undefined,
-    row.branch,
   ].filter(Boolean).join(", ");
 }
 

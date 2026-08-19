@@ -5,18 +5,17 @@ import type { AgentAttentionRollup, AgentDisplayState, AgentRecord } from "../ag
 import { orderedSessions } from "../shell/model";
 
 /**
- * A workspace row in the sidebar: name, what its loudest few agents are doing,
- * and which branch it is on.
+ * A workspace row in the sidebar: name and what its loudest few agents are
+ * doing.
  *
  * The row is derived, not stored. tmux owns the topology and the agent store
  * owns the states, so this module's whole job is to answer "what does one
  * sidebar row say" from those two, with no per-row state to fall out of sync.
  *
- * `branch` and `path` are two fields rather than one composed string because
- * the two surfaces reading them want different things: the sidebar shows the
- * branch alone (a working directory beside every row is noise once a host has
- * more than a handful of workspaces), while ⌘P still matches on the path,
- * where searching for `~/dev/thing` is the fastest way to a workspace.
+ * `branch` and `path` are carried for ⌘P alone — the sidebar renders neither.
+ * A workspace holds many tabs in many directories, so one branch per row was
+ * a lie half the time; in the switcher they are match keys, where searching
+ * for `~/dev/thing` or a branch name is the fastest way to a workspace.
  */
 export interface WorkspaceRowModel {
   session: Session;
@@ -115,12 +114,11 @@ function topAgentsBySession(
 }
 
 /**
- * Branch and path recomposed, for ⌘P — the one surface that still wants both.
+ * Branch and path recomposed, for ⌘P — the one surface that shows either.
  *
- * The two are stored apart because the sidebar shows only the branch, but the
- * switcher matches on the pair and shows what it matched. Composing that here
- * keeps the separator in the module that owns the fields, rather than in a
- * component that would rebuild it on every keystroke.
+ * The switcher matches on the pair and shows what it matched. Composing that
+ * here keeps the separator in the module that owns the fields, rather than in
+ * a component that would rebuild it on every keystroke.
  */
 export function workspaceMetaLine(row: Pick<WorkspaceRowModel, "branch" | "path">): string {
   return [row.branch, row.path].filter(Boolean).join(" · ");
