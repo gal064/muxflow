@@ -18,6 +18,12 @@ interface AppAgentControllerOptions {
   activeWindow?: TmuxWindow;
   activeWindowId?: string;
   agentClient: AgentClient;
+  /**
+   * Consent for this host's agent setup that was already given elsewhere —
+   * the remote helper install dialog, which names it. Passed straight through;
+   * `useAgentHostSetup` is what decides whether it applies.
+   */
+  agentAutoSetup?: { hostProfileId: string; consume(): void };
   appFocused: boolean;
   clientHostProfileId?: string;
   clientId?: string;
@@ -125,6 +131,7 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
   });
   const hostSetup = useAgentHostSetup({
     adapters: runtime.adapters,
+    autoSetup: options.agentAutoSetup,
     applyHooks: runtime.applyHooks,
     applyHostNaming: runtime.applyHostNaming,
     connected: Boolean(scope),

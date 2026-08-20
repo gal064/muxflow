@@ -66,6 +66,72 @@ describe("App orchestration", () => {
     await act(async () => renderer!.unmount());
   });
 
+  /**
+   * The picker names the machine the form belongs to, and Connect keeps it.
+   *
+   * Connect used to derive the profile id from the form values on every press,
+   * so correcting one host's address connected to the corrected host and left
+   * the original in the list beside it — two entries for one machine, and a
+   * picker that grew an entry every time an address changed.
+   */
+  it("edits the picked host in place, and adds one only when asked to", async () => {
+    const saved: unknown[] = [];
+    invokeMock.mockImplementation((command: string, request: { profile?: unknown }) => {
+      if (command === "load_app_state") return Promise.resolve(defaultAppState);
+      if (command === "list_host_profiles") return Promise.resolve({
+        lastProfileId: "remote-a",
+        profiles: [{ id: "remote-a", label: "qa", connection: { mode: "ssh", profileId: "remote-a", target: "qa-host" } }],
+      });
+      if (command === "save_host_profile") saved.push(request.profile);
+      if (command === "start_terminal") return Promise.resolve("client-1");
+      if (command === "stop_terminal") return Promise.resolve(undefined);
+      if (command === "bridge_final_totals") return Promise.resolve({ cumulativeFrameCount: 0, cumulativeByteLength: 0, quiesced: true });
+      return Promise.resolve(undefined);
+    });
+    let renderer: ReactTestRenderer;
+    await act(async () => { renderer = create(<App />); });
+    const openSettings = async () => {
+      const hostRow = renderer.root.findAllByType("button")
+        .find((button) => String(button.props["aria-label"] ?? "").startsWith("Host "))!;
+      await act(async () => { hostRow.props.onClick(); });
+    };
+    const sshTarget = () => renderer.root.findAllByType("input")
+      .find((input) => input.props.placeholder === "Host or config alias")!;
+    const picker = () => renderer.root.findByProps({ "aria-label": "Host" });
+    const connect = async () => {
+      const button = renderer.root.findAllByType("button").find((node) => node.props.children === "Connect")!;
+      await act(async () => { button.props.onClick(); });
+    };
+
+    await openSettings();
+    // The saved host is what the form is editing, so its address is what is
+    // being corrected — not the seed for a new entry.
+    expect(picker().props.value).toBe("remote-a");
+    await act(async () => { sshTarget().props.onChange({ target: { value: "qa-host-2" } }); });
+    expect(picker().props.value).toBe("remote-a");
+    await connect();
+    expect(saved).toEqual([{
+      id: "remote-a",
+      label: "qa-host-2",
+      connection: { mode: "ssh", profileId: "remote-a", target: "qa-host-2" },
+    }]);
+
+    // A second machine is a deliberate act, and it starts from an empty form
+    // with no saved host behind it.
+    await openSettings();
+    const add = renderer!.root.findAllByType("button").find((node) => String(node.children).includes("Add host"))!;
+    await act(async () => { add.props.onClick(); });
+    expect(sshTarget().props.value).toBe("");
+    expect(picker().props.value).toBe("");
+    expect(renderer!.root.findAllByType("option").map((node) => node.props.children)).toContain("New host…");
+    await act(async () => { sshTarget().props.onChange({ target: { value: "staging-host" } }); });
+    await connect();
+    expect(saved).toHaveLength(2);
+    expect(saved[1]).toMatchObject({ label: "staging-host", connection: { target: "staging-host" } });
+    expect((saved[1] as { id: string }).id).not.toBe("remote-a");
+    await act(async () => renderer!.unmount());
+  });
+
   it("reconstructs an already-selected local bridge when Connect is used as retry", async () => {
     let client = 0;
     invokeMock.mockImplementation((command: string) => {

@@ -21,6 +21,8 @@ interface HostSettingsActionsOptions {
   profiles: readonly HostProfile[];
   resetHost(): void;
   scopeIsCurrent(scope: HostScopeToken): boolean;
+  /** The saved host the form is editing; empty is the new-host form. */
+  selectedProfileId: string;
   setConnection: Dispatch<SetStateAction<ConnectionSpec>>;
   setConnectionDetail: Dispatch<SetStateAction<string>>;
   setConnectionEpoch: Dispatch<SetStateAction<number>>;
@@ -118,7 +120,21 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     const target = options.sshTarget.trim();
     if (!target) return options.setStatus("Enter an SSH host or config alias.");
     const configPath = options.sshConfigPath.trim();
-    const profileId = profileIdForSshConnection(options.profiles, target, configPath);
+    /**
+     * The saved host being edited, if the picker is showing one.
+     *
+     * Connect used to derive the id from the form values alone, so correcting
+     * one machine's address — a renamed alias, a moved config — connected to
+     * the corrected host and left the original sitting in the list beside it,
+     * as a second entry for the same machine that the user never asked for.
+     * Keeping the picked id makes the same edit an edit: the backend upserts on
+     * it, so the saved host moves with the form. A new host is the other
+     * branch, where deriving the id is still right — and `profileIdForSsh-
+     * Connection` is what stops two of *those* from being saved twice.
+     */
+    const edited = options.profiles.find((profile) => profile.id === options.selectedProfileId
+      && profile.connection.mode === "ssh");
+    const profileId = edited?.id ?? profileIdForSshConnection(options.profiles, target, configPath);
     const connection: ConnectionSpec = {
       mode: "ssh", profileId, target, ...(configPath ? { configPath } : {}),
     };
@@ -126,7 +142,12 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     options.setConnection(connection);
     options.setConnectionEpoch((value) => value + 1);
     options.setSelectedProfileId(profile.id);
-    options.setProfiles((current) => [...current.filter((item) => item.id !== profile.id), profile]);
+    // An edit keeps its place in the list, exactly as the store keeps it: the
+    // picker is a list of machines, and a machine that jumped to the bottom
+    // every time its address was corrected would read as a different one.
+    options.setProfiles((current) => edited
+      ? current.map((item) => item.id === profile.id ? profile : item)
+      : [...current.filter((item) => item.id !== profile.id), profile]);
     void invoke("save_host_profile", { profile }).catch((error) => options.setStatus(String(error)));
     options.setStatus(`Connecting to ${target}…`);
   }, [options]);

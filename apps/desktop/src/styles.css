@@ -1077,6 +1077,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .settings-check { display: flex !important; align-items: center; gap: 8px; color: var(--chrome-ink) !important; }
 .settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-faint); font-size: var(--type-secondary); line-height: 1.5; }
+/* The picker and "+ Add host" on one row: choosing a saved host and starting a
+   new one are the same decision, and separating them made the button read as an
+   action on whatever the picker was showing. Aligned to the end of the row so
+   the button meets the field, not the caption above it. */
+.settings-host-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.settings-host-picker label { min-width: 0; }
 /* Its own row under the picker, so the panel keeps one full-width column and a
    destructive control is not a misclick away from the control above it. */
 .settings-host-actions { display: grid; gap: 4px; justify-items: start; }

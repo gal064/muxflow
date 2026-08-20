@@ -31,6 +31,18 @@ export interface AgentHostSetupOptions {
   applyHostNaming(expectedHost: string): Promise<AgentHostNamingOutcome>;
   /** Re-asks the host what its wiring is now, after a change to it. */
   refreshWiring(): void;
+  /**
+   * A consent this host has already been given, elsewhere, for exactly this.
+   *
+   * Installing the remote helper asks a question that names agent status as
+   * part of what it sets up, so arriving here and asking again is asking twice
+   * about one decision. Carried as the host it was answered for rather than a
+   * bare flag, because the answer belongs to that machine and the connection it
+   * applies to is the one that comes back *after* the install — by which time
+   * the app may be somewhere else entirely. `consume` spends it: it is good for
+   * one host, once, and never survives a relaunch.
+   */
+  autoSetup?: { hostProfileId: string; consume(): void };
   onStatus(message: string): void;
   /** Opens the existing exact-diff dialog after this flow has loaded it. */
   openReview(review: AgentHookReview, host: { profileId: string; identity: string }): void;
@@ -136,13 +148,6 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     });
   }, []);
 
-  // Asked once, when the host has actually answered. `decision` being undefined
-  // is the whole condition: a recorded answer of either kind ends this forever.
-  useEffect(() => {
-    if (!promptable || options.decision !== undefined) return;
-    offer();
-  }, [offer, promptable, options.decision]);
-
   // A host that goes away takes its question with it, rather than leaving a
   // modal over a disconnected app that would act on the next host to connect.
   useEffect(() => {
@@ -237,6 +242,60 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       current.refreshWiring();
     });
   }, [assertNaming, updateQuestion]);
+
+  /**
+   * Asked once, when the host has actually answered. `decision` being undefined
+   * is the whole condition: a recorded answer of either kind ends this forever.
+   *
+   * Or not asked at all, when the helper install already asked. That dialog
+   * names agent status as part of what it sets up, so a second modal a few
+   * seconds later — after the first had visibly succeeded — was two questions
+   * about one decision. `autoSetup` is the answer to the first one arriving
+   * here, and it buys exactly what `accept` buys: the same targets, through the
+   * same host-bound `install`, recording the same "accepted".
+   *
+   * Placed after `install` rather than beside the other effects because it
+   * calls it; its dependencies are otherwise the ones it always had.
+   */
+  const autoSetupHost = useRef<string>(undefined);
+  useEffect(() => {
+    if (!promptable || options.decision !== undefined) return;
+    const current = optionsRef.current;
+    // The "accepted" that `install` records is a state update away, and the
+    // wiring refresh it ends with re-runs this effect before that update
+    // arrives. Without this the second pass would find the consent already
+    // spent and open the very prompt the consent existed to prevent.
+    if (autoSetupHost.current === current.hostProfileId) return;
+    // Read from the ref, never depended on: spending the consent must not be
+    // what re-runs this effect.
+    const auto = current.autoSetup?.hostProfileId === current.hostProfileId ? current.autoSetup : undefined;
+    const host = auto ? consentedHost(current) : undefined;
+    if (!auto || !host) {
+      // Either nothing was agreed elsewhere, or it cannot be acted on — a host
+      // that is no longer connected, or an app state that could not record the
+      // answer. Both fall back to the question that explains itself and can be
+      // declined; silently doing nothing would lose the setup entirely.
+      offer();
+      return;
+    }
+    autoSetupHost.current = host.profileId;
+    auto.consume();
+    // `hostHookWiring` re-read here for the same reason `offer` re-reads it:
+    // the targets are taken at the moment the decision is acted on, from the
+    // adapters this host last reported.
+    const targets = hostHookWiring(current.adapters).setupTargets;
+    const label = current.hostLabel;
+    void install(targets, host).then((ok) => {
+      // No dialog to carry the outcome, so the status line does — the same two
+      // sentences `accept` and the migration path use.
+      optionsRef.current.onStatus(ok
+        ? `Agent status hooks installed on ${label}.`
+        : `Could not install the agent status hooks on ${label}.`);
+    });
+    // Exactly the dependencies this effect always had. The host is read through
+    // the ref instead: re-running on a host change would rewrite a question
+    // already on screen, and answering *that* is what M13-E004 was.
+  }, [install, offer, promptable, options.decision]);
 
   // Consent is to keeping this host set up, not to one particular set of hook
   // events. The managed event set moves when a vendor adds an event worth
