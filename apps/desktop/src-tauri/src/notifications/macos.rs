@@ -180,6 +180,25 @@ pub struct NotificationReceipt {
 #[derive(Clone)]
 pub struct NativeNotifications {
     route_directory: Option<Arc<File>>,
+    /// Whether UserNotifications may be touched at all in this process.
+    bundled: bool,
+}
+
+/// UserNotifications throws NSInternalInconsistencyException for any
+/// process outside a real .app bundle — `tauri dev` runs the bare target
+/// binary — so bundle-less runs must never touch the notification center.
+///
+/// Reading the executable path is deliberate: it needs no new objc2 features
+/// and cannot itself throw.
+fn running_from_bundle() -> bool {
+    std::env::current_exe().is_ok_and(|path| {
+        path.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|s| s.ends_with(".app"))
+        })
+    })
 }
 
 /// One notification's parameters, named. Two of these are adjacent booleans,
@@ -208,14 +227,20 @@ impl NativeNotifications {
             let _ = ROUTE_DIRECTORY.set(clone);
         }
         let _ = APP.set(app);
-        let center = UNUserNotificationCenter::currentNotificationCenter();
-        let delegate: Retained<NotificationDelegate> =
-            unsafe { objc2::msg_send![NotificationDelegate::class(), new] };
-        center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        // UNUserNotificationCenter.delegate is weak. This delegate is exactly
-        // app-lifetime state and is released by process teardown.
-        let _ = Retained::into_raw(delegate);
-        Self { route_directory }
+        let bundled = running_from_bundle();
+        if bundled {
+            let center = UNUserNotificationCenter::currentNotificationCenter();
+            let delegate: Retained<NotificationDelegate> =
+                unsafe { objc2::msg_send![NotificationDelegate::class(), new] };
+            center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            // UNUserNotificationCenter.delegate is weak. This delegate is
+            // exactly app-lifetime state and is released by process teardown.
+            let _ = Retained::into_raw(delegate);
+        }
+        Self {
+            route_directory,
+            bundled,
+        }
     }
 
     pub fn notify(
@@ -255,11 +280,20 @@ impl NativeNotifications {
 
     /// What macOS says about this app, in the five words the UI knows.
     pub fn authorization_status(&self) -> Result<String, String> {
+        if !self.bundled {
+            // The same word the other backends use for "there is nothing here
+            // to grant", so the UI keeps its one sentence per status rather
+            // than meeting a sixth word it cannot render.
+            return Ok("unsupported".to_owned());
+        }
         let center = UNUserNotificationCenter::currentNotificationCenter();
         Ok(authorization_status_name(notification_status(&center)?).to_owned())
     }
 
     fn post(&self, posting: Posting<'_>) -> Result<NotificationReceipt, String> {
+        if !self.bundled {
+            return Err("notifications are unavailable outside a bundled app".to_owned());
+        }
         let Posting {
             title,
             body,
