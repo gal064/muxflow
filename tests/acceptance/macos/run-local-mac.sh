@@ -7,7 +7,7 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 work="$repo/tmp/work/phase10/local-$run_id"
 runtime="$work/runtime"
 socket="p10-$$"
-host="$repo/target/debug/tmux-ide-host"
+host="$repo/target/debug/muxflow-host"
 export TMUX_TMPDIR="$repo/tmp/t10-$$"
 
 cleanup() {
@@ -22,10 +22,10 @@ trap cleanup EXIT
 mkdir -p "$runtime" "$work/repo" "$TMUX_TMPDIR"
 chmod 0700 "$work" "$runtime" "$TMUX_TMPDIR"
 cd "$repo"
-cargo build --locked -p tmux-ide-host
-cargo test --locked -p tmux-agent-desktop --lib connection::files::local_destination
-cargo test --locked -p tmux-agent-desktop --lib connection::files::clipboard_staging
-cargo test --locked -p tmux-ide-host service::agents::process::tests
+cargo build --locked -p muxflow-host
+cargo test --locked -p muxflow --lib connection::files::local_destination
+cargo test --locked -p muxflow --lib connection::files::clipboard_staging
+cargo test --locked -p muxflow-host service::agents::process::tests
 
 tmux -L "$socket" -f /dev/null new-session -d -s "ade-phase10-$run_id" -c "$work/repo"
 ADE_HOST_RUNTIME_DIR="$runtime" ADE_TMUX_SOCKET_NAME="$socket" "$host" discover \

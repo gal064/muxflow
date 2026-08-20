@@ -21,7 +21,7 @@ import {
 } from "./terminalTransfers";
 
 const preflight = (overrides: Partial<UploadPreflight> = {}): UploadPreflight => ({
-  sourcePath: "/home/user/a", name: "a", sizeBytes: "1", sourceKind: "regularFile", readable: true,
+  sourcePath: "/home/operator/a", name: "a", sizeBytes: "1", sourceKind: "regularFile", readable: true,
   collision: false, ...overrides,
 });
 
@@ -43,7 +43,7 @@ describe("terminal path preparation", () => {
 
   it("rejects invalid normal paths and validates strict raw agent image paths", () => {
     expect(() => shellEscapePath("")).toThrow("empty");
-    expect(validateAgentImagePath("/home/user/.cache/app/abc.png")).toBe("/home/user/.cache/app/abc.png");
+    expect(validateAgentImagePath("/home/operator/.cache/app/abc.png")).toBe("/home/operator/.cache/app/abc.png");
     expect(() => validateAgentImagePath("/tmp/image one.png")).toThrow("agent-compatible");
     expect(() => validateAgentImagePath("relative.png")).toThrow("agent-compatible");
   });
@@ -167,14 +167,14 @@ describe("terminal upload policy", () => {
     let settled = false;
     const pending = uploadInOriginalOrder([preflight()], (_item, _index, onProgress) => {
       report = onProgress;
-      report({ id: "transfer", sourcePath: "/home/user/a", name: "a", state: "running", completedBytes: "1" });
+      report({ id: "transfer", sourcePath: "/home/operator/a", name: "a", state: "running", completedBytes: "1" });
       return new Promise((done) => { resolve = done; });
     }, cancel, vi.fn(), controller.signal).finally(() => { settled = true; });
     controller.abort();
     await Promise.resolve(); await Promise.resolve();
     expect(cancel).toHaveBeenCalledWith("transfer");
     expect(settled).toBe(false);
-    report({ id: "transfer", sourcePath: "/home/user/a", name: "a", state: "completed", outcome: "published", completedBytes: "1" });
+    report({ id: "transfer", sourcePath: "/home/operator/a", name: "a", state: "completed", outcome: "published", completedBytes: "1" });
     resolve({ id: "transfer", destination: "/remote/stale", digest: "verified" });
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(settled).toBe(true);

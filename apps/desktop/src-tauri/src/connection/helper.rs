@@ -239,7 +239,7 @@ fn helper_artifact_for_arch(architecture: &str) -> Result<PathBuf, String> {
     }
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
     if let Some(parent) = current.parent() {
-        let filename = format!("tmux-ide-host-linux-{architecture}");
+        let filename = format!("muxflow-host-linux-{architecture}");
         for packaged in [
             parent.join(&filename),
             parent.join("../Resources").join(&filename),

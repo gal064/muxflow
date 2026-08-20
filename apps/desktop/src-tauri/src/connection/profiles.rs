@@ -320,11 +320,11 @@ mod tests {
         let store = ProfileStore::load(path.clone()).unwrap();
         store
             .save_profile_transactionally(HostProfile {
-                id: "ssh-omarchy".into(),
-                label: "omarchy".into(),
+                id: "ssh-remote-linux".into(),
+                label: "remote-linux".into(),
                 connection: ConnectionSpec::Ssh {
-                    profile_id: "ssh-omarchy".into(),
-                    target: "omarchy".into(),
+                    profile_id: "ssh-remote-linux".into(),
+                    target: "remote-linux".into(),
                     config_path: None,
                 },
             })
@@ -332,16 +332,16 @@ mod tests {
 
         // The deleted profile was also the last one used, so the pointer has to
         // move with it or the next launch reads a file it will call corrupt.
-        store.delete_profile_transactionally("ssh-omarchy").unwrap();
+        store.delete_profile_transactionally("ssh-remote-linux").unwrap();
         let reloaded = ProfileStore::load(path).unwrap();
         let value = reloaded.value.lock().unwrap();
-        assert!(!value.profiles.iter().any(|item| item.id == "ssh-omarchy"));
+        assert!(!value.profiles.iter().any(|item| item.id == "ssh-remote-linux"));
         assert_eq!(value.last_profile_id.as_deref(), Some("local"));
         drop(value);
 
         assert!(
             store
-                .delete_profile_transactionally("ssh-omarchy")
+                .delete_profile_transactionally("ssh-remote-linux")
                 .unwrap_err()
                 .contains("does not exist")
         );

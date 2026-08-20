@@ -10,7 +10,7 @@ phase8_storage_begin "$repo_root" phase8-scale-ssh
 run_root=$PHASE8_WORK_DIR
 evidence=$PHASE8_EVIDENCE_DIR
 container="ade-phase8-scale-$(date +%s)-$$"
-image="tmux-agent-ide-phase8-scale-ssh"
+image="muxflow-phase8-scale-ssh"
 mkdir -p "$run_root/docker-config"
 chmod 0700 "$run_root" "$run_root/docker-config"
 phase8_isolate_docker_config "$run_root/docker-config"
@@ -35,7 +35,7 @@ wait "$driver_pid" "$image_pid"
 # every other gate validates, and now also the source of the helper shipped in
 # the macOS package (M10-E047, M10-E048).
 if phase8_is_darwin; then
-  remote_helper="$run_root/tmux-ide-host-linux"
+  remote_helper="$run_root/muxflow-host-linux"
   release/linux/build-compatible-host.sh "$target_arch" "$remote_helper" \
     > "$run_root/package-verify.log"
 else
@@ -52,7 +52,7 @@ else
   mkdir -p "$run_root/unpack"
   tar -xzf "$archive" -C "$run_root/unpack"
   package_root=$(find "$run_root/unpack" -mindepth 1 -maxdepth 1 -type d -print -quit)
-  remote_helper="$package_root/bin/tmux-ide-host"
+  remote_helper="$package_root/bin/muxflow-host"
 fi
 
 ssh-keygen -q -t ed25519 -N '' -f "$run_root/ssh-key"
@@ -72,10 +72,10 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 
-scp -q -F "$run_root/ssh-config" "$remote_helper" ade-phase8-scale:/home/ade/tmux-ide-host
+scp -q -F "$run_root/ssh-config" "$remote_helper" ade-phase8-scale:/home/ade/muxflow-host
 scp -q -F "$run_root/ssh-config" tests/release/create-scale-fixture.sh ade-phase8-scale:/home/ade/create-scale-fixture.sh
 ssh -F "$run_root/ssh-config" ade-phase8-scale \
-  'mkdir -p "$HOME/.local/bin" "$HOME/phase8-home" "$HOME/phase8-runtime"; mv "$HOME/tmux-ide-host" "$HOME/.local/bin/tmux-ide-host"; chmod 0700 "$HOME/.local/bin/tmux-ide-host" "$HOME/create-scale-fixture.sh"; "$HOME/create-scale-fixture.sh" "$HOME/phase8-repository"' \
+  'mkdir -p "$HOME/.local/bin" "$HOME/phase8-home" "$HOME/phase8-runtime"; mv "$HOME/muxflow-host" "$HOME/.local/bin/muxflow-host"; chmod 0700 "$HOME/.local/bin/muxflow-host" "$HOME/create-scale-fixture.sh"; "$HOME/create-scale-fixture.sh" "$HOME/phase8-repository"' \
   > "$run_root/fixture.log"
 docker exec "$container" tc qdisc add dev eth0 root netem delay 100ms rate 100mbit
 

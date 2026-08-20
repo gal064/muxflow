@@ -1,13 +1,12 @@
 [package]
-name = "tmux-agent-desktop"
+name = "muxflow"
 version = "0.1.0"
 description = "A graphical IDE on top of tmux"
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "tmux_agent_desktop_lib"
+name = "muxflow_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]

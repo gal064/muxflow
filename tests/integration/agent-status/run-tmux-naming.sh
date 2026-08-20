@@ -17,7 +17,7 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-helper=${ADE_HELPER:-"$here/../../target/debug/tmux-ide-host"}
+helper=${ADE_HELPER:-"$here/../../target/debug/muxflow-host"}
 socket="ade-phase13-naming-$$"
 user_socket="ade-phase13-naming-user-$$"
 work=$(mktemp -d "${TMPDIR:-/tmp}/ade-phase13-naming.XXXXXX")
@@ -33,7 +33,7 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-[[ -x "$helper" ]] || fail "helper not built at $helper (cargo build -p tmux-ide-host)"
+[[ -x "$helper" ]] || fail "helper not built at $helper (cargo build -p muxflow-host)"
 
 # The daemon reaches tmux through the same socket name the app connects on.
 export ADE_TMUX_SOCKET_NAME="$socket"
@@ -88,11 +88,11 @@ echo "plain client sees: $listed"
 # than a change to how the user's shell windows are named.
 shell_window=$(tmux -L "$socket" new-window -t ade-phase13 -P -F '#{window_id}')
 shell_pane=$(tmux -L "$socket" list-panes -t "$shell_window" -F '#{pane_id}' | head -1)
-tmux -L "$socket" select-pane -t "$shell_pane" -T "dev@host:~/somewhere"
+tmux -L "$socket" select-pane -t "$shell_pane" -T "operator@host:~/somewhere"
 sleep 0.5
 shell_name=$(tmux -L "$socket" display-message -p -t "$shell_window" '#{window_name}')
 echo "non-agent window kept its own name: $shell_name"
-[[ "$shell_name" != "dev@host:~/somewhere" ]] || fail "a non-agent window took its pane title"
+[[ "$shell_name" != "operator@host:~/somewhere" ]] || fail "a non-agent window took its pane title"
 
 # ── twice ───────────────────────────────────────────────────────────────────
 "$helper" host-naming > "$work/again.json" || fail "second host-naming failed"

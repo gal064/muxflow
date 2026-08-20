@@ -266,7 +266,7 @@ function NotificationSettings(props: {
         with the detail behind disclosure. */}
     {failure !== undefined && <SurfaceError detail={String(failure)} summary="The test notification could not be sent." />}
     {sent && <span className="settings-hint" role="status">
-      Sent. If nothing appeared, check System Settings → Notifications → tmux Agent IDE.
+      Sent. If nothing appeared, check System Settings → Notifications → Muxflow.
     </span>}
   </div>;
 }
@@ -276,8 +276,8 @@ function notificationStatusHint(status: NotificationPermissionStatus | "unreadab
   switch (status) {
     case undefined: return "Checking whether this system will deliver notifications…";
     case "authorized": return "Notifications are allowed for this app.";
-    case "provisional": return "Notifications are delivered quietly. Allow them in System Settings → Notifications → tmux Agent IDE to get banners.";
-    case "denied": return "Notifications are turned off for this app. Enable them in System Settings → Notifications → tmux Agent IDE.";
+    case "provisional": return "Notifications are delivered quietly. Allow them in System Settings → Notifications → Muxflow to get banners.";
+    case "denied": return "Notifications are turned off for this app. Enable them in System Settings → Notifications → Muxflow.";
     case "notDetermined": return "Not requested yet — sending a test notification is what asks for permission.";
     // On Linux, no notification daemon is answering. On macOS it is the
     // catch-all for a permission state this build has never heard of — hence

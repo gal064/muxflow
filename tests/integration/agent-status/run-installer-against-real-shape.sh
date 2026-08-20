@@ -13,7 +13,7 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-helper=${ADE_HELPER:-"$here/../../target/debug/tmux-ide-host"}
+helper=${ADE_HELPER:-"$here/../../target/debug/muxflow-host"}
 source_config=${ADE_REAL_SETTINGS:-"$HOME/.claude/settings.json"}
 work=$(mktemp -d "${TMPDIR:-/tmp}/ade13-installer.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -59,14 +59,14 @@ echo "every pre-existing hook command survived the install"
 
 # The backup is the original, byte for byte — this is what a user would restore
 # from, so it is the copy that has to be exact.
-backup="$copy.tmux-agent-ide.backup"
+backup="$copy.muxflow.backup"
 [[ -f "$backup" ]] || fail "no backup was written"
 cmp -s "$work/before.json" "$backup" || fail "the backup is not the original file"
 echo "backup is byte-identical to the original"
 
 removed=$(run uninstall)
 echo "$removed" | grep -q '"wiring":"notWired"' || fail "uninstall left it wired: $removed"
-! grep -qF 'tmux-agent-ide' "$copy" || fail "a managed entry survived the uninstall"
+! grep -qF 'muxflow' "$copy" || fail "a managed entry survived the uninstall"
 while IFS= read -r command_line; do
   [[ -n "$command_line" ]] || continue
   grep -qF -- "$command_line" "$copy" || fail "uninstall lost $command_line"

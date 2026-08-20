@@ -8,7 +8,7 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 runtime="$repo_root/tmp/phase5-backend-$run_id"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/integration/git/protocol-driver/target}"
-host_binary="$main_target/debug/tmux-ide-host"
+host_binary="$main_target/debug/muxflow-host"
 driver_binary="$driver_target/debug/git-test-driver"
 socket_name="ade-phase5-local-$$"
 host_runtime="$runtime/host-runtime"
@@ -27,11 +27,11 @@ cargo fmt --all -- --check >"$runtime/fmt.log" 2>&1 &
 fmt_pid=$!
 cargo test -p tmux-agent-protocol --test roundtrip >"$runtime/protocol.log" 2>&1 &
 protocol_pid=$!
-cargo test -p tmux-ide-host service::git::tests -- --test-threads=1 >"$runtime/host-git.log" 2>&1 &
+cargo test -p muxflow-host service::git::tests -- --test-threads=1 >"$runtime/host-git.log" 2>&1 &
 host_pid=$!
-cargo test -p tmux-agent-desktop connection::git::tests >"$runtime/desktop-bridge.log" 2>&1 &
+cargo test -p muxflow connection::git::tests >"$runtime/desktop-bridge.log" 2>&1 &
 bridge_pid=$!
-cargo build --bin tmux-ide-host >"$runtime/host-build.log" 2>&1 &
+cargo build --bin muxflow-host >"$runtime/host-build.log" 2>&1 &
 host_build_pid=$!
 cargo build --manifest-path tests/integration/git/protocol-driver/Cargo.toml >"$runtime/driver-build.log" 2>&1 &
 driver_build_pid=$!
@@ -79,7 +79,7 @@ ADE_HOST_RUNTIME_DIR="$host_runtime" ADE_TMUX_SOCKET_NAME="$socket_name" \
 jq -e '.authoritativeStatus and .repositoryStableAcrossReconnect and .rawPathSafe and .ignored and .stage and .stagedDiff and .hookErrorSurfaced and .discardTokenEnforced and .pathEscapeRejected and .staleConnectionRejected and .literalPathspecSafe and .transportLossCancelledHook' \
   "$runtime/local.json" >/dev/null
 
-cargo clippy -p tmux-ide-host -p tmux-agent-protocol -p tmux-agent-desktop --all-targets -- -D warnings \
+cargo clippy -p muxflow-host -p tmux-agent-protocol -p muxflow --all-targets -- -D warnings \
   >"$runtime/clippy.log" 2>&1 &
 clippy_pid=$!
 wait "$clippy_pid"

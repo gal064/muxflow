@@ -7,7 +7,7 @@ source tests/release/storage.sh
 phase8_storage_begin "$repo_root" phase8-fault-security
 run_root=$PHASE8_WORK_DIR
 evidence=$PHASE8_EVIDENCE_DIR
-host_binary="$CARGO_TARGET_DIR/debug/tmux-ide-host"
+host_binary="$CARGO_TARGET_DIR/debug/muxflow-host"
 fixture_home="$run_root/home"
 runtime="$run_root/runtime"
 mkdir -p "$fixture_home" "$runtime"
@@ -19,21 +19,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cargo test -p tmux-ide-host diagnostics -- --nocapture > "$run_root/diagnostics-tests.log" 2>&1
-cargo test -p tmux-ide-host symlink -- --nocapture > "$run_root/host-symlink-tests.log" 2>&1
+cargo test -p muxflow-host diagnostics -- --nocapture > "$run_root/diagnostics-tests.log" 2>&1
+cargo test -p muxflow-host symlink -- --nocapture > "$run_root/host-symlink-tests.log" 2>&1
 cargo test -p tmux-control malformed -- --nocapture > "$run_root/parser-malformed-tests.log" 2>&1
-cargo test -p tmux-agent-desktop reused_id -- --nocapture > "$run_root/notification-id-tests.log" 2>&1
-cargo test -p tmux-agent-desktop schema -- --nocapture > "$run_root/schema-tests.log" 2>&1
+cargo test -p muxflow reused_id -- --nocapture > "$run_root/notification-id-tests.log" 2>&1
+cargo test -p muxflow schema -- --nocapture > "$run_root/schema-tests.log" 2>&1
 cargo run --manifest-path tests/integration/fuzz-smoke/Cargo.toml -- 10000 > "$run_root/fuzz-smoke.log" 2>&1
 
-cargo build -p tmux-ide-host > "$run_root/host-build.log" 2>&1
+cargo build -p muxflow-host > "$run_root/host-build.log" 2>&1
 HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$runtime" "$host_binary" doctor --json \
   > "$run_root/doctor.json"
 bundle="$run_root/support-bundle.json"
 HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$runtime" "$host_binary" support-bundle --output "$bundle"
 [[ "$(phase8_stat_mode "$bundle")" == "600" ]]
 jq -e '.privacy.telemetryUploaded == false and .privacy.terminalOutputIncluded == false and .privacy.promptTextIncluded == false and .privacy.fileContentIncluded == false and .privacy.credentialsIncluded == false and .privacy.pathsOrHostnamesIncluded == false' "$bundle" >/dev/null
-if rg -i '(BEGIN.*PRIVATE KEY|bearer [a-z0-9]|password=|api[_-]?key=|/home/user|phase8-secret)' "$bundle" > "$run_root/bundle-secret-scan.log"; then
+if rg -i '(BEGIN.*PRIVATE KEY|bearer [a-z0-9]|password=|api[_-]?key=|/home/operator|phase8-secret)' "$bundle" > "$run_root/bundle-secret-scan.log"; then
   echo "support bundle contains a forbidden secret/content marker" >&2
   exit 1
 fi
@@ -52,7 +52,7 @@ done
 [[ -f "$runtime/daemon.json" ]]
 daemon_pid=$(jq -r '.pid' "$runtime/daemon.json")
 if phase8_pid_tcp_listeners "$daemon_pid" > "$run_root/unexpected-tcp-listener.log"; then
-  echo "tmux-ide-host unexpectedly opened a TCP listener" >&2
+  echo "muxflow-host unexpectedly opened a TCP listener" >&2
   exit 1
 fi
 printf 'no TCP listener for daemon pid %s\n' "$daemon_pid" > "$run_root/no-tcp-listener.log"

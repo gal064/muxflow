@@ -10,17 +10,17 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 runtime="$repo_root/tmp/phase4-backend-$run_id"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/integration/filesystem/protocol-driver/target}"
-host_binary="$main_target/debug/tmux-ide-host"
+host_binary="$main_target/debug/muxflow-host"
 driver_binary="$driver_target/debug/filesystem-test-driver"
 socket_name="ade-phase4-local-$$"
 local_runtime="$runtime/local-runtime"
 local_repo="$runtime/local-repo"
 container_name="ade-phase4-$run_id"
-image_name="tmux-agent-ide-phase4-ssh"
+image_name="muxflow-phase4-ssh"
 ssh_key="$runtime/ssh-key"
 ssh_config="$runtime/ssh-config"
 known_hosts="$runtime/known-hosts"
-remote_helper="${ADE_TEST_BOOKWORM_HELPER:-$runtime/tmux-ide-host-bookworm}"
+remote_helper="${ADE_TEST_BOOKWORM_HELPER:-$runtime/muxflow-host-bookworm}"
 
 cleanup() {
   ADE_HOST_RUNTIME_DIR="$local_runtime" ADE_TMUX_SOCKET_NAME="$socket_name" \
@@ -35,7 +35,7 @@ chmod 0700 "$runtime" "$local_runtime" "$runtime/docker-config"
 printf '%s\n' "$runtime" >"$repo_root/tmp/phase4-backend-latest"
 
 cd "$repo_root"
-cargo build --bin tmux-ide-host >"$runtime/cargo-host.log" 2>&1 &
+cargo build --bin muxflow-host >"$runtime/cargo-host.log" 2>&1 &
 host_build_pid=$!
 cargo build --manifest-path tests/integration/filesystem/protocol-driver/Cargo.toml \
   >"$runtime/cargo-driver.log" 2>&1 &
@@ -101,9 +101,9 @@ done
 ssh -F "$ssh_config" ade-phase4-docker true
 ssh -F "$ssh_config" ade-phase4-docker 'mkdir -p "$HOME/.local/bin" "$HOME/phase4-repo/subdir"'
 scp -q -F "$ssh_config" "$remote_helper" \
-  ade-phase4-docker:/home/ade/.local/bin/tmux-ide-host
+  ade-phase4-docker:/home/ade/.local/bin/muxflow-host
 ssh -F "$ssh_config" ade-phase4-docker \
-  'chmod 0700 "$HOME/.local/bin/tmux-ide-host"; git -C "$HOME/phase4-repo" init -q; printf "%s\n" visible >"$HOME/phase4-repo/.dotfile"; yes x | head -c 10485760 >"$HOME/phase4-repo/editor-max.txt" || true; head -c 26214400 /dev/zero >"$HOME/phase4-repo/preview-25.png"; head -c 26214401 /dev/zero >"$HOME/phase4-repo/preview-over.png"; mkdir -p "$HOME/phase4-repo/.git/never-traverse" "$HOME/phase4-repo/node_modules/package"; tmux new-session -d -s phase4 -c "$HOME/phase4-repo/subdir" "exec bash"'
+  'chmod 0700 "$HOME/.local/bin/muxflow-host"; git -C "$HOME/phase4-repo" init -q; printf "%s\n" visible >"$HOME/phase4-repo/.dotfile"; yes x | head -c 10485760 >"$HOME/phase4-repo/editor-max.txt" || true; head -c 26214400 /dev/zero >"$HOME/phase4-repo/preview-25.png"; head -c 26214401 /dev/zero >"$HOME/phase4-repo/preview-over.png"; mkdir -p "$HOME/phase4-repo/.git/never-traverse" "$HOME/phase4-repo/node_modules/package"; tmux new-session -d -s phase4 -c "$HOME/phase4-repo/subdir" "exec bash"'
 docker exec "$container_name" tc qdisc add dev eth0 root netem delay 100ms rate 100mbit
 "$driver_binary" ssh "$ssh_config" ade-phase4-docker >"$runtime/remote.json"
 jq -e '.activeRootAtomic and .rootToken and .dotfilesVisible and .gitCollapsed and .textRoundTrip and .blake3Verified and .folderDownload and .controlBodiesRejected and (.editorMaxReadWriteBytes == 10485760) and (.previewBoundaryBytes == 26214400) and .oversizedPreviewMetadataOnly and (.maxControlLatencyMs < 2500) and .nonEmptyConfirmation' \

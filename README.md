@@ -1,4 +1,4 @@
-# tmux Agent IDE
+# Muxflow
 
 A lightweight macOS/Linux desktop IDE that mirrors an existing tmux server. tmux remains authoritative for persistent sessions, windows, panes, and processes; the desktop adds graphical terminal, editor, Explorer, Git, transfer, and agent-attention surfaces.
 
@@ -27,10 +27,10 @@ baseline. The desktop itself is built natively for the selected architecture.
 
 ```sh
 SOURCE_DATE_EPOCH=1704067200 pnpm release:linux -- x86_64
-release/linux/verify-package.sh tmp/release/tmux-agent-ide-*-linux-x86_64.tar.gz
-tar -xzf tmp/release/tmux-agent-ide-*-linux-x86_64.tar.gz -C /tmp
-ADE_INSTALL_PREFIX="$HOME/.local" /tmp/tmux-agent-ide-*/install.sh
-tmux-agent-ide
+release/linux/verify-package.sh tmp/release/muxflow-*-linux-x86_64.tar.gz
+tar -xzf tmp/release/muxflow-*-linux-x86_64.tar.gz -C /tmp
+ADE_INSTALL_PREFIX="$HOME/.local" /tmp/muxflow-*/install.sh
+muxflow
 ```
 
 The app attaches to an existing tmux server and never owns its lifetime. For
@@ -49,8 +49,8 @@ and x86_64 SSH targets.
 
 ```sh
 pnpm release:macos
-release/macos/install.sh "$PWD/target/release/bundle/macos/tmux Agent IDE.app"
-open "$HOME/Applications/tmux Agent IDE.app"
+release/macos/install.sh "$PWD/target/release/bundle/macos/Muxflow.app"
+open "$HOME/Applications/Muxflow.app"
 release/macos/uninstall.sh
 ```
 

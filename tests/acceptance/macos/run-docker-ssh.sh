@@ -7,9 +7,9 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 work="$repo/tmp/work/phase10/docker-$run_id"
 container="ade-phase10-$run_id"
 image='ade-phase10-ssh:local'
-app="$repo/target/release/bundle/macos/tmux Agent IDE.app"
-local_host="$app/Contents/MacOS/tmux-ide-host"
-artifact="$app/Contents/Resources/tmux-ide-host-linux-aarch64"
+app="$repo/target/release/bundle/macos/Muxflow.app"
+local_host="$app/Contents/MacOS/muxflow-host"
+artifact="$app/Contents/Resources/muxflow-host-linux-aarch64"
 key="$work/id_ed25519"
 config="$work/ssh_config"
 known_hosts="$work/known_hosts"
@@ -58,14 +58,14 @@ legacy_digest=$(shasum -a 256 "$legacy" | cut -d' ' -f1)
 artifact_digest=$(shasum -a 256 "$artifact" | cut -d' ' -f1)
 "$local_host" helper install ade-phase10-docker --config "$config" \
   --artifact "$legacy" --digest "$legacy_digest" --expected-arch aarch64 >/dev/null
-ssh -F "$config" ade-phase10-docker '$HOME/.local/bin/tmux-ide-host bridge --stdio </dev/null >/dev/null 2>&1 || true'
+ssh -F "$config" ade-phase10-docker '$HOME/.local/bin/muxflow-host bridge --stdio </dev/null >/dev/null 2>&1 || true'
 if ADE_PHASE1_TESTING=1 "$local_host" helper install ade-phase10-docker --config "$config" \
   --artifact "$artifact" --digest "$artifact_digest" --expected-arch aarch64 \
   --allow-upgrade --test-fail-after-shutdown >/dev/null 2>&1; then
   echo "injected helper upgrade unexpectedly succeeded" >&2
   exit 1
 fi
-remote_digest=$(ssh -F "$config" ade-phase10-docker 'sha256sum $HOME/.local/bin/tmux-ide-host' | cut -d' ' -f1)
+remote_digest=$(ssh -F "$config" ade-phase10-docker 'sha256sum $HOME/.local/bin/muxflow-host' | cut -d' ' -f1)
 [[ "$remote_digest" == "$legacy_digest" ]]
 "$local_host" helper install ade-phase10-docker --config "$config" \
   --artifact "$artifact" --digest "$artifact_digest" --expected-arch aarch64 \
@@ -74,8 +74,8 @@ remote_digest=$(ssh -F "$config" ade-phase10-docker 'sha256sum $HOME/.local/bin/
   | jq -e '.operatingSystem == "Linux" and .architecture == "aarch64" and .compatible' >/dev/null
 
 ssh -F "$config" ade-phase10-docker \
-  'set -eu; tmux new-session -d -s ade-phase10-docker; tmux rename-window -t ade-phase10-docker:0 qa; mkdir -p $HOME/ade-phase10-repo; git -C $HOME/ade-phase10-repo init -q; printf "phase10\n" >$HOME/ade-phase10-repo/file; git -C $HOME/ade-phase10-repo add file; tmux kill-server; rm -rf $HOME/ade-phase10-repo $HOME/.local/bin/tmux-ide-host'
+  'set -eu; tmux new-session -d -s ade-phase10-docker; tmux rename-window -t ade-phase10-docker:0 qa; mkdir -p $HOME/ade-phase10-repo; git -C $HOME/ade-phase10-repo init -q; printf "phase10\n" >$HOME/ade-phase10-repo/file; git -C $HOME/ade-phase10-repo add file; tmux kill-server; rm -rf $HOME/ade-phase10-repo $HOME/.local/bin/muxflow-host'
 ssh -F "$config" ade-phase10-docker \
-  'test ! -e $HOME/ade-phase10-repo && test ! -e $HOME/.local/bin/tmux-ide-host && ! tmux list-sessions >/dev/null 2>&1'
+  'test ! -e $HOME/ade-phase10-repo && test ! -e $HOME/.local/bin/muxflow-host && ! tmux list-sessions >/dev/null 2>&1'
 
 echo "PHASE10_DOCKER_SSH_SMOKE_PASS latency_ms=100 helper=linux-aarch64"

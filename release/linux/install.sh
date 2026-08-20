@@ -3,7 +3,7 @@ set -euo pipefail
 
 package_root=$(cd "$(dirname "$0")" && pwd)
 prefix=${ADE_INSTALL_PREFIX:-"$HOME/.local"}
-owner='dev.dev.tmux-agent-ide:1'
+owner='dev.muxflow.desktop:1'
 
 case "$prefix" in
   /*) ;;
@@ -34,14 +34,14 @@ prefix=$(realpath -e "$prefix")
 [[ "$prefix" != / ]]
 
 lib_parent="$prefix/lib"
-lib_dir="$lib_parent/tmux-agent-ide"
+lib_dir="$lib_parent/muxflow"
 bin_dir="$prefix/bin"
 application_dir="$prefix/share/applications"
 icon_dir="$prefix/share/icons/hicolor/256x256/apps"
-desktop_file="$application_dir/tmux-agent-ide.desktop"
-icon_file="$icon_dir/tmux-agent-ide.png"
-desktop_link="$bin_dir/tmux-agent-ide"
-host_link="$bin_dir/tmux-ide-host"
+desktop_file="$application_dir/muxflow.desktop"
+icon_file="$icon_dir/muxflow.png"
+desktop_link="$bin_dir/muxflow"
+host_link="$bin_dir/muxflow-host"
 created_directories=()
 $prefix_created && created_directories+=("$prefix")
 install_directories=( \
@@ -72,7 +72,7 @@ assert_install_directories
 upgrading=false
 if [[ -e "$lib_dir" || -L "$lib_dir" ]]; then
   [[ -d "$lib_dir" && ! -L "$lib_dir" && -f "$lib_dir/.package-owner" ]] || {
-    echo "refusing to replace an installation not owned by tmux Agent IDE" >&2; exit 73;
+    echo "refusing to replace an installation not owned by Muxflow" >&2; exit 73;
   }
   grep -Fxq "$owner" "$lib_dir/.package-owner" || {
     echo "installed package ownership marker is invalid" >&2; exit 73;
@@ -87,8 +87,8 @@ else
 fi
 
 if $upgrading; then
-  [[ -L "$desktop_link" && "$(readlink "$desktop_link")" == ../lib/tmux-agent-ide/tmux-agent-desktop ]]
-  [[ -L "$host_link" && "$(readlink "$host_link")" == ../lib/tmux-agent-ide/tmux-ide-host ]]
+  [[ -L "$desktop_link" && "$(readlink "$desktop_link")" == ../lib/muxflow/muxflow ]]
+  [[ -L "$host_link" && "$(readlink "$host_link")" == ../lib/muxflow/muxflow-host ]]
   [[ -f "$desktop_file" && ! -L "$desktop_file" && -f "$icon_file" && ! -L "$icon_file" ]]
   read -r old_desktop_digest old_icon_digest < "$lib_dir/.owned-assets"
   [[ "$(sha256sum "$desktop_file" | cut -d' ' -f1)" == "$old_desktop_digest" ]]
@@ -101,7 +101,7 @@ fi
 assert_install_directories
 
 umask 077
-transaction=$(mktemp -d "$lib_parent/.tmux-agent-ide.transaction.XXXXXX")
+transaction=$(mktemp -d "$lib_parent/.muxflow.transaction.XXXXXX")
 stage_dir="$transaction/new-lib"
 backup_dir="$transaction/old-lib"
 mkdir -p "$stage_dir"
@@ -112,8 +112,8 @@ cleanup() {
     rm -rf "$lib_dir"
     if [[ -d "$backup_dir" ]]; then
       mv "$backup_dir" "$lib_dir"
-      ln -s ../lib/tmux-agent-ide/tmux-agent-desktop "$desktop_link"
-      ln -s ../lib/tmux-agent-ide/tmux-ide-host "$host_link"
+      ln -s ../lib/muxflow/muxflow "$desktop_link"
+      ln -s ../lib/muxflow/muxflow-host "$host_link"
       cp -a "$transaction/old-desktop" "$desktop_file"
       cp -a "$transaction/old-icon" "$icon_file"
     fi
@@ -122,9 +122,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-install -m 0755 "$package_root/bin/tmux-agent-desktop" "$stage_dir/tmux-agent-desktop"
-install -m 0755 "$package_root/bin/tmux-ide-host" "$stage_dir/tmux-ide-host"
-for qualified in "$package_root"/bin/tmux-ide-host-x86_64 "$package_root"/bin/tmux-ide-host-aarch64; do
+install -m 0755 "$package_root/bin/muxflow" "$stage_dir/muxflow"
+install -m 0755 "$package_root/bin/muxflow-host" "$stage_dir/muxflow-host"
+for qualified in "$package_root"/bin/muxflow-host-x86_64 "$package_root"/bin/muxflow-host-aarch64; do
   [[ -f "$qualified" ]] && install -m 0755 "$qualified" "$stage_dir/$(basename "$qualified")"
 done
 install -m 0755 "$package_root/uninstall.sh" "$stage_dir/uninstall.sh"
@@ -145,9 +145,9 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     'Icon=@ICON@') printf 'Icon=%s\n' "$icon_file" ;;
     *) printf '%s\n' "$line" ;;
   esac
-done < "$package_root/share/applications/tmux-agent-ide.desktop.in" > "$desktop_stage"
+done < "$package_root/share/applications/muxflow.desktop.in" > "$desktop_stage"
 icon_stage="$transaction/new-icon"
-install -m 0644 "$package_root/share/icons/hicolor/256x256/apps/tmux-agent-ide.png" "$icon_stage"
+install -m 0644 "$package_root/share/icons/hicolor/256x256/apps/muxflow.png" "$icon_stage"
 chmod 0644 "$desktop_stage"
 printf '%s %s\n' \
   "$(sha256sum "$desktop_stage" | cut -d' ' -f1)" \
@@ -168,10 +168,10 @@ fi
 assert_install_directories
 
 link_stage="$transaction/desktop-link"
-ln -s ../lib/tmux-agent-ide/tmux-agent-desktop "$link_stage"
+ln -s ../lib/muxflow/muxflow "$link_stage"
 mv -Tf "$link_stage" "$desktop_link"
 link_stage="$transaction/host-link"
-ln -s ../lib/tmux-agent-ide/tmux-ide-host "$link_stage"
+ln -s ../lib/muxflow/muxflow-host "$link_stage"
 mv -Tf "$link_stage" "$host_link"
 mv -Tf "$desktop_stage" "$desktop_file"
 mv -Tf "$icon_stage" "$icon_file"
@@ -179,4 +179,4 @@ mv -Tf "$icon_stage" "$icon_file"
 published=false
 rm -rf "$backup_dir" "$transaction"
 trap - EXIT
-printf 'Installed tmux Agent IDE under %s\n' "$prefix"
+printf 'Installed Muxflow under %s\n' "$prefix"

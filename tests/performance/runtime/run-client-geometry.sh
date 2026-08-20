@@ -15,8 +15,8 @@
 # session. Nothing outside it is created, resized, killed or written to.
 #
 #   bash tests/performance/runtime/run-client-geometry.sh                       # local, short
-#   ADE_GEO_TARGET=omarchy ADE_GEO_IDLE_SECONDS=600 \
-#     bash tests/performance/runtime/run-client-geometry.sh                     # against omarchy
+#   ADE_GEO_TARGET=remote-linux ADE_GEO_IDLE_SECONDS=600 \
+#     bash tests/performance/runtime/run-client-geometry.sh                     # against remote-linux
 set -euo pipefail
 trap 'echo "client-geometry lane failed at line $LINENO" >&2' ERR
 
@@ -27,12 +27,12 @@ runtime="/tmp/adegeo-$run_id"
 socket="ade-geo-$run_id"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/performance/runtime/perf-driver/target}"
-host_binary="$main_target/release/tmux-ide-host"
+host_binary="$main_target/release/muxflow-host"
 driver_binary="$driver_target/release/performance-test-driver"
 
 target="${ADE_GEO_TARGET:-}"                 # empty = local isolated tmux server
 ssh_config="${ADE_GEO_SSH_CONFIG:-$HOME/.ssh/config}"
-remote_runtime="${ADE_GEO_REMOTE_RUNTIME:-/tmp/tmux-agent-ide-1000}"
+remote_runtime="${ADE_GEO_REMOTE_RUNTIME:-/tmp/muxflow-1000}"
 columns="${ADE_GEO_COLUMNS:-180}"
 rows="${ADE_GEO_ROWS:-45}"
 bound_columns="${ADE_GEO_BOUND_COLUMNS:-188}"
@@ -72,7 +72,7 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$repo_root"
-cargo build --release --bin tmux-ide-host >"$runtime/cargo-host-build.log" 2>&1
+cargo build --release --bin muxflow-host >"$runtime/cargo-host-build.log" 2>&1
 cargo build --release --manifest-path tests/performance/runtime/perf-driver/Cargo.toml \
   >"$runtime/cargo-driver-build.log" 2>&1
 

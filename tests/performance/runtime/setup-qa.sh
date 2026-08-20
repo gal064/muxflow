@@ -9,7 +9,7 @@
 #
 # Usage:
 #   bash tests/performance/runtime/setup-qa.sh            # local fixture
-#   ADE_PHASE12_QA_REMOTE=omarchy bash tests/performance/runtime/setup-qa.sh
+#   ADE_PHASE12_QA_REMOTE=remote-linux bash tests/performance/runtime/setup-qa.sh
 #
 # Prints the run directory; `<run>/launch.sh` starts the app.
 set -euo pipefail
@@ -31,11 +31,11 @@ tmux_socket="ade-phase12-qa-$$"
 # the bundle out from under their live window; building the QA bundle into its
 # own target directory leaves theirs alone.
 target_root="${ADE_PHASE12_QA_TARGET:-$repo_root/target}"
-desktop="${ADE_PHASE12_QA_DESKTOP:-$target_root/release/bundle/macos/tmux Agent IDE.app/Contents/MacOS/tmux-agent-desktop}"
-helper="${ADE_PHASE12_QA_HELPER:-$target_root/release/tmux-ide-host}"
+desktop="${ADE_PHASE12_QA_DESKTOP:-$target_root/release/bundle/macos/Muxflow.app/Contents/MacOS/muxflow}"
+helper="${ADE_PHASE12_QA_HELPER:-$target_root/release/muxflow-host}"
 
-[[ -x "$desktop" ]] || { echo "build the app bundle first: pnpm --filter @tmux-agent-ide/desktop tauri build --bundles app" >&2; exit 1; }
-[[ -x "$helper" ]] || { echo "build the release helper first: cargo build --release --bin tmux-ide-host" >&2; exit 1; }
+[[ -x "$desktop" ]] || { echo "build the app bundle first: pnpm --filter @muxflow/desktop tauri build --bundles app" >&2; exit 1; }
+[[ -x "$helper" ]] || { echo "build the release helper first: cargo build --release --bin muxflow-host" >&2; exit 1; }
 
 mkdir -p "$home" "$config" "$data" "$cache" "$runtime" "$tmux_runtime" "$repository" "$run_root/evidence"
 chmod 0700 "$home" "$config" "$data" "$cache" "$runtime" "$tmux_runtime"
@@ -69,8 +69,8 @@ fi
 # Local profile — `ADE_PHASE12_QA_REMOTE` did nothing at all, and no lane that
 # needs a remote host could ever have used it.
 for profile_dir in \
-  "$config/dev.dev.tmux-agent-ide" \
-  "$home/Library/Application Support/dev.dev.tmux-agent-ide"
+  "$config/dev.muxflow.desktop" \
+  "$home/Library/Application Support/dev.muxflow.desktop"
 do
   mkdir -p "$profile_dir"
   printf '{\n  "schemaVersion": 1,\n  "profiles": [\n    {"id":"local","label":"Local","connection":{"mode":"local"}}%s\n  ],\n  "lastProfileId":"local"\n}\n' "$remote_profile" >"$profile_dir/profiles.json"
@@ -113,14 +113,14 @@ set -uo pipefail
 # already exited — cannot signal whatever inherited the number in between.
 if [[ -r '$run_root/desktop.pid' ]]; then
   ade_pid="\$(cat '$run_root/desktop.pid')"
-  if [[ "\$ade_pid" =~ ^[0-9]+\$ ]] && ps -p "\$ade_pid" -o command= 2>/dev/null | grep -qF 'tmux-agent-desktop'; then
+  if [[ "\$ade_pid" =~ ^[0-9]+\$ ]] && ps -p "\$ade_pid" -o command= 2>/dev/null | grep -qF 'muxflow'; then
     kill "\$ade_pid" >/dev/null 2>&1 || true
   fi
   rm -f '$run_root/desktop.pid'
 fi
 # The same resolution the app was launched with. Naming the directory here
 # instead resolved $runtime while the app's daemon, which only had
-# XDG_RUNTIME_DIR, was in $runtime/tmux-agent-ide — so cleanup could not
+# XDG_RUNTIME_DIR, was in $runtime/muxflow — so cleanup could not
 # reach it and every run left a daemon behind.
 HOME='$home' XDG_RUNTIME_DIR='$runtime' \\
   ADE_TMUX_SOCKET_NAME='$tmux_socket' '$helper' daemon-stop >/dev/null 2>&1 || true

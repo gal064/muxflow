@@ -710,7 +710,7 @@ fn spawn_bridge(arguments: &[String]) -> Result<Child, String> {
         .arg("-T")
         .arg(&arguments[3])
         .arg(format!(
-            "{REMOTE_ENV} $HOME/.local/bin/tmux-ide-host bridge --stdio"
+            "{REMOTE_ENV} $HOME/.local/bin/muxflow-host bridge --stdio"
         ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

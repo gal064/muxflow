@@ -95,7 +95,7 @@ fn spawn_bridge(mode: &Mode, bulk: bool) -> Result<Child, String> {
             }
             command
                 .arg(target)
-                .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
+                .arg("$HOME/.local/bin/muxflow-host bridge --stdio");
             command
         }
     };

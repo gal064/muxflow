@@ -53,7 +53,7 @@ const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}
   agentsRatio={0.4}
   canMutate
   commandScope={commandScope}
-  hostLabel="omarchy"
+  hostLabel="remote-linux"
   latencyMs={41}
   onAgentsRatio={noop}
   onLaunchAgent={noop}
@@ -90,7 +90,7 @@ describe("application shell accessibility contracts", () => {
     // The one control in the agents header names both its state and its effect.
     expect(html).toContain("Agent ordering: workspace. Switch to status.");
     // The only resting connection indicator, and it is the way into settings.
-    expect(html).toContain("Host omarchy over ssh, connected. Open connection settings.");
+    expect(html).toContain("Host remote-linux over ssh, connected. Open connection settings.");
     expect(html).toContain("41 ms");
   });
 
@@ -140,7 +140,7 @@ describe("application shell accessibility contracts", () => {
     let renderer!: ReturnType<typeof create>;
     const element = (rows: typeof agents, canMutate = true) => <WorkspaceSidebar
       adapters={adapters} agents={rows} agentSort="workspace" agentsRatio={0.4} canMutate={canMutate} commandScope={commandScope}
-      hostLabel="omarchy" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
+      hostLabel="remote-linux" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
       onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop}
       onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop}
@@ -288,7 +288,7 @@ describe("application shell accessibility contracts", () => {
     const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
     const element = (scope: typeof commandScope) => <WorkspaceSidebar
       adapters={[]} agents={[]} agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope}
-      hostLabel="omarchy" maxWidth={426} phase="connected" rows={rows} stateGlyphs={false} transport="ssh" width={240}
+      hostLabel="remote-linux" maxWidth={426} phase="connected" rows={rows} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
       onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
       onWorkspaceCommand={onWorkspaceCommand}
@@ -313,7 +313,7 @@ describe("application shell accessibility contracts", () => {
     );
     const element = (scope: typeof commandScope, displayName: string) => <WorkspaceSidebar
       adapters={[]} agents={agentRows.map((row) => ({ ...row, agent: { ...row.agent, displayName } }))}
-      agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} hostLabel="omarchy" maxWidth={426}
+      agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} hostLabel="remote-linux" maxWidth={426}
       phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
       onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
@@ -410,10 +410,10 @@ describe("application shell accessibility contracts", () => {
     const html = renderToStaticMarkup(<HookReviewDialog applying={false} review={{
       adapterId: "codex", action: "install", revision: "token", alreadyInstalled: false,
       managedLabel: "v1", trustGuidance: "Review and trust this integration with /hooks; trust is not managed automatically.",
-      changes: [{ path: "/home/me/.codex/hooks.json", summary: "Add hook", owner: "Codex adapter", command: "/usr/bin/tmux-ide-host hook ingest", events: ["Stop", "PermissionRequest"], beforeHash: "", afterHash: "sha256:new", createsConfig: true, removesConfig: false, beforePreview: "{}", afterPreview: "{\"token\":\"<redacted>\"}", diffPreview: "--- before\n-{}\n+++ after\n+{\"token\":\"<redacted>\"}", previewTruncated: true }],
+      changes: [{ path: "/home/me/.codex/hooks.json", summary: "Add hook", owner: "Codex adapter", command: "/usr/bin/muxflow-host hook ingest", events: ["Stop", "PermissionRequest"], beforeHash: "", afterHash: "sha256:new", createsConfig: true, removesConfig: false, beforePreview: "{}", afterPreview: "{\"token\":\"<redacted>\"}", diffPreview: "--- before\n-{}\n+++ after\n+{\"token\":\"<redacted>\"}", previewTruncated: true }],
     }} onCancel={noop} onConfirm={noop} />);
     expect(html).toContain("/home/me/.codex/hooks.json");
-    expect(html).toContain("/usr/bin/tmux-ide-host hook ingest");
+    expect(html).toContain("/usr/bin/muxflow-host hook ingest");
     expect(html).toContain("Stop, PermissionRequest");
     expect(html).toContain("Codex adapter");
     expect(html).toContain("/hooks");
@@ -431,7 +431,7 @@ describe("application shell accessibility contracts", () => {
 describe("saved host picker", () => {
   const profiles = [
     { id: "local", label: "Local", connection: { mode: "local" } },
-    { id: "ssh-omarchy", label: "omarchy", connection: { mode: "ssh", profileId: "ssh-omarchy", target: "omarchy" } },
+    { id: "ssh-remote-linux", label: "remote-linux", connection: { mode: "ssh", profileId: "ssh-remote-linux", target: "remote-linux" } },
   ] as const;
 
   const settings = (overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}) => <SettingsDialog
@@ -517,10 +517,10 @@ describe("saved host picker", () => {
     act(() => { renderer = create(settings({ onProfile })); });
     const picker = renderer.root.findByProps({ "aria-label": "Saved host" });
     expect(picker.props.value).toBe("");
-    act(() => picker.props.onChange({ target: { value: "ssh-omarchy" } }));
+    act(() => picker.props.onChange({ target: { value: "ssh-remote-linux" } }));
     expect(onProfile).toHaveBeenCalledWith(profiles[1]);
-    act(() => { renderer.update(settings({ onProfile, selectedProfileId: "ssh-omarchy" })); });
-    expect(renderer.root.findByProps({ "aria-label": "Saved host" }).props.value).toBe("ssh-omarchy");
+    act(() => { renderer.update(settings({ onProfile, selectedProfileId: "ssh-remote-linux" })); });
+    expect(renderer.root.findByProps({ "aria-label": "Saved host" }).props.value).toBe("ssh-remote-linux");
     act(() => renderer.unmount());
   });
 
@@ -534,11 +534,11 @@ describe("saved host picker", () => {
     // A disabled control that does not say why reads as broken.
     expect(JSON.stringify(renderer.toJSON())).toContain("Pick a saved host above to remove it.");
 
-    act(() => { renderer.update(settings({ onDeleteProfile, deletableProfile: profiles[1] as unknown as HostProfile, selectedProfileId: "ssh-omarchy" })); });
+    act(() => { renderer.update(settings({ onDeleteProfile, deletableProfile: profiles[1] as unknown as HostProfile, selectedProfileId: "ssh-remote-linux" })); });
     const enabled = deleteButton(renderer);
     expect(enabled.props.disabled).toBe(false);
     // A verb with an object: "Delete host…" beside a combobox names nothing.
-    expect(String(enabled.children)).toContain("omarchy");
+    expect(String(enabled.children)).toContain("remote-linux");
     act(() => enabled.props.onClick());
     expect(onDeleteProfile).toHaveBeenCalled();
     act(() => renderer.unmount());

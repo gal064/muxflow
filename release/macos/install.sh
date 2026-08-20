@@ -3,11 +3,11 @@ set -euo pipefail
 
 source_app=${1:-}
 applications=${ADE_MACOS_APPLICATIONS_DIR:-"$HOME/Applications"}
-name='tmux Agent IDE.app'
-owner='dev.dev.tmux-agent-ide:1'
+name='Muxflow.app'
+owner='dev.muxflow.desktop:1'
 
 [[ "$source_app" == /* && -d "$source_app" && ! -L "$source_app" ]] || {
-  echo "usage: install.sh /absolute/path/to/tmux Agent IDE.app" >&2; exit 64;
+  echo "usage: install.sh /absolute/path/to/Muxflow.app" >&2; exit 64;
 }
 [[ "$applications" == /* && "$applications" != / && "$applications" != *$'\n'* ]] || {
   echo "unsafe applications directory" >&2; exit 64;
@@ -21,12 +21,12 @@ target="$applications/$name"
 if [[ -e "$target" || -L "$target" ]]; then
   [[ -d "$target" && ! -L "$target" ]]
   grep -Fxq "$owner" "$target/Contents/Resources/package-owner" || {
-    echo "refusing to replace an application not owned by tmux Agent IDE" >&2; exit 73;
+    echo "refusing to replace an application not owned by Muxflow" >&2; exit 73;
   }
 fi
 
 umask 077
-transaction=$(mktemp -d "$applications/.tmux-agent-ide.install.XXXXXX")
+transaction=$(mktemp -d "$applications/.muxflow.install.XXXXXX")
 stage="$transaction/new.app"
 backup="$transaction/old.app"
 published=false

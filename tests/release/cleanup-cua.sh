@@ -10,8 +10,8 @@ prefix="$run_root/prefix"
 container=$(cat "$run_root/container-name")
 tmux_socket=$(cat "$run_root/tmux-socket-name")
 
-pkill -f "$prefix/lib/tmux-agent-ide/tmux-agent-desktop" >/dev/null 2>&1 || true
-HOME="$home" ADE_HOST_RUNTIME_DIR="$runtime" "$prefix/lib/tmux-agent-ide/tmux-ide-host" daemon-stop >/dev/null 2>&1 || true
+pkill -f "$prefix/lib/muxflow/muxflow" >/dev/null 2>&1 || true
+HOME="$home" ADE_HOST_RUNTIME_DIR="$runtime" "$prefix/lib/muxflow/muxflow-host" daemon-stop >/dev/null 2>&1 || true
 env -u TMUX HOME="$home" XDG_RUNTIME_DIR="$runtime" TMUX_TMPDIR="$tmux_runtime" tmux -L "$tmux_socket" kill-server >/dev/null 2>&1 || true
 env -u TMUX HOME="$home" XDG_RUNTIME_DIR="$runtime" TMUX_TMPDIR="$tmux_runtime" tmux -L phase8-inner kill-server >/dev/null 2>&1 || true
 docker rm -f "$container" >/dev/null 2>&1 || true

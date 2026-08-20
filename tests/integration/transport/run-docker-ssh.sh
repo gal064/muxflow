@@ -84,7 +84,7 @@ ssh -F "$ssh_config" ade-phase0-docker true
 docker exec "$container_name" tc qdisc add dev eth0 root netem delay 100ms rate 100mbit
 
 ADE_PHASE0_SSH_CONFIG="$ssh_config" \
-  cargo run --quiet --bin tmux-ide-host -- phase0-ssh ade-phase0-docker
+  cargo run --quiet --bin muxflow-host -- phase0-ssh ade-phase0-docker
 
 ssh -F "$ssh_config" ade-phase0-docker 'sleep 30' >/dev/null 2>&1 &
 long_ssh_pid=$!

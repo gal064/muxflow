@@ -5,7 +5,7 @@ import type { AgentAdapterDescriptor, AgentHookWiring } from "./types";
 const adapter = (id: string, hookWiring: AgentHookWiring, overrides: Partial<AgentAdapterDescriptor> = {}): AgentAdapterDescriptor => ({
   id, displayName: id, supportsLaunch: true, supportsResume: true, supportsHooks: true,
   supportsProcessDetection: true,
-  hookConfigPath: `/home/user/.${id}/settings.json`, hookEvents: [], placements: ["window", "split"],
+  hookConfigPath: `/home/operator/.${id}/settings.json`, hookEvents: [], placements: ["window", "split"],
   hookWiring, hookWiringDetail: "", hookSetupRecommended: hookWiring === "notWired" || hookWiring === "partial",
   ...overrides,
 });

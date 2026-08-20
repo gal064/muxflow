@@ -5,7 +5,7 @@ import type { AgentRecord } from "./types";
 
 const locations: Record<string, AgentLocation> = {
   "$1": { workspaceOrder: 0, workspaceName: "muxflow", tabIndex: 1 },
-  "$2": { workspaceOrder: 1, workspaceName: "sampleco-e2e", tabIndex: 2 },
+  "$2": { workspaceOrder: 1, workspaceName: "project-e2e", tabIndex: 2 },
 };
 const locate = (record: AgentRecord): AgentLocation =>
   locations[record.sessionId] ?? { workspaceOrder: Number.MAX_SAFE_INTEGER, workspaceName: record.sessionName };
@@ -27,7 +27,7 @@ describe("agents section ordering", () => {
 
   it("follows the workspace list, then tab order, in workspace mode", () => {
     const rows = buildAgentRows([done, idle, blocked, working], locate, () => true, "workspace");
-    expect(rows.map((row) => row.location.workspaceName)).toEqual(["muxflow", "muxflow", "sampleco-e2e", "sampleco-e2e"]);
+    expect(rows.map((row) => row.location.workspaceName)).toEqual(["muxflow", "muxflow", "project-e2e", "project-e2e"]);
     // Within a workspace, ties fall back to the agent's own name so the list
     // does not reshuffle on every update.
     expect(rows.slice(2).map((row) => row.agent.displayName)).toEqual(["claude three", "claude two"]);

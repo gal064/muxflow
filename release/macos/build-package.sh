@@ -26,7 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-CARGO_INCREMENTAL=0 cargo build --locked --release -p tmux-ide-host
+CARGO_INCREMENTAL=0 cargo build --locked --release -p muxflow-host
 
 # The shipped Linux helpers are produced by release/linux/build-compatible-host.sh,
 # the same builder every Phase 8/9 gate validates. They previously had their own
@@ -40,8 +40,8 @@ CARGO_INCREMENTAL=0 cargo build --locked --release -p tmux-ide-host
 build_linux_helper() {
   local helper_arch=$1
   release/linux/build-compatible-host.sh "$helper_arch" \
-    "$helpers/tmux-ide-host-linux-$helper_arch" >/dev/null
-  chmod 0755 "$helpers/tmux-ide-host-linux-$helper_arch"
+    "$helpers/muxflow-host-linux-$helper_arch" >/dev/null
+  chmod 0755 "$helpers/muxflow-host-linux-$helper_arch"
 }
 
 if [[ ${ADE_MACOS_PACKAGE_SMOKE:-0} != 1 ]]; then
@@ -54,7 +54,7 @@ fi
 # the same sidecar by the same mechanism. It used to be installed and re-signed
 # by hand here, which left the bundler's path exercised only by the bare flow.
 pnpm --dir apps/desktop tauri build --bundles app
-app="$repo/target/release/bundle/macos/tmux Agent IDE.app"
+app="$repo/target/release/bundle/macos/Muxflow.app"
 # Re-seal with an ad-hoc identity after the plist edit: macOS UserNotifications
 # requires a stable application identity even for an internal build, while this
 # still makes no Developer ID, Gatekeeper, or notarization claim.
@@ -62,9 +62,9 @@ app="$repo/target/release/bundle/macos/tmux Agent IDE.app"
 codesign --force --sign - "$app"
 "$repo/release/macos/verify-package.sh" "$app"
 version=$(node -e 'process.stdout.write(require("./apps/desktop/src-tauri/tauri.conf.json").version)')
-dmg="$repo/target/release/bundle/dmg/tmux Agent IDE_${version}_aarch64.dmg"
+dmg="$repo/target/release/bundle/dmg/Muxflow_${version}_aarch64.dmg"
 mkdir -p "$(dirname "$dmg")"
-hdiutil create -volname 'tmux Agent IDE' -srcfolder "$app" -ov -format UDZO "$dmg"
+hdiutil create -volname 'Muxflow' -srcfolder "$app" -ov -format UDZO "$dmg"
 
 cleanup
 trap - EXIT

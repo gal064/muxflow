@@ -39,13 +39,13 @@ Build the package with `pnpm release:linux`. Extract the resulting archive from
 `~/.local`; set `ADE_INSTALL_PREFIX` for a different location.
 
 ```sh
-tar -xzf tmux-agent-ide-*-linux-x86_64.tar.gz
-cd tmux-agent-ide-*-linux-x86_64
+tar -xzf muxflow-*-linux-x86_64.tar.gz
+cd muxflow-*-linux-x86_64
 ./install.sh
-~/.local/bin/tmux-agent-ide
+~/.local/bin/muxflow
 ```
 
-The desktop and `tmux-ide-host` helper are installed as siblings. Profiles and
+The desktop and `muxflow-host` helper are installed as siblings. Profiles and
 application state live outside the package directory and survive upgrades.
 
 ## First connection

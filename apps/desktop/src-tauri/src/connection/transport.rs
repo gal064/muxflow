@@ -46,7 +46,7 @@ pub(super) fn spawn_bridge(
                     .configure(&mut command, target, config_path.as_deref())?;
                 command
                     .arg(target)
-                    .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
+                    .arg("$HOME/.local/bin/muxflow-host bridge --stdio");
                 command
             }
         };
@@ -169,7 +169,7 @@ pub(crate) fn spawn_bulk_bridge(
                 command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
                 command
                     .arg(target)
-                    .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio");
+                    .arg("$HOME/.local/bin/muxflow-host bridge --stdio");
                 command
             }
         };
@@ -201,7 +201,7 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut sibling_path = None;
     if let Some(parent) = current.parent() {
-        let sibling = parent.join("tmux-ide-host");
+        let sibling = parent.join("muxflow-host");
         if sibling.is_file() {
             return Ok(sibling);
         }
@@ -213,7 +213,7 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
             let candidate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../../target")
                 .join(profile)
-                .join("tmux-ide-host");
+                .join("muxflow-host");
             if candidate.is_file() {
                 return Ok(candidate);
             }
@@ -222,7 +222,7 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
     // The banner this produces is the only thing the user sees, so it names the
     // path that was checked and the command that fills it (P12-U004).
     Err(format!(
-        "tmux-ide-host helper is not installed beside the desktop{}. Rebuild the app with `pnpm --dir apps/desktop tauri build --bundles app`, which stages the helper, or run `release/macos/build-package.sh` for the packaged flow.",
+        "muxflow-host helper is not installed beside the desktop{}. Rebuild the app with `pnpm --dir apps/desktop tauri build --bundles app`, which stages the helper, or run `release/macos/build-package.sh` for the packaged flow.",
         sibling_path
             .map(|path| format!(" (looked for {})", path.display()))
             .unwrap_or_default()

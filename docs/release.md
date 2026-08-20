@@ -10,7 +10,7 @@ separately verified `ADE_HOST_BINARY_OVERRIDE` is supplied.
 
 ```sh
 SOURCE_DATE_EPOCH=1704067200 release/linux/build-package.sh x86_64
-release/linux/verify-package.sh tmp/release/tmux-agent-ide-*-linux-x86_64.tar.gz
+release/linux/verify-package.sh tmp/release/muxflow-*-linux-x86_64.tar.gz
 ```
 
 ARM64 uses `aarch64-unknown-linux-gnu` and requires the Rust target, an ARM64

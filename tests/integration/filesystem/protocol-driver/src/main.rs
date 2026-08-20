@@ -44,7 +44,7 @@ fn spawn_bridge(arguments: &[String]) -> Result<Child, String> {
             .arg(arguments.get(2).ok_or("SSH config is required")?)
             .arg("-T")
             .arg(arguments.get(3).ok_or("SSH target is required")?)
-            .arg("$HOME/.local/bin/tmux-ide-host bridge --stdio")
+            .arg("$HOME/.local/bin/muxflow-host bridge --stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

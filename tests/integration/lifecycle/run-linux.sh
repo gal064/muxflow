@@ -15,9 +15,9 @@ case "$target_arch" in
 esac
 runtime="$repo_root/tmp/phase1-linux"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
-host_binary="$main_target/debug/tmux-ide-host"
-remote_host_binary="${ADE_TEST_BOOKWORM_HELPER:-$runtime/tmux-ide-host-bookworm}"
-rollback_artifact="$runtime/tmux-ide-host-rollback-fixture"
+host_binary="$main_target/debug/muxflow-host"
+remote_host_binary="${ADE_TEST_BOOKWORM_HELPER:-$runtime/muxflow-host-bookworm}"
+rollback_artifact="$runtime/muxflow-host-rollback-fixture"
 local_socket_name="ade-phase1-local-$$"
 local_runtime="$runtime/local-runtime-$$"
 local_socket="$local_runtime/host.sock"
@@ -34,8 +34,8 @@ wait_local_input_count() {
   for _ in $(seq 1 100); do
     # BSD wc pads its count with leading spaces, so compare numerically rather
     # than as text; a string compare never matches on macOS.
-    if [[ -f /tmp/tmux-agent-ide-phase1-input-count ]] &&
-      (($(wc -c </tmp/tmux-agent-ide-phase1-input-count) == expected)); then
+    if [[ -f /tmp/muxflow-phase1-input-count ]] &&
+      (($(wc -c </tmp/muxflow-phase1-input-count) == expected)); then
       return 0
     fi
     sleep 0.02
@@ -46,7 +46,7 @@ wait_local_input_count() {
 wait_remote_input_count() {
   local expected="$1"
   for _ in $(seq 1 100); do
-    if [[ "$(ssh -F "$ssh_config" ade-phase1-docker 'wc -c < /tmp/tmux-agent-ide-phase1-input-count' 2>/dev/null || true)" == "$expected" ]]; then
+    if [[ "$(ssh -F "$ssh_config" ade-phase1-docker 'wc -c < /tmp/muxflow-phase1-input-count' 2>/dev/null || true)" == "$expected" ]]; then
       return 0
     fi
     sleep 0.05
@@ -62,18 +62,18 @@ cleanup() {
   tmux -L "$local_socket_name" kill-server >/dev/null 2>&1 || true
   ssh -F "$ssh_config" -S "$control_socket" -O exit ade-phase1-docker >/dev/null 2>&1 || true
   docker rm -f "$container_name" >/dev/null 2>&1 || true
-  rm -f /tmp/tmux-agent-ide-phase1-input-count
+  rm -f /tmp/muxflow-phase1-input-count
 }
 trap cleanup EXIT
 
 mkdir -p "$runtime"
 chmod 0700 "$runtime"
-cargo build --bin tmux-ide-host
+cargo build --bin muxflow-host
 if [[ -z "${ADE_TEST_BOOKWORM_HELPER:-}" ]]; then
   release/linux/build-compatible-host.sh "$target_arch" "$remote_host_binary"
 fi
 
-rm -f /tmp/tmux-agent-ide-phase1-input-count
+rm -f /tmp/muxflow-phase1-input-count
 tmux -L "$local_socket_name" new-session -d -s phase1 'bash'
 ADE_HOST_RUNTIME_DIR="$local_runtime" \
 ADE_TMUX_SOCKET_NAME="$local_socket_name" \
@@ -197,7 +197,7 @@ ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   --artifact "$remote_host_binary" --digest "$digest" --expected-arch "$target_arch" >"$runtime/helper-current.log"
 rg 'helper-current: pass' "$runtime/helper-current.log" >/dev/null
 
-installed_digest="$(ssh -F "$ssh_config" ade-phase1-docker 'sha256sum "$HOME/.local/bin/tmux-ide-host" | cut -d" " -f1')"
+installed_digest="$(ssh -F "$ssh_config" ade-phase1-docker 'sha256sum "$HOME/.local/bin/muxflow-host" | cut -d" " -f1')"
 if ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   "$host_binary" helper install ade-phase1-docker --config "$ssh_config" \
   --artifact "$remote_host_binary" --digest "$(printf '0%.0s' $(seq 1 64))" \
@@ -205,7 +205,7 @@ if ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   echo 'digest mismatch unexpectedly replaced installed remote helper' >&2
   exit 1
 fi
-[[ "$(ssh -F "$ssh_config" ade-phase1-docker 'sha256sum "$HOME/.local/bin/tmux-ide-host" | cut -d" " -f1')" == "$installed_digest" ]]
+[[ "$(ssh -F "$ssh_config" ade-phase1-docker 'sha256sum "$HOME/.local/bin/muxflow-host" | cut -d" " -f1')" == "$installed_digest" ]]
 if ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   "$host_binary" helper install ade-phase1-docker --config "$ssh_config" \
   --artifact "$remote_host_binary" --digest "$digest" --expected-arch "$mismatch_arch" \
@@ -213,10 +213,10 @@ if ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   echo 'architecture mismatch unexpectedly replaced installed remote helper' >&2
   exit 1
 fi
-[[ "$(ssh -F "$ssh_config" ade-phase1-docker 'sha256sum "$HOME/.local/bin/tmux-ide-host" | cut -d" " -f1')" == "$installed_digest" ]]
+[[ "$(ssh -F "$ssh_config" ade-phase1-docker 'sha256sum "$HOME/.local/bin/muxflow-host" | cut -d" " -f1')" == "$installed_digest" ]]
 
 ssh -F "$ssh_config" ade-phase1-docker \
-  'cp "$HOME/.local/bin/tmux-ide-host" "$HOME/.local/bin/tmux-ide-host.broken"; printf x >> "$HOME/.local/bin/tmux-ide-host.broken"; mv -f "$HOME/.local/bin/tmux-ide-host.broken" "$HOME/.local/bin/tmux-ide-host"'
+  'cp "$HOME/.local/bin/muxflow-host" "$HOME/.local/bin/muxflow-host.broken"; printf x >> "$HOME/.local/bin/muxflow-host.broken"; mv -f "$HOME/.local/bin/muxflow-host.broken" "$HOME/.local/bin/muxflow-host"'
 if ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   "$host_binary" helper install ade-phase1-docker --config "$ssh_config" \
   --artifact "$remote_host_binary" --digest "$digest" --expected-arch "$target_arch"; then
@@ -231,17 +231,17 @@ ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
 # shutdown operation. Its private metadata must be verified before fallback
 # termination, and the replacement must still pass a fresh handshake.
 ssh -F "$ssh_config" ade-phase1-docker \
-  '"$HOME/.local/bin/tmux-ide-host" daemon-stop >/dev/null 2>&1 || true; runtime=${XDG_RUNTIME_DIR:-/tmp/tmux-agent-ide-$(id -u)}; for i in $(seq 1 100); do [ ! -S "$runtime/host.sock" ] && break; sleep 0.05; done; [ ! -S "$runtime/host.sock" ]; ADE_PHASE1_TESTING=1 ADE_PHASE1_TEST_PROTOCOL_MAJOR=99 nohup "$HOME/.local/bin/tmux-ide-host" daemon </dev/null >/dev/null 2>&1 &'
+  '"$HOME/.local/bin/muxflow-host" daemon-stop >/dev/null 2>&1 || true; runtime=${XDG_RUNTIME_DIR:-/tmp/muxflow-$(id -u)}; for i in $(seq 1 100); do [ ! -S "$runtime/host.sock" ] && break; sleep 0.05; done; [ ! -S "$runtime/host.sock" ]; ADE_PHASE1_TESTING=1 ADE_PHASE1_TEST_PROTOCOL_MAJOR=99 nohup "$HOME/.local/bin/muxflow-host" daemon </dev/null >/dev/null 2>&1 &'
 for _ in $(seq 1 100); do
   phase8_timeout 5 5 ssh -F "$ssh_config" ade-phase1-docker \
-    'test -S /tmp/tmux-agent-ide-1000/host.sock' && break
+    'test -S /tmp/muxflow-1000/host.sock' && break
   sleep 0.05
 done
 ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   "$host_binary" helper install ade-phase1-docker --config "$ssh_config" \
   --artifact "$remote_host_binary" --digest "$digest" --expected-arch "$target_arch"
 ssh -F "$ssh_config" ade-phase1-docker \
-  '"$HOME/.local/bin/tmux-ide-host" protocol-check >/dev/null'
+  '"$HOME/.local/bin/muxflow-host" protocol-check >/dev/null'
 
 # A failure after atomic replacement and daemon shutdown restores the prior
 # artifact and starts a healthy daemon. A failed first install leaves no final
@@ -256,32 +256,32 @@ if ADE_PHASE1_TESTING=1 ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   echo 'post-replacement fault unexpectedly completed' >&2
   exit 1
 fi
-[[ "$(ssh -F "$ssh_config" ade-phase1-docker 'sha256sum "$HOME/.local/bin/tmux-ide-host" | cut -d" " -f1')" == "$digest" ]]
+[[ "$(ssh -F "$ssh_config" ade-phase1-docker 'sha256sum "$HOME/.local/bin/muxflow-host" | cut -d" " -f1')" == "$digest" ]]
 ssh -F "$ssh_config" ade-phase1-docker \
-  '"$HOME/.local/bin/tmux-ide-host" protocol-check >/dev/null'
+  '"$HOME/.local/bin/muxflow-host" protocol-check >/dev/null'
 if ADE_PHASE1_TESTING=1 ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   "$host_binary" helper install ade-phase1-docker --config "$ssh_config" \
-  --remote-path '$HOME/.local/bin/tmux-ide-host-first-fail' \
+  --remote-path '$HOME/.local/bin/muxflow-host-first-fail' \
   --artifact "$rollback_artifact" --digest "$rollback_digest" --expected-arch "$target_arch" \
   --allow-upgrade --test-fail-after-shutdown; then
   echo 'failed first-install fault unexpectedly completed' >&2
   exit 1
 fi
 ssh -F "$ssh_config" ade-phase1-docker \
-  'test ! -e "$HOME/.local/bin/tmux-ide-host-first-fail"; nohup "$HOME/.local/bin/tmux-ide-host" daemon </dev/null >/dev/null 2>&1 &'
+  'test ! -e "$HOME/.local/bin/muxflow-host-first-fail"; nohup "$HOME/.local/bin/muxflow-host" daemon </dev/null >/dev/null 2>&1 &'
 for _ in $(seq 1 100); do
   phase8_timeout 5 5 ssh -F "$ssh_config" ade-phase1-docker \
-    '"$HOME/.local/bin/tmux-ide-host" protocol-check >/dev/null' && break
+    '"$HOME/.local/bin/muxflow-host" protocol-check >/dev/null' && break
   sleep 0.05
 done
 
 # The installer intentionally starts a production daemon to verify the new
 # binary. Restart it through the testing bridge for the fault-injection cases.
 ssh -F "$ssh_config" ade-phase1-docker \
-  "pkill -f '/home/ade/.local/bin/tmux-ide-host daemon' || true" || true
+  "pkill -f '/home/ade/.local/bin/muxflow-host daemon' || true" || true
 
 ssh -F "$ssh_config" ade-phase1-docker \
-  'rm -f /tmp/tmux-agent-ide-phase1-input-count; tmux new-session -d -s phase1 "bash"'
+  'rm -f /tmp/muxflow-phase1-input-count; tmux new-session -d -s phase1 "bash"'
 ssh -F "$ssh_config" -M -N -f -o ControlMaster=yes -o ControlPersist=60 \
   -S "$control_socket" ade-phase1-docker
 ssh -F "$ssh_config" -T -o ControlMaster=no -o ControlPath=none ade-phase1-docker \
@@ -296,13 +296,13 @@ jq -e '
   .cancellation == "pass" and .scopedSnapshot == true and .terminalInputRouted == true
 ' "$runtime/remote-smoke.json" >/dev/null
 wait_remote_input_count 1
-[[ "$(ssh -F "$ssh_config" ade-phase1-docker "stat -c '%a' /tmp/tmux-agent-ide-1000")" == "700" ]]
-[[ "$(ssh -F "$ssh_config" ade-phase1-docker "stat -c '%a' /tmp/tmux-agent-ide-1000/host.sock")" == "600" ]]
-[[ "$(ssh -F "$ssh_config" ade-phase1-docker "stat -c '%u' /tmp/tmux-agent-ide-1000")" == "1000" ]]
-[[ "$(ssh -F "$ssh_config" ade-phase1-docker "stat -c '%u' /tmp/tmux-agent-ide-1000/host.sock")" == "1000" ]]
+[[ "$(ssh -F "$ssh_config" ade-phase1-docker "stat -c '%a' /tmp/muxflow-1000")" == "700" ]]
+[[ "$(ssh -F "$ssh_config" ade-phase1-docker "stat -c '%a' /tmp/muxflow-1000/host.sock")" == "600" ]]
+[[ "$(ssh -F "$ssh_config" ade-phase1-docker "stat -c '%u' /tmp/muxflow-1000")" == "1000" ]]
+[[ "$(ssh -F "$ssh_config" ade-phase1-docker "stat -c '%u' /tmp/muxflow-1000/host.sock")" == "1000" ]]
 
 ssh -F "$ssh_config" ade-phase1-docker \
-  "pkill -f '/home/ade/.local/bin/tmux-ide-host daemon' || true" || true
+  "pkill -f '/home/ade/.local/bin/muxflow-host daemon' || true" || true
 ADE_PHASE1_TESTING=1 "$host_binary" phase1-client ssh ade-phase1-docker \
   --config "$ssh_config" --control-socket "$control_socket" >"$runtime/remote-daemon-recovered.json"
 jq -e '.sessions == 1 and .terminalInputRouted == true' "$runtime/remote-daemon-recovered.json" >/dev/null

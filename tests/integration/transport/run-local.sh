@@ -9,7 +9,7 @@ cargo test --workspace --all-targets
 pnpm check
 pnpm test
 pnpm build
-cargo run --quiet --bin tmux-ide-host -- doctor
-cargo run --quiet --bin tmux-ide-host -- discover
-cargo run --quiet --bin tmux-ide-host -- phase0-lanes
+cargo run --quiet --bin muxflow-host -- doctor
+cargo run --quiet --bin muxflow-host -- discover
+cargo run --quiet --bin muxflow-host -- phase0-lanes
 

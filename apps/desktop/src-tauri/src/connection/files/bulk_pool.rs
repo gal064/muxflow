@@ -327,11 +327,11 @@ fn returnable(cancelled: bool, clean: bool, alive: bool) -> bool {
 /// A bulk bridge held for the duration of one job.
 ///
 /// Every file operation used to spawn its own: a local `ssh -O check`, a local
-/// `ssh` fork, a fresh SSH channel, a remote `tmux-ide-host` fork, a daemon
+/// `ssh` fork, a fresh SSH channel, a remote `muxflow-host` fork, a daemon
 /// connection whose setup forks `tmux -V`, `git --version` and
 /// `tmux display-message` and starts a filesystem watcher, and only then a
 /// ClientHello round trip — before the first byte of the file moved. Over a
-/// tailscale link that is the "opening a file takes seconds" the user reported.
+/// private overlay network link that is the "opening a file takes seconds" the user reported.
 ///
 /// A lease reuses all of it, and reuses nothing whose stream position or
 /// liveness is in doubt (`Bridge::reusable`).
@@ -535,7 +535,7 @@ pub(crate) enum Prewarm {
 /// Establishes one idle bulk bridge ahead of the first file operation.
 ///
 /// Every first-of-session file open paid for a fresh bridge — a local
-/// `ssh -O check`, an `ssh` fork, a new SSH channel, a remote `tmux-ide-host`
+/// `ssh -O check`, an `ssh` fork, a new SSH channel, a remote `muxflow-host`
 /// fork and a ClientHello round trip — before the first byte of the file moved.
 /// `leaseReuse` was false on every measured first open, at 245–325 ms, and it
 /// grows with RTT because the handshake is multi-round-trip

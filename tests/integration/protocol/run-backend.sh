@@ -10,21 +10,21 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 runtime="$repo_root/tmp/phase2-backend-$run_id"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/integration/protocol/protocol-driver/target}"
-host_binary="$main_target/debug/tmux-ide-host"
+host_binary="$main_target/debug/muxflow-host"
 driver_binary="$driver_target/debug/protocol-test-driver"
 local_socket="ade-phase2-local-$$"
 local_runtime="$runtime/local-runtime"
-image_name="tmux-agent-ide-phase2-ssh"
-container_name="tmux-agent-ide-phase2-$run_id"
+image_name="muxflow-phase2-ssh"
+container_name="muxflow-phase2-$run_id"
 ssh_key="$runtime/ssh-key"
 ssh_config="$runtime/ssh-config"
 known_hosts="$runtime/known-hosts"
-remote_artifact="${ADE_TEST_BOOKWORM_HELPER:-$runtime/tmux-ide-host-bookworm}"
+remote_artifact="${ADE_TEST_BOOKWORM_HELPER:-$runtime/muxflow-host-bookworm}"
 local_client_pid=""
 remote_client_pid=""
 local_client_name=""
 remote_client_name=""
-remote_client_pid_file="/tmp/tmux-agent-ide-phase2-ordinary-$run_id.pid"
+remote_client_pid_file="/tmp/muxflow-phase2-ordinary-$run_id.pid"
 
 cleanup() {
   if [[ -n "$local_client_pid" ]]; then
@@ -55,7 +55,7 @@ phase8_isolate_docker_config "$runtime/docker-config"
 printf '%s\n' "$runtime" >"$repo_root/tmp/phase2-backend-latest"
 
 cd "$repo_root"
-cargo build --bin tmux-ide-host >"$runtime/cargo-host-build.log" 2>&1 &
+cargo build --bin muxflow-host >"$runtime/cargo-host-build.log" 2>&1 &
 build_host_pid=$!
 cargo build --manifest-path tests/integration/protocol/protocol-driver/Cargo.toml \
   >"$runtime/cargo-driver-build.log" 2>&1 &
@@ -205,9 +205,9 @@ ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
   --artifact "$remote_artifact" --digest "$remote_digest" --expected-arch "$(uname -m)" \
   >"$runtime/remote-helper-install.log"
 ssh -F "$ssh_config" ade-phase2-docker \
-  '$HOME/.local/bin/tmux-ide-host version; tmux -V' >"$runtime/remote-versions.txt"
+  '$HOME/.local/bin/muxflow-host version; tmux -V' >"$runtime/remote-versions.txt"
 ssh -F "$ssh_config" ade-phase2-docker \
-  '$HOME/.local/bin/tmux-ide-host daemon-stop' >/dev/null 2>&1 || true
+  '$HOME/.local/bin/muxflow-host daemon-stop' >/dev/null 2>&1 || true
 ssh -F "$ssh_config" ade-phase2-docker \
   'tmux new-session -d -s primary "exec bash"; tmux new-session -d -s external "exec bash"'
 
@@ -290,7 +290,7 @@ jq -e '.transport == "ssh" and .sessions == 2 and .offlineOutputReseeded and .ov
   "$runtime/remote-network-recovered.json" >/dev/null
 
 [[ "$(remote_tmux list-sessions -F '#{session_name}' | sort | tr '\n' ' ')" == "external primary " ]]
-[[ "$(ssh -F "$ssh_config" ade-phase2-docker "stat -c '%a' /tmp/tmux-agent-ide-1000/session-order.json")" == "600" ]]
+[[ "$(ssh -F "$ssh_config" ade-phase2-docker "stat -c '%a' /tmp/muxflow-1000/session-order.json")" == "600" ]]
 if remote_tmux show-options -Aqv @tmux_agent_ide_order | rg .; then
   echo 'remote Phase 2 mutated a tmux user option' >&2
   exit 1

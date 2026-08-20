@@ -60,7 +60,7 @@ pub(super) struct TerminalAttachment {
     workers: Vec<std::thread::JoinHandle<()>>,
     /// The last size tmux was told for *this* client, so it is not told again.
     ///
-    /// `refresh-client -C` is not free — the omarchy lane measured 3 identical
+    /// `refresh-client -C` is not free — the remote-linux lane measured 3 identical
     /// requests costing 15 topology-dirty events on a real link — and the
     /// desktop's own dedupe cannot cover this one, because what re-sends it is
     /// the host carrying a size across to a client that became visible
@@ -122,7 +122,7 @@ impl TerminalAttachment {
     /// `ignore-size` decides whether tmux *acts* on a client's size, not
     /// whether it remembers one — so a workspace switched away from and back
     /// costs nothing. That matters because the desktop re-states the visible
-    /// session on every switch and every reconnect, and the omarchy lane
+    /// session on every switch and every reconnect, and the remote-linux lane
     /// measured identical `refresh-client -C` requests at 15 topology-dirty
     /// events each on a real link.
     fn ensure_size(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {

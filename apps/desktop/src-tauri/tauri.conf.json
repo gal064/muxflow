@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tmux Agent IDE",
+  "productName": "Muxflow",
   "version": "0.1.0",
-  "identifier": "dev.dev.tmux-agent-ide",
+  "identifier": "dev.muxflow.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build && pnpm stage-host-helper",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "tmux Agent IDE",
+        "title": "Muxflow",
         "width": 1280,
         "height": 800,
         "minWidth": 800,
@@ -29,7 +29,7 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "externalBin": ["binaries/tmux-ide-host"],
+    "externalBin": ["binaries/muxflow-host"],
     "resources": {
       "binaries/linux-helpers/*": ".",
       "../../../release/macos/package-owner": "."

@@ -288,9 +288,9 @@ mod tests {
         std::fs::create_dir(&foreign).unwrap();
         std::fs::set_permissions(&foreign, std::fs::Permissions::from_mode(0o755)).unwrap();
         #[cfg(target_os = "macos")]
-        let app_name = "dev.dev.tmux-agent-ide";
+        let app_name = "dev.muxflow.desktop";
         #[cfg(not(target_os = "macos"))]
-        let app_name = "tmux-agent-ide";
+        let app_name = "muxflow";
         symlink(&foreign, cache.join(app_name)).unwrap();
         assert!(LocalOwnedDirectory::open_clipboard_cache(&root).is_err());
         assert_eq!(

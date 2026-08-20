@@ -34,7 +34,7 @@ desktop_exec() {
   if [[ -x "$repo_root/apps/desktop/node_modules/.bin/$tool" ]]; then
     (cd "$repo_root/apps/desktop" && "./node_modules/.bin/$tool" "$@")
   else
-    pnpm --filter @tmux-agent-ide/desktop exec "$tool" "$@"
+    pnpm --filter @muxflow/desktop exec "$tool" "$@"
   fi
 }
 
@@ -49,10 +49,10 @@ run_fixture pane-resource cargo test -p tmux-control phase14_pane_resource_scali
 run_fixture desktop-frontend-build desktop_build
 # This is a Rust unit fixture, not a bundle test. Avoid requiring or copying a
 # target-specific sidecar while still giving generate_context! its real dist.
-run_fixture transfer-admission env TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test -p tmux-agent-desktop phase14_full_queue_reports_admission_and_exact_terminal_outcomes -- --ignored --nocapture
-run_fixture ssh-master-coordination env TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test -p tmux-agent-desktop phase14_fake_delayed_ssh_master_coordination_counts -- --ignored --nocapture --test-threads=1
-run_fixture git-consumers cargo test -p tmux-ide-host phase14_thirty_two_consumers_report_native_watchers_and_status_processes -- --ignored --nocapture --test-threads=1
-run_fixture git-processes cargo test -p tmux-ide-host phase14_warm_diff_and_mutation_process_counts -- --ignored --nocapture --test-threads=1
+run_fixture transfer-admission env TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test -p muxflow phase14_full_queue_reports_admission_and_exact_terminal_outcomes -- --ignored --nocapture
+run_fixture ssh-master-coordination env TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test -p muxflow phase14_fake_delayed_ssh_master_coordination_counts -- --ignored --nocapture --test-threads=1
+run_fixture git-consumers cargo test -p muxflow-host phase14_thirty_two_consumers_report_native_watchers_and_status_processes -- --ignored --nocapture --test-threads=1
+run_fixture git-processes cargo test -p muxflow-host phase14_warm_diff_and_mutation_process_counts -- --ignored --nocapture --test-threads=1
 
 uv run --no-project "$repo_root/tests/performance/optimization/extract-metrics.py" "$artifacts/deterministic-metrics.json" "$artifacts"/logs/*.log || fixture_status=1
 

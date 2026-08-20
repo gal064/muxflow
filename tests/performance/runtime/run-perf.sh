@@ -33,7 +33,7 @@ label="${ADE_PHASE12_LABEL:-$run_id}"
 runtime="$repo_root/tmp/phase12-perf-$run_id"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/performance/runtime/perf-driver/target}"
-host_binary="$main_target/release/tmux-ide-host"
+host_binary="$main_target/release/muxflow-host"
 driver_binary="$driver_target/release/performance-test-driver"
 if [[ -n "${ADE_PHASE12_FLOOD_SECONDS:-}" ]]; then
   flood_seconds="$ADE_PHASE12_FLOOD_SECONDS"
@@ -48,12 +48,12 @@ if [[ "${ADE_PHASE12_ENFORCE:-0}" == "1" ]] && (( flood_seconds < 60 )); then
 fi
 local_socket="ade-phase12-perf-$$"
 local_runtime="$runtime/local-runtime"
-image_name="tmux-agent-ide-phase12-ssh"
-container_name="tmux-agent-ide-phase12-$run_id"
+image_name="muxflow-phase12-ssh"
+container_name="muxflow-phase12-$run_id"
 ssh_key="$runtime/ssh-key"
 ssh_config="$runtime/ssh-config"
 known_hosts="$runtime/known-hosts"
-remote_artifact="${ADE_TEST_BOOKWORM_HELPER:-$runtime/tmux-ide-host-bookworm}"
+remote_artifact="${ADE_TEST_BOOKWORM_HELPER:-$runtime/muxflow-host-bookworm}"
 # The harness must reconcile stale topology on exactly the budget the shipped
 # desktop uses, or its create-action numbers would describe a different product.
 reconcile_timeout_ms="$(sed -n 's/^const ACTION_RECONCILE_TIMEOUT_MS = \([0-9_]*\);.*/\1/p' \
@@ -85,7 +85,7 @@ fi
 
 cd "$repo_root"
 # Release builds on both sides: an opt-level-0 parser is not the product.
-cargo build --release --bin tmux-ide-host >"$runtime/cargo-host-build.log" 2>&1
+cargo build --release --bin muxflow-host >"$runtime/cargo-host-build.log" 2>&1
 cargo build --release --manifest-path tests/performance/runtime/perf-driver/Cargo.toml \
   >"$runtime/cargo-driver-build.log" 2>&1
 "$host_binary" version >"$runtime/host-version.json"
@@ -184,7 +184,7 @@ if [[ "$docker_status" == "ran" ]]; then
     --artifact "$remote_artifact" --digest "$remote_digest" --expected-arch "$(uname -m)" \
     >"$runtime/remote-helper-install.log"
   ssh -F "$ssh_config" ade-phase12-docker \
-    '$HOME/.local/bin/tmux-ide-host version; tmux -V' >"$runtime/remote-versions.txt"
+    '$HOME/.local/bin/muxflow-host version; tmux -V' >"$runtime/remote-versions.txt"
   ssh -F "$ssh_config" ade-phase12-docker \
     'tmux new-session -d -s primary "exec bash"; tmux new-session -d -s external "exec bash"'
   remote_pane="$(ssh -F "$ssh_config" ade-phase12-docker \

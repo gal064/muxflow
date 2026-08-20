@@ -14,7 +14,7 @@ const session: Session = { id: "$1", name: "muxflow", windowCount: 1, attachedCl
 const window: TmuxWindow = { id: "@1", sessionId: "$1", index: 1, name: "zsh", active: true, layout: "" };
 const pane: Pane = {
   id: "%1", sessionId: "$1", windowId: "@1", index: 0, active: true,
-  width: 80, height: 24, left: 0, top: 0, currentPath: "/home/user", currentCommand: "zsh",
+  width: 80, height: 24, left: 0, top: 0, currentPath: "/home/operator", currentCommand: "zsh",
 };
 const snapshot: TmuxSnapshot = { sessions: [session], windows: [window], panes: [pane] };
 const hostScope: HostScopeToken = {
@@ -24,7 +24,7 @@ const hostScope: HostScopeToken = {
 
 const appTab: PersistedAppState["appTabs"][number] = {
   id: "tab-1", hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1",
-  sessionName: "muxflow", kind: "file", resource: "/home/user/notes.md", title: "notes.md", order: 0,
+  sessionName: "muxflow", kind: "file", resource: "/home/operator/notes.md", title: "notes.md", order: 0,
 };
 
 const ambientSession: Session = { ...session, id: "$ambient", name: "ambient" };

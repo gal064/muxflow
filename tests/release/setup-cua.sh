@@ -23,8 +23,8 @@ cleanup_failed_setup() {
   status=$?
   trap - EXIT
   if ! $handed_off; then
-    pkill -f "$prefix/lib/tmux-agent-ide/tmux-agent-desktop" >/dev/null 2>&1 || true
-    HOME="$home" ADE_HOST_RUNTIME_DIR="$runtime" "$prefix/lib/tmux-agent-ide/tmux-ide-host" daemon-stop >/dev/null 2>&1 || true
+    pkill -f "$prefix/lib/muxflow/muxflow" >/dev/null 2>&1 || true
+    HOME="$home" ADE_HOST_RUNTIME_DIR="$runtime" "$prefix/lib/muxflow/muxflow-host" daemon-stop >/dev/null 2>&1 || true
     env -u TMUX HOME="$home" XDG_RUNTIME_DIR="$runtime" TMUX_TMPDIR="$tmux_runtime" tmux -L "$tmux_socket" kill-server >/dev/null 2>&1 || true
     docker rm -f "$container" >/dev/null 2>&1 || true
   fi
@@ -57,7 +57,7 @@ printf 'paste file\n' > "$local_repo/local paste ü.txt"
 cp tests/integration/agents/evidence/local-connected.png "$local_repo/clipboard.png"
 
 phase8_isolate_docker_config "$run_root/docker-config"
-docker build -t tmux-agent-ide-phase8-cua tests/integration/transport/ssh-target > "$run_root/docker-build.log" 2>&1
+docker build -t muxflow-phase8-cua tests/integration/transport/ssh-target > "$run_root/docker-build.log" 2>&1
 ssh-keygen -q -t ed25519 -N '' -f "$run_root/ssh-key"
 port=""
 for candidate in $(seq 23122 23221); do
@@ -65,7 +65,7 @@ for candidate in $(seq 23122 23221); do
 done
 [[ -n "$port" ]]
 docker run -d --name "$container" --cap-add NET_ADMIN -p "127.0.0.1:$port:22" \
-  -v "$run_root/ssh-key.pub:/config/authorized_keys:ro" tmux-agent-ide-phase8-cua \
+  -v "$run_root/ssh-key.pub:/config/authorized_keys:ro" muxflow-phase8-cua \
   > "$run_root/container-id"
 printf '%s\n' 'Host phase8-cua-remote' '  HostName 127.0.0.1' "  Port $port" '  User ade' \
   "  IdentityFile $run_root/ssh-key" '  IdentitiesOnly yes' '  BatchMode yes' '  ConnectTimeout 5' \
@@ -77,9 +77,9 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 ssh -F "$run_root/ssh-config" phase8-cua-remote 'mkdir -p "$HOME/.local/bin" "$HOME/phase8-repo"'
-scp -q -F "$run_root/ssh-config" "$prefix/lib/tmux-agent-ide/tmux-ide-host-x86_64" phase8-cua-remote:/home/ade/.local/bin/tmux-ide-host
+scp -q -F "$run_root/ssh-config" "$prefix/lib/muxflow/muxflow-host-x86_64" phase8-cua-remote:/home/ade/.local/bin/muxflow-host
 ssh -F "$run_root/ssh-config" phase8-cua-remote '
-  chmod 0700 "$HOME/.local/bin/tmux-ide-host"
+  chmod 0700 "$HOME/.local/bin/muxflow-host"
   repo="$HOME/phase8-repo"
   git -C "$repo" init -q
   git -C "$repo" config user.name "Phase Eight Remote"
@@ -92,7 +92,7 @@ ssh -F "$run_root/ssh-config" phase8-cua-remote '
 '
 docker exec "$container" tc qdisc add dev eth0 root netem delay 100ms rate 100mbit
 
-profile_dir="$config/dev.dev.tmux-agent-ide"
+profile_dir="$config/dev.muxflow.desktop"
 mkdir -p "$profile_dir"
 printf '{\n  "schemaVersion": 1,\n  "profiles": [\n    {"id":"local","label":"Local","connection":{"mode":"local"}},\n    {"id":"phase8-remote","label":"Phase 8 Remote","connection":{"mode":"ssh","profileId":"phase8-remote","target":"phase8-cua-remote","configPath":"%s"}}\n  ],\n  "lastProfileId":"local"\n}\n' "$run_root/ssh-config" > "$profile_dir/profiles.json"
 chmod 0600 "$profile_dir/profiles.json"
@@ -108,12 +108,12 @@ export XDG_RUNTIME_DIR='$runtime'
 export TMUX_TMPDIR='$tmux_runtime'
 export ADE_TMUX_SOCKET_NAME='$tmux_socket'
 unset TMUX
-export ADE_HOST_HELPER_PATH='$prefix/lib/tmux-agent-ide/tmux-ide-host'
+export ADE_HOST_HELPER_PATH='$prefix/lib/muxflow/muxflow-host'
 if ! tmux -L '$tmux_socket' list-sessions >/dev/null 2>&1; then
   tmux -L '$tmux_socket' -f /dev/null new-session -d -s phase8-local -c '$local_repo' 'exec bash'
   tmux -L '$tmux_socket' -f /dev/null new-window -d -t phase8-local -n second -c '$local_repo' 'exec bash'
 fi
-exec '$prefix/lib/tmux-agent-ide/tmux-agent-desktop' >> '$run_root/desktop.log' 2>&1
+exec '$prefix/lib/muxflow/muxflow' >> '$run_root/desktop.log' 2>&1
 EOF
 chmod 0700 "$run_root/launch.sh"
 cat > "$run_root/start-scale-fixture.sh" <<EOF

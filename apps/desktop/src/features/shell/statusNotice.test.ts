@@ -16,7 +16,7 @@ describe("status notices", () => {
       "Discovering local tmux…",
       "Waiting for authoritative tmux state…",
       "Topology changed; reconciling…",
-      "Connecting to omarchy…",
+      "Connecting to remote-linux…",
       "Connection reconnecting…",
       "Opened README.md",
       "Viewing the last known workspace. Writes remain frozen.",

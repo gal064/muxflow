@@ -23,7 +23,7 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-helper=${ADE_HELPER:-"$here/../../target/debug/tmux-ide-host"}
+helper=${ADE_HELPER:-"$here/../../target/debug/muxflow-host"}
 run_id=$$
 socket_name="ade-phase14-$run_id"
 runtime=$(mktemp -d "${TMPDIR:-/tmp}/ade14.XXXXXX")

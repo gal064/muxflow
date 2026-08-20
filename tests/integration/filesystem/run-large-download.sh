@@ -8,7 +8,7 @@ source "$repo_root/tests/release/storage.sh"
 phase8_storage_begin "$repo_root" phase4-large-download
 runtime="$PHASE8_WORK_DIR"
 evidence="$PHASE8_EVIDENCE_DIR"
-host_binary="$CARGO_TARGET_DIR/debug/tmux-ide-host"
+host_binary="$CARGO_TARGET_DIR/debug/muxflow-host"
 driver_binary="$CARGO_TARGET_DIR/debug/filesystem-test-driver"
 socket_name="ade-phase4-large-$$"
 host_runtime="$runtime/host-runtime"
@@ -31,7 +31,7 @@ mkdir -p "$runtime" "$host_runtime" "$fixture/subdir"
 chmod 0700 "$runtime" "$host_runtime"
 
 cd "$repo_root"
-cargo build --bin tmux-ide-host >"$runtime/cargo-host.log" 2>&1 &
+cargo build --bin muxflow-host >"$runtime/cargo-host.log" 2>&1 &
 host_build_pid=$!
 cargo build --manifest-path tests/integration/filesystem/protocol-driver/Cargo.toml \
   >"$runtime/cargo-driver.log" 2>&1 &

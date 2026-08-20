@@ -50,7 +50,7 @@ impl HookManager {
     pub(super) fn for_home(home: &Path) -> Self {
         Self {
             home: home.into(),
-            helper_path: PathBuf::from("/opt/tmux-agent-ide/bin/tmux-ide-host"),
+            helper_path: PathBuf::from("/opt/muxflow/bin/muxflow-host"),
             config_override: None,
         }
     }
@@ -276,7 +276,7 @@ impl HookManager {
                     "Merge labeled lifecycle hooks; preserve every unrelated hook and setting"
                 }
                 v1::HookManagementAction::Uninstall => {
-                    "Remove only tmux-agent-ide labeled hooks; preserve backup and unrelated config"
+                    "Remove only muxflow labeled hooks; preserve backup and unrelated config"
                 }
                 _ => "Review managed hook configuration",
             }
@@ -512,7 +512,7 @@ impl ConfigLock {
             fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
         }
         inspect_parent(parent)?;
-        let path = parent.join(".tmux-agent-ide-hook.lock");
+        let path = parent.join(".muxflow-hook.lock");
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -680,7 +680,7 @@ fn is_owned_command(command: &str, adapter: &dyn adapters::AgentAdapter) -> bool
 
 fn managed_command_version(command: &str, adapter: &dyn adapters::AgentAdapter) -> Option<u32> {
     let legacy = format!(
-        "tmux-ide-host hook ingest --adapter {} # tmux-agent-ide-managed:v1",
+        "muxflow-host hook ingest --adapter {} # muxflow-managed:v1",
         adapter.id()
     );
     if command == legacy {
@@ -720,7 +720,7 @@ fn ensure_no_future_managed(
         .filter_map(|command| managed_command_version(command, adapter))
         .any(|version| version > adapters::MANAGED_VERSION);
     if future {
-        bail!("hook configuration is owned by a newer tmux-agent-ide version");
+        bail!("hook configuration is owned by a newer muxflow version");
     }
     Ok(())
 }
@@ -827,7 +827,7 @@ fn confirmation_token(
 
 fn backup_path(path: &Path) -> PathBuf {
     path.with_extension(format!(
-        "{}.tmux-agent-ide.backup",
+        "{}.muxflow.backup",
         path.extension()
             .and_then(|value| value.to_str())
             .unwrap_or("json")
@@ -971,9 +971,9 @@ mod tests {
         );
         assert_eq!(
             review.proposed_command,
-            "'/opt/tmux-agent-ide/bin/tmux-ide-host' hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 3"
+            "'/opt/muxflow/bin/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 3"
         );
-        assert_eq!(review.ownership_marker, "owner=tmux-agent-ide;version=3");
+        assert_eq!(review.ownership_marker, "owner=muxflow;version=3");
         assert!(review.trust_guidance.contains("never edits or bypasses"));
         assert!(review.before_preview.contains("keep-me"));
         assert!(review.after_preview.contains("--managed-owner"));
@@ -1032,8 +1032,8 @@ mod tests {
         fs::create_dir_all(home.join(".claude")).unwrap();
         let current = adapters::adapter(v1::AgentAdapterKind::Codex)
             .unwrap()
-            .hook_command(Path::new("/opt/tmux-agent-ide/bin/tmux-ide-host"));
-        let legacy = "tmux-ide-host hook ingest --adapter claude-code # tmux-agent-ide-managed:v1";
+            .hook_command(Path::new("/opt/muxflow/bin/muxflow-host"));
+        let legacy = "muxflow-host hook ingest --adapter claude-code # muxflow-managed:v1";
         fs::write(
             home.join(".codex/hooks.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -1203,7 +1203,7 @@ mod tests {
     #[test]
     fn uninstall_matches_the_exact_owned_command_only() {
         let adapter = adapters::adapter(v1::AgentAdapterKind::Codex).unwrap();
-        let helper = Path::new("/opt/tmux-agent-ide/bin/tmux-ide-host");
+        let helper = Path::new("/opt/muxflow/bin/muxflow-host");
         let owned = adapter.hook_command(helper);
         let lookalike = format!("{owned} --extra");
         let mut value = serde_json::json!({"hooks":{"Stop":[{"hooks":[
@@ -1224,7 +1224,7 @@ mod tests {
             .join(format!("phase6-hook-migrate-{}", uuid::Uuid::new_v4()));
         let path = home.join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let legacy = "tmux-ide-host hook ingest --adapter codex # tmux-agent-ide-managed:v1";
+        let legacy = "muxflow-host hook ingest --adapter codex # muxflow-managed:v1";
         fs::write(
             &path,
             serde_json::to_vec(&serde_json::json!({
@@ -1296,7 +1296,7 @@ mod tests {
             .join(format!("phase6-hook-future-{}", uuid::Uuid::new_v4()));
         let path = home.join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let future = "'/opt/future/tmux-ide-host' hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 99";
+        let future = "'/opt/future/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 99";
         fs::write(
             &path,
             serde_json::to_vec(&serde_json::json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":future}]}]}})).unwrap(),
@@ -1347,7 +1347,7 @@ mod tests {
         let path = home.join(".claude/settings.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let original = include_bytes!(
-            "../../../../../tests/integration/agent-status/fixtures/claude-settings-orca.json"
+            "../../../../../tests/integration/agent-status/fixtures/claude-settings-existing-hooks.json"
         );
         fs::write(&path, original).unwrap();
         let manager = HookManager::for_home(&home);
@@ -1521,7 +1521,7 @@ mod tests {
         // One managed entry for one event: the remaining transitions can never
         // arrive, which is not the same as being wired.
         let adapter = adapters::adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
-        let command = adapter.hook_command(Path::new("/opt/tmux-agent-ide/bin/tmux-ide-host"));
+        let command = adapter.hook_command(Path::new("/opt/muxflow/bin/muxflow-host"));
         fs::write(
             &path,
             serde_json::to_vec(&serde_json::json!({

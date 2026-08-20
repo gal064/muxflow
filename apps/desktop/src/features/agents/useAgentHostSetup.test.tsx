@@ -7,7 +7,7 @@ import type { AgentAdapterDescriptor, AgentHookReview, AgentHookWiring } from ".
 const adapter = (id: string, hookWiring: AgentHookWiring): AgentAdapterDescriptor => ({
   id, displayName: id, supportsLaunch: true, supportsResume: true, supportsHooks: true,
   supportsProcessDetection: true,
-  hookConfigPath: `/home/user/.${id}/settings.json`, hookEvents: [], placements: ["window", "split"],
+  hookConfigPath: `/home/operator/.${id}/settings.json`, hookEvents: [], placements: ["window", "split"],
   hookWiring, hookWiringDetail: "", hookSetupRecommended: hookWiring === "notWired" || hookWiring === "partial",
 });
 
@@ -29,10 +29,10 @@ function harness(overrides: Partial<AgentHostSetupOptions> = {}) {
   const options: AgentHostSetupOptions = {
     adapters: [adapter("claude-code", "notWired")],
     connected: true,
-    hostProfileId: "ssh-omarchy",
-    hostIdentity: "ssh-omarchy client-1 1",
+    hostProfileId: "ssh-remote-linux",
+    hostIdentity: "ssh-remote-linux client-1 1",
     decisionsArePersistable: true,
-    hostLabel: "omarchy",
+    hostLabel: "remote-linux",
     decision: undefined,
     ...calls,
     ...overrides,
@@ -54,11 +54,11 @@ describe("the one-time set-up prompt", () => {
     await act(async () => { renderer = create(<setup.Harness />); });
     const html = JSON.stringify(renderer.toJSON());
     expect(html).toContain("Set up agent status on ");
-    expect(html).toContain("omarchy");
+    expect(html).toContain("remote-linux");
     expect(html).toContain("One-time setup");
     // The exact files it would change are named: that is the part a user would
     // say no to, so it is not hidden behind the review.
-    expect(html).toContain("/home/user/.claude-code/settings.json");
+    expect(html).toContain("/home/operator/.claude-code/settings.json");
     expect(setup.current.open).toBe(true);
     await act(async () => renderer.unmount());
   });
@@ -83,7 +83,7 @@ describe("the one-time set-up prompt", () => {
     await act(async () => accept.props.onClick());
     expect(calls.reviewHooks.mock.calls.map(([id]) => id)).toEqual(["claude-code", "codex"]);
     expect(calls.applyHooks).toHaveBeenCalledTimes(2);
-    expect(calls.recordDecision).toHaveBeenCalledWith("ssh-omarchy", "accepted");
+    expect(calls.recordDecision).toHaveBeenCalledWith("ssh-remote-linux", "accepted");
     expect(calls.refreshWiring).toHaveBeenCalledTimes(1);
     await act(async () => renderer.unmount());
   });
@@ -96,7 +96,7 @@ describe("the one-time set-up prompt", () => {
       .find((node) => String(node.children[0]).startsWith("Set up this host"))!;
     await act(async () => accept.props.onClick());
     expect(calls.applyHooks).not.toHaveBeenCalled();
-    expect(calls.recordDecision).toHaveBeenCalledWith("ssh-omarchy", "accepted");
+    expect(calls.recordDecision).toHaveBeenCalledWith("ssh-remote-linux", "accepted");
     await act(async () => renderer.unmount());
   });
 
@@ -121,7 +121,7 @@ describe("the one-time set-up prompt", () => {
     const decline = renderer.root.findAll((node) => node.type === "button")
       .find((node) => node.children[0] === "Not now")!;
     await act(async () => decline.props.onClick());
-    expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-omarchy", "declined");
+    expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-remote-linux", "declined");
     expect(renderer.toJSON()).toEqual({ type: "div", props: {}, children: null });
     // Declining does not hide the door: Settings and the sidebar's own line
     // both drive `offer`, and the prompt comes back when they do.
@@ -180,7 +180,7 @@ describe("the one-time set-up prompt", () => {
     const accept = renderer.root.findAll((node) => node.type === "button")
       .find((node) => String(node.children[0]).startsWith("Set up this host"))!;
     await act(async () => accept.props.onClick());
-    expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-omarchy", "accepted");
+    expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-remote-linux", "accepted");
     expect(setup.calls.onStatus).toHaveBeenCalledWith(expect.stringContaining("window naming was not applied"));
     await act(async () => renderer.unmount());
   });
@@ -274,7 +274,7 @@ describe("the one-time set-up prompt", () => {
     // The runtime stands in for the real one: it refuses a request bound to a
     // host it is no longer connected to, and lets an unbound one through — so
     // dropping the binding fails the assertions below rather than the stub.
-    let liveHost = "ssh-omarchy client-1 1";
+    let liveHost = "ssh-remote-linux client-1 1";
     const refuseIfMoved = (expectedHost: string | undefined) => {
       if (expectedHost !== undefined && expectedHost !== liveHost) {
         throw new Error("answered for a different host than this app is connected to now");
@@ -305,7 +305,7 @@ describe("the one-time set-up prompt", () => {
     // The record follows the write and names the host that took it. Above all
     // it never names the host that was never asked — which is the state the
     // field machine was found in.
-    expect(setup.calls.recordDecision.mock.calls).toEqual([["ssh-omarchy", "accepted"]]);
+    expect(setup.calls.recordDecision.mock.calls).toEqual([["ssh-remote-linux", "accepted"]]);
     await act(async () => renderer.unmount());
   });
 
@@ -337,7 +337,7 @@ describe("the one-time set-up prompt", () => {
     const decline = renderer.root.findAll((node) => node.type === "button")
       .find((node) => node.children[0] === "Not now")!;
     await act(async () => decline.props.onClick());
-    expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-omarchy", "declined");
+    expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-remote-linux", "declined");
     expect(setup.calls.recordDecision).not.toHaveBeenCalledWith("local", "declined");
     await act(async () => renderer.unmount());
   });
@@ -354,7 +354,7 @@ describe("the one-time set-up prompt", () => {
 
     await act(async () => reviewButton.props.onClick());
     expect(JSON.stringify(renderer.toJSON())).toContain("Loading review…");
-    expect(JSON.stringify(renderer.toJSON())).toContain("/home/user/.claude-code/settings.json");
+    expect(JSON.stringify(renderer.toJSON())).toContain("/home/operator/.claude-code/settings.json");
     expect(setup.current.open).toBe(true);
     expect(setup.calls.openReview).not.toHaveBeenCalled();
 
@@ -367,10 +367,10 @@ describe("the one-time set-up prompt", () => {
     />));
     const loaded = review("claude-code");
     await act(async () => resolveReview(loaded));
-    expect(reviewHooks).toHaveBeenCalledWith("claude-code", "install", "ssh-omarchy client-1 1");
+    expect(reviewHooks).toHaveBeenCalledWith("claude-code", "install", "ssh-remote-linux client-1 1");
     expect(setup.calls.openReview).toHaveBeenCalledWith(loaded, {
-      profileId: "ssh-omarchy",
-      identity: "ssh-omarchy client-1 1",
+      profileId: "ssh-remote-linux",
+      identity: "ssh-remote-linux client-1 1",
     });
     expect(setup.current.open).toBe(false);
     await act(async () => renderer.unmount());
@@ -397,8 +397,8 @@ describe("the one-time set-up prompt", () => {
     await act(async () => reviewButton.props.onClick());
     expect(reviewHooks).toHaveBeenCalledTimes(2);
     expect(setup.calls.openReview).toHaveBeenCalledWith(loaded, {
-      profileId: "ssh-omarchy",
-      identity: "ssh-omarchy client-1 1",
+      profileId: "ssh-remote-linux",
+      identity: "ssh-remote-linux client-1 1",
     });
     await act(async () => renderer.unmount());
   });
@@ -420,12 +420,12 @@ describe("the one-time set-up prompt", () => {
       hostLabel="local"
       hostProfileId="local"
     />));
-    expect(JSON.stringify(renderer.toJSON())).toContain("/home/user/.codex/settings.json");
+    expect(JSON.stringify(renderer.toJSON())).toContain("/home/operator/.codex/settings.json");
     await act(async () => resolveReview(review("claude-code")));
     expect(setup.calls.openReview).not.toHaveBeenCalled();
     expect(JSON.stringify(renderer.toJSON())).toContain("Set up agent status on ");
     expect(JSON.stringify(renderer.toJSON())).toContain("local");
-    expect(JSON.stringify(renderer.toJSON())).toContain("/home/user/.codex/settings.json");
+    expect(JSON.stringify(renderer.toJSON())).toContain("/home/operator/.codex/settings.json");
     await act(async () => renderer.unmount());
   });
 
@@ -449,7 +449,7 @@ describe("the one-time set-up prompt", () => {
     await act(async () => rejectReview(new Error("old host stopped answering")));
     const html = JSON.stringify(renderer.toJSON());
     expect(html).not.toContain("old host stopped answering");
-    expect(html).toContain("/home/user/.codex/settings.json");
+    expect(html).toContain("/home/operator/.codex/settings.json");
     expect(html).toContain("Review exact changes…");
     await act(async () => renderer.unmount());
   });

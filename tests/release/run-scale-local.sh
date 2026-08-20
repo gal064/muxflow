@@ -18,7 +18,7 @@ cleanup() {
   local status=$?
   # Stop whichever helper this run actually used: the packaged macOS binary on
   # Darwin, or the one installed from the Linux archive elsewhere.
-  local stop_helper="${helper:-$prefix/lib/tmux-agent-ide/tmux-ide-host}"
+  local stop_helper="${helper:-$prefix/lib/muxflow/muxflow-host}"
   [[ ! -x "$stop_helper" ]] || \
     HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$runtime" \
       "$stop_helper" daemon-stop >/dev/null 2>&1 || true
@@ -36,7 +36,7 @@ tests/release/create-scale-fixture.sh "$fixture_repo" "$socket" > "$run_root/fix
 # ships on this platform. The macOS packaged install/upgrade/uninstall path has
 # its own coverage in tests/acceptance/macos/run-package-lifecycle.sh.
 if phase8_is_darwin; then
-  helper="$repo_root/target/release/bundle/macos/tmux Agent IDE.app/Contents/MacOS/tmux-ide-host"
+  helper="$repo_root/target/release/bundle/macos/Muxflow.app/Contents/MacOS/muxflow-host"
   if [[ ! -x "$helper" ]]; then
     echo "macOS scale gate needs the packaged candidate; run release/macos/build-package.sh first" >&2
     exit 69
@@ -63,7 +63,7 @@ if [[ -z "$helper" ]]; then
   tar -xzf "$archive" -C "$run_root/unpack"
   package_root=$(find "$run_root/unpack" -mindepth 1 -maxdepth 1 -type d -print -quit)
   HOME="$fixture_home" ADE_INSTALL_PREFIX="$prefix" "$package_root/install.sh" > "$run_root/install.log"
-  helper="$prefix/lib/tmux-agent-ide/tmux-ide-host"
+  helper="$prefix/lib/muxflow/muxflow-host"
 fi
 cargo build --manifest-path tests/release/protocol-driver/Cargo.toml > "$run_root/driver-build.log" 2>&1
 HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$runtime" ADE_TMUX_SOCKET_NAME="$socket" \
@@ -71,9 +71,9 @@ HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$runtime" ADE_TMUX_SOCKET_NAME="$sock
   > "$run_root/result.json" 2> "$run_root/driver.log"
 jq -e '.status == "pass" and .sessions >= 20 and .windows >= 100 and .panes >= 100 and .rootEntries >= 250' \
   "$run_root/result.json" >/dev/null
-if [[ -x "$prefix/lib/tmux-agent-ide/uninstall.sh" ]]; then
+if [[ -x "$prefix/lib/muxflow/uninstall.sh" ]]; then
   HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$runtime" ADE_INSTALL_PREFIX="$prefix" \
-    "$prefix/lib/tmux-agent-ide/uninstall.sh" > "$run_root/uninstall.log"
+    "$prefix/lib/muxflow/uninstall.sh" > "$run_root/uninstall.log"
 fi
 for artifact in result.json fixture.log package-verify.log driver.log driver-build.log install.log uninstall.log; do
   [[ ! -f "$run_root/$artifact" ]] || cp "$run_root/$artifact" "$evidence/$artifact"

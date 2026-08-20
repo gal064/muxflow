@@ -1,5 +1,5 @@
 /// The one notification a person can ask for, worded once for every backend.
-pub(crate) const TEST_TITLE: &str = "tmux Agent IDE";
+pub(crate) const TEST_TITLE: &str = "Muxflow";
 pub(crate) const TEST_BODY: &str = "Test notification — delivery works.";
 
 /// The whole vocabulary `authorization_status` may answer with.

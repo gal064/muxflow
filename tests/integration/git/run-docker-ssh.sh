@@ -10,9 +10,9 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 runtime="$repo_root/tmp/phase5-ssh-$run_id"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/integration/git/protocol-driver/target}"
 driver="$driver_target/debug/git-test-driver"
-remote_helper="${ADE_TEST_BOOKWORM_HELPER:-$runtime/tmux-ide-host-bookworm}"
+remote_helper="${ADE_TEST_BOOKWORM_HELPER:-$runtime/muxflow-host-bookworm}"
 container="ade-phase5-$run_id"
-image="tmux-agent-ide-phase5-ssh"
+image="muxflow-phase5-ssh"
 cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 if ! command -v docker >/dev/null 2>&1; then
@@ -55,9 +55,9 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 ssh -F "$runtime/ssh-config" ade-phase5-docker 'mkdir -p "$HOME/.local/bin" "$HOME/phase5-repo"'
-scp -q -F "$runtime/ssh-config" "$remote_helper" ade-phase5-docker:/home/ade/.local/bin/tmux-ide-host
+scp -q -F "$runtime/ssh-config" "$remote_helper" ade-phase5-docker:/home/ade/.local/bin/muxflow-host
 ssh -F "$runtime/ssh-config" ade-phase5-docker \
-  'chmod 0700 "$HOME/.local/bin/tmux-ide-host"; repo="$HOME/phase5-repo"; git -C "$repo" init -q; git -C "$repo" config user.name "Phase Five"; git -C "$repo" config user.email phase5@example.test; printf "%s\n" "ignored*" >"$repo/.gitignore"; printf "%s\n" base >"$repo/tracked"; git -C "$repo" add .gitignore tracked; git -C "$repo" commit -qm base; printf "%s\n" changed >"$repo/tracked"; printf "%s\n" ignored >"$repo/ignored-one"; printf "%s\n" literal >"$repo/:(glob)*"; printf "%s\n" ordinary >"$repo/ordinary"; raw="$(printf "raw-\377")"; printf "%s\n" raw >"$repo/$raw"; printf "%s\n" "#!/bin/sh" "echo phase5-hook-blocked >&2" "exit 17" >"$repo/.git/hooks/pre-commit"; chmod 0700 "$repo/.git/hooks/pre-commit"; tmux new-session -d -s phase5 -c "$repo" "exec bash"'
+  'chmod 0700 "$HOME/.local/bin/muxflow-host"; repo="$HOME/phase5-repo"; git -C "$repo" init -q; git -C "$repo" config user.name "Phase Five"; git -C "$repo" config user.email phase5@example.test; printf "%s\n" "ignored*" >"$repo/.gitignore"; printf "%s\n" base >"$repo/tracked"; git -C "$repo" add .gitignore tracked; git -C "$repo" commit -qm base; printf "%s\n" changed >"$repo/tracked"; printf "%s\n" ignored >"$repo/ignored-one"; printf "%s\n" literal >"$repo/:(glob)*"; printf "%s\n" ordinary >"$repo/ordinary"; raw="$(printf "raw-\377")"; printf "%s\n" raw >"$repo/$raw"; printf "%s\n" "#!/bin/sh" "echo phase5-hook-blocked >&2" "exit 17" >"$repo/.git/hooks/pre-commit"; chmod 0700 "$repo/.git/hooks/pre-commit"; tmux new-session -d -s phase5 -c "$repo" "exec bash"'
 docker exec "$container" tc qdisc add dev eth0 root netem delay 100ms rate 100mbit
 "$driver" ssh "$runtime/ssh-config" ade-phase5-docker \
   >"$runtime/remote.json" 2>"$runtime/remote-driver.log"

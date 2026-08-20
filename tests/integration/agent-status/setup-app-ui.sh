@@ -21,7 +21,7 @@ run_root=$(bash "$repo_root/tests/performance/runtime/setup-qa.sh" | tail -1)
 home="$run_root/home"
 
 mkdir -p "$home/.claude"
-cp "$here/fixtures/claude-settings-orca.json" "$home/.claude/settings.json"
+cp "$here/fixtures/claude-settings-existing-hooks.json" "$home/.claude/settings.json"
 chmod 0600 "$home/.claude/settings.json"
 
 # An agent process for the app to detect, in the fixture's own tmux server, so

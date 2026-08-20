@@ -39,7 +39,8 @@ run_gate() {
 }
 
 : > "$run_root/results.tsv"
-bookworm_helper="$PHASE8_WORK_DIR/tmux-ide-host-bookworm"
+run_gate repo-privacy bash tests/release/check-repo-privacy.sh
+bookworm_helper="$PHASE8_WORK_DIR/muxflow-host-bookworm"
 run_gate bookworm-helper release/linux/build-compatible-host.sh "$target_arch" "$bookworm_helper"
 export ADE_TEST_BOOKWORM_HELPER="$bookworm_helper"
 run_gate phase8-storage bash tests/release/test-storage.sh

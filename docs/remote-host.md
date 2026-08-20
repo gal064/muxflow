@@ -8,8 +8,8 @@ starve terminal and notification traffic. No public or TCP listener is opened.
 
 ## Helper lifecycle
 
-The remote `tmux-ide-host` binary is installed under
-`~/.local/bin/tmux-ide-host` only after explicit confirmation. Installation:
+The remote `muxflow-host` binary is installed under
+`~/.local/bin/muxflow-host` only after explicit confirmation. Installation:
 
 1. probes OS and architecture;
 2. chooses the matching x86-64 or ARM64 artifact;

@@ -1,9 +1,9 @@
 # Troubleshooting
 
-Run `tmux-ide-host doctor` first. Use `doctor --json` when a machine-readable result is useful. If support needs a durable artifact, create one with:
+Run `muxflow-host doctor` first. Use `doctor --json` when a machine-readable result is useful. If support needs a durable artifact, create one with:
 
 ```sh
-tmux-ide-host support-bundle --output ./tmux-agent-ide-support.json
+muxflow-host support-bundle --output ./muxflow-support.json
 ```
 
 The command refuses to overwrite an existing path. Move or remove an old bundle, or select a different filename. Do not weaken its `0600` permissions.
@@ -22,7 +22,7 @@ The report never includes terminal output, prompts, file contents, SSH configura
 The internal macOS build is unsigned. If a quarantined artifact is blocked,
 inspect it with `release/macos/verify-package.sh` and use the normal System
 Settings privacy/security UI; do not disable Gatekeeper globally. Notification
-denial is reported by the app and can be changed for `tmux Agent IDE` in System
+denial is reported by the app and can be changed for `Muxflow` in System
 Settings. Accessibility and Screen Recording are required only by the QA
 driver, not by normal app operation.
 
@@ -37,7 +37,7 @@ notification does not arrive.
   finished, the app never appears in System Settings at all. Pressing the button
   is what raises the prompt.
 - *"Notifications are turned off for this app"* — grant them in System Settings →
-  Notifications → tmux Agent IDE.
+  Notifications → Muxflow.
 - *"macOS did not answer"* — the running binary is not a bundle the system will
   register, so the permission query never comes back. There is no framework
   status for this; the silence *is* the symptom. `pnpm tauri dev` runs an
@@ -58,11 +58,11 @@ notification is shown, including while the app is frontmost.
 notification options at the first authorization request and never asks again.
 Builds before this one asked for alerts only, so an install that granted
 permission then has no sound permission now and cannot be re-prompted from
-inside the app. Turn sound on in System Settings → Notifications → tmux Agent
-IDE, or revoke and re-grant.
+inside the app. Turn sound on in System Settings → Notifications → Muxflow,
+or revoke and re-grant.
 
 The local helper uses a private runtime under
-`~/Library/Caches/dev.dev.tmux-agent-ide/runtime` unless
+`~/Library/Caches/dev.muxflow.desktop/runtime` unless
 `ADE_HOST_RUNTIME_DIR` is explicitly set. Remote Linux helpers are ELF files in
 the application Resources directory; a macOS Mach-O helper is never uploaded
 to Linux.
