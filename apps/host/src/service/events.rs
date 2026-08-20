@@ -134,6 +134,64 @@ pub(super) enum SequencerControl {
     TopologyEpochBarrier(std::sync::mpsc::SyncSender<u64>),
 }
 
+/// A deliberately-triggerable sequence gap, for end-to-end verification only.
+///
+/// Gap recovery is the client's most expensive path and, in normal operation,
+/// only a broadcast saturation reaches it — which is not something a test rig
+/// can produce on demand against a real daemon. Setting
+/// `ADE_FAULT_INJECT_GAP_AFTER=N` makes every connection skip exactly one
+/// sequence number after its N-th ordered event and carry the same
+/// `ResyncRequired` event the saturation path emits, so a desktop build can be
+/// watched recovering from a real host gap. It fires once per connection and
+/// then disarms itself.
+///
+/// Nothing else reads it: there is no flag, no config key, and no request. With
+/// the variable unset — every ordinary run — this is a `None` that each framed
+/// message is compared against, and the environment is never consulted again
+/// after the first connection.
+pub(super) struct GapFaultInjector {
+    /// Ordered events still to pass before firing; `None` once it cannot fire.
+    remaining: Option<u64>,
+}
+
+impl GapFaultInjector {
+    /// Arms one connection from the daemon's environment, read once per process.
+    pub(super) fn for_connection() -> Self {
+        static CONFIGURED: OnceLock<Option<u64>> = OnceLock::new();
+        Self::armed_after(*CONFIGURED.get_or_init(|| {
+            std::env::var("ADE_FAULT_INJECT_GAP_AFTER")
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .filter(|after| *after > 0)
+        }))
+    }
+
+    pub(super) fn armed_after(after: Option<u64>) -> Self {
+        Self { remaining: after }
+    }
+
+    /// The gap to frame directly after `message`, if it was the N-th ordered
+    /// event on this connection.
+    pub(super) fn after(&mut self, message: &SequencerControl) -> Option<SequencerControl> {
+        if !matches!(message, SequencerControl::OrderedEvent(_)) {
+            return None;
+        }
+        let remaining = self.remaining?.saturating_sub(1);
+        if remaining > 0 {
+            self.remaining = Some(remaining);
+            return None;
+        }
+        self.remaining = None;
+        Some(SequencerControl::InjectGap(v1::HostEvent {
+            kind: v1::EventKind::ResyncRequired.into(),
+            scope: "full".into(),
+            detail: "ADE_FAULT_INJECT_GAP_AFTER skipped a sequence to exercise client gap recovery"
+                .into(),
+            ..Default::default()
+        }))
+    }
+}
+
 const MAX_COALESCED_TERMINAL_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Combines only terminal-output records that are already adjacent in the one
@@ -235,6 +293,74 @@ impl ProtocolSequencer {
             SequencerControl::TopologyEpochBarrier(_) => {
                 unreachable!("the connection writer consumes topology epoch barriers")
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod gap_fault_tests {
+    use super::*;
+
+    fn ordered() -> SequencerControl {
+        SequencerControl::OrderedEvent(v1::HostEvent {
+            kind: v1::EventKind::TopologyDirty.into(),
+            scope: "topology".into(),
+            ..Default::default()
+        })
+    }
+
+    fn response() -> SequencerControl {
+        SequencerControl::Response {
+            request_id: 4,
+            response: v1::Response::default(),
+            snapshot_barrier: false,
+        }
+    }
+
+    /// The gap has to be a real one — a skipped sequence carrying the same
+    /// `ResyncRequired` the saturation path sends — or it verifies nothing.
+    #[test]
+    fn the_armed_injector_skips_one_sequence_after_the_nth_ordered_event() {
+        let mut injector = GapFaultInjector::armed_after(Some(2));
+        let mut sequencer = ProtocolSequencer::default();
+
+        // Only ordered events count toward N.
+        assert!(injector.after(&response()).is_none());
+        assert!(injector.after(&ordered()).is_none());
+        assert_eq!(sequencer.frame(ordered()).sequence, 1);
+
+        let gap = injector
+            .after(&ordered())
+            .expect("the second ordered event did not trip the injector");
+        assert_eq!(sequencer.frame(ordered()).sequence, 2);
+        let SequencerControl::InjectGap(event) = &gap else {
+            panic!("the injector did not reuse the InjectGap mechanics: not a gap")
+        };
+        assert_eq!(event.kind, v1::EventKind::ResyncRequired as i32);
+        assert_eq!(event.scope, "full");
+        let frame = sequencer.frame(gap);
+        assert_eq!(frame.sequence, 4, "sequence 3 was not skipped");
+        assert!(matches!(frame.payload, Some(Payload::Event(_))));
+
+        // The next ordered event resumes from the injected sequence, so the
+        // client sees exactly one gap and then a coherent stream.
+        assert_eq!(sequencer.frame(ordered()).sequence, 5);
+    }
+
+    #[test]
+    fn the_injector_fires_once_per_connection_and_is_inert_when_unarmed() {
+        let mut armed = GapFaultInjector::armed_after(Some(1));
+        assert!(armed.after(&ordered()).is_some());
+        for _ in 0..16 {
+            assert!(
+                armed.after(&ordered()).is_none(),
+                "the injector re-armed itself on the same connection"
+            );
+        }
+
+        let mut unarmed = GapFaultInjector::armed_after(None);
+        for _ in 0..16 {
+            assert!(unarmed.after(&ordered()).is_none());
         }
     }
 }
