@@ -721,7 +721,16 @@ export function TerminalPane({
         if (action === "retry") {
           // The latch stays held: this key is still the pane's live reveal, and
           // the retry re-runs under it rather than announcing a new attempt.
-          if (retriesUsed === 0) recordIncident("pane.revealRetry", { paneId: pane.id, attempt: revealAttemptRef.current });
+          // The error text is the whole diagnosis: which of the transient
+          // transport errors fired is what separates a resume race from a
+          // stale-epoch race in the post-wake journal.
+          if (retriesUsed === 0) {
+            recordIncident("pane.revealRetry", {
+              paneId: pane.id,
+              attempt: revealAttemptRef.current,
+              error: String(error).slice(0, 200),
+            });
+          }
           clearTimeout(retryTimer);
           retryTimer = setTimeout(() => {
             retryTimer = undefined;
@@ -735,6 +744,13 @@ export function TerminalPane({
         // hidden and no output is ever sent for it. The watchdog is what turns
         // that into a bounded series of re-assertions.
         watchdogRef.current?.note("revealFailed");
+        // The watchdog's own pane.degraded lines carry only attempt counts;
+        // this is the one record that names what the transport actually said.
+        recordIncident("pane.revealFailed", {
+          paneId: pane.id,
+          retriesUsed,
+          error: String(error).slice(0, 200),
+        });
         diagnosticRef.current?.(`Could not mark ${pane.id} visible: ${String(error)}`);
         if (clientIdRef.current === clientId && hub.generationEpoch === currentCheckpoint.terminalEpoch) {
           void requestTerminalSeed(clientId, pane.id).catch((seedError) => {
