@@ -50,11 +50,20 @@ pub(super) enum TerminalEvent {
     },
     /// A pane tmux paused that the host could not get resumed.
     ///
-    /// Not the ordinary `%pause`, which the host recovers from by itself and
-    /// which the renderer is deliberately never told about: this is the host
-    /// having run out of attempts, after which the pane delivers nothing until
-    /// something asks for a seed.
+    /// Not the ordinary `%pause`, which the host recovers from by itself: this
+    /// is the host having run out of attempts, after which the pane delivers
+    /// nothing until something asks for a seed.
     FlowStalled {
+        pane_id: String,
+        message: String,
+    },
+    /// The ordinary `%pause`: tmux clamped a pane the pipeline fell behind on.
+    ///
+    /// The host resumes and re-captures it by itself, so the renderer must not
+    /// react — but the pane delivers nothing while the episode lasts, which is
+    /// exactly the window the echo-lag journal keeps catching. This is that
+    /// episode's timestamped name in the journal, nothing more.
+    FlowPaused {
         pane_id: String,
         message: String,
     },
@@ -163,6 +172,9 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
         }
         TerminalEvent::FlowStalled { pane_id, message } => {
             encode_bytes(15, pane_id, sequence, message.into_bytes())
+        }
+        TerminalEvent::FlowPaused { pane_id, message } => {
+            encode_bytes(16, pane_id, sequence, message.into_bytes())
         }
         TerminalEvent::FileService { scope, payload } => encode_bytes(12, scope, sequence, payload),
         TerminalEvent::GitService { scope, payload } => encode_bytes(13, scope, sequence, payload),

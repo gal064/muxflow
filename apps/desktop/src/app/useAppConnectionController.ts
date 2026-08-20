@@ -291,6 +291,12 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
           setTerminalEpoch(event.epoch);
         } else if (event.kind === "topologyDirty") {
           setStatus("Topology changed; reconciling…");
+        } else if (event.kind === "flowPaused") {
+          // Journal only — the host resumes the pane itself. This is the
+          // per-pane mute window tmux opens when the pipeline falls behind,
+          // and pairing its timestamps with input.echoTimeout lines is what
+          // convicts (or clears) flow control for the typing-lag reports.
+          recordIncident("flow.paused", { paneId: event.paneId });
         } else if (event.kind === "flowStalled") {
           terminalStateCache.delete(event.paneId);
           // The host already tried the only in-place tmux resume twice. Its
