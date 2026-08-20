@@ -3,3 +3,13 @@ packages:
 
 allowBuilds:
   esbuild: true
+
+# Upstream bug in @xterm/addon-webgl 0.19.0 only: TextureAtlas sets
+# `_requestClearModel` true on an atlas page merge or the first oversized glyph
+# and never resets it, so from that frame on WebglRenderer.renderRows clears and
+# rebuilds the *whole* viewport model every frame for the rest of the session —
+# the garbled rows and stutter while scrolling a busy pane. The patch makes
+# `TextureAtlas.beginFrame()` consume the flag, so exactly one frame rebuilds
+# per merge event. Drop it if a later addon release fixes this upstream.
+patchedDependencies:
+  '@xterm/addon-webgl@0.19.0': patches/@xterm__addon-webgl@0.19.0.patch
