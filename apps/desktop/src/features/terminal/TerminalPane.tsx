@@ -20,6 +20,7 @@ import { ownTerminalBytes } from "./TerminalBytes";
 import { DeferredTerminalOutputQueue } from "./DeferredTerminalOutputQueue";
 import { describePaneDegradation, PaneDegradedWatchdog } from "./PaneDegradedWatchdog";
 import { awaitWithin } from "./timeBound";
+import { REVEAL_RETRY_DELAY_MS, revealFailureAction } from "./revealRetry";
 import { TerminalTransferSurface, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
 import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
@@ -643,66 +644,96 @@ export function TerminalPane({
   useEffect(() => {
     if (!clientId) return;
     let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    // `retriesUsed` counts only within one reveal attempt: a retry re-runs the
+    // visibility call under the *same* key, so it never gets past the
+    // once-per-(client, epoch) latch on its own and never races the reveal a
+    // newer epoch or an explicit re-assertion starts.
+    const runReveal = async (
+      checkpoint: { terminalEpoch: number; outputGeneration: number },
+      revealKey: string,
+      retriesUsed: number,
+    ) => {
+      const handoff = pendingPaneHandoffs.get(pane.id);
+      if (handoff && (await awaitWithin(handoff, PANE_HANDOFF_TIMEOUT_MS)) === "timeout") {
+        // Proceeding is safe, and waiting longer is not. A pending handoff
+        // belongs to a *previous* instance of this pane — it is created by the
+        // mount effect's cleanup, and React runs that cleanup before the new
+        // instance's effects — so its own guard
+        // (`paneLifecycleVersions.get(pane.id) !== lifecycle`) already makes
+        // everything it does after the drain a no-op: it writes no
+        // `terminalStateCache` entry and sends no hide. That guard is what
+        // rules out the two things this wait was protecting against, a late
+        // hide overtaking this reveal and a stale serialize landing in the
+        // cache under this pane's id — the cache is keyed by pane id alone,
+        // with the epoch only carried as a field, so a stale `set` would be
+        // indistinguishable from a fresh one if it ever ran. The one case
+        // where the handoff is still current is a pane that really did go
+        // away, and then `active` is false and this reveal stops below.
+        // Dropping the map entry keeps the *next* reveal from queueing behind
+        // the same wedged promise.
+        if (pendingPaneHandoffs.get(pane.id) === handoff) pendingPaneHandoffs.delete(pane.id);
+        recordPerfCounter("terminal.pane.handoffTimeouts");
+      }
+      if (!active || lastRevealKeyRef.current !== revealKey) return;
+      const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
+      if (!currentCheckpoint || currentCheckpoint.terminalEpoch !== checkpoint.terminalEpoch) return;
+      revealStateRef.current = {
+        ready: false,
+        hasLocalState: rendererEpochRef.current === currentCheckpoint.terminalEpoch,
+      };
+      const rendererMatchesEpoch = rendererEpochRef.current === currentCheckpoint.terminalEpoch;
+      try {
+        await setTerminalVisibility(
+          clientId,
+          pane.id,
+          true,
+          new Uint8Array(),
+          rendererMatchesEpoch ? currentCheckpoint : { ...currentCheckpoint, outputGeneration: 0 },
+        );
+        watchdogRef.current?.clear("revealFailed");
+      } catch (error) {
+        const action = revealFailureAction({
+          error,
+          current: active && lastRevealKeyRef.current === revealKey,
+          retriesUsed,
+        });
+        if (action === "ignore") return;
+        if (action === "retry") {
+          // The latch stays held: this key is still the pane's live reveal, and
+          // the retry re-runs under it rather than announcing a new attempt.
+          if (retriesUsed === 0) recordIncident("pane.revealRetry", { paneId: pane.id, attempt: revealAttemptRef.current });
+          clearTimeout(retryTimer);
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined;
+            void runReveal(checkpoint, revealKey, retriesUsed + 1);
+          }, REVEAL_RETRY_DELAY_MS);
+          return;
+        }
+        lastRevealKeyRef.current = undefined;
+        // Clearing the latch is not a retry: nothing re-runs this unless the
+        // epoch changes, so the host can be left believing a mounted pane is
+        // hidden and no output is ever sent for it. The watchdog is what turns
+        // that into a bounded series of re-assertions.
+        watchdogRef.current?.note("revealFailed");
+        diagnosticRef.current?.(`Could not mark ${pane.id} visible: ${String(error)}`);
+        if (clientIdRef.current === clientId && hub.generationEpoch === currentCheckpoint.terminalEpoch) {
+          void requestTerminalSeed(clientId, pane.id).catch((seedError) => {
+            diagnosticRef.current?.(`Could not reseed ${pane.id} after a visibility conflict: ${String(seedError)}`);
+          });
+        }
+      }
+    };
     const revealForCurrentEpoch = () => {
       const checkpoint = hub.visibilityCheckpoint(pane.id);
       if (!checkpoint) return;
       const revealKey = `${clientId}:${checkpoint.terminalEpoch}:${revealAttemptRef.current}`;
       if (lastRevealKeyRef.current === revealKey) return;
       lastRevealKeyRef.current = revealKey;
-      void (async () => {
-        const handoff = pendingPaneHandoffs.get(pane.id);
-        if (handoff && (await awaitWithin(handoff, PANE_HANDOFF_TIMEOUT_MS)) === "timeout") {
-          // Proceeding is safe, and waiting longer is not. A pending handoff
-          // belongs to a *previous* instance of this pane — it is created by the
-          // mount effect's cleanup, and React runs that cleanup before the new
-          // instance's effects — so its own guard
-          // (`paneLifecycleVersions.get(pane.id) !== lifecycle`) already makes
-          // everything it does after the drain a no-op: it writes no
-          // `terminalStateCache` entry and sends no hide. That guard is what
-          // rules out the two things this wait was protecting against, a late
-          // hide overtaking this reveal and a stale serialize landing in the
-          // cache under this pane's id — the cache is keyed by pane id alone,
-          // with the epoch only carried as a field, so a stale `set` would be
-          // indistinguishable from a fresh one if it ever ran. The one case
-          // where the handoff is still current is a pane that really did go
-          // away, and then `active` is false and this reveal stops below.
-          // Dropping the map entry keeps the *next* reveal from queueing behind
-          // the same wedged promise.
-          if (pendingPaneHandoffs.get(pane.id) === handoff) pendingPaneHandoffs.delete(pane.id);
-          recordPerfCounter("terminal.pane.handoffTimeouts");
-        }
-        if (!active || lastRevealKeyRef.current !== revealKey) return;
-        const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
-        if (!currentCheckpoint || currentCheckpoint.terminalEpoch !== checkpoint.terminalEpoch) return;
-        revealStateRef.current = {
-          ready: false,
-          hasLocalState: rendererEpochRef.current === currentCheckpoint.terminalEpoch,
-        };
-        const rendererMatchesEpoch = rendererEpochRef.current === currentCheckpoint.terminalEpoch;
-        try {
-          await setTerminalVisibility(
-            clientId,
-            pane.id,
-            true,
-            new Uint8Array(),
-            rendererMatchesEpoch ? currentCheckpoint : { ...currentCheckpoint, outputGeneration: 0 },
-          );
-          watchdogRef.current?.clear("revealFailed");
-        } catch (error) {
-          if (lastRevealKeyRef.current === revealKey) lastRevealKeyRef.current = undefined;
-          // Clearing the latch is not a retry: nothing re-runs this unless the
-          // epoch changes, so the host can be left believing a mounted pane is
-          // hidden and no output is ever sent for it. The watchdog is what turns
-          // that into a bounded series of re-assertions.
-          watchdogRef.current?.note("revealFailed");
-          diagnosticRef.current?.(`Could not mark ${pane.id} visible: ${String(error)}`);
-          if (clientIdRef.current === clientId && hub.generationEpoch === currentCheckpoint.terminalEpoch) {
-            void requestTerminalSeed(clientId, pane.id).catch((seedError) => {
-              diagnosticRef.current?.(`Could not reseed ${pane.id} after a visibility conflict: ${String(seedError)}`);
-            });
-          }
-        }
-      })();
+      // Whatever was still queued to retry belongs to the key this supersedes.
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+      void runReveal(checkpoint, revealKey, 0);
     };
     reassertVisibilityRef.current = () => {
       // Stepping the attempt is what gets past the once-per-(client, epoch)
@@ -722,6 +753,7 @@ export function TerminalPane({
     });
     return () => {
       active = false;
+      clearTimeout(retryTimer);
       reassertVisibilityRef.current = undefined;
       unsubscribe();
     };

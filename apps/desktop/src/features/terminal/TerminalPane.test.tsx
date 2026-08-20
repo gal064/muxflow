@@ -150,7 +150,18 @@ class FakeHub {
     if (health.conflictReseedRequested) this.setPaneHealth(paneId, { ...health, conflictReseedRequested: false });
   }
 
-  subscribeEpoch(): () => void { return () => undefined; }
+  #epochListeners = new Set<() => void>();
+
+  subscribeEpoch(listener: () => void): () => void {
+    this.#epochListeners.add(listener);
+    return () => { this.#epochListeners.delete(listener); };
+  }
+
+  /** A reconnect: the host announces a new terminal epoch for the same pane. */
+  advanceEpoch(): void {
+    this.generationEpoch = (this.generationEpoch ?? 0) + 1;
+    for (const listener of [...this.#epochListeners]) listener();
+  }
 
   markRendered(paneId: string, generation: number, terminalEpoch?: number): void {
     this.rendered.push({ paneId, generation, terminalEpoch: terminalEpoch ?? this.generationEpoch });
@@ -271,8 +282,10 @@ beforeEach(() => {
   renderers.config.wedgeDrain = false;
   paneNodes.length = 0;
   resizeCallbacks.length = 0;
-  api.setTerminalVisibility.mockClear();
-  api.requestTerminalSeed.mockClear();
+  // Reset, not clear: a test that scripts a refusal must not leave it armed for
+  // the next one, and a failing assertion skips any cleanup the test itself does.
+  api.setTerminalVisibility.mockReset();
+  api.requestTerminalSeed.mockReset();
   Object.assign(globalThis, {
     IS_REACT_ACT_ENVIRONMENT: true,
     ResizeObserver: class {
@@ -612,6 +625,74 @@ describe("TerminalPane degraded-state watchdog", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
     expect(revealCalls()).toBe(2);
     expect(api.requestTerminalSeed).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+    await act(async () => mounted.unmount());
+  });
+
+  // A connection (re)start rejects the first reveals it is given: the client id
+  // comes back before the SSH handshake, and the bridge announces its epoch a
+  // round trip before it can carry a request. Falling straight through to the
+  // watchdog leaves the visible pane frozen for seconds on every rebuild.
+  it("retries a reveal the host refused because its transport was not up yet", async () => {
+    api.setTerminalVisibility.mockImplementationOnce(async () => {
+      throw new Error("host bridge is disconnected");
+    });
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%early"), hub);
+    expect(revealCalls()).toBe(1);
+    // Nothing about this failure is a conflict, so none of the conflict
+    // recovery runs for it.
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(revealCalls()).toBe(2);
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+    await act(async () => mounted.unmount());
+  });
+
+  it("gives up on a transient reveal once its retries run out", async () => {
+    api.setTerminalVisibility.mockImplementation(async (...args: unknown[]) => {
+      if (args[2] !== true) return undefined;
+      throw new Error("terminal client is no longer attached");
+    });
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%hopeless"), hub);
+
+    // Eight retries at 250ms, and then the watchdog's own re-assertion at +2s
+    // takes over rather than this looping forever.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(revealCalls()).toBe(9);
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+
+    vi.useRealTimers();
+    await act(async () => mounted.unmount());
+  });
+
+  it("lets a superseded reveal fail without marking the pane degraded", async () => {
+    let refuseFirstReveal!: (error: Error) => void;
+    api.setTerminalVisibility.mockImplementationOnce(
+      () => new Promise<undefined>((_, reject) => { refuseFirstReveal = reject; }),
+    );
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%superseded"), hub);
+    expect(revealCalls()).toBe(1);
+
+    // The reconnect supersedes the in-flight reveal, and its own reveal lands.
+    await act(async () => { hub.advanceEpoch(); });
+    expect(revealCalls()).toBe(2);
+
+    vi.useFakeTimers();
+    await act(async () => { refuseFirstReveal(new Error("visibility conflict")); });
+    // The pane is healthy; the loser of that race has no standing to say
+    // otherwise, so no watchdog episode starts on its behalf.
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(revealCalls()).toBe(2);
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
 
     vi.useRealTimers();
     await act(async () => mounted.unmount());
