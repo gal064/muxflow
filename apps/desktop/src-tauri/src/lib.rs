@@ -1,6 +1,7 @@
 mod app_state;
 mod connection;
 mod external_links;
+mod incidents;
 mod macos_window;
 mod notifications;
 mod perf_log;
@@ -184,6 +185,7 @@ pub fn run() {
             app.manage(app_state::AppStateStore::load(
                 config_dir.join("app-state.json"),
             ));
+            app.manage(incidents::IncidentJournal::new(app.path().app_log_dir()?));
             app.manage(connection::TerminalClients::default());
             app.manage(connection::files::DownloadManager::default());
             app.manage(connection::files::FileIoManager);
@@ -210,6 +212,7 @@ pub fn run() {
             emit_agent_notification,
             emit_test_notification,
             notification_permission_status,
+            incidents::record_incident,
             connection::start_terminal,
             connection::stop_terminal,
             connection::delivery_ack::acknowledge_terminal_delivery,

@@ -15,6 +15,13 @@ export interface NormalizedHostState {
   generation: number;
   lastSequence: number;
   resyncRequested: boolean;
+  /**
+   * Which mismatch requested the resync, with the numbers that proved it.
+   * Written for the incident journal: `resyncRequested` alone says the world
+   * is being rebuilt, and this says why — the difference between knowing the
+   * amber bar showed and knowing what to fix.
+   */
+  resyncReason?: string;
   sessions: Record<string, TmuxSnapshot["sessions"][number]>;
   windows: Record<string, TmuxSnapshot["windows"][number]>;
   panes: Record<string, TmuxSnapshot["panes"][number]>;
@@ -43,6 +50,16 @@ function indexById<T extends { id: string }>(items: T[]): Record<string, T> {
   return Object.fromEntries(items.map((item) => [item.id, item]));
 }
 
+function requestResync(state: NormalizedHostState, reason: string): NormalizedHostState {
+  return {
+    ...state,
+    phase: "resyncing",
+    canMutate: false,
+    resyncRequested: true,
+    resyncReason: reason,
+  };
+}
+
 function replaceSnapshot(
   state: NormalizedHostState,
   action: Extract<HostAction, { type: "snapshot" | "orderedSnapshot" }>,
@@ -53,6 +70,7 @@ function replaceSnapshot(
     generation: action.generation ?? state.generation + 1,
     lastSequence: action.sequence,
     resyncRequested: false,
+    resyncReason: undefined,
     sessions: indexById(action.snapshot.sessions),
     windows: indexById(action.snapshot.windows),
     panes: indexById(action.snapshot.panes),
@@ -74,47 +92,22 @@ export function connectionReducer(state: NormalizedHostState, action: HostAction
     case "orderedEvent": {
       if (action.sequence <= state.lastSequence) return state;
       if (action.sequence !== state.lastSequence + 1) {
-        return {
-          ...state,
-          phase: "resyncing",
-          canMutate: false,
-          resyncRequested: true,
-        };
+        return requestResync(state, `event-gap expected=${state.lastSequence + 1} received=${action.sequence}`);
       }
       return { ...state, lastSequence: action.sequence };
     }
     case "sequenceGap":
-      return {
-        ...state,
-        phase: "resyncing",
-        canMutate: false,
-        resyncRequested: true,
-      };
+      return requestResync(state, `bridge-gap expected=${action.expected} received=${action.received}`);
     case "orderedSnapshot": {
       if (action.serverIdentity !== state.serverIdentity) {
-        return {
-          ...state,
-          phase: "resyncing",
-          canMutate: false,
-          resyncRequested: true,
-        };
+        return requestResync(state, `snapshot-identity had=${state.serverIdentity} received=${action.serverIdentity}`);
       }
       if (action.sequence <= state.lastSequence) return state;
       if (action.sequence !== state.lastSequence + 1) {
-        return {
-          ...state,
-          phase: "resyncing",
-          canMutate: false,
-          resyncRequested: true,
-        };
+        return requestResync(state, `snapshot-gap expected=${state.lastSequence + 1} received=${action.sequence}`);
       }
       if (action.generation !== undefined && action.generation <= state.generation) {
-        return {
-          ...state,
-          phase: "resyncing",
-          canMutate: false,
-          resyncRequested: true,
-        };
+        return requestResync(state, `snapshot-stale-generation had=${state.generation} received=${action.generation}`);
       }
       return replaceSnapshot(state, action);
     }
