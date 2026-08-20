@@ -144,11 +144,20 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     };
   }, []);
 
+  /**
+   * The last reason left that costs a full rebuild: a different tmux server.
+   *
+   * Everything else the reducer used to force a reconnect for was sequence
+   * bookkeeping, and the native link repairs those on the connection it
+   * already holds. A new server identity is not repairable — none of the
+   * sessions, windows or panes on screen exist on the machine now answering —
+   * so this one still bumps the connection epoch.
+   */
   useEffect(() => {
     if (hostState.resyncRequested && !frontendResyncActive.current) {
       frontendResyncActive.current = true;
-      recordPerfCounter("connection.reconnect.sequenceGap");
-      recordIncident("reconnect.sequenceGap", { reason: hostState.resyncReason });
+      recordPerfCounter("connection.reconnect.serverChanged");
+      recordIncident("reconnect.serverChanged", { reason: hostState.resyncReason });
       setConnectionEpoch((value) => value + 1);
     } else if (!hostState.resyncRequested) {
       frontendResyncActive.current = false;
@@ -162,6 +171,24 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
    * amber investigation has been missing.
    */
   const linkDegradedSince = useRef<number | undefined>(undefined);
+  /**
+   * The pane half of a resync the connection survived.
+   *
+   * `resyncing` → `connected` is the native link repairing a sequence break in
+   * place: ordering is whole again and the connection was never replaced, so
+   * nothing else re-establishes the panes — and whatever the missing frames
+   * were painting is simply absent from their screens. A connecting → connected
+   * transition is an ordinary first attach, whose seeds are already on the way,
+   * which is why the previous phase and not the current one decides this.
+   */
+  const previousPhase = useRef(hostState.phase);
+  useEffect(() => {
+    const before = previousPhase.current;
+    previousPhase.current = hostState.phase;
+    if (before !== "resyncing" || hostState.phase !== "connected") return;
+    recordIncident("link.resynced", {});
+    hub.reseedSubscribedPanes("post-resync reseed");
+  }, [hostState.phase, hub]);
   useEffect(() => {
     const degraded = hostState.phase === "disconnected"
       || hostState.phase === "reconnecting"
@@ -235,7 +262,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     const scope = terminalBridgeScope();
     void startTerminal(scope.sessionId, scope.paneIds, connection, (event) => {
       if (disposed) return;
-      const admission = hub.publish(event, () => {
+      hub.publish(event, () => {
         if (event.kind === "generationEpoch") {
           terminalStateCache.clear();
           terminalEpochRef.current = event.epoch;
@@ -306,10 +333,6 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
           else if (event.event) agentClient.publishWireEvent(agentScope, event.event);
         }
       });
-      if (admission.kind === "gap") {
-        dispatchHost({ type: "sequenceGap", expected: admission.expected, received: admission.received });
-        setStatus(`Terminal event gap: expected ${admission.expected}, received ${admission.received}; resyncing…`);
-      }
     }).then((id) => {
       startedClient = id;
       if (disposed) void stopTerminal(id);

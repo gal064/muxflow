@@ -1,5 +1,6 @@
 import type { TerminalEvent } from "./api";
 import type { OperationRecorder } from "../../perf/operations";
+import { recordIncident } from "../../diagnostics/incidents";
 
 type EpochEvent = Extract<TerminalEvent, { kind: "generationEpoch" }>;
 type EpochListener = (event: EpochEvent) => void;
@@ -81,8 +82,16 @@ export interface TerminalEventHubLimits {
 
 export type TerminalEventAdmission =
   | { kind: "accepted" | "local" }
-  | { kind: "stale" }
-  | { kind: "gap"; expected: number; received: number };
+  | { kind: "stale" };
+
+/**
+ * How often a sequence jump may cost every mounted pane a reseed.
+ *
+ * A jump is one anomaly however many frames it spans, and the frames arrive in
+ * a burst: repairing per event would ask the host for the same screens dozens
+ * of times for a single incident.
+ */
+const SEQUENCE_REPAIR_DEBOUNCE_MS = 1_000;
 
 /**
  * Routes pane events without retaining an unbounded all-host history. Active
@@ -106,7 +115,7 @@ export class TerminalEventHub {
   #retainedPaneCount = 0;
   #generationEpoch?: number;
   #lastSequence = 0;
-  #sequenceFrozen = false;
+  #lastSequenceRepairAt = Number.NEGATIVE_INFINITY;
   #unknownPanesRequireSeed = false;
 
   constructor(
@@ -131,7 +140,7 @@ export class TerminalEventHub {
     }
     const epochChanged = event.kind === "generationEpoch" && event.epoch !== this.#generationEpoch;
     const admission = this.#admitSequence(event);
-    if (admission.kind === "stale" || admission.kind === "gap") return admission;
+    if (admission.kind === "stale") return admission;
     if (epochChanged && event.kind === "generationEpoch") {
       this.#generationEpoch = event.epoch;
       this.#clearPaneState();
@@ -346,6 +355,32 @@ export class TerminalEventHub {
     this.#notifyHealthChange(paneId, healthBefore);
   }
 
+  /**
+   * Asks the host for one fresh screen per mounted pane.
+   *
+   * Repairs that keep the connection — a native in-place resync, a decoded
+   * frame this process dropped — restore ordering without restoring content:
+   * whatever those bytes were painting is simply missing from the panes. This
+   * is the scoped answer to that, on the same request path the pane watchdogs
+   * use, in place of the connection teardown that used to stand in for it.
+   */
+  reseedSubscribedPanes(reason: string): void {
+    // Copied: a seed request runs application code that may mount or unmount a
+    // pane, and the live map must not be iterated across that.
+    for (const paneId of [...this.#paneListeners.keys()]) {
+      const pane = this.#activePaneStates.get(paneId);
+      if (pane?.conflictReseedRequested) {
+        // The one-shot conflict latch bounds a storm of *handoff* conflicts. It
+        // must not also swallow this reseed, which has its own cause, so reopen
+        // it exactly as `retryPaneSeed` does before asking again.
+        const healthBefore = paneHealthOf(pane);
+        pane.conflictReseedRequested = false;
+        this.#notifyHealthChange(paneId, healthBefore);
+      }
+      this.#requestSeed(paneId, reason);
+    }
+  }
+
   clearPane(paneId: string): void {
     const pane = this.#activePaneStates.get(paneId) ?? this.#dormantPaneStates.get(paneId);
     if (pane) {
@@ -364,7 +399,6 @@ export class TerminalEventHub {
   clear(): void {
     this.#generationEpoch = undefined;
     this.#lastSequence = 0;
-    this.#sequenceFrozen = false;
     this.#clearPaneState();
   }
 
@@ -599,28 +633,46 @@ export class TerminalEventHub {
     }
   }
 
+  /**
+   * Where the wire's ordering is read, and no longer where it is enforced.
+   *
+   * The native link owns sequence integrity: on a real break it stays on the
+   * connection, requests a resync and forwards an authoritative snapshot at the
+   * barrier. A hole reaching this far is therefore not a lost stretch of host
+   * history — it is this process dropping a decoded frame — so freezing the
+   * whole connection on it (which is what a `gap` admission used to do, via a
+   * connection-epoch bump) tore down a link the native side had already
+   * repaired. Admit the event, carry the watermark to it, and repair the only
+   * thing actually at risk: the panes whose screens may have lost a fragment.
+   */
   #admitSequence(event: TerminalEvent): TerminalEventAdmission {
     if (event.sequence === 0) {
       if (event.kind === "generationEpoch" && event.epoch !== this.#generationEpoch) {
         this.#lastSequence = 0;
-        this.#sequenceFrozen = false;
       }
       return { kind: "local" };
     }
     if (event.kind === "snapshot" && event.authoritative) {
       this.#lastSequence = event.sequence;
-      this.#sequenceFrozen = false;
       return { kind: "accepted" };
     }
-    if (this.#sequenceFrozen) return { kind: "gap", expected: this.#lastSequence + 1, received: event.sequence };
     if (event.sequence <= this.#lastSequence) return { kind: "stale" };
     const expected = this.#lastSequence + 1;
-    if (event.sequence !== expected) {
-      this.#sequenceFrozen = true;
-      return { kind: "gap", expected, received: event.sequence };
-    }
     this.#lastSequence = event.sequence;
+    if (event.sequence !== expected) this.#repairSequenceJump(expected, event.sequence);
     return { kind: "accepted" };
+  }
+
+  #repairSequenceJump(expected: number, received: number): void {
+    const now = Date.now();
+    if (now - this.#lastSequenceRepairAt < SEQUENCE_REPAIR_DEBOUNCE_MS) return;
+    this.#lastSequenceRepairAt = now;
+    this.measurements?.add("terminal.hub.sequenceJumps");
+    // Journalled unconditionally: this path is meant to be unreachable now that
+    // the native layer repairs breaks in place, and the journal is the only way
+    // to learn that it fires in the field.
+    recordIncident("link.eventGap", { expected, received });
+    this.reseedSubscribedPanes("event sequence jumped (decode drop?)");
   }
 
   #requestConflictReseed(paneId: string, pane: PaneStreamState): void {
