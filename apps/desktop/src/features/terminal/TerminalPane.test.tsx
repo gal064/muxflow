@@ -37,7 +37,6 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     disposed = false;
     focusCalls = 0;
     restoredSerialized: string | undefined;
-    restores: string[] = [];
     measured = config.measured;
     /** Mirrors the real renderer: `setGrid` is the only writer of cols/rows. */
     grid: Size = { columns: 80, rows: 24 };
@@ -76,7 +75,6 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     }
     restore(serialized: string, onRendered?: () => void): boolean {
       this.restoredSerialized = serialized;
-      this.restores.push(serialized);
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
@@ -350,27 +348,24 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     const renderer = await mountPane(fixturePane("%5"), hub);
     expect(renderers.created[0].restoredSerialized).toBe("warm-screen");
     // Between `open` and the restored content xterm would paint an empty grid
-    // with a cursor in it. The gate hides the terminal for exactly that gap —
-    // and stays closed past the cache restore, because the reveal handshake is
-    // about to answer with the same screen (see the redundant-restore tests).
+    // with a cursor in it. The gate hides the terminal for exactly that gap,
+    // and the restore's rendered callback is what ends it.
     expect(paneNode().getAttribute("data-painted")).toBe("false");
     await act(async () => { renderers.created[0].flushRendered(); });
-    expect(paneNode().getAttribute("data-painted")).toBe("false");
+    expect(paneNode().getAttribute("data-painted")).toBe("true");
     await awaitPaint();
 
-    // The span still closes: the cache restore did paint, it just did not show.
     expect(perfSummary().map(({ name }) => name)).toContain("window.switch");
     await act(async () => renderer.unmount());
   });
 
-  it("does not reveal the deliberate blank a pane shows while it owes a seed", async () => {
+  it("reveals a pane that seeds empty and waits for a fresh seed", async () => {
     const hub = new FakeHub();
     const mounted = await mountPane(fixturePane("%await"), hub);
     expect(paneNode().getAttribute("data-painted")).toBe("false");
 
-    // The blank RIS this branch writes is seed debt, not content. Showing it is
-    // a whole extra visible repaint before the arriving seed paints the real
-    // screen, so the gate stays shut and the 300ms fallback owns the worst case.
+    // An empty screen under a diagnostic is this branch's intended visible
+    // state; it produces no rendered callback, so it must reveal itself.
     await act(async () => {
       hub.deliver({
         kind: "paneResource", paneId: "%await", state: "released", requiresSeed: false,
@@ -380,11 +375,7 @@ describe("TerminalPane pane-paint span lifecycle", () => {
         rawTail: ownTerminalBytes(new Uint8Array()),
       });
     });
-    expect(paneNode().getAttribute("data-painted")).toBe("false");
 
-    // The seed it was waiting for both repaints and reveals.
-    await act(async () => { hub.deliver(seedEvent("%await", 5)); });
-    await act(async () => { renderers.created[0].flushRendered(); });
     expect(paneNode().getAttribute("data-painted")).toBe("true");
     await act(async () => mounted.unmount());
   });
@@ -455,180 +446,6 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     abandonPanePaintSpansForScope("client-a");
     await awaitPaint();
     expect(perfSummary().map(({ name }) => name)).not.toContain("create.workspace");
-  });
-});
-
-// A tab switch remounts every pane, and every remount used to be up to three
-// full screen rewrites — each one an ESC c, so each one visibly blank before it
-// filled. The cache restore and the reveal handshake carry the *same* bytes (the
-// host stores this pane's hide checkpoint as `snapshot_generation` and hands it
-// straight back), so the second rewrite is pure flicker. These pin one visible
-// paint per switch: the cache restore paints without showing, and the handshake
-// writes only what is new and reveals.
-describe("TerminalPane reveal handshake", () => {
-  function hostRestore(paneId: string, options: {
-    serialized?: string;
-    snapshotGeneration: number;
-    tailThroughGeneration: number;
-    tail?: string;
-  }): PaneEvent {
-    return {
-      kind: "paneResource", paneId, state: "hiddenBuffered", requiresSeed: false,
-      recoveryReason: "", generation: options.tailThroughGeneration,
-      snapshotGeneration: options.snapshotGeneration,
-      tailThroughGeneration: options.tailThroughGeneration, sequence: 2,
-      serializedSnapshot: ownTerminalBytes(new TextEncoder().encode(options.serialized ?? "warm-screen")),
-      rawTail: ownTerminalBytes(new TextEncoder().encode(options.tail ?? "")),
-    };
-  }
-
-  async function mountWarmPane(paneId: string, hub: FakeHub) {
-    terminalStateCache.set(paneId, prepareTerminalSnapshot("warm-screen"), { terminalEpoch: 7, outputGeneration: 3 });
-    const mounted = await mountPane(fixturePane(paneId), hub);
-    const renderer = renderers.created[0];
-    expect(renderer.restores).toEqual(["warm-screen"]);
-    await act(async () => { renderer.flushRendered(); });
-    // Painted, acknowledged — and still hidden, because the handshake below is
-    // about to answer with this very screen.
-    expect(hub.rendered).toEqual([{ paneId, generation: 3, terminalEpoch: 7 }]);
-    expect(paneNode().getAttribute("data-painted")).toBe("false");
-    return { mounted, renderer };
-  }
-
-  it("writes only the raw tail when the host hands back the screen the cache painted", async () => {
-    const hub = new FakeHub();
-    const { mounted, renderer } = await mountWarmPane("%warm", hub);
-
-    await act(async () => {
-      hub.deliver(hostRestore("%warm", { snapshotGeneration: 3, tailThroughGeneration: 5, tail: "tail" }));
-    });
-    // No second restore: it would clear the screen and rewrite it byte for byte.
-    expect(renderer.restores).toEqual(["warm-screen"]);
-    expect(renderer.writes).toEqual(["write:4"]);
-    expect(paneNode().getAttribute("data-painted")).toBe("false");
-
-    await act(async () => { renderer.flushRendered(); });
-    expect(paneNode().getAttribute("data-painted")).toBe("true");
-    expect(hub.rendered.at(-1)).toEqual({ paneId: "%warm", generation: 5, terminalEpoch: 7 });
-    await act(async () => mounted.unmount());
-  });
-
-  it("still acknowledges and reveals when the skipped restore has no tail at all", async () => {
-    const hub = new FakeHub();
-    const { mounted, renderer } = await mountWarmPane("%warm-notail", hub);
-
-    await act(async () => {
-      hub.deliver(hostRestore("%warm-notail", { snapshotGeneration: 3, tailThroughGeneration: 3 }));
-    });
-    expect(renderer.restores).toEqual(["warm-screen"]);
-    // An empty write is still an ordered record, so its callback cannot overtake
-    // bytes already inside xterm's parser.
-    expect(renderer.writes).toEqual(["write:0"]);
-
-    await act(async () => { renderer.flushRendered(); });
-    expect(paneNode().getAttribute("data-painted")).toBe("true");
-    expect(hub.rendered.at(-1)).toEqual({ paneId: "%warm-notail", generation: 3, terminalEpoch: 7 });
-    await act(async () => mounted.unmount());
-  });
-
-  it("restores when the host's snapshot is not the one the cache painted", async () => {
-    const hub = new FakeHub();
-    const { mounted, renderer } = await mountWarmPane("%stale", hub);
-
-    // A newer host-side capture: its generation is not the cache's, so the two
-    // screens are genuinely different and the restore has to happen.
-    await act(async () => {
-      hub.deliver(hostRestore("%stale", {
-        serialized: "host-screen", snapshotGeneration: 4, tailThroughGeneration: 6, tail: "tail",
-      }));
-    });
-    expect(renderer.restores).toEqual(["warm-screen", "host-screen"]);
-    expect(renderer.writes).toEqual(["write:4"]);
-
-    await act(async () => { renderer.flushRendered(); });
-    expect(paneNode().getAttribute("data-painted")).toBe("true");
-    await act(async () => mounted.unmount());
-  });
-
-  it("reveals a cold pane on the restore the handshake brings it", async () => {
-    const hub = new FakeHub();
-    const mounted = await mountPane(fixturePane("%cold"), hub);
-    expect(renderers.created[0].restores).toEqual([]);
-    expect(paneNode().getAttribute("data-painted")).toBe("false");
-
-    await act(async () => {
-      hub.deliver(hostRestore("%cold", { serialized: "host-screen", snapshotGeneration: 4, tailThroughGeneration: 4 }));
-    });
-    expect(renderers.created[0].restores).toEqual(["host-screen"]);
-    expect(paneNode().getAttribute("data-painted")).toBe("false");
-    await act(async () => { renderers.created[0].flushRendered(); });
-    expect(paneNode().getAttribute("data-painted")).toBe("true");
-    await act(async () => mounted.unmount());
-  });
-
-  it("reveals the pane the handshake had nothing to add to", async () => {
-    // A reveal only reports local state the renderer has actually established,
-    // so reaching this branch takes a reveal issued after the cache restore
-    // landed — here the transport-not-up-yet retry.
-    api.setTerminalVisibility.mockImplementationOnce(async () => { throw new Error("host bridge is disconnected"); });
-    vi.useFakeTimers();
-    const hub = new FakeHub();
-    terminalStateCache.set("%agreed", prepareTerminalSnapshot("warm-screen"), { terminalEpoch: 7, outputGeneration: 3 });
-    const mounted = await mountPane(fixturePane("%agreed"), hub);
-    const renderer = renderers.created[0];
-    await act(async () => { renderer.flushRendered(); });
-    expect(paneNode().getAttribute("data-painted")).toBe("false");
-
-    // Still inside the 300ms fallback, so the reveal below is the effect's.
-    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
-    expect(revealCalls()).toBe(2);
-
-    // The host kept no recovery material because this pane's own state is
-    // already the screen. Nothing repaints, so this is the effect that reveals.
-    await act(async () => {
-      hub.deliver({
-        kind: "paneResource", paneId: "%agreed", state: "visible", requiresSeed: false,
-        recoveryReason: "", generation: 3, snapshotGeneration: 3, tailThroughGeneration: 3, sequence: 2,
-        serializedSnapshot: ownTerminalBytes(new Uint8Array()),
-        rawTail: ownTerminalBytes(new Uint8Array()),
-      });
-    });
-    expect(renderer.restores).toEqual(["warm-screen"]);
-    expect(paneNode().getAttribute("data-painted")).toBe("true");
-
-    vi.useRealTimers();
-    await act(async () => mounted.unmount());
-  });
-
-  it("falls back to the timer when the handshake never answers a warm pane", async () => {
-    vi.useFakeTimers();
-    const hub = new FakeHub();
-    terminalStateCache.set("%silent", prepareTerminalSnapshot("warm-screen"), { terminalEpoch: 7, outputGeneration: 3 });
-    const mounted = await mountPane(fixturePane("%silent"), hub);
-    await act(async () => { renderers.created[0].flushRendered(); });
-    expect(paneNode().getAttribute("data-painted")).toBe("false");
-
-    // Gating the reveal on the handshake may never leave a pane invisible.
-    act(() => { vi.advanceTimersByTime(300); });
-    expect(paneNode().getAttribute("data-painted")).toBe("true");
-
-    vi.useRealTimers();
-    await act(async () => mounted.unmount());
-  });
-
-  it("restores again when a seed has replaced what the cache painted", async () => {
-    const hub = new FakeHub();
-    const { mounted, renderer } = await mountWarmPane("%reseeded", hub);
-
-    // An authoritative seed is now the screen, so the cache's generation says
-    // nothing about what this terminal is showing.
-    await act(async () => { hub.deliver(seedEvent("%reseeded", 4)); });
-    await act(async () => { renderer.flushRendered(); });
-    await act(async () => {
-      hub.deliver(hostRestore("%reseeded", { snapshotGeneration: 3, tailThroughGeneration: 5, tail: "tail" }));
-    });
-    expect(renderer.restores).toEqual(["warm-screen", "warm-screen"]);
-    await act(async () => mounted.unmount());
   });
 });
 
