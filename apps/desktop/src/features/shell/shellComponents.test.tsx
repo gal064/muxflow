@@ -438,6 +438,7 @@ describe("saved host picker", () => {
     agentSetup={{ available: false, connected: true, reports: true, onSetUp: noop }}
     connectionMode="local"
     helper={{ phase: "idle" }}
+    onAddHost={noop}
     onClose={noop}
     onConnect={noop}
     onConnectionMode={noop}
@@ -515,12 +516,56 @@ describe("saved host picker", () => {
     const onProfile = vi.fn();
     let renderer!: ReturnType<typeof create>;
     act(() => { renderer = create(settings({ onProfile })); });
-    const picker = renderer.root.findByProps({ "aria-label": "Saved host" });
+    const picker = renderer.root.findByProps({ "aria-label": "Host" });
     expect(picker.props.value).toBe("");
     act(() => picker.props.onChange({ target: { value: "ssh-remote-linux" } }));
     expect(onProfile).toHaveBeenCalledWith(profiles[1]);
     act(() => { renderer.update(settings({ onProfile, selectedProfileId: "ssh-remote-linux" })); });
-    expect(renderer.root.findByProps({ "aria-label": "Saved host" }).props.value).toBe("ssh-remote-linux");
+    expect(renderer.root.findByProps({ "aria-label": "Host" }).props.value).toBe("ssh-remote-linux");
+    act(() => renderer.unmount());
+  });
+
+  it("lists saved hosts only, and says so when the form is not one of them", () => {
+    // The list used to open on "Current values (not saved)" — an entry that was
+    // neither a saved host nor anything the user had chosen, and the reason
+    // Connect could not tell "edit this machine" from "add another one".
+    const onAddHost = vi.fn();
+    const onProfile = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    act(() => { renderer = create(settings({ onAddHost, onProfile, selectedProfileId: "ssh-remote-linux" })); });
+    const options = () => renderer.root.findAllByType("option").map((node) => ({
+      value: node.props.value, label: node.props.children, disabled: node.props.disabled,
+    }));
+    expect(JSON.stringify(renderer.toJSON())).not.toContain("Current values");
+    expect(options()).toEqual([
+      { value: "local", label: "Local", disabled: undefined },
+      { value: "ssh-remote-linux", label: "remote-linux", disabled: undefined },
+    ]);
+
+    // Nothing saved is being edited: the picker says which state the form is
+    // in rather than showing someone else's host, and the entry cannot be
+    // chosen because it is not a place to go.
+    act(() => { renderer.update(settings({ onAddHost, onProfile, selectedProfileId: "" })); });
+    expect(options()[0]).toEqual({ value: "", label: "New host…", disabled: true });
+    expect(renderer.root.findByProps({ "aria-label": "Host" }).props.value).toBe("");
+
+    // Picking a real host is what leaves that state; the placeholder goes with
+    // it once the shell has recorded the selection.
+    act(() => renderer.root.findByProps({ "aria-label": "Host" })
+      .props.onChange({ target: { value: "ssh-remote-linux" } }));
+    expect(onProfile).toHaveBeenCalledWith(profiles[1]);
+    act(() => { renderer.update(settings({ onAddHost, onProfile, selectedProfileId: "ssh-remote-linux" })); });
+    expect(options().some((option) => option.label === "New host…")).toBe(false);
+    act(() => renderer.unmount());
+  });
+
+  it("offers a way to a host that is not saved yet, beside the picker", () => {
+    const onAddHost = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    act(() => { renderer = create(settings({ onAddHost, selectedProfileId: "ssh-remote-linux" })); });
+    const add = renderer.root.findAllByType("button").find((node) => String(node.children).includes("Add host"))!;
+    act(() => add.props.onClick());
+    expect(onAddHost).toHaveBeenCalledTimes(1);
     act(() => renderer.unmount());
   });
 

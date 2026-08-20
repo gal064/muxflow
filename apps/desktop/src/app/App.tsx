@@ -66,7 +66,7 @@ import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
-import type { HostProfile, Pane } from "./types";
+import type { ConnectionSpec, HostProfile, Pane } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
 import { useAppRecoveryController } from "./useAppRecoveryController";
@@ -81,6 +81,7 @@ import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
 import { useAppAgentController } from "./useAppAgentController";
 import { useAppShellChrome } from "./useAppShellChrome";
 import { useAppHostSettingsActions } from "./useAppHostSettingsActions";
+import { useMissingHelperRecovery } from "./useMissingHelperRecovery";
 import { useAppFileActions } from "./useAppFileActions";
 import { AppNoticeLayer } from "./AppNoticeLayer";
 import { AppRightPanel } from "./AppRightPanel";
@@ -167,10 +168,20 @@ export function App() {
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
   // One shared observation per repository, for the sidebar and every diff tab.
   const gitRepositories = useMemo(() => new GitRepositoryStore(gitClient), [gitClient]);
-  const connectionController = useAppConnectionController({ agentClient, fileClient, gitClient, setStatus });
+  // The connection controller reports a handshake failure; what to do about one
+  // is decided further down this component, with the helper reducer in hand.
+  // The indirection is what lets the two be defined in that order.
+  const onHandshakeFailure = useRef<(connection: ConnectionSpec) => void>(() => undefined);
+  const connectionController = useAppConnectionController({
+    agentClient,
+    fileClient,
+    gitClient,
+    onHandshakeFailure: (failed) => onHandshakeFailure.current(failed),
+    setStatus,
+  });
   const {
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
-    connectionDetail, connectionMode, currentHostProfileId,
+    connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, hostScopeRef, hostState, hub, optimisticWindow, profileRecovery,
     profiles, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
@@ -222,6 +233,18 @@ export function App() {
   const terminalTransferRegistry = useTerminalTransferRegistry();
   const latency = useHostLatency();
   useEffect(() => dispatchHelper({ type: "reset" }), [currentHelperConnectionKey]);
+  onHandshakeFailure.current = useMissingHelperRecovery({
+    connection, connectionEpoch, dispatchHelper, setConnectionDetail,
+  });
+  /**
+   * The host whose agent status the *helper install* dialog already consented
+   * to, waiting for the connection that install produces.
+   *
+   * In memory only, and spent by the first prompt it prevents. A relaunch
+   * before the host reconnects goes back to the ordinary one-time question,
+   * which is the correct fallback: it explains itself and can be declined.
+   */
+  const [pendingAgentAutoSetup, setPendingAgentAutoSetup] = useState<string>();
   // Renderers read this once, when they are created; changing it must not tear
   // down live terminals, so the setting says panes pick it up as they appear.
   useEffect(() => setTerminalScreenReaderMode(appState.shell.terminalScreenReader), [appState.shell.terminalScreenReader]);
@@ -364,6 +387,7 @@ export function App() {
     profiles,
     resetHost: () => dispatchHost({ type: "reset" }),
     scopeIsCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
+    selectedProfileId,
     setConnection,
     setConnectionDetail,
     setConnectionEpoch,
@@ -398,6 +422,12 @@ export function App() {
     activeWindow,
     activeWindowId,
     agentClient,
+    // Only for the host it was given for. The install reconnects, and by the
+    // time that connection is up the user may have switched somewhere else —
+    // where this consent means nothing and the ordinary prompt is right.
+    agentAutoSetup: pendingAgentAutoSetup === currentHostProfileId
+      ? { hostProfileId: currentHostProfileId, consume: () => setPendingAgentAutoSetup(undefined) }
+      : undefined,
     appFocused,
     clientHostProfileId,
     clientId,
@@ -1075,6 +1105,15 @@ export function App() {
       connectionMode={connectionMode}
       deletableProfile={deletableProfile}
       helper={helperState}
+      // An empty form with no saved host behind it, which is the one state the
+      // picker can no longer reach on its own now that it lists saved hosts
+      // only. SSH because a second local host is not a thing that exists.
+      onAddHost={() => {
+        setSelectedProfileId("");
+        setSshTarget("");
+        setSshConfigPath("");
+        setConnectionMode("ssh");
+      }}
       onClose={() => setSettingsOpen(false)}
       onConnect={() => { connect(); setSettingsOpen(false); }}
       onConnectionMode={(mode) => { setSelectedProfileId(""); setConnectionMode(mode); }}
@@ -1088,8 +1127,13 @@ export function App() {
       onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
       onShell={updateShell}
       onSounds={(preferences) => { setAgentSounds(preferences); saveAgentSoundPreferences(preferences); }}
-      onSshConfigPath={(value) => { setSelectedProfileId(""); setSshConfigPath(value); }}
-      onSshTarget={(value) => { setSelectedProfileId(""); setSshTarget(value); }}
+      // The selection survives typing. It used to be cleared on every
+      // keystroke, which made "correct this host's address" indistinguishable
+      // from "add a host": Connect derived a fresh id from the new values and
+      // saved a second entry for the same machine beside the one being
+      // corrected. Editing the fields of a picked host now edits that host.
+      onSshConfigPath={setSshConfigPath}
+      onSshTarget={setSshTarget}
       profiles={profiles}
       remote={connection.mode === "ssh"}
       selectedProfileId={selectedProfileId}
@@ -1136,7 +1180,16 @@ export function App() {
         void performAction(pending.action, pending.precondition);
       }}
       onHelperCancel={() => dispatchHelper({ type: "cancelUpgrade" })}
-      onHelperConfirm={() => void confirmHelperInstall()}
+      onHelperConfirm={() => {
+        // An install — never an upgrade — is the dialog that says agent status
+        // is part of what it sets up, so it is the only one that answers the
+        // agent question. Recorded against the host being installed on, and
+        // read again when that host's connection comes back.
+        if (helperState.phase === "confirming" && helperState.operation === "install") {
+          setPendingAgentAutoSetup(currentHostProfileId);
+        }
+        void confirmHelperInstall();
+      }}
       onHostDeleteCancel={() => setHostDeleteConfirmation(undefined)}
       onHostDeleteConfirm={(profile) => {
         setHostDeleteConfirmation(undefined);

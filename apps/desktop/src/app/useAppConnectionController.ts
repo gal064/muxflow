@@ -21,9 +21,24 @@ type ControllerArguments = {
   fileClient: TauriFileWorkspaceClient;
   gitClient: TauriGitWorkspaceClient;
   setStatus: Dispatch<SetStateAction<string>>;
+  /**
+   * Called when an SSH bridge dies with a handshake failure, which is the one
+   * connection error that is usually not a connection problem at all: a host
+   * with no helper installed answers the exec with "no such file or
+   * directory", and the supervisor reports that as a failed handshake. This
+   * controller does not know what to do about that — it stays a connection
+   * error here, with the detail and the status set exactly as before — so the
+   * shell is told and decides whether to offer the install.
+   */
+  onHandshakeFailure?(connection: ConnectionSpec): void;
 };
 
-export function useAppConnectionController({ agentClient, fileClient, gitClient, setStatus }: ControllerArguments) {
+export function useAppConnectionController({ agentClient, fileClient, gitClient, setStatus, onHandshakeFailure }: ControllerArguments) {
+  // Through a ref, because the bridge effect is keyed on the connection alone:
+  // a callback the shell rebuilds every render must not be able to tear the
+  // bridge down and start it again.
+  const handshakeFailureRef = useRef(onHandshakeFailure);
+  handshakeFailureRef.current = onHandshakeFailure;
   const [hostState, dispatchHost] = useReducer(connectionReducer, initialHostState);
   const snapshot = useMemo(() => denormalizeSnapshot(hostState), [hostState]);
   const snapshotRef = useRef(snapshot);
@@ -62,9 +77,14 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
    * the live `connection`, so choosing a different host filled the form in and
    * then snapped the control straight back to the connected one — the selection
    * was invisible until Connect made it the connection. Selecting is its own
-   * state; Connect is what turns it into a connection. Empty means "current
-   * values": either nothing is chosen, or the form has been edited away from
-   * whatever was.
+   * state; Connect is what turns it into a connection.
+   *
+   * A saved host here is the machine the form is *editing*: Connect keeps this
+   * id, so correcting a target moves that host rather than leaving a second
+   * entry for the same machine behind it. Empty is the other mode — a host that
+   * is not saved yet — which is what "+ Add host" sets, and what changing the
+   * transport falls back to, because a saved host does not change transport in
+   * place.
    */
   const [selectedProfileId, setSelectedProfileId] = useState("");
   const [profilesHydrated, setProfilesHydrated] = useState(false);
@@ -217,6 +237,14 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
           setConnectionDetail(detail);
           setStatus(detail);
+          // The message is the only thing that separates "this host has no
+          // helper" from "this host cannot be reached": both arrive as a dead
+          // bridge, and only the first one has a fix the app can offer. The
+          // wording comes from the bridge supervisor, which says either
+          // "handshake" or "connection setup" for every failure of that stage.
+          if (event.kind === "error" && connection.mode === "ssh" && /handshake|connection setup/i.test(event.message)) {
+            handshakeFailureRef.current?.(connection);
+          }
         } else if (event.kind === "connectionState") {
           dispatchHost({ type: "connection", phase: event.state });
           if (event.state === "connected") setConnectionDetail("");

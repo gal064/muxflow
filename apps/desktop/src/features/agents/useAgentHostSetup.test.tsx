@@ -63,6 +63,69 @@ describe("the one-time set-up prompt", () => {
     await act(async () => renderer.unmount());
   });
 
+  /**
+   * One consent, one setup. The helper install dialog says agent status is part
+   * of what it sets up, so this prompt arriving seconds later — after that
+   * install had visibly succeeded — asked the same person the same question
+   * twice. The consent travels as the host it was given for, and buys exactly
+   * what pressing "Set up this host" buys.
+   */
+  describe("when the helper install already asked", () => {
+    const autoSetup = (hostProfileId = "ssh-remote-linux") => ({ hostProfileId, consume: vi.fn() });
+
+    it("installs without asking, and spends the consent doing it", async () => {
+      const auto = autoSetup();
+      const setup = harness({ autoSetup: auto, adapters: [adapter("claude-code", "notWired"), adapter("codex", "notWired")] });
+      let renderer!: ReturnType<typeof create>;
+      await act(async () => { renderer = create(<setup.Harness />); });
+      expect(renderer.toJSON()).toEqual({ type: "div", props: {}, children: null });
+      expect(setup.current.open).toBe(false);
+      // Every adapter the dialog would have listed, on the host it was given
+      // for, recorded the way an accepted prompt records it.
+      expect(setup.calls.applyHooks).toHaveBeenCalledTimes(2);
+      expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-remote-linux", "accepted");
+      expect(setup.calls.onStatus).toHaveBeenCalledWith("Agent status hooks installed on remote-linux.");
+      // Spent: a relaunch, or a second host, goes back to the ordinary prompt.
+      expect(auto.consume).toHaveBeenCalledTimes(1);
+      await act(async () => renderer.unmount());
+    });
+
+    it("still asks when nothing was agreed elsewhere", async () => {
+      const setup = harness();
+      let renderer!: ReturnType<typeof create>;
+      await act(async () => { renderer = create(<setup.Harness />); });
+      expect(JSON.stringify(renderer.toJSON())).toContain("Set up agent status on ");
+      expect(setup.calls.applyHooks).not.toHaveBeenCalled();
+      await act(async () => renderer.unmount());
+    });
+
+    it("asks anyway when the consent belongs to another host", async () => {
+      const auto = autoSetup("local");
+      const setup = harness({ autoSetup: auto });
+      let renderer!: ReturnType<typeof create>;
+      await act(async () => { renderer = create(<setup.Harness />); });
+      expect(JSON.stringify(renderer.toJSON())).toContain("Set up agent status on ");
+      expect(setup.calls.applyHooks).not.toHaveBeenCalled();
+      expect(auto.consume).not.toHaveBeenCalled();
+      await act(async () => renderer.unmount());
+    });
+
+    it("asks anyway when the answer could not be recorded", async () => {
+      // The same gate `accept` walks into: consent that cannot be written down
+      // is not consent, and an install here would leave configured hooks with
+      // no record of anyone agreeing to them. The prompt is the honest
+      // fallback — it explains itself and can be declined.
+      const auto = autoSetup();
+      const setup = harness({ autoSetup: auto, decisionsArePersistable: false });
+      let renderer!: ReturnType<typeof create>;
+      await act(async () => { renderer = create(<setup.Harness />); });
+      expect(JSON.stringify(renderer.toJSON())).toContain("Set up agent status on ");
+      expect(setup.calls.applyHooks).not.toHaveBeenCalled();
+      expect(auto.consume).not.toHaveBeenCalled();
+      await act(async () => renderer.unmount());
+    });
+  });
+
   it("never asks again once the host has an answer, of either kind", async () => {
     for (const decision of ["accepted", "declined"] as const) {
       const setup = harness({ decision });

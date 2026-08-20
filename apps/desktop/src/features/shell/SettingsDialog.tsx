@@ -10,7 +10,7 @@ import type { ShellState } from "./types";
 interface SettingsDialogProps {
   connectionMode: "local" | "ssh";
   profiles: readonly HostProfile[];
-  /** The picked saved host; empty is the "Current values" entry. */
+  /** The saved host the form is editing; empty is the unsaved new host. */
   selectedProfileId: string;
   /** The saved host Delete would remove, or undefined while there is none. */
   deletableProfile?: HostProfile;
@@ -21,6 +21,8 @@ interface SettingsDialogProps {
   shell: ShellState;
   sounds: AgentSoundPreferences;
   onClose(): void;
+  /** Empties the form for a host that is not saved yet. */
+  onAddHost(): void;
   onConnect(): void;
   onConnectionMode(mode: "local" | "ssh"): void;
   onDeleteProfile(): void;
@@ -113,17 +115,31 @@ export function SettingsDialog(props: SettingsDialogProps) {
         tabIndex={0}
       >
         {tab === "connection" && <>
-          <label>Saved host
-            {/* Bound to what the user picked, not to what the app is connected
-                to. Connect is what turns one into the other. */}
-            <select aria-label="Saved host" onChange={(event) => {
-              const profile = props.profiles.find((item) => item.id === event.target.value);
-              props.onProfile(profile);
-            }} value={props.selectedProfileId}>
-              <option value="">Current values (not saved)</option>
-              {props.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
-            </select>
-          </label>
+          {/* Picking is editing. The list holds saved hosts and nothing else:
+              it used to open on "Current values (not saved)", a phantom entry
+              that was neither a host nor a thing anyone chose, and picking a
+              real one only filled the form in — Connect then derived a fresh id
+              from those values and saved a *second* host beside the one being
+              corrected. The picker now says which machine the fields below
+              belong to, and Connect keeps it. "+ Add host" is the other half of
+              that: the only way to reach the form with no host behind it.
+
+              Bound to what the user picked, not to what the app is connected
+              to. Connect is what turns one into the other. */}
+          <div className="settings-host-picker">
+            <label>Host
+              <select aria-label="Host" onChange={(event) => {
+                const profile = props.profiles.find((item) => item.id === event.target.value);
+                props.onProfile(profile);
+              }} value={props.selectedProfileId}>
+                {/* Only while there is no host to show, and unselectable: it is
+                    a description of the form's state, not a destination. */}
+                {!props.selectedProfileId && <option disabled value="">New host…</option>}
+                {props.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
+              </select>
+            </label>
+            <button onClick={props.onAddHost} type="button">+ Add host</button>
+          </div>
           {/* Under the picker on its own line, not beside it: this is the one
               control in the panel that destroys something, and putting it a
               few pixels from the control the user reaches for most is how it
