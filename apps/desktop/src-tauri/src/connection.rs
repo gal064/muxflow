@@ -30,7 +30,7 @@ use event_frame::{TerminalEvent, encode_event};
 mod delivery_window;
 use delivery_window::{DeliveryWindow, HostCharge};
 pub(crate) mod delivery_ack;
-use delivery_ack::flush_delivery_ack;
+use delivery_ack::{flush_delivery_ack, forfeit_delivery_charge};
 mod dispatch;
 mod operations;
 use dispatch::{

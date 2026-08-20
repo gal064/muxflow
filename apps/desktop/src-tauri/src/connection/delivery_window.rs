@@ -27,6 +27,11 @@ impl HostCharge {
             records: 1,
         }
     }
+
+    pub(super) fn accumulate(&mut self, other: Self) {
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        self.records = self.records.saturating_add(other.records);
+    }
 }
 
 #[derive(Debug)]
@@ -190,6 +195,28 @@ impl DeliveryWindow {
             self.released.notify_all();
             return Ok(Some(host));
         }
+    }
+
+    /// Releases host credit for terminal payload that never became a frame.
+    ///
+    /// The ledger above maps admitted frames to the credit they owe; this is the
+    /// one charge that has no frame to map. Events quarantined between a
+    /// detected sequence gap and its resync barrier are dropped before they
+    /// reach JavaScript, so no acknowledgement will ever cover them — but the
+    /// host already reserved their exact `terminal_delivery_*` charge and holds
+    /// it until this connection's cumulative total catches up. Adding it here
+    /// keeps that total monotonic and still bounded by what the host reserved,
+    /// which is what stops a resync from permanently narrowing the window.
+    pub(super) fn forfeit(&self, epoch: u64, host: HostCharge) -> Option<HostCharge> {
+        let mut state = self.state.lock().unwrap();
+        let State::Open(open) = &mut *state else {
+            return None;
+        };
+        if epoch != open.epoch {
+            return None;
+        }
+        open.acknowledged_host.accumulate(host);
+        Some(open.acknowledged_host)
     }
 
     pub(super) fn close(&self) {

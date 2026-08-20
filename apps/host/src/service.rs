@@ -170,6 +170,7 @@ pub async fn serve_with_shutdown(
     let writer_closed = Arc::clone(&closed);
     let mut writer_task = tokio::spawn(async move {
         let mut sequencer = ProtocolSequencer::default();
+        let mut gap_fault = events::GapFaultInjector::for_connection();
         let mut pending_message = None;
         loop {
             let message = match pending_message.take() {
@@ -187,9 +188,16 @@ pub async fn serve_with_shutdown(
                 continue;
             }
             writer_topology_signal.observe_event(&message);
+            let injected_gap = gap_fault.after(&message);
             let frame = sequencer.frame(message);
             if write_frame(&mut writer, &frame).await.is_err() {
                 break;
+            }
+            if let Some(injected_gap) = injected_gap {
+                let frame = sequencer.frame(injected_gap);
+                if write_frame(&mut writer, &frame).await.is_err() {
+                    break;
+                }
             }
         }
         writer_closed.store(true, Ordering::Release);

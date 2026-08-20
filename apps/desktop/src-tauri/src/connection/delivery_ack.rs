@@ -55,6 +55,32 @@ pub fn acknowledge_terminal_delivery(
     flush_delivery_ack_serialized(&client).inspect_err(|_| client.reconnect_transport())
 }
 
+/// Acknowledges host terminal credit for payload this connection dropped.
+///
+/// The only caller is the bridge's gap quarantine, which discards events the
+/// host has already charged for. It shares the ack serialization and the
+/// cumulative pending slot with the JavaScript path above precisely so the two
+/// can never publish a lower total than the other already sent.
+pub(super) fn forfeit_delivery_charge(
+    client: &TerminalClient,
+    forfeited: HostCharge,
+) -> Result<(), String> {
+    if forfeited == HostCharge::default() {
+        return Ok(());
+    }
+    let _serialization = client.delivery_ack_serialization.lock().unwrap();
+    let window = client.delivery_window.lock().unwrap().clone();
+    let Some(window) = window else {
+        return Ok(());
+    };
+    let epoch = client.terminal_epoch.load(Ordering::Acquire);
+    let Some(host) = window.forfeit(epoch, forfeited) else {
+        return Ok(());
+    };
+    *client.pending_delivery_ack.lock().unwrap() = Some((epoch, host));
+    flush_delivery_ack_serialized(client)
+}
+
 pub(super) fn flush_delivery_ack(client: &TerminalClient) -> Result<(), String> {
     let _serialization = client.delivery_ack_serialization.lock().unwrap();
     flush_delivery_ack_serialized(client)

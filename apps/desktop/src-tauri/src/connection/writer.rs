@@ -33,7 +33,7 @@ impl ControlWriterHandle {
         Self::start_with(stdin, name)
     }
 
-    fn start_with<W>(writer: W, name: &str) -> Result<Self, String>
+    pub(super) fn start_with<W>(writer: W, name: &str) -> Result<Self, String>
     where
         W: Write + AsRawFd + Send + 'static,
     {

@@ -1,6 +1,5 @@
 use std::{
     io::{BufReader, Read, Write},
-    process::ChildStdout,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
@@ -503,7 +502,7 @@ fn read_until_response_with_value(
 }
 
 fn read_protocol_stream(
-    mut reader: BufReader<ChildStdout>,
+    mut reader: impl Read,
     mut sequence: u64,
     server_identity: &str,
     channel: &TerminalEventChannel,
@@ -511,6 +510,9 @@ fn read_protocol_stream(
     admit_events: bool,
 ) -> Result<(), String> {
     let mut resync_request_id = None;
+    // Terminal payload the host has already reserved credit for and this run
+    // will never deliver: see the quarantine below.
+    let mut quarantined_charge = super::HostCharge::default();
     loop {
         let frame = read_frame_sync(&mut reader)
             .map_err(|error| error.to_string())?
@@ -541,10 +543,32 @@ fn read_protocol_stream(
                         authoritative: true,
                     },
                 )?;
-                return Err(
-                    "resync complete; reconnecting terminal for an authoritative screen seed"
-                        .into(),
+                super::forfeit_delivery_charge(client, std::mem::take(&mut quarantined_charge))?;
+                // The barrier is the new watermark, and adopting it verbatim is
+                // what makes the first event after it validate. The host's
+                // `ProtocolSequencer` stamps a snapshot barrier with the
+                // sequence it has *already* spent (`accepted_sequence =
+                // self.sequence`, it does not advance) and numbers the next
+                // ordered event `self.sequence + 1` — exactly the successor
+                // `validate_event_sequence` demands.
+                sequence = response.accepted_sequence;
+                // The barrier is also what ends the quarantine below, so this
+                // must clear before the loop reads another event. Nothing else
+                // latches: a later gap re-arms the same two fields.
+                resync_request_id = None;
+                client.ready.store(true, Ordering::Release);
+                // The transport never went away, so the input epoch and the
+                // resize queue are deliberately left alone: keystrokes queued
+                // while the screen was reconciling are still bound for the same
+                // host connection, and marking a reconnect here would discard
+                // them. Only the renderer's `resyncing` banner has to retire.
+                send_event(
+                    channel,
+                    TerminalEvent::ConnectionState {
+                        state: "connected".into(),
+                    },
                 );
+                continue;
             }
             if let Some(waiter) = client.pending.lock().unwrap().remove(&frame.request_id) {
                 let _ = waiter.send(Ok(response));
@@ -555,6 +579,15 @@ fn read_protocol_stream(
             // Events received after a detected gap are superseded by the
             // authoritative resync barrier. Correlated responses above must
             // still be delivered to callers.
+            //
+            // Their host delivery credit is not superseded, though. The host
+            // reserved it before it sent them and releases it only against this
+            // client's cumulative acknowledgement, so a charge dropped here is
+            // credit it never gets back. That was harmless while the run ended
+            // at the barrier and took the whole window with it; now that the run
+            // resumes, every gap would shrink the terminal output window until
+            // the host stopped sending. Release it as one exact total below.
+            quarantined_charge.accumulate(event_delivery_charge(&frame));
             continue;
         }
         if !admit_events {
@@ -564,6 +597,11 @@ fn read_protocol_stream(
             // without applying payloads from a protocol we cannot trust.
             continue;
         }
+        // Read before the frame is consumed: an event that trips the gap below
+        // is refused by `validate_event_sequence` before any of its payload is
+        // forwarded, so its charge joins the quarantined total rather than the
+        // delivered one.
+        let charge = event_delivery_charge(&frame);
         match process_event(frame, sequence, server_identity, channel, client) {
             Ok((next, scoped_seed)) => {
                 sequence = next;
@@ -581,6 +619,7 @@ fn read_protocol_stream(
                 }
             }
             Err(error) if error.starts_with("sequence gap") || error == "host requested resync" => {
+                quarantined_charge.accumulate(charge);
                 client.ready.store(false, Ordering::Release);
                 send_event(
                     channel,
@@ -611,6 +650,17 @@ fn read_protocol_stream(
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+/// The host delivery credit an event frame carries, without consuming it.
+fn event_delivery_charge(frame: &v1::Envelope) -> super::HostCharge {
+    match &frame.payload {
+        Some(Payload::Event(event)) => super::HostCharge {
+            bytes: event.terminal_delivery_bytes,
+            records: event.terminal_delivery_records,
+        },
+        _ => super::HostCharge::default(),
     }
 }
 
