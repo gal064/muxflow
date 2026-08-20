@@ -19,6 +19,7 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "output"; paneId: string; generation: number; data: OwnedTerminalBytes }
   | { kind: "seedDiagnostic"; paneId: string; message: string }
   | { kind: "flowStalled"; paneId: string; message: string }
+  | { kind: "flowPaused"; paneId: string; message: string }
   | { kind: "topologyDirty"; name: string }
   | { kind: "error"; message: string }
   | { kind: "exit"; reason: string }
@@ -202,6 +203,14 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
         return { kind: "flowStalled", paneId: label, message: decoder.decode(data), sequence };
       } catch {
         throw new Error("terminal flow stall payload is not valid UTF-8");
+      }
+    case 16:
+      requireHostSequence(sequence, "terminal flow pause");
+      requirePaneId(label, "terminal flow pause");
+      try {
+        return { kind: "flowPaused", paneId: label, message: decoder.decode(data), sequence };
+      } catch {
+        throw new Error("terminal flow pause payload is not valid UTF-8");
       }
     default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
   }

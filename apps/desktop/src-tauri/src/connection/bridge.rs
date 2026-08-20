@@ -783,11 +783,26 @@ fn process_event(
                 ));
             }
         }
-        // `TerminalFlowPaused` is deliberately absent. It is the start of a
-        // flow-control episode the host resumes and re-captures by itself, and
-        // a second recovery raced in from here would only re-photograph a pane
-        // that is already being re-photographed. What reaches the renderer is
-        // the case the host could not fix.
+        // `TerminalFlowPaused` is a notice, never a recovery. The host resumes
+        // and re-captures the pane by itself, and a second recovery raced in
+        // from here would only re-photograph a pane that is already being
+        // re-photographed — so this forwards the episode for the journal and
+        // nothing may act on it. What reaches the recovery paths below is the
+        // case the host could not fix.
+        v1::EventKind::TerminalFlowPaused => {
+            if let Some(pane_id) = scoped_terminal_recovery(&event.scope) {
+                send_protocol_event(
+                    channel,
+                    event_sequence,
+                    TerminalEvent::FlowPaused {
+                        pane_id,
+                        message: event.detail,
+                    },
+                )?;
+            } else {
+                send_protocol_event(channel, event_sequence, TerminalEvent::ProtocolProgress)?;
+            }
+        }
         v1::EventKind::TerminalFlowStalled => {
             if let Some(pane_id) = scoped_terminal_recovery(&event.scope) {
                 send_protocol_event(

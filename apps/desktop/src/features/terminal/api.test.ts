@@ -459,6 +459,14 @@ describe("binary terminal IPC", () => {
     expect(() => decodeTerminalEvent(frame(15, "%7", 1, Uint8Array.of(0xff)))).toThrow("UTF-8");
   });
 
+  it("decodes a pane-scoped flow pause and rejects malformed values", () => {
+    expect(decodeTerminalEvent(frame(16, "%7", 21, textEncoder.encode("tmux pause-after flow control engaged")))).toEqual({
+      kind: "flowPaused", paneId: "%7", message: "tmux pause-after flow control engaged", sequence: 21,
+    });
+    expect(() => decodeTerminalEvent(frame(16, "terminal", 1, Uint8Array.of(65)))).toThrow("pane label");
+    expect(() => decodeTerminalEvent(frame(16, "%7", 1, Uint8Array.of(0xff)))).toThrow("UTF-8");
+  });
+
   it("keeps one initially-empty bridge lifecycle stable across session and topology UI changes", () => {
     const connection = { mode: "local" } as const;
     const initialKey = terminalBridgeKey(connection, 2);
