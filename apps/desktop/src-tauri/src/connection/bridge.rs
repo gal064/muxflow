@@ -517,6 +517,7 @@ fn read_protocol_stream(
         let frame = read_frame_sync(&mut reader)
             .map_err(|error| error.to_string())?
             .ok_or("host bridge closed")?;
+        client.note_host_frame();
         let mut frame = frame;
         if matches!(frame.payload, Some(Payload::Response(_))) {
             let Some(Payload::Response(response)) = frame.payload.take() else {

@@ -182,7 +182,7 @@ export function App() {
   const {
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
-    currentHostScope, dispatchHost, hostScopeRef, hostState, hub, optimisticWindow, profileRecovery,
+    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, optimisticWindow, profileRecovery,
     profiles, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
     setProfileRecovery, setProfiles, setSelectedProfileId, setSshConfigPath, setSshTarget,
@@ -664,9 +664,12 @@ export function App() {
 
   const handleInput = useCallback((paneId: string, input: TerminalInput) => {
     if (!clientId || !hostState.canMutate) return;
+    // The one place a keystroke becomes a request, so the one place the wait
+    // for its echo can start.
+    echoLagProbe.noteInput(paneId);
     const request = input.kind === "text" ? sendInput(clientId, paneId, input.data) : sendBinaryInput(clientId, paneId, input.data);
     void request.catch((error) => { if (clientIdRef.current === clientId) setStatus(String(error)); });
-  }, [clientId, hostState.canMutate]);
+  }, [clientId, echoLagProbe, hostState.canMutate]);
 
   // Which workspace tmux sizes from is decided here and nowhere else, so it is
   // stated to the host as a fact rather than left to whichever event happened

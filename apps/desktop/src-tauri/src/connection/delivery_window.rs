@@ -219,6 +219,25 @@ impl DeliveryWindow {
         Some(open.acknowledged_host)
     }
 
+    /// Cumulative host credit reserved by this connection, and the part of it
+    /// JavaScript has already acknowledged.
+    ///
+    /// Read-only, for the renderer's echo-lag journal: the difference between
+    /// the two is exactly the terminal credit the host is still holding open
+    /// for frames this desktop has not yet released, which is what separates a
+    /// stalled delivery window from a link that has simply gone quiet.
+    pub(super) fn totals(&self) -> Option<(HostCharge, HostCharge)> {
+        let state = self.state.lock().unwrap();
+        let State::Open(open) = &*state else {
+            return None;
+        };
+        let mut reserved = open.acknowledged_host;
+        for frame in &open.frames {
+            reserved.accumulate(frame.host);
+        }
+        Some((reserved, open.acknowledged_host))
+    }
+
     pub(super) fn close(&self) {
         *self.state.lock().unwrap() = State::Closed;
         self.released.notify_all();
@@ -394,6 +413,51 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn totals_report_the_credit_still_held_open_without_consuming_it() {
+        let window = DeliveryWindow::new(3);
+        window
+            .reserve(100, HostCharge::terminal(80))
+            .unwrap()
+            .commit()
+            .unwrap();
+        window
+            .reserve(60, HostCharge::terminal(40))
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(
+            window.totals(),
+            Some((
+                HostCharge {
+                    bytes: 120,
+                    records: 2
+                },
+                HostCharge::default()
+            ))
+        );
+        window.acknowledge(3, 1, 100).unwrap();
+        // Reading twice must report the same ledger: the acknowledgement above
+        // is the only thing allowed to move it.
+        for _ in 0..2 {
+            assert_eq!(
+                window.totals(),
+                Some((
+                    HostCharge {
+                        bytes: 120,
+                        records: 2
+                    },
+                    HostCharge {
+                        bytes: 80,
+                        records: 1
+                    }
+                ))
+            );
+        }
+        window.close();
+        assert_eq!(window.totals(), None);
     }
 
     #[test]

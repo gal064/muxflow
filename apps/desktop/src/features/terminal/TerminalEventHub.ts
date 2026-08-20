@@ -123,6 +123,13 @@ export class TerminalEventHub {
     limits: TerminalEventHubLimits = {},
     readonly measurements?: OperationRecorder,
     readonly onObserverFailure?: (message: string) => void,
+    /**
+     * Journal-only notice that a pane's screen has just been repainted, used by
+     * the echo-lag probe. It runs on the fanout path, so it must not throw:
+     * a failure here would be indistinguishable from the pane's own consumer
+     * rejecting the event.
+     */
+    readonly onPaneRepaint?: (paneId: string) => void,
   ) {
     this.#maxPaneBytes = limits.maxPaneBytes ?? DEFAULT_MAX_PANE_BYTES;
     this.#maxTotalBytes = limits.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
@@ -245,6 +252,9 @@ export class TerminalEventHub {
     }
     const listener = this.#paneListeners.get(event.paneId);
     if (listener) {
+      // A seed or restored screen repaints the pane just as output does; a
+      // diagnostic carries no content and repaints nothing.
+      if (event.kind !== "seedDiagnostic") this.onPaneRepaint?.(event.paneId);
       this.measurements?.add("terminal.hub.fanoutDeliveries");
       try {
         listener(event);
