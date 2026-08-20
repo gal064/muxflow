@@ -157,6 +157,14 @@ interface Props {
   pane: Pane;
   hub: TerminalEventHub;
   onInput: (paneId: string, input: TerminalInput) => void;
+  /**
+   * A physical key was pressed in this pane.
+   *
+   * Separate from `onInput` because they are not the same event: the terminal
+   * also emits input on its own, replying to what a program asked it, and only
+   * this one means a human touched the keyboard.
+   */
+  onKeyActivity?: (paneId: string) => void;
   onFocus: (paneId: string) => void;
   /**
    * Reports what this terminal turns pixels into. It describes a terminal, not
@@ -176,6 +184,7 @@ export function TerminalPane({
   pane,
   hub,
   onInput,
+  onKeyActivity,
   onFocus,
   onMeasurements,
   onController,
@@ -195,6 +204,7 @@ export function TerminalPane({
   }
   const paneRef = useRef(pane);
   const inputRef = useRef(onInput);
+  const keyActivityRef = useRef(onKeyActivity);
   const focusRef = useRef(onFocus);
   const measurementsRef = useRef(onMeasurements);
   const controllerRef = useRef(onController);
@@ -226,6 +236,7 @@ export function TerminalPane({
   const searchComposing = useRef(false);
   paneRef.current = pane;
   inputRef.current = onInput;
+  keyActivityRef.current = onKeyActivity;
   focusRef.current = onFocus;
   measurementsRef.current = onMeasurements;
   controllerRef.current = onController;
@@ -357,6 +368,13 @@ export function TerminalPane({
       });
     };
     terminalContainer.addEventListener("paste", interceptPaste, true);
+    const noteKeyActivity = () => {
+      // Capture phase and observation only: this must see the key even when
+      // something below stops the event, and must never alter what xterm does
+      // with it.
+      keyActivityRef.current?.(pane.id);
+    };
+    terminalContainer.addEventListener("keydown", noteKeyActivity, true);
     const cached = terminalStateCache.get(pane.id);
     const currentCached = cached?.terminalEpoch !== undefined && cached.terminalEpoch === hub.generationEpoch
       ? cached
@@ -577,6 +595,7 @@ export function TerminalPane({
       unsubscribeViewport();
       unsubscribeInput();
       terminalContainer.removeEventListener("paste", interceptPaste, true);
+      terminalContainer.removeEventListener("keydown", noteKeyActivity, true);
       controllerRef.current(pane.id, undefined);
       const currentClientId = clientIdRef.current;
       const handoff = (async () => {

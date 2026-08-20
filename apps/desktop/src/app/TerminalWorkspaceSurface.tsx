@@ -32,6 +32,8 @@ type TerminalWorkspaceSurfaceProps = {
   beginDividerDrag(event: PointerEvent<HTMLElement>, pane: Pane, axis: "horizontal" | "vertical"): void;
   focusPane(pane: Pane): void;
   handleInput(paneId: string, input: TerminalInput): void;
+  /** A physical key was pressed in a pane, which no `handleInput` can tell. */
+  handleKeyActivity(paneId: string): void;
   /** A terminal reported what it turns pixels into. */
   onMeasurements(measurements: TerminalMeasurements): void;
   performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
@@ -63,6 +65,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         onDiagnostic={props.setStatus}
         onFocus={(paneId) => { if (paneId !== activePane?.id) props.focusPane(pane); }}
         onInput={props.handleInput}
+        onKeyActivity={props.handleKeyActivity}
         onMeasurements={props.onMeasurements}
         transferClient={props.terminalTransferClient}
         transferRegistry={props.terminalTransferRegistry}
