@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { measurePerfRequest, recordPerfCounter } from "../../perf/probe";
 import { perfProbeReady } from "../../perf/bootstrap";
+import { recordIncident } from "../../diagnostics/incidents";
 import type { ConnectionSpec, TmuxSnapshot } from "../../app/types";
 import type { WireFileEvent } from "../files/api";
 import type { WireGitEvent } from "../git/api";
@@ -563,6 +564,54 @@ function requireEmptyPayload(payload: Uint8Array, context: string): void {
   if (payload.byteLength !== 0) throw new Error(`${context} frame has an unexpected payload`);
 }
 
+/**
+ * Turns one wire frame into one delivered event, and never escapes with the
+ * frame unaccounted for.
+ *
+ * The channel dispatcher in `@tauri-apps/api` advances its own message index
+ * around this call: a throw that reaches it stops that index from advancing, so
+ * every later frame queues behind the failure forever and the pane is frozen
+ * until the app restarts. A malformed or invalid frame must therefore be
+ * *dropped* here, not raised: the frame already passed the native contiguity
+ * check before it was encoded, so the hole this leaves is seen by the hub's
+ * own watermark, whose recovery path — however blunt — recovers, while a
+ * wedged channel does not.
+ *
+ * Credit is charged per wire frame regardless of whether the frame could be
+ * decoded, so the acknowledgements are recorded on the failure path too;
+ * skipping them would leak the host's window one undecodable frame at a time.
+ */
+function handleTerminalFrame(
+  frame: ArrayBuffer,
+  onEvent: (event: TerminalEvent) => void,
+  acknowledgements: BridgeAcknowledgements,
+  delivery: DeliveryAcknowledgements,
+): void {
+  recordPerfCounter("bridge.ingressBytes", frame.byteLength);
+  recordPerfCounter("desktop.hostEvents");
+  let event: TerminalEvent;
+  try {
+    event = decodeTerminalEvent(frame);
+  } catch (error) {
+    acknowledgements.record(frame.byteLength);
+    delivery.record(frame.byteLength);
+    recordIncident("link.decodeFailure", { message: String(error) });
+    return;
+  }
+  if (event.kind === "generationEpoch") delivery.beginEpoch(event.epoch);
+  // Decoding is the ownership boundary: once a complete wire frame becomes
+  // a typed event, native and host credit must eventually be released even
+  // if an application observer rejects the event. A callback failure may be
+  // surfaced (and the app's hub turns observer failures into reconnects),
+  // but it cannot punch an ordinal hole that a later cumulative ACK crosses.
+  try {
+    onEvent(event);
+  } finally {
+    acknowledgements.record(frame.byteLength);
+    delivery.record(frame.byteLength);
+  }
+}
+
 export async function startTerminal(
   sessionId: string,
   paneIds: string[],
@@ -573,23 +622,7 @@ export async function startTerminal(
   const channel = new Channel<ArrayBuffer>();
   const acknowledgements = new BridgeAcknowledgements(measurementEnabled);
   const delivery = new DeliveryAcknowledgements();
-  channel.onmessage = (frame) => {
-    recordPerfCounter("bridge.ingressBytes", frame.byteLength);
-    recordPerfCounter("desktop.hostEvents");
-    const event = decodeTerminalEvent(frame);
-    if (event.kind === "generationEpoch") delivery.beginEpoch(event.epoch);
-    // Decoding is the ownership boundary: once a complete wire frame becomes
-    // a typed event, native and host credit must eventually be released even
-    // if an application observer rejects the event. A callback failure may be
-    // surfaced (and the app's hub turns observer failures into reconnects),
-    // but it cannot punch an ordinal hole that a later cumulative ACK crosses.
-    try {
-      onEvent(event);
-    } finally {
-      acknowledgements.record(frame.byteLength);
-      delivery.record(frame.byteLength);
-    }
-  };
+  channel.onmessage = (frame) => handleTerminalFrame(frame, onEvent, acknowledgements, delivery);
   try {
     const startRequest = {
       sessionId, paneIds, connection, measurementId: acknowledgements.measurementId,
