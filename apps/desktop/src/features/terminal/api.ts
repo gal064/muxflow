@@ -783,6 +783,30 @@ export function requestTerminalSeed(clientId: string, paneId: string): Promise<v
   );
 }
 
+/** The native half of one echo-lag journal line — see `terminal_link_stats`. */
+export interface TerminalLinkStats {
+  reservedBytes: number;
+  ackedBytes: number;
+  reservedRecords: number;
+  ackedRecords: number;
+  msSinceLastHostEvent: number;
+}
+
+/**
+ * Reads the delivery link's counters for the incident journal.
+ *
+ * Deliberately unmeasured and never rejecting: this runs while the app is
+ * already struggling, and a diagnostic that can fail the path it is describing
+ * is worse than no diagnostic. `null` means "stats unavailable".
+ */
+export async function fetchLinkStats(clientId: string): Promise<TerminalLinkStats | null> {
+  try {
+    return await invoke<TerminalLinkStats>("terminal_link_stats", { clientId });
+  } catch {
+    return null;
+  }
+}
+
 export function terminalBridgeKey(connection: ConnectionSpec, epoch: number): string {
   return `${JSON.stringify(connection)}:${epoch}`;
 }

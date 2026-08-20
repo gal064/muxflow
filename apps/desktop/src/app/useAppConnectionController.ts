@@ -7,7 +7,8 @@ import { helperConnectionKey } from "../features/shell/helperUpgrade";
 import { hostProfileId } from "../features/shell/types";
 import { useDesktopResumeRecovery } from "../features/shell/useDesktopResumeRecovery";
 import { TerminalEventHub } from "../features/terminal/TerminalEventHub";
-import { requestTerminalSeed, startTerminal, stopTerminal, terminalBridgeKey, terminalBridgeScope } from "../features/terminal/api";
+import { createEchoLagProbe } from "../features/terminal/echoLagProbe";
+import { fetchLinkStats, requestTerminalSeed, startTerminal, stopTerminal, terminalBridgeKey, terminalBridgeScope } from "../features/terminal/api";
 import { terminalStateCache } from "../features/terminal/TerminalStateCache";
 import { connectionReducer, denormalizeSnapshot, initialHostState } from "../state/connectionReducer";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
@@ -104,6 +105,26 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   };
   const hostScopeRef = useRef(currentHostScope);
   hostScopeRef.current = currentHostScope;
+  /**
+   * The journal's record of typing lag, which nothing else can report.
+   *
+   * One probe for the app: input is dispatched from a single callback and the
+   * hub repaints every pane, so both halves of the measurement meet here. The
+   * link counters are read only once an outlier has already been decided, and
+   * a failed read still leaves the lag itself in the journal.
+   */
+  const echoLagProbe = useMemo(() => createEchoLagProbe({
+    onIncident: ({ kind, ...detail }) => {
+      const currentClientId = clientIdRef.current;
+      if (!currentClientId) {
+        recordIncident(kind, detail);
+        return;
+      }
+      void fetchLinkStats(currentClientId)
+        .then((stats) => recordIncident(kind, stats ? { ...detail, ...stats } : detail));
+    },
+  }), []);
+  useEffect(() => () => echoLagProbe.dispose(), [echoLagProbe]);
   const hub = useMemo(() => new TerminalEventHub(
     (paneId, reason) => {
       terminalStateCache.delete(paneId);
@@ -122,7 +143,8 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
       setStatus(message);
       setConnectionEpoch((value) => value + 1);
     },
-  ), [setStatus]);
+    (paneId) => echoLagProbe.noteOutput(paneId),
+  ), [echoLagProbe, setStatus]);
 
   useDesktopResumeRecovery(() => {
     if (!profilesHydrated) return;
@@ -358,7 +380,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   return {
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
-    currentHostScope, dispatchHost, hostScopeRef, hostState, hub, profileRecovery,
+    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, profileRecovery,
     optimisticWindow,
     profiles, profilesHydrated, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,

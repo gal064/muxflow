@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     process::Child,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -116,6 +116,18 @@ pub(crate) struct TerminalClient {
     delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
     delivery_ack_serialization: Mutex<()>,
     pending_delivery_ack: Mutex<Option<(u64, HostCharge)>>,
+    /// Milliseconds since `MONOTONIC_ORIGIN` at the last host frame, or 0 for
+    /// a connection that has never read one. Journal-only, and written once per
+    /// frame with a relaxed store so the read loop stays lock-free.
+    last_host_frame_at: AtomicU64,
+}
+
+/// A process-wide monotonic base, so "when did the last frame arrive" fits in
+/// one atomic instead of a lock around an `Instant`.
+static MONOTONIC_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+fn monotonic_millis() -> u64 {
+    MONOTONIC_ORIGIN.elapsed().as_millis() as u64
 }
 
 struct InitialHostState {
@@ -148,7 +160,13 @@ impl TerminalClient {
             delivery_window: Arc::new(Mutex::new(None)),
             delivery_ack_serialization: Mutex::new(()),
             pending_delivery_ack: Mutex::new(None),
+            last_host_frame_at: AtomicU64::new(0),
         }
+    }
+
+    pub(super) fn note_host_frame(&self) {
+        self.last_host_frame_at
+            .store(monotonic_millis(), Ordering::Relaxed);
     }
 
     fn start_dispatchers(self: &Arc<Self>, client_id: &str) -> Result<(), String> {
@@ -828,6 +846,45 @@ fn terminal_seed_request(pane_id: String) -> Result<v1::Request, String> {
         operation: v1::Operation::RequestTerminalSeed.into(),
         scope: pane_id,
         ..Default::default()
+    })
+}
+
+/// What the delivery link looked like at one instant, for the journal.
+///
+/// `reserved` minus `acked` is the terminal credit the host is still holding
+/// for this connection; `msSinceLastHostEvent` says whether the link is moving
+/// at all. Together they are what turns "typing echoed three seconds late" into
+/// a cause. Nothing here mutates the ledger it reads.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalLinkStats {
+    reserved_bytes: u64,
+    acked_bytes: u64,
+    reserved_records: u64,
+    acked_records: u64,
+    ms_since_last_host_event: u64,
+}
+
+#[tauri::command]
+pub fn terminal_link_stats(
+    client_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<TerminalLinkStats, String> {
+    let client = get_client(&clients, &client_id)?;
+    let last_frame_at = client.last_host_frame_at.load(Ordering::Relaxed);
+    if last_frame_at == 0 {
+        return Err("this terminal connection has not read a host frame yet".into());
+    }
+    let window = client.delivery_window.lock().unwrap().clone();
+    let (reserved, acked) = window
+        .and_then(|window| window.totals())
+        .ok_or("terminal delivery window is unavailable")?;
+    Ok(TerminalLinkStats {
+        reserved_bytes: reserved.bytes,
+        acked_bytes: acked.bytes,
+        reserved_records: reserved.records,
+        acked_records: acked.records,
+        ms_since_last_host_event: monotonic_millis().saturating_sub(last_frame_at),
     })
 }
 
