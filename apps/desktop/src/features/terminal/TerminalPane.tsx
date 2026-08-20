@@ -298,18 +298,22 @@ export function TerminalPane({
     const revealTerminal = () => {
       container.current?.setAttribute("data-painted", "true");
     };
-    const publishInitialPaint = (
+    /**
+     * Everything a first paint owes the rest of the app *except* showing it.
+     *
+     * The mount-time cache restore paints real content — it closes the
+     * perceived-latency spans, establishes the renderer epoch and acknowledges
+     * delivery — but it must not flip the pane visible, because the reveal
+     * handshake is still about to answer with the same screen. Revealing here
+     * is what made a tab switch two or three visible full repaints instead of
+     * one; `revealTerminal` now belongs to whichever effect settles the
+     * handshake, with the 300ms fallback below as the backstop.
+     */
+    const noteInitialPaint = (
       generation: number,
       terminalEpoch: number | undefined,
       establishesEpoch = false,
     ) => {
-      // First, unconditionally, and straight at the DOM. This runs from the
-      // renderer's rendered callback — the same task as the write that queued
-      // the content draw — so the reveal lands on the frame the content does.
-      // `useState` would be batched into a later frame, which is one more frame
-      // of the empty grid, and the probe helpers below are no-ops when the perf
-      // probe is off, so the reveal cannot live inside them either.
-      revealTerminal();
       if (!commitRendered(generation, terminalEpoch, establishesEpoch)) return;
       // The perceived-latency spans (create.*, window.switch, pane.split) end
       // at the frame that shows this pane's content, so they are closed apart
@@ -331,6 +335,20 @@ export function TerminalPane({
           recordPerfMilestone("startup.terminalPaint");
         },
       );
+    };
+    const publishInitialPaint = (
+      generation: number,
+      terminalEpoch: number | undefined,
+      establishesEpoch = false,
+    ) => {
+      // First, unconditionally, and straight at the DOM. This runs from the
+      // renderer's rendered callback — the same task as the write that queued
+      // the content draw — so the reveal lands on the frame the content does.
+      // `useState` would be batched into a later frame, which is one more frame
+      // of the empty grid, and the probe helpers below are no-ops when the perf
+      // probe is off, so the reveal cannot live inside them either.
+      revealTerminal();
+      noteInitialPaint(generation, terminalEpoch, establishesEpoch);
     };
     rendererRef.current = renderer;
     const terminalContainer = container.current;
@@ -357,6 +375,14 @@ export function TerminalPane({
       });
     };
     terminalContainer.addEventListener("paste", interceptPaste, true);
+    // What the mount-time cache restore put on this terminal, or `undefined`
+    // once anything else has replaced the screen. The host hands the very same
+    // snapshot back in the reveal handshake — it stores this pane's own hide
+    // checkpoint as `snapshot_generation` and returns it verbatim — so when the
+    // generations agree the handshake's restore would clear (ESC c) and rewrite
+    // a byte-identical screen. That redundant full repaint is what the restore
+    // branch below skips.
+    let cacheRestorePainted: { generation: number; terminalEpoch: number | undefined } | undefined;
     const cached = terminalStateCache.get(pane.id);
     const currentCached = cached?.terminalEpoch !== undefined && cached.terminalEpoch === hub.generationEpoch
       ? cached
@@ -364,12 +390,14 @@ export function TerminalPane({
     if (currentCached) {
       const cachedEpoch = currentCached.terminalEpoch;
       const restored = renderer.restore(currentCached.serialized, () => {
-        publishInitialPaint(currentCached.outputGeneration, cachedEpoch, true);
+        // Bookkeeping only: the reveal belongs to the handshake below.
+        noteInitialPaint(currentCached.outputGeneration, cachedEpoch, true);
       }, currentCached.outputGeneration);
       // A fresh terminal cannot refuse a restore today, but a caller that
       // ignores the answer is how the tail-splice bug happened; if it ever
       // does refuse, the cache is not what this pane should show.
-      if (!restored) terminalStateCache.delete(pane.id);
+      if (restored) cacheRestorePainted = { generation: currentCached.outputGeneration, terminalEpoch: cachedEpoch };
+      else terminalStateCache.delete(pane.id);
     } else if (cached) {
       terminalStateCache.delete(pane.id);
     }
@@ -431,6 +459,9 @@ export function TerminalPane({
       if (effect.kind === "seed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
+        // A seed replaces the screen wholesale, so whatever the cache restored
+        // is no longer what this terminal shows.
+        cacheRestorePainted = undefined;
         // An authoritative screen is what every degraded state here was waiting
         // for: this pane is working again, and the next fault starts over at the
         // shortest retry delay rather than inheriting this episode's backoff.
@@ -461,27 +492,41 @@ export function TerminalPane({
       } else if (effect.kind === "awaitSeed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
+        cacheRestorePainted = undefined;
         // Nobody on this side requests the seed when the host said it owns the
         // request (`requestSeed` false). That is exactly the case where a
         // suppressed host seed freezes the pane, so bound the wait either way.
         watchdog.note("paneAwaitingSeed");
         renderer.seed(ownTerminalBytes(new Uint8Array()));
         setRendererDiagnostic(`${effect.reason}; waiting for a fresh terminal seed…`);
-        // An empty pane under a diagnostic banner is this branch's intended
-        // visible state, and it never reaches `publishInitialPaint`, so it
-        // reveals itself rather than waiting for the fallback timer.
-        revealTerminal();
+        // Deliberately not revealed. This branch's blank RIS is seed debt, not
+        // content, and showing it is a whole extra visible repaint on the way to
+        // the screen the arriving seed paints (which reveals for itself). The
+        // 300ms fallback owns the case where that seed never comes.
         if (effect.requestSeed) requestFreshSeed(effect.reason);
       } else if (effect.kind === "restore") {
         const markRecoveryRendered = () => {
           publishInitialPaint(effect.tailThroughGeneration, eventEpoch, true);
         };
+        // The host's answer is this pane's own hide snapshot handed straight
+        // back. When it is the screen the cache already restored — same epoch,
+        // same generation — restoring it again is an ESC c and a byte-identical
+        // rewrite, seen as a blank frame followed by the text that was already
+        // there. Only the raw tail is new information, and writing it (even
+        // empty, which the scheduler queues as an ordered barrier) keeps the
+        // rendered callback, the delivery ack and the reveal exactly as the
+        // restoring path has them.
+        const skipRedundantRestore = cacheRestorePainted !== undefined
+          && cacheRestorePainted.terminalEpoch === eventEpoch
+          && cacheRestorePainted.generation === effect.snapshotGeneration;
+        // Whatever happens next, the screen is no longer just the cached one.
+        cacheRestorePainted = undefined;
         // The snapshot and its raw tail are one screen in two pieces. If the
         // snapshot was refused, the tail must not be written onto whatever the
         // terminal happens to be showing, and nothing may be reported as
         // rendered: the renderer has already asked the host for a seed, and
         // this pane waits for it.
-        const restored = renderer.restore(
+        const restored = skipRedundantRestore || renderer.restore(
           effect.serialized,
           effect.rawTail.byteLength ? undefined : markRecoveryRendered,
           effect.rawTail.byteLength ? effect.snapshotGeneration : effect.tailThroughGeneration,
@@ -491,7 +536,7 @@ export function TerminalPane({
           clearDeferredOutput();
           revealStateRef.current = { ready: false, hasLocalState: false };
         } else {
-          if (effect.rawTail.byteLength) {
+          if (skipRedundantRestore || effect.rawTail.byteLength) {
             renderer.write(effect.rawTail, markRecoveryRendered, effect.tailThroughGeneration);
           }
           flushDeferredOutput(effect.tailThroughGeneration);
@@ -506,6 +551,12 @@ export function TerminalPane({
         setSeedDiagnostic(effect.message);
       } else if (transition.state.ready) {
         flushDeferredOutput();
+        // The handshake had no material to hand back because this pane's own
+        // local state is already the screen — and `hasLocalState` is only true
+        // once that state's bytes reached xterm and established the renderer
+        // epoch, so there is content behind the gate. Nothing else will paint
+        // here, so this is the effect that owns the reveal.
+        revealTerminal();
       }
     }, (health) => {
       // The hub's two latches, mirrored. While `awaitingSeed` stands the hub
