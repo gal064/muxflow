@@ -62,6 +62,24 @@ use events::{
 pub(crate) const EVENT_QUEUE: usize = 1024;
 pub(crate) const TERMINAL_INPUT_QUEUE: usize = 256;
 
+/// How long teardown lets the writer drain before aborting it.
+///
+/// The writer finishes on its own only when every sender clone is gone; after
+/// the teardown wakes the topology actor and stops the terminal clients, the
+/// stragglers drop within milliseconds, so this bound is an order of magnitude
+/// above the expected wait — like the handshake timeout below. It exists for
+/// the clone nothing released: without it, one parked sender kept a connection
+/// task, its socket, and the remote bridge process alive for days.
+const WRITER_DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+/// How long teardown waits for terminal worker threads to join.
+///
+/// By this point their child processes are dead and the event channel is
+/// closed, so a join is milliseconds; a thread that still does not return is
+/// wedged in a way no further waiting fixes, and leaking it is strictly better
+/// than hanging the connection task with it.
+const TERMINAL_JOIN_GRACE: Duration = Duration::from_secs(5);
+
 pub async fn serve_with_shutdown(
     mut stream: UnixStream,
     shutdown: Option<tokio::sync::mpsc::UnboundedSender<()>>,
@@ -150,7 +168,7 @@ pub async fn serve_with_shutdown(
     let topology_signal = TopologySignal::default();
     let writer_topology_signal = topology_signal.clone();
     let writer_closed = Arc::clone(&closed);
-    let writer_task = tokio::spawn(async move {
+    let mut writer_task = tokio::spawn(async move {
         let mut sequencer = ProtocolSequencer::default();
         let mut pending_message = None;
         loop {
@@ -393,10 +411,40 @@ pub async fn serve_with_shutdown(
     for (_, token) in pending.lock().unwrap().drain() {
         token.store(true, Ordering::Release);
     }
-    terminal.lock().unwrap().stop();
+    // The topology actor sleeps up to its safety interval holding an event
+    // sender; woken now, it observes `closed` and drops the clone immediately
+    // instead of pushing every disconnect into the abort path below.
+    topology_signal.wake();
+    // Kill the terminal children and wake their waiters, but keep the worker
+    // joins for after the writer is gone: a worker parked in the ordered-event
+    // channel only unblocks once the receiver drops, so joining here — as this
+    // teardown once did, under the terminal mutex, on a runtime worker — is
+    // the deadlock this sequence exists to prevent.
+    let terminal_teardown = terminal.lock().unwrap().signal_stop();
+    // Git subscribers hold sender clones that are otherwise released only by
+    // the service's drop — which runs after the await below, a circularity
+    // that could never resolve.
+    git.release_connection();
     drop(event_registration.take());
     drop(control_tx);
-    let _ = writer_task.await;
+    if timeout(WRITER_DRAIN_GRACE, &mut writer_task).await.is_err() {
+        // Something is still holding a sender. Aborting the writer drops the
+        // receiver and the socket's write half in one move: every parked send
+        // fails instantly, and the peer's bridge sees EOF and exits. A frame
+        // truncated mid-write is acceptable — the peer's request stream has
+        // already ended, so this connection is over either way.
+        crate::diagnostics::record_connection_force_closed();
+        eprintln!("connection teardown: writer did not drain within grace; aborting");
+        writer_task.abort();
+        let _ = writer_task.await;
+    }
+    let join = tokio::task::spawn_blocking(move || drop(terminal_teardown));
+    if timeout(TERMINAL_JOIN_GRACE, join).await.is_err() {
+        // The blocking task keeps running detached; leaking a wedged thread is
+        // strictly better than hanging this connection task with it.
+        crate::diagnostics::record_connection_force_closed();
+        eprintln!("connection teardown: terminal workers did not join within grace; leaking them");
+    }
     if let Some(error) = read_error {
         Err(error.into())
     } else {

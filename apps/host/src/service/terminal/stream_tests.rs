@@ -479,3 +479,48 @@ fn terminal_output_waits_for_bounded_sequencer_capacity_without_marking_overflow
     };
     assert_eq!(event.terminal.unwrap().data, b"exact");
 }
+
+/// The backpressure above must have an exit: connection teardown aborts the
+/// sequencer writer, which drops the receiver, and that is the only thing that
+/// can release a reader already parked in the channel send. A parked reader
+/// that outlives the receiver held its connection task — and the remote
+/// bridge process — alive indefinitely.
+#[test]
+fn dropping_the_sequencer_receiver_releases_a_parked_terminal_emitter() {
+    let (sender, receiver) = mpsc::channel(1);
+    sender
+        .try_send(SequencerControl::OrderedEvent(v1::HostEvent::default()))
+        .unwrap();
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let thread_overflowed = Arc::clone(&overflowed);
+    let emitted = std::thread::spawn(move || {
+        let output_credit = super::OutputCredit::negotiated(false);
+        super::stream_helpers::emit_terminal(
+            &sender,
+            &thread_overflowed,
+            v1::EventKind::TerminalOutput,
+            "%1".into(),
+            b"parked".to_vec(),
+            1,
+            &AtomicBool::new(false),
+            &output_credit,
+        );
+    });
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    assert!(
+        !emitted.is_finished(),
+        "a full bounded queue must apply backpressure"
+    );
+
+    drop(receiver);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !emitted.is_finished() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a parked emitter must return once the receiver is gone"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    emitted.join().unwrap();
+    assert!(overflowed.load(Ordering::Acquire));
+}

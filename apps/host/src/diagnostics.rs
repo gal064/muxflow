@@ -42,6 +42,12 @@ struct FlowCounters {
     /// so a state file written before this counter existed still loads.
     #[serde(default)]
     terminal_client_resize_rejections: u64,
+    /// Connection teardowns where the writer drain or the terminal-worker join
+    /// outlived its grace period and was forced. Zero is the healthy value; a
+    /// climbing count means some sender clone or worker thread is not
+    /// releasing on its own and teardown is running on the backstop.
+    #[serde(default)]
+    connections_force_closed: u64,
     /// The six counters below are the persisted half of the pane-stranding
     /// story. Every one of them names an event that used to happen silently, on
     /// a path whose only other record was a stderr line the daemon sends to a
@@ -268,6 +274,12 @@ fn persist_state(path: &Path, state: &Mutex<RuntimeState>) -> anyhow::Result<()>
 pub fn record_event_queue_overflow() {
     update_active_counter(|counters| {
         counters.event_queue_overflows = counters.event_queue_overflows.saturating_add(1);
+    });
+}
+
+pub fn record_connection_force_closed() {
+    update_active_counter(|counters| {
+        counters.connections_force_closed = counters.connections_force_closed.saturating_add(1);
     });
 }
 

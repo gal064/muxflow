@@ -36,6 +36,15 @@ impl TopologySignal {
         self.notify.notify_one();
     }
 
+    /// Wakes the actor without dirtying the topology, so a teardown that has
+    /// just set `closed` is observed now rather than after the safety
+    /// interval. Left asleep, the actor keeps its event-sender clone alive for
+    /// up to thirty seconds, which turns every clean disconnect into a
+    /// forced writer abort.
+    pub(super) fn wake(&self) {
+        self.notify.notify_one();
+    }
+
     pub(super) fn observe_event(&self, message: &SequencerControl) {
         if matches!(
             message,
@@ -83,6 +92,11 @@ impl TopologyActor {
                     _ = self.signal.notify.notified() => true,
                     _ = sleep(SAFETY_RECONCILE_INTERVAL) => false,
                 };
+                // A teardown wake must not be answered with one last discovery
+                // pass; the connection this actor serves is already gone.
+                if self.closed.load(Ordering::Acquire) {
+                    break;
+                }
                 if !self.subscribed.load(Ordering::Acquire) {
                     continue;
                 }

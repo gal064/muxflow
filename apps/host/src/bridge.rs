@@ -8,11 +8,23 @@ use std::{
 
 use anyhow::{Context, bail};
 use tokio::{
-    io::{self, AsyncWriteExt},
+    io::{self, AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     process::Command,
-    time::sleep,
+    sync::oneshot,
+    time::{sleep, timeout},
 };
+
+/// How long the bridge keeps draining the daemon after its own stdin closed.
+///
+/// Stdin closing means the client is gone: the desktop holds this process's
+/// stdin open for the connection's whole life and only releases it by dying.
+/// The daemon's teardown then closes the socket well inside this window, so
+/// the timer normally never fires — it is the self-reaper for a daemon that
+/// regresses into holding the socket open, which once left bridge processes
+/// orphaned for days. The timer re-arms on every read, so a daemon still
+/// actively flushing is never cut off.
+const DRAIN_IDLE: Duration = Duration::from_secs(10);
 
 pub async fn run(socket_path: PathBuf, auto_start: bool) -> anyhow::Result<()> {
     let stream = connect(&socket_path, auto_start).await?;
@@ -20,15 +32,45 @@ pub async fn run(socket_path: PathBuf, auto_start: bool) -> anyhow::Result<()> {
     let mut stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    let upload = async {
-        io::copy(&mut stdin, &mut socket_write).await?;
-        socket_write.shutdown().await
-    };
-    let download = async {
-        io::copy(&mut socket_read, &mut stdout).await?;
-        stdout.flush().await
-    };
-    tokio::try_join!(upload, download)?;
+    let (stdin_closed_tx, mut stdin_closed) = oneshot::channel::<()>();
+    let upload = tokio::spawn(async move {
+        let copied = io::copy(&mut stdin, &mut socket_write).await;
+        let _ = socket_write.shutdown().await;
+        let _ = stdin_closed_tx.send(());
+        copied
+    });
+
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut draining = false;
+    loop {
+        let read = if draining {
+            match timeout(DRAIN_IDLE, socket_read.read(&mut buffer)).await {
+                Ok(read) => read?,
+                // Nothing from the daemon for a whole idle window after the
+                // client already left: stop waiting for a close that may
+                // never come.
+                Err(_elapsed) => break,
+            }
+        } else {
+            tokio::select! {
+                read = socket_read.read(&mut buffer) => read?,
+                _ = &mut stdin_closed => {
+                    draining = true;
+                    continue;
+                }
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        stdout.write_all(&buffer[..read]).await?;
+        stdout.flush().await?;
+    }
+    stdout.flush().await?;
+    // The daemon side is finished; a pump still parked on a live stdin has
+    // nothing left to deliver to.
+    upload.abort();
+    let _ = upload.await;
     Ok(())
 }
 

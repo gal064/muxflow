@@ -215,6 +215,98 @@ async fn buffered_cancel_or_eof_before_first_poll_cannot_stage_a_file() {
     exercise(true).await;
 }
 
+/// The incident this guards: a client whose transport died leaves the socket
+/// half-closed — request stream ended, read side still open — and with a live
+/// Git watch the teardown could never finish, because the watch subscriber's
+/// sender clone was only released by the `GitService` drop that runs *after*
+/// the writer await. The connection task, its socket, and the remote bridge
+/// process then survived their client by days.
+#[tokio::test]
+async fn half_closed_client_with_live_git_watch_completes_teardown() {
+    let root: PathBuf = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("half-close-teardown-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let git = |arguments: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "Half Close"]);
+    git(&["config", "user.email", "half-close@example.test"]);
+    let root_text = root.to_string_lossy().into_owned();
+
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let task = tokio::spawn(serve_with_shutdown(server, None));
+    write_frame(
+        &mut client,
+        &envelope(
+            1,
+            0,
+            Payload::ClientHello(v1::ClientHello {
+                desktop_version: "half-close".into(),
+                requested_capabilities: HOST_CAPABILITIES,
+                expected_helper_version: HELPER_VERSION.into(),
+                ..Default::default()
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    let _hello = read_frame(&mut client).await.unwrap().unwrap();
+    write_frame(
+        &mut client,
+        &envelope(
+            7,
+            0,
+            Payload::Request(v1::Request {
+                operation: v1::Operation::WatchGit.into(),
+                git: Some(v1::GitRequest {
+                    watch_id: "half-close-watch".into(),
+                    root: root_text.clone(),
+                    root_token: filesystem::root_token(&root_text).unwrap(),
+                    expected_server_identity: server_identity(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = read_frame(&mut client).await.unwrap().unwrap();
+            if frame.request_id == 7 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("git watch bootstrap must answer");
+
+    // Half-close: the request stream ends, but the client — like a bridge
+    // whose ssh transport died — keeps the read direction open.
+    client.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), task)
+        .await
+        .expect("teardown must complete for a half-closed client")
+        .unwrap()
+        .unwrap();
+    drop(client);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn process_wide_file_events_preserve_bulk_commit_order_and_generation() {
     let (sender, mut receiver) = mpsc::channel(8);
