@@ -18,6 +18,7 @@ import { TerminalGenerationWatermark } from "./TerminalGenerationWatermark";
 import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 import { settleWithin } from "./timeBound";
 import { recordPerfCounter } from "../../perf/probe";
+import { recordIncident } from "../../diagnostics/incidents";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
@@ -38,6 +39,12 @@ export interface DrainedTerminalSnapshot {
 }
 
 export interface TerminalRendererOptions {
+  /**
+   * Which pane this renderer draws, for the incident journal only. The renderer
+   * carries no identity of its own, and a `render.webglFallback` record that
+   * cannot say *which* pane fell back is not worth reading.
+   */
+  paneId?: string;
   onDiagnostic?: (message: string | undefined) => void;
   onOpenLink?: (url: string) => void;
   /**
@@ -109,10 +116,17 @@ export interface TerminalRenderer {
   dispose(): void;
 }
 
-/** xterm's default-feeling scroll animation, used while the pane is keeping up. */
-const SMOOTH_SCROLL_DURATION_MS = 80;
-/** Queue depth past which animating each scroll step is wasted work. */
-const SMOOTH_SCROLL_SUSPEND_BYTES = 256 * 1024;
+/**
+ * No scroll easing at all.
+ *
+ * xterm quantises viewport scrolling to whole rows, so an animation duration
+ * buys no intermediate positions to animate *through* — it only defers the
+ * single row-aligned jump the wheel tick already decided on. At the 80ms this
+ * used to hold, every wheel tick carried ~80ms of trailing ease that the user
+ * reads as the terminal lagging their scroll: pure perceived latency for zero
+ * smoothness. Zero means each tick lands on the frame it arrives in.
+ */
+const SMOOTH_SCROLL_DURATION_MS = 0;
 
 /**
  * Closes a background bleed in xterm's serialize addon before it can paint.
@@ -243,8 +257,14 @@ export class XtermRenderer implements TerminalRenderer {
       256 * 1024,
       8 * 1024 * 1024,
       (pending) => {
-        this.#applyScrollSmoothingForLoad(pending);
         if (pending > 4 * 1024 * 1024) this.#options.onDiagnostic?.("Terminal output is catching up…");
+        // The `#webgl` guard keeps the fallback banner up deliberately. A pane
+        // that lost its GPU renderer never gets it back — nothing here remounts
+        // the addon — so it renders through the DOM for the rest of its life,
+        // and clearing the banner once the queue drains would tell the user the
+        // degradation had passed when it had not. The catching-up message is
+        // transient and its own condition still clears it; only the permanent
+        // one persists.
         else if (pending === 0 && this.#webgl) this.#options.onDiagnostic?.(undefined);
       },
       (pending, records) => this.#requestSeed(
@@ -560,18 +580,6 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   /**
-   * Smooth scrolling animates each scroll step, which is pleasant when the user
-   * scrolls and pure overhead when output is arriving faster than frames. It is
-   * disabled while the queue is backed up and restored when it drains, so the
-   * resting behaviour is unchanged.
-   */
-  #applyScrollSmoothingForLoad(pendingBytes: number): void {
-    const smoothing = pendingBytes > SMOOTH_SCROLL_SUSPEND_BYTES ? 0 : SMOOTH_SCROLL_DURATION_MS;
-    if (this.#terminal.options.smoothScrollDuration === smoothing) return;
-    this.#terminal.options.smoothScrollDuration = smoothing;
-  }
-
-  /**
    * Restates the token's row pitch in xterm's units, now that xterm has
    * measured the face.
    *
@@ -665,15 +673,21 @@ export class XtermRenderer implements TerminalRenderer {
       webgl.onContextLoss(() => {
         webgl.dispose();
         if (this.#webgl === webgl) this.#webgl = undefined;
-        this.#options.onDiagnostic?.("WebGL context lost; using the canvas renderer.");
+        // Disposing the WebGL addon drops xterm back to the *DOM* renderer:
+        // xterm 6 has no canvas renderer and no `@xterm/addon-canvas` is
+        // installed, so naming one sent every such report looking for a
+        // renderer that does not exist.
+        this.#options.onDiagnostic?.("WebGL context lost; using the slow DOM renderer.");
+        recordIncident("render.webglFallback", { paneId: this.#options.paneId, reason: "contextLoss" });
       });
       this.#terminal.loadAddon(webgl);
       this.#webgl = webgl;
       this.#options.onDiagnostic?.(undefined);
     } catch (error) {
       this.#webgl = undefined;
-      this.#options.onDiagnostic?.("WebGL unavailable; using the canvas renderer.");
-      console.warn("WebGL terminal renderer unavailable; using canvas renderer", error);
+      this.#options.onDiagnostic?.("WebGL unavailable; using the slow DOM renderer.");
+      console.warn("WebGL terminal renderer unavailable; using the DOM renderer", error);
+      recordIncident("render.webglFallback", { paneId: this.#options.paneId, reason: String(error) });
     }
   }
 

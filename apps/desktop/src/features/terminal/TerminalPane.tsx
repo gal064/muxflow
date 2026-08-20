@@ -256,6 +256,7 @@ export function TerminalPane({
     let rendererActive = true;
     let rendererEpoch: number | undefined;
     const renderer = new XtermRenderer({
+      paneId: pane.id,
       onDiagnostic: (message) => {
         if (!rendererActive) return;
         setRendererDiagnostic(message);
