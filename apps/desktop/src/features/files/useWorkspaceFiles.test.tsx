@@ -717,6 +717,65 @@ describe("useWorkspaceFiles", () => {
     vi.useRealTimers();
   });
 
+  it("checks the root the moment the host reports the active pane changed directory", async () => {
+    // tmux announces no `cd`, so the settled backstop is minutes away from
+    // noticing one. The host's topology reconcile does notice, and the pane's
+    // `currentPath` arriving different in that snapshot is the whole signal:
+    // one probe, on the transition, and nothing on the transitions that are
+    // only connection churn.
+    vi.useFakeTimers();
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const resolveActiveRoot = vi.fn(async () => root);
+    const client: FileWorkspaceClient = {
+      resolveActiveRoot,
+      listDirectory: vi.fn(async (_scope, active, directory) => listing(active.token, directory)),
+      acquireDirectoryWatch: vi.fn(async (_scope, active, directory) => ({
+        fresh: true, snapshot: listing(active.token, directory), release: () => undefined,
+      })),
+      openFile: vi.fn(), writeText: vi.fn(), mutate: vi.fn(), startDownload: vi.fn(), cancelTransfer: vi.fn(),
+      subscribe: vi.fn(async () => () => undefined),
+    };
+    function Harness({ panePath }: { panePath?: string }) {
+      useWorkspaceFiles(client, BASE_SCOPE, undefined, panePath);
+      return null;
+    }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness panePath="/repo" />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    // The scope's own probe already ran; a pane path present from the first
+    // render is not a change and must not buy a second one.
+    expect(resolveActiveRoot.mock.calls.length, "mount probed the root twice").toBe(1);
+
+    for (let tick = 0; tick < ACTIVE_ROOT_SETTLED_MULTIPLIER - 1; tick += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(ACTIVE_ROOT_BACKSTOP_MS + 1); });
+    }
+    const settled = resolveActiveRoot.mock.calls.length;
+    expect(settled).toBeGreaterThan(1);
+
+    // The same path, re-reported by every later snapshot, says nothing new.
+    await act(async () => { renderer.update(<Harness panePath="/repo" />); await Promise.resolve(); });
+    expect(resolveActiveRoot.mock.calls.length, "an unchanged pane path cost a probe").toBe(settled);
+
+    // Losing and regaining the pane is a reconnect, not a `cd`.
+    await act(async () => { renderer.update(<Harness />); await Promise.resolve(); });
+    await act(async () => { renderer.update(<Harness panePath="/repo" />); await Promise.resolve(); });
+    expect(
+      resolveActiveRoot.mock.calls.length,
+      "connection churn through `undefined` probed the root",
+    ).toBe(settled);
+
+    // A genuinely different directory probes at once, settled or not — no
+    // timer advanced here on purpose.
+    await act(async () => { renderer.update(<Harness panePath="/elsewhere" />); await Promise.resolve(); });
+    expect(
+      resolveActiveRoot.mock.calls.length,
+      "the host's `cd` signal waited for the settled backstop",
+    ).toBe(settled + 1);
+
+    await act(async () => { renderer.unmount(); });
+    vi.useRealTimers();
+  });
+
   it("treats a host root announcement as a reason to check, never as the answer", async () => {
     // The broadcast carries no caller epoch, so installing its root would
     // reintroduce the stale cross-pane race the probe barriers exist to stop.
