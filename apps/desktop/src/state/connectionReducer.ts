@@ -16,10 +16,15 @@ export interface NormalizedHostState {
   lastSequence: number;
   resyncRequested: boolean;
   /**
-   * Which mismatch requested the resync, with the numbers that proved it.
+   * Which mismatch requested the resync, with the identities that proved it.
    * Written for the incident journal: `resyncRequested` alone says the world
    * is being rebuilt, and this says why — the difference between knowing the
    * amber bar showed and knowing what to fix.
+   *
+   * Only a different tmux server answering sets this now. Sequence integrity
+   * belongs to the native link, which repairs a break in place and keeps the
+   * connection; a frontend that rebuilt the world on its own gap bookkeeping
+   * was tearing down exactly the link that repair had just fixed.
    */
   resyncReason?: string;
   sessions: Record<string, TmuxSnapshot["sessions"][number]>;
@@ -32,7 +37,6 @@ export type HostAction =
   | { type: "snapshot"; snapshot: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
   | { type: "orderedSnapshot"; snapshot: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
   | { type: "orderedEvent"; sequence: number }
-  | { type: "sequenceGap"; expected: number; received: number }
   | { type: "reset" };
 
 export const initialHostState: NormalizedHostState = {
@@ -90,25 +94,21 @@ export function connectionReducer(state: NormalizedHostState, action: HostAction
     case "snapshot":
       return replaceSnapshot(state, action);
     case "orderedEvent": {
+      // Stale frames are still dropped; a jump forward is not this layer's to
+      // adjudicate. The native link is the sequence authority — it repairs a
+      // break on the connection it already holds — so the watermark follows
+      // what arrives instead of freezing the world behind it.
       if (action.sequence <= state.lastSequence) return state;
-      if (action.sequence !== state.lastSequence + 1) {
-        return requestResync(state, `event-gap expected=${state.lastSequence + 1} received=${action.sequence}`);
-      }
       return { ...state, lastSequence: action.sequence };
     }
-    case "sequenceGap":
-      return requestResync(state, `bridge-gap expected=${action.expected} received=${action.received}`);
     case "orderedSnapshot": {
+      // The one mismatch the frontend must still rebuild for: a different tmux
+      // server cannot be reconciled with the entities on screen, whatever the
+      // sequence numbers say about them.
       if (action.serverIdentity !== state.serverIdentity) {
         return requestResync(state, `snapshot-identity had=${state.serverIdentity} received=${action.serverIdentity}`);
       }
       if (action.sequence <= state.lastSequence) return state;
-      if (action.sequence !== state.lastSequence + 1) {
-        return requestResync(state, `snapshot-gap expected=${state.lastSequence + 1} received=${action.sequence}`);
-      }
-      if (action.generation !== undefined && action.generation <= state.generation) {
-        return requestResync(state, `snapshot-stale-generation had=${state.generation} received=${action.generation}`);
-      }
       return replaceSnapshot(state, action);
     }
   }

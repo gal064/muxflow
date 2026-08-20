@@ -1,4 +1,14 @@
+import { useEffect, useState } from "react";
 import type { ConnectionPhase } from "../../state/connectionReducer";
+
+/**
+ * How long the link must stay degraded before the strip is worth showing.
+ *
+ * Sub-400ms blips are self-healing repairs whose banner would only be legible
+ * as a flash — the native link dips through `resyncing` for the length of one
+ * round trip and comes back with the stream intact.
+ */
+export const STRIP_APPEAR_DELAY_MS = 400;
 
 interface DisconnectedStripProps {
   phase: ConnectionPhase;
@@ -24,15 +34,28 @@ const TITLES: Partial<Record<ConnectionPhase, string>> = {
  * the terminal. Two of those are gone and the third is this: nothing at all
  * while connected, one line while not.
  *
- * It is deliberately a single fixed-height row that ellipsizes. This strip sits
- * directly above the terminal surface, and the tmux client size is measured
- * from that surface — a status line that grows by a wrapped row would shrink
- * the user's real tmux windows by a row, and the resulting topology push would
- * re-render the line and do it again. The full text stays on the element's
- * title and in the shell's live region.
+ * It is deliberately a single fixed-height row that ellipsizes, and it overlays
+ * the shell body rather than taking a row from it. The tmux client size is
+ * measured from the terminal surface directly below, so a strip that appeared
+ * *in flow* resized every one of the user's real tmux windows on the way in and
+ * again on the way out — churn charged to a banner that is often gone within a
+ * second. The full text stays on the element's title and in the live region.
+ *
+ * It also waits: see `STRIP_APPEAR_DELAY_MS`. Recovery is not delayed — the
+ * strip leaves the moment the phase is healthy again.
  */
 export function DisconnectedStrip(props: DisconnectedStripProps) {
-  if (props.phase === "connected") return null;
+  const degraded = props.phase !== "connected";
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    if (!degraded) {
+      setSettled(false);
+      return;
+    }
+    const timer = setTimeout(() => setSettled(true), STRIP_APPEAR_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [degraded]);
+  if (!degraded || !settled) return null;
   const readOnly = props.phase === "readOnly";
   const title = TITLES[props.phase] ?? "Disconnected from tmux";
   const detail = props.detail

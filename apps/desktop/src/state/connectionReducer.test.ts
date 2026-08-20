@@ -22,7 +22,10 @@ describe("connectionReducer", () => {
     expect(connected.canMutate).toBe(true);
   });
 
-  it("rejects stale events and freezes writes on a sequence gap", () => {
+  it("rejects stale snapshots and applies a forward one without adjudicating the jump", () => {
+    // Sequence integrity belongs to the native link, which repairs a break on
+    // the connection it already holds. A snapshot that skips ahead is that
+    // repair's own authoritative answer arriving — applying it is the point.
     const state = connectionReducer(initialHostState, {
       type: "snapshot", snapshot: populated, sequence: 7, serverIdentity: "server-a",
     });
@@ -30,13 +33,25 @@ describe("connectionReducer", () => {
       type: "orderedSnapshot", snapshot: empty, sequence: 7, serverIdentity: "server-a",
     });
     expect(stale).toBe(state);
-    const gap = connectionReducer(state, {
+    const jumped = connectionReducer(state, {
       type: "orderedSnapshot", snapshot: empty, sequence: 9, serverIdentity: "server-a",
     });
-    expect(gap.phase).toBe("resyncing");
-    expect(gap.canMutate).toBe(false);
-    expect(gap.resyncRequested).toBe(true);
-    expect(Object.keys(gap.panes)).toEqual(["%3"]);
+    expect(jumped.phase).toBe(state.phase);
+    expect(jumped.resyncRequested).toBe(false);
+    expect(jumped.lastSequence).toBe(9);
+    expect(jumped.panes).toEqual({});
+  });
+
+  it("keeps a forward event jump on the connection instead of freezing writes", () => {
+    const state = connectionReducer({ ...initialHostState, phase: "connected", canMutate: true }, {
+      type: "snapshot", snapshot: populated, sequence: 7, serverIdentity: "server-a",
+    });
+    const jumped = connectionReducer(state, { type: "orderedEvent", sequence: 10 });
+    expect(jumped.lastSequence).toBe(10);
+    expect(jumped.phase).toBe("connected");
+    expect(jumped.canMutate).toBe(true);
+    expect(jumped.resyncRequested).toBe(false);
+    expect(connectionReducer(jumped, { type: "orderedEvent", sequence: 9 })).toBe(jumped);
   });
 
   it("advances sequence watermarks for non-snapshot terminal events", () => {
@@ -50,15 +65,6 @@ describe("connectionReducer", () => {
     });
     expect(next.lastSequence).toBe(9);
     expect(next.resyncRequested).toBe(false);
-  });
-
-  it("freezes atomically on an already-detected payload gap without advancing or mutating entities", () => {
-    const state = connectionReducer(initialHostState, {
-      type: "snapshot", snapshot: populated, sequence: 7, serverIdentity: "server-a",
-    });
-    const gap = connectionReducer(state, { type: "sequenceGap", expected: 8, received: 9 });
-    expect(gap).toMatchObject({ lastSequence: 7, phase: "resyncing", canMutate: false, resyncRequested: true });
-    expect(gap.panes).toEqual(state.panes);
   });
 
   it("freezes on an event from a new tmux server until an authoritative snapshot arrives", () => {
@@ -79,38 +85,22 @@ describe("connectionReducer", () => {
     expect(replaced.panes).toEqual({});
   });
 
-  it("rejects an ordered snapshot with a stale host generation and freezes writes", () => {
-    const state = connectionReducer(initialHostState, {
-      type: "snapshot", snapshot: populated, sequence: 2, generation: 5, serverIdentity: "server-a",
-    });
-    const stale = connectionReducer(state, {
-      type: "orderedSnapshot", snapshot: empty, sequence: 3, generation: 4, serverIdentity: "server-a",
-    });
-    expect(stale.phase).toBe("resyncing");
-    expect(stale.canMutate).toBe(false);
-    expect(stale.panes["%3"]).toBeDefined();
-  });
-
-  it("names the mismatch that requested each resync, and clears it on the next snapshot", () => {
+  it("names the one mismatch that requests a resync, and clears it on the next snapshot", () => {
+    // A different tmux server is the only thing the frontend still rebuilds
+    // for: sequence and generation ordering are the native link's to repair,
+    // and rebuilding on them tore down the connection that repair had fixed.
     const state = connectionReducer(initialHostState, {
       type: "snapshot", snapshot: populated, sequence: 7, generation: 5, serverIdentity: "server-a",
     });
-    const eventGap = connectionReducer(state, { type: "orderedEvent", sequence: 10 });
-    expect(eventGap.resyncReason).toBe("event-gap expected=8 received=10");
-    const bridgeGap = connectionReducer(state, { type: "sequenceGap", expected: 8, received: 11 });
-    expect(bridgeGap.resyncReason).toBe("bridge-gap expected=8 received=11");
-    const staleGeneration = connectionReducer(state, {
-      type: "orderedSnapshot", snapshot: empty, sequence: 8, generation: 4, serverIdentity: "server-a",
-    });
-    expect(staleGeneration.resyncReason).toBe("snapshot-stale-generation had=5 received=4");
     const identity = connectionReducer(state, {
       type: "orderedSnapshot", snapshot: empty, sequence: 8, serverIdentity: "server-b",
     });
     expect(identity.resyncReason).toBe("snapshot-identity had=server-a received=server-b");
-    const recovered = connectionReducer(eventGap, {
-      type: "snapshot", snapshot: populated, sequence: 1, generation: 6, serverIdentity: "server-a",
+    const recovered = connectionReducer(identity, {
+      type: "snapshot", snapshot: populated, sequence: 1, generation: 6, serverIdentity: "server-b",
     });
     expect(recovered.resyncReason).toBeUndefined();
+    expect(recovered.resyncRequested).toBe(false);
   });
 
   it("accepts a lower sequence authoritative reconnect snapshot for the same server", () => {

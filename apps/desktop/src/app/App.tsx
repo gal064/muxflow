@@ -864,19 +864,22 @@ export function App() {
       unread={unread}
       workspaceName={activeSession?.name}
     />
-    <DisconnectedStrip
-      // `connectionDetail` only — never the general status line. The status
-      // line carries whatever happened last, which during a disconnect is
-      // usually an unrelated consequence ("Could not mark %117 hidden…"), and
-      // this strip's job is to explain the connection. The full status stays in
-      // the live region at the end of the shell.
-      detail={connectionDetail}
-      hasSnapshot={snapshot.sessions.length > 0}
-      onOpenSettings={() => setSettingsOpen(true)}
-      onReconnect={() => setConnectionEpoch((value) => value + 1)}
-      phase={hostState.phase}
-    />
     <div className="shell-body">
+      {/* Inside the body, and positioned over it: the strip is an overlay now,
+          so the row it used to occupy no longer resizes every tmux window on
+          the way in and out. `.shell-body` is its containing block. */}
+      <DisconnectedStrip
+        // `connectionDetail` only — never the general status line. The status
+        // line carries whatever happened last, which during a disconnect is
+        // usually an unrelated consequence ("Could not mark %117 hidden…"), and
+        // this strip's job is to explain the connection. The full status stays in
+        // the live region at the end of the shell.
+        detail={connectionDetail}
+        hasSnapshot={snapshot.sessions.length > 0}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onReconnect={() => setConnectionEpoch((value) => value + 1)}
+        phase={hostState.phase}
+      />
       {sidebarOpen && <WorkspaceSidebar
         adapters={agentRuntime.adapters}
         agents={agentRows}

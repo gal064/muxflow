@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TerminalEventHub } from "./TerminalEventHub";
 import type { TerminalEvent } from "./api";
 import { copyTerminalBytes } from "./TerminalBytes";
+import { recordIncident } from "../../diagnostics/incidents";
+
+vi.mock("../../diagnostics/incidents", () => ({ recordIncident: vi.fn() }));
+const incidents = vi.mocked(recordIncident);
+beforeEach(() => incidents.mockClear());
 
 const output = (sequence: number, generation: number, paneId = "%1", data = Uint8Array.of(generation)): TerminalEvent => ({
   kind: "output", paneId, generation, data: copyTerminalBytes(data), sequence,
@@ -233,15 +238,77 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(requests).toEqual([]);
   });
 
-  it("rejects a global sequence gap before delivering its pane payload and stays frozen", () => {
-    const hub = new TerminalEventHub();
+  it("admits a forward sequence jump, carries the watermark, and reseeds the mounted panes once", () => {
+    // The native link owns sequence integrity and repairs a break in place. A
+    // hole reaching this far is a frame this process dropped, so the answer is
+    // scoped: deliver what arrived and re-establish the panes' screens — never
+    // freeze the connection the native side has already made whole.
+    const requests: [string, string][] = [];
+    const hub = new TerminalEventHub((paneId, reason) => requests.push([paneId, reason]));
     const received: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => received.push(event));
+    hub.subscribePane("%2", () => undefined);
     expect(hub.publish(output(1, 1))).toEqual({ kind: "accepted" });
-    expect(hub.publish(output(3, 2))).toEqual({ kind: "gap", expected: 2, received: 3 });
-    expect(hub.publish(output(2, 3))).toEqual({ kind: "gap", expected: 2, received: 2 });
-    expect(received).toEqual([output(1, 1)]);
-    expect(hub.lastSequence).toBe(1);
+    expect(requests).toEqual([]);
+    expect(incidents).not.toHaveBeenCalled();
+
+    // A burst of three jumps is one anomaly: one reseed per pane, not three.
+    expect(hub.publish(output(4, 2))).toEqual({ kind: "accepted" });
+    expect(hub.publish(output(9, 3))).toEqual({ kind: "accepted" });
+    expect(hub.publish(output(20, 4))).toEqual({ kind: "accepted" });
+    expect(hub.lastSequence).toBe(20);
+    expect(received).toEqual([output(1, 1), output(4, 2), output(9, 3), output(20, 4)]);
+    expect(requests).toEqual([
+      ["%1", "event sequence jumped (decode drop?)"],
+      ["%2", "event sequence jumped (decode drop?)"],
+    ]);
+    expect(incidents.mock.calls).toEqual([["link.eventGap", { expected: 2, received: 4 }]]);
+
+    // Contiguous traffic after the jump costs nothing at all.
+    expect(hub.publish(output(21, 5))).toEqual({ kind: "accepted" });
+    expect(requests).toHaveLength(2);
+    expect(incidents).toHaveBeenCalledTimes(1);
+    // And a frame from behind the watermark is still dropped before delivery.
+    expect(hub.publish(output(20, 6))).toEqual({ kind: "stale" });
+    expect(received).toHaveLength(5);
+  });
+
+  it("fast-forwards to an authoritative snapshot without calling a jump a jump", () => {
+    // The resync barrier arrives at whatever sequence the host reached. It is
+    // the repair, not evidence of a loss, so it must not cost a pane reseed.
+    const requests: string[] = [];
+    const hub = new TerminalEventHub((paneId) => requests.push(paneId));
+    hub.subscribePane("%1", () => undefined);
+    hub.publish(output(1, 1));
+    const barrier = {
+      kind: "snapshot", snapshot: { sessions: [], windows: [], panes: [] },
+      generation: 3, serverIdentity: "server", authoritative: true, sequence: 77,
+    } as TerminalEvent;
+    expect(hub.publish(barrier)).toEqual({ kind: "accepted" });
+    expect(hub.lastSequence).toBe(77);
+    expect(hub.publish(output(78, 2))).toEqual({ kind: "accepted" });
+    expect(requests).toEqual([]);
+    expect(incidents).not.toHaveBeenCalled();
+  });
+
+  it("reseeds every mounted pane on request, reopening a one-shot conflict latch", () => {
+    const requests: [string, string][] = [];
+    const hub = new TerminalEventHub((paneId, reason) => requests.push([paneId, reason]));
+    const unsubscribe = hub.subscribePane("%1", () => undefined);
+    hub.subscribePane("%2", () => undefined);
+    // %1 arrives already holding the one-shot conflict latch.
+    hub.publish(output(1, 7));
+    hub.publish(seed(2, 3));
+    expect(requests).toEqual([["%1", "stale or conflicting terminal visibility handoff"]]);
+
+    hub.reseedSubscribedPanes("post-resync reseed");
+    expect(requests.slice(1)).toEqual([["%1", "post-resync reseed"], ["%2", "post-resync reseed"]]);
+    expect(hub.paneHealth("%1").conflictReseedRequested).toBe(false);
+
+    // Unmounted panes are not asked for: nothing is rendering them.
+    unsubscribe();
+    hub.reseedSubscribedPanes("post-resync reseed");
+    expect(requests.slice(3)).toEqual([["%2", "post-resync reseed"]]);
   });
 
   it("admits a sequence-zero agent snapshot paired with an authoritative topology snapshot", () => {

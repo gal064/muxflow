@@ -13,7 +13,8 @@ import { WorkspaceSidebar } from "../workspaces/WorkspaceSidebar";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../workspaces/TabStrip";
 import { workspaceRows, type WorkspaceRowModel } from "../workspaces/workspaceRows";
 import { deriveAgentRollups } from "../agents/selectors";
-import { DisconnectedStrip } from "./DisconnectedStrip";
+import { DisconnectedStrip, STRIP_APPEAR_DELAY_MS } from "./DisconnectedStrip";
+import type { ConnectionPhase } from "../../state/connectionReducer";
 import { RightPanel } from "./RightPanel";
 import type { ShellState } from "./types";
 import { SettingsDialog } from "./SettingsDialog";
@@ -383,27 +384,61 @@ describe("application shell accessibility contracts", () => {
     expect([...bar("linux").matchAll(/<button/gu)]).toHaveLength([...bar("mac").matchAll(/<button/gu)].length);
   });
 
-  it("shows nothing while connected, and one explained line while not", () => {
-    expect(renderToStaticMarkup(<DisconnectedStrip
-      detail="" hasSnapshot onOpenSettings={noop} onReconnect={noop} phase="connected"
-    />)).toBe("");
-    const reconnecting = renderToStaticMarkup(<DisconnectedStrip
-      detail="network unreachable" hasSnapshot onOpenSettings={noop} onReconnect={noop} phase="reconnecting"
-    />);
-    expect(reconnecting).toContain("Reconnecting to tmux…");
-    expect(reconnecting).toContain("network unreachable");
-    expect(reconnecting).toContain("Reconnect");
-    expect(reconnecting).toContain('role="status"');
-    const frozen = renderToStaticMarkup(<DisconnectedStrip
-      detail="" hasSnapshot onOpenSettings={noop} onReconnect={noop} phase="readOnly"
-    />);
-    // `status`, not `alert`: read-only is a persistent condition, and an
-    // assertive region would re-interrupt on every detail re-render.
-    expect(frozen).toContain('role="status"');
-    expect(frozen).toContain("Connected read-only");
-    expect(frozen).toContain("writes are frozen");
-    // Read-only is not something "Reconnect" fixes, so it is not offered.
-    expect(frozen).not.toContain(">Reconnect<");
+  it("shows nothing while connected, and one explained line once the trouble persists", () => {
+    vi.useFakeTimers();
+    try {
+      const strip = (phase: ConnectionPhase, detail = "") => <DisconnectedStrip
+        detail={detail} hasSnapshot onOpenSettings={noop} onReconnect={noop} phase={phase}
+      />;
+      const rendered = (renderer: ReturnType<typeof create>) => JSON.stringify(renderer.toJSON());
+      let renderer!: ReturnType<typeof create>;
+      act(() => { renderer = create(strip("connected")); });
+      expect(renderer.toJSON()).toBeNull();
+
+      // A blip that heals inside the delay never becomes a banner: the native
+      // link repairs a sequence break in place, and a strip that flashed for
+      // 200ms was unreadable churn over the terminal.
+      act(() => { renderer.update(strip("resyncing")); });
+      act(() => { vi.advanceTimersByTime(STRIP_APPEAR_DELAY_MS - 1); });
+      expect(renderer.toJSON()).toBeNull();
+      act(() => { renderer.update(strip("connected")); });
+      act(() => { vi.advanceTimersByTime(5_000); });
+      expect(renderer.toJSON()).toBeNull();
+
+      act(() => { renderer.update(strip("reconnecting", "network unreachable")); });
+      act(() => { vi.advanceTimersByTime(STRIP_APPEAR_DELAY_MS); });
+      const reconnecting = rendered(renderer);
+      expect(reconnecting).toContain("link-strip");
+      expect(reconnecting).toContain("Reconnecting to tmux…");
+      expect(reconnecting).toContain("network unreachable");
+      expect(reconnecting).toContain("Reconnect");
+      expect(reconnecting).toContain('"role":"status"');
+      // Recovery is never delayed, only the appearance is.
+      act(() => { renderer.update(strip("connected")); });
+      expect(renderer.toJSON()).toBeNull();
+
+      act(() => { renderer.update(strip("readOnly")); });
+      act(() => { vi.advanceTimersByTime(STRIP_APPEAR_DELAY_MS); });
+      const frozen = rendered(renderer);
+      // `status`, not `alert`: read-only is a persistent condition, and an
+      // assertive region would re-interrupt on every detail re-render.
+      expect(frozen).toContain('"role":"status"');
+      expect(frozen).toContain("Connected read-only");
+      expect(frozen).toContain("writes are frozen");
+      // Read-only is not something "Reconnect" fixes, so it is not offered.
+      expect(frozen).not.toContain("Reconnect");
+      act(() => { renderer.unmount(); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("overlays the shell body with the strip instead of taking a row from it", () => {
+    // In flow, this band moved the terminal surface the tmux client size is
+    // measured from: appearing and recovering each resized the user's real
+    // windows. It is an overlay in its own containing block now.
+    expect(stylesCss).toMatch(/\.link-strip \{\s*position: absolute; z-index: 30; top: 0; left: 0; right: 0;/u);
+    expect(stylesCss).toMatch(/\.shell-body \{ position: relative;/u);
   });
 
   it("shows exact hook events, command, owner, path, and Codex trust guidance", () => {
