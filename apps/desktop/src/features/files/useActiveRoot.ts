@@ -53,6 +53,12 @@ interface Options {
   onError: (message: string) => void;
   /** The caller's lifecycle counter, so paint measurements share its identity. */
   lifecycle: () => number;
+  /**
+   * The working directory the host last reported for the active pane.
+   *
+   * The one signal that a `cd` happened at all — see the effect that watches it.
+   */
+  activePaneCurrentPath?: string;
 }
 
 /**
@@ -82,7 +88,8 @@ export function useActiveRoot(options: Options): {
   const activityRef = useRef<(() => void) | undefined>(undefined);
   // Read only from the probe, which runs long after the render that set it.
   const latest = useCommittedRef(options);
-  const { client, scopeKey } = options;
+  const { activePaneCurrentPath, client, scopeKey } = options;
+  const lastPanePath = useRef(activePaneCurrentPath);
 
   useEffect(() => {
     if (!scopeKey) return;
@@ -182,6 +189,32 @@ export function useActiveRoot(options: Options): {
       activityRef.current = undefined;
     };
   }, [client, scopeKey]);
+
+  /**
+   * The pane's working directory moved, so check the root now.
+   *
+   * tmux announces no `cd` at all, which is why the backstop above exists — but
+   * the host does notice: its topology safety reconcile compares each pane's
+   * `current_path` every 30 s and pushes a `TopologySnapshot` when one differs,
+   * and that snapshot is what changes this value. So the detector already runs
+   * on the host, and all this effect does is turn its signal into a single
+   * immediate probe rather than leaving it to a timer that has decayed to one
+   * check every two minutes. Worst case is the reconcile's own interval — ~30 s
+   * for a bare `cd` in an otherwise idle pane — and instant when any tmux
+   * activity accompanies it, because that pushes the snapshot straight away.
+   *
+   * Not on mount (the scope effect above probes immediately) and not across
+   * `undefined`, which is connection churn rather than a `cd`. The root itself
+   * is the git toplevel, so `cd` within one repository resolves the same root
+   * and `rootToken` dedupes the answer to no repaint at all.
+   */
+  useEffect(() => {
+    const previous = lastPanePath.current;
+    lastPanePath.current = activePaneCurrentPath;
+    if (previous === undefined || activePaneCurrentPath === undefined) return;
+    if (previous === activePaneCurrentPath) return;
+    rearmRef.current?.();
+  }, [activePaneCurrentPath]);
 
   // Stable, because callers keep it in dependency arrays and in event
   // handlers that must not be rebuilt on every render.

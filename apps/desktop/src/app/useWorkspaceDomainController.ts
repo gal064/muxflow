@@ -78,7 +78,10 @@ export function useWorkspaceDomainController(arguments_: WorkspaceDomainArgument
     connectionEpoch: String(terminalEpoch),
     mode: connection.mode,
   } : undefined, [clientId, connection.mode, currentHostProfileId, serverIdentity, terminalEpoch]);
-  const workspaceFiles = useWorkspaceFiles(fileClient, fileScope, fileSelectionKey);
+  // The pane's own `current_path`, straight from the host's topology snapshot:
+  // tmux announces no `cd`, so this changing is the Explorer's only notice that
+  // the active pane moved.
+  const workspaceFiles = useWorkspaceFiles(fileClient, fileScope, fileSelectionKey, activePane?.currentPath);
   const workspaceGit = useWorkspaceGit(gitRepositories, fileScope, workspaceFiles.root);
   const workspaceAppTabs = useMemo(
     () => appTabsForWorkspace(appState, currentHostProfileId, serverIdentity, activeSession),

@@ -62,6 +62,8 @@ export function useWorkspaceFiles(
   client: FileWorkspaceClient,
   scope: FileWorkspaceScope | undefined,
   selectionKey = scope ? keyForScope(scope) : "",
+  /** The host's last word on the active pane's cwd — the only `cd` signal there is. */
+  activePaneCurrentPath?: string,
 ) {
   const [state, setState] = useState<WorkspaceFilesState>({
     scopeKey: "",
@@ -609,6 +611,7 @@ export function useWorkspaceFiles(
   }, [abortListing, selectionKey]);
 
   const { rearm, noteActivity } = useActiveRoot({
+    activePaneCurrentPath,
     client,
     scope: () => scopeRef.current,
     scopeKey: liveScopeKey,
