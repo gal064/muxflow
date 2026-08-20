@@ -13,7 +13,7 @@ use tmux_agent_protocol::{
 };
 use uuid::Uuid;
 
-use super::event_frame::encode_event_with_sequence;
+use super::event_frame::{AGENT_SNAPSHOT_SCOPE, encode_event_with_sequence};
 use super::transport::{
     BridgeStderr, SshLease, acquire_control_master_cancellable, spawn_bridge,
     with_bridge_diagnostic,
@@ -234,11 +234,13 @@ fn run_bridge_once(
                 terminal_epoch,
             ))
             .map_err(|error| error.to_string())?;
+            // Paired with the topology frame above at the same accepted
+            // sequence, which is why the encoder stamps this one zero.
             send_protocol_event(
                 channel,
                 sequence,
                 TerminalEvent::AgentService {
-                    scope: "snapshot".into(),
+                    scope: AGENT_SNAPSHOT_SCOPE.into(),
                     payload,
                 },
             )?;
@@ -701,11 +703,13 @@ fn process_event(
                     client.terminal_epoch.load(Ordering::Acquire),
                 ))
                 .map_err(|error| error.to_string())?;
+                // The second frame of one host event: the topology frame above
+                // already delivered the sequence they share.
                 send_protocol_event(
                     channel,
                     event_sequence,
                     TerminalEvent::AgentService {
-                        scope: "snapshot".into(),
+                        scope: AGENT_SNAPSHOT_SCOPE.into(),
                         payload,
                     },
                 )?;
@@ -852,6 +856,10 @@ fn process_event(
                 client.terminal_epoch.load(Ordering::Acquire),
             ))
             .map_err(|error| error.to_string())?;
+            // A standalone ordered event: its scope is the agent's identifier,
+            // never the reserved snapshot scope, so the frame keeps the
+            // sequence this event spent. Dropping it would leave a hole the
+            // renderer reads as a lost frame.
             send_protocol_event(
                 channel,
                 event_sequence,

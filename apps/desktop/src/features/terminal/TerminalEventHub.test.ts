@@ -255,6 +255,23 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(hub.lastSequence).toBe(12);
   });
 
+  it("advances the watermark through a standalone agent event instead of reading it as a gap", () => {
+    // A live agent event is an ordered host event that spent a sequence of its
+    // own. The native layer used to stamp every agent frame local, so the very
+    // next ordered frame looked like a lost one and tore the connection down
+    // for the length of any agent run.
+    const hub = new TerminalEventHub();
+    const received: TerminalEvent[] = [];
+    const before = output(1, 1);
+    const agent = { kind: "agentService", scope: "claude-code:2f9a", event: { generation: "9", connectionEpoch: "41", notify: true, reason: "blocked", agent: { agentId: "claude-code:2f9a" } }, sequence: 2 } as TerminalEvent;
+    const after = resource(3, 2);
+    expect(hub.publish(before, () => received.push(before))).toEqual({ kind: "accepted" });
+    expect(hub.publish(agent, () => received.push(agent))).toEqual({ kind: "accepted" });
+    expect(hub.publish(after, () => received.push(after))).toEqual({ kind: "accepted" });
+    expect(received).toEqual([before, agent, after]);
+    expect(hub.lastSequence).toBe(3);
+  });
+
   it("treats repeated checkpoints as idempotent but scoped-reseeds a conflicting handoff without discarding backlog", () => {
     const requests: string[] = [];
     const hub = new TerminalEventHub((paneId) => requests.push(paneId));

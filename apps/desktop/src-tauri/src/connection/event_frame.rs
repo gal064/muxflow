@@ -72,6 +72,16 @@ pub(super) enum TerminalEvent {
     },
 }
 
+/// The one agent scope that is not a host agent event.
+///
+/// A snapshot-scoped agent frame is emitted beside the topology frame built
+/// from the same host event, so the sequence they share has already crossed to
+/// the hub by the time it is encoded. Every other scope is an agent identifier
+/// from a standalone ordered `AgentState` event, and the renderer keys the same
+/// distinction off this label when it decides whether the payload is a snapshot
+/// or an event.
+pub(super) const AGENT_SNAPSHOT_SCOPE: &str = "snapshot";
+
 pub(super) fn encode_event(event: TerminalEvent) -> Vec<u8> {
     let sequence = snapshot_sequence(&event).unwrap_or(0);
     encode_event_with_sequence(event, sequence)
@@ -81,13 +91,18 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
     // A snapshot's sequence is its accepted/topology barrier and is part of the
     // snapshot payload. Keep the common binary header atomic with that value,
     // even for snapshots produced directly by handshake and resync responses.
-    // Agent service frames are sideband state. They may be paired with the
-    // topology frame at the same accepted protocol sequence, so they use the
-    // hub's reserved sequence zero and carry their connection epoch in JSON.
-    let sequence = if matches!(&event, TerminalEvent::AgentService { .. }) {
-        0
-    } else {
-        snapshot_sequence(&event).unwrap_or(protocol_sequence)
+    //
+    // Otherwise the invariant is: a frame carries sequence zero iff its host
+    // event consumed no sequence number or the sequence was already delivered
+    // by a sibling frame. The snapshot-scoped agent frame is that second case —
+    // it rides along with the topology frame that already carried their shared
+    // accepted sequence, and repeating it would read as a duplicate. Every
+    // other agent frame is a standalone ordered `AgentState` event that
+    // consumed a sequence of its own; zeroing it would make the hub's next
+    // frame look like a gap and tear the connection down.
+    let sequence = match &event {
+        TerminalEvent::AgentService { scope, .. } if scope == AGENT_SNAPSHOT_SCOPE => 0,
+        _ => snapshot_sequence(&event).unwrap_or(protocol_sequence),
     };
     match event {
         TerminalEvent::GenerationEpoch { epoch } => {
@@ -225,32 +240,40 @@ fn snapshot_sequence(event: &TerminalEvent) -> Option<u64> {
 mod tests {
     use super::*;
 
+    fn agent_frame_sequence(scope: &str, protocol_sequence: u64) -> u64 {
+        let frame = encode_event_with_sequence(
+            TerminalEvent::AgentService {
+                scope: scope.into(),
+                payload: br#"{"connectionEpoch":"41"}"#.to_vec(),
+            },
+            protocol_sequence,
+        );
+        assert_eq!(frame[0], 14);
+        let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+        assert_eq!(&frame[3..3 + label_len], scope.as_bytes());
+        let sequence_at = 3 + label_len;
+        u64::from_be_bytes(frame[sequence_at..sequence_at + 8].try_into().unwrap())
+    }
+
+    /// The paired frame must not re-spend its sibling's sequence.
     #[test]
-    fn agent_service_is_sequence_zero_even_when_paired_with_protocol_event() {
-        // These labels represent all production bridge paths: handshake or
-        // topology snapshot sidebands and live AgentState events.
-        for (scope, protocol_sequence) in [("snapshot", 17), ("agent:live", u64::MAX)] {
-            let frame = encode_event_with_sequence(
-                TerminalEvent::AgentService {
-                    scope: scope.into(),
-                    payload: br#"{"connectionEpoch":"41"}"#.to_vec(),
-                },
-                protocol_sequence,
-            );
-            assert_eq!(frame[0], 14);
-            let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
-            let sequence_at = 3 + label_len;
-            assert_eq!(
-                u64::from_be_bytes(frame[sequence_at..sequence_at + 8].try_into().unwrap()),
-                0
-            );
-        }
+    fn a_snapshot_scoped_agent_frame_defers_to_the_topology_frame_beside_it() {
+        assert_eq!(agent_frame_sequence(AGENT_SNAPSHOT_SCOPE, 17), 0);
 
         let frame = encode_event(TerminalEvent::AgentService {
-            scope: "snapshot".into(),
+            scope: AGENT_SNAPSHOT_SCOPE.into(),
             payload: Vec::new(),
         });
         let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
         assert_eq!(&frame[3 + label_len..11 + label_len], &0_u64.to_be_bytes());
+    }
+
+    /// A standalone `AgentState` event consumed a host sequence of its own, and
+    /// swallowing it made the hub read the next ordered frame as a gap and tear
+    /// the whole connection down mid-agent-run.
+    #[test]
+    fn a_standalone_agent_event_frame_carries_the_sequence_it_consumed() {
+        assert_eq!(agent_frame_sequence("claude-code:2f9a", 18), 18);
+        assert_eq!(agent_frame_sequence("codex:live", u64::MAX), u64::MAX);
     }
 }

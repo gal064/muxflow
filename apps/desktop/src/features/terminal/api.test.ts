@@ -156,16 +156,18 @@ describe("binary terminal IPC", () => {
 
   it("decodes ordered agent events and authoritative reconnect snapshots losslessly", () => {
     const event = { generation: "18446744073709551615", connectionEpoch: "41", notify: true, reason: "blocked", agent: { agentId: "codex:1" } };
-    expect(decodeTerminalEvent(frame(14, "agent:codex:1", 0, textEncoder.encode(JSON.stringify(event))))).toEqual({
-      kind: "agentService", scope: "agent:codex:1", sequence: 0, event,
+    expect(decodeTerminalEvent(frame(14, "agent:codex:1", 21, textEncoder.encode(JSON.stringify(event))))).toEqual({
+      kind: "agentService", scope: "agent:codex:1", sequence: 21, event,
     });
     const snapshot = { generation: "20", acceptedGeneration: "20", agents: [], authoritative: true, notificationWatermark: "20", connectionEpoch: "41" };
     expect(decodeTerminalEvent(frame(14, "snapshot", 0, textEncoder.encode(JSON.stringify(snapshot))))).toEqual({
       kind: "agentService", scope: "snapshot", sequence: 0, snapshot,
     });
-    expect(decodeTerminalEvent(frame(14, "agent", 0, textEncoder.encode(JSON.stringify(event)))).sequence).toBe(0);
-    expect(() => decodeTerminalEvent(frame(14, "agent", 2, textEncoder.encode(JSON.stringify(event))))).toThrow("agent service frame must use local sequence zero");
-    expect(() => decodeTerminalEvent(frame(14, "agent", 0, Uint8Array.of(0xff)))).toThrow("UTF-8 JSON");
+    // An agent event spends a host sequence of its own; only the snapshot that
+    // shares the topology frame's sequence may arrive local.
+    expect(() => decodeTerminalEvent(frame(14, "agent", 0, textEncoder.encode(JSON.stringify(event))))).toThrow("agent event frame must use a nonzero host sequence");
+    expect(() => decodeTerminalEvent(frame(14, "snapshot", 2, textEncoder.encode(JSON.stringify(snapshot))))).toThrow("agent snapshot frame must use local sequence zero");
+    expect(() => decodeTerminalEvent(frame(14, "agent", 2, Uint8Array.of(0xff)))).toThrow("UTF-8 JSON");
   });
 
   it("decodes compact pane recovery material with strict length-delimited byte segments", () => {
