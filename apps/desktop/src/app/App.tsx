@@ -19,6 +19,7 @@ import { setTerminalScreenReaderMode } from "../features/terminal/accessibilityP
 import { TauriTerminalTransferClient } from "../features/terminal/terminalTransferApi";
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import { abandonPanePaintSpansForScope } from "../perf/probe";
+import { recordIncident } from "../diagnostics/incidents";
 import type { TmuxAction } from "../features/tmux/actions";
 import { TauriAgentClient } from "../features/agents/api";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
@@ -103,6 +104,19 @@ const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then(
  * moves between; the fifth costs a rebuild, exactly as every switch did before.
  */
 const MOUNTED_APP_TAB_LIMIT = 4;
+
+/**
+ * When a keystroke took too long to *leave* the app.
+ *
+ * The input invoke blocks while the native send queue is full, so this is the
+ * outbound half of the lag the echo probe measures: past this, the delay is
+ * already on this side of the link and no amount of server-side latency
+ * explains it.
+ */
+const SLOW_SEND_THRESHOLD_MS = 250;
+
+/** A backed-up queue produces one line per episode, not one per keystroke. */
+const SLOW_SEND_INTERVAL_MS = 10_000;
 
 /**
  * What makes a mounted document surface a *different* surface.
@@ -226,6 +240,7 @@ export function App() {
   // workspaces.
   const historyStep = useRef(false);
   const controllers = useRef(new Map<string, TerminalPaneController>());
+  const lastSlowSendAt = useRef(new Map<string, number>());
   const platform = useMemo(() => currentPlatform(), []);
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
   const currentHelperConnectionKey = helperConnectionKey(connection);
@@ -667,9 +682,25 @@ export function App() {
     // The one place a keystroke becomes a request, so the one place the wait
     // for its echo can start.
     echoLagProbe.noteInput(paneId);
+    const sentAt = performance.now();
     const request = input.kind === "text" ? sendInput(clientId, paneId, input.data) : sendBinaryInput(clientId, paneId, input.data);
-    void request.catch((error) => { if (clientIdRef.current === clientId) setStatus(String(error)); });
+    // How long the keystroke took to *leave*. The native side blocks this
+    // invoke while its input queue is full, so a slow one says the stall is on
+    // the way out of the app — which a silent link cannot otherwise distinguish
+    // from a keystroke that left promptly and died server-side.
+    void request.then(() => {
+      const outboundMs = performance.now() - sentAt;
+      if (outboundMs <= SLOW_SEND_THRESHOLD_MS) return;
+      const previous = lastSlowSendAt.current.get(paneId);
+      if (previous !== undefined && sentAt - previous < SLOW_SEND_INTERVAL_MS) return;
+      lastSlowSendAt.current.set(paneId, sentAt);
+      recordIncident("input.sendSlow", { paneId, ms: Math.round(outboundMs) });
+    }).catch((error) => { if (clientIdRef.current === clientId) setStatus(String(error)); });
   }, [clientId, echoLagProbe, hostState.canMutate]);
+
+  const handleKeyActivity = useCallback((paneId: string) => {
+    echoLagProbe.noteKey(paneId);
+  }, [echoLagProbe]);
 
   // Which workspace tmux sizes from is decided here and nowhere else, so it is
   // stated to the host as a fact rather than left to whichever event happened
@@ -996,6 +1027,7 @@ export function App() {
               onMeasurements={onMeasurements}
               grid={grid}
               handleInput={handleInput}
+              handleKeyActivity={handleKeyActivity}
               hub={hub}
               mountedPanes={mountedPanes}
               paneAttention={agentRuntime.rollups.byPane}
