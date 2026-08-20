@@ -91,6 +91,28 @@ describe("connectionReducer", () => {
     expect(stale.panes["%3"]).toBeDefined();
   });
 
+  it("names the mismatch that requested each resync, and clears it on the next snapshot", () => {
+    const state = connectionReducer(initialHostState, {
+      type: "snapshot", snapshot: populated, sequence: 7, generation: 5, serverIdentity: "server-a",
+    });
+    const eventGap = connectionReducer(state, { type: "orderedEvent", sequence: 10 });
+    expect(eventGap.resyncReason).toBe("event-gap expected=8 received=10");
+    const bridgeGap = connectionReducer(state, { type: "sequenceGap", expected: 8, received: 11 });
+    expect(bridgeGap.resyncReason).toBe("bridge-gap expected=8 received=11");
+    const staleGeneration = connectionReducer(state, {
+      type: "orderedSnapshot", snapshot: empty, sequence: 8, generation: 4, serverIdentity: "server-a",
+    });
+    expect(staleGeneration.resyncReason).toBe("snapshot-stale-generation had=5 received=4");
+    const identity = connectionReducer(state, {
+      type: "orderedSnapshot", snapshot: empty, sequence: 8, serverIdentity: "server-b",
+    });
+    expect(identity.resyncReason).toBe("snapshot-identity had=server-a received=server-b");
+    const recovered = connectionReducer(eventGap, {
+      type: "snapshot", snapshot: populated, sequence: 1, generation: 6, serverIdentity: "server-a",
+    });
+    expect(recovered.resyncReason).toBeUndefined();
+  });
+
   it("accepts a lower sequence authoritative reconnect snapshot for the same server", () => {
     const state = connectionReducer(initialHostState, {
       type: "snapshot", snapshot: populated, sequence: 42, serverIdentity: "same-server",

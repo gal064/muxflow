@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { afterNextPaint, closePanePaintSpans, recordPerfCounter, recordPerfMilestone } from "../../perf/probe";
+import { recordIncident } from "../../diagnostics/incidents";
 import { createPaintTicket } from "../../perf/paintTicket";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import type { Pane } from "../../app/types";
@@ -400,6 +401,9 @@ export function TerminalPane({
     const watchdog = new PaneDegradedWatchdog((reason, attempt) => {
       if (!rendererActive) return;
       recordPerfCounter("terminal.pane.watchdogReseeds");
+      // Every retry, not once per episode: attempt numbers in the journal are
+      // how "stuck for 2 seconds" and "stuck until reconnect" tell apart.
+      recordIncident("pane.degraded", { paneId: pane.id, reason, attempt });
       // Once per episode, not once per retry: the point is that a stuck pane
       // stops being silent, not that it becomes noisy.
       if (attempt === 0) {

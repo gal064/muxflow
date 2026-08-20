@@ -15,6 +15,7 @@ import { resolveActiveWindowId, type OptimisticWindowSwitch } from "./windowSele
 import { resolveSelectedSession } from "../features/shell/model";
 import type { HostScopeToken } from "../features/shell/hostScope";
 import { recordPerfCounter } from "../perf/probe";
+import { recordIncident } from "../diagnostics/incidents";
 
 type ControllerArguments = {
   agentClient: TauriAgentClient;
@@ -116,6 +117,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     undefined,
     (message) => {
       recordPerfCounter("connection.reconnect.observerFailure");
+      recordIncident("reconnect.observerFailure", { message });
       setConnectionDetail(message);
       setStatus(message);
       setConnectionEpoch((value) => value + 1);
@@ -125,6 +127,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   useDesktopResumeRecovery(() => {
     if (!profilesHydrated) return;
     recordPerfCounter("connection.reconnect.desktopResume");
+    recordIncident("reconnect.desktopResume");
     setConnectionDetail("System resumed; reconnecting for an authoritative state refresh.");
     setStatus("System resumed; reconnecting…");
     setConnectionEpoch((value) => value + 1);
@@ -145,11 +148,32 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     if (hostState.resyncRequested && !frontendResyncActive.current) {
       frontendResyncActive.current = true;
       recordPerfCounter("connection.reconnect.sequenceGap");
+      recordIncident("reconnect.sequenceGap", { reason: hostState.resyncReason });
       setConnectionEpoch((value) => value + 1);
     } else if (!hostState.resyncRequested) {
       frontendResyncActive.current = false;
     }
   }, [hostState.resyncRequested]);
+
+  /**
+   * The journal's record of what the user saw: the amber strip shows exactly
+   * while the phase is degraded, so this pair of records is "the strip
+   * appeared (and why)" / "it went away after N ms" — the ground truth every
+   * amber investigation has been missing.
+   */
+  const linkDegradedSince = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const degraded = hostState.phase === "disconnected"
+      || hostState.phase === "reconnecting"
+      || hostState.phase === "resyncing";
+    if (degraded && linkDegradedSince.current === undefined) {
+      linkDegradedSince.current = Date.now();
+      recordIncident("link.degraded", { phase: hostState.phase });
+    } else if (!degraded && linkDegradedSince.current !== undefined) {
+      recordIncident("link.restored", { afterMs: Date.now() - linkDegradedSince.current });
+      linkDegradedSince.current = undefined;
+    }
+  }, [hostState.phase]);
 
   useEffect(() => {
     void invoke<PersistedProfiles>("list_host_profiles").then((saved) => {
@@ -229,12 +253,14 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
           if (!recoveringFlowStall) {
             recoveringFlowStall = true;
             recordPerfCounter("connection.reconnect.terminalFlowStall");
+            recordIncident("reconnect.flowStall", { paneId: event.paneId });
             setConnectionDetail("A terminal output stream stalled; reconnecting it now.");
             setStatus("Terminal output stalled; reconnecting…");
             setConnectionEpoch((value) => value + 1);
           }
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
+          recordIncident("link.bridgeDown", { kind: event.kind, detail });
           setConnectionDetail(detail);
           setStatus(detail);
           // The message is the only thing that separates "this host has no
