@@ -428,7 +428,7 @@ fn phase7_terminal_upload_contract_round_trips_u64_and_opaque_names() {
         destination_name: "東京.png".into(),
         total_bytes: (5_u64 << 30) + 17,
         available_bytes: u64::MAX,
-        final_path: "/home/test/.cache/tmux-agent-ide/uploads/東京.png".into(),
+        final_path: "/home/test/.cache/muxflow/uploads/東京.png".into(),
         verified: true,
         blake3: "a".repeat(64),
         ..Default::default()

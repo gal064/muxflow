@@ -17,19 +17,19 @@ cargo fmt --manifest-path tests/integration/transfers/protocol-driver/Cargo.toml
   >"$evidence/driver-fmt.log" 2>&1 & driver_fmt_pid=$!
 cargo test -p tmux-agent-protocol \
   >"$evidence/protocol.log" 2>&1 & protocol_pid=$!
-cargo test -p tmux-ide-host terminal_upload::tests -- --test-threads=1 \
+cargo test -p muxflow-host terminal_upload::tests -- --test-threads=1 \
   >"$evidence/host-upload.log" 2>&1 & host_pid=$!
-cargo test -p tmux-ide-host terminal_upload::staging::tests \
+cargo test -p muxflow-host terminal_upload::staging::tests \
   >"$evidence/host-staging-security.log" 2>&1 & host_staging_pid=$!
-cargo test -p tmux-agent-desktop upload_manager::tests \
+cargo test -p muxflow upload_manager::tests \
   >"$evidence/desktop-upload.log" 2>&1 & desktop_pid=$!
-cargo test -p tmux-agent-desktop clipboard_staging::tests \
+cargo test -p muxflow clipboard_staging::tests \
   >"$evidence/desktop-clipboard.log" 2>&1 & clipboard_pid=$!
-cargo test -p tmux-agent-desktop local_destination::tests \
+cargo test -p muxflow local_destination::tests \
   >"$evidence/desktop-destination-security.log" 2>&1 & destination_pid=$!
-cargo test -p tmux-agent-desktop transfer_event::tests \
+cargo test -p muxflow transfer_event::tests \
   >"$evidence/typed-transfer-contract.log" 2>&1 & event_pid=$!
-cargo test -p tmux-agent-desktop scheduler::tests -- --test-threads=1 \
+cargo test -p muxflow scheduler::tests -- --test-threads=1 \
   >"$evidence/canonical-engine.log" 2>&1 & engine_pid=$!
 pnpm --dir apps/desktop test -- \
   src/features/terminal/terminalTransfers.test.ts \
@@ -58,7 +58,7 @@ else
   expected_upload_tests=24
 fi
 rg -Fq "test result: ok. $expected_upload_tests passed; 0 failed" "$evidence/host-upload.log"
-cargo clippy -p tmux-agent-protocol -p tmux-ide-host -p tmux-agent-desktop \
+cargo clippy -p tmux-agent-protocol -p muxflow-host -p muxflow \
   --all-targets -- -D warnings >"$evidence/clippy.log" 2>&1 & clippy_pid=$!
 cargo clippy --manifest-path tests/integration/transfers/protocol-driver/Cargo.toml -- -D warnings \
   >"$evidence/driver-clippy.log" 2>&1 & driver_clippy_pid=$!

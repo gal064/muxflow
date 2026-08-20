@@ -7,7 +7,7 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 evidence="$repo_root/tmp/phase7-parent-swap-$run_id"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/integration/transfers/protocol-driver/target}"
-host_binary="$main_target/debug/tmux-ide-host"
+host_binary="$main_target/debug/muxflow-host"
 driver_binary="$driver_target/debug/transfer-test-driver"
 socket_name="ade-phase7-swap-$$"
 host_runtime="$evidence/host-runtime"
@@ -25,13 +25,13 @@ phase7_capture_source_tree "$repo_root" "$evidence"
 chmod 0700 "$evidence" "$host_runtime" "$fixture_home"
 printf '%s\n' "$evidence" >"$repo_root/tmp/phase7-parent-swap-latest"
 cd "$repo_root"
-cargo build --bin tmux-ide-host >"$evidence/host-build.log" 2>&1 & host_pid=$!
+cargo build --bin muxflow-host >"$evidence/host-build.log" 2>&1 & host_pid=$!
 cargo build --manifest-path tests/integration/transfers/protocol-driver/Cargo.toml \
   >"$evidence/driver-build.log" 2>&1 & driver_pid=$!
 phase7_wait_all "$host_pid" "$driver_pid"
 tmux -L "$socket_name" new-session -d -s phase7-swap -c "$fixture_home/workspace" 'exec bash'
 HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$host_runtime" ADE_TMUX_SOCKET_NAME="$socket_name" \
-ADE_PHASE7_STAGING_DIR="$fixture_home/.cache/tmux-agent-ide/uploads" \
+ADE_PHASE7_STAGING_DIR="$fixture_home/.cache/muxflow/uploads" \
   "$driver_binary" parent-swap local "$host_binary" \
   >"$evidence/result.json" 2>"$evidence/driver.log" & swap_pid=$!
 wait "$swap_pid"

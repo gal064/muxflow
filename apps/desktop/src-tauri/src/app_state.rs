@@ -662,7 +662,7 @@ mod tests {
             Some(&HostSetupDecision::Accepted)
         );
         assert_eq!(
-            value.host_setup.get("ssh-omarchy"),
+            value.host_setup.get("ssh-remote-linux"),
             Some(&HostSetupDecision::Declined)
         );
         validate(&value).expect("the frontend's own payload must validate");

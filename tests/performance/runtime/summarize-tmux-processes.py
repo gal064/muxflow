@@ -23,7 +23,7 @@ counts: dict[str, int] = {}
 host_lines = []
 for raw in path.read_text().splitlines():
     parent, separator, arguments = raw.partition("\t")
-    if not separator or parent != "tmux-ide-host":
+    if not separator or parent != "muxflow-host":
         continue
     category = classify(arguments)
     counts[category] = counts.get(category, 0) + 1

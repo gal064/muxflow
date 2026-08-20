@@ -39,7 +39,7 @@ impl Client {
                     .arg("-T")
                     .arg(arguments.get(3).ok_or("SSH target is required")?)
                     .arg(format!(
-                        "{remote_env} $HOME/.local/bin/tmux-ide-host bridge --stdio"
+                        "{remote_env} $HOME/.local/bin/muxflow-host bridge --stdio"
                     ))
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())

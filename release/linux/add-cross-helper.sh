@@ -19,7 +19,7 @@ case "$(basename "$other_archive")" in
   *-linux-aarch64.tar.gz) other_arch=aarch64 ;;
   *) echo "other archive has unsupported architecture" >&2; exit 64 ;;
 esac
-install -m 0755 "$other_root/bin/tmux-ide-host" "$target_root/bin/tmux-ide-host-$other_arch"
+install -m 0755 "$other_root/bin/muxflow-host" "$target_root/bin/muxflow-host-$other_arch"
 (
   cd "$target_root"
   find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS

@@ -52,7 +52,7 @@ impl Transport {
                     "-o",
                     "BatchMode=yes",
                     target,
-                    "env ADE_PHASE1_TESTING=1 $HOME/.local/bin/tmux-ide-host bridge --stdio",
+                    "env ADE_PHASE1_TESTING=1 $HOME/.local/bin/muxflow-host bridge --stdio",
                 ]);
                 command
             }
@@ -113,7 +113,7 @@ impl Transport {
                     "-F",
                     config,
                     target,
-                    "$HOME/.local/bin/tmux-ide-host daemon-stop",
+                    "$HOME/.local/bin/muxflow-host daemon-stop",
                 ])
                 .output(),
         }

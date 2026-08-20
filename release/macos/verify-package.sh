@@ -3,19 +3,19 @@ set -euo pipefail
 
 app=${1:-}
 [[ -n "$app" && "$app" == /* && -d "$app" && ! -L "$app" ]] || {
-  echo "usage: verify-package.sh /absolute/path/to/tmux Agent IDE.app" >&2
+  echo "usage: verify-package.sh /absolute/path/to/Muxflow.app" >&2
   exit 64
 }
 
 contents="$app/Contents"
 plist="$contents/Info.plist"
-desktop="$contents/MacOS/tmux-agent-desktop"
-host="$contents/MacOS/tmux-ide-host"
+desktop="$contents/MacOS/muxflow"
+host="$contents/MacOS/muxflow-host"
 resources="$contents/Resources"
-owner='dev.dev.tmux-agent-ide:1'
+owner='dev.muxflow.desktop:1'
 
 [[ -f "$plist" && -x "$desktop" && -x "$host" ]]
-[[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist") == dev.dev.tmux-agent-ide ]]
+[[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist") == dev.muxflow.desktop ]]
 [[ $(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist") == 14.0 ]]
 if /usr/libexec/PlistBuddy -c 'Print :LSRequiresCarbon' "$plist" >/dev/null 2>&1; then
   echo 'obsolete LSRequiresCarbon metadata must not be present' >&2
@@ -29,7 +29,7 @@ host_file=$(file "$host")
 [[ "$host_file" == *Mach-O*arm64* ]]
 
 for architecture in aarch64 x86_64; do
-  helper="$resources/tmux-ide-host-linux-$architecture"
+  helper="$resources/muxflow-host-linux-$architecture"
   if [[ ${ADE_MACOS_PACKAGE_SMOKE:-0} == 1 && ! -f "$helper" ]]; then
     continue
   fi

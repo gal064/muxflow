@@ -3,9 +3,9 @@
 The host provides two local diagnostics commands:
 
 ```sh
-tmux-ide-host doctor
-tmux-ide-host doctor --json
-tmux-ide-host support-bundle --output ./tmux-agent-ide-support.json
+muxflow-host doctor
+muxflow-host doctor --json
+muxflow-host support-bundle --output ./muxflow-support.json
 ```
 
 `doctor` checks the installed helper, protocol and capability versions, platform, tmux/Git/OpenSSH availability, the private Unix-socket endpoint, configured flow limits, runtime connection counters, and recent safe error classes. The support bundle is the same schema-versioned report in a portable JSON file.

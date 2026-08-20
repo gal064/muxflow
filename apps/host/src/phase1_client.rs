@@ -207,7 +207,7 @@ pub fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             v1::Operation::TerminalInput,
             v1::Request {
                 scope: pane.id.clone(),
-                data: b"printf x >> /tmp/tmux-agent-ide-phase1-input-count # PHASE1_PROTOCOL_INPUT_OK\r".to_vec(),
+                data: b"printf x >> /tmp/muxflow-phase1-input-count # PHASE1_PROTOCOL_INPUT_OK\r".to_vec(),
                 ..Default::default()
             },
         )?;
@@ -483,9 +483,9 @@ fn spawn_bridge(arguments: &[String]) -> anyhow::Result<Child> {
             command.arg("-F").arg(config);
         }
         let remote_command = if std::env::var_os("ADE_PHASE1_TESTING").is_some() {
-            "ADE_PHASE1_TESTING=1 $HOME/.local/bin/tmux-ide-host bridge --stdio"
+            "ADE_PHASE1_TESTING=1 $HOME/.local/bin/muxflow-host bridge --stdio"
         } else {
-            "$HOME/.local/bin/tmux-ide-host bridge --stdio"
+            "$HOME/.local/bin/muxflow-host bridge --stdio"
         };
         command.args(["-T", "-o", "BatchMode=yes"]);
         if let Some(socket) = value_after(arguments, "--control-socket") {

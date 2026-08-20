@@ -36,10 +36,10 @@ case "$(basename "$archive")" in
   *-linux-aarch64.tar.gz) expected_machine='AArch64' ;;
   *) echo "archive name does not declare a supported architecture" >&2; exit 1 ;;
 esac
-for binary in "$package_root/bin/tmux-agent-desktop" "$package_root/bin/tmux-ide-host"; do
+for binary in "$package_root/bin/muxflow" "$package_root/bin/muxflow-host"; do
   readelf -h "$binary" | grep -F "Machine:                           $expected_machine" >/dev/null
 done
-for helper in "$package_root"/bin/tmux-ide-host-x86_64 "$package_root"/bin/tmux-ide-host-aarch64; do
+for helper in "$package_root"/bin/muxflow-host-x86_64 "$package_root"/bin/muxflow-host-aarch64; do
   [[ -f "$helper" ]] || continue
   case "$helper" in
     *-x86_64) helper_machine='Advanced Micro Devices X86-64' ;;
@@ -47,8 +47,8 @@ for helper in "$package_root"/bin/tmux-ide-host-x86_64 "$package_root"/bin/tmux-
   esac
   readelf -h "$helper" | grep -F "Machine:                           $helper_machine" >/dev/null
 done
-strings "$package_root/bin/tmux-agent-desktop" | grep -F "default-src 'self' customprotocol: asset:" >/dev/null
-if strings "$package_root/bin/tmux-ide-host" | grep -E 'phase0-lanes|phase0-ssh|phase1-client' >/dev/null; then
+strings "$package_root/bin/muxflow" | grep -F "default-src 'self' customprotocol: asset:" >/dev/null
+if strings "$package_root/bin/muxflow-host" | grep -E 'phase0-lanes|phase0-ssh|phase1-client' >/dev/null; then
   echo "release host contains development-only phase drivers" >&2
   exit 1
 fi

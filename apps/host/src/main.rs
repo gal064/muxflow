@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("bridge") => {
             if std::env::args().nth(2).as_deref() != Some("--stdio") {
-                bail!("usage: tmux-ide-host bridge --stdio [--socket PATH]");
+                bail!("usage: muxflow-host bridge --stdio [--socket PATH]");
             }
             bridge::run(
                 argument_path("--socket").unwrap_or_else(paths::default_socket_path),
@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
                 hook::manage(verb, std::env::args().skip(3).collect())
             }
             _ => bail!(
-                "usage: tmux-ide-host hook <ingest --adapter ID|status|install|uninstall> [--adapter ID] [--home PATH] [--settings-path PATH]"
+                "usage: muxflow-host hook <ingest --adapter ID|status|install|uninstall> [--adapter ID] [--home PATH] [--settings-path PATH]"
             ),
         },
         Some("version") => {
@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(debug_assertions)]
         Some("phase1-client") => phase1_client::run(std::env::args().skip(2).collect()),
         _ => bail!(
-            "usage: tmux-ide-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover>"
+            "usage: muxflow-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover>"
         ),
     }
 }
@@ -142,7 +142,7 @@ fn phase0_ssh(target: &str) -> anyhow::Result<()> {
     // macOS per-user temporary directory leaves no room for it under the
     // 104-byte AF_UNIX limit. Use the same short, private, uid-scoped runtime
     // root the helper's own SSH control sockets already use.
-    let runtime = std::path::PathBuf::from(format!("/tmp/tmux-agent-ide-{}", unsafe {
+    let runtime = std::path::PathBuf::from(format!("/tmp/muxflow-{}", unsafe {
         libc::geteuid()
     }))
     .join("ssh");

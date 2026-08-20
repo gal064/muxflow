@@ -28,7 +28,7 @@ runtime="/tmp/adepause-$run_id"
 socket="ade-pause-probe-$$"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/performance/runtime/perf-driver/target}"
-host_binary="$main_target/release/tmux-ide-host"
+host_binary="$main_target/release/muxflow-host"
 driver_binary="$driver_target/release/performance-test-driver"
 stall_seconds="${1:-8}"
 
@@ -46,7 +46,7 @@ mkdir -p "$runtime"
 chmod 0700 "$runtime"
 
 cd "$repo_root"
-cargo build --release --bin tmux-ide-host >"$runtime/cargo-host-build.log" 2>&1
+cargo build --release --bin muxflow-host >"$runtime/cargo-host-build.log" 2>&1
 cargo build --release --manifest-path tests/performance/runtime/perf-driver/Cargo.toml \
   >"$runtime/cargo-driver-build.log" 2>&1
 

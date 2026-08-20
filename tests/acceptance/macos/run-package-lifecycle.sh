@@ -2,12 +2,12 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd -P)
-source_app="$repo/target/release/bundle/macos/tmux Agent IDE.app"
+source_app="$repo/target/release/bundle/macos/Muxflow.app"
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 work="$repo/tmp/work/phase10/package-$run_id"
 applications="$work/Applications"
-candidate="$work/candidate/tmux Agent IDE.app"
-installed="$applications/tmux Agent IDE.app"
+candidate="$work/candidate/Muxflow.app"
+installed="$applications/Muxflow.app"
 config_fixture="$work/config-preserved"
 
 cleanup() {

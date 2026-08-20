@@ -826,7 +826,7 @@ fn control_directory_rejects_symlink_and_repairs_owned_legacy_mode() {
     let temporary = tempfile::tempdir().unwrap();
     let uid_root = temporary
         .path()
-        .join(format!("tmux-agent-ide-{}", unsafe { libc::geteuid() }));
+        .join(format!("muxflow-{}", unsafe { libc::geteuid() }));
     let foreign = temporary.path().join("foreign");
     fs::create_dir(&foreign).unwrap();
     std::os::unix::fs::symlink(&foreign, &uid_root).unwrap();

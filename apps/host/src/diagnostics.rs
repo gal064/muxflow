@@ -516,7 +516,7 @@ pub fn run_doctor(arguments: impl Iterator<Item = String>) -> anyhow::Result<()>
         match argument.as_str() {
             "--json" => json = true,
             "--help" | "-h" => {
-                println!("usage: tmux-ide-host doctor [--json]");
+                println!("usage: muxflow-host doctor [--json]");
                 return Ok(());
             }
             _ => bail!("unknown doctor option"),
@@ -535,7 +535,7 @@ pub fn write_support_bundle(arguments: impl Iterator<Item = String>) -> anyhow::
     let arguments: Vec<_> = arguments.collect();
     let output = match arguments.as_slice() {
         [flag, path] if flag == "--output" => PathBuf::from(path),
-        _ => bail!("usage: tmux-ide-host support-bundle --output PATH"),
+        _ => bail!("usage: muxflow-host support-bundle --output PATH"),
     };
     let bytes = serde_json::to_vec_pretty(&build_report())?;
     write_new_private(&output, &bytes)?;
@@ -600,7 +600,7 @@ fn build_report() -> DiagnosticsReport {
 
 fn print_human_report(report: &DiagnosticsReport) {
     println!(
-        "tmux-agent-ide helper {} (protocol {}.{})",
+        "muxflow helper {} (protocol {}.{})",
         report.helper.version, report.helper.protocol_major, report.helper.protocol_minor
     );
     println!(

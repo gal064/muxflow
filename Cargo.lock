@@ -2298,6 +2298,53 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
+name = "muxflow"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "block2",
+ "clipboard-rs",
+ "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-user-notifications",
+ "phase0-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tempfile",
+ "tmux-agent-protocol",
+ "tmux-control",
+ "tokio",
+ "uuid",
+ "zbus",
+]
+
+[[package]]
+name = "muxflow-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "libc",
+ "notify",
+ "phase0-core",
+ "prost",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tmux-agent-protocol",
+ "tmux-control",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ndk"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4218,33 +4265,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tmux-agent-desktop"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "block2",
- "clipboard-rs",
- "libc",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "objc2-user-notifications",
- "phase0-core",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tempfile",
- "tmux-agent-protocol",
- "tmux-control",
- "tokio",
- "uuid",
- "zbus",
-]
-
-[[package]]
 name = "tmux-agent-protocol"
 version = "0.2.0"
 dependencies = [
@@ -4264,26 +4284,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "tmux-ide-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "libc",
- "notify",
- "phase0-core",
- "prost",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tmux-agent-protocol",
- "tmux-control",
- "tokio",
- "uuid",
 ]
 
 [[package]]

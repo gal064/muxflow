@@ -17,7 +17,7 @@ fn cli_persists_an_exact_unsequenced_hook_envelope() {
     };
     let runtime = runtime_root.join(format!("phase6-hook-cli-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&runtime).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
         .args(["hook", "ingest", "--adapter", "codex"])
         .env("ADE_HOST_RUNTIME_DIR", &runtime)
         .env("TMUX_PANE", "%77")
@@ -76,7 +76,7 @@ fn a_hook_outside_tmux_is_silent_and_files_nothing() {
     fs::create_dir_all(&runtime).unwrap();
 
     let ingest = |pane: Option<&str>| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_muxflow-host"));
         command
             .args(["hook", "ingest", "--adapter", "claude-code"])
             .env("ADE_HOST_RUNTIME_DIR", &runtime)
@@ -151,9 +151,9 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     // `paths.rs`, so writing the pointer by hand states the one fact this test
     // depends on without borrowing the machine to produce it.
     let pointer = if cfg!(target_os = "macos") {
-        home.join("Library/Caches/dev.dev.tmux-agent-ide/daemon-runtime-dir")
+        home.join("Library/Caches/dev.muxflow.desktop/daemon-runtime-dir")
     } else {
-        home.join(".local/state/tmux-agent-ide/daemon-runtime-dir")
+        home.join(".local/state/muxflow/daemon-runtime-dir")
     };
     fs::create_dir_all(pointer.parent().unwrap()).unwrap();
     fs::write(&pointer, daemon_runtime.as_os_str().as_encoded_bytes()).unwrap();
@@ -163,7 +163,7 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     // that outlives a failing assertion holds the captured output open and
     // hangs `cargo test` instead of reporting the failure.
     let mut daemon = DaemonGuard(Some(
-        Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
             .args(["daemon"])
             .env("HOME", &home)
             .env("ADE_HOST_RUNTIME_DIR", &daemon_runtime)
@@ -180,7 +180,7 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     assert!(started, "the fixture daemon never bound its socket");
 
     let ingest = |mailbox_expected: bool| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
             .args(["hook", "ingest", "--adapter", "codex"])
             .env("HOME", &home)
             // What a tmux pane inherits, and what the daemon never saw.
@@ -198,7 +198,7 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
             .write_all(br#"{"hook_event_name":"Stop","session_id":"s"}"#)
             .unwrap();
         assert!(child.wait().unwrap().success());
-        let stranded = mailbox_entries(&hook_xdg.join("tmux-agent-ide"));
+        let stranded = mailbox_entries(&hook_xdg.join("muxflow"));
         assert!(
             stranded.is_empty(),
             "the event was filed in the hook's own directory, where no daemon reads: {stranded:?}"
@@ -214,7 +214,7 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
 
     // And with the daemon gone, the event waits in the directory that daemon
     // will come back to rather than in the one the hook happened to resolve.
-    let stopped = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+    let stopped = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
         .args(["daemon-stop"])
         .arg("--socket")
         .arg(&socket)
@@ -232,7 +232,7 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     // is worth nothing if the daemon that returns does not look where the hook
     // was told to leave it.
     let mut restarted = DaemonGuard(Some(
-        Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
             .args(["daemon"])
             .env("HOME", &home)
             .env("ADE_HOST_RUNTIME_DIR", &daemon_runtime)
@@ -272,7 +272,7 @@ impl DaemonGuard {
     }
 
     fn reap_after_stop(&mut self, socket: &std::path::Path, home: &PathBuf, runtime: &PathBuf) {
-        let _ = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        let _ = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
             .args(["daemon-stop"])
             .arg("--socket")
             .arg(socket)
@@ -320,13 +320,13 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     fs::create_dir_all(settings.parent().unwrap()).unwrap();
     let original = fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/integration/agent-status/fixtures/claude-settings-orca.json"
+        "/../../tests/integration/agent-status/fixtures/claude-settings-existing-hooks.json"
     ))
     .unwrap();
     fs::write(&settings, &original).unwrap();
 
     let run = |verb: &str| -> serde_json::Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        let output = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
             .args(["hook", verb, "--adapter", "claude-code"])
             .arg("--home")
             .arg(&home)
@@ -390,7 +390,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     // Nothing writes the operator's own configuration without being told to.
     // This command is the one installer with no interface to ask through, and
     // it used to have no notion of consent at all.
-    let unconfirmed = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+    let unconfirmed = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
         .args(["hook", "install"])
         .output()
         .unwrap();
@@ -403,7 +403,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     );
     // The gate asks where the write lands, not how the command was spelled: a
     // redirection that resolves back to the operator's own files is not one.
-    let laundered = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+    let laundered = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
         .args(["hook", "install", "--home"])
         .arg(std::env::var("HOME").unwrap())
         .output()
@@ -414,7 +414,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     );
     // And `status` still answers freely: it reads, it does not write.
     assert!(
-        Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
             .args(["hook", "status"])
             .output()
             .unwrap()
@@ -423,7 +423,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     );
 
     // The override names one adapter's file, so it cannot be used without one.
-    let ambiguous = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+    let ambiguous = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
         .args(["hook", "status", "--settings-path", "/tmp/anything.json"])
         .output()
         .unwrap();
@@ -431,7 +431,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
 
     // Without `--adapter`, an install must not create configuration for an
     // agent that is not on this host — the exact thing the desktop refuses.
-    let unscoped = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+    let unscoped = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
         .args(["hook", "install", "--home"])
         .arg(&home)
         .env_remove("PATH")
@@ -462,7 +462,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     // and reported that the agents were not installed.
     fs::write(&settings, &original).unwrap();
     let unscoped_verb = |verb: &str| -> serde_json::Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_tmux-ide-host"))
+        let output = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
             .args(["hook", verb, "--home"])
             .arg(&home)
             .output()
@@ -478,7 +478,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     assert!(
         fs::read_to_string(&settings)
             .unwrap()
-            .contains("tmux-agent-ide"),
+            .contains("muxflow"),
         "the unscoped install did not wire the adapter that is present"
     );
     let removed = unscoped_verb("uninstall");
@@ -496,7 +496,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     assert!(
         !fs::read_to_string(&settings)
             .unwrap()
-            .contains("tmux-agent-ide"),
+            .contains("muxflow"),
         "a managed entry survived an unscoped uninstall"
     );
     fs::remove_dir_all(home).unwrap();

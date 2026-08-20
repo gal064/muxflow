@@ -27,13 +27,13 @@ fn resolved_runtime_dir(
         return PathBuf::from(path);
     }
     if let Some(path) = environment("XDG_RUNTIME_DIR") {
-        return PathBuf::from(path).join("tmux-agent-ide");
+        return PathBuf::from(path).join("muxflow");
     }
     #[cfg(target_os = "macos")]
     if let Some(home) = environment("HOME") {
-        return PathBuf::from(home).join("Library/Caches/dev.dev.tmux-agent-ide/runtime");
+        return PathBuf::from(home).join("Library/Caches/dev.muxflow.desktop/runtime");
     }
-    PathBuf::from(format!("/tmp/tmux-agent-ide-{uid}"))
+    PathBuf::from(format!("/tmp/muxflow-{uid}"))
 }
 
 pub fn default_socket_path() -> PathBuf {
@@ -68,9 +68,9 @@ pub fn runtime_dir() -> PathBuf {
 /// `XDG_RUNTIME_DIR`, which is *not* the same in the two contexts that matter.
 /// The desktop starts the daemon over a non-interactive `ssh` command, where
 /// systemd's user environment is not applied and the variable is unset, so the
-/// daemon lived in `/tmp/tmux-agent-ide-<uid>`. The hooks run inside the user's
+/// daemon lived in `/tmp/muxflow-<uid>`. The hooks run inside the user's
 /// tmux server, whose global environment carries `XDG_RUNTIME_DIR`, so
-/// `hook ingest` looked in `/run/user/<uid>/tmux-agent-ide`, found no socket,
+/// `hook ingest` looked in `/run/user/<uid>/muxflow`, found no socket,
 /// and wrote its events to a fallback mailbox in that other directory that no
 /// daemon has ever read. Every lifecycle event on the field machine was
 /// delivered correctly and filed somewhere nobody was listening.
@@ -83,9 +83,9 @@ pub fn runtime_dir() -> PathBuf {
 fn runtime_pointer_path(environment: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let home = PathBuf::from(environment("HOME")?);
     if cfg!(target_os = "macos") {
-        Some(home.join("Library/Caches/dev.dev.tmux-agent-ide/daemon-runtime-dir"))
+        Some(home.join("Library/Caches/dev.muxflow.desktop/daemon-runtime-dir"))
     } else {
-        Some(home.join(".local/state/tmux-agent-ide/daemon-runtime-dir"))
+        Some(home.join(".local/state/muxflow/daemon-runtime-dir"))
     }
 }
 
@@ -155,7 +155,7 @@ fn candidate_runtime_dirs(
         return candidates;
     }
     if let Some(path) = environment("XDG_RUNTIME_DIR") {
-        add_unique(&mut candidates, PathBuf::from(path).join("tmux-agent-ide"));
+        add_unique(&mut candidates, PathBuf::from(path).join("muxflow"));
     }
     // Both platform defaults, not only this platform's: `XDG_RUNTIME_DIR` set
     // on a Mac takes the resolution above away from the cache directory, and a
@@ -164,16 +164,16 @@ fn candidate_runtime_dirs(
     if let Some(home) = environment("HOME") {
         add_unique(
             &mut candidates,
-            PathBuf::from(home).join("Library/Caches/dev.dev.tmux-agent-ide/runtime"),
+            PathBuf::from(home).join("Library/Caches/dev.muxflow.desktop/runtime"),
         );
     }
     add_unique(
         &mut candidates,
-        PathBuf::from(format!("/run/user/{uid}/tmux-agent-ide")),
+        PathBuf::from(format!("/run/user/{uid}/muxflow")),
     );
     add_unique(
         &mut candidates,
-        PathBuf::from(format!("/tmp/tmux-agent-ide-{uid}")),
+        PathBuf::from(format!("/tmp/muxflow-{uid}")),
     );
     candidates
 }
@@ -346,13 +346,13 @@ mod tests {
         let guesses = candidate_runtime_dirs(hook_environment, 4242);
         assert_eq!(
             guesses.first(),
-            Some(&PathBuf::from("/run/user/4242/tmux-agent-ide")),
+            Some(&PathBuf::from("/run/user/4242/muxflow")),
             "this process's own resolution still comes first"
         );
-        for guess in ["/tmp/tmux-agent-ide-4242", "/run/user/4242/tmux-agent-ide"] {
+        for guess in ["/tmp/muxflow-4242", "/run/user/4242/muxflow"] {
             assert!(guesses.contains(&PathBuf::from(guess)), "{guesses:?}");
         }
-        assert!(guesses.contains(&home.join("Library/Caches/dev.dev.tmux-agent-ide/runtime")));
+        assert!(guesses.contains(&home.join("Library/Caches/dev.muxflow.desktop/runtime")));
 
         // And once a daemon has: its answer, and nothing else. The guesses stop
         // — a directory nobody claimed is one this process must not connect to,
@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(
             candidate_runtime_dirs(hook_environment, 4242),
             vec![
-                PathBuf::from("/run/user/4242/tmux-agent-ide"),
+                PathBuf::from("/run/user/4242/muxflow"),
                 daemon_runtime
             ],
             "the recorded directory must end the list"
@@ -417,14 +417,14 @@ mod tests {
             "a pinned fixture claimed the pointer it must not read"
         );
 
-        publish_runtime_dir(&home.join("tmux-agent-ide"), unpinned, 11).unwrap();
+        publish_runtime_dir(&home.join("muxflow"), unpinned, 11).unwrap();
         assert_eq!(
             fs::read(&pointer).unwrap(),
-            home.join("tmux-agent-ide").as_os_str().as_encoded_bytes(),
+            home.join("muxflow").as_os_str().as_encoded_bytes(),
             "the real daemon's own directory was not published"
         );
         // And it round-trips as bytes rather than as text.
-        assert!(candidate_runtime_dirs(unpinned, 11).contains(&home.join("tmux-agent-ide")));
+        assert!(candidate_runtime_dirs(unpinned, 11).contains(&home.join("muxflow")));
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -474,7 +474,7 @@ mod tests {
         {
             assert_eq!(
                 default_runtime_dir(),
-                PathBuf::from(home).join("Library/Caches/dev.dev.tmux-agent-ide/runtime")
+                PathBuf::from(home).join("Library/Caches/dev.muxflow.desktop/runtime")
             );
         }
     }

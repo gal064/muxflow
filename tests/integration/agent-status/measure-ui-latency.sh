@@ -29,7 +29,7 @@ tmux_env="$(T display-message -p '#{socket_path},0,0')"
 [[ -n "$pane" ]] || { echo "no agent pane in the fixture" >&2; exit 1; }
 
 # The app's own daemon, in the fixture's runtime directory.
-export ADE_HOST_RUNTIME_DIR="$runtime/tmux-agent-ide"
+export ADE_HOST_RUNTIME_DIR="$runtime/muxflow"
 [[ -S "$ADE_HOST_RUNTIME_DIR/host.sock" ]] || ADE_HOST_RUNTIME_DIR="$runtime"
 
 agent_state() {

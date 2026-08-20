@@ -30,7 +30,7 @@ function client(overrides: Partial<TerminalTransferClient> = {}): TerminalTransf
     preflight: vi.fn(async (_scope, path) => item(path)),
     start: vi.fn(async (_scope, path) => ({ id: path, destination: `/remote/${path.split("/").at(-1)}`, digest: "verified" })),
     cancel: vi.fn(async () => ({ disposition: "cancelRequested" as const, phase: "running" as const })),
-    stageClipboardPng: vi.fn(async () => ({ path: "/home/user/.cache/app/image.png", sizeBytes: "10", name: "clipboard-00000000-0000-4000-8000-000000000001.png" })),
+    stageClipboardPng: vi.fn(async () => ({ path: "/home/operator/.cache/app/image.png", sizeBytes: "10", name: "clipboard-00000000-0000-4000-8000-000000000001.png" })),
     ...overrides,
   };
 }
@@ -557,7 +557,7 @@ describe("TerminalTransferSurface", () => {
       await controller!.pasteClipboard();
     });
     expect(transferClient.stageClipboardPng).toHaveBeenCalledWith(expect.any(Uint8Array));
-    expect(view.onPaste).toHaveBeenCalledWith("/home/user/.cache/app/image.png");
+    expect(view.onPaste).toHaveBeenCalledWith("/home/operator/.cache/app/image.png");
     expect(view.onPaste).not.toHaveBeenCalledWith(expect.stringContaining("'"));
     expect(close).toHaveBeenCalled();
   });
@@ -593,7 +593,7 @@ describe("TerminalTransferSurface", () => {
     });
     expect(event.preventDefault).toHaveBeenCalled();
     expect(transferClient.stageClipboardPng).toHaveBeenCalledWith(expect.any(Uint8Array));
-    expect(view.onPaste).toHaveBeenCalledWith("/home/user/.cache/app/image.png");
+    expect(view.onPaste).toHaveBeenCalledWith("/home/operator/.cache/app/image.png");
   });
 
   it("accepts two successive remote clipboard images with distinct backend-generated destinations", async () => {

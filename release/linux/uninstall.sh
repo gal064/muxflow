@@ -2,7 +2,7 @@
 set -euo pipefail
 
 prefix=${ADE_INSTALL_PREFIX:-"$HOME/.local"}
-owner='dev.dev.tmux-agent-ide:1'
+owner='dev.muxflow.desktop:1'
 [[ "$prefix" == /* && "$prefix" != / ]]
 current=/
 IFS=/ read -r -a prefix_parts <<< "${prefix#/}"
@@ -15,11 +15,11 @@ for part in "${prefix_parts[@]}"; do
   }
 done
 prefix=$(realpath -e "$prefix")
-lib_dir="$prefix/lib/tmux-agent-ide"
-desktop_link="$prefix/bin/tmux-agent-ide"
-host_link="$prefix/bin/tmux-ide-host"
-desktop_file="$prefix/share/applications/tmux-agent-ide.desktop"
-icon_file="$prefix/share/icons/hicolor/256x256/apps/tmux-agent-ide.png"
+lib_dir="$prefix/lib/muxflow"
+desktop_link="$prefix/bin/muxflow"
+host_link="$prefix/bin/muxflow-host"
+desktop_file="$prefix/share/applications/muxflow.desktop"
+icon_file="$prefix/share/icons/hicolor/256x256/apps/muxflow.png"
 install_directories=(
   "$prefix/lib" "$prefix/bin" "$prefix/share" "$prefix/share/applications"
   "$prefix/share/icons" "$prefix/share/icons/hicolor"
@@ -37,13 +37,13 @@ done
 grep -Fxq "$owner" "$lib_dir/.package-owner"
 while IFS= read -r installed; do
   case "${installed#"$lib_dir/"}" in
-    tmux-agent-desktop|tmux-ide-host|tmux-ide-host-x86_64|tmux-ide-host-aarch64|uninstall.sh|SHA256SUMS|.package-owner|.owned-assets|.created-dirs) ;;
+    muxflow|muxflow-host|muxflow-host-x86_64|muxflow-host-aarch64|uninstall.sh|SHA256SUMS|.package-owner|.owned-assets|.created-dirs) ;;
     *) echo "refusing to remove unowned file from package directory: $installed" >&2; exit 73 ;;
   esac
 done < <(find "$lib_dir" -mindepth 1 -type f -print)
 [[ -z "$(find "$lib_dir" -mindepth 1 ! -type f -print -quit)" ]]
-[[ -L "$desktop_link" && "$(readlink "$desktop_link")" == ../lib/tmux-agent-ide/tmux-agent-desktop ]]
-[[ -L "$host_link" && "$(readlink "$host_link")" == ../lib/tmux-agent-ide/tmux-ide-host ]]
+[[ -L "$desktop_link" && "$(readlink "$desktop_link")" == ../lib/muxflow/muxflow ]]
+[[ -L "$host_link" && "$(readlink "$host_link")" == ../lib/muxflow/muxflow-host ]]
 [[ -f "$desktop_file" && ! -L "$desktop_file" && -f "$icon_file" && ! -L "$icon_file" ]]
 read -r desktop_digest icon_digest < "$lib_dir/.owned-assets"
 mapfile -t created_directories < "$lib_dir/.created-dirs"
@@ -56,7 +56,7 @@ done
 [[ "$(sha256sum "$desktop_file" | cut -d' ' -f1)" == "$desktop_digest" ]]
 [[ "$(sha256sum "$icon_file" | cut -d' ' -f1)" == "$icon_digest" ]]
 
-if ! hook_status=$("$lib_dir/tmux-ide-host" hooks-status 2>/dev/null); then
+if ! hook_status=$("$lib_dir/muxflow-host" hooks-status 2>/dev/null); then
   echo "Could not safely inspect managed agent hooks; refusing uninstall." >&2
   echo "Remove hooks from the app or repair their configuration, then retry." >&2
   exit 73
@@ -70,13 +70,13 @@ fi
 if [[ -n "${ADE_HOST_RUNTIME_DIR:-}" ]]; then
   runtime=$ADE_HOST_RUNTIME_DIR
 elif [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
-  runtime="$XDG_RUNTIME_DIR/tmux-agent-ide"
+  runtime="$XDG_RUNTIME_DIR/muxflow"
 else
-  runtime="/tmp/tmux-agent-ide-$(id -u)"
+  runtime="/tmp/muxflow-$(id -u)"
 fi
 socket="$runtime/host.sock"
 if [[ -S "$socket" ]]; then
-  "$lib_dir/tmux-ide-host" daemon-stop
+  "$lib_dir/muxflow-host" daemon-stop
   for _ in $(seq 1 100); do
     [[ ! -S "$socket" ]] && break
     sleep 0.02
@@ -84,7 +84,7 @@ if [[ -S "$socket" ]]; then
   [[ ! -S "$socket" ]] || { echo "host daemon did not stop; refusing uninstall" >&2; exit 73; }
 fi
 
-quarantine=$(mktemp -d "$prefix/lib/.tmux-agent-ide.uninstall.XXXXXX")
+quarantine=$(mktemp -d "$prefix/lib/.muxflow.uninstall.XXXXXX")
 mv "$lib_dir" "$quarantine/package"
 if ! rm -f "$desktop_link" "$host_link" "$desktop_file" "$icon_file"; then
   mv "$quarantine/package" "$lib_dir"
@@ -97,4 +97,4 @@ for ((index=${#created_directories[@]} - 1; index >= 0; index--)); do
   rmdir "${created_directories[$index]}" >/dev/null 2>&1 || true
 done
 
-printf 'Removed tmux Agent IDE binaries. tmux sessions and user configuration were preserved.\n'
+printf 'Removed Muxflow binaries. tmux sessions and user configuration were preserved.\n'

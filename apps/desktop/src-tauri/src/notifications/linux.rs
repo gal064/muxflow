@@ -279,7 +279,7 @@ impl NativeNotifications {
         };
         let id = proxy
             .notify(
-                "tmux Agent IDE",
+                "Muxflow",
                 0,
                 "utilities-terminal",
                 title,
@@ -305,7 +305,7 @@ impl NativeNotifications {
             // never advertise an Open button whose route must be rejected.
             proxy
                 .notify(
-                    "tmux Agent IDE",
+                    "Muxflow",
                     id,
                     "utilities-terminal",
                     title,

@@ -1,6 +1,6 @@
 import { defaultAgentSoundPreferences, type AgentSoundPreferences } from "./types";
 
-const STORAGE_KEY = "tmux-agent-ide.agent-sounds.v1";
+const STORAGE_KEY = "muxflow.agent-sounds.v1";
 
 export function loadAgentSoundPreferences(storage: Pick<Storage, "getItem"> | undefined = globalThis.localStorage): AgentSoundPreferences {
   if (!storage) return defaultAgentSoundPreferences;

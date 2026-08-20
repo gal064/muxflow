@@ -16,14 +16,14 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 runtime="$repo_root/tmp/phase12-stall-$run_id"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/performance/runtime/perf-driver/target}"
-host_binary="$main_target/release/tmux-ide-host"
+host_binary="$main_target/release/muxflow-host"
 driver_binary="$driver_target/release/performance-test-driver"
-image_name="tmux-agent-ide-phase12-ssh"
-container_name="tmux-agent-ide-phase12-stall-$run_id"
+image_name="muxflow-phase12-ssh"
+container_name="muxflow-phase12-stall-$run_id"
 ssh_key="$runtime/ssh-key"
 ssh_config="$runtime/ssh-config"
 known_hosts="$runtime/known-hosts"
-remote_artifact="${ADE_TEST_BOOKWORM_HELPER:-$runtime/tmux-ide-host-bookworm}"
+remote_artifact="${ADE_TEST_BOOKWORM_HELPER:-$runtime/muxflow-host-bookworm}"
 stall_seconds="${ADE_PHASE12_STALL_SECONDS:-2}"
 
 cleanup() {
@@ -37,7 +37,7 @@ phase8_isolate_docker_config "$runtime/docker-config"
 printf '%s\n' "$runtime" >"$repo_root/tmp/phase12-stall-latest"
 
 cd "$repo_root"
-cargo build --release --bin tmux-ide-host >"$runtime/cargo-host-build.log" 2>&1
+cargo build --release --bin muxflow-host >"$runtime/cargo-host-build.log" 2>&1
 cargo build --release --manifest-path tests/performance/runtime/perf-driver/Cargo.toml \
   >"$runtime/cargo-driver-build.log" 2>&1
 if [[ -z "${ADE_TEST_BOOKWORM_HELPER:-}" ]]; then

@@ -1,0 +1,171 @@
+{
+  "_comment": [
+    "The exact shape of a real ~/.claude/settings.json on the field machine",
+    "(read on 2026-08-14, values replaced with fixture paths).",
+    "",
+    "Everything the installer has to survive is here: every hook already routed",
+    "to another tool's script, a second unrelated entry sharing the Stop array,",
+    "matchers on the tool events, a typed matcher on Notification, four event",
+    "names this app does not manage, and unrelated top-level settings.",
+    "",
+    "A merge that damages any of it breaks a tool the user relies on, so this",
+    "file is asserted byte-for-byte outside the managed entries."
+  ],
+  "theme": "dark",
+  "effortLevel": "high",
+  "autoMemoryEnabled": true,
+  "permissions": {
+    "allow": ["Bash(git status:*)"],
+    "deny": []
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "/fixture/home/.claude/statusline.sh"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash \"/fixture/home/.claude/hooks/notify.sh\" \"Claude Code\" \"Claude finished\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/bash \"/fixture/home/.claude/hooks/notify.sh\" \"Claude Code\" \"Claude needs you\""
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh' ]; then '/fixture/home/.existing-agent-hooks/agent-hooks/claude-hook.sh'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

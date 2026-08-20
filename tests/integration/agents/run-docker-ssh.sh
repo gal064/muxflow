@@ -10,9 +10,9 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 runtime="$repo_root/tmp/phase6-ssh-$run_id"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/integration/agents/protocol-driver/target}"
 driver_binary="$driver_target/debug/agent-test-driver"
-remote_helper="${ADE_TEST_BOOKWORM_HELPER:-$runtime/tmux-ide-host-bookworm}"
+remote_helper="${ADE_TEST_BOOKWORM_HELPER:-$runtime/muxflow-host-bookworm}"
 container="ade-phase6-$run_id"
-image="tmux-agent-ide-phase6-ssh"
+image="muxflow-phase6-ssh"
 cleanup() {
   if [[ "${ADE_PHASE6_KEEP_CONTAINER:-0}" != "1" ]]; then
     docker rm -f "$container" >/dev/null 2>&1 || true
@@ -55,7 +55,7 @@ chmod 0600 "$runtime/ssh-config"
 for _ in $(seq 1 100); do ssh -F "$runtime/ssh-config" ade-phase6-docker true >/dev/null 2>&1 && break; sleep 0.05; done
 docker exec "$container" tc qdisc add dev eth0 root netem delay 100ms rate 100mbit
 
-scp -q -F "$runtime/ssh-config" "$remote_helper" ade-phase6-docker:/home/ade/tmux-ide-host
+scp -q -F "$runtime/ssh-config" "$remote_helper" ade-phase6-docker:/home/ade/muxflow-host
 scp -q -F "$runtime/ssh-config" "$runtime/agent-fixture" ade-phase6-docker:/home/ade/agent-fixture
 docker cp "$runtime/agent-fixture" "$container:/usr/local/bin/codex"
 docker cp "$runtime/agent-fixture" "$container:/usr/local/bin/claude"
@@ -63,7 +63,7 @@ docker exec "$container" chmod 0755 /usr/local/bin/codex /usr/local/bin/claude
 ssh -F "$runtime/ssh-config" ade-phase6-docker '
   set -eu
   install -d -m 0700 "$HOME/.local/bin" "$HOME/phase6-bin" "$HOME/phase6-home/.codex" "$HOME/phase6-home/.claude" "$HOME/phase6-runtime" "$HOME/phase6-repo"
-  install -m 0700 "$HOME/tmux-ide-host" "$HOME/.local/bin/tmux-ide-host"
+  install -m 0700 "$HOME/muxflow-host" "$HOME/.local/bin/muxflow-host"
   install -m 0700 "$HOME/agent-fixture" "$HOME/phase6-bin/codex"
   install -m 0700 "$HOME/agent-fixture" "$HOME/phase6-bin/claude"
   printf "%s\n" "{\"unrelated\":{\"private\":\"phase6-private-value\"},\"hooks\":{\"UnrelatedEvent\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"preserve-codex\"}]}]}}" >"$HOME/phase6-home/.codex/hooks.json"
@@ -81,7 +81,7 @@ jq -e '.privateUnixSocket and .adapterRegistry and .manualDetection and .launchW
 # private Unix socket. The protocol driver above deliberately exercises the
 # stdio bridge separately, so start a daemon and invoke the CLI as a hook would.
 ssh -F "$runtime/ssh-config" ade-phase6-docker '
-  env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime" ADE_TMUX_SOCKET_NAME=ade-phase6 "$HOME/.local/bin/tmux-ide-host" daemon >"$HOME/phase6-runtime/daemon.log" 2>&1 </dev/null &
+  env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime" ADE_TMUX_SOCKET_NAME=ade-phase6 "$HOME/.local/bin/muxflow-host" daemon >"$HOME/phase6-runtime/daemon.log" 2>&1 </dev/null &
 '
 for _ in $(seq 1 50); do
   if ssh -F "$runtime/ssh-config" ade-phase6-docker 'test -S "$HOME/phase6-runtime/host.sock"'; then break; fi
@@ -91,7 +91,7 @@ ssh -F "$runtime/ssh-config" ade-phase6-docker '
   pane=$(tmux -L ade-phase6 list-panes -a -f "#{==:#{pane_current_command},bash}" -F "#{pane_id}" | head -n 1)
   test -n "$pane"
   printf "%s\n" "$pane" > "$HOME/phase6-runtime/actual-hook-pane.txt"
-  command="printf %s eyJob29rX2V2ZW50X25hbWUiOiJVc2VyUHJvbXB0U3VibWl0Iiwic2Vzc2lvbl9pZCI6InJlbW90ZS1jbGktcHJvb2YifQ== | base64 -d | env HOME=\"$HOME/phase6-home\" ADE_HOST_RUNTIME_DIR=\"$HOME/phase6-runtime\" \"$HOME/.local/bin/tmux-ide-host\" hook ingest --adapter codex"
+  command="printf %s eyJob29rX2V2ZW50X25hbWUiOiJVc2VyUHJvbXB0U3VibWl0Iiwic2Vzc2lvbl9pZCI6InJlbW90ZS1jbGktcHJvb2YifQ== | base64 -d | env HOME=\"$HOME/phase6-home\" ADE_HOST_RUNTIME_DIR=\"$HOME/phase6-runtime\" \"$HOME/.local/bin/muxflow-host\" hook ingest --adapter codex"
   printf "%s" "$command" | tmux -L ade-phase6 load-buffer -
   tmux -L ade-phase6 paste-buffer -d -t "$pane"
   tmux -L ade-phase6 send-keys -t "$pane" Enter
@@ -119,13 +119,13 @@ fi
 # Daemon-down delivery writes one bounded, privacy-minimized fallback envelope.
 ssh -F "$runtime/ssh-config" ade-phase6-docker '
   set -eu
-  env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime" ADE_TMUX_SOCKET_NAME=ade-phase6 "$HOME/.local/bin/tmux-ide-host" daemon-stop
+  env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime" ADE_TMUX_SOCKET_NAME=ade-phase6 "$HOME/.local/bin/muxflow-host" daemon-stop
   for _ in $(seq 1 50); do
     test ! -S "$HOME/phase6-runtime/host.sock" && break
     sleep 0.1
   done
   test ! -S "$HOME/phase6-runtime/host.sock"
-  printf "%s" "{\"hook_event_name\":\"Stop\",\"session_id\":\"offline\",\"prompt\":\"do-not-store\",\"api_token\":\"secret\"}" | env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime" ADE_TMUX_SOCKET_NAME=ade-phase6 TMUX_PANE=%777 "$HOME/.local/bin/tmux-ide-host" hook ingest --adapter codex
+  printf "%s" "{\"hook_event_name\":\"Stop\",\"session_id\":\"offline\",\"prompt\":\"do-not-store\",\"api_token\":\"secret\"}" | env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime" ADE_TMUX_SOCKET_NAME=ade-phase6 TMUX_PANE=%777 "$HOME/.local/bin/muxflow-host" hook ingest --adapter codex
   test -f "$HOME/phase6-runtime/hook-fallback-codex-777.pb"
   ! grep -aE "do-not-store|secret" "$HOME/phase6-runtime/hook-fallback-codex-777.pb"
 '
@@ -133,10 +133,10 @@ ssh -F "$runtime/ssh-config" ade-phase6-docker '
 ssh -F "$runtime/ssh-config" ade-phase6-docker '
   grep -q preserve-codex "$HOME/phase6-home/.codex/hooks.json"
   grep -q preserve-claude "$HOME/phase6-home/.claude/settings.json"
-  test -f "$HOME/phase6-home/.codex/hooks.json.tmux-agent-ide.backup"
-  test -f "$HOME/phase6-home/.claude/settings.json.tmux-agent-ide.backup"
-  ! grep -q tmux-agent-ide "$HOME/phase6-home/.codex/hooks.json"
-  ! grep -q tmux-agent-ide "$HOME/phase6-home/.claude/settings.json"
+  test -f "$HOME/phase6-home/.codex/hooks.json.muxflow.backup"
+  test -f "$HOME/phase6-home/.claude/settings.json.muxflow.backup"
+  ! grep -q muxflow "$HOME/phase6-home/.codex/hooks.json"
+  ! grep -q muxflow "$HOME/phase6-home/.claude/settings.json"
 ' >"$runtime/config-preservation.txt"
 
 echo "phase6 Docker SSH evidence: $runtime"

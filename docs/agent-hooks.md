@@ -42,9 +42,9 @@ The same installer is reachable without a UI, which is how it is exercised
 against a copy of a real configuration:
 
 ```
-tmux-ide-host hook status    [--adapter codex|claude-code] [--home DIR] [--settings-path FILE]
-tmux-ide-host hook install   [--adapter …] [--home …] [--settings-path …] [--yes]
-tmux-ide-host hook uninstall [--adapter …] [--home …] [--settings-path …] [--yes]
+muxflow-host hook status    [--adapter codex|claude-code] [--home DIR] [--settings-path FILE]
+muxflow-host hook install   [--adapter …] [--home …] [--settings-path …] [--yes]
+muxflow-host hook uninstall [--adapter …] [--home …] [--settings-path …] [--yes]
 ```
 
 `install` and `uninstall` refuse to change the agent configuration in your own
@@ -80,7 +80,7 @@ at Claude's maximum configurable `Bash` timeout of 600s — with half again for
 headroom.
 
 Use the same review flow with Uninstall to remove only entries labeled
-`tmux-agent-ide-managed`. Do this before uninstalling the desktop package. The
+`muxflow-managed`. Do this before uninstalling the desktop package. The
 package uninstaller refuses to remove the helper while a known managed marker
 is present, preventing silently broken agent configuration.
 

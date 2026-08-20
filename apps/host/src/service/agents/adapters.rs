@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tmux_agent_protocol::v1;
 
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
-pub(crate) const MANAGED_OWNER: &str = "tmux-agent-ide";
+pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting
 /// it as current would leave a transition that can never arrive.
@@ -459,8 +459,8 @@ mod tests {
         assert_eq!(codex.hook_events().len(), 7);
         assert_eq!(codex.descriptor(home, &observed[0].1).id, "codex");
         assert_eq!(
-            codex.hook_command(Path::new("/opt/tmux-ide-host")),
-            "'/opt/tmux-ide-host' hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 3"
+            codex.hook_command(Path::new("/opt/muxflow-host")),
+            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 3"
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));

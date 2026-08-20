@@ -7,7 +7,7 @@ unrelated configuration.
 Run the installed uninstaller:
 
 ```sh
-~/.local/lib/tmux-agent-ide/uninstall.sh
+~/.local/lib/muxflow/uninstall.sh
 ```
 
 Set `ADE_INSTALL_PREFIX` if the package was installed elsewhere. The script

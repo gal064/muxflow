@@ -34,7 +34,7 @@ desktop_exec() {
   if [[ -x "$repo_root/apps/desktop/node_modules/.bin/$tool" ]]; then
     (cd "$repo_root/apps/desktop" && "./node_modules/.bin/$tool" "$@")
   else
-    pnpm --filter @tmux-agent-ide/desktop exec "$tool" "$@"
+    pnpm --filter @muxflow/desktop exec "$tool" "$@"
   fi
 }
 

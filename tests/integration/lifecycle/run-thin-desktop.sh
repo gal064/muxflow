@@ -17,18 +17,18 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$repo_root"
-cargo build --release --bin tmux-ide-host
+cargo build --release --bin muxflow-host
 pnpm tauri build --no-bundle
 mkdir -p "$stage"
 release_target="${CARGO_TARGET_DIR:-$repo_root/target}/release"
-cp "$release_target/tmux-agent-desktop" "$stage/tmux-agent-desktop"
-cp "$release_target/tmux-ide-host" "$stage/tmux-ide-host"
-chmod 0755 "$stage/tmux-agent-desktop" "$stage/tmux-ide-host"
+cp "$release_target/muxflow" "$stage/muxflow"
+cp "$release_target/muxflow-host" "$stage/muxflow-host"
+chmod 0755 "$stage/muxflow" "$stage/muxflow-host"
 
-metadata="$($stage/tmux-ide-host version)"
+metadata="$($stage/muxflow-host version)"
 jq -e '.helperVersion == "0.2.0" and .protocolMajor == 2' <<<"$metadata" >/dev/null
-[[ -x "$stage/tmux-agent-desktop" ]]
-[[ -x "$stage/tmux-ide-host" ]]
+[[ -x "$stage/muxflow" ]]
+[[ -x "$stage/muxflow-host" ]]
 [[ -n "${DISPLAY:-}" ]] || { echo 'phase1 thin desktop smoke requires DISPLAY' >&2; exit 1; }
 rm -rf "$runtime"
 mkdir -p "$runtime/config" "$runtime/data" "$runtime/cache" "$runtime/host"
@@ -40,7 +40,7 @@ env \
   XDG_CACHE_HOME="$runtime/cache" \
   ADE_HOST_RUNTIME_DIR="$runtime/host" \
   ADE_TMUX_SOCKET_NAME="$tmux_socket" \
-  "$stage/tmux-agent-desktop" >"$runtime/desktop.log" 2>&1 &
+  "$stage/muxflow" >"$runtime/desktop.log" 2>&1 &
 desktop_pid=$!
 for _ in $(seq 1 200); do
   [[ -S "$runtime/host/host.sock" ]] && break
@@ -48,6 +48,6 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 [[ -S "$runtime/host/host.sock" ]]
-"$stage/tmux-ide-host" protocol-check --socket "$runtime/host/host.sock" \
+"$stage/muxflow-host" protocol-check --socket "$runtime/host/host.sock" \
   | jq -e '.helperVersion == "0.2.0" and .protocolMajor == 2' >/dev/null
 echo "phase1-thin-desktop: pass ($stage)"

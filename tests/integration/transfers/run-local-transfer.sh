@@ -13,7 +13,7 @@ fi
 phase8_storage_begin "$repo_root" phase7-local
 evidence="$PHASE8_WORK_DIR"
 durable_evidence="$PHASE8_EVIDENCE_DIR"
-host_binary="$CARGO_TARGET_DIR/debug/tmux-ide-host"
+host_binary="$CARGO_TARGET_DIR/debug/muxflow-host"
 driver_binary="$CARGO_TARGET_DIR/debug/transfer-test-driver"
 socket_name="ade-phase7-local-$$"
 host_runtime="$evidence/host-runtime"
@@ -35,10 +35,10 @@ phase7_capture_source_tree "$repo_root" "$evidence"
 chmod 0700 "$evidence" "$host_runtime" "$fixture_home"
 cd "$repo_root"
 
-cargo build --bin tmux-ide-host >"$evidence/host-build.log" 2>&1 & host_pid=$!
+cargo build --bin muxflow-host >"$evidence/host-build.log" 2>&1 & host_pid=$!
 cargo build --manifest-path tests/integration/transfers/protocol-driver/Cargo.toml \
   >"$evidence/driver-build.log" 2>&1 & driver_pid=$!
-cargo test -p tmux-agent-desktop \
+cargo test -p muxflow \
   connection::files::manager_acceptance::production_desktop_managers_transfer_exact_bytes_through_canonical_engine \
   --no-run >"$evidence/manager-build.log" 2>&1 & manager_build_pid=$!
 phase7_wait_all "$host_pid" "$driver_pid" "$manager_build_pid"
@@ -63,7 +63,7 @@ ADE_PHASE7_MANAGER_UPLOAD_SOURCE="$manager_source" \
 ADE_PHASE7_MANAGER_DOWNLOAD_DESTINATION="$manager_download" \
 ADE_PHASE7_MANAGER_DOWNLOAD_FILE=phase7-five-gib-source.bin \
 ADE_PHASE7_MANAGER_RESULT="$evidence/result-manager.json" \
-  cargo test -p tmux-agent-desktop \
+  cargo test -p muxflow \
     connection::files::manager_acceptance::production_desktop_managers_transfer_exact_bytes_through_canonical_engine \
     -- --exact --nocapture --test-threads=1 \
     >"$evidence/manager-test.log" 2>&1 & manager_pid=$!
@@ -99,7 +99,7 @@ jq -e --arg bytes "$transfer_bytes" '
 ' "$evidence/result.json" >/dev/null
 
 final_path="$(jq -r .uploadFinalPath "$evidence/result.json")"
-staging="$fixture_home/.cache/tmux-agent-ide/uploads"
+staging="$fixture_home/.cache/muxflow/uploads"
 phase8_stat_detail "$staging" "$final_path" \
   >"$evidence/staging-stat.txt"
 [[ "$(phase8_stat_mode "$staging")" == 700 ]]

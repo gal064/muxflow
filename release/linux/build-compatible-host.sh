@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 arch=${1:-$(uname -m)}
-output=${2:-"$repo_root/tmp/compatible-host/tmux-ide-host"}
+output=${2:-"$repo_root/tmp/compatible-host/muxflow-host"}
 case "$arch" in
   x86_64|amd64) arch=x86_64 ;;
   aarch64|arm64) arch=aarch64 ;;
@@ -52,7 +52,7 @@ source_digest=$(
 )
 cache_dir="$work_root/cache/compatible-host/$arch/$source_digest"
 target_dir="$cache_dir/target"
-cached_binary="$cache_dir/tmux-ide-host"
+cached_binary="$cache_dir/muxflow-host"
 mkdir -p "$cache_dir"
 exec 9>"$cache_dir/build.lock"
 if command -v flock >/dev/null 2>&1; then
@@ -72,13 +72,13 @@ fi
 docker run --rm --platform "$docker_platform" --user "$(id -u):$(id -g)" \
   -e CARGO_HOME=/artifact-cache/cargo-home \
   -e SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1704067200}" \
-  -e RUSTFLAGS='--remap-path-prefix=/workspace=/workspace/tmux-agent-ide --remap-path-prefix=/artifact-build=/workspace/target' \
+  -e RUSTFLAGS='--remap-path-prefix=/workspace=/workspace/muxflow --remap-path-prefix=/artifact-build=/workspace/target' \
   -v "$repo_root:/workspace:ro" -v "$cache_dir:/artifact-build" \
   -v "$work_root/cache:/artifact-cache" \
   -w /workspace rust:1.97.1-slim-bookworm \
-  cargo build --locked --release --bin tmux-ide-host \
+  cargo build --locked --release --bin muxflow-host \
     --target-dir /artifact-build/target
-install -m 0755 "$target_dir/release/tmux-ide-host" "$cached_binary"
+install -m 0755 "$target_dir/release/muxflow-host" "$cached_binary"
 install -m 0755 "$cached_binary" "$output"
 
 # Debian 12's glibc 2.36 is the declared dynamically-linked compatibility

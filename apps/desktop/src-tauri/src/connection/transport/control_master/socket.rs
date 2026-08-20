@@ -57,7 +57,7 @@ pub(super) fn ssh_profile_control_socket_in(
     config_path: Option<&str>,
 ) -> Result<PathBuf, String> {
     validate_ssh_target(target)?;
-    let base = temporary_root.join(format!("tmux-agent-ide-{}", unsafe { libc::geteuid() }));
+    let base = temporary_root.join(format!("muxflow-{}", unsafe { libc::geteuid() }));
     ensure_private_directory(&base)?;
     let directory = base.join(process_socket_namespace());
     ensure_private_directory(&directory)?;

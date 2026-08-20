@@ -772,7 +772,7 @@ fn upload_cache_symlink_substitution_preserves_foreign_inode_and_mode() {
     fs::create_dir(&cache).unwrap();
     fs::create_dir(&foreign).unwrap();
     fs::set_permissions(&foreign, fs::Permissions::from_mode(0o755)).unwrap();
-    symlink(&foreign, cache.join("tmux-agent-ide")).unwrap();
+    symlink(&foreign, cache.join("muxflow")).unwrap();
     assert!(StagingDirectory::open_upload_cache(&root).is_err());
     assert_eq!(
         fs::metadata(&foreign).unwrap().permissions().mode() & 0o777,

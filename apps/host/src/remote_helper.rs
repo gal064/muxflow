@@ -13,7 +13,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-const DEFAULT_REMOTE_PATH: &str = "$HOME/.local/bin/tmux-ide-host";
+const DEFAULT_REMOTE_PATH: &str = "$HOME/.local/bin/muxflow-host";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,7 +46,7 @@ pub fn run_cli(arguments: Vec<String>) -> anyhow::Result<()> {
     let action = arguments
         .first()
         .map(String::as_str)
-        .context("usage: tmux-ide-host helper <probe|install> TARGET [options]")?;
+        .context("usage: muxflow-host helper <probe|install> TARGET [options]")?;
     let options = parse_options(&arguments[1..])?;
     let connection = SshControl::start(
         &options.target,
@@ -246,7 +246,7 @@ fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
         restart_remote_daemon(connection, &final_path, options.test_fail_after_shutdown)
     {
         let rollback = connection.command(&format!(
-            "set -eu; runtime=${{XDG_RUNTIME_DIR:-/tmp/tmux-agent-ide-$(id -u)}}; install -d -m 0700 \"$runtime\"; metadata=\"$runtime/daemon.json\"; socket=\"$runtime/host.sock\"; log=\"$runtime/daemon-start.log\"; if [ -S \"$socket\" ]; then if ! {final_path} daemon-stop >/dev/null 2>&1; then pid=$(sed -n 's/.*\"pid\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_start=$(sed -n 's/.*\"processStartTime\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_exe=$(sed -n 's/.*\"executable\":\"\\([^\"]*\\)\".*/\\1/p' \"$metadata\"); [ -n \"$pid\" ] && [ -n \"$recorded_start\" ] && [ -n \"$recorded_exe\" ]; actual_start=$(awk '{{print $22}}' \"/proc/$pid/stat\"); actual_exe=$(readlink \"/proc/$pid/exe\"); actual_exe=${{actual_exe% (deleted)}}; [ \"$actual_start\" = \"$recorded_start\" ] && [ \"$actual_exe\" = \"$recorded_exe\" ]; kill -TERM \"$pid\"; for i in $(seq 1 100); do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.05; done; ! kill -0 \"$pid\" 2>/dev/null; rm -f \"$socket\" \"$metadata\"; fi; fi; for i in $(seq 1 100); do [ ! -S \"$socket\" ] && break; sleep 0.05; done; [ ! -S \"$socket\" ]; if [ -e {backup} ]; then mv -f {backup} {final_path}; nohup {final_path} daemon </dev/null >\"$log\" 2>&1 & for i in $(seq 1 100); do [ -S \"$socket\" ] && break; sleep 0.05; done; {final_path} protocol-check >/dev/null || {{ cat \"$log\" >&2; false; }}; else rm -f {final_path}; fi"
+            "set -eu; runtime=${{XDG_RUNTIME_DIR:-/tmp/muxflow-$(id -u)}}; install -d -m 0700 \"$runtime\"; metadata=\"$runtime/daemon.json\"; socket=\"$runtime/host.sock\"; log=\"$runtime/daemon-start.log\"; if [ -S \"$socket\" ]; then if ! {final_path} daemon-stop >/dev/null 2>&1; then pid=$(sed -n 's/.*\"pid\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_start=$(sed -n 's/.*\"processStartTime\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_exe=$(sed -n 's/.*\"executable\":\"\\([^\"]*\\)\".*/\\1/p' \"$metadata\"); [ -n \"$pid\" ] && [ -n \"$recorded_start\" ] && [ -n \"$recorded_exe\" ]; actual_start=$(awk '{{print $22}}' \"/proc/$pid/stat\"); actual_exe=$(readlink \"/proc/$pid/exe\"); actual_exe=${{actual_exe% (deleted)}}; [ \"$actual_start\" = \"$recorded_start\" ] && [ \"$actual_exe\" = \"$recorded_exe\" ]; kill -TERM \"$pid\"; for i in $(seq 1 100); do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.05; done; ! kill -0 \"$pid\" 2>/dev/null; rm -f \"$socket\" \"$metadata\"; fi; fi; for i in $(seq 1 100); do [ ! -S \"$socket\" ] && break; sleep 0.05; done; [ ! -S \"$socket\" ]; if [ -e {backup} ]; then mv -f {backup} {final_path}; nohup {final_path} daemon </dev/null >\"$log\" 2>&1 & for i in $(seq 1 100); do [ -S \"$socket\" ] && break; sleep 0.05; done; {final_path} protocol-check >/dev/null || {{ cat \"$log\" >&2; false; }}; else rm -f {final_path}; fi"
         ));
         return match rollback {
             Ok(_) => Err(error).context(
@@ -276,7 +276,7 @@ fn restart_remote_daemon(
         ""
     };
     let script = format!(
-        "set -eu; runtime=${{XDG_RUNTIME_DIR:-/tmp/tmux-agent-ide-$(id -u)}}; install -d -m 0700 \"$runtime\"; metadata=\"$runtime/daemon.json\"; socket=\"$runtime/host.sock\"; log=\"$runtime/daemon-start.log\"; if [ -S \"$socket\" ]; then if ! {final_path} daemon-stop >/dev/null 2>&1; then pid=$(sed -n 's/.*\"pid\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_start=$(sed -n 's/.*\"processStartTime\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_exe=$(sed -n 's/.*\"executable\":\"\\([^\"]*\\)\".*/\\1/p' \"$metadata\"); [ -n \"$pid\" ] && [ -n \"$recorded_start\" ] && [ -n \"$recorded_exe\" ]; actual_start=$(awk '{{print $22}}' \"/proc/$pid/stat\"); actual_exe=$(readlink \"/proc/$pid/exe\"); actual_exe=${{actual_exe% (deleted)}}; [ \"$actual_start\" = \"$recorded_start\" ] && [ \"$actual_exe\" = \"$recorded_exe\" ]; kill -TERM \"$pid\"; for i in $(seq 1 100); do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.05; done; ! kill -0 \"$pid\" 2>/dev/null; rm -f \"$socket\" \"$metadata\"; fi; fi; for i in $(seq 1 100); do [ ! -S \"$socket\" ] && break; sleep 0.05; done; [ ! -S \"$socket\" ]; {fault} nohup {final_path} daemon </dev/null >\"$log\" 2>&1 & for i in $(seq 1 100); do [ -S \"$socket\" ] && break; sleep 0.05; done; [ -S \"$socket\" ]; {final_path} protocol-check >/dev/null || {{ cat \"$log\" >&2; false; }}"
+        "set -eu; runtime=${{XDG_RUNTIME_DIR:-/tmp/muxflow-$(id -u)}}; install -d -m 0700 \"$runtime\"; metadata=\"$runtime/daemon.json\"; socket=\"$runtime/host.sock\"; log=\"$runtime/daemon-start.log\"; if [ -S \"$socket\" ]; then if ! {final_path} daemon-stop >/dev/null 2>&1; then pid=$(sed -n 's/.*\"pid\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_start=$(sed -n 's/.*\"processStartTime\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_exe=$(sed -n 's/.*\"executable\":\"\\([^\"]*\\)\".*/\\1/p' \"$metadata\"); [ -n \"$pid\" ] && [ -n \"$recorded_start\" ] && [ -n \"$recorded_exe\" ]; actual_start=$(awk '{{print $22}}' \"/proc/$pid/stat\"); actual_exe=$(readlink \"/proc/$pid/exe\"); actual_exe=${{actual_exe% (deleted)}}; [ \"$actual_start\" = \"$recorded_start\" ] && [ \"$actual_exe\" = \"$recorded_exe\" ]; kill -TERM \"$pid\"; for i in $(seq 1 100); do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.05; done; ! kill -0 \"$pid\" 2>/dev/null; rm -f \"$socket\" \"$metadata\"; fi; fi; for i in $(seq 1 100); do [ ! -S \"$socket\" ] && break; sleep 0.05; done; [ ! -S \"$socket\" ]; {fault} nohup {final_path} daemon </dev/null >\"$log\" 2>&1 & for i in $(seq 1 100); do [ -S \"$socket\" ] && break; sleep 0.05; done; [ -S \"$socket\" ]; {final_path} protocol-check >/dev/null || {{ cat \"$log\" >&2; false; }}"
     );
     connection
         .command(&script)
@@ -335,7 +335,7 @@ impl SshControl {
 
         // OpenSSH appends a temporary suffix while creating a control socket;
         // keep this path short enough for Linux's 108-byte AF_UNIX limit.
-        let runtime = PathBuf::from(format!("/tmp/tmux-agent-ide-{}", unsafe {
+        let runtime = PathBuf::from(format!("/tmp/muxflow-{}", unsafe {
             libc::geteuid()
         }))
         .join("ssh");
@@ -672,7 +672,7 @@ mod tests {
     fn rejects_unsafe_targets_and_paths() {
         assert!(validate_target("workbox").is_ok());
         assert!(validate_target("-oProxyCommand=bad").is_err());
-        assert!(validate_remote_path("$HOME/.local/bin/tmux-ide-host").is_ok());
+        assert!(validate_remote_path("$HOME/.local/bin/muxflow-host").is_ok());
         assert!(validate_remote_path("$HOME/../victim").is_err());
     }
 

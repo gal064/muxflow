@@ -76,6 +76,6 @@
   },
   "hostSetup": {
     "local": "accepted",
-    "ssh-omarchy": "declined"
+    "ssh-remote-linux": "declined"
   }
 }

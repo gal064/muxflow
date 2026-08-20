@@ -9,7 +9,7 @@ const probe: RemoteHelperProbe = {
   installed: true,
   helperVersion: "0.0.1",
   compatible: false,
-  remotePath: "$HOME/.local/bin/tmux-ide-host",
+  remotePath: "$HOME/.local/bin/muxflow-host",
 };
 
 describe("helper upgrade experience", () => {

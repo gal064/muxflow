@@ -251,7 +251,7 @@ pub fn run() {
             perf_log::operations::sample_native_measurements,
         ])
         .build(tauri::generate_context!())
-        .expect("failed to build tmux Agent IDE")
+        .expect("failed to build Muxflow")
         .run(|_, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 connection::close_all_control_masters();

@@ -69,7 +69,7 @@ impl StagingDirectory {
         let cache = open_or_create_child(&home_fd, OsStr::new(".cache"), false, "cache parent")?;
         let app = open_or_create_child(
             &cache,
-            OsStr::new("tmux-agent-ide"),
+            OsStr::new("muxflow"),
             true,
             "private app cache",
         )?;
@@ -78,7 +78,7 @@ impl StagingDirectory {
         let metadata = uploads.metadata()?;
         Ok(Self {
             file: uploads,
-            path: home.join(".cache/tmux-agent-ide/uploads"),
+            path: home.join(".cache/muxflow/uploads"),
             device: metadata.dev(),
             inode: metadata.ino(),
         })

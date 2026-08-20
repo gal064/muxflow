@@ -388,7 +388,7 @@ mod tests {
             supports_resume: true,
             supports_hooks: true,
             supports_process_detection: true,
-            hook_config_path: "/home/user/.claude/settings.json".into(),
+            hook_config_path: "/home/operator/.claude/settings.json".into(),
             hook_events: vec!["Stop".into()],
             hook_wiring: v1::AgentHookWiring::Partial.into(),
             hook_wiring_detail: String::new(),

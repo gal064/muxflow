@@ -116,7 +116,7 @@ export function useClientResize({
     const { columns, rows } = decision.size;
     const previous = lastRequested.current;
     // Every trigger recomputes; only a *different* answer reaches tmux.
-    // Re-sending a size tmux already has is not free: the omarchy lane measured
+    // Re-sending a size tmux already has is not free: the remote-linux lane measured
     // 3 identical `refresh-client -C` requests costing 15 topology-dirty events
     // on the real link (6 on a local one), which is the churn this stage exists
     // to remove.

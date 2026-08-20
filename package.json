@@ -1,11 +1,12 @@
 {
-  "name": "tmux-agent-ide",
+  "name": "muxflow",
   "private": true,
   "packageManager": "pnpm@11.18.0",
   "scripts": {
-    "build": "pnpm --filter @tmux-agent-ide/desktop build",
-    "check": "pnpm --filter @tmux-agent-ide/desktop check",
-    "dev": "pnpm --filter @tmux-agent-ide/desktop dev",
+    "build": "pnpm --filter @muxflow/desktop build",
+    "check": "pnpm --filter @muxflow/desktop check",
+    "check:privacy": "bash tests/release/check-repo-privacy.sh",
+    "dev": "pnpm --filter @muxflow/desktop dev",
     "test:transport:local": "bash tests/integration/transport/run-local.sh",
     "test:transport:ssh": "bash tests/integration/transport/run-docker-ssh.sh",
     "test:transport:ssh:keep": "ADE_PHASE0_KEEP_CONTAINER=1 bash tests/integration/transport/run-docker-ssh.sh",
@@ -34,7 +35,7 @@
     "test:performance:stall": "bash tests/performance/runtime/run-stall.sh",
     "release:linux": "bash release/linux/build-package.sh",
     "release:macos": "bash release/macos/build-package.sh",
-    "tauri": "pnpm --filter @tmux-agent-ide/desktop tauri",
-    "test": "pnpm --filter @tmux-agent-ide/desktop test"
+    "tauri": "pnpm --filter @muxflow/desktop tauri",
+    "test": "pnpm --filter @muxflow/desktop test"
   }
 }

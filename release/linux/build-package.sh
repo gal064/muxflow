@@ -47,7 +47,7 @@ build_root=$(mktemp -d "$work_root/package-builds/linux-package.XXXXXX")
 trap 'rm -rf "$build_root"' EXIT
 target_root=${CARGO_TARGET_DIR:-"$repo_root/target"}
 [[ "$target_root" == /* ]] || target_root="$repo_root/$target_root"
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$repo_root=/workspace/tmux-agent-ide --remap-path-prefix=$target_root=/workspace/target"
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$repo_root=/workspace/muxflow --remap-path-prefix=$target_root=/workspace/target"
 
 native_arch=$(uname -m)
 case "$native_arch" in
@@ -75,7 +75,7 @@ build_frontend_reproducibly() {
 
 if [[ "$arch" == "$native_arch" ]]; then
   build_frontend_reproducibly
-  cargo build --locked --release -p tmux-agent-desktop
+  cargo build --locked --release -p muxflow
   binary_dir="$target_root/release"
 else
   target_libdir=$(rustc --print target-libdir --target "$rust_target" 2>/dev/null || true)
@@ -90,31 +90,31 @@ else
   fi
   export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$linker"
   build_frontend_reproducibly
-  cargo build --locked --release --target "$rust_target" -p tmux-agent-desktop
+  cargo build --locked --release --target "$rust_target" -p muxflow
   binary_dir="$target_root/$rust_target/release"
 fi
 
 host_binary=${ADE_HOST_BINARY_OVERRIDE:-}
 if [[ -z "$host_binary" ]]; then
-  host_binary="$build_root/compatible-host/tmux-ide-host"
+  host_binary="$build_root/compatible-host/muxflow-host"
   release/linux/build-compatible-host.sh "$arch" "$host_binary" > "$build_root/compatible-host.log"
 fi
 
-package_name="tmux-agent-ide-$version-linux-$arch"
+package_name="muxflow-$version-linux-$arch"
 package_root="$build_root/$package_name"
 mkdir -p "$package_root/bin" "$package_root/share/applications" "$package_root/share/icons/hicolor/256x256/apps"
-install -m 0755 "$binary_dir/tmux-agent-desktop" "$package_root/bin/tmux-agent-desktop"
-install -m 0755 "$host_binary" "$package_root/bin/tmux-ide-host"
-install -m 0755 "$host_binary" "$package_root/bin/tmux-ide-host-$arch"
+install -m 0755 "$binary_dir/muxflow" "$package_root/bin/muxflow"
+install -m 0755 "$host_binary" "$package_root/bin/muxflow-host"
+install -m 0755 "$host_binary" "$package_root/bin/muxflow-host-$arch"
 if [[ "$arch" == x86_64 && -n "${ADE_HOST_HELPER_AARCH64_OVERRIDE:-}" ]]; then
-  install -m 0755 "$ADE_HOST_HELPER_AARCH64_OVERRIDE" "$package_root/bin/tmux-ide-host-aarch64"
+  install -m 0755 "$ADE_HOST_HELPER_AARCH64_OVERRIDE" "$package_root/bin/muxflow-host-aarch64"
 elif [[ "$arch" == aarch64 && -n "${ADE_HOST_HELPER_X86_64_OVERRIDE:-}" ]]; then
-  install -m 0755 "$ADE_HOST_HELPER_X86_64_OVERRIDE" "$package_root/bin/tmux-ide-host-x86_64"
+  install -m 0755 "$ADE_HOST_HELPER_X86_64_OVERRIDE" "$package_root/bin/muxflow-host-x86_64"
 fi
 install -m 0755 release/linux/install.sh "$package_root/install.sh"
 install -m 0755 release/linux/uninstall.sh "$package_root/uninstall.sh"
-install -m 0644 release/linux/tmux-agent-ide.desktop.in "$package_root/share/applications/tmux-agent-ide.desktop.in"
-install -m 0644 apps/desktop/src-tauri/icons/icon.png "$package_root/share/icons/hicolor/256x256/apps/tmux-agent-ide.png"
+install -m 0644 release/linux/muxflow.desktop.in "$package_root/share/applications/muxflow.desktop.in"
+install -m 0644 apps/desktop/src-tauri/icons/icon.png "$package_root/share/icons/hicolor/256x256/apps/muxflow.png"
 install -m 0644 LICENSE "$package_root/LICENSE" 2>/dev/null || true
 
 (

@@ -60,7 +60,7 @@ if [[ "$digest_a" != "$digest_b" ]]; then
   root_b=$(find "$compare_b" -mindepth 1 -maxdepth 1 -type d -print -quit)
   diff -u "$root_a/SHA256SUMS" "$root_b/SHA256SUMS" \
     > "$evidence/reproducibility-content.diff" || true
-  for binary in tmux-agent-desktop tmux-ide-host tmux-ide-host-x86_64; do
+  for binary in muxflow muxflow-host muxflow-host-x86_64; do
     printf '%s\ta\t%s\n' "$binary" "$(sha256sum "$root_a/bin/$binary" | cut -d' ' -f1)"
     printf '%s\tb\t%s\n' "$binary" "$(sha256sum "$root_b/bin/$binary" | cut -d' ' -f1)"
   done > "$evidence/reproducibility-binaries.tsv"
@@ -72,10 +72,10 @@ unpack="$run_root/unpack"
 mkdir -p "$unpack"
 tar -xzf "$archive_a" -C "$unpack"
 package_root=$(find "$unpack" -mindepth 1 -maxdepth 1 -type d -print -quit)
-if strings "$package_root/bin/tmux-agent-desktop" | grep -F "$repo_root" >/dev/null \
-  || strings "$package_root/bin/tmux-agent-desktop" | grep -F "$source_b" >/dev/null \
-  || strings "$package_root/bin/tmux-agent-desktop" | grep -F "$clean_target_a" >/dev/null \
-  || strings "$package_root/bin/tmux-agent-desktop" | grep -F "$clean_target_b" >/dev/null; then
+if strings "$package_root/bin/muxflow" | grep -F "$repo_root" >/dev/null \
+  || strings "$package_root/bin/muxflow" | grep -F "$source_b" >/dev/null \
+  || strings "$package_root/bin/muxflow" | grep -F "$clean_target_a" >/dev/null \
+  || strings "$package_root/bin/muxflow" | grep -F "$clean_target_b" >/dev/null; then
   echo "release desktop embeds a private checkout or target path" >&2
   exit 1
 fi
@@ -84,7 +84,7 @@ fi
 rm -rf "$source_b"
 docker run --rm --user "$(id -u):$(id -g)" \
   -v "$package_root/bin:/artifact:ro" debian:bookworm-slim \
-  /artifact/tmux-ide-host version > "$evidence/bookworm-version.json"
+  /artifact/muxflow-host version > "$evidence/bookworm-version.json"
 
 # Every install ancestor is fail-closed. A pre-existing share symlink must not
 # redirect desktop assets outside the chosen prefix.
@@ -100,31 +100,31 @@ fi
 [[ -z "$(find "$escape_target" -mindepth 1 -print -quit)" ]]
 
 HOME="$fixture_home" ADE_INSTALL_PREFIX="$prefix" "$package_root/install.sh" > "$evidence/install.log"
-[[ -x "$prefix/lib/tmux-agent-ide/tmux-agent-desktop" ]]
-[[ -x "$prefix/lib/tmux-agent-ide/tmux-ide-host" ]]
-[[ -x "$prefix/lib/tmux-agent-ide/tmux-ide-host-$architecture" ]]
-[[ -L "$prefix/bin/tmux-ide-host" ]]
-[[ -f "$prefix/share/applications/tmux-agent-ide.desktop" ]]
-[[ -f "$prefix/share/icons/hicolor/256x256/apps/tmux-agent-ide.png" ]]
-HOME="$fixture_home" "$prefix/bin/tmux-ide-host" version > "$evidence/version.json"
-HOME="$fixture_home" "$prefix/bin/tmux-ide-host" doctor > "$evidence/doctor.json"
+[[ -x "$prefix/lib/muxflow/muxflow" ]]
+[[ -x "$prefix/lib/muxflow/muxflow-host" ]]
+[[ -x "$prefix/lib/muxflow/muxflow-host-$architecture" ]]
+[[ -L "$prefix/bin/muxflow-host" ]]
+[[ -f "$prefix/share/applications/muxflow.desktop" ]]
+[[ -f "$prefix/share/icons/hicolor/256x256/apps/muxflow.png" ]]
+HOME="$fixture_home" "$prefix/bin/muxflow-host" version > "$evidence/version.json"
+HOME="$fixture_home" "$prefix/bin/muxflow-host" doctor > "$evidence/doctor.json"
 
-mkdir -p "$fixture_home/.config/tmux-agent-ide"
-printf 'preserve-me\n' > "$fixture_home/.config/tmux-agent-ide/user-state"
+mkdir -p "$fixture_home/.config/muxflow"
+printf 'preserve-me\n' > "$fixture_home/.config/muxflow/user-state"
 env -u TMUX tmux -L "$socket" new-session -d -s survives-uninstall
 
 # An in-place second install is the upgrade path and must preserve user state.
 HOME="$fixture_home" ADE_INSTALL_PREFIX="$prefix" "$package_root/install.sh" > "$evidence/upgrade.log"
-grep -Fxq preserve-me "$fixture_home/.config/tmux-agent-ide/user-state"
-printf 'rollback sentinel\n' > "$prefix/lib/tmux-agent-ide/rollback-sentinel"
+grep -Fxq preserve-me "$fixture_home/.config/muxflow/user-state"
+printf 'rollback sentinel\n' > "$prefix/lib/muxflow/rollback-sentinel"
 if HOME="$fixture_home" ADE_INSTALL_PREFIX="$prefix" ADE_PHASE8_TEST_FAIL_AFTER_LIB_PUBLICATION=1 \
   "$package_root/install.sh" > "$evidence/injected-upgrade.out" 2> "$evidence/injected-upgrade.err"; then
   echo "injected upgrade unexpectedly succeeded" >&2
   exit 1
 fi
-grep -Fxq 'rollback sentinel' "$prefix/lib/tmux-agent-ide/rollback-sentinel"
-[[ -L "$prefix/bin/tmux-agent-ide" && -f "$prefix/share/applications/tmux-agent-ide.desktop" ]]
-rm "$prefix/lib/tmux-agent-ide/rollback-sentinel"
+grep -Fxq 'rollback sentinel' "$prefix/lib/muxflow/rollback-sentinel"
+[[ -L "$prefix/bin/muxflow" && -f "$prefix/share/applications/muxflow.desktop" ]]
+rm "$prefix/lib/muxflow/rollback-sentinel"
 
 # The same confinement applies to uninstall, even after a hostile ancestor
 # replacement. It must not touch the symlink target or partially uninstall.
@@ -132,43 +132,43 @@ mv "$prefix/share" "$run_root/real-share"
 mkdir "$run_root/uninstall-escape"
 printf 'outside sentinel\n' > "$run_root/uninstall-escape/sentinel"
 ln -s "$run_root/uninstall-escape" "$prefix/share"
-if HOME="$fixture_home" ADE_INSTALL_PREFIX="$prefix" "$prefix/lib/tmux-agent-ide/uninstall.sh" \
+if HOME="$fixture_home" ADE_INSTALL_PREFIX="$prefix" "$prefix/lib/muxflow/uninstall.sh" \
   > "$evidence/symlink-uninstall.out" 2> "$evidence/symlink-uninstall.err"; then
   echo "uninstaller followed a symlinked destination ancestor" >&2
   exit 1
 fi
 grep -Fxq 'outside sentinel' "$run_root/uninstall-escape/sentinel"
-[[ -x "$prefix/lib/tmux-agent-ide/tmux-agent-desktop" ]]
+[[ -x "$prefix/lib/muxflow/muxflow" ]]
 rm "$prefix/share"
 mv "$run_root/real-share" "$prefix/share"
 
 # The packaged uninstaller must use the host's canonical ownership parser for
 # both current Codex and legacy Claude hook formats and fail closed.
 mkdir -p "$fixture_home/.codex" "$fixture_home/.claude"
-printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s hook ingest --adapter codex --managed-owner tmux-agent-ide --managed-version 2"}]}]}}\n' \
-  "'$prefix/lib/tmux-agent-ide/tmux-ide-host'" > "$fixture_home/.codex/hooks.json"
-printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"tmux-ide-host hook ingest --adapter claude-code # tmux-agent-ide-managed:v1"}]}]}}' \
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s hook ingest --adapter codex --managed-owner muxflow --managed-version 2"}]}]}}\n' \
+  "'$prefix/lib/muxflow/muxflow-host'" > "$fixture_home/.codex/hooks.json"
+printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"muxflow-host hook ingest --adapter claude-code # muxflow-managed:v1"}]}]}}' \
   > "$fixture_home/.claude/settings.json"
-if HOME="$fixture_home" ADE_INSTALL_PREFIX="$prefix" "$prefix/lib/tmux-agent-ide/uninstall.sh" \
+if HOME="$fixture_home" ADE_INSTALL_PREFIX="$prefix" "$prefix/lib/muxflow/uninstall.sh" \
   > "$evidence/managed-hook-uninstall.out" 2> "$evidence/managed-hook-uninstall.err"; then
   echo "uninstall unexpectedly removed a helper referenced by managed hooks" >&2
   exit 1
 fi
-[[ -x "$prefix/lib/tmux-agent-ide/tmux-ide-host" ]]
+[[ -x "$prefix/lib/muxflow/muxflow-host" ]]
 rm -f "$fixture_home/.codex/hooks.json" "$fixture_home/.claude/settings.json"
 
-HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$runtime" "$prefix/lib/tmux-agent-ide/tmux-ide-host" daemon \
+HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$runtime" "$prefix/lib/muxflow/muxflow-host" daemon \
   > "$evidence/daemon.log" 2>&1 &
 daemon_launcher=$!
 for _ in $(seq 1 100); do [[ -S "$runtime/host.sock" ]] && break; sleep 0.02; done
 [[ -S "$runtime/host.sock" ]]
 HOME="$fixture_home" ADE_HOST_RUNTIME_DIR="$runtime" ADE_INSTALL_PREFIX="$prefix" \
-  "$prefix/lib/tmux-agent-ide/uninstall.sh" > "$evidence/uninstall.log"
+  "$prefix/lib/muxflow/uninstall.sh" > "$evidence/uninstall.log"
 wait "$daemon_launcher"
-[[ ! -e "$prefix/bin/tmux-agent-ide" ]]
-[[ ! -e "$prefix/lib/tmux-agent-ide" ]]
+[[ ! -e "$prefix/bin/muxflow" ]]
+[[ ! -e "$prefix/lib/muxflow" ]]
 [[ ! -e "$prefix" ]]
-grep -Fxq preserve-me "$fixture_home/.config/tmux-agent-ide/user-state"
+grep -Fxq preserve-me "$fixture_home/.config/muxflow/user-state"
 env -u TMUX tmux -L "$socket" has-session -t survives-uninstall
 
 mkdir -p "$evidence/output-a"

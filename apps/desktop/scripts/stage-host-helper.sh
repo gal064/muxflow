@@ -14,11 +14,11 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 triple="${TAURI_ENV_TARGET_TRIPLE:-$(rustc -vV | sed -n 's/^host: //p')}"
 [[ -n "$triple" ]]
 target_dir="${CARGO_TARGET_DIR:-$repo/target}"
-staged="$repo/apps/desktop/src-tauri/binaries/tmux-ide-host-$triple"
+staged="$repo/apps/desktop/src-tauri/binaries/muxflow-host-$triple"
 
 # `--locked`, like the release flow: a packaged helper must be built from the
 # dependency versions the lockfile pins, not from whatever resolves today.
-cargo build --locked --release --manifest-path "$repo/Cargo.toml" --bin tmux-ide-host
+cargo build --locked --release --manifest-path "$repo/Cargo.toml" --bin muxflow-host
 mkdir -p "$(dirname "$staged")"
-install -m 0755 "$target_dir/release/tmux-ide-host" "$staged"
+install -m 0755 "$target_dir/release/muxflow-host" "$staged"
 printf 'staged %s\n' "$staged"

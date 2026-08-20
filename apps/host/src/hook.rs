@@ -123,7 +123,7 @@ pub(crate) fn manage(verb: &str, arguments: Vec<String>) -> anyhow::Result<()> {
         "status" => None,
         "install" => Some(v1::HookManagementAction::Install),
         "uninstall" => Some(v1::HookManagementAction::Uninstall),
-        _ => bail!("usage: tmux-ide-host hook <ingest|status|install|uninstall>"),
+        _ => bail!("usage: muxflow-host hook <ingest|status|install|uninstall>"),
     };
     // Consent, for the one caller that has no user interface to ask through.
     //

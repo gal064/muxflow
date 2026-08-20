@@ -13,10 +13,10 @@ fi
 phase8_storage_begin "$repo_root" phase7-ssh
 evidence="$PHASE8_WORK_DIR"
 durable_evidence="$PHASE8_EVIDENCE_DIR"
-host_binary="$CARGO_TARGET_DIR/debug/tmux-ide-host"
+host_binary="$CARGO_TARGET_DIR/debug/muxflow-host"
 driver_binary="$CARGO_TARGET_DIR/debug/transfer-test-driver"
 container="ade-phase7-$run_id"
-image="tmux-agent-ide-phase7-ssh"
+image="muxflow-phase7-ssh"
 target="ade-phase7-docker"
 driver_pid=''
 monitor_pid=''
@@ -46,17 +46,17 @@ chmod 0700 "$evidence" "$evidence/docker-config"
 phase8_isolate_docker_config "$evidence/docker-config"
 cd "$repo_root"
 
-cargo build --bin tmux-ide-host >"$evidence/host-build.log" 2>&1 & host_pid=$!
+cargo build --bin muxflow-host >"$evidence/host-build.log" 2>&1 & host_pid=$!
 cargo build --manifest-path tests/integration/transfers/protocol-driver/Cargo.toml \
   >"$evidence/driver-build.log" 2>&1 & protocol_pid=$!
-cargo test -p tmux-agent-desktop \
+cargo test -p muxflow \
   connection::files::manager_acceptance::production_desktop_managers_transfer_exact_bytes_through_canonical_engine \
   --no-run >"$evidence/manager-build.log" 2>&1 & manager_build_pid=$!
 target_arch=$(phase8_linux_target_arch)
 docker_platform=$(phase8_docker_platform)
 docker build --platform "$docker_platform" -t "$image" tests/integration/transport/ssh-target \
   >"$evidence/docker-build.log" 2>&1 & image_pid=$!
-release/linux/build-compatible-host.sh "$target_arch" "$evidence/tmux-ide-host-bookworm" \
+release/linux/build-compatible-host.sh "$target_arch" "$evidence/muxflow-host-bookworm" \
   >"$evidence/remote-build.log" 2>&1 & remote_pid=$!
 phase7_wait_all "$host_pid" "$protocol_pid" "$manager_build_pid" "$image_pid" "$remote_pid"
 
@@ -93,10 +93,10 @@ for _ in $(seq 1 100); do
 done
 ssh -F "$evidence/ssh-config" "$target" true
 ssh -F "$evidence/ssh-config" "$target" 'mkdir -p "$HOME/.local/bin" "$HOME/phase7-workspace"'
-scp -q -F "$evidence/ssh-config" "$evidence/tmux-ide-host-bookworm" \
-  "$target:/home/ade/.local/bin/tmux-ide-host"
+scp -q -F "$evidence/ssh-config" "$evidence/muxflow-host-bookworm" \
+  "$target:/home/ade/.local/bin/muxflow-host"
 ssh -F "$evidence/ssh-config" "$target" \
-  "chmod 0700 \"\$HOME/.local/bin/tmux-ide-host\"; mkdir -p \"\$HOME/phase7-workspace\"; truncate -s '$transfer_bytes' \"\$HOME/phase7-workspace/phase7-five-gib-source.bin\"; git -C \"\$HOME/phase7-workspace\" init -q; tmux new-session -d -s phase7 -c \"\$HOME/phase7-workspace\" 'exec bash'"
+  "chmod 0700 \"\$HOME/.local/bin/muxflow-host\"; mkdir -p \"\$HOME/phase7-workspace\"; truncate -s '$transfer_bytes' \"\$HOME/phase7-workspace/phase7-five-gib-source.bin\"; git -C \"\$HOME/phase7-workspace\" init -q; tmux new-session -d -s phase7 -c \"\$HOME/phase7-workspace\" 'exec bash'"
 
 # Delay and rate shaping are applied after setup. The one control-master TCP
 # connection must remain responsive while exactly two ControlMaster=no bulk
@@ -134,7 +134,7 @@ ADE_PHASE7_MANAGER_UPLOAD_SOURCE="$manager_source" \
 ADE_PHASE7_MANAGER_DOWNLOAD_DESTINATION="$manager_download" \
 ADE_PHASE7_MANAGER_DOWNLOAD_FILE=phase7-five-gib-source.bin \
 ADE_PHASE7_MANAGER_RESULT="$evidence/result-manager.json" \
-  cargo test -p tmux-agent-desktop \
+  cargo test -p muxflow \
     connection::files::manager_acceptance::production_desktop_managers_transfer_exact_bytes_through_canonical_engine \
     -- --exact --nocapture --test-threads=1 \
     >"$evidence/manager-test.log" 2>&1 & driver_pid=$!
@@ -184,7 +184,7 @@ jq -e --arg bytes "$transfer_bytes" '
 
 final_path="$(jq -r .uploadFinalPath "$evidence/result.json")"
 ssh -F "$evidence/ssh-config" "$target" \
-  "stat -c 'path=%n mode=%a uid=%u size=%s blocks=%b' \"\$HOME/.cache/tmux-agent-ide/uploads\" '$final_path'; test \"\$(stat -c %a \"\$HOME/.cache/tmux-agent-ide/uploads\")\" = 700; test \"\$(stat -c %a '$final_path')\" = 600; test \"\$(stat -c %s '$final_path')\" = '$transfer_bytes'; test -z \"\$(find \"\$HOME/.cache/tmux-agent-ide/uploads\" -maxdepth 1 -type f -name '.tmux-agent-upload-*.partial' -print -quit)\"; truncate -s 0 '$final_path'" \
+  "stat -c 'path=%n mode=%a uid=%u size=%s blocks=%b' \"\$HOME/.cache/muxflow/uploads\" '$final_path'; test \"\$(stat -c %a \"\$HOME/.cache/muxflow/uploads\")\" = 700; test \"\$(stat -c %a '$final_path')\" = 600; test \"\$(stat -c %s '$final_path')\" = '$transfer_bytes'; test -z \"\$(find \"\$HOME/.cache/muxflow/uploads\" -maxdepth 1 -type f -name '.tmux-agent-upload-*.partial' -print -quit)\"; truncate -s 0 '$final_path'" \
   >"$evidence/staging-stat.txt"
 manager_upload_path="$(jq -r .uploadFinalPath "$evidence/result-manager.json")"
 ssh -F "$evidence/ssh-config" "$target" "truncate -s 0 '$manager_upload_path'"
@@ -192,7 +192,7 @@ truncate -s 0 "$manager_download"
 
 # Run the parent-replacement security gate after the transfer evidence so a
 # fail-closed defect remains independently diagnosable in result-security.json.
-ADE_PHASE7_STAGING_DIR=/home/ade/.cache/tmux-agent-ide/uploads \
+ADE_PHASE7_STAGING_DIR=/home/ade/.cache/muxflow/uploads \
   "$driver_binary" parent-swap ssh "$evidence/ssh-config" "$target" \
   >"$evidence/result-security.json" 2>"$evidence/security-driver.log" & security_pid=$!
 if wait "$security_pid"; then security_status=0; else security_status=$?; fi

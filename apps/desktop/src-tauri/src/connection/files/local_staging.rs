@@ -67,9 +67,9 @@ impl LocalOwnedDirectory {
         #[cfg(not(target_os = "macos"))]
         let cache = open_or_create_child(&home_fd, OsStr::new(".cache"), false, "cache parent")?;
         #[cfg(target_os = "macos")]
-        let app_name = OsStr::new("dev.dev.tmux-agent-ide");
+        let app_name = OsStr::new("dev.muxflow.desktop");
         #[cfg(not(target_os = "macos"))]
-        let app_name = OsStr::new("tmux-agent-ide");
+        let app_name = OsStr::new("muxflow");
         let app = open_or_create_child(&cache, app_name, true, "private app cache")?;
         let clipboard = open_or_create_child(
             &app,
@@ -189,9 +189,9 @@ impl LocalOwnedDirectory {
 
 pub(super) fn clipboard_cache_path(home: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
-    return home.join("Library/Caches/dev.dev.tmux-agent-ide/clipboard");
+    return home.join("Library/Caches/dev.muxflow.desktop/clipboard");
     #[cfg(not(target_os = "macos"))]
-    home.join(".cache/tmux-agent-ide/clipboard")
+    home.join(".cache/muxflow/clipboard")
 }
 
 fn open_directory_path(path: &Path, label: &str) -> Result<File, String> {
