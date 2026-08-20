@@ -604,6 +604,26 @@ impl GitService {
     }
 }
 
+impl GitService {
+    /// Releases everything that ties this service to its connection's event
+    /// channel: watchers stop, and every subscriber's sender clone is dropped.
+    ///
+    /// The connection teardown must call this before awaiting the sequencer
+    /// writer — the writer only finishes once every sender is gone, and this
+    /// service's `Drop` runs after that await, so without an explicit release
+    /// the two wait on each other forever. The repository map itself stays
+    /// populated: detached request tasks may still hold the `Arc` and touch
+    /// coordinators, and a `WatchGit` that races in after this point registers
+    /// a subscriber whose sends fail once the channel closes, which `fan_out`
+    /// already answers by unsubscribing it.
+    pub(in crate::service) fn release_connection(&self) {
+        for coordinator in self.repositories.lock().unwrap().values() {
+            coordinator.stop_watcher();
+            coordinator.drop_all_subscribers();
+        }
+    }
+}
+
 impl Drop for GitService {
     fn drop(&mut self) {
         for (_, coordinator) in self.repositories.get_mut().unwrap().drain() {

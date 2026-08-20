@@ -803,19 +803,43 @@ impl TerminalClients {
         }
     }
 
-    pub(super) fn stop(&mut self) {
+    /// Stops every attachment but keeps their worker threads unjoined.
+    ///
+    /// A reader parked in the ordered-event channel only unblocks once the
+    /// connection's sequencer receiver is gone, so the joins — which live in
+    /// the returned value's drop — must run after the writer task is torn
+    /// down, and never under the mutex this method is called through.
+    pub(super) fn signal_stop(&mut self) -> TerminalTeardown {
         self.output_credit.close();
         // Nothing this connection owed a pane survives it: the next connection
         // reseeds every pane it mounts.
         self.owed_seeds.clear();
-        if let Some(mut input) = self.input.take() {
+        let mut input = self.input.take();
+        if let Some(input) = input.as_mut() {
             input.stop();
         }
         for client in self.clients.values_mut() {
             client.stop();
         }
-        self.clients.clear();
+        TerminalTeardown {
+            _clients: std::mem::take(&mut self.clients),
+            _input: input,
+        }
     }
+
+    pub(super) fn stop(&mut self) {
+        drop(self.signal_stop());
+    }
+}
+
+/// The joinable remains of a stopped connection's terminal clients.
+///
+/// Every child process is already dead and every credit waiter woken when this
+/// value exists; dropping it joins the worker threads through the attachments'
+/// own `Drop` impls.
+pub(super) struct TerminalTeardown {
+    _clients: HashMap<String, TerminalAttachment>,
+    _input: Option<PersistentInputClient>,
 }
 
 impl Drop for TerminalClients {
