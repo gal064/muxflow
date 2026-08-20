@@ -176,13 +176,17 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       return { kind: "gitService", scope: label, event, sequence };
     }
     case 14: {
-      // Every agent frame is a connection-epoch-scoped sideband. Topology and
-      // agent frames can share a protocol sequence, so admitting a nonzero
-      // header here would create a false gap or duplicate in the terminal hub.
-      requireLocalSequence(sequence, "agent service");
+      // An agent snapshot rides along with the topology frame built from the
+      // same host event, which already carried the sequence they share, so it
+      // arrives local; readmitting that sequence would read as a duplicate. An
+      // agent event is a host event of its own that spent its own sequence, and
+      // treating it as local would make the next ordered frame look like a gap.
+      const snapshotScoped = label === "snapshot";
+      if (snapshotScoped) requireLocalSequence(sequence, "agent snapshot");
+      else requireHostSequence(sequence, "agent event");
       try {
         const payload = JSON.parse(decoder.decode(data)) as WireAgentEvent | WireAgentSnapshot;
-        if (label === "snapshot") return { kind: "agentService", scope: label, snapshot: payload as WireAgentSnapshot, sequence };
+        if (snapshotScoped) return { kind: "agentService", scope: label, snapshot: payload as WireAgentSnapshot, sequence };
         const event = payload as WireAgentEvent;
         if (!event || typeof event !== "object" || event.generation === undefined) throw new Error("malformed");
         return { kind: "agentService", scope: label, event, sequence };
