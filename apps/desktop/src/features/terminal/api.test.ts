@@ -343,6 +343,48 @@ describe("binary terminal IPC", () => {
     });
   });
 
+  /**
+   * A frame the decoder rejects must not reach the channel dispatcher as a
+   * throw: that dispatcher stops advancing its message index on an exception,
+   * so every later frame would queue behind the bad one forever and the pane
+   * would stay frozen until the app restarts. Drop the frame, keep its credit
+   * exact, journal why, and let the native sequence check resync the hole.
+   */
+  it("drops an undecodable frame without wedging the channel or leaking its credit", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "start_terminal") return "client-undecodable-frame";
+      return undefined;
+    });
+    const events: TerminalEvent[] = [];
+    const clientId = await startTerminal("", [], { mode: "local" }, (event) => events.push(event));
+    const epoch = frame(10, "terminal", 0, u64(23));
+    const before = frame(2, "%1", 1, Uint8Array.from([...u64(1), 120]));
+    const malformed = Uint8Array.from([1, 0, 4, 37]).buffer;
+    const after = frame(2, "%1", 3, Uint8Array.from([...u64(1), 121]));
+
+    channels[0].onmessage?.(epoch);
+    channels[0].onmessage?.(before);
+    expect(() => channels[0].onmessage?.(malformed)).not.toThrow();
+    channels[0].onmessage?.(after);
+
+    expect(events.map((event) => event.kind)).toEqual(["generationEpoch", "output", "output"]);
+    expect(events.map((event) => event.sequence)).toEqual([0, 1, 3]);
+    await vi.waitFor(() => {
+      const calls = vi.mocked(invoke).mock.calls.filter(
+        ([command]) => command === "acknowledge_terminal_delivery",
+      );
+      expect(calls.at(-1)?.[1]).toMatchObject({
+        clientId,
+        connectionEpoch: 23,
+        cumulativeFrameCount: 4,
+        cumulativeByteLength: epoch.byteLength + before.byteLength + malformed.byteLength + after.byteLength,
+      });
+    });
+    const incidents = vi.mocked(invoke).mock.calls.filter(([command]) => command === "record_incident");
+    expect(incidents).toHaveLength(1);
+    expect(String((incidents[0][1] as { line: string }).line)).toContain("link.decodeFailure");
+  });
+
   it("keeps the next cumulative boundary exact after a pane listener throws", async () => {
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === "start_terminal") return "client-consumed-listener-error";
