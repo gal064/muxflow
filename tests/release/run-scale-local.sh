@@ -36,7 +36,8 @@ tests/release/create-scale-fixture.sh "$fixture_repo" "$socket" > "$run_root/fix
 # ships on this platform. The macOS packaged install/upgrade/uninstall path has
 # its own coverage in tests/acceptance/macos/run-package-lifecycle.sh.
 if phase8_is_darwin; then
-  helper="$repo_root/target/release/bundle/macos/Muxflow.app/Contents/MacOS/muxflow-host"
+  release_target=${CARGO_TARGET_DIR:-"$repo_root/tmp/work/cache/release-target/macos"}
+  helper="$release_target/release/bundle/macos/Muxflow.app/Contents/MacOS/muxflow-host"
   if [[ ! -x "$helper" ]]; then
     echo "macOS scale gate needs the packaged candidate; run release/macos/build-package.sh first" >&2
     exit 69

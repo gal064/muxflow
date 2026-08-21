@@ -35,6 +35,274 @@ fn start_long_lived_attachment(
     )
 }
 
+/// A stand-in control client that keeps every byte the host writes to it.
+///
+/// The commands *are* the behaviour under test — tmux discards a
+/// `refresh-client -C` from a client that does not own `w->latest`, and the only
+/// place the difference exists on this side is the command stream — so the
+/// fixture is a process that records that stream and stays alive like a real
+/// attachment does.
+struct RecordedClient {
+    path: std::path::PathBuf,
+}
+
+impl RecordedClient {
+    fn new() -> Self {
+        Self {
+            path: std::env::temp_dir().join(format!("ade-latest-claim-{}", uuid::Uuid::new_v4())),
+        }
+    }
+
+    fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exec cat > \"$0\"", &self.path.to_string_lossy()]);
+        command
+    }
+
+    fn written(&self) -> String {
+        std::fs::read_to_string(&self.path).unwrap_or_default()
+    }
+
+    /// Waits for a line the host has already written to reach the recording,
+    /// so an assertion about what follows it is not racing the pipe.
+    fn wait_for(&self, occurrences: usize, needle: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while self.written().matches(needle).count() < occurrences {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "control client never received {occurrences}x {needle}: {}",
+                self.written()
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// A write the host performs *after* the one under test, so "no
+    /// switch-client" is a statement about a stream that has gone past the point
+    /// where one would have appeared, not about a stream that has not caught up.
+    fn fence(&self, clients: &mut TerminalClients, occurrences: usize) {
+        clients.request_seed("%1").unwrap();
+        self.wait_for(occurrences, "__ADE_CAPTURE__");
+    }
+}
+
+impl Drop for RecordedClient {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The recorded control client, attached to `$1` and owning `%1`. The receiver
+/// comes back with it because dropping it would stop the reader, and this
+/// fixture is about what the writer emits.
+fn clients_with_recorded_client(
+    recorded: &RecordedClient,
+) -> (TerminalClients, mpsc::Receiver<SequencerControl>) {
+    let output_credit = Arc::new(OutputCredit::negotiated(false));
+    let mut clients =
+        TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
+    let (events, receiver) = mpsc::channel(64);
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let clipboard = Arc::new(ClipboardNotificationSender::start(
+        events.clone(),
+        Arc::clone(&overflowed),
+    ));
+    let attachment = TerminalAttachment::start_with_command(
+        "$1",
+        &["%1".into()],
+        AttachmentRuntime {
+            event_tx: events,
+            overflowed,
+            resources: Arc::clone(&clients.resources),
+            terminal_generation: Arc::clone(&clients.generation),
+            output_credit,
+            emission_order: Arc::clone(&clients.emission_order),
+            topology_trigger: TopologyOutputTrigger::default(),
+            clipboard,
+        },
+        recorded.command(),
+    )
+    .unwrap();
+    clients.clients.insert("$1".into(), attachment);
+    // The attachment's own startup capture, so later fences are countable.
+    recorded.wait_for(1, "__ADE_CAPTURE__");
+    (clients, receiver)
+}
+
+/// One snapshot's worth of the gate's only input.
+fn session_snapshot(attached_clients: u32) -> tmux_control::TmuxSnapshot {
+    tmux_control::TmuxSnapshot {
+        sessions: vec![tmux_control::Session {
+            id: "$1".into(),
+            name: "fixture".into(),
+            window_count: 1,
+            attached_clients,
+            order: 0,
+        }],
+        windows: Vec::new(),
+        panes: Vec::new(),
+    }
+}
+
+/// The bug, in one test: a plain terminal the user typed into owns `w->latest`,
+/// so the size this daemon asserts is discarded unless it takes the pointer
+/// back. The order is the whole fix — the claim recomputes the windows from the
+/// size this client holds, so a claim before the size would resize the user's
+/// real windows to tmux's 80x24 default.
+#[test]
+fn sizing_a_session_a_foreign_client_shares_reclaims_the_size_pointer() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    // Two attached: this daemon's control client, and somebody else's.
+    clients.reconcile(&session_snapshot(2));
+    clients.last_size = Some((120, 40));
+
+    clients.select_session("$1").unwrap();
+    recorded.wait_for(1, "switch-client");
+
+    let written = recorded.written();
+    let size = written.find("refresh-client -C 120,40").unwrap();
+    let claim = written.find("switch-client -E -t $1").unwrap();
+    assert!(
+        size < claim,
+        "the claim must follow the size it makes tmux honour: {written}"
+    );
+    assert_eq!(
+        written.matches("switch-client").count(),
+        1,
+        "one selection must cost exactly one topology reconcile: {written}"
+    );
+    clients.stop();
+}
+
+/// The common case, which must stay free. Every claim emits a
+/// `%session-changed` on this daemon's own control stream and so costs a
+/// topology reconcile; a session nobody else is attached to has no pointer to
+/// reclaim.
+#[test]
+fn sizing_a_session_nobody_else_shares_never_claims() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    // The one attached client is this daemon's own.
+    clients.reconcile(&session_snapshot(1));
+    clients.last_size = Some((120, 40));
+
+    clients.select_session("$1").unwrap();
+    recorded.fence(&mut clients, 2);
+    assert!(
+        !recorded.written().contains("switch-client"),
+        "an unshared session paid for a reconcile it did not need: {}",
+        recorded.written()
+    );
+
+    clients.resize(100, 30).unwrap();
+    recorded.fence(&mut clients, 3);
+    let written = recorded.written();
+    assert!(written.contains("refresh-client -C 100,30"), "{written}");
+    assert!(
+        !written.contains("switch-client"),
+        "a resize on an unshared session claimed anyway: {written}"
+    );
+    clients.stop();
+}
+
+/// The hazard that would be worse than the bug: `switch-client` recomputes the
+/// windows from the size the claiming client holds, and a control client that
+/// has never been sent a `refresh-client -C` holds tmux's 80x24 default. Sizing
+/// a session the desktop has not given a size to must therefore claim nothing,
+/// however many foreign clients are attached.
+#[test]
+fn a_client_that_was_never_sized_is_never_used_to_claim() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    clients.reconcile(&session_snapshot(3));
+    assert!(clients.last_size.is_none());
+
+    clients.select_session("$1").unwrap();
+    recorded.fence(&mut clients, 2);
+    let written = recorded.written();
+    assert!(
+        !written.contains("refresh-client -C"),
+        "nothing asserted a size, so nothing may have claimed on one: {written}"
+    );
+    assert!(
+        !written.contains("switch-client"),
+        "an unsized client claimed the size pointer: {written}"
+    );
+
+    // The refusal lives in the operation, not in its call sites: a future
+    // caller that reaches it out of order still cannot shrink the user's
+    // windows to 80x24.
+    let attachment = clients.clients.get_mut("$1").unwrap();
+    assert!(!attachment.claim_latest("$1").unwrap());
+    recorded.fence(&mut clients, 3);
+    assert!(
+        !recorded.written().contains("switch-client"),
+        "claim_latest wrote on an unsized client: {}",
+        recorded.written()
+    );
+    clients.stop();
+}
+
+/// The resize path carries the same gate as selection. A desktop resize is a
+/// size the user's own terminal never asked for, so it is exactly when the
+/// pointer has to move — and exactly when a session nobody shares must still
+/// pay nothing.
+#[test]
+fn resizing_a_session_a_foreign_client_shares_reclaims_the_size_pointer() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    clients.reconcile(&session_snapshot(2));
+    clients.last_size = Some((120, 40));
+    clients.select_session("$1").unwrap();
+    recorded.wait_for(1, "switch-client");
+
+    clients.resize(100, 30).unwrap();
+    recorded.wait_for(2, "switch-client");
+    let written = recorded.written();
+    let size = written.find("refresh-client -C 100,30").unwrap();
+    let claim = written.rfind("switch-client -E -t $1").unwrap();
+    assert!(
+        size < claim,
+        "the resize claimed before it sized: {written}"
+    );
+    assert_eq!(clients.last_size, Some((100, 30)));
+    clients.stop();
+}
+
+/// The gate is arithmetic on tmux's own count, and this daemon's input sidecar
+/// is one of the clients tmux counts. Mistaking it for a foreign one would claim
+/// on every sizing of the session it happens to be attached to — the churn the
+/// gate exists to avoid.
+#[test]
+fn the_input_sidecar_is_not_counted_as_a_foreign_client() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    // Two attached, and both of them are this daemon's: the control client and
+    // the input sidecar on the same session.
+    clients.reconcile(&session_snapshot(2));
+    clients.input_session = Some("$1".into());
+    clients.last_size = Some((120, 40));
+    assert!(!clients.foreign_client_shares("$1"));
+
+    clients.select_session("$1").unwrap();
+    recorded.fence(&mut clients, 2);
+    assert!(
+        !recorded.written().contains("switch-client"),
+        "the daemon's own sidecar was mistaken for a user's terminal: {}",
+        recorded.written()
+    );
+
+    // The third client is the one that can own `w->latest`.
+    clients.reconcile(&session_snapshot(3));
+    assert!(clients.foreign_client_shares("$1"));
+    assert!(
+        !clients.foreign_client_shares("$2"),
+        "a session the last snapshot never carried must not gate on a guess"
+    );
+    clients.stop();
+}
+
 #[test]
 fn every_attachment_worker_spawn_failure_reaps_the_child_and_allows_retry() {
     use super::startup::{assert_last_startup_child_reaped, with_worker_spawn_failure};
@@ -220,6 +488,7 @@ fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
             output_credit: &output_credit_clone,
             emission_order: &emission_order,
             topology_trigger: &TopologyOutputTrigger::default(),
+            read_started: std::time::Instant::now(),
         }
         .record("%1".into(), vec![b'O']);
     });
@@ -332,6 +601,7 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
             output_credit: &reader_credit,
             emission_order: &reader_emission_order,
             topology_trigger: &TopologyOutputTrigger::default(),
+            read_started: std::time::Instant::now(),
         }
         .record("%1".into(), vec![b'O']);
     });
@@ -1122,6 +1392,7 @@ fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
         output_credit: &output_credit,
         emission_order: &emission_order,
         topology_trigger: &TopologyOutputTrigger::default(),
+        read_started: std::time::Instant::now(),
     }
     .record("%1".into(), vec![b'o'; 64]);
 

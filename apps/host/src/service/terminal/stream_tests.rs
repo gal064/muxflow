@@ -100,6 +100,7 @@ impl Harness {
             emission_order: &self.emission_order,
             topology_trigger: &self.topology_trigger,
             clipboard: &self.clipboard,
+            read_started: std::time::Instant::now(),
         }
     }
 
@@ -445,6 +446,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
             emission_order: &emission_order,
             topology_trigger: &topology_trigger,
             clipboard: &clipboard,
+            read_started: std::time::Instant::now(),
         },
     );
     assert!(matches!(state.command_block, CommandBlock::None));

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { recordIncident } from "../../diagnostics/incidents";
 import { agentGeneration, zeroGeneration, type AgentGeneration } from "./generation";
 import { canonicalAdapterId } from "./adapterDefinitions";
 import { AGENT_HOOK_WIRINGS, AGENT_HOST_NAMING_OUTCOMES } from "./types";
@@ -233,6 +234,19 @@ export class TauriAgentClient implements AgentClient {
       return;
     }
     const record = mapRecord(scope, event.agent);
+    // Live transitions only (replays re-state old facts): this line is how a
+    // "stuck working/blocked" tab is diagnosed after the fact — the last state
+    // the host asserted, its reason, and whether anything followed it.
+    if (event.notify !== false) {
+      recordIncident("agent.state", {
+        id: record.id,
+        lifecycle: record.lifecycle,
+        reason: event.reason,
+        attentionKind: record.attentionKind,
+        paneId: record.paneId,
+        windowId: record.windowId,
+      });
+    }
     this.#publish({
       kind: "upsert",
       hostProfileId: scope.hostProfileId,

@@ -6,6 +6,7 @@
     "build": "pnpm --filter @muxflow/desktop build",
     "check": "pnpm --filter @muxflow/desktop check",
     "check:privacy": "bash tests/release/check-repo-privacy.sh",
+    "clean:rust": "bash release/clean-rust-cache.sh",
     "dev": "pnpm --filter @muxflow/desktop dev",
     "test:transport:local": "bash tests/integration/transport/run-local.sh",
     "test:transport:ssh": "bash tests/integration/transport/run-docker-ssh.sh",

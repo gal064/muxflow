@@ -1,9 +1,9 @@
 ---
 name: test-desktop-with-cua
-description: Build and drive the packaged desktop app on Linux or macOS with CUA.
+description: Manual desktop QA with CUA. Use only when explicitly requested.
 ---
 
-# Test the packaged desktop
+# Manual desktop QA with CUA
 
 1. Build the real package: `pnpm release:linux -- x86_64` on Linux or `pnpm release:macos` on macOS.
 2. Start an isolated app home plus disposable Docker/SSH target. On Linux, run `ADE_PHASE8_CUA_ARCHIVE=<archive> tests/release/setup-cua.sh`; give macOS an equivalent fixture around the packaged `.app`.

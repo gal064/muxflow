@@ -41,6 +41,7 @@ output_dir=${ADE_RELEASE_OUTPUT_DIR:-"$repo_root/tmp/release"}
 mkdir -p "$repo_root/tmp" "$output_dir"
 work_root=${ADE_WORK_ROOT:-"$repo_root/tmp/work"}
 mkdir -p "$work_root/package-builds" "$work_root/system-tmp"
+release/check-disk-space.sh "$repo_root" "$work_root"
 work_fstype=$(findmnt -n -o FSTYPE -T "$work_root")
 case "$work_fstype" in
   tmpfs|ramfs) echo "release work root must be disk-backed: $work_root" >&2; exit 78 ;;
@@ -49,8 +50,10 @@ export TMPDIR="$work_root/system-tmp"
 export CARGO_INCREMENTAL=0
 build_root=$(mktemp -d "$work_root/package-builds/linux-package.XXXXXX")
 trap 'rm -rf "$build_root"' EXIT
-target_root=${CARGO_TARGET_DIR:-"$repo_root/target"}
+target_root=${CARGO_TARGET_DIR:-"$work_root/cache/release-target/linux-$arch"}
 [[ "$target_root" == /* ]] || target_root="$repo_root/$target_root"
+export CARGO_TARGET_DIR="$target_root"
+mkdir -p "$target_root"
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$repo_root=/workspace/muxflow --remap-path-prefix=$target_root=/workspace/target"
 
 native_arch=$(uname -m)
