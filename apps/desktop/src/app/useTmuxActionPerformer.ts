@@ -5,6 +5,7 @@ import {
   type ReconciledTmuxActionOptions,
 } from "../features/tmux/actionReconciliation";
 import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
+import { recordIncident } from "../diagnostics/incidents";
 import {
   abandonPanePaintSpan,
   openPanePaintSpan,
@@ -72,6 +73,12 @@ export function useTmuxActionPerformer(options: Options) {
       return result;
     } catch (error) {
       abandonPanePaintSpan(paneSpanHandle);
+      // Every refusal, whoever is listening. A status string is read by whatever
+      // renders next and then gone — and a bulk close overwrote its own with the
+      // following tab's — so the only record of "the host said no" was a message
+      // nobody kept. One line per refusal: refusals are exceptional, and the
+      // largest burst is one per tab in a bulk close.
+      recordIncident("action.refused", { kind: action.kind, error: String(error).slice(0, 200) });
       if (reportStatus && sameHostConnection(initialScope, options.hostScopeRef.current)) options.setStatus(String(error));
       if (execution?.kind === "navigation") throw error;
       return undefined;

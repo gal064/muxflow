@@ -47,6 +47,7 @@ import {
   PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
 } from "../features/shell/types";
 import {
+  bulkCloseOutcomeStatus,
   combineWorkspaceTabs,
   closeAppTab,
   mountedAppTabIds,
@@ -54,6 +55,7 @@ import {
   openFileTab,
   openGitDiffTab,
   pinAppTab,
+  retirePendingTab,
   selectAppTab,
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
@@ -497,6 +499,16 @@ export function App() {
   // session until its ack names one, and drawing it anywhere before that would
   // put it in the workspace being navigated away from.
   const pendingTabHere = pendingTab && pendingTab.sessionId === activeSessionId ? pendingTab : undefined;
+  // Where the placeholder actually retires, from the same window list the strip
+  // draws it against. Only for the workspace on screen: another workspace's
+  // window list is not in `windows`, so retiring its placeholder here would be
+  // retiring it on no evidence at all. The identity check keeps a create that
+  // started in the meantime — the second of two quick clicks — from being
+  // retired by the first one's snapshot.
+  useEffect(() => {
+    if (!pendingTabHere) return;
+    setPendingTab((current) => (current === pendingTabHere ? retirePendingTab(current, windows) : current));
+  }, [pendingTabHere, windows]);
   const combinedTabs = useMemo(
     () => combineWorkspaceTabs(windows, workspaceAppTabs, agentRuntime.rollups.byWindow, pendingTabHere),
     [agentRuntime.rollups.byWindow, pendingTabHere, windows, workspaceAppTabs],
@@ -823,16 +835,32 @@ export function App() {
       const appTab = workspaceAppTabs.find((item) => item.id === tab.id);
       if (appTab) closeWorkspaceAppTab(appTab, scope);
     }
+    let closed = 0;
+    let failed = 0;
     for (const tab of tabs) {
       if (tab.kind !== "terminal") continue;
       const terminalWindow = windows.find((item) => item.id === tab.id);
-      // No captured precondition: each close advances the topology generation,
-      // so one stamped before the first would refuse every close after it.
-      if (terminalWindow) await performAction({
+      if (!terminalWindow) continue;
+      // Identity only, and a generation of 0 on purpose: 0 is the host's "no
+      // generation guard" (`tmux_actions.rs`, `expected_generation != 0 &&`).
+      // Every close advances the generation twice — once for the dispatch and
+      // once for tmux's own notification — so any stamped generation, including
+      // the implicit one `requestReconciledTmuxAction` would otherwise
+      // substitute from the live scope, refuses every close after the first and
+      // leaves the survivors this set was meant to remove. What must not change
+      // under the batch is the server, and that is what stays stamped.
+      const result = await performAction({
         kind: "closeWindow", sessionId: terminalWindow.sessionId, windowId: terminalWindow.id, confirmed: true,
-      });
+      }, { serverIdentity: scope.serverIdentity!, generation: 0 });
+      if (result) closed += 1;
+      else failed += 1;
       if (!sameHostConnection(scope, hostScopeRef.current)) return;
     }
+    // Counted rather than last-error-wins: the loop used to overwrite each
+    // refusal with the next iteration's progress message, so a partial close
+    // was indistinguishable from a complete one.
+    const outcome = bulkCloseOutcomeStatus(closed, failed);
+    if (outcome) setStatus(outcome);
   };
 
   /** Terminal windows in the set mean one dialog for the set; app tabs alone close on the spot. */
