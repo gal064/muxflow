@@ -112,6 +112,12 @@ describe("reading state the previous build wrote", () => {
     expect(saved({}).shell.agentSort).toBe(defaultShellState.agentSort);
   });
 
+  it("restores the global compact workspace preference and defaults old saves to normal", () => {
+    expect(saved({ compactWorkspaces: true }).shell.compactWorkspaces).toBe(true);
+    expect(saved({ compactWorkspaces: false }).shell.compactWorkspaces).toBe(false);
+    expect(saved({}).shell.compactWorkspaces).toBe(false);
+  });
+
   it("leaves the rest of a legacy save alone while migrating the ordering", () => {
     // The migration is one field. A save that carries open tabs and a picked
     // workspace must come back with both, not with a fresh default state.

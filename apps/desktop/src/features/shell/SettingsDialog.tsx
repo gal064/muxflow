@@ -46,10 +46,11 @@ interface SettingsDialogProps {
   agentSetup: { available: boolean; reports: boolean; connected: boolean; onSetUp(): void };
 }
 
-type SettingsTab = "connection" | "sounds" | "accessibility";
+type SettingsTab = "connection" | "workspace" | "sounds" | "accessibility";
 
 const TABS: readonly { id: SettingsTab; label: string }[] = [
   { id: "connection", label: "Connection" },
+  { id: "workspace", label: "Workspace" },
   { id: "sounds", label: "Sounds" },
   { id: "accessibility", label: "Accessibility" },
 ];
@@ -191,6 +192,14 @@ export function SettingsDialog(props: SettingsDialogProps) {
             />}
             {props.helper.phase === "succeeded" && <p role="status">Helper {props.helper.operation === "install" ? "installed" : "upgraded"}. {props.helper.message}</p>}
           </div>}
+        </>}
+
+        {tab === "workspace" && <>
+          <label className="settings-check">
+            <input checked={props.shell.compactWorkspaces} onChange={(event) => props.onShell({ compactWorkspaces: event.target.checked })} type="checkbox" />
+            Compact workspace list
+          </label>
+          <p className="settings-hint">Hides individual agent lines under each workspace while keeping its activity, unread count, and connection status visible.</p>
         </>}
 
         {tab === "sounds" && <>
