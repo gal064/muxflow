@@ -54,7 +54,7 @@ git -C "$local_repo" commit -qm baseline
 printf 'working tree change\n' >> "$local_repo/tracked.txt"
 printf 'ignored\n' > "$local_repo/ignored.log"
 printf 'paste file\n' > "$local_repo/local paste ü.txt"
-cp apps/desktop/src-tauri/icons/icon.png "$local_repo/clipboard.png"
+cp tests/integration/agents/evidence/local-connected.png "$local_repo/clipboard.png"
 
 phase8_isolate_docker_config "$run_root/docker-config"
 docker build -t muxflow-phase8-cua tests/integration/transport/ssh-target > "$run_root/docker-build.log" 2>&1
