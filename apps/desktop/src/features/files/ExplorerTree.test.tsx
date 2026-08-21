@@ -8,6 +8,7 @@ import { rowCommandRegistry } from "../../commands/rowCommands";
 import { enablePerfProbe, perfHighWaterSnapshot, resetPerfProbe } from "../../perf/probe";
 import { ExplorerTree } from "./ExplorerTree";
 import type { ActiveRoot, DirectoryListing } from "./types";
+import { INTERNAL_PATH_DRAG_TYPE } from "../terminal/internalPathDrag";
 
 const root: ActiveRoot = { token: "root-1", paneId: "%1", cwd: "/r", path: "/r", gitWorktree: true, revision: "1" };
 const listing: DirectoryListing = {
@@ -24,6 +25,29 @@ const listing: DirectoryListing = {
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("ExplorerTree", () => {
+  it("writes private same-host payloads for both file and folder rows", async () => {
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" serverIdentity="server-a"
+      listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+    const values = new Map<string, string>();
+    const dataTransfer = { effectAllowed: "all", setData: (type: string, value: string) => values.set(type, value) };
+    const rows = renderer.root.findAllByProps({ className: "file-row" });
+    for (const row of [rows[0], rows[2]]) row.props.onDragStart({ dataTransfer });
+    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!)).toEqual({ version: 1, serverIdentity: "server-a", path: "/r/.git" });
+    expect(rows[0].props.draggable).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("disables path drag when rows are not bound to a live host identity", async () => {
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="stale"
+      listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+      onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+    expect(renderer.root.findAllByProps({ className: "file-row" })[0].props.draggable).toBe(false);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("exposes the deterministic 4,096-row Phase 14 DOM high-water hook", async () => {
     enablePerfProbe(async () => undefined);
     const wide: DirectoryListing = {

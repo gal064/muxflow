@@ -73,6 +73,7 @@ import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
 import type { ConnectionSpec, HostProfile, Pane } from "./types";
+import { currentTerminalFilePane } from "./terminalFileOpenRoute";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
 import { useAppRecoveryController } from "./useAppRecoveryController";
@@ -890,6 +891,40 @@ export function App() {
     else void closeTabSet(tabs, scope, protectAgents);
   };
 
+  const openTerminalFilePath = useCallback(async (paneId: string, candidate: string) => {
+    const pane = snapshotRef.current.panes.find((item) => item.id === paneId);
+    const capturedHost = hostScopeRef.current;
+    const liveClientId = clientIdRef.current;
+    if (!pane || !fileScope || !liveClientId || !capturedHost.serverIdentity) {
+      setStatus("Reconnect the terminal before opening a file path.");
+      return;
+    }
+    const scope = { ...fileScope, clientId: liveClientId, paneId, sessionId: pane.sessionId };
+    try {
+      const resolved = await fileClient.resolveTerminalFile(scope, candidate, {
+        sessionId: pane.sessionId, windowId: pane.windowId, cwd: pane.currentPath,
+      });
+      if (clientIdRef.current !== liveClientId || !sameHostConnection(capturedHost, hostScopeRef.current)) return;
+      const livePane = currentTerminalFilePane(
+        pane, snapshotRef.current.panes, hostScopeRef.current.generation, resolved.topologyGeneration,
+      );
+      if (!livePane) return;
+      const session = snapshotRef.current.sessions.find((item) => item.id === livePane.sessionId);
+      if (!session) return;
+      const kind = /\.md(?:own)?$/i.test(resolved.path) ? "markdown" as const : "file" as const;
+      shellNavigation.selectLocalAppTab(session.id, livePane.windowId, `file:${resolved.root.token}:${resolved.path}`, () => {
+        setAppState((current) => openFileTab(
+          current, capturedHost.hostProfileId, capturedHost.serverIdentity!, session,
+          resolved.path, kind, resolved.root, { preview: false },
+        ));
+      });
+    } catch (error) {
+      if (clientIdRef.current === liveClientId && sameHostConnection(capturedHost, hostScopeRef.current)) {
+        setStatus(`Could not open ${candidate}: ${String(error)}`);
+      }
+    }
+  }, [clientIdRef, fileClient, fileScope, hostScopeRef, setAppState, shellNavigation, snapshotRef]);
+
   const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {
     if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || entry.kind === "directory"
       || (entry.kind === "symlink" && entry.targetKind !== "file")) return;
@@ -1091,6 +1126,7 @@ export function App() {
               controllers={controllers}
               focusPane={focusTerminalPane}
               onMeasurements={onMeasurements}
+              onOpenFilePath={(paneId, path) => { void openTerminalFilePath(paneId, path); }}
               grid={grid}
               handleInput={handleInput}
               handleKeyActivity={handleKeyActivity}

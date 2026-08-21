@@ -20,6 +20,7 @@ import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 import { settleWithin } from "./timeBound";
 import { recordPerfCounter } from "../../perf/probe";
 import { recordIncident } from "../../diagnostics/incidents";
+import { isTerminalFileLinkActivation, terminalFileLinkCellRange, terminalFileLinks } from "./terminalFilePaths";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
@@ -48,6 +49,7 @@ export interface TerminalRendererOptions {
   paneId?: string;
   onDiagnostic?: (message: string | undefined) => void;
   onOpenLink?: (url: string) => void;
+  onOpenFilePath?: (path: string) => void;
   /**
    * Asks the owner to fetch a fresh seed. Returning a promise lets the renderer
    * reopen its one-shot request latch when the request itself fails, so a pane
@@ -753,8 +755,9 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   #linksForLine(bufferLineNumber: number): ILink[] | undefined {
-    const line = this.#terminal.buffer.active.getLine(bufferLineNumber - 1)?.translateToString(true);
-    if (!line) return undefined;
+    const bufferLine = this.#terminal.buffer.active.getLine(bufferLineNumber - 1);
+    const line = bufferLine?.translateToString(true);
+    if (!line || !bufferLine) return undefined;
     const links: ILink[] = [];
     const pattern = /https?:\/\/[^\s<>"']+/gu;
     for (const match of line.matchAll(pattern)) {
@@ -768,6 +771,26 @@ export class XtermRenderer implements TerminalRenderer {
         },
         activate: () => this.#activateLink(text),
       });
+    }
+    if (this.#options.onOpenFilePath) {
+      for (const link of terminalFileLinks(line)) {
+        const cells = terminalFileLinkCellRange(bufferLine, link.start, link.end);
+        if (!cells) continue;
+        // A URL provider has already claimed this range. File-path recognition
+        // deliberately excludes schemes, but keep the ownership explicit if
+        // that vocabulary changes later.
+        if (links.some((existing) => existing.range.start.x - 1 === cells.start)) continue;
+        links.push({
+          text: link.text,
+          range: {
+            start: { x: cells.start + 1, y: bufferLineNumber },
+            end: { x: cells.end + 1, y: bufferLineNumber },
+          },
+          activate: (event) => {
+            if (isTerminalFileLinkActivation(event)) this.#options.onOpenFilePath?.(link.text);
+          },
+        });
+      }
     }
     return links.length ? links : undefined;
   }

@@ -173,6 +173,7 @@ interface Props {
   onMeasurements: (measurements: TerminalMeasurements) => void;
   onController: (paneId: string, controller: TerminalPaneController | undefined) => void;
   onDiagnostic?: (message: string) => void;
+  onOpenFilePath?: (paneId: string, path: string) => void;
   transferClient?: TerminalTransferClient;
   transferRegistry?: TerminalTransferRegistry;
   transferScope?: TerminalTransferConnectionScope;
@@ -189,6 +190,7 @@ export function TerminalPane({
   onMeasurements,
   onController,
   onDiagnostic,
+  onOpenFilePath,
   transferClient,
   transferRegistry,
   transferScope,
@@ -209,6 +211,7 @@ export function TerminalPane({
   const measurementsRef = useRef(onMeasurements);
   const controllerRef = useRef(onController);
   const diagnosticRef = useRef(onDiagnostic);
+  const openFilePathRef = useRef(onOpenFilePath);
   const clientIdRef = useRef(clientId);
   const appFocusedRef = useRef(appFocused);
   const rendererEpochRef = useRef<number | undefined>(undefined);
@@ -241,6 +244,7 @@ export function TerminalPane({
   measurementsRef.current = onMeasurements;
   controllerRef.current = onController;
   diagnosticRef.current = onDiagnostic;
+  openFilePathRef.current = onOpenFilePath;
   clientIdRef.current = clientId;
   const paneTransferScope: TerminalTransferScope | undefined = transferScope ? {
     ...transferScope,
@@ -301,6 +305,7 @@ export function TerminalPane({
           window.open(url, "_blank", "noopener,noreferrer");
         }
       },
+      onOpenFilePath: (path) => openFilePathRef.current?.(pane.id, path),
       // Rejecting is how this tells the renderer the request did not go out,
       // which reopens its latch so the pane can ask again.
       onResnapshotRequired: async (reason) => {

@@ -16,6 +16,7 @@ import {
 import { canCancelTransfer, isTerminalTransferState, transferStateLabel } from "../transfers/transferState";
 import { SurfaceError } from "../../ui/SurfaceError";
 import { useTerminalTransferRegistry, type TerminalTransferRegistry } from "./terminalTransferRegistry";
+import { readInternalPathDrop } from "./internalPathDrag";
 
 interface PendingReview {
   items: UploadPreflight[];
@@ -435,6 +436,16 @@ export function TerminalTransferSurface({
   const onDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     setDragging(false);
+    const internal = readInternalPathDrop(event.dataTransfer, scope?.serverIdentity);
+    if (internal.kind === "accepted") {
+      setError(undefined);
+      onPaste(internal.shellText);
+      return;
+    }
+    if (internal.kind === "rejected") {
+      fail(new Error(internal.reason));
+      return;
+    }
     const copiedFiles = event.dataTransfer.getData("x-special/gnome-copied-files");
     const uriList = copiedFiles || event.dataTransfer.getData("text/uri-list");
     if (uriList) {

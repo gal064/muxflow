@@ -7,6 +7,7 @@ import type { WorkspaceGitState } from "./useWorkspaceGit";
 import type { GitRepositoryHandle } from "./repositoryStore";
 import { rowCommandRegistry } from "../../commands/rowCommands";
 import { GitSidebar } from "./GitSidebar";
+import { INTERNAL_PATH_DRAG_TYPE } from "../terminal/internalPathDrag";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -38,6 +39,26 @@ async function rowMenuItem(renderer: ReturnType<typeof create>, displayPath: str
 }
 
 describe("GitSidebar", () => {
+  it("writes a private canonical same-host payload for Git rows", async () => {
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...baseProps()} />); });
+    const values = new Map<string, string>();
+    const dataTransfer = { effectAllowed: "all", setData: (type: string, value: string) => values.set(type, value) };
+    gitRow(renderer, "changed.txt").props.onDragStart({ dataTransfer });
+    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!)).toEqual({ version: 1, serverIdentity: "s", path: "/repo/changed.txt" });
+    expect(gitRow(renderer, "changed.txt").props.draggable).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("fails closed instead of dragging a lossy Git display path", async () => {
+    const value = status();
+    value.entries = [entry("lossy-name", { absolutePath: undefined })];
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...baseProps(gitState({ status: value }))} />); });
+    expect(gitRow(renderer, "lossy-name").props.draggable).toBe(false);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("groups staged, unstaged, untracked and conflict entries, and shows nothing ignored", async () => {
     const value = status();
     value.entries.push(entry("image.png", { binary: true }));
@@ -389,6 +410,6 @@ function baseProps(git: WorkspaceGitState = gitState()) {
 
 const scope: FileWorkspaceScope = { clientId: "c", hostProfileId: "local", serverIdentity: "s", generation: 1, terminalEpoch: 1, sessionId: "$1", paneId: "%1" };
 const root: ActiveRoot = { token: "root", path: "/repo", cwd: "/repo", paneId: "%1", gitWorktree: true, revision: "1" };
-function entry(path: string, overrides: Record<string, unknown> = {}) { return { path: btoa(path), displayPath: path, indexKind: "none", worktreeKind: "modified", indexStatus: ".", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false, ...overrides } as GitStatusSnapshot["entries"][number]; }
+function entry(path: string, overrides: Record<string, unknown> = {}) { return { path: btoa(path), displayPath: path, absolutePath: `/repo/${path}`, indexKind: "none", worktreeKind: "modified", indexStatus: ".", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false, ...overrides } as GitStatusSnapshot["entries"][number]; }
 function status(): GitStatusSnapshot { return { repository: { id: "repo", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "1", sourceGeneration: "source", authoritative: true, entries: [entry("staged.txt", { indexKind: "modified", worktreeKind: "none" }), entry("changed.txt"), entry("new.txt", { untracked: true, worktreeKind: "untracked" }), entry("conflict.txt", { conflicted: true, conflictCode: "UU", indexKind: "unmerged", worktreeKind: "unmerged" }), entry("ignored.log", { ignored: true, worktreeKind: "ignored" })] }; }
 async function settle() { await Promise.resolve(); await new Promise((resolve) => setTimeout(resolve, 0)); }
