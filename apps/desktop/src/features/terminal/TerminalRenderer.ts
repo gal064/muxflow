@@ -292,6 +292,25 @@ export class XtermRenderer implements TerminalRenderer {
     // After `open`, not in the constructor: xterm builds its char-size service
     // out of the helper elements `open` creates, and measures there.
     this.#applyRowPitch();
+    // Wheel speed is buffer-dependent because xterm's two wheel paths are not
+    // symmetric. The normal buffer scrolls the viewport at native speed. The
+    // alternate buffer — every full-screen TUI — forwards wheel motion to the
+    // program, and that path multiplies trackpad deltas by 0.3
+    // (CoreMouseService.consumeWheelEvent's isLikelyTrackpad haircut) before
+    // emitting at most one report per DOM event: a TUI scrolls at roughly a
+    // quarter of the speed of the shell in the pane next to it, felt as "the
+    // scroll speed setting is wrong", never as jank. 1/0.3 cancels the haircut
+    // exactly, restoring deltaY/cellHeight — the same rule a native terminal
+    // applies — and it must not leak into the normal buffer, where it would
+    // triple a speed that is already right. Applied at open because a seeded
+    // pane can already be on the alternate screen before any buffer event
+    // fires.
+    const applyWheelSensitivity = () => {
+      this.#terminal.options.scrollSensitivity =
+        this.#terminal.buffer.active.type === "alternate" ? 1 / 0.3 : 1;
+    };
+    applyWheelSensitivity();
+    this.#terminal.buffer.onBufferChange(applyWheelSensitivity);
     // And again whenever that measurement changes. A one-shot application is a
     // latch: a terminal opened before the bundled face resolved would keep a
     // multiplier derived from a measurement that no longer holds, and the only
