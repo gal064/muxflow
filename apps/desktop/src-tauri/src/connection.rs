@@ -800,6 +800,18 @@ fn take_length_prefixed<'a>(body: &'a [u8], offset: &mut usize) -> Result<&'a st
         .map_err(|_| "raw IPC frame label is not valid UTF-8".to_owned())
 }
 
+/// The structured discriminator for "this checkpoint names an epoch the host
+/// has already replaced".
+///
+/// It is a code rather than a bare sentence because the desktop has to branch
+/// on it: a reveal refused here can never be satisfied by resending the same
+/// request — the epoch is stamped by whoever built the checkpoint, and only a
+/// newer `GenerationEpoch` frame can change it — so `revealRetry.ts` routes it
+/// to the checkpoint-free seed path instead of the retry series. Renaming this
+/// constant without renaming `STALE_REVEAL_EPOCH_CODE` there turns that
+/// one-round-trip recovery back into ~2s of futile retries.
+const STALE_VISIBILITY_EPOCH_CODE: &str = "terminal_visibility_epoch_rejected";
+
 fn terminal_visibility_request(
     pane_id: String,
     visible: bool,
@@ -813,7 +825,9 @@ fn terminal_visibility_request(
         return Err("serialized terminal snapshot exceeds 4 MiB".into());
     }
     if terminal_epoch == 0 || terminal_epoch != current_epoch {
-        return Err("terminal visibility checkpoint belongs to a stale connection epoch".into());
+        return Err(format!(
+            "{STALE_VISIBILITY_EPOCH_CODE}: terminal visibility checkpoint belongs to a stale connection epoch"
+        ));
     }
     Ok(v1::Request {
         operation: v1::Operation::SetTerminalVisibility.into(),
