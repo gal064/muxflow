@@ -11,8 +11,17 @@
  * Journal-only: nothing here touches input, delivery, or rendering.
  */
 
-/** Above the point where an echo stops feeling instant on a remote link. */
-export const ECHO_LAG_THRESHOLD_MS = 400;
+/**
+ * Above the point where an echo stops feeling instant on a remote link.
+ *
+ * Lowered from 400 once the histograms established the healthy baseline
+ * (16-32ms typical): the open question moved from "are there huge stalls"
+ * to "which leg do the 100-300ms spikes live in", and a spike can only be
+ * attributed if it produces its own record with link context attached. The
+ * per-pane incident interval below keeps the worst case to a few lines a
+ * minute.
+ */
+export const ECHO_LAG_THRESHOLD_MS = 100;
 
 /**
  * When a pending measurement is abandoned.
