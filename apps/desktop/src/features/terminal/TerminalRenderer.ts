@@ -5,6 +5,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { terminalScreenReaderMode } from "./accessibilityPreference";
 import { installAtlasFontSmoothing } from "./atlasFontSmoothing";
+import { watchAtlasStaleness } from "./atlasStaleProbe";
 import { GHOSTTY_TEXT_OPTIONS, searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
 import {
   terminalMeasurements,
@@ -194,6 +195,13 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #search = new SearchAddon({ highlightLimit: 1_000 });
   readonly #viewportListeners = new Set<(state: TerminalViewportState) => void>();
   readonly #disposables: IDisposable[] = [];
+  /**
+   * Everything that only makes sense while the GPU renderer is mounted: the
+   * atlas-change repaint and the staleness probe both read the addon, and a
+   * pane that has dropped back to the DOM renderer has neither an atlas nor a
+   * model for them to speak about.
+   */
+  readonly #webglDisposables: IDisposable[] = [];
   readonly #scheduler: TerminalWriteScheduler;
   readonly #generations = new TerminalGenerationWatermark();
   readonly #options: TerminalRendererOptions;
@@ -530,6 +538,7 @@ export class XtermRenderer implements TerminalRenderer {
   disposeGpuRenderer(): void {
     this.#webgl?.dispose();
     this.#webgl = undefined;
+    for (const disposable of this.#webglDisposables.splice(0)) disposable.dispose();
   }
 
   dispose(): void {
@@ -682,6 +691,7 @@ export class XtermRenderer implements TerminalRenderer {
       webgl.onContextLoss(() => {
         webgl.dispose();
         if (this.#webgl === webgl) this.#webgl = undefined;
+        for (const disposable of this.#webglDisposables.splice(0)) disposable.dispose();
         // Disposing the WebGL addon drops xterm back to the *DOM* renderer:
         // xterm 6 has no canvas renderer and no `@xterm/addon-canvas` is
         // installed, so naming one sent every such report looking for a
@@ -689,8 +699,29 @@ export class XtermRenderer implements TerminalRenderer {
         this.#options.onDiagnostic?.("WebGL context lost; using the slow DOM renderer.");
         recordIncident("render.webglFallback", { paneId: this.#options.paneId, reason: "contextLoss" });
       });
+      // The shared atlas has no way to reach the panes drawing from it, and it
+      // rewrites their glyph coordinates from under them: merging four pages
+      // into one moves every glyph already rasterised, and each pane baked the
+      // old coordinates into its vertex buffer the last time it touched a cell.
+      // The merge happens *during* a paint — inside the glyph lookup of the row
+      // being drawn — so the frame on screen ends up half pre-merge and half
+      // post-merge, and the rows drawn before it are scattered garbage. Marking
+      // the model stale is not enough on its own: it only corrects the *next*
+      // frame, and a pane whose output has stopped has no next frame, so the
+      // garbage stays until something else happens to dirty those rows.
+      //
+      // This is the missing schedule. The addon already announces every atlas
+      // page change to every pane sharing the atlas (`onAddTextureAtlasCanvas`,
+      // forwarded from the atlas by each `WebglRenderer`), so one repaint per
+      // pane per announcement closes the hole with no patch of our own. It also
+      // fires for an ordinary new page, which invalidates nothing — that costs
+      // a wasted viewport repaint on an event that happens once per ~1500 newly
+      // rasterised glyphs, which is far cheaper than the alternative of leaving
+      // a pane wrong until the user scrolls it.
+      this.#webglDisposables.push(webgl.onAddTextureAtlasCanvas(() => this.#repaintAfterAtlasChange()));
       this.#terminal.loadAddon(webgl);
       this.#webgl = webgl;
+      this.#webglDisposables.push({ dispose: watchAtlasStaleness(this.#options.paneId, webgl) });
       this.#options.onDiagnostic?.(undefined);
     } catch (error) {
       this.#webgl = undefined;
@@ -698,6 +729,17 @@ export class XtermRenderer implements TerminalRenderer {
       console.warn("WebGL terminal renderer unavailable; using the DOM renderer", error);
       recordIncident("render.webglFallback", { paneId: this.#options.paneId, reason: String(error) });
     }
+  }
+
+  /**
+   * One full-viewport repaint for one atlas change. `refresh` only queues the
+   * rows; the addon's own `beginFrame` decides on the next animation frame
+   * whether the change actually invalidated this pane's model, and rebuilds it
+   * exactly once if it did.
+   */
+  #repaintAfterAtlasChange(): void {
+    if (this.#disposed) return;
+    this.#terminal.refresh(0, this.#terminal.rows - 1);
   }
 
   #activateLink(value: string): void {
