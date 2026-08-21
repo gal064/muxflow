@@ -9,6 +9,7 @@ import type { TauriTerminalTransferClient } from "../features/terminal/terminalT
 import type { TerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import type { TerminalTransferConnectionScope } from "../features/terminal/terminalTransfers";
 import type { AgentAttentionRollup } from "../features/agents/types";
+import type { Platform } from "../commands/registry";
 import { needsAttention } from "../features/agents/agentsList";
 import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 
@@ -24,6 +25,8 @@ type TerminalWorkspaceSurfaceProps = {
   /** Per-pane agent state; a pane whose agent wants a human gets the ring. */
   paneAttention?: ReadonlyMap<string, AgentAttentionRollup>;
   panes: Pane[];
+  copyOnSelect?: boolean;
+  platform?: Platform;
   /** Receives the tiled surface element the tmux client size is measured from. */
   surfaceRef: (element: HTMLElement | null) => void;
   terminalTransferClient: TauriTerminalTransferClient;
@@ -61,6 +64,8 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         appFocused={props.appFocused}
         clientId={props.clientId}
         pane={pane}
+        copyOnSelect={Boolean(props.copyOnSelect)}
+        platform={props.platform ?? "linux"}
         hub={props.hub}
         onController={(paneId, controller) => { if (controller) props.controllers.current.set(paneId, controller); else props.controllers.current.delete(paneId); }}
         onDiagnostic={props.setStatus}

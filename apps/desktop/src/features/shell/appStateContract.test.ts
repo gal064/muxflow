@@ -118,6 +118,12 @@ describe("reading state the previous build wrote", () => {
     expect(saved({}).shell.compactWorkspaces).toBe(false);
   });
 
+  it("persists copy-on-select and leaves legacy saves explicitly disabled", () => {
+    expect(saved({ copyOnSelect: true }).shell.copyOnSelect).toBe(true);
+    expect(saved({ copyOnSelect: false }).shell.copyOnSelect).toBe(false);
+    expect(saved({}).shell.copyOnSelect).toBe(false);
+  });
+
   it("leaves the rest of a legacy save alone while migrating the ordering", () => {
     // The migration is one field. A save that carries open tabs and a picked
     // workspace must come back with both, not with a fresh default state.

@@ -21,6 +21,7 @@ import { settleWithin } from "./timeBound";
 import { recordPerfCounter } from "../../perf/probe";
 import { recordIncident } from "../../diagnostics/incidents";
 import { isTerminalFileLinkActivation, terminalFileLinkCellRange, terminalFileLinks } from "./terminalFilePaths";
+import { installOsc52ClipboardWrite } from "./osc52Clipboard";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
@@ -61,6 +62,9 @@ export interface TerminalRendererOptions {
    * for tests; every production caller takes the default.
    */
   drainTimeoutMs?: number;
+  /** Receives write-only OSC 52 clipboard requests emitted by terminal apps. */
+  onClipboardWrite?: (text: string) => void | Promise<void>;
+  onClipboardWriteError?: (error: unknown) => void;
 }
 
 /**
@@ -116,6 +120,8 @@ export interface TerminalRenderer {
   onViewportChange(listener: (state: TerminalViewportState) => void): () => void;
   getSelection(): string;
   hasSelection(): boolean;
+  onSelectionChange(listener: () => void): () => void;
+  isAlternateScreenActive(): boolean;
   paste(text: string): void;
   search(query: string, direction?: "next" | "previous"): boolean;
   clearSearch(): void;
@@ -267,6 +273,11 @@ export class XtermRenderer implements TerminalRenderer {
     this.#terminal.loadAddon(this.#fit);
     this.#terminal.loadAddon(this.#serialize);
     this.#terminal.loadAddon(this.#search);
+    this.#disposables.push(installOsc52ClipboardWrite(
+      this.#terminal.parser,
+      this.#options.onClipboardWrite ?? (() => undefined),
+      this.#options.onClipboardWriteError,
+    ));
     this.#scheduler = new TerminalWriteScheduler(
       (chunk, done) => this.#terminal.write(chunk, done),
       (callback) => window.requestAnimationFrame(callback),
@@ -541,6 +552,15 @@ export class XtermRenderer implements TerminalRenderer {
     this.#webgl?.dispose();
     this.#webgl = undefined;
     for (const disposable of this.#webglDisposables.splice(0)) disposable.dispose();
+  }
+
+  onSelectionChange(listener: () => void): () => void {
+    const disposable = this.#terminal.onSelectionChange(listener);
+    return () => disposable.dispose();
+  }
+
+  isAlternateScreenActive(): boolean {
+    return this.#terminal.buffer.active.type === "alternate";
   }
 
   dispose(): void {

@@ -126,6 +126,8 @@ pub struct ShellPreferences {
     #[serde(default)]
     pub terminal_screen_reader: bool,
     #[serde(default)]
+    pub copy_on_select: bool,
+    #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
 }
 
@@ -533,6 +535,7 @@ mod tests {
                 agent_state_glyphs: true,
                 compact_workspaces: true,
                 terminal_screen_reader: false,
+                copy_on_select: false,
                 window_geometry: Some(WindowGeometry {
                     x: 20,
                     y: 30,
@@ -662,6 +665,7 @@ mod tests {
             value.shell.agent_state_glyphs
                 && value.shell.compact_workspaces
                 && value.shell.terminal_screen_reader
+                && value.shell.copy_on_select
         );
         assert!(value.shell.window_geometry.is_some());
         assert_eq!(

@@ -1123,6 +1123,7 @@ export function App() {
               appFocused={appFocused}
               beginDividerDrag={beginDividerDrag}
               clientId={clientId}
+              copyOnSelect={appState.shell.copyOnSelect}
               controllers={controllers}
               focusPane={focusTerminalPane}
               onMeasurements={onMeasurements}
@@ -1134,6 +1135,7 @@ export function App() {
               mountedPanes={mountedPanes}
               paneAttention={agentRuntime.rollups.byPane}
               panes={panes}
+              platform={platform}
               performAction={performAction}
               setStatus={setStatus}
               surfaceRef={surfaceRef}
