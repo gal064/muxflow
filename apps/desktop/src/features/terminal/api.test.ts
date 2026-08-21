@@ -380,9 +380,14 @@ describe("binary terminal IPC", () => {
         cumulativeByteLength: epoch.byteLength + before.byteLength + malformed.byteLength + after.byteLength,
       });
     });
-    const incidents = vi.mocked(invoke).mock.calls.filter(([command]) => command === "record_incident");
+    // Only the decode journal is this test's business: the clients earlier
+    // tests in this file leave live make the module's concurrency journal fire
+    // on this start too, and that line is covered in terminalClientLifecycle.
+    const incidents = vi.mocked(invoke).mock.calls
+      .filter(([command]) => command === "record_incident")
+      .map(([, argument]) => String((argument as { line: string }).line))
+      .filter((line) => line.includes("link.decodeFailure"));
     expect(incidents).toHaveLength(1);
-    expect(String((incidents[0][1] as { line: string }).line)).toContain("link.decodeFailure");
   });
 
   it("keeps the next cumulative boundary exact after a pane listener throws", async () => {
