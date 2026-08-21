@@ -6,6 +6,7 @@ settings:
 
 patchedDependencies:
   '@xterm/addon-webgl@0.19.0': 21c02fa6287773d09f3a2aade8ca9325d9c9f3e0043829b8072198c9951941f6
+  '@xterm/xterm@6.0.0': 2d72a78c3f0e59895f61c47732f6cceccd230620d83c905f7eacd8aea6eddcb1
 
 importers:
 
@@ -36,7 +37,7 @@ importers:
         version: 0.19.0(patch_hash=21c02fa6287773d09f3a2aade8ca9325d9c9f3e0043829b8072198c9951941f6)
       '@xterm/xterm':
         specifier: 6.0.0
-        version: 6.0.0
+        version: 6.0.0(patch_hash=2d72a78c3f0e59895f61c47732f6cceccd230620d83c905f7eacd8aea6eddcb1)
       dompurify:
         specifier: 3.4.13
         version: 3.4.13
@@ -1724,7 +1725,7 @@ snapshots:
 
   '@xterm/headless@6.0.0': {}
 
-  '@xterm/xterm@6.0.0': {}
+  '@xterm/xterm@6.0.0(patch_hash=2d72a78c3f0e59895f61c47732f6cceccd230620d83c905f7eacd8aea6eddcb1)': {}
 
   assertion-error@2.0.1: {}
 

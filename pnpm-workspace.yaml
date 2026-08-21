@@ -11,5 +11,15 @@ allowBuilds:
 # the garbled rows and stutter while scrolling a busy pane. The patch makes
 # `TextureAtlas.beginFrame()` consume the flag, so exactly one frame rebuilds
 # per merge event. Drop it if a later addon release fixes this upstream.
+#
+# Upstream in @xterm/xterm 6.0.0: the wheel path that feeds full-screen TUIs
+# multiplies every sub-50px delta by 0.3 and then emits at most one report per
+# DOM wheel event, whatever the delta was worth — a TUI scrolls at a fraction of
+# the speed of the shell in the pane beside it, which reads as a wrong scroll
+# speed setting rather than as lag. The patch drops the 0.3, honours the whole-row
+# count (bounded to 5 rows per DOM event), and repeats the encoded report inside
+# the single existing data event so N rows still cost one input round trip.
+# Drop it if a later xterm release fixes this upstream.
 patchedDependencies:
   '@xterm/addon-webgl@0.19.0': patches/@xterm__addon-webgl@0.19.0.patch
+  '@xterm/xterm@6.0.0': patches/@xterm__xterm@6.0.0.patch
