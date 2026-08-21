@@ -182,6 +182,44 @@ impl TerminalAttachment {
         )
     }
 
+    /// Takes back the hidden per-window pointer tmux actually sizes from, and
+    /// says whether it did.
+    ///
+    /// Under `window-size latest` a window's size follows `w->latest`, the last
+    /// client tmux considers to have *used* that window. A control client can
+    /// never become that client by asserting sizes: only an attach, an
+    /// interactive keypress or an interactive `MSG_RESIZE` move the pointer, and
+    /// the resize path returns early for a control client. So one keystroke in
+    /// the user's own terminal pins every window it shows to that terminal's
+    /// size, and from then on this daemon's `refresh-client -C` writes are
+    /// computed, delivered, and discarded — the pane letterboxes and nothing in
+    /// the log says why. `switch-client -E` issued *by* this client is the one
+    /// command reachable from a control client that moves the pointer to it and
+    /// recomputes the session's current window from the size this client holds.
+    ///
+    /// Which is exactly why an unsized client must never issue it: a control
+    /// client that has not been sent a `refresh-client -C` is still at tmux's
+    /// 80x24 default, and claiming on it would recompute the user's real windows
+    /// down to 80x24 — worse than the bug this repairs. [`Self::last_size`] is
+    /// that guarantee and this refuses without it, rather than trusting each
+    /// call site to order its two writes correctly.
+    ///
+    /// The caller gates *when* this is worth doing. Each claim emits a
+    /// `%session-changed` on this client's own control stream, which
+    /// `stream_helpers.rs` classifies as a topology notification, so every claim
+    /// costs one topology reconcile; a session no foreign client shares has
+    /// nothing to reclaim and should not pay it.
+    fn claim_latest(&mut self, session_id: &str) -> anyhow::Result<bool> {
+        validate_tmux_id(session_id, '$')?;
+        if self.last_size.is_none() {
+            return Ok(false);
+        }
+        let mut stdin = self.stdin.lock().unwrap();
+        writeln!(stdin, "switch-client -E -t {session_id}")?;
+        stdin.flush()?;
+        Ok(true)
+    }
+
     fn set_sizing(&mut self, participates: bool) -> anyhow::Result<()> {
         let mut stdin = self.stdin.lock().unwrap();
         let flag = if participates {
@@ -280,9 +318,29 @@ pub(super) struct TerminalClients {
     /// size to send. Whoever clears `ignore-size` owns giving that client a
     /// size, and that is this type.
     last_size: Option<(u32, u32)>,
+    /// How many clients tmux said were attached to each session, from the last
+    /// topology snapshot this connection reconciled.
+    ///
+    /// The one input to [`Self::foreign_client_shares`], and the reason
+    /// [`TerminalAttachment::claim_latest`] stays off the common path. It is
+    /// read from the snapshot the daemon already discovers rather than from a
+    /// probe of its own: a gate that cost a tmux fork to answer would cost more
+    /// than the claim it is protecting against. Empty until the first
+    /// reconciliation, which reads as "no foreign client" and is the
+    /// conservative direction — a missed claim letterboxes a pane until the next
+    /// selection, an unwarranted one churns topology for every connection.
+    session_attached: HashMap<String, u32>,
     resources: Arc<Mutex<PaneResourceStore>>,
     generation: Arc<AtomicU64>,
     input: Option<PersistentInputClient>,
+    /// The session `input` is attached to, so the gate can tell this daemon's
+    /// own second client on that session apart from a foreign one.
+    ///
+    /// INVARIANT: `Some` exactly while `input` holds a started sidecar. Every
+    /// place that takes `input` clears this in the same step, because the gate
+    /// reads it as "tmux is counting a client of ours on that session" and a
+    /// stale name would hide a real foreign client for as long as it survived.
+    input_session: Option<String>,
     /// Panes the host owes a seed and could not ask tmux for.
     ///
     /// A seed request fails when the pane's session control client is not
@@ -315,6 +373,8 @@ impl TerminalClients {
             clients: HashMap::new(),
             visible_session: None,
             last_size: None,
+            session_attached: HashMap::new(),
+            input_session: None,
             resources: Arc::new(Mutex::new(PaneResourceStore::with_total_limit(
                 32,
                 4 * 1024 * 1024,
@@ -494,13 +554,40 @@ impl TerminalClients {
         }
         if let Some(mut failed) = self.input.take() {
             failed.stop();
+            self.input_session = None;
         }
         self.input = Some(PersistentInputClient::start(
             session_id,
             event_tx.clone(),
             Arc::clone(overflowed),
         )?);
+        // Recorded only once the sidecar exists, so a failed start cannot make
+        // the gate believe this daemon owns a client tmux never counted.
+        self.input_session = Some(session_id.to_owned());
         Ok(())
+    }
+
+    /// Whether a client this daemon did not attach may be constraining
+    /// `session_id`'s windows.
+    ///
+    /// tmux counts every attached client in `session_attached`, this daemon's
+    /// included, so the question is arithmetic: the session's total against the
+    /// clients this connection holds on it — its session control client, plus
+    /// the input sidecar when that is the session it attached to. Anything above
+    /// that is somebody else, and somebody else is who can own `w->latest`; see
+    /// [`TerminalAttachment::claim_latest`].
+    ///
+    /// A second desktop connection counts as foreign here, because from this
+    /// connection's `TerminalClients` it is indistinguishable from a plain
+    /// terminal. That errs toward claiming, which is the side that costs a
+    /// topology reconcile rather than a letterboxed pane.
+    fn foreign_client_shares(&self, session_id: &str) -> bool {
+        let Some(&attached) = self.session_attached.get(session_id) else {
+            return false;
+        };
+        let control = u32::from(self.clients.contains_key(session_id));
+        let input = u32::from(self.input_session.as_deref() == Some(session_id));
+        attached > control + input
     }
 
     /// Makes `session_id`'s client the one tmux sizes from, and tells it what
@@ -528,6 +615,7 @@ impl TerminalClients {
     fn size_visible_client(&mut self, session_id: &str) -> anyhow::Result<()> {
         let last_size = self.last_size;
         let previous = self.visible_session.clone();
+        let claim = self.foreign_client_shares(session_id);
         let outcome = (|| -> anyhow::Result<()> {
             // Nobody participates until the flag lands. Cleared first rather
             // than on each failure path, so every way out of the two lines
@@ -542,10 +630,18 @@ impl TerminalClients {
             let Some((columns, rows)) = last_size else {
                 return Ok(());
             };
-            self.clients
+            let client = self
+                .clients
                 .get_mut(session_id)
-                .context("selected session control client is detached")?
-                .ensure_size(columns, rows)
+                .context("selected session control client is detached")?;
+            client.ensure_size(columns, rows)?;
+            // Size first, claim second, and only for a session somebody else is
+            // in: the claim recomputes the windows from the size this client
+            // holds, so it is only ever correct once that size has landed.
+            if claim && client.claim_latest(session_id)? {
+                crate::diagnostics::write_sizing_latest_claim_log(session_id);
+            }
+            Ok(())
         })();
         // Both writes go to a pipe, and a pipe write tmux ignores still
         // succeeds, so this is the only record that the handoff happened at all.
@@ -585,15 +681,31 @@ impl TerminalClients {
         let session_id = self
             .visible_session
             .as_deref()
-            .context("no visible session control client")?;
+            .context("no visible session control client")?
+            .to_owned();
+        let claim = self.foreign_client_shares(&session_id);
         self.clients
-            .get_mut(session_id)
+            .get_mut(&session_id)
             .context("visible session control client is detached")?
             .resize(columns, rows)?;
         // Remembered only once tmux has actually been told, so a refused or
         // failed size is never replayed onto the next client as if it were the
         // surface's real geometry.
         self.last_size = Some((columns, rows));
+        // A resize is a size the user's own terminal never asked for, so it is
+        // the other moment tmux has to be told which client the windows follow.
+        // After `last_size` rather than before it: the size itself did land, and
+        // a claim that fails must not also cost the next visible client the
+        // geometry this one is already showing.
+        if claim
+            && self
+                .clients
+                .get_mut(&session_id)
+                .context("visible session control client is detached")?
+                .claim_latest(&session_id)?
+        {
+            crate::diagnostics::write_sizing_latest_claim_log(&session_id);
+        }
         Ok(())
     }
 
@@ -800,6 +912,14 @@ impl TerminalClients {
     }
 
     pub(super) fn reconcile(&mut self, snapshot: &tmux_control::TmuxSnapshot) {
+        // Replaced wholesale from the same snapshot that decides which
+        // attachments survive, so the gate can never answer from a count
+        // belonging to a session that is gone.
+        self.session_attached = snapshot
+            .sessions
+            .iter()
+            .map(|item| (item.id.clone(), item.attached_clients))
+            .collect();
         let sessions: HashSet<_> = snapshot
             .sessions
             .iter()
@@ -823,6 +943,7 @@ impl TerminalClients {
             && let Some(mut input) = self.input.take()
         {
             input.stop();
+            self.input_session = None;
         }
     }
 
@@ -841,6 +962,7 @@ impl TerminalClients {
         if let Some(input) = input.as_mut() {
             input.stop();
         }
+        self.input_session = None;
         for client in self.clients.values_mut() {
             client.stop();
         }
