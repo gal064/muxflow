@@ -4,13 +4,23 @@ packages:
 allowBuilds:
   esbuild: true
 
-# Upstream bug in @xterm/addon-webgl 0.19.0 only: TextureAtlas sets
-# `_requestClearModel` true on an atlas page merge or the first oversized glyph
-# and never resets it, so from that frame on WebglRenderer.renderRows clears and
-# rebuilds the *whole* viewport model every frame for the rest of the session —
-# the garbled rows and stutter while scrolling a busy pane. The patch makes
-# `TextureAtlas.beginFrame()` consume the flag, so exactly one frame rebuilds
-# per merge event. Drop it if a later addon release fixes this upstream.
+# Upstream bug in @xterm/addon-webgl 0.19.0 only: one texture atlas is shared by
+# every terminal with the same font config (`CharAtlasCache.acquireTextureAtlas`
+# keys the cache on that config and hands the same atlas to each), and merging
+# four atlas pages into one rewrites `texturePage`, `texturePositionClipSpace`
+# and `sizeClipSpace` on every glyph already rasterised into them. Each renderer
+# baked the old values into its own vertex buffer when it last touched a cell, so
+# every renderer's model needs rebuilding after a merge — but upstream tracks
+# that as a single `_requestClearModel` boolean on the shared atlas, which can
+# only be answered once. Left set forever it made `WebglRenderer.renderRows`
+# rebuild the whole viewport every frame for the rest of the session (stutter);
+# consumed by the first renderer to ask, its sibling panes keep sampling the
+# pre-merge coordinates and paint smeared, column-shifted rows until an unrelated
+# redraw touches those lines. The patch counts invalidations on the atlas
+# (a merge, the first oversized glyph, and `clearTexture()`) and has each
+# `GlyphRenderer` remember the count it last acted on, so every renderer sharing
+# the atlas rebuilds exactly once per event and no renderer rebuilds twice.
+# Drop it if a later addon release fixes this upstream.
 #
 # Upstream in @xterm/xterm 6.0.0: the wheel path that feeds full-screen TUIs
 # multiplies every sub-50px delta by 0.3 and then emits at most one report per
