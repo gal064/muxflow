@@ -8,8 +8,14 @@ cd "$repo"
 [[ $(uname -m) == arm64 ]] || { echo "this internal package is Apple Silicon only" >&2; exit 69; }
 
 helpers="$repo/apps/desktop/src-tauri/binaries/linux-helpers"
-work_dir="$repo/tmp/work/macos-package"
+work_root=${ADE_WORK_ROOT:-"$repo/tmp/work"}
+work_dir="$work_root/macos-package"
 mkdir -p "$helpers" "$work_dir"
+release/check-disk-space.sh "$repo" "$work_root"
+release_target=${CARGO_TARGET_DIR:-"$work_root/cache/release-target/macos"}
+[[ "$release_target" == /* ]] || release_target="$repo/$release_target"
+export CARGO_TARGET_DIR="$release_target"
+mkdir -p "$CARGO_TARGET_DIR"
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 package_targets="$work_dir/.package-targets-$run_id"
 cleanup() {
@@ -54,7 +60,7 @@ fi
 # the same sidecar by the same mechanism. It used to be installed and re-signed
 # by hand here, which left the bundler's path exercised only by the bare flow.
 pnpm --dir apps/desktop tauri build --bundles app
-app="$repo/target/release/bundle/macos/Muxflow.app"
+app="$CARGO_TARGET_DIR/release/bundle/macos/Muxflow.app"
 # Re-seal with an ad-hoc identity after the plist edit: macOS UserNotifications
 # requires a stable application identity even for an internal build, while this
 # still makes no Developer ID, Gatekeeper, or notarization claim.
@@ -62,10 +68,10 @@ app="$repo/target/release/bundle/macos/Muxflow.app"
 codesign --force --sign - "$app"
 "$repo/release/macos/verify-package.sh" "$app"
 version=$(node -e 'process.stdout.write(require("./apps/desktop/src-tauri/tauri.conf.json").version)')
-dmg="$repo/target/release/bundle/dmg/Muxflow_${version}_aarch64.dmg"
+dmg="$CARGO_TARGET_DIR/release/bundle/dmg/Muxflow_${version}_aarch64.dmg"
 mkdir -p "$(dirname "$dmg")"
 hdiutil create -volname 'Muxflow' -srcfolder "$app" -ov -format UDZO "$dmg"
 
 cleanup
 trap - EXIT
-echo "MACOS_PACKAGE_READY unsigned-internal apple-silicon-only"
+echo "MACOS_PACKAGE_READY unsigned-internal apple-silicon-only app=$app dmg=$dmg"
