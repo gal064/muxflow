@@ -102,4 +102,28 @@ describe("XtermRenderer drain bound", () => {
     expect(await renderer.drainAndSerialize()).toBe(drained);
     renderer.dispose();
   });
+
+  it("says so when it could not queue a write, so the caller's callback is not simply lost", async () => {
+    const renderer = new XtermRenderer({ drainTimeoutMs: 30_000 });
+    renderer.open(document.createElement("div"));
+    expect(renderer.write(ownTerminalBytes(new TextEncoder().encode("queued")), undefined, 1)).toBe(true);
+
+    // Sealing for the hide drain is the ordinary way a scheduler stops
+    // accepting. Anything written after it is dropped along with its `onRendered`
+    // — including the empty barrier the handshake hangs its acknowledgement and
+    // its reveal on, which is why the answer has to reach the caller.
+    await renderer.drainAndSerialize();
+    let rendered = false;
+    const accepted = renderer.write(
+      ownTerminalBytes(new TextEncoder().encode("refused")),
+      () => { rendered = true; },
+      2,
+    );
+
+    expect(accepted).toBe(false);
+    expect(rendered).toBe(false);
+    // The empty-record barrier is refused on exactly the same terms.
+    expect(renderer.write(ownTerminalBytes(new Uint8Array()), undefined, 3)).toBe(false);
+    renderer.dispose();
+  });
 });

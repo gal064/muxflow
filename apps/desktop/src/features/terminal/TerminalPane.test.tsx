@@ -78,9 +78,10 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
-    write(bytes: Uint8Array, onRendered?: () => void): void {
+    write(bytes: Uint8Array, onRendered?: () => void): boolean {
       this.writes.push(`write:${bytes.byteLength}`);
       if (onRendered) this.#pendingRendered.push(onRendered);
+      return true;
     }
     /** The real renderer reports rendered only after xterm drains its queue. */
     flushRendered(): void {
@@ -359,13 +360,15 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("reveals a pane that seeds empty and waits for a fresh seed", async () => {
+  it("does not reveal the deliberate blank a pane shows while it owes a seed", async () => {
     const hub = new FakeHub();
     const mounted = await mountPane(fixturePane("%await"), hub);
     expect(paneNode().getAttribute("data-painted")).toBe("false");
 
-    // An empty screen under a diagnostic is this branch's intended visible
-    // state; it produces no rendered callback, so it must reveal itself.
+    // The blank RIS this branch writes is seed debt, not content. Showing it is
+    // a whole extra visible repaint before the arriving seed paints the real
+    // screen, and the diagnostic banner tells the user what is happening
+    // whether or not the terminal itself is visible.
     await act(async () => {
       hub.deliver({
         kind: "paneResource", paneId: "%await", state: "released", requiresSeed: false,
@@ -375,7 +378,12 @@ describe("TerminalPane pane-paint span lifecycle", () => {
         rawTail: ownTerminalBytes(new Uint8Array()),
       });
     });
+    expect(paneNode().getAttribute("data-painted")).toBe("false");
+    expect(paneDiagnostic(mounted)).toContain("waiting for a fresh terminal seed");
 
+    // The seed it was waiting for both repaints and reveals.
+    await act(async () => { hub.deliver(seedEvent("%await", 5)); });
+    await act(async () => { renderers.created[0].flushRendered(); });
     expect(paneNode().getAttribute("data-painted")).toBe("true");
     await act(async () => mounted.unmount());
   });
