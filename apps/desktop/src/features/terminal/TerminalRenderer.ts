@@ -9,7 +9,6 @@ import { watchAtlasStaleness } from "./atlasStaleProbe";
 import { GHOSTTY_TEXT_OPTIONS, searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
 import {
   terminalMeasurements,
-  xtermLineHeight,
   type MeasurableTerminal,
   type TerminalMeasurements,
   type TerminalSize,
@@ -25,7 +24,7 @@ import { installOsc52ClipboardWrite } from "./osc52Clipboard";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
-export { cellsForBox, terminalMeasurements, xtermLineHeight } from "./cellMetrics";
+export { cellsForBox, terminalMeasurements } from "./cellMetrics";
 
 export type TerminalInput =
   | { kind: "text"; data: string }
@@ -213,8 +212,6 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #scheduler: TerminalWriteScheduler;
   readonly #generations = new TerminalGenerationWatermark();
   readonly #options: TerminalRendererOptions;
-  /** CSS pixels the token asks one row to occupy. See `xtermLineHeight`. */
-  readonly #rowPitch: number;
   #webgl?: WebglAddon;
   #newOutput = false;
   #lastViewport?: TerminalViewportState;
@@ -229,7 +226,6 @@ export class XtermRenderer implements TerminalRenderer {
     // terminal is a Ghostty surface by derivation rather than by a second set
     // of literals that drifted from the chrome.
     const font = terminalFont();
-    this.#rowPitch = font.rowPitch;
     this.#terminal = new Terminal({
       allowProposedApi: false,
       altClickMovesCursor: false,
@@ -239,10 +235,6 @@ export class XtermRenderer implements TerminalRenderer {
       ...GHOSTTY_TEXT_OPTIONS,
       fontFamily: font.fontFamily,
       fontSize: font.fontSize,
-      // Corrected to the token's row pitch in `open`, once xterm has measured
-      // the face this multiplier is relative to (`xtermLineHeight`). Rows are
-      // one measured character tall until then, which is only ever too tight.
-      lineHeight: 1,
       ignoreBracketedPasteMode: false,
       macOptionClickForcesSelection: true,
       rightClickSelectsWord: true,
@@ -310,54 +302,8 @@ export class XtermRenderer implements TerminalRenderer {
 
   open(element: HTMLElement): void {
     this.#terminal.open(element);
-    // After `open`, not in the constructor: xterm builds its char-size service
-    // out of the helper elements `open` creates, and measures there.
-    this.#applyRowPitch();
-    // And again whenever that measurement changes. A one-shot application is a
-    // latch: a terminal opened before the bundled face resolved would keep a
-    // multiplier derived from a measurement that no longer holds, and the only
-    // symptom is a grid that does not fit its surface — nobody would trace that
-    // back to here. xterm fires this only when the *measured* value moves, and
-    // that measurement is in CSS pixels, so it says nothing about the ratio.
-    const charSize = (this.#terminal as MeasurableTerminal)._core?._charSizeService;
-    const subscribe = charSize?.onCharSizeChange;
-    if (subscribe) this.#disposables.push(subscribe.call(charSize, () => this.#applyRowPitch()));
-    this.#watchDevicePixelRatio();
     this.#mountWebgl();
     this.#discardFallbackAtlas();
-  }
-
-  /**
-   * Re-derives the row pitch when the window moves to a display of a different
-   * pixel ratio.
-   *
-   * This used to be deliberately uncovered, and the note that said so was right
-   * at the time: the multiplier was derived from a CSS measurement, so a ratio
-   * change cost a fraction of a pixel of pitch and nothing else. It is not right
-   * any more. The multiplier now encodes a *ratio-specific* choice — the row
-   * that keeps `rows × cell` divisible — so carrying one derived at 2× onto a
-   * 1.25× display gives `floor(22 × 1.0735) = 23` device px, 18.4 CSS px, and
-   * exactly the stretched grid the whole rule exists to prevent.
-   *
-   * `matchMedia` on the current ratio is the only event for this: `resize` does
-   * not fire for a same-size move between displays. The query is rebuilt each
-   * time because it can only ever match one ratio.
-   */
-  #watchDevicePixelRatio(): void {
-    if (typeof window.matchMedia !== "function") return;
-    let query: MediaQueryList | undefined;
-    const arm = () => {
-      query?.removeEventListener("change", onChange);
-      query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
-      query.addEventListener("change", onChange);
-    };
-    const onChange = () => {
-      if (this.#disposed) return;
-      this.#applyRowPitch();
-      arm();
-    };
-    arm();
-    this.#disposables.push({ dispose: () => query?.removeEventListener("change", onChange) });
   }
 
   seed(bytes: OwnedTerminalBytes, onRendered?: () => void, generation = 0): void {
@@ -617,41 +563,6 @@ export class XtermRenderer implements TerminalRenderer {
     const state = { atBottom, newOutput: this.#newOutput };
     this.#lastViewport = state;
     for (const listener of this.#viewportListeners) listener(state);
-  }
-
-  /**
-   * Restates the token's row pitch in xterm's units, now that xterm has
-   * measured the face.
-   *
-   * Re-applied whenever xterm re-measures, not latched at open. The font family
-   * and size are constants from `tokens.css` and the app waits for the bundled
-   * face before it builds a terminal at all (`main.tsx`), so in practice the
-   * first answer is the only one — but a measurement that arrived late, or a
-   * window dragged to a display of a different pixel ratio, would otherwise
-   * leave a multiplier derived from a measurement that no longer holds, and the
-   * only symptom would be a grid that does not fit its surface.
-   *
-   * What is *not* covered: the cell metric the tmux client size is derived from
-   * is re-read by the pane's `ResizeObserver`, which fires on the surface's box,
-   * not on this multiplier. A re-application that changes the line height
-   * without changing that box — a late measurement, a display change — leaves
-   * tmux sized from the previous cell until the next resize. Recorded in
-   * `docs/history/qa/review-round-3-deferred.md` rather than fixed here: the
-   * fix belongs in the observer, which is the protected resize
-   * path. (A display change now re-applies this; see
-   * `#watchDevicePixelRatio`.)
-   *
-   * A missing measurement is reported rather than guessed at: it means xterm
-   * moved the service, which is what `measureBox.test.ts` fails on.
-   */
-  #applyRowPitch(): void {
-    const measured = (this.#terminal as MeasurableTerminal)._core?._charSizeService?.height;
-    const lineHeight = xtermLineHeight(this.#rowPitch, measured, window.devicePixelRatio);
-    if (lineHeight === undefined) {
-      console.warn("xterm reported no character height; terminal rows keep xterm's unit line height");
-      return;
-    }
-    this.#terminal.options.lineHeight = lineHeight;
   }
 
   /**
