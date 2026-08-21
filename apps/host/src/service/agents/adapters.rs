@@ -277,15 +277,6 @@ impl AgentAdapter for ClaudeCodeAdapter {
             };
             return Ok(parsed(payload, lifecycle, ApprovalEffect::None));
         }
-        if event == "Stop"
-            && (nonempty(payload.get("background_tasks")) || nonempty(payload.get("session_crons")))
-        {
-            return Ok(parsed(
-                payload,
-                v1::AgentLifecycleState::Working,
-                ApprovalEffect::None,
-            ));
-        }
         parse_common_hook(
             payload,
             &[
@@ -294,6 +285,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 ("PreToolUse", v1::AgentLifecycleState::Working),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
                 ("SubagentStop", v1::AgentLifecycleState::Working),
+                // A `Stop` is a finished turn, unconditionally — including one
+                // that leaves background tasks or session crons running behind
+                // it. Background work is not foreground attention, and reading
+                // it as `Working` left every such pane working forever; worse,
+                // it withheld the terminal flag `ingest` sets on an idle Stop,
+                // which is exactly what stops Claude Code's routine idle
+                // notification (~60s after any idle turn) from reading as
+                // Blocked.
                 ("Stop", v1::AgentLifecycleState::Idle),
                 // A failed turn is over. It is the case most worth surfacing
                 // and the one that used to leave the row working forever.
@@ -373,17 +372,6 @@ fn command_basename(command: &str) -> &str {
 fn shell_quote(path: &Path) -> String {
     let value = path.to_string_lossy();
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn nonempty(value: Option<&Value>) -> bool {
-    match value {
-        Some(Value::Array(values)) => !values.is_empty(),
-        Some(Value::Object(values)) => !values.is_empty(),
-        Some(Value::Number(value)) => value.as_u64().is_some_and(|value| value > 0),
-        Some(Value::Bool(value)) => *value,
-        Some(Value::String(value)) => !value.is_empty(),
-        _ => false,
-    }
 }
 
 fn parse_common_hook(
@@ -529,19 +517,36 @@ mod tests {
         );
     }
 
+    /// Background work outlives the turn that started it; the turn is still
+    /// over. Reading these payloads as `Working` is what pinned a pane to
+    /// "working" for the rest of the session.
     #[test]
-    fn claude_stop_with_live_background_work_stays_working() {
+    fn claude_stop_with_live_background_work_still_ends_the_turn() {
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         for field in ["background_tasks", "session_crons"] {
             let payload = serde_json::json!({
                 "hook_event_name": "Stop",
                 "session_id": "claude-session",
-                field: ["live"]
+                field: [{"command": "sleep 300", "status": "running"}]
             });
             assert_eq!(
                 claude.parse_hook(&payload).unwrap().lifecycle,
-                v1::AgentLifecycleState::Working
+                v1::AgentLifecycleState::Idle
             );
         }
+    }
+
+    #[test]
+    fn claude_idle_notification_is_blocked_before_ingest_applies_its_guard() {
+        let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
+        let payload = serde_json::json!({
+            "hook_event_name": "Notification",
+            "session_id": "claude-session",
+            "notification_type": "idle_prompt"
+        });
+        assert_eq!(
+            claude.parse_hook(&payload).unwrap().lifecycle,
+            v1::AgentLifecycleState::Blocked
+        );
     }
 }

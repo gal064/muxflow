@@ -425,6 +425,107 @@ pub fn write_flow_resume_rejected_log(pane_id: &str, disposition: &str, reason: 
     eprintln!("{line}");
 }
 
+/// How slow a daemon-internal echo leg has to be before it earns a log line.
+///
+/// The desktop already decomposes typing latency, and every leg it can see is
+/// under 10 ms while the spikes being hunted are 100-300 ms end to end. 50 ms is
+/// therefore far above anything either daemon leg does when healthy and far
+/// below the incidents this log exists to explain, so a line here is evidence
+/// rather than background noise.
+const SLOW_LEG_THRESHOLD: Duration = Duration::from_millis(50);
+
+/// The shortest gap between two logged occurrences of the same leg.
+///
+/// One stalled sequencer makes every record of a burst slow, and a line each
+/// would be megabytes of stderr for a single incident — on a path whose whole
+/// point is that it is not supposed to cost anything. One line per two seconds
+/// still lands inside any incident the desktop journal marks, and `suppressed`
+/// says how many occurrences that one line stands for.
+const SLOW_LEG_LOG_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Rate-limiter state for one kind of slow-leg line: when the last one was
+/// written, and how many occurrences have been dropped since.
+struct SlowLegLimiter {
+    last_emit: Option<Instant>,
+    suppressed: u64,
+}
+
+impl SlowLegLimiter {
+    const fn new() -> Self {
+        Self {
+            last_emit: None,
+            suppressed: 0,
+        }
+    }
+}
+
+/// One limiter per kind, so a flooding output leg can never hide the input leg
+/// that is the actual subject of an investigation.
+static SLOW_INPUT_LEG: Mutex<SlowLegLimiter> = Mutex::new(SlowLegLimiter::new());
+static SLOW_OUTPUT_LEG: Mutex<SlowLegLimiter> = Mutex::new(SlowLegLimiter::new());
+
+/// Names one slow leg from an input batch leaving the dispatch queue to its
+/// bytes being committed to tmux.
+///
+/// Below [`SLOW_LEG_THRESHOLD`] this returns before touching any lock, which is
+/// what keeps the measurement free on the path it measures.
+pub fn record_slow_input_leg(elapsed: Duration, bytes: usize, pane_id: &str) {
+    write_slow_leg_log("slowInputLeg", &SLOW_INPUT_LEG, elapsed, bytes, pane_id);
+}
+
+/// Names one slow leg from a control-stream read returning to the terminal
+/// output it produced being accepted by the outbound sequencer.
+pub fn record_slow_output_leg(elapsed: Duration, bytes: usize, pane_id: &str) {
+    write_slow_leg_log("slowOutputLeg", &SLOW_OUTPUT_LEG, elapsed, bytes, pane_id);
+}
+
+/// Writes one slow-leg line, or counts it as suppressed.
+///
+/// `atUnixMillis` is the whole reason this is a log line rather than a counter:
+/// the desktop keeps its own incident journal in wall clock, and a slow leg is
+/// only useful if it can be lined up with the echo spike it explains.
+///
+/// A tmux pane identifier (`%3`) is the server's own ordinal, and the other
+/// fields are a duration and a byte count. No path, no hostname, and no
+/// terminal content, so this stays inside the privacy declaration above.
+fn write_slow_leg_log(
+    event: &str,
+    limiter: &Mutex<SlowLegLimiter>,
+    elapsed: Duration,
+    bytes: usize,
+    pane_id: &str,
+) {
+    if elapsed < SLOW_LEG_THRESHOLD {
+        return;
+    }
+    let Some(suppressed) = admit_slow_leg(&mut limiter.lock().unwrap(), Instant::now()) else {
+        return;
+    };
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": event,
+        "ms": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        "bytes": bytes,
+        "paneId": pane_id,
+        "atUnixMillis": now_epoch_millis(),
+        "suppressed": suppressed,
+    });
+    eprintln!("{line}");
+}
+
+/// Decides whether this occurrence is written, returning the number of
+/// occurrences the line it is about to write stands for.
+fn admit_slow_leg(limiter: &mut SlowLegLimiter, now: Instant) -> Option<u64> {
+    if let Some(last) = limiter.last_emit
+        && now.duration_since(last) < SLOW_LEG_LOG_INTERVAL
+    {
+        limiter.suppressed = limiter.suppressed.saturating_add(1);
+        return None;
+    }
+    limiter.last_emit = Some(now);
+    Some(std::mem::replace(&mut limiter.suppressed, 0))
+}
+
 /// Bounds the one free-form field either of the two loggers above carries.
 ///
 /// Both take text this crate composed from tmux's own refusal messages, which
@@ -1010,6 +1111,17 @@ fn now_epoch_seconds() -> u64 {
         .as_secs()
 }
 
+/// Wall clock for a slow-leg line, in the same unit the desktop journal keeps.
+fn now_epoch_millis() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
+}
+
 fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
@@ -1276,6 +1388,39 @@ mod tests {
         assert_eq!(
             serialized,
             r#"{"errorClass":"host_connection_ended","subsystem":"host_daemon"}"#
+        );
+    }
+
+    /// A slow leg that fires in a burst must cost one line, and that line must
+    /// still say how big the burst was — a rate limiter that silently drops the
+    /// rest turns "one slow record" and "every record was slow" into the same
+    /// evidence.
+    #[test]
+    fn slow_leg_lines_are_rate_limited_and_carry_what_they_stand_for() {
+        let start = Instant::now();
+        let mut limiter = SlowLegLimiter::new();
+
+        assert_eq!(admit_slow_leg(&mut limiter, start), Some(0));
+        assert_eq!(
+            admit_slow_leg(&mut limiter, start + Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(
+            admit_slow_leg(
+                &mut limiter,
+                start + SLOW_LEG_LOG_INTERVAL - Duration::from_nanos(1)
+            ),
+            None
+        );
+        assert_eq!(
+            admit_slow_leg(&mut limiter, start + SLOW_LEG_LOG_INTERVAL),
+            Some(2)
+        );
+        // The counter resets with the line that reported it, so the next line
+        // describes only its own interval.
+        assert_eq!(
+            admit_slow_leg(&mut limiter, start + SLOW_LEG_LOG_INTERVAL * 2),
+            Some(0)
         );
     }
 

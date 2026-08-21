@@ -14,6 +14,8 @@ import {
   type TerminalViewportState,
 } from "./TerminalRenderer";
 import { terminalStateCache } from "./TerminalStateCache";
+import { readAtlasInvalidationCount } from "./atlasStaleProbe";
+import { notePaint, startLongTaskTracker } from "./paintTailProbe";
 import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./PaneRevealState";
 import { prepareTerminalSnapshot, requestTerminalSeed, setTerminalVisibility } from "./api";
 import { ownTerminalBytes } from "./TerminalBytes";
@@ -48,6 +50,55 @@ let nextTransferRenderLifetime = 0;
  * proceeding after the bound is safe.
  */
 const PANE_HANDOFF_TIMEOUT_MS = 2_000;
+
+/**
+ * How often one pane may contribute a render-cost sample.
+ *
+ * The render segment of the typing-lag journal (`inputLatencyStats`) is timed
+ * around an xterm write completion, and this pane cannot tell which write is
+ * the echo of a keystroke — the correlation lives in the echo probe, one level
+ * up. Sampling every write would time a `yes` flood instead, and pay a clock
+ * read per chunk to do it; one sample per pane per interval keeps the
+ * distribution representative of paints a user is watching and the overhead
+ * fixed.
+ */
+export const PAINT_SAMPLE_INTERVAL_MS = 500;
+
+/**
+ * How long a *successful* reveal may produce nothing before it is disbelieved.
+ *
+ * Every other recovery in this file triggers on an error. A reveal that the
+ * host accepts and then never streams — observed three times in one evening
+ * while heavy tmux session churn (a nested client) raced pane creation — is
+ * invisible to all of them: the pane mounts, the cursor renders, keystrokes
+ * reach tmux and are echoed server-side, and no seed and no output ever come
+ * back. The journal showed literally nothing for the pane, because nothing
+ * failed. Only the *absence* of content distinguishes it, so only a timer can
+ * see it.
+ *
+ * Long enough that a busy host answering a reveal in the normal way always wins
+ * (a handshake answer is one round trip, and the reveal's own retry ladder is
+ * bounded well under this), short enough that a pane stuck in the void is
+ * rescued before the user reaches for the tab bar.
+ */
+export const REVEAL_VOID_TIMEOUT_MS = 4_000;
+
+/**
+ * How many times a void reveal is answered with a fresh seed before this stops.
+ *
+ * A pane that is still silent after this many checkpoint-free seeds is not in
+ * the transient race this exists for, and `PaneDegradedWatchdog` is already the
+ * unbounded outer net for everything else. Re-arming forever would only turn a
+ * dead connection into a permanent reseed loop.
+ */
+export const REVEAL_VOID_MAX_ATTEMPTS = 3;
+
+/** Disarms the void watch. Safe to call when nothing is armed. */
+function cancelRevealVoidWatch(timer: { current: ReturnType<typeof setTimeout> | undefined }): void {
+  if (timer.current === undefined) return;
+  clearTimeout(timer.current);
+  timer.current = undefined;
+}
 
 /**
  * Renders a pane at the grid tmux says it has, not the one its CSS box measures.
@@ -177,6 +228,15 @@ interface Props {
    * this pane, and the tmux client size is computed from it (P12-U006).
    */
   onMeasurements: (measurements: TerminalMeasurements) => void;
+  /**
+   * How long delivered output took to reach the screen.
+   *
+   * The render segment of the typing-lag decomposition: from handing bytes to
+   * the renderer until its write completion fires. Journal-only, and sampled at
+   * most once per `PAINT_SAMPLE_INTERVAL_MS` per pane so a pane repainting at
+   * full speed cannot make its own measurement expensive.
+   */
+  onPaintSample?: (paneId: string, ms: number) => void;
   onController: (paneId: string, controller: TerminalPaneController | undefined) => void;
   onDiagnostic?: (message: string) => void;
   onOpenFilePath?: (paneId: string, path: string) => void;
@@ -196,6 +256,7 @@ export function TerminalPane({
   onKeyActivity,
   onFocus,
   onMeasurements,
+  onPaintSample,
   onController,
   onDiagnostic,
   onOpenFilePath,
@@ -219,6 +280,15 @@ export function TerminalPane({
   const keyActivityRef = useRef(onKeyActivity);
   const focusRef = useRef(onFocus);
   const measurementsRef = useRef(onMeasurements);
+  const paintSampleRef = useRef(onPaintSample);
+  /** When this pane last contributed a paint sample, for the throttle. */
+  const lastPaintSampledAtRef = useRef(0);
+  // Our own live-output writes still sitting in xterm's buffer. xterm parses
+  // what it is handed in time-sliced batches, so a chunk's completion fires only
+  // after everything queued ahead of it has parsed — these two are how a slow
+  // paint that is really someone else's backlog says so.
+  const queuedWritesRef = useRef(0);
+  const queuedBytesRef = useRef(0);
   const controllerRef = useRef(onController);
   const diagnosticRef = useRef(onDiagnostic);
   const openFilePathRef = useRef(onOpenFilePath);
@@ -238,6 +308,17 @@ export function TerminalPane({
   // newer one supersedes it.
   const revealAttemptRef = useRef(0);
   const reassertVisibilityRef = useRef<(() => void) | undefined>(undefined);
+  // The bound on a reveal the host accepted and then never streamed. Armed by
+  // the reveal effect on a successful `setTerminalVisibility`, disarmed by the
+  // mount effect the moment any content lands, so it lives in a ref the two
+  // share rather than in either one.
+  const revealVoidTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // How many times content has reached this terminal, ever. The reveal reads it
+  // before it calls the host and again when the call resolves: the answer to a
+  // reveal arrives on the event stream, which is not ordered against the
+  // request's own reply, so a host that already streamed the pane while the
+  // call was in flight must not be waited on afterwards.
+  const contentArrivalsRef = useRef(0);
   const watchdogRef = useRef<PaneDegradedWatchdog | undefined>(undefined);
   const revealStateRef = useRef<PaneRevealState>({ ready: false, hasLocalState: false });
   const deferredOutputRef = useRef(new DeferredTerminalOutputQueue());
@@ -254,6 +335,7 @@ export function TerminalPane({
   keyActivityRef.current = onKeyActivity;
   focusRef.current = onFocus;
   measurementsRef.current = onMeasurements;
+  paintSampleRef.current = onPaintSample;
   controllerRef.current = onController;
   diagnosticRef.current = onDiagnostic;
   openFilePathRef.current = onOpenFilePath;
@@ -267,6 +349,9 @@ export function TerminalPane({
   } : undefined;
 
   useEffect(() => {
+    // Idempotent, and armed here rather than at import so a build that never
+    // mounts a terminal never installs an observer.
+    startLongTaskTracker();
     const terminalContainer = container.current;
     if (!terminalContainer) return;
     // Re-asserted rather than left to the JSX default: this element outlives a
@@ -549,6 +634,17 @@ export function TerminalPane({
       const effect = transition.effect;
       const generation = "generation" in event ? event.generation : 0;
       const eventEpoch = hub.generationEpoch;
+      // Content — of any size, from any of the three paths that put bytes on
+      // this terminal — is proof the reveal reached a host that is streaming
+      // this pane, which is the one thing the void watch is waiting to learn.
+      // An empty seed counts: the host answering at all means the subscription
+      // is live. Deliberately not extended to `deferOutput` or `awaitSeed`,
+      // which are output this pane cannot show yet and seed debt respectively —
+      // neither is a screen, and both leave the recovery worth asking for.
+      if (effect.kind === "seed" || effect.kind === "output" || effect.kind === "restore") {
+        contentArrivalsRef.current += 1;
+        cancelRevealVoidWatch(revealVoidTimerRef);
+      }
       if (effect.kind === "seed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
@@ -569,7 +665,37 @@ export function TerminalPane({
         // Output reaching the renderer is proof the pane is not frozen.
         watchdog.noteHealthy();
         screenOnDisplay = undefined;
+        // Decided before the write and charged at the decision, so a burst of
+        // chunks inside one interval yields exactly one sample rather than one
+        // per chunk that happens to complete first.
+        const writtenAt = performance.now();
+        const sampling = Boolean(paintSampleRef.current)
+          && writtenAt - lastPaintSampledAtRef.current >= PAINT_SAMPLE_INTERVAL_MS;
+        if (sampling) lastPaintSampledAtRef.current = writtenAt;
+        // The histogram is throttled; the slow-paint probe is not, because the
+        // tail it exists to explain is exactly the sample a throttle would miss.
+        // Counted before the write and captured into locals, so the callback
+        // reports the depth its own chunk waited behind rather than the depth
+        // whenever it happens to run.
+        const bytes = effect.data.byteLength;
+        const queuedWrites = (queuedWritesRef.current += 1);
+        const queuedBytes = (queuedBytesRef.current += bytes);
+        const atlasBefore = readAtlasInvalidationCount(pane.id);
         renderer.write(effect.data, () => {
+          const paintMs = performance.now() - writtenAt;
+          queuedWritesRef.current -= 1;
+          queuedBytesRef.current -= bytes;
+          if (sampling) paintSampleRef.current?.(pane.id, paintMs);
+          const atlasAfter = readAtlasInvalidationCount(pane.id);
+          notePaint({
+            paneId: pane.id,
+            ms: paintMs,
+            startedAtMs: writtenAt,
+            bytes,
+            queuedWrites,
+            queuedBytes,
+            atlasDelta: atlasBefore !== undefined && atlasAfter !== undefined ? atlasAfter - atlasBefore : undefined,
+          });
           // Output is content, and for some panes it is the only content that
           // ever arrives: a pane already `ready` when it mounted never sees a
           // seed or a restore, so before this its first real screenful was
@@ -745,6 +871,10 @@ export function TerminalPane({
     return () => {
       rendererActive = false;
       clearTimeout(revealFallback);
+      // This teardown is also the hide half of the visibility protocol (the
+      // `setTerminalVisibility(false)` below), and a pane on its way to hidden
+      // has no reveal left to disbelieve. No void timer may outlive its mount.
+      cancelRevealVoidWatch(revealVoidTimerRef);
       initialPaint.abandon();
       watchdog.stop();
       if (watchdogRef.current === watchdog) watchdogRef.current = undefined;
@@ -825,6 +955,41 @@ export function TerminalPane({
     if (!clientId) return;
     let active = true;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    /**
+     * Waits for the reveal to produce something, and reseeds when it does not.
+     *
+     * `attempt` is zero-based across one uninterrupted wait; each expiry that
+     * has to act re-arms the next one at the same spacing until the bound.
+     */
+    const armRevealVoidWatch = (attempt: number) => {
+      cancelRevealVoidWatch(revealVoidTimerRef);
+      revealVoidTimerRef.current = setTimeout(() => {
+        revealVoidTimerRef.current = undefined;
+        // The same guard the rebuild path uses: this pane is only allowed to
+        // recover the connection it was revealed on.
+        if (!active || clientIdRef.current !== clientId) return;
+        // A pane that is already in a degraded episode has a bounded recovery
+        // running — one that re-asserts visibility as well as reseeding — and
+        // two cadences reseeding the same pane is just noise. Silence here is
+        // deliberate: the episode is already in the journal under
+        // `pane.degraded`, and this never re-arms behind it.
+        if (watchdogRef.current?.degraded) return;
+        recordIncident("pane.revealVoid", {
+          paneId: pane.id,
+          msWaited: REVEAL_VOID_TIMEOUT_MS,
+          attempt,
+        });
+        // The one recovery that carries no checkpoint: the host answers it by
+        // forcing the pane visible and capturing it, which is exactly what a
+        // reveal that landed in the void needs undone. Same shape as the
+        // stale-epoch rebuild path's reseed.
+        void requestTerminalSeed(clientId, pane.id).catch((seedError) => {
+          recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(seedError).slice(0, 200) });
+          diagnosticRef.current?.(`Could not reseed ${pane.id} after a reveal produced nothing: ${String(seedError)}`);
+        });
+        if (attempt + 1 < REVEAL_VOID_MAX_ATTEMPTS) armRevealVoidWatch(attempt + 1);
+      }, REVEAL_VOID_TIMEOUT_MS);
+    };
     // `retriesUsed` counts only within one reveal attempt: a retry re-runs the
     // visibility call under the *same* key, so it never gets past the
     // once-per-(client, epoch) latch on its own and never races the reveal a
@@ -863,6 +1028,9 @@ export function TerminalPane({
         hasLocalState: rendererEpochRef.current === currentCheckpoint.terminalEpoch,
       };
       const rendererMatchesEpoch = rendererEpochRef.current === currentCheckpoint.terminalEpoch;
+      // Read before the request goes out, so the host answering it *during* the
+      // call still counts as this reveal having produced something.
+      const contentBeforeReveal = contentArrivalsRef.current;
       try {
         await setTerminalVisibility(
           clientId,
@@ -872,6 +1040,16 @@ export function TerminalPane({
           rendererMatchesEpoch ? currentCheckpoint : { ...currentCheckpoint, outputGeneration: 0 },
         );
         watchdogRef.current?.clear("revealFailed");
+        // The host took the request; nothing here proves it acted on it. Start
+        // the clock only while this is still the pane's live reveal — a
+        // superseded one's successor arms its own — and only while this reveal
+        // has produced nothing, which the counter answers for the window the
+        // call itself was open.
+        if (active
+          && lastRevealKeyRef.current === revealKey
+          && contentArrivalsRef.current === contentBeforeReveal) {
+          armRevealVoidWatch(0);
+        }
       } catch (error) {
         const action = revealFailureAction({
           error,
@@ -964,9 +1142,12 @@ export function TerminalPane({
       const revealKey = `${clientId}:${checkpoint.terminalEpoch}:${revealAttemptRef.current}`;
       if (lastRevealKeyRef.current === revealKey) return;
       lastRevealKeyRef.current = revealKey;
-      // Whatever was still queued to retry belongs to the key this supersedes.
+      // Whatever was still queued to retry belongs to the key this supersedes,
+      // and so does whatever void watch the superseded reveal armed: this
+      // reveal is the one whose silence counts from here.
       clearTimeout(retryTimer);
       retryTimer = undefined;
+      cancelRevealVoidWatch(revealVoidTimerRef);
       void runReveal(checkpoint, revealKey, 0);
     };
     reassertVisibilityRef.current = () => {
@@ -983,11 +1164,18 @@ export function TerminalPane({
       deferredOutputRef.current.reset();
       rendererEpochRef.current = undefined;
       revealStateRef.current = { ready: false, hasLocalState: false };
+      // The reveal being waited on belongs to the epoch that just ended, and a
+      // checkpoint that no longer exists cannot be answered. Disarmed here as
+      // well as in `revealForCurrentEpoch`, which returns early when this epoch
+      // has no checkpoint yet.
+      cancelRevealVoidWatch(revealVoidTimerRef);
       revealForCurrentEpoch();
     });
     return () => {
       active = false;
       clearTimeout(retryTimer);
+      // Nothing armed for this client may outlive it.
+      cancelRevealVoidWatch(revealVoidTimerRef);
       reassertVisibilityRef.current = undefined;
       unsubscribe();
     };

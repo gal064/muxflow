@@ -39,6 +39,8 @@ type TerminalWorkspaceSurfaceProps = {
   handleKeyActivity(paneId: string): void;
   /** A terminal reported what it turns pixels into. */
   onMeasurements(measurements: TerminalMeasurements): void;
+  /** How long one write took to reach the screen — journal-only, throttled. */
+  onPaintSample?(paneId: string, ms: number): void;
   onOpenFilePath(paneId: string, path: string): void;
   performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
   setStatus(message: string): void;
@@ -73,6 +75,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         onInput={props.handleInput}
         onKeyActivity={props.handleKeyActivity}
         onMeasurements={props.onMeasurements}
+        onPaintSample={props.onPaintSample}
         onOpenFilePath={props.onOpenFilePath}
         transferClient={props.terminalTransferClient}
         transferRegistry={props.terminalTransferRegistry}
