@@ -3,6 +3,7 @@ import {
   __noteLongTaskForTests,
   __resetPaintTailProbeForTests,
   longTasksOverlapping,
+  msSinceLastFrame,
   notePaint,
   PAINT_SLOW_INCIDENT_INTERVAL_MS,
   PAINT_SLOW_THRESHOLD_MS,
@@ -127,6 +128,158 @@ describe("the long-task overlap", () => {
     __noteLongTaskForTests({ startTime: 1_010, duration: 120 });
     notePaint(paint({ startedAtMs: 1_000, ms: 100 }));
     expect(slowPaints()[0].detail).toMatchObject({ longTasks: { count: 1, totalMs: 120, maxMs: 120 } });
+  });
+});
+
+interface DocumentStub {
+  visibilityState?: string;
+  hasFocus?: () => boolean;
+}
+
+/** Swaps globals for the duration of one test, restoring absences as absences. */
+function withGlobals(patch: Record<string, unknown>, body: () => void): void {
+  const scope = globalThis as Record<string, unknown>;
+  const saved = new Map<string, { present: boolean; value: unknown }>();
+  for (const key of Object.keys(patch)) {
+    saved.set(key, { present: key in scope, value: scope[key] });
+    if (patch[key] === undefined) delete scope[key];
+    else scope[key] = patch[key];
+  }
+  try {
+    body();
+  } finally {
+    for (const [key, previous] of saved) {
+      if (previous.present) scope[key] = previous.value;
+      else delete scope[key];
+    }
+  }
+}
+
+/** A frame clock nobody advances, plus the window state that comes with it. */
+function withFrameClock(
+  document: DocumentStub | undefined,
+  body: (frames: Array<(time: number) => void>) => void,
+): void {
+  const frames: Array<(time: number) => void> = [];
+  withGlobals({
+    requestAnimationFrame: (callback: (time: number) => void) => frames.push(callback),
+    cancelAnimationFrame: () => undefined,
+    document,
+  }, () => body(frames));
+}
+
+describe("the stopped-frame-clock fingerprint", () => {
+  it("reports how long the frame clock has been parked, and what the window was doing", () => {
+    withFrameClock({ visibilityState: "hidden", hasFocus: () => false }, (frames) => {
+      const now = vi.spyOn(performance, "now");
+      try {
+        now.mockReturnValue(1_000);
+        startLongTaskTracker();
+        // One frame in flight, and its timestamp is the heartbeat.
+        expect(frames).toHaveLength(1);
+        now.mockReturnValue(1_016);
+        expect(msSinceLastFrame()).toBe(16);
+
+        now.mockReturnValue(1_016);
+        frames.shift()!(1_016);
+        expect(frames).toHaveLength(1);
+        // Nothing fires the re-armed frame: this is an occluded window, and the
+        // gap is the only field on the record that grows with it.
+        now.mockReturnValue(9_000);
+        expect(msSinceLastFrame()).toBe(7_984);
+
+        notePaint(paint({ startedAtMs: 0, ms: 7_900 }));
+        expect(slowPaints()[0].detail).toMatchObject({
+          visibility: "hidden",
+          focused: false,
+          msSinceLastFrame: 7_984,
+        });
+      } finally {
+        now.mockRestore();
+      }
+    });
+  });
+
+  it("separates a painting window from a parked one on the same record", () => {
+    withFrameClock({ visibilityState: "visible", hasFocus: () => true }, (frames) => {
+      const now = vi.spyOn(performance, "now");
+      try {
+        now.mockReturnValue(500);
+        startLongTaskTracker();
+        now.mockReturnValue(508);
+        frames.shift()!(508);
+        now.mockReturnValue(512);
+        notePaint(paint({ startedAtMs: 0 }));
+        // A live frame clock: the slow paint has to be explained by one of the
+        // other three fingerprints.
+        expect(slowPaints()[0].detail).toMatchObject({
+          visibility: "visible",
+          focused: true,
+          msSinceLastFrame: 4,
+        });
+      } finally {
+        now.mockRestore();
+      }
+    });
+  });
+
+  it("stops the heartbeat on teardown, and a stale frame cannot restart it", () => {
+    withFrameClock(undefined, (frames) => {
+      startLongTaskTracker();
+      const stale = frames.shift();
+      expect(stale).toBeTypeOf("function");
+      __resetPaintTailProbeForTests();
+      stale?.(0);
+      expect(frames).toHaveLength(0);
+      expect(msSinceLastFrame()).toBeUndefined();
+    });
+  });
+});
+
+describe("an environment with no frame clock", () => {
+  it("reports no gap rather than an infinite one, and does not throw", () => {
+    withGlobals({ requestAnimationFrame: undefined, cancelAnimationFrame: undefined, document: undefined }, () => {
+      expect(() => startLongTaskTracker()).not.toThrow();
+      expect(msSinceLastFrame()).toBeUndefined();
+      notePaint(paint());
+      const detail = slowPaints()[0].detail ?? {};
+      // Present and undefined: absent is not the same fact as "never parked".
+      expect("msSinceLastFrame" in detail).toBe(true);
+      expect(detail.msSinceLastFrame).toBeUndefined();
+      expect(detail.visibility).toBeUndefined();
+      expect(detail.focused).toBeUndefined();
+    });
+  });
+
+  it("survives a frame clock that refuses to schedule", () => {
+    withGlobals({
+      requestAnimationFrame: () => {
+        throw new Error("no frames for an occluded window");
+      },
+    }, () => {
+      expect(() => startLongTaskTracker()).not.toThrow();
+      expect(msSinceLastFrame()).toBeUndefined();
+      expect(() => notePaint(paint())).not.toThrow();
+      expect(slowPaints()).toHaveLength(1);
+    });
+  });
+
+  it("tolerates a document that throws when asked what it is doing", () => {
+    withGlobals({
+      document: {
+        get visibilityState(): string {
+          throw new Error("detached");
+        },
+        hasFocus: () => {
+          throw new Error("detached");
+        },
+      },
+    }, () => {
+      expect(() => notePaint(paint())).not.toThrow();
+      const detail = slowPaints()[0].detail ?? {};
+      expect(detail.visibility).toBeUndefined();
+      expect(detail.focused).toBeUndefined();
+    });
   });
 });
 

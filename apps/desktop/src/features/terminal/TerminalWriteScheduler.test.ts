@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TerminalWriteScheduler, WRITE_FLUSH_FALLBACK_MS } from "./TerminalWriteScheduler";
 import { ownTerminalBytes } from "./TerminalBytes";
 
 interface HarnessOptions {
@@ -218,5 +218,118 @@ describe("TerminalWriteScheduler", () => {
     // Every published backlog observation was a real, non-negative byte count.
     expect(h.pending.every((bytes) => bytes >= 0)).toBe(true);
     expect(h.pending.at(-1)).toBe(0);
+  });
+});
+
+/**
+ * The harness's frame seam only ever records callbacks, so a test that never
+ * fires them is a window macOS has stopped painting: timers still run, frames
+ * never come. Everything here is about the queue staying alive through that.
+ */
+describe("TerminalWriteScheduler without a frame clock", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("flushes on the fallback timer when no frame ever arrives", () => {
+    const h = harness({ maxBytesPerFrame: 4 });
+    const rendered = vi.fn();
+    expect(h.scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    // The idle fast path took the first record; the latch now sends everything
+    // behind it through the frame path, which is the path that has stopped.
+    expect(h.written).toEqual([[1]]);
+    h.completions.shift()!();
+    expect(h.scheduler.enqueue(Uint8Array.of(2, 3), rendered)).toBe(true);
+    expect(h.written).toEqual([[1]]);
+
+    vi.advanceTimersByTime(WRITE_FLUSH_FALLBACK_MS - 1);
+    expect(h.written).toEqual([[1]]);
+    vi.advanceTimersByTime(1);
+    expect(h.written).toEqual([[1], [2, 3]]);
+    // And the completion protocol the reveal latch hangs off still runs.
+    h.completions.shift()!();
+    expect(rendered).toHaveBeenCalledOnce();
+    expect(h.scheduler.pendingBytes).toBe(0);
+  });
+
+  it("keeps draining record after record on the fallback alone", () => {
+    const h = harness({ maxBytesPerFrame: 2 });
+    expect(h.scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    h.completions.shift()!();
+    expect(h.scheduler.enqueue(Uint8Array.of(2, 3))).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(4, 5))).toBe(true);
+    for (let tick = 0; tick < 4; tick++) {
+      vi.advanceTimersByTime(WRITE_FLUSH_FALLBACK_MS);
+      while (h.completions.length > 0) h.completions.shift()!();
+    }
+    expect(h.written.flat()).toEqual([1, 2, 3, 4, 5]);
+    expect(h.scheduler.pendingBytes).toBe(0);
+    expect(h.frames.length).toBeGreaterThan(0);
+  });
+
+  it("releases the once-per-frame immediate write on the fallback too", () => {
+    const h = harness();
+    expect(h.scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    expect(h.written).toEqual([[1]]);
+    h.completions.shift()!();
+    // Without the fallback this latch is held for the whole occlusion, and the
+    // first record of a freshly created pane waits behind it.
+    vi.advanceTimersByTime(WRITE_FLUSH_FALLBACK_MS);
+    expect(h.scheduler.enqueue(Uint8Array.of(2))).toBe(true);
+    expect(h.written).toEqual([[1], [2]]);
+  });
+
+  it("defers both the frame and the fallback behind an unacknowledged write", () => {
+    const h = harness({ maxBytesPerFrame: 2 });
+    expect(h.scheduler.enqueue(Uint8Array.of(1, 2, 3, 4))).toBe(true);
+    expect(h.written).toEqual([[1, 2]]);
+    // xterm still owns the first chunk. The fallback substitutes for a missing
+    // frame tick; it does not get to overtake the parser.
+    vi.advanceTimersByTime(WRITE_FLUSH_FALLBACK_MS * 3);
+    h.frames.splice(0, h.frames.length).forEach((frame) => frame(16));
+    expect(h.written).toEqual([[1, 2]]);
+    h.completions.shift()!();
+    expect(h.written).toEqual([[1, 2], [3, 4]]);
+  });
+
+  it("cancels the fallback when a frame wins the race, and never flushes twice", () => {
+    const h = harness({ maxBytesPerFrame: 4 });
+    expect(h.scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    h.completions.shift()!();
+    expect(h.scheduler.enqueue(Uint8Array.of(2, 3))).toBe(true);
+    h.frames.splice(0, h.frames.length).forEach((frame) => frame(16));
+    expect(h.written).toEqual([[1], [2, 3]]);
+    h.completions.shift()!();
+    // The timer the frame beat is gone, not merely held off by backpressure: an
+    // idle queue plus three fallback windows still produces no second write.
+    vi.advanceTimersByTime(WRITE_FLUSH_FALLBACK_MS * 3);
+    expect(h.written).toEqual([[1], [2, 3]]);
+    expect(h.scheduler.pendingBytes).toBe(0);
+  });
+
+  it("drops its pending fallback when the queue is cleared", () => {
+    const h = harness({ maxBytesPerFrame: 4 });
+    expect(h.scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    h.completions.shift()!();
+    expect(h.scheduler.enqueue(Uint8Array.of(2, 3))).toBe(true);
+    h.scheduler.clear();
+    vi.advanceTimersByTime(WRITE_FLUSH_FALLBACK_MS * 2);
+    // Dropped bytes stay dropped: a timer cannot resurrect a cleared queue.
+    expect(h.written).toEqual([[1]]);
+  });
+
+  it("drops its pending fallback when the scheduler is disposed", () => {
+    const h = harness({ maxBytesPerFrame: 4 });
+    expect(h.scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    h.completions.shift()!();
+    expect(h.scheduler.enqueue(Uint8Array.of(2, 3))).toBe(true);
+    h.scheduler.dispose();
+    vi.advanceTimersByTime(WRITE_FLUSH_FALLBACK_MS * 2);
+    // No write into a terminal that has already been torn down.
+    expect(h.written).toEqual([[1]]);
   });
 });
