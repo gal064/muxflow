@@ -15,6 +15,10 @@ if [[ $(uname -s) != Linux ]]; then
   exit 78
 fi
 
+if [[ ${1:-} == -- ]]; then
+  shift
+fi
+
 arch=${1:-$(uname -m)}
 case "$arch" in
   x86_64|amd64)
@@ -75,7 +79,11 @@ build_frontend_reproducibly() {
 
 if [[ "$arch" == "$native_arch" ]]; then
   build_frontend_reproducibly
-  cargo build --locked --release -p muxflow
+  # This flow assembles a tarball directly instead of asking Tauri to create an
+  # app bundle. The compatible helper built below is installed beside the
+  # desktop in that tarball, so Tauri's bundle-only sidecar placeholder must not
+  # make the desktop compilation depend on a stale staged source-tree artifact.
+  TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo build --locked --release -p muxflow
   binary_dir="$target_root/release"
 else
   target_libdir=$(rustc --print target-libdir --target "$rust_target" 2>/dev/null || true)
@@ -90,7 +98,7 @@ else
   fi
   export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$linker"
   build_frontend_reproducibly
-  cargo build --locked --release --target "$rust_target" -p muxflow
+  TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo build --locked --release --target "$rust_target" -p muxflow
   binary_dir="$target_root/$rust_target/release"
 fi
 
