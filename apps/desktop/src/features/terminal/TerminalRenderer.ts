@@ -88,7 +88,14 @@ export interface TerminalRenderer {
     generation?: number,
     throughGeneration?: number,
   ): boolean;
-  write(bytes: OwnedTerminalBytes, onRendered?: () => void, generation?: number): void;
+  /**
+   * Queues output for xterm. Returns whether the record was accepted: a
+   * refusal means `onRendered` will never run, so a caller that hangs an
+   * acknowledgement — or a reveal — on that callback has just lost it and must
+   * recover rather than wait. Callers writing ordinary output can ignore the
+   * answer; the renderer asks for its own seed on the overflow case.
+   */
+  write(bytes: OwnedTerminalBytes, onRendered?: () => void, generation?: number): boolean;
   /** Measures the CSS box in cells. Does not resize the terminal. */
   measure(): TerminalSize | undefined;
   /**
@@ -368,15 +375,17 @@ export class XtermRenderer implements TerminalRenderer {
     return true;
   }
 
-  write(bytes: OwnedTerminalBytes, onRendered?: () => void, generation = 0): void {
+  write(bytes: OwnedTerminalBytes, onRendered?: () => void, generation = 0): boolean {
     if (!this.#atBottom()) this.#newOutput = true;
-    if (!this.#scheduler.enqueueOwned(bytes, this.#enqueued(generation, onRendered)) && this.#scheduler.overflowed) {
+    const queued = this.#scheduler.enqueueOwned(bytes, this.#enqueued(generation, onRendered));
+    if (!queued && this.#scheduler.overflowed) {
       // Only an overflow refusal means bytes were lost. The scheduler also
       // refuses when it is disposed or sealed for the hide drain, and asking
       // for a seed then would be recovery for a pane that is going away.
       this.#requestSeed("Terminal output could not be queued for this pane; requesting a fresh seed.");
     }
     this.#emitViewport();
+    return queued;
   }
 
   /**

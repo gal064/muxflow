@@ -249,7 +249,41 @@ export function TerminalPane({
   } : undefined;
 
   useEffect(() => {
-    if (!container.current) return;
+    const terminalContainer = container.current;
+    if (!terminalContainer) return;
+    // Re-asserted rather than left to the JSX default: this element outlives a
+    // remount that reuses the DOM node, and a node still carrying "true" from
+    // the previous renderer would show the new one's empty first frame.
+    terminalContainer.setAttribute("data-painted", "false");
+    // xterm defers the parse of whatever it is handed to a timeout and the draw
+    // to a later frame, so the frame right after `open` is a fully visible
+    // empty grid with a block cursor at (0,0) — a pane that is about to show a
+    // screenful of text flashes an empty one first on every remount (a window
+    // or tab switch remounts every pane). `data-painted="false"` keeps the
+    // terminal itself hidden until content lands; the pane's background is
+    // painted by CSS either way, so nothing moves and nothing goes black.
+    //
+    // Latched, because every content path calls this and a busy pane would
+    // otherwise touch the DOM once per output chunk.
+    let revealed = false;
+    const revealTerminal = () => {
+      if (revealed) return;
+      revealed = true;
+      container.current?.setAttribute("data-painted", "true");
+    };
+    // The safety net, not the mechanism: content reveals the terminal as it
+    // paints, and the paths that produce no content at all (a restore the
+    // renderer refused, a host that never answers the seed request) would
+    // otherwise leave this pane's terminal hidden indefinitely. Long enough
+    // that a warm restore always wins the race and reveals on its own frame,
+    // short enough that a stuck pane still shows its cursor.
+    //
+    // Armed here, first, ahead of everything below that can throw — the
+    // renderer construction, and `hub.subscribePane`, which replays this pane's
+    // buffered backlog synchronously and rethrows if the replay fails. A
+    // fallback armed at the end of this effect is not a fallback for any of
+    // that: the pane would stay hidden with no timer to rescue it.
+    const revealFallback = setTimeout(revealTerminal, 300);
     const lifecycle = (paneLifecycleVersions.get(pane.id) ?? 0) + 1;
     paneLifecycleVersions.set(pane.id, lifecycle);
     const initialPaint = createPaintTicket([], lifecycle);
@@ -300,16 +334,6 @@ export function TerminalPane({
       hub.markRendered(pane.id, generation, terminalEpoch);
       return true;
     };
-    // xterm defers the parse of whatever it is handed to a timeout and the draw
-    // to a later frame, so the frame right after `open` is a fully visible
-    // empty grid with a block cursor at (0,0) — a pane that is about to show a
-    // screenful of text flashes an empty one first on every remount (a window
-    // or tab switch remounts every pane). `data-painted="false"` keeps the
-    // terminal itself hidden until content lands; the pane's background is
-    // painted by CSS either way, so nothing moves and nothing goes black.
-    const revealTerminal = () => {
-      container.current?.setAttribute("data-painted", "true");
-    };
     const publishInitialPaint = (
       generation: number,
       terminalEpoch: number | undefined,
@@ -345,11 +369,6 @@ export function TerminalPane({
       );
     };
     rendererRef.current = renderer;
-    const terminalContainer = container.current;
-    // Re-asserted rather than left to the JSX default: this element outlives a
-    // remount that reuses the DOM node, and a node still carrying "true" from
-    // the previous renderer would show the new one's empty first frame.
-    terminalContainer.setAttribute("data-painted", "false");
     renderer.open(terminalContainer);
     const reportGrid = (message: string | undefined) => {
       // Divergence is the norm, not a fault the user can act on, so it goes to
@@ -376,6 +395,27 @@ export function TerminalPane({
       keyActivityRef.current?.(pane.id);
     };
     terminalContainer.addEventListener("keydown", noteKeyActivity, true);
+    // What this terminal is known to be showing, while that is exactly one
+    // serialized screen with nothing written after it — the mount-time cache
+    // restore, or a handshake restore that arrived without a tail. Any byte
+    // written on top of it clears this.
+    //
+    // It exists because a remount is answered with that same screen more than
+    // once: the host emits a pane-resource event for the hide, which the hub
+    // buffers and replays into the next mount, and then another for the reveal.
+    // Both carry this pane's own hide snapshot, and restoring a screen that is
+    // already on the terminal is an ESC c and a byte-identical rewrite — a
+    // blank frame followed by the text that was already there, which is the
+    // flicker a tab switch used to show two or three times.
+    //
+    // The serialized screen is kept, not just its generation: the generation is
+    // the host's claim about which bytes these are, and it is not always a true
+    // one. `set_visible(true)` restamps `snapshot_generation` without replacing
+    // the snapshot, and the idempotent path in `hide_with_checkpoint` returns
+    // the stored snapshot under a checkpoint this side has since re-serialized
+    // (both in crates/tmux-control/src/replay.rs). A skip decided on the
+    // generation alone keeps a screen the host is trying to replace.
+    let screenOnDisplay: { generation: number; terminalEpoch: number | undefined; serialized: string } | undefined;
     const cached = terminalStateCache.get(pane.id);
     const currentCached = cached?.terminalEpoch !== undefined && cached.terminalEpoch === hub.generationEpoch
       ? cached
@@ -388,7 +428,13 @@ export function TerminalPane({
       // A fresh terminal cannot refuse a restore today, but a caller that
       // ignores the answer is how the tail-splice bug happened; if it ever
       // does refuse, the cache is not what this pane should show.
-      if (!restored) terminalStateCache.delete(pane.id);
+      if (restored) {
+        screenOnDisplay = {
+          generation: currentCached.outputGeneration,
+          terminalEpoch: cachedEpoch,
+          serialized: currentCached.serialized,
+        };
+      } else terminalStateCache.delete(pane.id);
     } else if (cached) {
       terminalStateCache.delete(pane.id);
     }
@@ -400,10 +446,18 @@ export function TerminalPane({
     };
     const flushDeferredOutput = (afterGeneration = -1) => {
       const deferred = outputAfterRecovery(deferredOutputRef.current.drain(), afterGeneration);
+      // These bytes land on top of whatever screen is up, so it is no longer
+      // the bare snapshot the handshake could be asked to skip.
+      if (deferred.length) screenOnDisplay = undefined;
       for (const output of deferred) {
         renderer.write(
           output.data,
-          () => commitRendered(output.generation, output.terminalEpoch),
+          () => {
+            // Same rule as live output: bytes that reach xterm are content, and
+            // content is what makes this pane worth showing.
+            revealTerminal();
+            commitRendered(output.generation, output.terminalEpoch);
+          },
           output.generation,
         );
       }
@@ -450,6 +504,9 @@ export function TerminalPane({
       if (effect.kind === "seed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
+        // A seed replaces the screen wholesale, so whatever was up is not what
+        // this terminal shows any more.
+        screenOnDisplay = undefined;
         // An authoritative screen is what every degraded state here was waiting
         // for: this pane is working again, and the next fault starts over at the
         // shortest retry delay rather than inheriting this episode's backoff.
@@ -463,7 +520,16 @@ export function TerminalPane({
       } else if (effect.kind === "output") {
         // Output reaching the renderer is proof the pane is not frozen.
         watchdog.noteHealthy();
-        renderer.write(effect.data, () => commitRendered(generation, eventEpoch), generation);
+        screenOnDisplay = undefined;
+        renderer.write(effect.data, () => {
+          // Output is content, and for some panes it is the only content that
+          // ever arrives: a pane already `ready` when it mounted never sees a
+          // seed or a restore, so before this its first real screenful was
+          // revealed by nothing but the fallback timer. Latched, so the busy
+          // case costs one comparison per chunk.
+          revealTerminal();
+          commitRendered(generation, eventEpoch);
+        }, generation);
       } else if (effect.kind === "deferOutput") {
         const admission = deferredOutputRef.current.enqueue({
           data: effect.data,
@@ -480,39 +546,85 @@ export function TerminalPane({
       } else if (effect.kind === "awaitSeed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
+        screenOnDisplay = undefined;
+        // A handshake answer this reducer has no rule for used to fall through
+        // to nothing at all. It recovers like any other seed debt now; what it
+        // still owes is a record, because the shape itself is the finding.
+        if (effect.unusableState) {
+          recordIncident("pane.revealDeadEnd", { paneId: pane.id, state: effect.unusableState });
+        }
         // Nobody on this side requests the seed when the host said it owns the
         // request (`requestSeed` false). That is exactly the case where a
-        // suppressed host seed freezes the pane, so bound the wait either way.
+        // suppressed host seed freezes the pane, so bound the wait either way:
+        // this note is what arms the watchdog, and it is deliberately outside
+        // the `requestSeed` branch below.
         watchdog.note("paneAwaitingSeed");
         renderer.seed(ownTerminalBytes(new Uint8Array()));
         setRendererDiagnostic(`${effect.reason}; waiting for a fresh terminal seed…`);
-        // An empty pane under a diagnostic banner is this branch's intended
-        // visible state, and it never reaches `publishInitialPaint`, so it
-        // reveals itself rather than waiting for the fallback timer.
-        revealTerminal();
+        // Deliberately not revealed. This branch's blank RIS is seed debt, not
+        // content, and showing it is a whole extra visible repaint on the way to
+        // the screen the arriving seed paints (which reveals for itself). The
+        // diagnostic banner is a sibling of the terminal, so the user is told
+        // what is happening either way, and the fallback armed at the top of
+        // this effect owns the case where that seed never comes.
         if (effect.requestSeed) requestFreshSeed(effect.reason);
       } else if (effect.kind === "restore") {
         const markRecoveryRendered = () => {
           publishInitialPaint(effect.tailThroughGeneration, eventEpoch, true);
         };
+        // When the host is handing back exactly the screen the cache already
+        // painted, restoring it again is an ESC c and a byte-identical rewrite
+        // — a blank frame followed by the text that was already there. Only the
+        // raw tail is new information then. The generation and epoch have to
+        // agree *and* the bytes have to match: the generation is the host's
+        // claim about which screen this is, and it is not always a true one
+        // (see `screenOnDisplay`). The byte comparison runs only after the two
+        // cheap checks have passed, and length settles almost every mismatch
+        // before a character is read.
+        const skipRedundantRestore = screenOnDisplay !== undefined
+          && screenOnDisplay.terminalEpoch === eventEpoch
+          && screenOnDisplay.generation === effect.snapshotGeneration
+          && screenOnDisplay.serialized.length === effect.serialized.length
+          && screenOnDisplay.serialized === effect.serialized;
         // The snapshot and its raw tail are one screen in two pieces. If the
         // snapshot was refused, the tail must not be written onto whatever the
         // terminal happens to be showing, and nothing may be reported as
         // rendered: the renderer has already asked the host for a seed, and
         // this pane waits for it.
-        const restored = renderer.restore(
+        const restored = skipRedundantRestore || renderer.restore(
           effect.serialized,
           effect.rawTail.byteLength ? undefined : markRecoveryRendered,
           effect.rawTail.byteLength ? effect.snapshotGeneration : effect.tailThroughGeneration,
           effect.tailThroughGeneration,
         );
-        if (!restored) {
+        // Only once the snapshot is down, and never after a refusal. An empty
+        // tail is still written on the skipped path: the scheduler queues it as
+        // an ordered barrier, and that barrier is what carries the
+        // acknowledgement and the reveal the skipped restore would otherwise
+        // have carried.
+        const writesTail = restored && (skipRedundantRestore || effect.rawTail.byteLength > 0);
+        const tailQueued = writesTail
+          ? renderer.write(effect.rawTail, markRecoveryRendered, effect.tailThroughGeneration)
+          : true;
+        if (!restored || !tailQueued) {
           clearDeferredOutput();
+          screenOnDisplay = undefined;
           revealStateRef.current = { ready: false, hasLocalState: false };
-        } else {
-          if (effect.rawTail.byteLength) {
-            renderer.write(effect.rawTail, markRecoveryRendered, effect.tailThroughGeneration);
+          // A refused restore has already asked the host for a seed. A refused
+          // *tail* has not: the scheduler drops the record and the callback
+          // with it, so this pane just lost its acknowledgement and its reveal
+          // with nothing said. Say it, and ask.
+          if (restored && !tailQueued) {
+            watchdog.note("rendererReseed");
+            requestFreshSeed(`Pane ${pane.id} could not queue the tail of its recovery screen`);
           }
+        } else {
+          // A tail-less answer leaves the terminal showing exactly this
+          // snapshot, which is what lets the *second* copy of it — the reveal's,
+          // after the hide's — be skipped as well.
+          screenOnDisplay = effect.rawTail.byteLength === 0
+            ? { generation: effect.tailThroughGeneration, terminalEpoch: eventEpoch, serialized: effect.serialized }
+            : undefined;
           flushDeferredOutput(effect.tailThroughGeneration);
           // Recovery material laid a real screen down; the pane is whole again.
           watchdog.noteHealthy();
@@ -556,7 +668,7 @@ export function TerminalPane({
       // ratios changes it with no remount.
       reportMeasurements();
     });
-    observer.observe(container.current);
+    observer.observe(terminalContainer);
 
     const controller: TerminalPaneController = {
       focus: () => renderer.focus(),
@@ -576,13 +688,6 @@ export function TerminalPane({
     controllerRef.current(pane.id, controller);
     reportMeasurements();
     if (pane.active) renderer.focus();
-    // The safety net, not the mechanism: content reveals the terminal through
-    // `publishInitialPaint`, and the paths that produce no content at all (a
-    // restore the renderer refused, a host that never answers the seed request)
-    // would otherwise leave this pane's terminal hidden indefinitely. Long
-    // enough that a warm restore always wins the race and reveals on its own
-    // frame, short enough that a stuck pane still shows its cursor.
-    const revealFallback = setTimeout(revealTerminal, 300);
 
     return () => {
       rendererActive = false;

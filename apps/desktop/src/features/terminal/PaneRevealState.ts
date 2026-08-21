@@ -26,7 +26,17 @@ export type PaneRevealEffect =
       snapshotGeneration: number;
       tailThroughGeneration: number;
     }
-  | { kind: "awaitSeed"; reason: string; requestSeed: boolean }
+  | {
+      kind: "awaitSeed";
+      reason: string;
+      requestSeed: boolean;
+      /**
+       * Set only when this seed debt came from a handshake answer in a state
+       * this reducer has no rule for. The owner journals it; nothing else
+       * behaves differently, because the recovery is the same either way.
+       */
+      unusableState?: string;
+    }
   | { kind: "diagnostic"; message: string };
 
 export function reducePaneReveal(
@@ -72,5 +82,21 @@ export function reducePaneReveal(
       effect: { kind: "awaitSeed", reason: "No recoverable renderer state was available", requestSeed: true },
     };
   }
-  return { state, effect: { kind: "none" } };
+  // Everything left is an answer this pane cannot act on: a state this build
+  // has no rule for (an unset or newer `PaneResourceState` decodes as
+  // `unspecified`), or one that says the host is holding this pane while
+  // handing back nothing to hold it with. Returning `none` here left the pane
+  // `ready: false` for the rest of its life — every later output deferred and
+  // never written, no watchdog reason, no diagnostic, nothing in the journal
+  // — which is the quietest way a pane can stay blank. It is seed debt, and
+  // the host plainly does not believe it owes one, so this side asks.
+  return {
+    state: { ready: false, hasLocalState: false },
+    effect: {
+      kind: "awaitSeed",
+      reason: `The host answered this pane's reveal with no usable renderer state (${event.state})`,
+      requestSeed: true,
+      unusableState: event.state,
+    },
+  };
 }
