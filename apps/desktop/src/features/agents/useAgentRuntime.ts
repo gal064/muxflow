@@ -18,6 +18,7 @@ import type {
   AgentRecord,
   AgentRequestScope,
   AgentSoundPreferences,
+  AgentTopologyAuthority,
   AgentWireEvent,
 } from "./types";
 
@@ -25,6 +26,8 @@ export interface AgentRuntimeOptions {
   client: AgentClient;
   scope?: AgentRequestScope;
   focus: AgentFocus;
+  /** Window IDs in the topology whose generation the requested snapshot covers. */
+  topologyWindowIds: readonly string[];
   soundPreferences: AgentSoundPreferences;
   onStatus(message: string): void;
   effects?: {
@@ -37,6 +40,7 @@ export interface AgentRuntimeOptions {
 
 export function useAgentRuntime(options: AgentRuntimeOptions) {
   const [state, dispatch] = useReducer(agentReducer, initialAgentState);
+  const [topologyAuthority, setTopologyAuthority] = useState<AgentTopologyAuthority>();
   const stateRef = useRef(state);
   stateRef.current = state;
   const optionsRef = useRef(options);
@@ -72,13 +76,32 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     });
   }, []);
 
-  const accept = useCallback((event: AgentWireEvent) => {
+  const accept = useCallback((
+    event: AgentWireEvent,
+    coverage?: { scope: AgentRequestScope; windowIds: readonly string[] },
+  ) => {
     const previousState = stateRef.current;
     const nextState = agentReducer(previousState, { type: "wire", event });
     if (nextState === previousState) return;
     stateRef.current = nextState;
     dispatch({ type: "wire", event });
     if (event.kind === "snapshot") {
+      // Only the request effect can pair this agent snapshot with an exact
+      // tmux topology. Push snapshots carry no window-set metadata, so they
+      // may refresh records but never manufacture an absence proof from the
+      // options of whatever render happened to receive them.
+      if (coverage
+        && event.snapshot.hostProfileId === coverage.scope.hostProfileId
+        && event.snapshot.serverIdentity === coverage.scope.serverIdentity
+        && event.snapshot.connectionEpoch === coverage.scope.connectionEpoch) {
+        setTopologyAuthority({
+          hostProfileId: coverage.scope.hostProfileId,
+          serverIdentity: coverage.scope.serverIdentity,
+          connectionEpoch: coverage.scope.connectionEpoch,
+          topologyGeneration: coverage.scope.topologyGeneration,
+          coveredWindowIds: new Set(coverage.windowIds),
+        });
+      }
       const key = scopeKey(event.snapshot.hostProfileId, event.snapshot.serverIdentity);
       const previousScope = runtimeMemory.current.scope(key);
       const previousRecords = previousScope?.records;
@@ -110,12 +133,17 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
   useEffect(() => {
     if (!options.scope) {
       dispatch({ type: "disconnect" });
+      setTopologyAuthority(undefined);
       return;
     }
     let cancelled = false;
     const captured = options.scope;
+    const capturedWindowIds = options.topologyWindowIds;
     void options.client.snapshot(captured).then((snapshot) => {
-      if (!cancelled) accept({ kind: "snapshot", snapshot, replayed: true });
+      if (!cancelled) accept(
+        { kind: "snapshot", snapshot, replayed: true },
+        { scope: captured, windowIds: capturedWindowIds },
+      );
     }).catch((error) => {
       if (!cancelled) options.onStatus(`Agent snapshot unavailable: ${String(error)}`);
     });
@@ -182,7 +210,10 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     return optionsRef.current.client.applyHostNaming(scope, "uninstall");
   }, []);
 
-  return { state, agents, adapters: state.adapters, rollups, accept, launch, resume, rename, reviewHooks, applyHooks, applyHostNaming, removeHostNaming, refreshSnapshot };
+  return {
+    state, topologyAuthority, agents, adapters: state.adapters, rollups, accept,
+    launch, resume, rename, reviewHooks, applyHooks, applyHostNaming, removeHostNaming, refreshSnapshot,
+  };
 }
 
 export type AgentRuntime = ReturnType<typeof useAgentRuntime>;

@@ -2,12 +2,42 @@ import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../ap
 import { renderedPanes } from "../terminal/layout";
 import type { AppOwnedTab, PersistedAppState, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
-import type { AgentAttentionRollup } from "../agents/types";
+import type { AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
 
 export type CombinedTab =
-  | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"] }
+  | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"]; agentPresence: TerminalAgentPresence }
   | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean }
   | { key: `pending:${string}`; kind: "pending"; title: string };
+export type SelectableTab = Exclude<CombinedTab, { kind: "pending" }>;
+export type TerminalAgentPresence = "present" | "absent" | "unknown";
+export interface AgentPresenceSnapshot {
+  accepted?: AgentTopologyAuthority;
+  current?: Omit<AgentTopologyAuthority, "coveredWindowIds">;
+  byWindow: ReadonlyMap<string, AgentAttentionRollup>;
+}
+
+/** The exact ordered set addressed by Control-1…9 and drawn with numbers. */
+export function selectableTabs(tabs: readonly CombinedTab[]): SelectableTab[] {
+  return tabs.filter((tab): tab is SelectableTab => tab.kind !== "pending");
+}
+
+/** One canonical answer for both menu candidates and mutation-time rechecks. */
+export function agentPresenceIsCurrent(presence: AgentPresenceSnapshot, minimumGeneration = 0): boolean {
+  const accepted = presence.accepted;
+  const current = presence.current;
+  return Boolean(accepted && current
+    && accepted.hostProfileId === current.hostProfileId
+    && accepted.serverIdentity === current.serverIdentity
+    && accepted.connectionEpoch === current.connectionEpoch
+    && accepted.topologyGeneration === current.topologyGeneration
+    && current.topologyGeneration >= minimumGeneration);
+}
+
+/** One canonical answer for both menu candidates and mutation-time rechecks. */
+export function terminalAgentPresence(windowId: string, presence: AgentPresenceSnapshot): TerminalAgentPresence {
+  if (!agentPresenceIsCurrent(presence) || !presence.accepted?.coveredWindowIds.has(windowId)) return "unknown";
+  return (presence.byWindow.get(windowId)?.total ?? 0) > 0 ? "present" : "absent";
+}
 
 /**
  * A tab that has been asked for but does not exist on the host yet.
@@ -89,21 +119,33 @@ export function combineWorkspaceTabs(
   appTabs: readonly AppOwnedTab[],
   attentionByWindow?: ReadonlyMap<string, AgentAttentionRollup>,
   pending?: PendingShellTab,
+  authority: Pick<AgentPresenceSnapshot, "accepted" | "current"> = {},
 ): CombinedTab[] {
+  const agentPresence = {
+    ...authority,
+    byWindow: attentionByWindow ?? new Map<string, AgentAttentionRollup>(),
+  };
   const terminalTabs: CombinedTab[] = [...windows]
     .sort((left, right) => left.index - right.index || left.id.localeCompare(right.id))
-    .map((window, index, ordered) => ({
-      key: `terminal:${window.id}`,
-      kind: "terminal",
-      id: window.id,
-      title: window.name,
-      index: window.index,
-      activeInTmux: window.active,
-      zoomed: Boolean(window.zoomed),
-      canMoveLeft: index > 0,
-      canMoveRight: index < ordered.length - 1,
-      attention: attentionByWindow?.get(window.id)?.state ?? "none",
-    }));
+    .map((window, index, ordered) => {
+      const attention = attentionByWindow?.get(window.id);
+      return {
+        key: `terminal:${window.id}`,
+        kind: "terminal",
+        id: window.id,
+        title: window.name,
+        index: window.index,
+        activeInTmux: window.active,
+        zoomed: Boolean(window.zoomed),
+        canMoveLeft: index > 0,
+        canMoveRight: index < ordered.length - 1,
+        attention: attention?.state ?? "none",
+        // Presence is deliberately independent of attention. Idle, unknown and
+        // already-read agents are just as protected by Close All Non-Agent Tabs
+        // as working, blocked and unread-complete agents.
+        agentPresence: terminalAgentPresence(window.id, agentPresence),
+      };
+    });
   const ownedTabs: CombinedTab[] = [...appTabs]
     .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
     .map((tab, index, ordered) => ({
@@ -148,6 +190,27 @@ export function tabsToCloseRight(tabs: readonly CombinedTab[], anchorKey: string
   const anchor = tabs.findIndex((tab) => tab.key === anchorKey);
   if (anchor < 0) return [];
   return tabs.slice(anchor + 1).filter((tab) => tab.kind !== "pending");
+}
+
+/** Every real strip tab that does not contain an agent, in display order. */
+export function tabsToCloseNonAgent(tabs: readonly CombinedTab[]): CombinedTab[] {
+  return tabs.filter((tab) => tab.kind === "app" || (tab.kind === "terminal" && tab.agentPresence === "absent"));
+}
+
+/**
+ * Revalidates the safety predicate at the mutation boundary. A confirmation or
+ * editor flush can outlive the snapshot that built the menu, so a terminal is
+ * eligible only when the latest authoritative agent snapshot still says it is
+ * empty. App-owned tabs never contain agents and remain eligible.
+ */
+export function tabsEligibleAtBulkCloseCommit(
+  tabs: readonly CombinedTab[],
+  protectAgents: boolean,
+  presence: AgentPresenceSnapshot,
+): CombinedTab[] {
+  if (!protectAgents) return [...tabs];
+  return tabs.filter((tab) => tab.kind === "app"
+    || (tab.kind === "terminal" && terminalAgentPresence(tab.id, presence) === "absent"));
 }
 
 export function workspaceUiRecord(
