@@ -17,7 +17,7 @@ describe("TauriGitWorkspaceClient", () => {
     enablePerfProbe(async () => undefined);
     invokeMock.mockResolvedValueOnce({ operationId: "status", status: wireStatus() });
     const status = await new TauriGitWorkspaceClient().status(scope, root);
-    expect(status).toMatchObject({ generation: "18446744073709551615", totalEntryCount: "1", copyDetectionIncomplete: true, entries: [{ path: "LS1hIGZpbGUJeAo=", displayPath: "--a file\\tx\\n" }] });
+    expect(status).toMatchObject({ generation: "18446744073709551615", totalEntryCount: "1", copyDetectionIncomplete: true, entries: [{ path: "LS1hIGZpbGUJeAo=", displayPath: "--a file\\tx\\n", absolutePath: "/repo/--a file\tx\n" }] });
     expect(invokeMock).toHaveBeenCalledWith("git_request", { clientId: "client", command: expect.objectContaining({
       operation: "status", root: "/repo", rootToken: "root-token", connectionEpoch: "41", expectedServerIdentity: "server",
     }) });
@@ -143,6 +143,6 @@ function wireRepository() { return { repositoryId: "repo-id", worktreeRoot: "/re
 function wireStatus() {
   return {
     repository: wireRepository(), generation: "18446744073709551615", sourceGeneration: "source", authoritative: true, totalEntryCount: "1", copyDetectionIncomplete: true,
-    entries: [{ path: [...new TextEncoder().encode("--a file\tx\n")], displayPath: "--a file\\tx\\n", originalPath: [], displayOriginalPath: "", indexKind: "unspecified", worktreeKind: "modified", indexStatus: ".", worktreeStatus: "M", conflicted: false, conflictCode: "", untracked: false, ignored: false, submodule: false, submoduleState: "", symlink: false, binary: false, renameScore: "" }],
+    entries: [{ path: [...new TextEncoder().encode("--a file\tx\n")], displayPath: "--a file\\tx\\n", absolutePath: "/repo/--a file\tx\n", originalPath: [], displayOriginalPath: "", indexKind: "unspecified", worktreeKind: "modified", indexStatus: ".", worktreeStatus: "M", conflicted: false, conflictCode: "", untracked: false, ignored: false, submodule: false, submoduleState: "", symlink: false, binary: false, renameScore: "" }],
   };
 }

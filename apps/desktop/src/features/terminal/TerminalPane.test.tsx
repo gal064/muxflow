@@ -54,6 +54,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       return { kind: "applied", size };
     }
     onInput(): () => void { return () => undefined; }
+    onSelectionChange(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
     focus(): void { this.focusCalls += 1; }
     hasSelection(): boolean { return false; }

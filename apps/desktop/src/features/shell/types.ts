@@ -74,6 +74,8 @@ export interface ShellState {
   agentsSectionRatio: number;
   /** Draws a shape inside each state dot as well as coloring it. */
   agentStateGlyphs: boolean;
+  /** Hides per-agent activity lines from workspace rows. */
+  compactWorkspaces: boolean;
   /**
    * Makes terminal *content* readable to a screen reader. Off by default
    * because xterm's screen-reader mode costs a string allocation and an
@@ -81,6 +83,8 @@ export interface ShellState {
    * that Phase 12 deferred to Phase 11's settings surface.
    */
   terminalScreenReader: boolean;
+  /** Copies a completed, non-empty terminal selection to the system clipboard. */
+  copyOnSelect: boolean;
   /** Physical geometry plus the capture scale, used to preserve logical size across monitors. */
   windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
 }
@@ -114,7 +118,9 @@ export const defaultShellState: ShellState = {
   agentSort: "workspace",
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
+  compactWorkspaces: false,
   terminalScreenReader: false,
+  copyOnSelect: false,
 };
 
 export const defaultAppState: PersistedAppState = {
@@ -156,7 +162,9 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       agentSort: migratedAgentSort(shell?.agentSort),
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
+      compactWorkspaces: Boolean(shell?.compactWorkspaces),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
+      copyOnSelect: Boolean(shell?.copyOnSelect),
       ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
         ? { windowGeometry: shell.windowGeometry } : {}),
     },

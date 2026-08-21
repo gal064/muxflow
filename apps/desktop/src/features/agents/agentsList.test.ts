@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentRows, jumpTarget, needsAttention, nextSortMode, unreadCount, type AgentLocation } from "./agentsList";
+import { buildAgentRows, groupAgentRows, jumpTarget, needsAttention, nextSortMode, unreadCount, type AgentLocation } from "./agentsList";
 import { agent } from "./testFixtures";
 import type { AgentRecord } from "./types";
 
@@ -63,5 +63,22 @@ describe("agents section ordering", () => {
     const rows = buildAgentRows([orphan, working], locate, () => false, "workspace");
     expect(rows.map((row) => row.agent.id)).toEqual(["working", "orphan"]);
     expect(rows.every((row) => row.routable)).toBe(false);
+  });
+
+  it("groups by host, server, and workspace without changing display order", () => {
+    const first = agent({ id: "a", hostProfileId: "local", serverIdentity: "one", sessionId: "$1", sessionName: "api" });
+    const second = agent({ id: "b", hostProfileId: "remote", serverIdentity: "two", sessionId: "$1", sessionName: "api" });
+    const third = agent({ id: "c", hostProfileId: "local", serverIdentity: "one", sessionId: "$1", sessionName: "api" });
+    const rows = buildAgentRows([first, third, second], (record) => ({
+      workspaceOrder: record.hostProfileId === "local" ? 0 : 1,
+      workspaceName: "api",
+      hostLabel: record.hostProfileId === "local" ? "This Mac" : "build-box",
+    }), () => true, "workspace");
+    const groups = groupAgentRows(rows);
+    expect(groups.map(({ workspaceName, hostLabel }) => [workspaceName, hostLabel])).toEqual([
+      ["api", "This Mac"], ["api", "build-box"],
+    ]);
+    expect(groups.flatMap((group) => group.rows.map((row) => row.agent.id)))
+      .toEqual(rows.map((row) => row.agent.id));
   });
 });

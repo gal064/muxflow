@@ -1,7 +1,8 @@
 import type { Pane, Session, TmuxSnapshot, Window } from "../../app/types";
 import { compareAgents, displayState } from "../agents/selectors";
 import { needsAttention } from "../agents/agentsList";
-import type { AgentAttentionRollup, AgentDisplayState, AgentRecord } from "../agents/types";
+import { agentSessionLabel } from "../agents/agentLabels";
+import type { AgentAdapterDescriptor, AgentAttentionRollup, AgentDisplayState, AgentRecord } from "../agents/types";
 import { orderedSessions } from "../shell/model";
 
 /**
@@ -53,6 +54,7 @@ export interface WorkspaceRowInputs {
   snapshot: TmuxSnapshot;
   activeSessionId?: string;
   agents: readonly AgentRecord[];
+  adapters?: readonly AgentAdapterDescriptor[];
   attentionByWorkspace: ReadonlyMap<string, AgentAttentionRollup>;
   /** Branch for the active workspace only; nothing else has a git snapshot. */
   activeBranch?: string;
@@ -68,7 +70,8 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
     unreadBySession.set(agent.sessionId, (unreadBySession.get(agent.sessionId) ?? 0) + 1);
   }
   return orderedSessions(inputs.snapshot.sessions).map((session) => {
-    const attention = inputs.attentionByWorkspace.get(session.id)?.state ?? "none";
+    const rollup = inputs.attentionByWorkspace.get(session.id);
+    const attention = rollup?.state ?? "none";
     const here = loudest.get(session.id);
     const shown = here?.top ?? [];
     const active = session.id === inputs.activeSessionId;
@@ -77,8 +80,8 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
       active,
       attention,
       unread: unreadBySession.get(session.id) ?? 0,
-      working: attention === "working",
-      agents: shown.map((agent) => ({ id: agent.id, name: agent.displayName, state: displayState(agent) })),
+      working: (rollup?.working ?? 0) > 0,
+      agents: shown.map((agent) => ({ id: agent.id, name: agentSessionLabel(agent, inputs.adapters ?? []), state: displayState(agent) })),
       agentOverflow: (here?.total ?? 0) - shown.length,
       branch: active ? inputs.activeBranch : undefined,
       path: abbreviateHome(sessionPath(inputs.snapshot, session.id), inputs.home),

@@ -26,7 +26,9 @@ export type CommandTarget =
   | { kind: "session"; id: string; scope: HostScopeToken }
   | { kind: "terminalTab"; id: string; scope: HostScopeToken }
   | { kind: "appTab"; id: string; scope: HostScopeToken }
-  | { kind: "pane"; id: string; scope: HostScopeToken };
+  | { kind: "pane"; id: string; scope: HostScopeToken }
+  /** The active pane/tab close surface captured by an open menu. */
+  | { kind: "focusedSurface"; paneId: string; scope: HostScopeToken };
 
 /** ⌘1–9 workspaces and ⌃1–9 tabs, the cmux keymap's positional selectors. */
 export type IndexDigit = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
@@ -308,7 +310,13 @@ export function keyFromCode(code: string): string | undefined {
 export function shortcutFromEvent(event: KeyboardEvent): string {
   const parts = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Meta"]
     .filter((part): part is string => Boolean(part));
-  const rewritten = event.shiftKey || event.altKey ? keyFromCode(event.code) : undefined;
+  // WebKit can report a control character in `key` for Control-number while
+  // xterm's hidden textarea has focus. Positional selectors are physical digit
+  // keys, so resolve that row from `code` under Ctrl/Meta too. Other Control
+  // keys continue through `event.key` and are not intercepted unless a command
+  // actually binds them.
+  const digitSelector = (event.ctrlKey || event.metaKey) && /^Digit[0-9]$/.test(event.code);
+  const rewritten = event.shiftKey || event.altKey || digitSelector ? keyFromCode(event.code) : undefined;
   const raw = rewritten ?? event.key;
   const key = raw.length === 1 ? raw.toUpperCase() : raw;
   if (!["Control", "Alt", "Shift", "Meta"].includes(key)) parts.push(key);

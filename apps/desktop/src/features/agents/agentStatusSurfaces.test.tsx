@@ -25,7 +25,7 @@ const rowsFor = (agents: readonly AgentRecord[]) => buildAgentRows(
 );
 
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
-  adapters={[]} agents={[]} agentSort="status" agentsRatio={0.4} canMutate commandScope={commandScope} hostLabel="remote-linux"
+  adapters={[]} agents={[]} agentSort="status" agentsRatio={0.4} canMutate commandScope={commandScope} compactWorkspaces={false} hostLabel="remote-linux"
   latencyMs={41} maxWidth={426} onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop}
   onRenameAgent={noop} onResumeAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
   onSelectWorkspace={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop}
@@ -149,7 +149,8 @@ describe("one derivation, three surfaces", () => {
     const surfaces = [
       sidebar({ agents: rows, stateGlyphs: true }),
       renderToStaticMarkup(<TabStrip
-        activeKey="terminal:@1" canMutate canSplit commandScope={commandScope} onClose={noop} onCloseOthers={noop}
+        activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate canSplit commandScope={commandScope} onClose={noop} onCloseCurrent={noop} onCloseOthers={noop}
+        onCloseNonAgent={noop}
         onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
         onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} stateGlyphs
         tabs={combineWorkspaceTabs(

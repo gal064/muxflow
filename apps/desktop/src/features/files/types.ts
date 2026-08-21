@@ -34,6 +34,19 @@ export interface ActiveRoot {
   revision: string;
 }
 
+export interface TerminalFileResolution {
+  path: string;
+  root: ActiveRoot;
+  /** Decimal topology generation from the host's final pane revalidation. */
+  topologyGeneration: string;
+}
+
+export interface TerminalFilePaneRoute {
+  sessionId: string;
+  windowId: string;
+  cwd: string;
+}
+
 export type FileKind = "file" | "directory" | "symlink";
 
 export interface FileEntry {

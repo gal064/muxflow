@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { afterNextPaint, closePanePaintSpans, recordPerfCounter, recordPerfMilestone } from "../../perf/probe";
 import { recordIncident } from "../../diagnostics/incidents";
 import { createPaintTicket } from "../../perf/paintTicket";
-import { keyboardEventIsComposing } from "../../commands/registry";
+import { keyboardEventIsComposing, type Platform } from "../../commands/registry";
 import type { Pane } from "../../app/types";
 import type { TerminalEventHub } from "./TerminalEventHub";
 import {
@@ -26,7 +26,14 @@ import { REVEAL_RETRY_DELAY_MS, revealFailureAction } from "./revealRetry";
 import { TerminalTransferSurface, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
 import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
+import { writeNativeTerminalClipboard } from "./terminalTransferApi";
+import {
+  copyCompletedTerminalSelection,
+  installTerminalCopyOnSelect,
+  translateTerminalKey,
+} from "./terminalInputPolicy";
 export { paneRecoveryPlan } from "./PaneRecovery";
+export { copyCompletedTerminalSelection, translateTerminalKey } from "./terminalInputPolicy";
 
 // A pane may remount while its prior renderer is still draining. Serializing
 // visibility ownership keeps a late hide from overtaking the new reveal.
@@ -193,7 +200,6 @@ export function interceptTerminalPlainTextPaste(
   return true;
 }
 
-
 export interface TerminalPaneController {
   focus(): void;
   copy(): Promise<boolean>;
@@ -233,6 +239,9 @@ interface Props {
   onPaintSample?: (paneId: string, ms: number) => void;
   onController: (paneId: string, controller: TerminalPaneController | undefined) => void;
   onDiagnostic?: (message: string) => void;
+  onOpenFilePath?: (paneId: string, path: string) => void;
+  copyOnSelect?: boolean;
+  platform?: Platform;
   transferClient?: TerminalTransferClient;
   transferRegistry?: TerminalTransferRegistry;
   transferScope?: TerminalTransferConnectionScope;
@@ -250,6 +259,9 @@ export function TerminalPane({
   onPaintSample,
   onController,
   onDiagnostic,
+  onOpenFilePath,
+  copyOnSelect = false,
+  platform = "linux",
   transferClient,
   transferRegistry,
   transferScope,
@@ -279,8 +291,11 @@ export function TerminalPane({
   const queuedBytesRef = useRef(0);
   const controllerRef = useRef(onController);
   const diagnosticRef = useRef(onDiagnostic);
+  const openFilePathRef = useRef(onOpenFilePath);
   const clientIdRef = useRef(clientId);
   const appFocusedRef = useRef(appFocused);
+  const copyOnSelectRef = useRef(copyOnSelect);
+  const platformRef = useRef(platform);
   const rendererEpochRef = useRef<number | undefined>(undefined);
   // What the box measured when tmux's grid was last applied to it. The anchor
   // `refitPaneGridToBox` compares against; written only where tmux's grid is
@@ -323,7 +338,10 @@ export function TerminalPane({
   paintSampleRef.current = onPaintSample;
   controllerRef.current = onController;
   diagnosticRef.current = onDiagnostic;
+  openFilePathRef.current = onOpenFilePath;
   clientIdRef.current = clientId;
+  copyOnSelectRef.current = copyOnSelect;
+  platformRef.current = platform;
   const paneTransferScope: TerminalTransferScope | undefined = transferScope ? {
     ...transferScope,
     paneId: pane.id,
@@ -385,6 +403,11 @@ export function TerminalPane({
         if (window.confirm(`Open this external link?\n\n${url}`)) {
           window.open(url, "_blank", "noopener,noreferrer");
         }
+      },
+      onOpenFilePath: (path) => openFilePathRef.current?.(pane.id, path),
+      onClipboardWrite: writeNativeTerminalClipboard,
+      onClipboardWriteError: (error) => {
+        diagnosticRef.current?.(`Could not copy terminal text to the system clipboard: ${String(error)}`);
       },
       // Rejecting is how this tells the renderer the request did not go out,
       // which reopens its latch so the pane can ask again.
@@ -473,7 +496,7 @@ export function TerminalPane({
       });
     };
     terminalContainer.addEventListener("paste", interceptPaste, true);
-    const noteKeyActivity = (event: KeyboardEvent) => {
+    const handleTerminalKeyDown = (event: KeyboardEvent) => {
       // A bare modifier must not vouch for input: wheel scrolling a TUI also
       // produces terminal input (the wheel is translated into sequences for
       // the program), and a Shift or Cmd pressed around a scroll opened the
@@ -481,12 +504,30 @@ export function TerminalPane({
       // five-second "stall" nobody felt when the program had nothing to
       // redraw. Only a key that can become bytes counts as typing.
       if (event.key === "Shift" || event.key === "Meta" || event.key === "Alt" || event.key === "Control") return;
-      // Capture phase and observation only: this must see the key even when
-      // something below stops the event, and must never alter what xterm does
-      // with it.
+      // Capture phase sees both physical activity and the two app-owned
+      // translations before xterm collapses modifiers. Every key the policy
+      // does not translate continues to xterm untouched.
       keyActivityRef.current?.(pane.id);
+      const translated = translateTerminalKey(event, {
+        alternateScreen: renderer.isAlternateScreenActive(),
+        currentCommand: paneRef.current.currentCommand,
+        platform: platformRef.current,
+      });
+      if (translated === undefined) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      inputRef.current(pane.id, { kind: "text", data: translated });
     };
-    terminalContainer.addEventListener("keydown", noteKeyActivity, true);
+    terminalContainer.addEventListener("keydown", handleTerminalKeyDown, true);
+    const disposeCopyOnSelect = installTerminalCopyOnSelect({
+      container: terminalContainer,
+      renderer,
+      enabled: () => copyOnSelectRef.current,
+      write: writeNativeTerminalClipboard,
+      onError: (error) => {
+        diagnosticRef.current?.(`Could not copy the terminal selection: ${String(error)}`);
+      },
+    });
     // What this terminal is known to be showing, while that is exactly one
     // serialized screen with nothing written after it — the mount-time cache
     // restore, or a handshake restore that arrived without a tail. Any byte
@@ -807,7 +848,7 @@ export function TerminalPane({
       focus: () => renderer.focus(),
       copy: async () => {
         if (!renderer.hasSelection()) return false;
-        await navigator.clipboard.writeText(renderer.getSelection());
+        await writeNativeTerminalClipboard(renderer.getSelection());
         return true;
       },
       paste: async () => {
@@ -838,7 +879,8 @@ export function TerminalPane({
       unsubscribeViewport();
       unsubscribeInput();
       terminalContainer.removeEventListener("paste", interceptPaste, true);
-      terminalContainer.removeEventListener("keydown", noteKeyActivity, true);
+      terminalContainer.removeEventListener("keydown", handleTerminalKeyDown, true);
+      disposeCopyOnSelect();
       controllerRef.current(pane.id, undefined);
       const currentClientId = clientIdRef.current;
       const handoff = (async () => {

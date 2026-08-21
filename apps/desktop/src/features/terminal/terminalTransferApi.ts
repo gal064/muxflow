@@ -66,6 +66,17 @@ interface UploadOptions {
 interface WireCancelDisposition { disposition: string; phase: string }
 
 const PREFLIGHT_DEADLINE_MS = 30_000;
+let nativeClipboardWriteTail: Promise<unknown> = Promise.resolve();
+
+/** Writes text through one ordered native queue, independent of WebView gesture timing. */
+export async function writeNativeTerminalClipboard(text: string): Promise<void> {
+  if (!text) throw new Error("Refusing to replace the system clipboard with empty text.");
+  const write = nativeClipboardWriteTail
+    .catch(() => undefined)
+    .then(() => invoke("write_native_terminal_clipboard", { text }));
+  nativeClipboardWriteTail = write;
+  await write;
+}
 
 export class TauriTerminalTransferClient implements TerminalTransferClient {
   async readNativeClipboard(): Promise<NativeTerminalClipboard | undefined> {

@@ -82,6 +82,7 @@ function FocusCallbackHarness({ agentClient }: { agentClient: AgentClient }) {
   useAgentRuntime({
     client: agentClient,
     scope: routeScope,
+    topologyWindowIds: ["@1"],
     focus: {
       hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@1",
       paneId: focusedPaneId, appFocused, terminalVisible: true, automaticSeen: guardedActivation.automaticSeen,

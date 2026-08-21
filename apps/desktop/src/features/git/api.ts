@@ -20,7 +20,7 @@ import type {
 
 interface WireRepository { repositoryId: string; worktreeRoot: string; initial: boolean; detachedHead: boolean; headName: string; headOid: string }
 interface WireStatusEntry {
-  path: number[]; displayPath: string; originalPath: number[]; displayOriginalPath: string;
+  path: number[]; displayPath: string; absolutePath?: string; originalPath: number[]; displayOriginalPath: string;
   indexKind: string; worktreeKind: string; indexStatus: string; worktreeStatus: string;
   conflicted: boolean; conflictCode: string; untracked: boolean; ignored: boolean; submodule: boolean;
   submoduleState: string; symlink: boolean; binary: boolean; renameScore: string;
@@ -305,6 +305,7 @@ function mapEntry(value: WireStatusEntry): GitStatusEntry {
   requireBytes(value.originalPath, "Git original path");
   return {
     path: toBase64(value.path), displayPath: value.displayPath, ...(value.originalPath.length ? { originalPath: toBase64(value.originalPath) } : {}),
+    ...(value.absolutePath ? { absolutePath: value.absolutePath } : {}),
     ...(value.displayOriginalPath ? { displayOriginalPath: value.displayOriginalPath } : {}),
     indexKind: mapChange(value.indexKind), worktreeKind: mapChange(value.worktreeKind), indexStatus: value.indexStatus,
     worktreeStatus: value.worktreeStatus, conflicted: Boolean(value.conflicted), ...(value.conflictCode ? { conflictCode: value.conflictCode } : {}),

@@ -8,6 +8,7 @@ import { IMAGE_PREVIEW_LIMIT_BYTES, type ActiveRoot, type BinaryFile, type FileW
 import { DelayedLoading } from "../../ui/DelayedLoading";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { SaveState } from "../files/autosave";
+import { useVisibleSaveState } from "../files/saveStatus";
 import type { AppOwnedTab } from "./types";
 import { useEditorPaint } from "../../perf/surfacePaint";
 
@@ -154,11 +155,12 @@ function EditorToolbar({ download, mode, onViewMode, saveState, tab }: {
   saveState: SaveState | undefined;
   tab: AppOwnedTab;
 }) {
+  const visibleSaveState = useVisibleSaveState(saveState);
   return <header className="editor-toolbar">
     <code title={tab.resource}>{tab.resource}</code>
-    {saveState
-      ? <span className={`save-state ${saveState}`} role="status">{saveState === "saving" ? "Saving…" : saveState === "dirty" ? "Unsaved" : saveState === "error" ? "Save failed" : "Saved"}</span>
-      : <span className="save-state" aria-hidden="true" />}
+    <span className={`save-state${visibleSaveState ? ` ${visibleSaveState}` : ""}`} role="status">
+      {visibleSaveState === "saving" ? "Saving…" : visibleSaveState === "dirty" ? "Unsaved" : visibleSaveState === "error" ? "Save failed" : ""}
+    </span>
     {tab.kind === "markdown" && <div aria-label="Markdown view" className="markdown-modes" role="group">
       {(["source", "preview", "split"] as const).map((item) => <button aria-pressed={mode === item} key={item} onClick={() => onViewMode(item)} type="button">{item}</button>)}
     </div>}

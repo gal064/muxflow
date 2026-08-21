@@ -61,8 +61,12 @@ interface Fixture {
   fresh?: boolean;
   /** Holds every open until released, so a late answer can be aimed at a dead surface. */
   holdOpens?: boolean;
+  /** Holds every write until released, so a slow save can cross the visible threshold. */
+  holdWrites?: boolean;
   /** Holds the watch bootstrap, so the read can be made to land first. */
   holdWatch?: boolean;
+  /** Rejects writes with this detail. */
+  writeFailure?: string;
 }
 
 function surfaceClient(fixture: Fixture) {
@@ -72,6 +76,7 @@ function surfaceClient(fixture: Fixture) {
   const signals: AbortSignal[] = [];
   const releases: number[] = [];
   const settleOpen: Array<() => void> = [];
+  const settleWrite: Array<() => void> = [];
   let releaseWatch: (() => void) | undefined;
   let listener: ((event: WorkspaceEvent) => void) | undefined;
   const client = {
@@ -91,6 +96,10 @@ function surfaceClient(fixture: Fixture) {
     }),
     writeText: vi.fn(async (_scope: FileWorkspaceScope, _root: ActiveRoot, request: { operationId: string }) => {
       writes.push(request.operationId);
+      if (fixture.holdWrites) {
+        await new Promise<void>((resolve) => { settleWrite.push(resolve); });
+      }
+      if (fixture.writeFailure) throw new Error(fixture.writeFailure);
       return { path: "/repo/note.txt", generation: "saved", operationId: request.operationId, sizeBytes: "5" };
     }),
     acquireDirectoryWatch: vi.fn(async (): Promise<DirectoryWatchLease> => {
@@ -114,6 +123,7 @@ function surfaceClient(fixture: Fixture) {
     client, opens, writes, signals, releases,
     publish: (event: WorkspaceEvent) => listener?.(event),
     settleOpens: () => { settleOpen.splice(0).forEach((resolve) => resolve()); },
+    settleWrites: () => { settleWrite.splice(0).forEach((resolve) => resolve()); },
     settleWatch: () => { releaseWatch?.(); releaseWatch = undefined; },
   };
 }
@@ -403,6 +413,67 @@ describe("AppTabSurface", () => {
       await Promise.resolve();
     });
     expect(surface.opens).toEqual(["g1"]);
+    await act(async () => { surface.renderer.unmount(); });
+    vi.useRealTimers();
+  });
+
+  it("keeps one live save-status region mounted while its calm label changes", async () => {
+    vi.useFakeTimers();
+    const surface = await mount({ bootstrap: listing([entry("/repo/note.txt", "g1")]) });
+    const status = () => surface.renderer.root.findAllByProps({ role: "status" });
+    expect(status()).toHaveLength(1);
+    expect(status()[0].children, "the idle editor announced a saved confirmation").toEqual([]);
+
+    const editor = surface.renderer.root.findByType(EditorStub);
+    await act(async () => { editor.props.onChange("hello there"); });
+    expect(status()).toHaveLength(1);
+    expect(status()[0].children).toEqual(["Unsaved"]);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(status()).toHaveLength(1);
+    expect(status()[0].children, "successful autosave left a noisy confirmation").toEqual([]);
+    await act(async () => { surface.renderer.unmount(); });
+    vi.useRealTimers();
+  });
+
+  it("shows saving only after a write stays slow for 100ms", async () => {
+    vi.useFakeTimers();
+    const surface = await mount({
+      bootstrap: listing([entry("/repo/note.txt", "g1")]),
+      holdWrites: true,
+    });
+    const status = () => surface.renderer.root.findByProps({ role: "status" }).children;
+    const editor = surface.renderer.root.findByType(EditorStub);
+    await act(async () => { editor.props.onChange("slow save"); });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(status()).toEqual(["Unsaved"]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(99); });
+    expect(status()).toEqual(["Unsaved"]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(status()).toEqual(["Saving…"]);
+
+    await act(async () => { surface.settleWrites(); await Promise.resolve(); });
+    expect(status()).toEqual([]);
+    await act(async () => { surface.renderer.unmount(); });
+    vi.useRealTimers();
+  });
+
+  it("shows a rejected save immediately in the live status and actionable alert", async () => {
+    vi.useFakeTimers();
+    const surface = await mount({
+      bootstrap: listing([entry("/repo/note.txt", "g1")]),
+      writeFailure: "permission denied",
+    });
+    const editor = surface.renderer.root.findByType(EditorStub);
+    await act(async () => { editor.props.onChange("cannot save"); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+
+    expect(surface.renderer.root.findByProps({ role: "status" }).children).toEqual(["Save failed"]);
+    expect(surface.renderer.root.findAllByProps({ role: "alert" })).toHaveLength(1);
+    const rendered = JSON.stringify(surface.renderer.toJSON());
+    expect(rendered).toContain("permission denied");
+    expect(rendered).toContain("Details");
     await act(async () => { surface.renderer.unmount(); });
     vi.useRealTimers();
   });

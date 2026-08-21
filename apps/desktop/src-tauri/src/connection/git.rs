@@ -213,7 +213,8 @@ fn status_entry_json(value: &v1::GitStatusEntry) -> Value {
         "worktreeMode": value.worktree_mode, "headOid": value.head_oid, "indexOid": value.index_oid,
         "untracked": value.untracked, "ignored": value.ignored, "conflicted": value.conflicted,
         "conflictCode": value.conflict_code, "submodule": value.submodule, "submoduleState": value.submodule_state,
-        "symlink": value.symlink, "binary": value.binary, "renameScore": value.rename_score })
+        "symlink": value.symlink, "binary": value.binary, "renameScore": value.rename_score,
+        "absolutePath": value.absolute_path })
 }
 
 fn diff_json(value: &v1::GitDiff) -> Value {

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { TauriTerminalTransferClient } from "./terminalTransferApi";
+import { TauriTerminalTransferClient, writeNativeTerminalClipboard } from "./terminalTransferApi";
 import type { TerminalTransferScope } from "./terminalTransfers";
 
 const channels = vi.hoisted(() => [] as Array<{ onmessage?: (value: unknown) => void }>);
@@ -22,6 +22,33 @@ const event = (value: Record<string, unknown>) => ({
 
 describe("TauriTerminalTransferClient", () => {
   beforeEach(() => { channels.length = 0; vi.mocked(invoke).mockReset(); });
+
+  it("writes clipboard text through the native write-only command", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await expect(writeNativeTerminalClipboard("copied from tmux")).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("write_native_terminal_clipboard", { text: "copied from tmux" });
+    await expect(writeNativeTerminalClipboard("")).rejects.toThrow("empty text");
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes clipboard writes so an older worker cannot finish last", async () => {
+    let finishFirst: (() => void) | undefined;
+    vi.mocked(invoke)
+      .mockImplementationOnce(() => new Promise<void>((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValueOnce(undefined);
+
+    const first = writeNativeTerminalClipboard("older selection");
+    const second = writeNativeTerminalClipboard("newest selection");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("write_native_terminal_clipboard", { text: "older selection" });
+
+    finishFirst?.();
+    await first;
+    await second;
+    expect(invoke).toHaveBeenNthCalledWith(2, "write_native_terminal_clipboard", { text: "newest selection" });
+  });
 
   it("uses the tokenized preflight command and resolves only its terminal scoped event", async () => {
     vi.mocked(invoke).mockResolvedValue("preflight-1");

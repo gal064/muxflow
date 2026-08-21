@@ -252,6 +252,7 @@ pub fn run() {
             connection::files::upload_manager::cancel_terminal_upload,
             connection::files::upload_manager::stage_clipboard_png,
             connection::files::native_clipboard::read_native_terminal_clipboard,
+            connection::files::native_clipboard::write_native_terminal_clipboard,
             external_links::open_external_link,
             perf_log::sink::perf_log_enabled,
             perf_log::sink::append_perf_log,

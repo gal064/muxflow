@@ -23,11 +23,15 @@ import {
   shouldSurfaceAuthoritativeTerminal,
   shellNavigationMode,
   tabsToCloseOthers,
+  tabsToCloseNonAgent,
   tabsToCloseRight,
+  tabsEligibleAtBulkCloseCommit,
   type CombinedTab,
 } from "./model";
 import { defaultAppState, type PersistedAppState } from "./types";
 import type { GitStatusEntry, GitStatusSnapshot } from "../git/types";
+import { deriveAgentRollups } from "../agents/selectors";
+import { agent } from "../agents/testFixtures";
 
 const sessions: Session[] = [
   { id: "$2", name: "two", windowCount: 1, attachedClients: 0, order: 2 },
@@ -137,6 +141,61 @@ describe("application shell model", () => {
     // every tab because the exclusion matched none of them.
     expect(tabsToCloseOthers(strip, "terminal:@9")).toEqual([]);
     expect(tabsToCloseRight(strip, "terminal:@9")).toEqual([]);
+  });
+
+  it("closes all and only tabs without agents, protecting every agent state", () => {
+    const windows: TmuxWindow[] = Array.from({ length: 6 }, (_, index) => ({
+      id: `@${index + 1}`, sessionId: "$1", index: index + 1, name: `tab-${index + 1}`,
+      active: index === 0, layout: "",
+    }));
+    const rollups = deriveAgentRollups([
+      agent({ id: "working", windowId: "@1", lifecycle: "working" }),
+      agent({ id: "blocked", windowId: "@2", lifecycle: "blocked" }),
+      agent({ id: "idle", windowId: "@3", lifecycle: "idle" }),
+      agent({ id: "unknown", windowId: "@4", lifecycle: "unknown" }),
+      agent({ id: "done", windowId: "@5", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 2, seenGeneration: 1 }),
+    ]);
+    const current = {
+      hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, topologyGeneration: 9,
+    };
+    const accepted = { ...current, coveredWindowIds: new Set(windows.map((window) => window.id)) };
+    const strip = combineWorkspaceTabs(
+      windows,
+      appTabsForWorkspace(tabs, "local", "server-a", sessions[1]),
+      rollups.byWindow,
+      { key: "pending", sessionId: "$1", title: "Creating" },
+      { accepted, current },
+    );
+
+    expect(strip.filter((tab) => tab.kind === "terminal").map((tab) => [tab.key, tab.agentPresence]))
+      .toEqual([
+        ["terminal:@1", "present"], ["terminal:@2", "present"], ["terminal:@3", "present"],
+        ["terminal:@4", "present"], ["terminal:@5", "present"], ["terminal:@6", "absent"],
+      ]);
+    expect(tabsToCloseNonAgent(strip).map((tab) => tab.key)).toEqual(["terminal:@6", "app:a", "app:b"]);
+    expect(tabsToCloseNonAgent(strip.filter((tab) => tab.kind === "terminal" && tab.agentPresence === "present"))).toEqual([]);
+
+    const unknown = combineWorkspaceTabs(windows, [], new Map(), undefined, {
+      accepted,
+      current: { ...current, topologyGeneration: 10 },
+    });
+    expect(unknown.every((tab) => tab.kind !== "terminal" || tab.agentPresence === "unknown")).toBe(true);
+    expect(tabsToCloseNonAgent(unknown)).toEqual([]);
+
+    const captured = tabsToCloseNonAgent(strip);
+    const gainedAgent = deriveAgentRollups([agent({ id: "late", windowId: "@6", lifecycle: "working" })]);
+    expect(tabsEligibleAtBulkCloseCommit(captured, true, {
+      accepted: { ...accepted, coveredWindowIds: new Set(["@6"]) }, current, byWindow: gainedAgent.byWindow,
+    })
+      .map((tab) => tab.key)).toEqual(["app:a", "app:b"]);
+    expect(tabsEligibleAtBulkCloseCommit(captured, true, {
+      accepted, current: { ...current, topologyGeneration: 10 }, byWindow: new Map(),
+    })
+      .map((tab) => tab.key)).toEqual(["app:a", "app:b"]);
+    expect(tabsEligibleAtBulkCloseCommit(captured, false, {
+      byWindow: new Map(),
+    }))
+      .toEqual(captured);
   });
 
   it("prunes app state only when its session is definitively absent from the same server", () => {

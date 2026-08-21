@@ -137,6 +137,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
       return { kind: "applied", size };
     }
     onInput(): () => void { return () => undefined; }
+    onSelectionChange(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
     focus(): void {}
     blur(): void {}

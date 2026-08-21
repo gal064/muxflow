@@ -23,15 +23,20 @@ function clientFor(snapshot: AgentSnapshot): AgentClient & { markSeen: ReturnTyp
   };
 }
 
-function Harness({ client, connected = true, focused = true, automaticSeen = true, connectionEpoch = 1, topologyGeneration = 9, effects, onNotificationInstrumentation, onSoundInstrumentation }: { client: AgentClient; connected?: boolean; focused?: boolean; automaticSeen?: boolean; connectionEpoch?: number; topologyGeneration?: number; effects?: AgentRuntimeOptions["effects"]; onNotificationInstrumentation?: AgentRuntimeOptions["onNotificationInstrumentation"]; onSoundInstrumentation?: AgentRuntimeOptions["onSoundInstrumentation"] }) {
+function Harness({ client, connected = true, focused = true, automaticSeen = true, connectionEpoch = 1, topologyGeneration = 9, topologyWindowIds = ["@1"], effects, onNotificationInstrumentation, onSoundInstrumentation }: { client: AgentClient; connected?: boolean; focused?: boolean; automaticSeen?: boolean; connectionEpoch?: number; topologyGeneration?: number; topologyWindowIds?: string[]; effects?: AgentRuntimeOptions["effects"]; onNotificationInstrumentation?: AgentRuntimeOptions["onNotificationInstrumentation"]; onSoundInstrumentation?: AgentRuntimeOptions["onSoundInstrumentation"] }) {
   const runtime = useAgentRuntime({
     client, scope: connected ? { ...scope, connectionEpoch, topologyGeneration } : undefined,
+    topologyWindowIds,
     focus: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: focused, terminalVisible: true, automaticSeen },
     soundPreferences: defaultAgentSoundPreferences,
     onStatus: vi.fn(),
     effects, onNotificationInstrumentation, onSoundInstrumentation,
   });
-  return <output data-names={runtime.agents.map((record) => record.displayName).join(",")}>{runtime.agents.map((record) => `${record.id}:${displayState(record)}`).join(",")}</output>;
+  return <output
+    data-names={runtime.agents.map((record) => record.displayName).join(",")}
+    data-topology-generation={runtime.topologyAuthority?.topologyGeneration}
+    data-covered-windows={[...(runtime.topologyAuthority?.coveredWindowIds ?? [])].join(",")}
+  >{runtime.agents.map((record) => `${record.id}:${displayState(record)}`).join(",")}</output>;
 }
 
 describe("useAgentRuntime focus semantics", () => {
@@ -104,6 +109,30 @@ describe("useAgentRuntime focus semantics", () => {
     expect(client.snapshot).toHaveBeenCalledTimes(2);
     expect(client.snapshot).toHaveBeenLastCalledWith({ ...scope, connectionEpoch: 2 });
     await act(async () => renderer!.unmount());
+  });
+
+  it("does not claim a new topology is covered until its refresh snapshot is accepted", async () => {
+    const first: AgentSnapshot = {
+      hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1,
+      revision: agentGeneration(9), eventSequence: agentGeneration(9), acceptedGeneration: agentGeneration(9),
+      notificationWatermark: agentGeneration(9), authoritative: true, adapters: [], agents: [],
+    };
+    let resolveRefresh!: (snapshot: AgentSnapshot) => void;
+    const refresh = new Promise<AgentSnapshot>((resolve) => { resolveRefresh = resolve; });
+    const client = clientFor(first);
+    vi.mocked(client.snapshot).mockResolvedValueOnce(first).mockImplementationOnce(() => refresh);
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness client={client} focused={false} topologyGeneration={9} />); });
+    expect(renderer.root.findByType("output").props["data-topology-generation"]).toBe(9);
+
+    await act(async () => renderer.update(<Harness
+      client={client} focused={false} topologyGeneration={10} topologyWindowIds={["@1", "@2"]}
+    />));
+    expect(renderer.root.findByType("output").props["data-topology-generation"]).toBe(9);
+    await act(async () => resolveRefresh(first));
+    expect(renderer.root.findByType("output").props["data-topology-generation"]).toBe(10);
+    expect(renderer.root.findByType("output").props["data-covered-windows"]).toBe("@1,@2");
+    await act(async () => renderer.unmount());
   });
 
   it("keeps a live event that arrives before an older reconnect snapshot response", async () => {
