@@ -3,6 +3,7 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TerminalTransferClient, TerminalTransferProgress, TerminalTransferScope, UploadCollisionPolicy, UploadPreflight, VerifiedTerminalUpload } from "./terminalTransfers";
 import { TerminalTransferSurface, formatBytes, pointIsInside, progressPercent, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
+import { INTERNAL_PATH_DRAG_TYPE } from "./internalPathDrag";
 
 const nativeDrag = vi.hoisted(() => ({ handler: undefined as ((event: { payload: Record<string, unknown> }) => void) | undefined }));
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -247,6 +248,37 @@ describe("TerminalTransferSurface", () => {
     expect(transferClient.stageClipboardPng).not.toHaveBeenCalled();
     expect(vi.mocked(transferClient.start).mock.calls.map((call) => call[1])).toEqual(["/tmp/first.png", "/tmp/second.txt"]);
     expect(view.onPaste).toHaveBeenCalledWith("'/remote/first.png' '/remote/second.txt'");
+  });
+
+  it("routes a same-host internal row drop directly through terminal input", async () => {
+    const transferClient = client();
+    const view = await mounted("ssh", transferClient);
+    const payload = JSON.stringify({ version: 1, serverIdentity: "server", path: "/repo/a b;$(nope)" });
+    await act(async () => {
+      view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onDrop({
+        preventDefault: vi.fn(),
+        dataTransfer: { files: [], types: [INTERNAL_PATH_DRAG_TYPE], getData: (type: string) => type === INTERNAL_PATH_DRAG_TYPE ? payload : "" },
+      });
+    });
+    expect(view.onPaste).toHaveBeenCalledWith("'/repo/a b;$(nope)'");
+    expect(transferClient.inspectLocalPaths).not.toHaveBeenCalled();
+    expect(transferClient.preflight).not.toHaveBeenCalled();
+    expect(transferClient.start).not.toHaveBeenCalled();
+  });
+
+  it("rejects a cross-host internal row drop without partial terminal input", async () => {
+    const transferClient = client();
+    const view = await mounted("ssh", transferClient);
+    const payload = JSON.stringify({ version: 1, serverIdentity: "other-server", path: "/repo/file" });
+    await act(async () => {
+      view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onDrop({
+        preventDefault: vi.fn(),
+        dataTransfer: { files: [], types: [INTERNAL_PATH_DRAG_TYPE], getData: () => payload },
+      });
+    });
+    expect(view.onPaste).not.toHaveBeenCalled();
+    expect(transferClient.preflight).not.toHaveBeenCalled();
+    expect(alertText(view.renderer.root.findByProps({ role: "alert" }))).toContain("same host");
   });
 
   it("processes every native Tauri drop path in original order without MIME reinterpretation", async () => {

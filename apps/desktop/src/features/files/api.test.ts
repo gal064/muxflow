@@ -137,6 +137,30 @@ describe("TauriFileWorkspaceClient", () => {
     expect(invokeMock).toHaveBeenCalledWith("file_request", { clientId: "client", command: expect.objectContaining({ operation: "resolveActiveRoot", paneId: "%1", expectedServerIdentity: "server", expectedTopologyGeneration: "7" }) });
   });
 
+  it.each([
+    ["local", "server-local"],
+    ["ssh", "server-ssh"],
+  ])("routes a %s terminal path through its pane and immutable server identity", async (hostProfileId, serverIdentity) => {
+    const targetScope = { ...scope, hostProfileId, serverIdentity };
+    invokeMock.mockResolvedValueOnce({
+      operationId: "resolve-path",
+      activeRoot: { paneId: "%1", root: "/outside", rootToken: "outside-token", gitWorktree: false, serverIdentity, topologyGeneration: "7", rootGeneration: "8" },
+      metadata: { path: "/outside/a.ts" },
+    });
+    await expect(new TauriFileWorkspaceClient().resolveTerminalFile(targetScope, "../outside/a.ts", {
+      sessionId: "$1", windowId: "@1", cwd: "/repo",
+    })).resolves.toEqual({
+      path: "/outside/a.ts",
+      root: { token: "outside-token", paneId: "%1", cwd: "/outside", path: "/outside", gitWorktree: false, revision: "8" },
+      topologyGeneration: "7",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("file_request", { clientId: "client", command: expect.objectContaining({
+      operation: "resolveTerminalFile", paneId: "%1", path: "../outside/a.ts",
+      expectedServerIdentity: serverIdentity, expectedTopologyGeneration: "7",
+      expectedSessionId: "$1", expectedWindowId: "@1", expectedCwd: "/repo",
+    }) });
+  });
+
   it("counts a malformed host response as a request failure, never a success", async () => {
     enablePerfProbe(async () => undefined);
     invokeMock.mockResolvedValueOnce({ operationId: "missing-root" });
