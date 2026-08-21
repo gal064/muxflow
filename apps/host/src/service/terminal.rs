@@ -694,9 +694,10 @@ impl TerminalClients {
         } = change;
         // Whichever operation owns this fence performs both its resource
         // transition and ordered event admission before a later visible output
-        // may observe the new state. Credit can block here without holding the
-        // PaneResourceStore, so hide/reveal cleanup remains independently
-        // lockable while output cannot overtake its recovery event.
+        // may observe the new state. Nothing under it waits on a peer: the
+        // PaneResourceStore is taken and released inside, and the delivery
+        // window is charged without waiting (see below), so the fence is held
+        // only for the transition and the queue admission it orders.
         let emission_order = Arc::clone(&self.emission_order);
         let _emission = emission_order.lock().unwrap();
         validate_tmux_id(pane_id, '%')?;
@@ -733,12 +734,24 @@ impl TerminalClients {
                 .len()
                 .saturating_add(resource.raw_tail.len()),
         );
-        let reservation = match self.output_credit.reserve(charge, &stopped) {
+        // Charged, never waited for. This runs as a blocking task that the
+        // connection's frame loop awaits inline — `SetTerminalVisibility` is
+        // `Scheduling::Inline` in `operation_policy.rs`, and `service.rs` polls
+        // inline work to completion with `work.await` before it reads the next
+        // frame. That same loop is the sole reader of the `TerminalOutputAck`
+        // frames that release the window. Waiting for credit here therefore
+        // waits on an acknowledgement that cannot be read until the wait ends,
+        // and the wait is taken while holding both the terminal mutex and the
+        // emission fence: the wedge captured in production, where a full window
+        // stopped every request, every pane's output and every topology
+        // snapshot for nine minutes. The control readers repay any excess this
+        // admits by waiting before their next emission.
+        let reservation = match self.output_credit.admit(charge, &stopped) {
             Ok(reservation) => reservation,
             Err(error) => {
                 self.resources.lock().unwrap().require_seed(
                     pane_id,
-                    "visibility recovery could not reserve ordered delivery credit",
+                    "visibility recovery could not be admitted for ordered delivery",
                 );
                 return Err(anyhow::Error::msg(error));
             }

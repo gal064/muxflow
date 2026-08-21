@@ -3,6 +3,33 @@
 //! The ordered event queue is a record bound, not a byte bound. This window
 //! limits terminal payload admitted ahead of a response while keeping every
 //! event and response in the existing single FIFO.
+//!
+//! # Who is allowed to wait
+//!
+//! Admission ([`OutputCredit::admit`]) never blocks. Waiting for the window to
+//! drain ([`OutputCredit::await_window`]) is a separate step, and only a tmux
+//! control-reader thread may take it. The split is not stylistic; both halves
+//! of it are deadlocks that happened.
+//!
+//! * The window is released only by `TerminalOutputAck` frames, and those are
+//!   read by the connection's frame loop in `service.rs`. That loop `await`s
+//!   every `Scheduling::Inline` request to completion before it reads the next
+//!   frame, and `SetTerminalVisibility` is inline. A request handler that waits
+//!   for credit is therefore waiting for an acknowledgement that the only
+//!   thread able to deliver it cannot read until the wait ends. That is not a
+//!   race — it is a closed cycle, and it is the one captured in production: a
+//!   `set_visibility` parked here while every request on the connection timed
+//!   out for nine minutes. Request handlers admit; they never wait.
+//! * A reader waits *after* admitting, with the emission-order fence released.
+//!   Waiting under that fence stops output for every pane on the connection,
+//!   and `set_visibility` takes the fence while holding the terminal mutex —
+//!   so it also stops input, resize, attach and topology reconciliation. That
+//!   is the "typing lag under heavy agent output" symptom.
+//!
+//! The window is consequently a soft bound: it can be over-subscribed by the
+//! one record each reader admits before it waits, plus any visibility recovery
+//! admitted meanwhile — each capped by [`MAX_FRAME_BYTES`]. The readers repay
+//! the excess by waiting longer before their next admission.
 
 use std::sync::{
     Condvar, Mutex,
@@ -63,15 +90,20 @@ impl OutputCredit {
         }
     }
 
-    /// Reserves before queue admission. One protocol-sized oversize record may
-    /// occupy an otherwise-empty window so a valid frame cannot deadlock.
+    /// Charges the window for a record that is about to be queued. Never waits.
     ///
-    /// `stopped` is the reserving attachment's stop flag. The credit is shared
-    /// by every attachment on the connection, so closure cannot be the only way
-    /// out of the wait: stopping one attachment must unpark its own waiters
-    /// without ending delivery for the others. The flag is checked under the
-    /// state lock; pair a store to it with [`Self::wake_waiters`].
-    pub(crate) fn reserve(
+    /// The charge is recorded even when the window is already over-subscribed,
+    /// so admission can never depend on a peer. Keeping the accounting exact is
+    /// the point: a record on the wire that was not charged would make the
+    /// client's cumulative acknowledgement exceed what was admitted, which
+    /// [`Self::acknowledge`] rejects as a protocol violation.
+    ///
+    /// Flow control is [`Self::await_window`], and only a control reader calls
+    /// it — see the module docs for the two deadlocks that split these apart.
+    ///
+    /// `stopped` is the admitting attachment's stop flag; a stopped attachment
+    /// admits nothing.
+    pub(crate) fn admit(
         &self,
         charge: OutputCharge,
         stopped: &AtomicBool,
@@ -80,13 +112,44 @@ impl OutputCredit {
             return Err("terminal delivery charge exceeds the protocol frame limit");
         }
         let mut state = self.state.lock().unwrap();
+        if stopped.load(Ordering::Acquire) {
+            return Err("terminal delivery attachment is stopped");
+        }
+        match &mut *state {
+            State::Legacy => Ok(Reservation::legacy(self)),
+            State::Closed => Err("terminal delivery credit is closed"),
+            State::Open(open) => {
+                open.reserved.bytes = open.reserved.bytes.saturating_add(charge.bytes);
+                open.reserved.records = open.reserved.records.saturating_add(charge.records);
+                Ok(Reservation {
+                    credit: self,
+                    charge,
+                    committed: false,
+                    legacy: false,
+                })
+            }
+        }
+    }
+
+    /// Blocks a control reader until the window has room for another record.
+    ///
+    /// Call this only from a tmux control-reader thread, holding no lock any
+    /// peer needs — never under the emission-order fence, never from a request
+    /// dispatch. The module docs say why: this is the only wait in the system
+    /// that depends on the client, and every other thread that took it wedged
+    /// the connection.
+    ///
+    /// Returns as soon as the window is under budget, the credit closes, or the
+    /// caller's attachment stops. `stopped` is read under the state lock; pair a
+    /// store to it with [`Self::wake_waiters`].
+    pub(crate) fn await_window(&self, stopped: &AtomicBool) {
+        let mut state = self.state.lock().unwrap();
         loop {
             if stopped.load(Ordering::Acquire) {
-                return Err("terminal delivery attachment is stopped");
+                return;
             }
-            match &mut *state {
-                State::Legacy => return Ok(Reservation::legacy(self)),
-                State::Closed => return Err("terminal delivery credit is closed"),
+            match &*state {
+                State::Legacy | State::Closed => return,
                 State::Open(open) => {
                     let outstanding_bytes =
                         open.reserved.bytes.saturating_sub(open.acknowledged.bytes);
@@ -94,22 +157,10 @@ impl OutputCredit {
                         .reserved
                         .records
                         .saturating_sub(open.acknowledged.records);
-                    let empty = outstanding_bytes == 0 && outstanding_records == 0;
-                    let bytes_fit = outstanding_bytes.saturating_add(charge.bytes)
-                        <= OUTPUT_WINDOW_BYTES
-                        || (empty && charge.bytes > OUTPUT_WINDOW_BYTES);
-                    let records_fit =
-                        outstanding_records.saturating_add(charge.records) <= OUTPUT_WINDOW_RECORDS;
-                    if bytes_fit && records_fit {
-                        open.reserved.bytes = open.reserved.bytes.saturating_add(charge.bytes);
-                        open.reserved.records =
-                            open.reserved.records.saturating_add(charge.records);
-                        return Ok(Reservation {
-                            credit: self,
-                            charge,
-                            committed: false,
-                            legacy: false,
-                        });
+                    if outstanding_bytes < OUTPUT_WINDOW_BYTES
+                        && outstanding_records < OUTPUT_WINDOW_RECORDS
+                    {
+                        return;
                     }
                 }
             }
@@ -143,7 +194,7 @@ impl OutputCredit {
         self.released.notify_all();
     }
 
-    /// Wakes every [`Self::reserve`] waiter so it re-checks its stop flag.
+    /// Wakes every [`Self::await_window`] waiter so it re-checks its stop flag.
     ///
     /// Call after storing the flag. Taking and releasing the state lock first
     /// is what closes the lost-wakeup race: a waiter that read the flag as
@@ -204,24 +255,23 @@ mod tests {
         AtomicBool::new(false)
     }
 
-    #[test]
-    fn exact_window_blocks_until_cumulative_credit_is_released() {
-        let credit = Arc::new(OutputCredit::negotiated(true));
-        let mut reservations = Vec::new();
+    fn fill_window(credit: &OutputCredit) {
         for _ in 0..32 {
-            let reservation = credit
-                .reserve(OutputCharge::terminal(64 * 1024), &running())
-                .unwrap();
-            reservation.commit();
-            reservations.push(());
+            credit
+                .admit(OutputCharge::terminal(64 * 1024), &running())
+                .unwrap()
+                .commit();
         }
+    }
+
+    #[test]
+    fn exact_window_holds_a_reader_until_cumulative_credit_is_released() {
+        let credit = Arc::new(OutputCredit::negotiated(true));
+        fill_window(&credit);
         let waiting = Arc::clone(&credit);
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let reservation = waiting
-                .reserve(OutputCharge::terminal(64 * 1024), &running())
-                .unwrap();
-            reservation.commit();
+            waiting.await_window(&running());
             sender.send(()).unwrap();
         });
         assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
@@ -234,33 +284,59 @@ mod tests {
         receiver.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
+    /// The deadlock this window caused, reduced to its one load-bearing fact:
+    /// a thread that cannot wait for an acknowledgement — because it is the
+    /// thread the acknowledgement has to be read by — can still admit. If
+    /// `admit` ever waits again this test hangs, since nothing here ever acks.
+    #[test]
+    fn admission_never_waits_on_a_full_window() {
+        let credit = OutputCredit::negotiated(true);
+        fill_window(&credit);
+        for _ in 0..4 {
+            credit
+                .admit(OutputCharge::terminal(64 * 1024), &running())
+                .unwrap()
+                .commit();
+        }
+        // Over-subscription is temporary and honest: the excess is charged, so
+        // the client may acknowledge all of it, and the window then reopens.
+        credit
+            .acknowledge(OutputCharge {
+                bytes: 36 * 64 * 1024,
+                records: 36,
+            })
+            .unwrap();
+        credit.await_window(&running());
+    }
+
     #[test]
     fn rollback_and_close_release_waiters_without_forging_credit() {
         let credit = OutputCredit::negotiated(true);
         drop(
             credit
-                .reserve(OutputCharge::terminal(128), &running())
+                .admit(OutputCharge::terminal(128), &running())
                 .unwrap(),
         );
         assert!(credit.acknowledge(OutputCharge::terminal(1)).is_err());
         credit.close();
-        assert!(
-            credit
-                .reserve(OutputCharge::terminal(1), &running())
-                .is_err()
-        );
+        assert!(credit.admit(OutputCharge::terminal(1), &running()).is_err());
     }
 
     #[test]
-    fn one_protocol_sized_oversize_record_uses_an_empty_window() {
+    fn an_oversize_record_is_refused_but_a_window_sized_one_is_admitted() {
         let credit = OutputCredit::negotiated(true);
-        let reservation = credit
-            .reserve(
+        assert!(
+            credit
+                .admit(OutputCharge::terminal(MAX_FRAME_BYTES + 1), &running())
+                .is_err()
+        );
+        credit
+            .admit(
                 OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize + 1),
                 &running(),
             )
-            .unwrap();
-        reservation.commit();
+            .unwrap()
+            .commit();
     }
 
     #[test]
@@ -268,17 +344,14 @@ mod tests {
         let credit = Arc::new(OutputCredit::negotiated(true));
         for _ in 0..OUTPUT_WINDOW_RECORDS {
             credit
-                .reserve(OutputCharge::terminal(1), &running())
+                .admit(OutputCharge::terminal(1), &running())
                 .unwrap()
                 .commit();
         }
         let waiting = Arc::clone(&credit);
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            waiting
-                .reserve(OutputCharge::terminal(1), &running())
-                .unwrap()
-                .commit();
+            waiting.await_window(&running());
             sender.send(()).unwrap();
         });
         assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
@@ -292,22 +365,24 @@ mod tests {
     }
 
     #[test]
-    fn stop_releases_a_writer_blocked_on_full_credit() {
+    fn close_releases_a_reader_waiting_on_a_full_window() {
         let credit = Arc::new(OutputCredit::negotiated(true));
         credit
-            .reserve(OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize), &running())
+            .admit(
+                OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
+                &running(),
+            )
             .unwrap()
             .commit();
         let waiting = Arc::clone(&credit);
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            sender
-                .send(waiting.reserve(OutputCharge::terminal(1), &running()).is_err())
-                .unwrap();
+            waiting.await_window(&running());
+            sender.send(()).unwrap();
         });
         assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
         credit.close();
-        assert!(receiver.recv_timeout(Duration::from_secs(1)).unwrap());
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
     /// Without the stop flag this waiter parks forever: the desktop has stopped
@@ -317,7 +392,10 @@ mod tests {
     fn attachment_stop_releases_its_waiter_without_closing_the_shared_credit() {
         let credit = Arc::new(OutputCredit::negotiated(true));
         credit
-            .reserve(OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize), &running())
+            .admit(
+                OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
+                &running(),
+            )
             .unwrap()
             .commit();
         let stopped = Arc::new(AtomicBool::new(false));
@@ -325,18 +403,13 @@ mod tests {
         let waiting_stopped = Arc::clone(&stopped);
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            sender
-                .send(
-                    waiting
-                        .reserve(OutputCharge::terminal(1), &waiting_stopped)
-                        .is_err(),
-                )
-                .unwrap();
+            waiting.await_window(&waiting_stopped);
+            sender.send(()).unwrap();
         });
         assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
         stopped.store(true, Ordering::Release);
         credit.wake_waiters();
-        assert!(receiver.recv_timeout(Duration::from_secs(1)).unwrap());
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         // Other attachments on the same connection are undisturbed: the window
         // still accepts acknowledgements and hands out credit.
         credit
@@ -346,7 +419,7 @@ mod tests {
             })
             .unwrap();
         credit
-            .reserve(OutputCharge::terminal(1), &running())
+            .admit(OutputCharge::terminal(1), &running())
             .unwrap()
             .commit();
     }

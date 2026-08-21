@@ -747,6 +747,7 @@ impl StreamState {
                                         })
                                         .unwrap_or((false, Vec::new()));
                                     emit_pane_degradations(sender, overflowed, degradations);
+                                    let mut admitted = false;
                                     if visible {
                                         if !diagnostics.is_empty() {
                                             emit_event(
@@ -761,7 +762,7 @@ impl StreamState {
                                                 },
                                             );
                                         }
-                                        emit_terminal(
+                                        admitted = emit_terminal(
                                             sender,
                                             overflowed,
                                             v1::EventKind::TerminalSeed,
@@ -773,8 +774,15 @@ impl StreamState {
                                         );
                                     }
                                     drop(_emission);
+                                    // Every wait for delivery credit on this
+                                    // thread happens here, outside the fence,
+                                    // once the record it pays for is queued.
+                                    if admitted {
+                                        output_credit.await_window(stopped);
+                                    }
                                     for output in replay_outputs {
                                         let _emission = emission_order.lock().unwrap();
+                                        let mut admitted = false;
                                         // Buffered sequence numbers establish
                                         // capture inclusion only. Rebase
                                         // replay delivery after the seed so a
@@ -797,7 +805,7 @@ impl StreamState {
                                         .unwrap_or((false, Vec::new()));
                                         emit_pane_degradations(sender, overflowed, degradations);
                                         if visible {
-                                            emit_terminal(
+                                            admitted = emit_terminal(
                                                 sender,
                                                 overflowed,
                                                 v1::EventKind::TerminalOutput,
@@ -807,6 +815,14 @@ impl StreamState {
                                                 stopped,
                                                 output_credit,
                                             );
+                                        }
+                                        drop(_emission);
+                                        // Replay can be many records long, so it
+                                        // pays the window per record, and — like
+                                        // every other wait on this thread — with
+                                        // the fence released.
+                                        if admitted {
+                                            output_credit.await_window(stopped);
                                         }
                                     }
                                 }
