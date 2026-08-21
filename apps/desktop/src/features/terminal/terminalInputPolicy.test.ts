@@ -38,12 +38,13 @@ describe("terminal input translation", () => {
       .toBeUndefined();
   });
 
-  it("maps bare macOS Command-Arrows only in shell panes", () => {
+  it("maps bare macOS Command-Arrows in normal-screen terminal contexts", () => {
     const left = key({ key: "ArrowLeft", keyCode: 37, metaKey: true });
     const right = key({ key: "ArrowRight", keyCode: 39, metaKey: true });
     expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "/bin/zsh", platform: "mac" })).toBe("\u0001");
     expect(translateTerminalKey(right, { alternateScreen: false, currentCommand: "fish", platform: "mac" })).toBe("\u0005");
-    expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "vim", platform: "mac" })).toBeUndefined();
+    expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "codex", platform: "mac" })).toBe("\u0001");
+    expect(translateTerminalKey(right, { alternateScreen: false, currentCommand: "shell-wrapper", platform: "mac" })).toBe("\u0005");
     expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "zsh", platform: "linux" })).toBeUndefined();
     expect(translateTerminalKey(left, { alternateScreen: true, currentCommand: "zsh", platform: "mac" })).toBeUndefined();
     expect(translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, altKey: true }), {

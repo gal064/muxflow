@@ -50,11 +50,11 @@ describe("workspace sidebar rows", () => {
     // working agent updated more recently — and leads the row's own list.
     expect(primary.attention).toBe("blocked");
     expect(primary.agents).toEqual([
-      { id: "b", name: "codex", state: "blocked" },
-      { id: "a", name: "claude", state: "working" },
+      { id: "b", adapterId: "codex", name: "codex", state: "blocked" },
+      { id: "a", adapterId: "codex", name: "claude", state: "working" },
     ]);
     expect(primary.agentOverflow).toBe(0);
-    expect(project.agents).toEqual([{ id: "c", name: "claude two", state: "done" }]);
+    expect(project.agents).toEqual([{ id: "c", adapterId: "codex", name: "claude two", state: "done" }]);
   });
 
   it("uses useful live tab labels and hides machine identifiers in workspace summaries", () => {
@@ -65,7 +65,9 @@ describe("workspace sidebar rows", () => {
     const adapters = [{ id: "future", displayName: "Future agent" }] as AgentAdapterDescriptor[];
     const result = workspaceRows({ snapshot, agents: labeled, adapters, attentionByWorkspace: deriveAgentRollups(labeled).byWorkspace });
     expect(result[0].agents[0].name).toBe("Review auth flow");
+    expect(result[0].agents[0].adapterId).toBe("codex");
     expect(result[1].agents[0].name).toBe("Future agent");
+    expect(result[1].agents[0].adapterId).toBe("future");
     expect(JSON.stringify(result)).not.toContain("00000000-0000-0000-0000-000000000000");
   });
 

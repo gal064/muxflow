@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   commandAvailable,
   commandForKeyboardEvent,
@@ -9,6 +9,7 @@ import {
   keyFromCode,
   keyboardEventIsComposing,
   normalizeShortcut,
+  repairShortcutCollisions,
   selectionIndex,
   shortcutFromEvent,
   shortcutFor,
@@ -53,6 +54,22 @@ describe("command registry", () => {
     const create = commandRegistry.find((command) => command.id === "session.new")!;
     expect(shortcutFor(create, "linux", { "session.new": "Alt+N" })).toBe("Alt+N");
     expect(shortcutFor(create, "linux", { "session.new": null })).toBeUndefined();
+  });
+
+  it("repairs conflicts persisted by older builds without changing canonical defaults", () => {
+    const defaultCollision = { "window.new": "Meta+1" } as const;
+    const repairedDefaultCollision = repairShortcutCollisions("mac", defaultCollision);
+    expect(repairedDefaultCollision).toEqual({ "window.new": "Meta+1", "workspace.select1": null });
+    expect(shortcutCollisions("mac", repairedDefaultCollision)).toEqual([]);
+    expect(shortcutFor(commandRegistry.find((command) => command.id === "window.new")!, "mac", repairedDefaultCollision)).toBe("Meta+1");
+
+    const twoOverrides = { "session.new": "Meta+J", "window.new": "Meta+J" } as const;
+    const displaced = vi.fn();
+    expect(repairShortcutCollisions("mac", twoOverrides, displaced)).toEqual({
+      "session.new": "Meta+J", "window.new": null,
+    });
+    expect(displaced).toHaveBeenCalledWith([{ commandId: "window.new", shortcut: "Meta+J" }]);
+    expect(repairShortcutCollisions("mac", {})).toEqual({});
   });
 
   it("freezes mutating commands while disconnected but leaves local terminal commands available", () => {
@@ -202,11 +219,14 @@ describe("command registry", () => {
     });
     const event = (editable: boolean, terminal: boolean, key = "1", code = "Digit1") => ({
       target: target(editable, terminal) as unknown as EventTarget,
-      key, code, keyCode: key.charCodeAt(0), ctrlKey: true, metaKey: false,
+      key, code, keyCode: key.charCodeAt(0), altKey: false, ctrlKey: true, metaKey: false,
     });
     expect(globalShortcutAllowed(event(true, false), false)).toBe(false);
     expect(globalShortcutAllowed(event(true, false), false, "workspace.select1")).toBe(true);
     expect(globalShortcutAllowed(event(true, false), false, "tab.select1")).toBe(true);
+    expect(globalShortcutAllowed({
+      ...event(true, false), altKey: true, ctrlKey: false,
+    }, false, "workspace.select1")).toBe(true);
     expect(globalShortcutAllowed(event(true, false), true, "tab.select1")).toBe(false);
     // A selector rebound to an editing chord does not steal that chord merely
     // because the resolved command happens to be positional.

@@ -210,12 +210,12 @@ describe("the editor chunk boundary", () => {
     try {
       const editor = surface.renderer.root.findByType(EditorStub);
       await act(async () => { editor.props.onChange("hello there"); });
-      expect(JSON.stringify(surface.renderer.toJSON())).toContain("Unsaved");
+      expect(JSON.stringify(surface.renderer.toJSON())).not.toContain("Unsaved");
 
       await surface.update({ viewMode: "preview" });
       expect(surface.renderer.root.findAllByType(EditorStub), "the editor survived a preview-only view").toHaveLength(0);
       expect(surface.writes, "unmounting the editor flushed the buffer as a side effect").toEqual([]);
-      expect(JSON.stringify(surface.renderer.toJSON()), "the dirty state went away with the editor").toContain("Unsaved");
+      expect(JSON.stringify(surface.renderer.toJSON()), "ordinary autosave churn became visible in preview mode").not.toContain("Unsaved");
 
       await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
       expect(surface.writes, "the pending save was lost with the editor").toEqual([{ content: "hello there" }]);
@@ -239,7 +239,7 @@ describe("the editor chunk boundary", () => {
       const editor = surface.renderer.root.findByType(EditorStub);
       await act(async () => { editor.props.onChange("after"); });
       expect(surface.renderer.root.findByType(EditorStub).props.value, "the editor waited for the preview").toBe("after");
-      expect(JSON.stringify(surface.renderer.toJSON()), "the save state waited for the preview").toContain("Unsaved");
+      expect(JSON.stringify(surface.renderer.toJSON()), "ordinary autosave churn became visible before the preview").not.toContain("Unsaved");
       expect(previewHtml(), "the preview was re-sanitized on the keystroke").toContain("before");
 
       await act(async () => { await vi.advanceTimersByTimeAsync(500); });

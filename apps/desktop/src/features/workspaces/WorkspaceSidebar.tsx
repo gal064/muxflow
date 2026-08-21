@@ -179,8 +179,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           <StateDot glyphs={props.stateGlyphs} state={row.state} />
           <AgentIcon adapterId={row.agent.adapterId} />
           <span className="agent-session-label">{sessionLabel}</span>
+          <span className="agent-detail">{detail}</span>
         </span>
-        <span className="agent-detail">{detail}</span>
       </button>
       {needsAttention(row.state) && <span aria-hidden="true" className="badge badge-row">1</span>}
     </div>;
@@ -236,6 +236,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                   {/* Decorative: the button's own accessible name already
                       carries the loudest agent and the total. */}
                   <StateDot glyphs={props.stateGlyphs} state={agent.state} />
+                  <AgentIcon adapterId={agent.adapterId} />
                   <span className="workspace-activity-text">{agentLine(agent)}</span>
                 </span>)}
                 {row.agentOverflow > 0 && <span className="workspace-activity-line workspace-activity-more">

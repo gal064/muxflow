@@ -11,16 +11,20 @@ export interface InternalPathDragSource {
 export type InternalPathDragTarget = Pick<InternalPathDragSource, "hostProfileId" | "serverIdentity">;
 
 interface ActiveInternalPathDrag {
+  gestureId: string;
   nativeClaimed: boolean;
+  delivery: "pending" | "delivered";
   source: InternalPathDragSource;
   expiresAt: number;
 }
 
 const ACTIVE_DRAG_MILLIS = 30_000;
 let activeDrag: ActiveInternalPathDrag | undefined;
+let nextGestureId = 0;
 
 type InternalPathDrop =
   | { kind: "absent" }
+  | { kind: "handled" }
   | { kind: "accepted"; path: string; shellText: string }
   | { kind: "rejected"; reason: string };
 
@@ -29,14 +33,17 @@ export function writeInternalPathDrag(
   source: InternalPathDragSource,
 ): void {
   assertSource(source);
+  const gestureId = String(++nextGestureId);
   transfer.effectAllowed = "copy";
-  transfer.setData(INTERNAL_PATH_DRAG_TYPE, JSON.stringify({ version: 1, ...source }));
+  transfer.setData(INTERNAL_PATH_DRAG_TYPE, JSON.stringify({ version: 1, gestureId, ...source }));
   // Tauri/Wry consumes HTML drop events on macOS even for an internal drag,
   // but still publishes its native event with an empty path list. Retain the
   // already-validated source just for that drag so the native event can bridge
   // it without trusting an external text payload.
   activeDrag = {
+    gestureId,
     nativeClaimed: false,
+    delivery: "pending",
     source: { ...source },
     expiresAt: Date.now() + ACTIVE_DRAG_MILLIS,
   };
@@ -54,12 +61,20 @@ export function claimNativeInternalPathDrag(): boolean {
 export function consumeNativeInternalPathDrop(target: InternalPathDragTarget | undefined): InternalPathDrop {
   const drag = currentActiveDrag();
   if (!drag?.nativeClaimed) return { kind: "absent" };
-  activeDrag = undefined;
+  if (drag.delivery === "delivered") {
+    activeDrag = undefined;
+    return { kind: "handled" };
+  }
+  drag.delivery = "delivered";
   return resolveInternalPathSource(drag.source, target);
 }
 
 /** Retires a DOM-only or cancelled drag without racing a claimed native drop. */
 export function finishInternalPathDrag(): void {
+  // A native callback and the DOM drop can be delivered on opposite sides of
+  // dragend. Keep a claimed gesture as a short-lived delivered tombstone so
+  // the later lane can recognize it as already handled instead of pasting or
+  // reporting an error. The next drag replaces it and expiry bounds it.
   if (!activeDrag?.nativeClaimed) activeDrag = undefined;
 }
 
@@ -80,18 +95,25 @@ export function readInternalPathDrop(
   target: InternalPathDragTarget | undefined,
 ): InternalPathDrop {
   if (!transfer.types || !Array.from(transfer.types).includes(INTERNAL_PATH_DRAG_TYPE)) return { kind: "absent" };
-  // DOM and native delivery can coexist on Linux and on future Wry versions.
-  // Once the private DOM payload arrives it owns this gesture, so the native
-  // bridge must not paste it a second time.
-  activeDrag = undefined;
   if (!target) return { kind: "rejected", reason: "The target terminal is disconnected." };
   try {
     const value: unknown = JSON.parse(transfer.getData(INTERNAL_PATH_DRAG_TYPE));
     if (!value || typeof value !== "object") throw new Error("payload is not an object");
-    const payload = value as Partial<InternalPathDragSource> & { version?: unknown };
-    if (payload.version !== 1 || typeof payload.hostProfileId !== "string" || typeof payload.serverIdentity !== "string" || typeof payload.path !== "string") {
+    const payload = value as Partial<InternalPathDragSource> & { gestureId?: unknown; version?: unknown };
+    if (payload.version !== 1 || typeof payload.gestureId !== "string"
+      || typeof payload.hostProfileId !== "string" || typeof payload.serverIdentity !== "string"
+      || typeof payload.path !== "string") {
       throw new Error("payload fields are invalid");
     }
+    const drag = currentActiveDrag();
+    if (!drag || drag.gestureId !== payload.gestureId) {
+      return { kind: "rejected", reason: "The internal path drag is no longer active." };
+    }
+    if (drag.delivery === "delivered") {
+      activeDrag = undefined;
+      return { kind: "handled" };
+    }
+    drag.delivery = "delivered";
     return resolveInternalPathSource({ hostProfileId: payload.hostProfileId, serverIdentity: payload.serverIdentity, path: payload.path }, target);
   } catch (error) {
     return { kind: "rejected", reason: `The internal path drag payload is invalid: ${String(error)}` };

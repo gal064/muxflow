@@ -192,6 +192,10 @@ describe("application shell model", () => {
       accepted, current: { ...current, topologyGeneration: 10 }, byWindow: new Map(),
     })
       .map((tab) => tab.key)).toEqual(["app:a", "app:b"]);
+    expect(tabsEligibleAtBulkCloseCommit(captured, true, {
+      accepted, current, byWindow: new Map(), hasUnmappedAgents: true,
+    })
+      .map((tab) => tab.key)).toEqual(["app:a", "app:b"]);
     expect(tabsEligibleAtBulkCloseCommit(captured, false, {
       byWindow: new Map(),
     }))

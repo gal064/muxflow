@@ -65,7 +65,13 @@ pub(super) fn execute(
             // placeholder the moment the snapshot names this window — without
             // it, a session-create placeholder had no window to wait for and
             // sat in the strip forever.
-            command.args(["new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}"]);
+            command.args([
+                "new-session",
+                "-d",
+                "-P",
+                "-F",
+                "#{session_id} #{window_id} #{pane_id}",
+            ]);
             if !action.name.is_empty() {
                 validate_name(&action.name)?;
                 command.args(["-s", &action.name]);

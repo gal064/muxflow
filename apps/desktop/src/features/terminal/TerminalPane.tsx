@@ -27,7 +27,7 @@ import { REVEAL_RETRY_DELAY_MS, revealFailureAction } from "./revealRetry";
 import { TerminalTransferSurface, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
 import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
-import { writeNativeTerminalClipboard } from "./terminalTransferApi";
+import { writeNativeTerminalClipboard, writeTerminalApplicationClipboard } from "./terminalTransferApi";
 import {
   copyCompletedTerminalSelection,
   installTerminalCopyOnSelect,
@@ -266,6 +266,7 @@ interface Props {
   onDiagnostic?: (message: string) => void;
   onOpenFilePath?: (paneId: string, path: string) => void;
   copyOnSelect?: boolean;
+  terminalApplicationClipboard?: boolean;
   platform?: Platform;
   transferClient?: TerminalTransferClient;
   transferRegistry?: TerminalTransferRegistry;
@@ -286,6 +287,7 @@ export function TerminalPane({
   onDiagnostic,
   onOpenFilePath,
   copyOnSelect = false,
+  terminalApplicationClipboard = false,
   platform = "linux",
   transferClient,
   transferRegistry,
@@ -320,6 +322,7 @@ export function TerminalPane({
   const clientIdRef = useRef(clientId);
   const appFocusedRef = useRef(appFocused);
   const copyOnSelectRef = useRef(copyOnSelect);
+  const terminalApplicationClipboardRef = useRef(terminalApplicationClipboard);
   const platformRef = useRef(platform);
   const rendererEpochRef = useRef<number | undefined>(undefined);
   // What the box measured when tmux's grid was last applied to it. The anchor
@@ -369,6 +372,7 @@ export function TerminalPane({
   openFilePathRef.current = onOpenFilePath;
   clientIdRef.current = clientId;
   copyOnSelectRef.current = copyOnSelect;
+  terminalApplicationClipboardRef.current = terminalApplicationClipboard;
   platformRef.current = platform;
   const paneTransferScope: TerminalTransferScope | undefined = transferScope ? {
     ...transferScope,
@@ -437,7 +441,9 @@ export function TerminalPane({
         }
       },
       onOpenFilePath: (path) => openFilePathRef.current?.(pane.id, path),
-      onClipboardWrite: writeNativeTerminalClipboard,
+      onClipboardWrite: async (text) => {
+        await writeTerminalApplicationClipboard(terminalApplicationClipboardRef.current, text);
+      },
       onClipboardWriteError: (error) => {
         diagnosticRef.current?.(`Could not copy terminal text to the system clipboard: ${String(error)}`);
       },

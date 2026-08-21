@@ -6,8 +6,8 @@ import { projectVisibleSaveState, SAVING_STATUS_DELAY_MILLIS, useVisibleSaveStat
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-function SaveStatusProbe({ state }: { state: SaveState | undefined }) {
-  const visible = useVisibleSaveState(state);
+function SaveStatusProbe({ state, writeAvailable = true }: { state: SaveState | undefined; writeAvailable?: boolean }) {
+  const visible = useVisibleSaveState(state, writeAvailable);
   return <span>{visible ?? "hidden"}</span>;
 }
 
@@ -18,11 +18,12 @@ function shown(renderer: ReactTestRenderer): string {
 afterEach(() => vi.useRealTimers());
 
 describe("useVisibleSaveState", () => {
-  it("projects immediate states directly instead of retaining a stale saving label", () => {
-    expect(projectVisibleSaveState("saved", true)).toBeUndefined();
-    expect(projectVisibleSaveState("dirty", true)).toBe("dirty");
-    expect(projectVisibleSaveState("error", true)).toBe("error");
-    expect(projectVisibleSaveState(undefined, true)).toBeUndefined();
+  it("shows only actionable immediate states", () => {
+    expect(projectVisibleSaveState("saved", true, true)).toBeUndefined();
+    expect(projectVisibleSaveState("dirty", true, true)).toBeUndefined();
+    expect(projectVisibleSaveState("dirty", true, false)).toBe("dirty");
+    expect(projectVisibleSaveState("error", true, true)).toBe("error");
+    expect(projectVisibleSaveState(undefined, true, true)).toBeUndefined();
   });
 
   it("keeps a fast save calm and never publishes a saved confirmation", async () => {
@@ -32,12 +33,12 @@ describe("useVisibleSaveState", () => {
     expect(shown(renderer)).toBe("hidden");
 
     await act(async () => { renderer.update(<SaveStatusProbe state="dirty" />); });
-    expect(shown(renderer)).toBe("dirty");
+    expect(shown(renderer)).toBe("hidden");
     await act(async () => { renderer.update(<SaveStatusProbe state="saving" />); });
-    expect(shown(renderer), "starting a write replaced the useful dirty status immediately").toBe("dirty");
+    expect(shown(renderer)).toBe("hidden");
 
     await act(async () => { await vi.advanceTimersByTimeAsync(SAVING_STATUS_DELAY_MILLIS - 1); });
-    expect(shown(renderer)).toBe("dirty");
+    expect(shown(renderer)).toBe("hidden");
     await act(async () => { renderer.update(<SaveStatusProbe state="saved" />); });
     expect(shown(renderer)).toBe("hidden");
 
@@ -54,6 +55,13 @@ describe("useVisibleSaveState", () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(SAVING_STATUS_DELAY_MILLIS); });
     expect(shown(renderer)).toBe("saving");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("shows dirty when the editor has lost write authority", async () => {
+    let renderer!: ReactTestRenderer;
+    await act(async () => { renderer = create(<SaveStatusProbe state="dirty" writeAvailable={false} />); });
+    expect(shown(renderer)).toBe("dirty");
     await act(async () => { renderer.unmount(); });
   });
 

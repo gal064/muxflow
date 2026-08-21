@@ -335,10 +335,8 @@ impl SshControl {
 
         // OpenSSH appends a temporary suffix while creating a control socket;
         // keep this path short enough for Linux's 108-byte AF_UNIX limit.
-        let runtime = PathBuf::from(format!("/tmp/muxflow-{}", unsafe {
-            libc::geteuid()
-        }))
-        .join("ssh");
+        let runtime =
+            PathBuf::from(format!("/tmp/muxflow-{}", unsafe { libc::geteuid() })).join("ssh");
         crate::paths::prepare_runtime_dir(&runtime)?;
         let socket = runtime.join(format!("control-{}.sock", Uuid::new_v4()));
         if safe_socket_identity(&socket)?.is_some() {

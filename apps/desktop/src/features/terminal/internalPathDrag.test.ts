@@ -51,7 +51,7 @@ describe("internal path drag payload", () => {
       path: "/repo/a b'$(touch nope).ts",
       shellText: "'/repo/a b'\"'\"'$(touch nope).ts'",
     });
-    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "absent" });
+    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "handled" });
 
     writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
     claimNativeInternalPathDrag();
@@ -75,7 +75,7 @@ describe("internal path drag payload", () => {
     writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
     claimNativeInternalPathDrag();
     expect(readInternalPathDrop(data, { hostProfileId: "local", serverIdentity: "server-a" })).toMatchObject({ kind: "accepted" });
-    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "absent" });
+    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "handled" });
   });
 
   it("retires a lost source when its host scope unmounts without clearing another host", () => {

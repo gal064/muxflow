@@ -908,8 +908,12 @@ mod tests {
         let binding = BulkBinding::capture(Arc::clone(&client), "prewarm-a".into(), 11).unwrap();
 
         assert_eq!(
-            prewarm_with_spawn(&ConnectionSpec::Local, &binding, hello_spawn("prewarm-a", 11))
-                .unwrap(),
+            prewarm_with_spawn(
+                &ConnectionSpec::Local,
+                &binding,
+                hello_spawn("prewarm-a", 11)
+            )
+            .unwrap(),
             Prewarm::Warmed,
         );
 
@@ -936,7 +940,12 @@ mod tests {
         let _guard = super::super::scheduler::engine_test_lock();
         let client = settled_client("prewarm-b", 12);
         let binding = BulkBinding::capture(Arc::clone(&client), "prewarm-b".into(), 12).unwrap();
-        prewarm_with_spawn(&ConnectionSpec::Local, &binding, hello_spawn("prewarm-b", 12)).unwrap();
+        prewarm_with_spawn(
+            &ConnectionSpec::Local,
+            &binding,
+            hello_spawn("prewarm-b", 12),
+        )
+        .unwrap();
 
         assert_eq!(
             prewarm_with_spawn(&ConnectionSpec::Local, &binding, |_, _| Err(
@@ -966,7 +975,10 @@ mod tests {
             panic!("a read-only connection must never reach a spawn")
         })
         .expect_err("a read-only connection must not be pre-warmed");
-        assert!(error.contains("writable live control connection"), "{error}");
+        assert!(
+            error.contains("writable live control connection"),
+            "{error}"
+        );
     }
 
     /// The same refusal for a connection that has not finished settling.
@@ -983,7 +995,10 @@ mod tests {
             panic!("a settling connection must never reach a spawn")
         })
         .expect_err("a connection that is not ready must not be pre-warmed");
-        assert!(error.contains("writable live control connection"), "{error}");
+        assert!(
+            error.contains("writable live control connection"),
+            "{error}"
+        );
     }
 
     /// A pre-warm from a replaced epoch must not leave a bridge that a live

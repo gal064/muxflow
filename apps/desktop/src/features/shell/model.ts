@@ -14,6 +14,8 @@ export interface AgentPresenceSnapshot {
   accepted?: AgentTopologyAuthority;
   current?: Omit<AgentTopologyAuthority, "coveredWindowIds">;
   byWindow: ReadonlyMap<string, AgentAttentionRollup>;
+  /** An authoritative live record exists but cannot prove which window owns it. */
+  hasUnmappedAgents?: boolean;
 }
 
 /** The exact ordered set addressed by Control-1…9 and drawn with numbers. */
@@ -35,7 +37,8 @@ export function agentPresenceIsCurrent(presence: AgentPresenceSnapshot, minimumG
 
 /** One canonical answer for both menu candidates and mutation-time rechecks. */
 export function terminalAgentPresence(windowId: string, presence: AgentPresenceSnapshot): TerminalAgentPresence {
-  if (!agentPresenceIsCurrent(presence) || !presence.accepted?.coveredWindowIds.has(windowId)) return "unknown";
+  if (presence.hasUnmappedAgents || !agentPresenceIsCurrent(presence)
+    || !presence.accepted?.coveredWindowIds.has(windowId)) return "unknown";
   return (presence.byWindow.get(windowId)?.total ?? 0) > 0 ? "present" : "absent";
 }
 

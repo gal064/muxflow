@@ -34,7 +34,8 @@ describe("ExplorerTree", () => {
     const dataTransfer = { effectAllowed: "all", setData: (type: string, value: string) => values.set(type, value) };
     const rows = renderer.root.findAllByProps({ className: "file-row" });
     for (const row of [rows[0], rows[2]]) row.props.onDragStart({ dataTransfer });
-    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!)).toEqual({ version: 1, hostProfileId: "local", serverIdentity: "server-a", path: "/r/.git" });
+    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!)).toMatchObject({ version: 1, hostProfileId: "local", serverIdentity: "server-a", path: "/r/.git" });
+    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!).gestureId).toEqual(expect.any(String));
     expect(rows[0].props.draggable).toBe(true);
     await act(async () => { renderer.unmount(); });
   });

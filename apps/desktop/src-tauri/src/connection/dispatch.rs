@@ -23,7 +23,26 @@ pub(super) const INPUT_LATENCY_BUCKETS: usize = 20;
 /// and changing either list without the other silently mislabels every native
 /// bucket in the journal.
 pub(super) const INPUT_LATENCY_BUCKET_BOUNDS_MS: [u64; INPUT_LATENCY_BUCKETS] = [
-    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 2048, 4096, u64::MAX,
+    1,
+    2,
+    4,
+    8,
+    16,
+    24,
+    32,
+    48,
+    64,
+    96,
+    128,
+    192,
+    256,
+    384,
+    512,
+    768,
+    1024,
+    2048,
+    4096,
+    u64::MAX,
 ];
 
 /// The first bucket whose upper bound the measured queue time does not exceed.
@@ -488,7 +507,10 @@ mod tests {
         client.record_input_latency(Duration::from_millis(700));
         let stats = client.drain_input_latency();
         assert_eq!(stats.bucket_counts.len(), INPUT_LATENCY_BUCKETS);
-        assert_eq!(stats.bucket_counts[0], 1, "300 µs belongs in the 1 ms bucket");
+        assert_eq!(
+            stats.bucket_counts[0], 1,
+            "300 µs belongs in the 1 ms bucket"
+        );
         assert_eq!(stats.bucket_counts[2], 2, "3 ms belongs in the 4 ms bucket");
         assert_eq!(
             stats.bucket_counts[15], 1,
@@ -518,7 +540,9 @@ mod tests {
 
         // No writer is attached, so the dispatch fails: those bytes never
         // reached the bridge and have no queue time to report.
-        client.enqueue_input("%1".into(), b"typed".to_vec()).unwrap();
+        client
+            .enqueue_input("%1".into(), b"typed".to_vec())
+            .unwrap();
         assert!(client.flush_input().is_err());
         let stats = client.drain_input_latency();
         assert_eq!(stats.bucket_counts.iter().sum::<u64>(), 0);
