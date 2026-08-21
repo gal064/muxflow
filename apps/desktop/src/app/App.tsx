@@ -704,9 +704,9 @@ export function App() {
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (!globalShortcutAllowed(event, modalOpen)) return;
       const command = commandForKeyboardEvent(event, platform, shortcuts);
-      if (!command || !commandAvailable(command, commandContext)) return;
+      if (!command || !globalShortcutAllowed(event, modalOpen, command.id)) return;
+      if (!commandAvailable(command, commandContext)) return;
       event.preventDefault();
       event.stopPropagation();
       void runCommand(command.id);
