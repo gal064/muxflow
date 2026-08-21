@@ -11,6 +11,7 @@ import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import { GitCommitForm } from "./GitCommitForm";
 import type { WorkspaceGitState } from "./useWorkspaceGit";
 import type { GitCommandResult, GitDiffTarget, GitMutationRequest, GitStatusEntry, GitStatusSnapshot } from "./types";
+import { writeInternalPathDrag } from "../terminal/internalPathDrag";
 
 interface Props {
   /**
@@ -179,6 +180,9 @@ export function GitSidebar(props: Props) {
   if (props.git.status.oversized) return <GitEmpty detail={`Repository status is too large. ${props.git.status.error || "The host bounded this snapshot to keep the terminal connection responsive."} ${props.git.status.totalEntryCount ?? "Unknown"} entries were detected.`} action={onRefresh} />;
 
   const stagedCount = groups.staged.length;
+  const dragEntry = props.scope ? (entry: GitStatusEntry, transfer: DataTransfer) => {
+    if (entry.absolutePath) writeInternalPathDrag(transfer, { serverIdentity: props.scope!.serverIdentity, path: entry.absolutePath });
+  } : undefined;
   return <section className="git-sidebar" aria-label="Source Control">
     <header className="git-sidebar-header">
       <span className="git-sidebar-identity">
@@ -193,10 +197,10 @@ export function GitSidebar(props: Props) {
     {props.git.status.copyDetectionIncomplete && <div className="surface-note" role="status">Copy detection was bounded for this large change set; some copies may appear as additions.</div>}
     {!props.git.status.authoritative && <div className="surface-error" role="alert">Git status is resynchronizing. Mutations are disabled.</div>}
     <div className="git-status-groups">
-      <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" mutable={!unavailable} onDiscard={discardRow} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
-      <GitGroup title="Staged" entries={groups.staged} target="staged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
-      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
-      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
+      <GitGroup title="Merge changes" entries={groups.conflicts} target="unstaged" mutable={!unavailable} onDiscard={discardRow} onDrag={dragEntry} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
+      <GitGroup title="Staged" entries={groups.staged} target="staged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onDrag={dragEntry} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
+      <GitGroup title="Changes" entries={groups.unstaged} target="unstaged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onDrag={dragEntry} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
+      <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onDrag={dragEntry} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
       {props.git.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
     </div>
     {/* The commit form is not permanent chrome any more: it exists exactly when
@@ -252,6 +256,7 @@ const GitGroup = memo(function GitGroup(props: {
   onStage?(entry: GitStatusEntry): void;
   onUnstage?(entry: GitStatusEntry): void;
   onDiscard?(entry: GitStatusEntry, target: GitDiffTarget): void;
+  onDrag?(entry: GitStatusEntry, transfer: DataTransfer): void;
 }) {
   const [limit, setLimit] = useState(200);
   if (!props.entries.length) return null;
@@ -276,6 +281,8 @@ const GitGroup = memo(function GitGroup(props: {
           <button
             aria-busy={props.pending?.has(entry.path) ?? false}
             className="git-file"
+            draggable={Boolean(props.onDrag && entry.absolutePath)}
+            onDragStart={(event) => entry.absolutePath && props.onDrag?.(entry, event.dataTransfer)}
             onClick={() => props.onOpen(entry, props.target)}
             // What "the selected change" means for the palette and for a bound
             // shortcut: whichever row the keyboard or the pointer last landed on.

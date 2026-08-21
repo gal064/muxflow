@@ -11,6 +11,7 @@ import { ExplorerEntryRow, ExplorerMoreRow, type ExplorerRowActions } from "./Ex
 import { DEFAULT_ROW_HEIGHT, mountedRowCount, rowWindow, scrollOffsetForRow } from "./explorerWindow";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
 import { recordPerfHighWater, recordPerfMilestone } from "../../perf/probe";
+import { writeInternalPathDrag } from "../terminal/internalPathDrag";
 
 interface Props {
   root?: ActiveRoot;
@@ -31,6 +32,7 @@ interface Props {
    */
   ignoredPaths?: ReadonlySet<string>;
   scopeIdentity: string;
+  serverIdentity?: string;
   disabled: boolean;
   error?: string;
   onToggle(path: string): void;
@@ -75,6 +77,7 @@ const INERT_ROW_ACTIONS: ExplorerRowActions = {
   keyDown: () => undefined,
   loadMore: () => undefined,
   moreKeyDown: () => undefined,
+  drag: () => undefined,
 };
 
 export function ExplorerTree(props: Props) {
@@ -162,6 +165,7 @@ export function ExplorerTree(props: Props) {
     keyDown: (event, index, depth, entry) => liveRowActions.current.keyDown(event, index, depth, entry),
     loadMore: (directory) => liveRowActions.current.loadMore(directory),
     moreKeyDown: (event, index) => liveRowActions.current.moreKeyDown(event, index),
+    drag: (entry, transfer) => liveRowActions.current.drag(entry, transfer),
   }), []);
 
   const focusRow = (index: number) => {
@@ -261,6 +265,10 @@ export function ExplorerTree(props: Props) {
     moreKeyDown: (event, index) => {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); focusRow(index + (event.key === "ArrowDown" ? 1 : -1)); }
       else if (event.key === "Home" || event.key === "End") { event.preventDefault(); focusRow(event.key === "Home" ? 0 : rows.length - 1); }
+    },
+    drag: (entry, transfer) => {
+      if (!props.serverIdentity) return;
+      writeInternalPathDrag(transfer, { serverIdentity: props.serverIdentity, path: entry.path });
     },
   };
   useLayoutEffect(() => { liveRowActions.current = committedRowActions; });
@@ -402,6 +410,7 @@ export function ExplorerTree(props: Props) {
             : <ExplorerEntryRow
               actions={rowActionsRef}
               depth={row.depth}
+              dragEnabled={Boolean(props.serverIdentity)}
               entry={row.entry}
               focused={index === focusIndex}
               index={index}

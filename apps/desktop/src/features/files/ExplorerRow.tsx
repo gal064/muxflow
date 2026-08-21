@@ -20,11 +20,13 @@ export interface ExplorerRowActions {
   keyDown(event: KeyboardEvent<HTMLElement>, index: number, depth: number, entry: FileEntry): void;
   loadMore(directory: string): void;
   moreKeyDown(event: KeyboardEvent<HTMLElement>, index: number): void;
+  drag(entry: FileEntry, transfer: DataTransfer): void;
 }
 
 interface EntryRowProps {
   actions: ExplorerRowActions;
   depth: number;
+  dragEnabled: boolean;
   entry: FileEntry;
   focused: boolean;
   index: number;
@@ -45,6 +47,7 @@ export const ExplorerEntryRow = memo(function ExplorerEntryRow(props: EntryRowPr
     aria-setsize={props.setSize}
     className="file-row"
     data-tree-index={index}
+    draggable={props.dragEnabled}
     onClick={(event) => { if (event.target === event.currentTarget) entry.expandable ? actions.toggle(entry.path) : actions.open(entry, { preview: true }); }}
     onContextMenu={(event) => {
       event.preventDefault();
@@ -57,6 +60,7 @@ export const ExplorerEntryRow = memo(function ExplorerEntryRow(props: EntryRowPr
       if (event.target === event.currentTarget && !entry.expandable) actions.open(entry, { preview: false });
     }}
     onFocus={() => actions.focus(index)}
+    onDragStart={(event) => { if (props.dragEnabled) actions.drag(entry, event.dataTransfer); }}
     onKeyDown={(event) => actions.keyDown(event, index, depth, entry)}
     onPointerDown={() => actions.focus(index)}
     role="treeitem"

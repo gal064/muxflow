@@ -455,7 +455,7 @@ fn phase7_terminal_upload_contract_round_trips_u64_and_opaque_names() {
     assert!(decoded.cleanup_failed);
 }
 
-/// The file-open stream and the Git diff-body lane are append-only: existing
+/// File-path/file-body operations are append-only: existing
 /// operations keep their numbers and existing payload variants keep theirs, so
 /// an older peer that does not know the operation still refuses it as
 /// unsupported rather than misreading a neighbouring one.
@@ -468,8 +468,9 @@ fn open_file_stream_operation_and_payload_are_append_only() {
     assert_eq!(v1::Operation::SelectTerminalSession as i32, 43);
     assert_eq!(v1::Operation::OpenFileStream as i32, 44);
     assert_eq!(v1::Operation::GitDiffContent as i32, 45);
+    assert_eq!(v1::Operation::ResolveTerminalFile as i32, 46);
     assert_eq!(v1::Operation::TestDelay as i32, 100);
-    assert!(v1::Operation::try_from(46).is_err());
+    assert!(v1::Operation::try_from(47).is_err());
 }
 
 #[test]
@@ -556,6 +557,20 @@ fn active_root_probe_round_trips_a_known_capability_and_its_unchanged_answer() {
     let decoded = v1::FileServiceResponse::decode(response.encode_to_vec().as_slice()).unwrap();
     assert!(decoded.root_unchanged);
     assert!(decoded.directory.is_none());
+}
+
+#[test]
+fn terminal_file_resolution_round_trips_its_exact_pane_route() {
+    let request = v1::FileServiceRequest {
+        pane_id: "%1".into(),
+        path: "./src/main.rs".into(),
+        expected_session_id: "$1".into(),
+        expected_window_id: "@1".into(),
+        expected_cwd: "/repo".into(),
+        ..Default::default()
+    };
+    let decoded = v1::FileServiceRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded, request);
 }
 
 /// Single-request file opens are a required capability, and the requirement is

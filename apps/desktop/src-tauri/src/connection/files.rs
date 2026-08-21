@@ -65,6 +65,12 @@ pub struct FileCommand {
     #[serde(default)]
     pub expected_topology_generation: String,
     #[serde(default)]
+    pub expected_session_id: String,
+    #[serde(default)]
+    pub expected_window_id: String,
+    #[serde(default)]
+    pub expected_cwd: String,
+    #[serde(default)]
     pub mutation: String,
     #[serde(default)]
     pub create_directory: bool,
@@ -107,6 +113,9 @@ pub async fn file_request(
             "expectedTopologyGeneration",
             &command.expected_topology_generation,
         )?,
+        expected_session_id: command.expected_session_id,
+        expected_window_id: command.expected_window_id,
+        expected_cwd: command.expected_cwd,
         mutation: mutation_from_name(&command.mutation)?.into(),
         create_directory: command.create_directory,
         overwrite_confirmed: command.overwrite_confirmed,
@@ -177,6 +186,7 @@ pub async fn cancel_file_request(
 fn operation_from_name(value: &str) -> Result<v1::Operation, String> {
     match value {
         "resolveActiveRoot" => Ok(v1::Operation::ResolveActiveRoot),
+        "resolveTerminalFile" => Ok(v1::Operation::ResolveTerminalFile),
         "listDirectory" => Ok(v1::Operation::ListDirectory),
         "watchDirectory" => Ok(v1::Operation::WatchDirectory),
         "unwatchDirectory" => Ok(v1::Operation::UnwatchDirectory),

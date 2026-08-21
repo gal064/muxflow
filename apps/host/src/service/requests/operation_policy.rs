@@ -125,7 +125,7 @@ impl OperationPolicy {
                 Scheduling::Inline,
                 Handler::TmuxAction,
             ),
-            v1::Operation::ResolveActiveRoot => (
+            v1::Operation::ResolveActiveRoot | v1::Operation::ResolveTerminalFile => (
                 Access::ReadOnly,
                 Lane::Control,
                 Scheduling::Detached,
@@ -344,6 +344,7 @@ mod tests {
             (SetTerminalVisibility, M, C, I, TH),
             (RequestTerminalSeed, M, C, I, TH),
             (ResolveActiveRoot, R, C, Dd, AR),
+            (ResolveTerminalFile, R, C, Dd, AR),
             (ListDirectory, R, C, Dd, FH),
             (WatchDirectory, M, C, Dd, FH),
             (UnwatchDirectory, M, C, Dd, FH),

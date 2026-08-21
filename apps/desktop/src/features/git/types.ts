@@ -17,6 +17,8 @@ export interface GitStatusEntry {
   /** Opaque base64 path identity. Never reconstruct this from displayPath. */
   path: string;
   displayPath: string;
+  /** Exact host-provided UTF-8 absolute path. Absent for non-UTF-8 Git paths. */
+  absolutePath?: string;
   originalPath?: string;
   displayOriginalPath?: string;
   indexKind: GitChangeKind;

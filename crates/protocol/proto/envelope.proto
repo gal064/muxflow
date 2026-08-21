@@ -140,6 +140,10 @@ enum Operation {
   // the same. Neither had been released, so the Git lane takes the next free
   // number. Nothing outside this repository speaks either one.
   OPERATION_GIT_DIFF_CONTENT = 45;
+  // Resolves one deliberately explicit terminal-output path against the
+  // authoritative cwd of the pane that displayed it. The response carries a
+  // parent-directory capability and canonical regular-file path for the editor.
+  OPERATION_RESOLVE_TERMINAL_FILE = 46;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -449,6 +453,11 @@ message FileServiceRequest {
   // unchanged root without a second authoritative discovery, without minting a
   // new root generation, and without broadcasting a duplicate ActiveRoot event.
   string known_root_token = 28;
+  // ResolveTerminalFile binds its authoritative lookup to the exact pane route
+  // and cwd the renderer showed when the user activated the path.
+  string expected_session_id = 29;
+  string expected_window_id = 30;
+  string expected_cwd = 31;
 }
 
 // One frame of an OpenFileStream body.
@@ -655,6 +664,9 @@ message GitStatusEntry {
   bool symlink = 20;
   bool binary = 21;
   string rename_score = 22;
+  // Exact UTF-8 absolute worktree path for private same-host drag payloads.
+  // Empty when the Git byte path cannot be represented losslessly as UTF-8.
+  string absolute_path = 23;
 }
 
 message GitStatusSnapshot {
