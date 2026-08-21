@@ -7,7 +7,15 @@ pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting
 /// it as current would leave a transition that can never arrive.
-pub(crate) const MANAGED_VERSION: u32 = 3;
+pub(crate) const MANAGED_VERSION: u32 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalEffect {
+    None,
+    Pending,
+    ResolveMatching,
+    ResolveAll,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedHook {
@@ -15,6 +23,8 @@ pub(crate) struct ParsedHook {
     pub lifecycle: v1::AgentLifecycleState,
     pub authority_millis: i64,
     pub event_name: String,
+    pub approval_key: String,
+    pub approval_effect: ApprovalEffect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,10 +120,10 @@ impl AgentAdapter for CodexAdapter {
         ".codex/hooks.json"
     }
 
-    /// Measured against a real `~/.codex/hooks.json` (Codex CLI 0.128 and
-    /// 0.147): Codex fires `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
-    /// `PermissionRequest`, `PostToolUse`, `Stop`, `SubagentStart` and
-    /// `SubagentStop`.
+    /// Measured against a real `~/.codex/hooks.json` and checked against the
+    /// Codex CLI 0.148 hook contract: Codex fires `SessionStart`,
+    /// `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`,
+    /// `PostToolUse`, `Stop`, `SubagentStart` and `SubagentStop`.
     ///
     /// Two events Claude Code has are absent from that surface and are
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
@@ -131,6 +141,7 @@ impl AgentAdapter for CodexAdapter {
             "PostToolUse",
             "SubagentStop",
             "Stop",
+            "SessionEnd",
         ]
     }
 
@@ -162,6 +173,7 @@ impl AgentAdapter for CodexAdapter {
                 // A subagent finishing says the parent is still mid-turn.
                 ("SubagentStop", v1::AgentLifecycleState::Working),
                 ("Stop", v1::AgentLifecycleState::Idle),
+                ("SessionEnd", v1::AgentLifecycleState::Idle),
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
         )
@@ -365,6 +377,23 @@ fn parse_common_hook(
 }
 
 fn parsed(payload: &Value, lifecycle: v1::AgentLifecycleState) -> ParsedHook {
+    let event_name = hook_event_name(payload).unwrap_or_default();
+    let approval_effect = if lifecycle == v1::AgentLifecycleState::Blocked {
+        ApprovalEffect::Pending
+    } else {
+        match event_name {
+            // This is the only supported hook that proves a particular tool
+            // passed its approval boundary and completed.
+            "PostToolUse" => ApprovalEffect::ResolveMatching,
+            // Codex exposes no denial event. Stop/SessionEnd are its observable
+            // denial or cancellation boundaries; the other two start a fresh
+            // lifecycle and cannot inherit an older pending request.
+            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" | "SessionStart" => {
+                ApprovalEffect::ResolveAll
+            }
+            _ => ApprovalEffect::None,
+        }
+    };
     ParsedHook {
         native_session_id: payload
             .get("session_id")
@@ -374,7 +403,13 @@ fn parsed(payload: &Value, lifecycle: v1::AgentLifecycleState) -> ParsedHook {
             .to_owned(),
         lifecycle,
         authority_millis: HOOK_AUTHORITY_MILLIS,
-        event_name: hook_event_name(payload).unwrap_or_default().to_owned(),
+        event_name: event_name.to_owned(),
+        approval_key: payload
+            .get("approval_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        approval_effect,
     }
 }
 
@@ -456,11 +491,11 @@ mod tests {
         assert_eq!(descriptors.len(), 2);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
-        assert_eq!(codex.hook_events().len(), 7);
+        assert_eq!(codex.hook_events().len(), 8);
         assert_eq!(codex.descriptor(home, &observed[0].1).id, "codex");
         assert_eq!(
             codex.hook_command(Path::new("/opt/muxflow-host")),
-            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 3"
+            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 4"
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));
