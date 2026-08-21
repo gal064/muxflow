@@ -1,5 +1,39 @@
 use serde_json::Value;
 
+const MAX_NATIVE_TEXT_BYTES: usize = tmux_control::MAX_INPUT_REQUEST_BYTES;
+
+#[tauri::command]
+pub async fn write_native_terminal_clipboard(text: String) -> Result<(), String> {
+    let text = validated_native_clipboard_write(text)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            use clipboard_rs::{Clipboard, ClipboardContext};
+            let clipboard = ClipboardContext::new()
+                .map_err(|error| format!("open native clipboard: {error}"))?;
+            clipboard
+                .set_text(text)
+                .map_err(|error| format!("write native clipboard text: {error}"))
+        })
+        .await
+        .map_err(|error| format!("native clipboard worker failed: {error}"))?
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    Err("native clipboard writes are unavailable on this platform".into())
+}
+
+fn validated_native_clipboard_write(text: String) -> Result<String, String> {
+    if text.is_empty() {
+        return Err("refusing to replace the native clipboard with empty text".into());
+    }
+    if text.len() > MAX_NATIVE_TEXT_BYTES {
+        return Err(format!(
+            "native clipboard text exceeds the {MAX_NATIVE_TEXT_BYTES}-byte bound"
+        ));
+    }
+    Ok(text)
+}
+
 #[tauri::command]
 pub async fn read_native_terminal_clipboard() -> Result<Option<Value>, String> {
     #[cfg(target_os = "linux")]
@@ -181,8 +215,6 @@ fn file_path_url(raw: &str) -> Option<String> {
 /// message here instead of being rejected further down the bridge.
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn native_clipboard_text(text: String) -> Result<Option<Value>, String> {
-    const MAX_NATIVE_TEXT_BYTES: usize = tmux_control::MAX_INPUT_REQUEST_BYTES;
-
     if text.is_empty() {
         return Ok(None);
     }
@@ -196,7 +228,22 @@ fn native_clipboard_text(text: String) -> Result<Option<Value>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::native_clipboard_text;
+    use super::{native_clipboard_text, validated_native_clipboard_write};
+
+    #[test]
+    fn native_clipboard_writes_are_nonempty_and_bounded() {
+        assert_eq!(
+            validated_native_clipboard_write("copied\nverbatim".into()).unwrap(),
+            "copied\nverbatim"
+        );
+        assert!(validated_native_clipboard_write(String::new()).is_err());
+        assert!(
+            validated_native_clipboard_write(
+                "a".repeat(tmux_control::MAX_INPUT_REQUEST_BYTES + 1)
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn empty_clipboard_text_is_not_a_payload() {

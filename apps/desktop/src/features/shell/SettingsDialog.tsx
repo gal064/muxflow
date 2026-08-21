@@ -46,11 +46,12 @@ interface SettingsDialogProps {
   agentSetup: { available: boolean; reports: boolean; connected: boolean; onSetUp(): void };
 }
 
-type SettingsTab = "connection" | "workspace" | "sounds" | "accessibility";
+type SettingsTab = "connection" | "workspace" | "terminal" | "sounds" | "accessibility";
 
 const TABS: readonly { id: SettingsTab; label: string }[] = [
   { id: "connection", label: "Connection" },
   { id: "workspace", label: "Workspace" },
+  { id: "terminal", label: "Terminal" },
   { id: "sounds", label: "Sounds" },
   { id: "accessibility", label: "Accessibility" },
 ];
@@ -200,6 +201,14 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Compact workspace list
           </label>
           <p className="settings-hint">Hides individual agent lines under each workspace while keeping its activity, unread count, and connection status visible.</p>
+        </>}
+
+        {tab === "terminal" && <>
+          <label className="settings-check">
+            <input checked={props.shell.copyOnSelect} onChange={(event) => props.onShell({ copyOnSelect: event.target.checked })} type="checkbox" />
+            Copy on select
+          </label>
+          <p className="settings-hint">Copies completed, non-empty terminal selections to the system clipboard.</p>
         </>}
 
         {tab === "sounds" && <>

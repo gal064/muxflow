@@ -61,6 +61,7 @@
     "agentStateGlyphs": true,
     "compactWorkspaces": true,
     "terminalScreenReader": true,
+    "copyOnSelect": true,
     "windowGeometry": {
       "x": 20,
       "y": 30,

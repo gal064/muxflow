@@ -20,6 +20,7 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "seedDiagnostic"; paneId: string; message: string }
   | { kind: "flowStalled"; paneId: string; message: string }
   | { kind: "flowPaused"; paneId: string; message: string }
+  | { kind: "clipboardWrite"; text: string }
   | { kind: "topologyDirty"; name: string }
   | { kind: "error"; message: string }
   | { kind: "exit"; reason: string }
@@ -211,6 +212,16 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
         return { kind: "flowPaused", paneId: label, message: decoder.decode(data), sequence };
       } catch {
         throw new Error("terminal flow pause payload is not valid UTF-8");
+      }
+    case 17:
+      requireHostSequence(sequence, "terminal clipboard write");
+      if (label !== "terminal-clipboard" || data.byteLength === 0 || data.byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) {
+        throw new Error("terminal clipboard write frame is malformed or oversized");
+      }
+      try {
+        return { kind: "clipboardWrite", text: decoder.decode(data), sequence };
+      } catch {
+        throw new Error("terminal clipboard write payload is not valid UTF-8");
       }
     default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
   }
