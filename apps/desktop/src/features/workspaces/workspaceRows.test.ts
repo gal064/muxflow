@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { agent } from "../agents/testFixtures";
 import { compareAgents, deriveAgentRollups } from "../agents/selectors";
 import type { TmuxSnapshot } from "../../app/types";
+import type { AgentAdapterDescriptor } from "../agents/types";
 import {
   WORKSPACE_ROW_AGENT_LIMIT, abbreviateHome, inferHome, sessionPath, workspaceMetaLine, workspaceRows,
 } from "./workspaceRows";
@@ -54,6 +55,18 @@ describe("workspace sidebar rows", () => {
     ]);
     expect(primary.agentOverflow).toBe(0);
     expect(project.agents).toEqual([{ id: "c", name: "claude two", state: "done" }]);
+  });
+
+  it("uses useful live tab labels and hides machine identifiers in workspace summaries", () => {
+    const labeled = [
+      agent({ id: "named", sessionId: "$1", windowName: "Review auth flow", displayName: "Codex" }),
+      agent({ id: "uuid", adapterId: "future", sessionId: "$2", windowName: "00000000-0000-0000-0000-000000000000", displayName: "00000000-0000-0000-0000-000000000000" }),
+    ];
+    const adapters = [{ id: "future", displayName: "Future agent" }] as AgentAdapterDescriptor[];
+    const result = workspaceRows({ snapshot, agents: labeled, adapters, attentionByWorkspace: deriveAgentRollups(labeled).byWorkspace });
+    expect(result[0].agents[0].name).toBe("Review auth flow");
+    expect(result[1].agents[0].name).toBe("Future agent");
+    expect(JSON.stringify(result)).not.toContain("00000000-0000-0000-0000-000000000000");
   });
 
   it("lists three agents and counts the rest", () => {

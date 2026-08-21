@@ -74,6 +74,8 @@ export interface ShellState {
   agentsSectionRatio: number;
   /** Draws a shape inside each state dot as well as coloring it. */
   agentStateGlyphs: boolean;
+  /** Hides per-agent activity lines from workspace rows. */
+  compactWorkspaces: boolean;
   /**
    * Makes terminal *content* readable to a screen reader. Off by default
    * because xterm's screen-reader mode costs a string allocation and an
@@ -114,6 +116,7 @@ export const defaultShellState: ShellState = {
   agentSort: "workspace",
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
+  compactWorkspaces: false,
   terminalScreenReader: false,
 };
 
@@ -156,6 +159,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       agentSort: migratedAgentSort(shell?.agentSort),
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
+      compactWorkspaces: Boolean(shell?.compactWorkspaces),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
       ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
         ? { windowGeometry: shell.windowGeometry } : {}),
