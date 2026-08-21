@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tmux_control::{HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
@@ -122,6 +122,12 @@ fn run_input_dispatch_with(
                 pane_id,
                 mut data,
             } => {
+                // The earliest per-batch point on this thread: the batch exists
+                // from the moment its first message leaves the queue, and the
+                // coalescing loop below only extends that same batch. Anything
+                // earlier would be `receiver.recv()`, which is where an idle
+                // dispatcher waits for work and would time the user's thinking.
+                let dequeued = Instant::now();
                 while data.len() < HOST_INPUT_COALESCE_BYTES {
                     match receiver.try_recv() {
                         Ok(InputDispatch::Bytes {
@@ -144,6 +150,16 @@ fn run_input_dispatch_with(
                     }
                 }
                 let result = send_batch(input_id, &pane_id, &data);
+                // Only a committed batch has a leg to measure: a failed write
+                // times a failure, not a latency, and the failure is already
+                // reported through the barrier.
+                if result.is_ok() {
+                    crate::diagnostics::record_slow_input_leg(
+                        dequeued.elapsed(),
+                        data.len(),
+                        &pane_id,
+                    );
+                }
                 if pending_error.is_none() {
                     pending_error = result.err();
                 }
