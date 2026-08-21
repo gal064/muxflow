@@ -46,10 +46,11 @@ interface SettingsDialogProps {
   agentSetup: { available: boolean; reports: boolean; connected: boolean; onSetUp(): void };
 }
 
-type SettingsTab = "connection" | "sounds" | "accessibility";
+type SettingsTab = "connection" | "terminal" | "sounds" | "accessibility";
 
 const TABS: readonly { id: SettingsTab; label: string }[] = [
   { id: "connection", label: "Connection" },
+  { id: "terminal", label: "Terminal" },
   { id: "sounds", label: "Sounds" },
   { id: "accessibility", label: "Accessibility" },
 ];
@@ -191,6 +192,14 @@ export function SettingsDialog(props: SettingsDialogProps) {
             />}
             {props.helper.phase === "succeeded" && <p role="status">Helper {props.helper.operation === "install" ? "installed" : "upgraded"}. {props.helper.message}</p>}
           </div>}
+        </>}
+
+        {tab === "terminal" && <>
+          <label className="settings-check">
+            <input checked={props.shell.copyOnSelect} onChange={(event) => props.onShell({ copyOnSelect: event.target.checked })} type="checkbox" />
+            Copy on select
+          </label>
+          <p className="settings-hint">Copies completed, non-empty terminal selections to the system clipboard.</p>
         </>}
 
         {tab === "sounds" && <>

@@ -225,6 +225,10 @@ enum EventKind {
   // out of attempts and the pane is delivering nothing until something reseeds
   // it.
   EVENT_KIND_TERMINAL_FLOW_STALLED = 17;
+  // A bounded, write-only clipboard update originating from tmux's automatic
+  // paste buffer. The desktop may write `detail` to the system clipboard and
+  // must never answer with clipboard contents.
+  EVENT_KIND_TERMINAL_CLIPBOARD_WRITE = 18;
 }
 
 message HostEvent {
