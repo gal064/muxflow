@@ -467,7 +467,11 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         }
         // Upgraded rather than withdrawn: the ack names the window but the
         // snapshot that contains it has not arrived, and dropping the
-        // placeholder here would blink the strip empty in between.
+        // placeholder here would blink the strip empty in between. Nothing on
+        // the success path ever withdraws it — retirement belongs to the latch
+        // in `App`, which clears it once the workspace's window list names this
+        // window (`retirePendingTab`). Withdrawal here stays for the failures
+        // above, where no window is ever coming.
         publishPendingTab(scope, {
           key, sessionId: created.sessionId ?? sessionId, windowId: created.windowId, title: "New window",
         });
@@ -639,8 +643,9 @@ export function useShellNavigation(options: ShellNavigationOptions) {
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope" };
         }
         // The ack's window id is what lets this placeholder retire: the retire
-        // rule is "the window I stand in for exists in the snapshot", and a
-        // placeholder without one waits forever.
+        // rule is "the window I stand in for exists in the snapshot" — applied
+        // once, and for good, by the latch in `App` (`retirePendingTab`) — and
+        // a placeholder without one waits forever.
         publishPendingTab(scope, {
           key, sessionId: created.sessionId, windowId: created.windowId, title: name || "New session",
         });
