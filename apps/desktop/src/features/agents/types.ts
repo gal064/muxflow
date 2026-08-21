@@ -81,6 +81,15 @@ export interface AgentSnapshot {
   adapters: AgentAdapterDescriptor[];
 }
 
+/** The tmux topology for which an accepted agent snapshot can prove absence. */
+export interface AgentTopologyAuthority {
+  hostProfileId: string;
+  serverIdentity: string;
+  connectionEpoch: number;
+  topologyGeneration: number;
+  coveredWindowIds: ReadonlySet<string>;
+}
+
 export type AgentWireEvent =
   | { kind: "snapshot"; snapshot: AgentSnapshot; replayed?: boolean }
   | { kind: "upsert"; hostProfileId: string; serverIdentity: string; connectionEpoch: number; sequence: AgentGeneration; record: AgentRecord; retiredAgentIds?: readonly string[]; replayed?: boolean }
