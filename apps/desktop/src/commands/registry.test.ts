@@ -132,6 +132,23 @@ describe("command registry", () => {
     expect(shortcutFromEvent(controlCharacter)).toBe("Ctrl+4");
     expect(commandForKeyboardEvent(controlCharacter, "mac", {})?.id).toBe("tab.select4");
 
+    const missingPhysicalCode = { ...controlCharacter, code: "" } as KeyboardEvent;
+    expect(shortcutFromEvent(missingPhysicalCode)).toBe("Ctrl+4");
+    expect(commandForKeyboardEvent(missingPhysicalCode, "mac", {})?.id).toBe("tab.select4");
+
+    const legacyCompositionCode = { ...controlCharacter, keyCode: 229 } as KeyboardEvent;
+    expect(commandForKeyboardEvent(legacyCompositionCode, "mac", {})?.id).toBe("tab.select4");
+
+    const legacyCompositionWithOnlyTypedDigit = { ...controlCharacter, key: "4", code: "", keyCode: 229 } as KeyboardEvent;
+    expect(commandForKeyboardEvent(legacyCompositionWithOnlyTypedDigit, "mac", {})?.id).toBe("tab.select4");
+
+    const missingCommandCode = {
+      key: "\u0002", code: "", ctrlKey: false, altKey: false, shiftKey: false, metaKey: true,
+      isComposing: false, keyCode: 50,
+    } as KeyboardEvent;
+    expect(shortcutFromEvent(missingCommandCode)).toBe("Meta+2");
+    expect(commandForKeyboardEvent(missingCommandCode, "mac", {})?.id).toBe("workspace.select2");
+
     // Only the nine registered selectors are consumed. A neighbouring terminal
     // Control sequence remains terminal input rather than an application key.
     const controlZero = { ...controlCharacter, key: "\u0000", code: "Digit0", keyCode: 48 } as KeyboardEvent;
@@ -183,9 +200,19 @@ describe("command registry", () => {
     const target = (editable: boolean, terminal: boolean) => ({
       closest: (selector: string) => selector.startsWith("input") ? (editable ? {} : null) : (terminal ? {} : null),
     });
-    expect(globalShortcutAllowed({ target: target(true, false) as unknown as EventTarget }, false)).toBe(false);
-    expect(globalShortcutAllowed({ target: target(true, true) as unknown as EventTarget }, false)).toBe(true);
-    expect(globalShortcutAllowed({ target: target(false, false) as unknown as EventTarget }, true)).toBe(false);
+    const event = (editable: boolean, terminal: boolean, key = "1", code = "Digit1") => ({
+      target: target(editable, terminal) as unknown as EventTarget,
+      key, code, keyCode: key.charCodeAt(0), ctrlKey: true, metaKey: false,
+    });
+    expect(globalShortcutAllowed(event(true, false), false)).toBe(false);
+    expect(globalShortcutAllowed(event(true, false), false, "workspace.select1")).toBe(true);
+    expect(globalShortcutAllowed(event(true, false), false, "tab.select1")).toBe(true);
+    expect(globalShortcutAllowed(event(true, false), true, "tab.select1")).toBe(false);
+    // A selector rebound to an editing chord does not steal that chord merely
+    // because the resolved command happens to be positional.
+    expect(globalShortcutAllowed(event(true, false, "x", "KeyX"), false, "tab.select1")).toBe(false);
+    expect(globalShortcutAllowed(event(true, true), false)).toBe(true);
+    expect(globalShortcutAllowed(event(false, false), true)).toBe(false);
   });
 
   it("has collision-free platform defaults and detects user override collisions", () => {

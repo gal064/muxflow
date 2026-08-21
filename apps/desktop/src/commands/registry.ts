@@ -307,6 +307,17 @@ export function keyFromCode(code: string): string | undefined {
   return UNSHIFTED_BY_CODE[code];
 }
 
+/** A modified top-row digit, including WebKit events whose `code` is blank. */
+function positionalDigitFromEvent(event: Pick<KeyboardEvent, "code" | "ctrlKey" | "key" | "keyCode" | "metaKey">): string | undefined {
+  if (!event.ctrlKey && !event.metaKey) return undefined;
+  if (/^Digit[0-9]$/.test(event.code)) return event.code.slice(5);
+  if (/^[0-9]$/.test(event.key)) return event.key;
+  // WKWebView can pair a Control-character `key` with no physical `code`, but
+  // its legacy code still identifies the top number row. Keep this fallback
+  // deliberately narrower than numpad and unmodified keys.
+  return event.keyCode >= 48 && event.keyCode <= 57 ? String(event.keyCode - 48) : undefined;
+}
+
 export function shortcutFromEvent(event: KeyboardEvent): string {
   const parts = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Meta"]
     .filter((part): part is string => Boolean(part));
@@ -315,8 +326,8 @@ export function shortcutFromEvent(event: KeyboardEvent): string {
   // keys, so resolve that row from `code` under Ctrl/Meta too. Other Control
   // keys continue through `event.key` and are not intercepted unless a command
   // actually binds them.
-  const digitSelector = (event.ctrlKey || event.metaKey) && /^Digit[0-9]$/.test(event.code);
-  const rewritten = event.shiftKey || event.altKey || digitSelector ? keyFromCode(event.code) : undefined;
+  const positionalDigit = positionalDigitFromEvent(event);
+  const rewritten = positionalDigit ?? (event.shiftKey || event.altKey ? keyFromCode(event.code) : undefined);
   const raw = rewritten ?? event.key;
   const key = raw.length === 1 ? raw.toUpperCase() : raw;
   if (!["Control", "Alt", "Shift", "Meta"].includes(key)) parts.push(key);
@@ -328,7 +339,10 @@ export function commandForKeyboardEvent(
   platform: Platform,
   overrides: ShortcutOverrides,
 ): CommandDefinition | undefined {
-  if (keyboardEventIsComposing(event)) return undefined;
+  // WebKit sometimes labels a non-composing modified digit with legacy 229.
+  // A real composition still wins; only a physically identified selector may
+  // bypass the legacy-code half of the composition guard.
+  if (event.isComposing || (event.keyCode === 229 && positionalDigitFromEvent(event) === undefined)) return undefined;
   const pressed = shortcutFromEvent(event);
   const matches = commandRegistry.filter((command) => {
     const shortcut = shortcutFor(command, platform, overrides);
@@ -348,8 +362,18 @@ export function keyboardEventIsComposing(
   return event.isComposing || event.keyCode === 229;
 }
 
-export function globalShortcutAllowed(event: Pick<KeyboardEvent, "target">, overlayOpen: boolean): boolean {
+export function globalShortcutAllowed(
+  event: Pick<KeyboardEvent, "code" | "ctrlKey" | "key" | "keyCode" | "metaKey" | "target">,
+  overlayOpen: boolean,
+  commandId?: CommandId,
+): boolean {
   if (overlayOpen) return false;
+  // Positional navigation is global by design: switching a workspace or tab
+  // must work while Monaco or another ordinary editor owns focus. Modal
+  // surfaces still win above, including the shortcut recorder itself.
+  if (positionalDigitFromEvent(event)
+    && commandId
+    && (selectionIndex(commandId, "workspace.select") || selectionIndex(commandId, "tab.select"))) return true;
   const target = event.target as { closest?: (selector: string) => unknown } | null;
   if (!target?.closest) return true;
   const editable = target.closest("input, textarea, select, [contenteditable=true], [role=textbox]");
