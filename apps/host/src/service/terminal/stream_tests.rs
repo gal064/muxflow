@@ -54,6 +54,7 @@ struct Harness {
     stopped: AtomicBool,
     output_credit: Arc<super::OutputCredit>,
     emission_order: Arc<Mutex<()>>,
+    topology_trigger: TopologyOutputTrigger,
 }
 
 impl Harness {
@@ -78,6 +79,7 @@ impl Harness {
                 stopped: AtomicBool::new(false),
                 output_credit: Arc::new(super::OutputCredit::negotiated(false)),
                 emission_order: Arc::new(Mutex::new(())),
+                topology_trigger: TopologyOutputTrigger::default(),
             },
         )
     }
@@ -92,6 +94,7 @@ impl Harness {
             stopped: &self.stopped,
             output_credit: &self.output_credit,
             emission_order: &self.emission_order,
+            topology_trigger: &self.topology_trigger,
         }
     }
 
@@ -421,6 +424,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
     let stopped = AtomicBool::new(false);
     let output_credit = super::OutputCredit::negotiated(false);
     let emission_order = Arc::new(Mutex::new(()));
+    let topology_trigger = TopologyOutputTrigger::default();
     state.finish_block(
         tag,
         StreamRuntime {
@@ -432,6 +436,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
             stopped: &stopped,
             output_credit: &output_credit,
             emission_order: &emission_order,
+            topology_trigger: &topology_trigger,
         },
     );
     assert!(matches!(state.command_block, CommandBlock::None));

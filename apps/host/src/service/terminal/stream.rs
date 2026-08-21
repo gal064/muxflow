@@ -23,6 +23,7 @@ use super::correlation::{
 use super::degradation::emit_pane_degradations;
 use super::flow_control::RejectedResume;
 use super::{build_seed_with_metadata, capture_metadata, validate_tmux_id};
+use crate::service::topology_output_trigger::TopologyOutputTrigger;
 
 /// Asks the control-writer thread to write a capture for `pane_id`.
 ///
@@ -75,6 +76,7 @@ pub(super) struct ControlStreamReader {
     pub(super) flow: Arc<super::FlowControl>,
     pub(super) output_credit: Arc<OutputCredit>,
     pub(super) emission_order: Arc<Mutex<()>>,
+    pub(super) topology_trigger: TopologyOutputTrigger,
 }
 
 pub(super) enum StreamControl {
@@ -100,6 +102,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         flow,
         output_credit,
         emission_order,
+        topology_trigger,
     } = context;
     let mut reader = BufReader::new(stdout);
     let mut parser = ControlParser::default();
@@ -115,6 +118,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         stopped: &stopped,
         output_credit: &output_credit,
         emission_order: &emission_order,
+        topology_trigger: &topology_trigger,
     };
     loop {
         match reader.read(&mut buffer) {
@@ -296,6 +300,7 @@ struct StreamRuntime<'a> {
     stopped: &'a AtomicBool,
     output_credit: &'a OutputCredit,
     emission_order: &'a Arc<Mutex<()>>,
+    topology_trigger: &'a TopologyOutputTrigger,
 }
 
 impl StreamState {
@@ -333,6 +338,7 @@ impl StreamState {
             stopped,
             output_credit,
             emission_order,
+            topology_trigger,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             return;
@@ -368,6 +374,7 @@ impl StreamState {
                     stopped,
                     output_credit,
                     emission_order,
+                    topology_trigger,
                 }
                 .record(pane_id, data),
             },
@@ -424,6 +431,7 @@ impl StreamState {
                     stopped,
                     output_credit,
                     emission_order,
+                    topology_trigger,
                 },
             ),
             ControlRecord::Error { tag, arguments } => {
@@ -618,6 +626,9 @@ impl StreamState {
             stopped,
             output_credit,
             emission_order,
+            // Seed and replay emission below is a reconnect artefact, not fresh
+            // pane activity, so it deliberately does not feed the trigger.
+            topology_trigger: _,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             self.command_block = CommandBlock::None;

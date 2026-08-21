@@ -21,6 +21,7 @@ use tmux_control::{
 use tokio::sync::mpsc;
 
 use super::SequencerControl;
+use super::topology_output_trigger::TopologyOutputTrigger;
 mod degradation;
 use degradation::{pane_resource_event, report_pane_degradations};
 mod flow_control;
@@ -298,11 +299,19 @@ pub(super) struct TerminalClients {
     /// deliberately separate from `resources`: credit/channel waits hold this
     /// fence, never the pane-resource store lock.
     emission_order: Arc<Mutex<()>>,
+    /// Handed to every attachment's reader thread so delivered pane output can
+    /// wake topology reconciliation; see
+    /// [`crate::service::topology_output_trigger`].
+    topology_trigger: TopologyOutputTrigger,
 }
 
 impl TerminalClients {
-    pub(super) fn new(output_credit: Arc<OutputCredit>) -> Self {
+    pub(super) fn new(
+        output_credit: Arc<OutputCredit>,
+        topology_trigger: TopologyOutputTrigger,
+    ) -> Self {
         Self {
+            topology_trigger,
             clients: HashMap::new(),
             visible_session: None,
             last_size: None,
@@ -392,6 +401,7 @@ impl TerminalClients {
                 terminal_generation: Arc::clone(&self.generation),
                 output_credit: Arc::clone(&self.output_credit),
                 emission_order: Arc::clone(&self.emission_order),
+                topology_trigger: self.topology_trigger.clone(),
             },
         ) {
             Ok(attachment) => attachment,

@@ -1,6 +1,7 @@
 use super::*;
 use crate::service::terminal::OutputCharge;
 use crate::service::terminal::degradation::emit_pane_degradations;
+use crate::service::topology_output_trigger::TopologyOutputTrigger;
 
 pub(in crate::service::terminal) fn with_active_resources<T>(
     resources: &Arc<Mutex<PaneResourceStore>>,
@@ -93,10 +94,17 @@ pub(in crate::service::terminal) struct OutputEmission<'a> {
     pub(in crate::service::terminal) stopped: &'a AtomicBool,
     pub(in crate::service::terminal) output_credit: &'a OutputCredit,
     pub(in crate::service::terminal) emission_order: &'a Mutex<()>,
+    pub(in crate::service::terminal) topology_trigger: &'a TopologyOutputTrigger,
 }
 
 impl OutputEmission<'_> {
     pub(in crate::service::terminal) fn record(self, pane_id: String, data: Vec<u8>) {
+        // Before the fence, and never under it. tmux stays silent for a
+        // title-driven window rename or a pane's cwd moving, but both always
+        // come with output; a debounced dirty mark here is what gets them to
+        // the desktop without waiting for the safety tick. The call is a few
+        // atomic operations and must stay that way.
+        self.topology_trigger.note_output();
         let admitted = {
             let _emission = self.emission_order.lock().unwrap();
             let generation = self.terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
