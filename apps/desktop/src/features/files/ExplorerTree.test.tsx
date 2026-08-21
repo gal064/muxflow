@@ -27,14 +27,14 @@ const listing: DirectoryListing = {
 describe("ExplorerTree", () => {
   it("writes private same-host payloads for both file and folder rows", async () => {
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" serverIdentity="server-a"
+    await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope" hostProfileId="local" serverIdentity="server-a"
       listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
       onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
     const values = new Map<string, string>();
     const dataTransfer = { effectAllowed: "all", setData: (type: string, value: string) => values.set(type, value) };
     const rows = renderer.root.findAllByProps({ className: "file-row" });
     for (const row of [rows[0], rows[2]]) row.props.onDragStart({ dataTransfer });
-    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!)).toEqual({ version: 1, serverIdentity: "server-a", path: "/r/.git" });
+    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!)).toEqual({ version: 1, hostProfileId: "local", serverIdentity: "server-a", path: "/r/.git" });
     expect(rows[0].props.draggable).toBe(true);
     await act(async () => { renderer.unmount(); });
   });
