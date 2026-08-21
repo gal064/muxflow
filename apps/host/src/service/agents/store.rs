@@ -59,6 +59,11 @@ pub(super) struct StoredAgent {
     pub present: bool,
     #[serde(default)]
     pub hook_terminal: bool,
+    /// Opaque correlation digests for approvals that have not produced a
+    /// matching resolution event. Empty on records written before this field
+    /// existed; ingest treats that legacy blocked state conservatively.
+    #[serde(default)]
+    pub pending_approval_keys: Vec<String>,
     /// When something last said what this agent was *doing*.
     ///
     /// Distinct from `updated_at_unix_millis`, which also moves when the agent
@@ -102,6 +107,7 @@ pub(super) fn load(path: &Path) -> StoredState {
         // UI immediately instead of waiting up to the stale-working TTL.
         if record.hook_terminal {
             record.lifecycle = tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32;
+            record.pending_approval_keys.clear();
         }
     }
     state
@@ -203,6 +209,7 @@ mod tests {
         // The field this phase added is absent from the file, and its default
         // is what the staleness sweep reads as "fall back to `updated_at`".
         assert_eq!(record.lifecycle_observed_at_unix_millis, 0);
+        assert!(record.pending_approval_keys.is_empty());
         fs::remove_file(path).unwrap();
     }
 
@@ -360,6 +367,7 @@ mod tests {
                 latest_source_generation: 0,
                 present: true,
                 hook_terminal: true,
+                pending_approval_keys: Vec::new(),
                 lifecycle_observed_at_unix_millis: 1,
             },
         );

@@ -5,6 +5,7 @@ use tmux_agent_protocol::v1;
 
 use super::{AgentRuntime, StoredAgent, adapters, identity, snapshot};
 use crate::service::snapshot::{discover_authoritative, server_identity};
+use adapters::ApprovalEffect;
 
 pub(super) const MAX_HOOK_BYTES: usize = 256 * 1024;
 const MAX_DEDUPE_IDS: usize = 512;
@@ -214,12 +215,56 @@ impl AgentRuntime {
                 parsed.event_name.as_str(),
                 "SessionStart" | "UserPromptSubmit"
             );
+        let mut pending_approval_keys = previous
+            .as_ref()
+            .map(|record| record.pending_approval_keys.clone())
+            .unwrap_or_default();
+        let legacy_pending = previous_lifecycle == v1::AgentLifecycleState::Blocked
+            && pending_approval_keys.is_empty();
+        let approval_resolved = if terminal_late {
+            pending_approval_keys.clear();
+            true
+        } else {
+            match parsed.approval_effect {
+                ApprovalEffect::Pending => {
+                    if !parsed.approval_key.is_empty()
+                        && !pending_approval_keys.contains(&parsed.approval_key)
+                    {
+                        pending_approval_keys.push(parsed.approval_key.clone());
+                    }
+                    false
+                }
+                ApprovalEffect::ResolveMatching => {
+                    if legacy_pending {
+                        true
+                    } else if let Some(index) = pending_approval_keys
+                        .iter()
+                        .position(|key| key == &parsed.approval_key)
+                    {
+                        pending_approval_keys.remove(index);
+                        pending_approval_keys.is_empty()
+                    } else {
+                        false
+                    }
+                }
+                ApprovalEffect::ResolveAll => {
+                    pending_approval_keys.clear();
+                    true
+                }
+                ApprovalEffect::None => false,
+            }
+        };
+        let approval_pending = (previous_lifecycle == v1::AgentLifecycleState::Blocked
+            && !approval_resolved)
+            || parsed.approval_effect == ApprovalEffect::Pending;
         let lifecycle = if terminal_late {
             // `hook_terminal` means a terminal Stop was already committed.
             // A late tool/subagent event cannot revive that turn, and an
             // inconsistent store written by an older build must not preserve
             // Working forever merely because every later Stop is also "late".
             v1::AgentLifecycleState::Idle
+        } else if approval_pending {
+            v1::AgentLifecycleState::Blocked
         } else {
             parsed.lifecycle
         };
@@ -298,6 +343,7 @@ impl AgentRuntime {
             latest_source_generation,
             present: true,
             hook_terminal,
+            pending_approval_keys,
             lifecycle_observed_at_unix_millis: observed_now,
         };
         state.agents.insert(agent_id, record.clone());

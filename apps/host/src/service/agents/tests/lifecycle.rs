@@ -1,5 +1,124 @@
 use super::*;
 
+fn codex_approval_fixture(sequence: &str) -> Vec<v1::AgentHookEvent> {
+    let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../../../../../tests/integration/agents/fixtures/codex-approval-sequences.json"
+    ))
+    .unwrap();
+    fixture[sequence]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|payload| {
+            crate::hook::build_event(
+                v1::AgentAdapterKind::Codex,
+                serde_json::to_vec(payload).unwrap(),
+                "%7",
+                "server-a",
+                now_millis(),
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+fn ingest_fixture(
+    runtime: &AgentRuntime,
+    topology: &tmux_control::TmuxSnapshot,
+    event: &v1::AgentHookEvent,
+) -> v1::AgentRecord {
+    runtime
+        .ingest_hook_with_context(event, "server-a", Some(topology))
+        .unwrap()
+        .agent
+        .unwrap()
+}
+
+/// Codex 0.148's PermissionRequest has no tool_use_id. The canonical hook
+/// boundary therefore correlates with the stable fields both sides do expose:
+/// turn_id, tool_name and tool_input. A parallel tool completing must not erase
+/// the approval; the corresponding PostToolUse is the first observable proof
+/// that the approved tool resumed.
+#[test]
+fn real_codex_approval_order_stays_blocked_until_the_matching_tool_resolves() {
+    let runtime = runtime("codex-real-approval-order");
+    let topology = topology("codex");
+    let events = codex_approval_fixture("approved");
+
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[0]).lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    ingest_fixture(&runtime, &topology, &events[1]);
+    let blocked = ingest_fixture(&runtime, &topology, &events[2]);
+    assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+    assert_eq!(blocked.attention_kind, "blocked");
+    let state_path = runtime.state_path.clone();
+    assert!(
+        !runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .pending_approval_keys
+            .is_empty()
+    );
+    drop(runtime);
+    let runtime = AgentRuntime::isolated(state_path);
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Blocked as i32,
+        "the pending approval must survive a daemon restart"
+    );
+
+    for unrelated in &events[3..=4] {
+        assert_eq!(
+            ingest_fixture(&runtime, &topology, unrelated).lifecycle,
+            v1::AgentLifecycleState::Blocked as i32,
+            "an unrelated tool lifecycle event cannot resolve the pending approval"
+        );
+    }
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[5]).lifecycle,
+        v1::AgentLifecycleState::Working as i32,
+        "the matching PostToolUse proves approval and tool completion"
+    );
+    let completed = ingest_fixture(&runtime, &topology, &events[6]);
+    assert_eq!(completed.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(completed.attention_kind, "completed");
+}
+
+/// Codex exposes no distinct denial hook. A denied request ends at Stop; an
+/// aborted session ends at SessionEnd. Both are supported observable terminal
+/// boundaries and both must clear the durable pending state.
+#[test]
+fn codex_denial_and_cancellation_resolve_pending_approval() {
+    for sequence in ["denied", "cancelled"] {
+        let runtime = runtime(&format!("codex-{sequence}-approval"));
+        let topology = topology("codex");
+        let events = codex_approval_fixture(sequence);
+        assert_eq!(
+            ingest_fixture(&runtime, &topology, &events[0]).lifecycle,
+            v1::AgentLifecycleState::Blocked as i32
+        );
+        let resolved = ingest_fixture(&runtime, &topology, &events[1]);
+        assert_eq!(resolved.lifecycle, v1::AgentLifecycleState::Idle as i32);
+        let state = runtime.state.lock().unwrap();
+        assert!(
+            state
+                .agents
+                .values()
+                .next()
+                .unwrap()
+                .pending_approval_keys
+                .is_empty()
+        );
+    }
+}
+
 #[test]
 fn hook_expiry_retires_an_unmapped_record_without_touching_direct_detection() {
     let runtime = runtime("expired-evidence");

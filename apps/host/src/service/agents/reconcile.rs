@@ -114,6 +114,7 @@ pub(super) fn topology(
                 latest_source_generation: 0,
                 present: true,
                 hook_terminal: false,
+                pending_approval_keys: Vec::new(),
                 // Process detection proves a process exists; it is not an
                 // observation of what that process is doing, so it starts no
                 // staleness clock.
