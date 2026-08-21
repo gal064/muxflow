@@ -39,9 +39,11 @@ pub(crate) use tmux_config::{
     remove_recommended_naming as remove_recommended_tmux_naming,
 };
 mod topology;
+mod topology_output_trigger;
 #[cfg(test)]
 use terminal::validate_tmux_id;
 use topology::{TopologyActor, TopologySignal};
+use topology_output_trigger::TopologyOutputTrigger;
 mod events;
 #[cfg(test)]
 use events::CONTROL_EVENT_HUB;
@@ -207,7 +209,13 @@ pub async fn serve_with_shutdown(
     let overflowed = Arc::new(AtomicBool::new(false));
     let subscribed = Arc::new(AtomicBool::new(false));
     let pending = Arc::new(Mutex::new(HashMap::<u64, Arc<AtomicBool>>::new()));
-    let terminal = Arc::new(Mutex::new(TerminalClients::new(Arc::clone(&output_credit))));
+    // tmux says nothing when a window retitles itself or a pane's cwd moves, so
+    // the reader threads turn the pane output that always accompanies those
+    // changes into a debounced dirty mark for the actor below.
+    let terminal = Arc::new(Mutex::new(TerminalClients::new(
+        Arc::clone(&output_credit),
+        TopologyOutputTrigger::new(topology_signal.clone(), tokio::runtime::Handle::current()),
+    )));
     let topology_lock = Arc::new(tokio::sync::Mutex::new(()));
     let topology_baseline = Arc::new(Mutex::new(None::<(tmux_control::TmuxSnapshot, String)>));
     let files = Arc::new(FileService::new());

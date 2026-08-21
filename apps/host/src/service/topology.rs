@@ -258,6 +258,36 @@ mod tests {
         assert!(!signal.acknowledges(later));
     }
 
+    /// The actor's only reason to skip a discovery pass for an epoch it was
+    /// notified about is [`TopologySignal::acknowledges`], and the sole writer
+    /// of that state is a frontend tmux action acknowledging the dirtiness its
+    /// own authoritative postcheck already covered. Output-driven dirtiness
+    /// raises the epoch past anything such an action can have acknowledged, so
+    /// it always reaches discovery — which is what makes the output trigger
+    /// safe to point at the same `mark_dirty`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn output_driven_dirty_is_never_consumed_by_an_action_acknowledgement() {
+        let signal = TopologySignal::default();
+        // An action reconciled and acknowledged everything dirty so far.
+        signal.mark_dirty();
+        signal.acknowledge_through(signal.current_epoch());
+        assert!(signal.acknowledges(signal.current_epoch()));
+
+        // A quiet pane then prints the prompt that followed a `cd`.
+        crate::service::topology_output_trigger::TopologyOutputTrigger::new(
+            signal.clone(),
+            tokio::runtime::Handle::current(),
+        )
+        .note_output();
+
+        let observed_epoch = signal.current_epoch();
+        assert_eq!(observed_epoch, 2);
+        assert!(
+            !signal.acknowledges(observed_epoch),
+            "the actor would have skipped its discovery pass for this epoch"
+        );
+    }
+
     #[test]
     fn later_dirty_between_final_check_and_completion_is_not_consumed() {
         let signal = TopologySignal::default();

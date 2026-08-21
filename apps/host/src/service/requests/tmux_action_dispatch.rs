@@ -314,9 +314,10 @@ mod tests {
 
     #[test]
     fn fresh_server_create_session_reaches_discovery_without_a_sidecar() {
-        let terminal = Arc::new(Mutex::new(TerminalClients::new(Arc::new(
-            OutputCredit::negotiated(false),
-        ))));
+        let terminal = Arc::new(Mutex::new(TerminalClients::new(
+            Arc::new(OutputCredit::negotiated(false)),
+            crate::service::topology_output_trigger::TopologyOutputTrigger::default(),
+        )));
         let action = v1::TmuxActionKind::CreateSession;
         let reached =
             begin_after_input_barrier(|| terminal.lock().unwrap().flush_input(), || action)

@@ -23,6 +23,7 @@ fn start_long_lived_attachment(
             terminal_generation: generation,
             output_credit,
             emission_order,
+            topology_trigger: TopologyOutputTrigger::default(),
         },
         long_lived_attachment_command(),
     )
@@ -115,7 +116,8 @@ fn stopping_one_attachment_unparks_its_credit_waiter_before_the_join() {
 #[test]
 fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
     let output_credit = Arc::new(OutputCredit::negotiated(true));
-    let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+    let mut clients =
+        TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
     let pane_id = "%1".to_owned();
     let session_id = "$1".to_owned();
     let generation = Arc::clone(&clients.generation);
@@ -211,6 +213,7 @@ fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
             stopped: &stopped,
             output_credit: &output_credit_clone,
             emission_order: &emission_order,
+            topology_trigger: &TopologyOutputTrigger::default(),
         }
         .record("%1".into(), vec![b'O']);
     });
@@ -289,7 +292,8 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
         )
         .unwrap()
         .commit();
-    let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+    let mut clients =
+        TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
     clients.generation.store(1, Ordering::Release);
     clients.resources.lock().unwrap().ensure("%1", true, 0);
     let (events, mut receiver) = mpsc::channel(8);
@@ -321,6 +325,7 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
             stopped: &parked_reader_stopped,
             output_credit: &reader_credit,
             emission_order: &reader_emission_order,
+            topology_trigger: &TopologyOutputTrigger::default(),
         }
         .record("%1".into(), vec![b'O']);
     });
@@ -389,7 +394,8 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
 fn failed_visibility_admission_invalidates_the_speculative_transition() {
     for close_credit in [true, false] {
         let output_credit = Arc::new(OutputCredit::negotiated(close_credit));
-        let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+        let mut clients =
+            TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
         clients.generation.store(1, Ordering::Release);
         clients.resources.lock().unwrap().ensure("%1", true, 0);
         clients
@@ -450,7 +456,10 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
 
 #[test]
 fn fresh_server_has_a_vacuous_input_fence_for_create_session_bootstrap() {
-    let mut clients = TerminalClients::new(Arc::new(OutputCredit::negotiated(false)));
+    let mut clients = TerminalClients::new(
+        Arc::new(OutputCredit::negotiated(false)),
+        TopologyOutputTrigger::default(),
+    );
     assert!(clients.clients.is_empty());
     assert!(clients.input.is_none());
     clients.flush_input().unwrap();
@@ -946,7 +955,8 @@ fn joined_capture_reconstructs_soft_wrap_at_authoritative_width() {
 #[test]
 fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later() {
     let output_credit = Arc::new(OutputCredit::negotiated(false));
-    let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+    let mut clients =
+        TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
     clients.generation.store(1, Ordering::Release);
     {
         let mut resources = clients.resources.lock().unwrap();
@@ -1043,7 +1053,8 @@ fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later()
 #[test]
 fn an_explicit_seed_request_makes_a_released_pane_emission_eligible_again() {
     let output_credit = Arc::new(OutputCredit::negotiated(false));
-    let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+    let mut clients =
+        TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
     clients
         .resources
         .lock()
@@ -1104,6 +1115,7 @@ fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
         stopped: &stopped,
         output_credit: &output_credit,
         emission_order: &emission_order,
+        topology_trigger: &TopologyOutputTrigger::default(),
     }
     .record("%1".into(), vec![b'o'; 64]);
 

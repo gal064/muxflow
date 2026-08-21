@@ -19,6 +19,7 @@ use super::{
     write_capture_request_resuming,
 };
 use crate::service::snapshot::tmux_command;
+use crate::service::topology_output_trigger::TopologyOutputTrigger;
 
 pub(super) struct AttachmentRuntime {
     pub(super) event_tx: mpsc::Sender<SequencerControl>,
@@ -27,6 +28,7 @@ pub(super) struct AttachmentRuntime {
     pub(super) terminal_generation: Arc<AtomicU64>,
     pub(super) output_credit: Arc<OutputCredit>,
     pub(super) emission_order: Arc<Mutex<()>>,
+    pub(super) topology_trigger: TopologyOutputTrigger,
 }
 
 impl TerminalAttachment {
@@ -51,6 +53,7 @@ impl TerminalAttachment {
             terminal_generation,
             output_credit,
             emission_order,
+            topology_trigger,
         } = runtime;
         validate_tmux_id(session_id, '$')?;
         if pane_ids.is_empty() {
@@ -128,6 +131,7 @@ impl TerminalAttachment {
                     flow: reader_flow,
                     output_credit: reader_output_credit,
                     emission_order: reader_emission_order,
+                    topology_trigger,
                 });
                 reader_stopped.store(true, Ordering::Release);
             },
