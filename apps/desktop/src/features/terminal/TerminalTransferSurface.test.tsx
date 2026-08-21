@@ -3,7 +3,7 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TerminalTransferClient, TerminalTransferProgress, TerminalTransferScope, UploadCollisionPolicy, UploadPreflight, VerifiedTerminalUpload } from "./terminalTransfers";
 import { TerminalTransferSurface, formatBytes, pointIsInside, progressPercent, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
-import { INTERNAL_PATH_DRAG_TYPE } from "./internalPathDrag";
+import { INTERNAL_PATH_DRAG_TYPE, writeInternalPathDrag } from "./internalPathDrag";
 
 const nativeDrag = vi.hoisted(() => ({ handler: undefined as ((event: { payload: Record<string, unknown> }) => void) | undefined }));
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -253,7 +253,7 @@ describe("TerminalTransferSurface", () => {
   it("routes a same-host internal row drop directly through terminal input", async () => {
     const transferClient = client();
     const view = await mounted("ssh", transferClient);
-    const payload = JSON.stringify({ version: 1, serverIdentity: "server", path: "/repo/a b;$(nope)" });
+    const payload = JSON.stringify({ version: 1, hostProfileId: "profile", serverIdentity: "server", path: "/repo/a b;$(nope)" });
     await act(async () => {
       view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onDrop({
         preventDefault: vi.fn(),
@@ -269,7 +269,7 @@ describe("TerminalTransferSurface", () => {
   it("rejects a cross-host internal row drop without partial terminal input", async () => {
     const transferClient = client();
     const view = await mounted("ssh", transferClient);
-    const payload = JSON.stringify({ version: 1, serverIdentity: "other-server", path: "/repo/file" });
+    const payload = JSON.stringify({ version: 1, hostProfileId: "other-profile", serverIdentity: "server", path: "/repo/file" });
     await act(async () => {
       view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onDrop({
         preventDefault: vi.fn(),
@@ -293,6 +293,59 @@ describe("TerminalTransferSurface", () => {
     expect(transferClient.stageClipboardPng).not.toHaveBeenCalled();
     expect(vi.mocked(transferClient.start).mock.calls.map((call) => call[1])).toEqual(["/tmp/first.png", "/tmp/second.txt"]);
     expect(view.onPaste).toHaveBeenCalledWith("'/remote/first.png' '/remote/second.txt'");
+  });
+
+  it("ignores a window-global native drop when another visible surface owns the DOM point", async () => {
+    Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
+    const transferClient = client();
+    const target = {
+      getBoundingClientRect: () => ({ left: 0, right: 200, top: 0, bottom: 200 }),
+      ownerDocument: { elementFromPoint: () => ({}) },
+      contains: () => false,
+    } as unknown as HTMLElement;
+    const view = await mounted("local", transferClient, vi.fn(), undefined, target);
+    await act(async () => {
+      nativeDrag.handler?.({ payload: { type: "drop", paths: ["/tmp/covered.txt"], position: { x: 20, y: 20 } } });
+      await Promise.resolve();
+    });
+    expect(transferClient.inspectLocalPaths).not.toHaveBeenCalled();
+    expect(view.onPaste).not.toHaveBeenCalled();
+  });
+
+  it("bridges a macOS native empty-path event back to the active internal row drag", async () => {
+    Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
+    const transferClient = client();
+    const target = { getBoundingClientRect: () => ({ left: 0, right: 200, top: 0, bottom: 200 }) } as HTMLElement;
+    const view = await mounted("local", transferClient, vi.fn(), undefined, target);
+    writeInternalPathDrag({ effectAllowed: "all", setData: vi.fn() }, {
+      hostProfileId: "profile", serverIdentity: "server", path: "/repo/a b;$(nope)",
+    });
+    await act(async () => {
+      nativeDrag.handler?.({ payload: { type: "enter", paths: [], position: { x: 20, y: 20 } } });
+      nativeDrag.handler?.({ payload: { type: "drop", paths: [], position: { x: 20, y: 20 } } });
+      await Promise.resolve();
+    });
+    expect(view.onPaste).toHaveBeenCalledWith("'/repo/a b;$(nope)'");
+    expect(transferClient.inspectLocalPaths).not.toHaveBeenCalled();
+    expect(transferClient.start).not.toHaveBeenCalled();
+  });
+
+  it("rejects a cross-host macOS native internal drag without partial input", async () => {
+    Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
+    const transferClient = client();
+    const target = { getBoundingClientRect: () => ({ left: 0, right: 200, top: 0, bottom: 200 }) } as HTMLElement;
+    const view = await mounted("ssh", transferClient, vi.fn(), undefined, target);
+    writeInternalPathDrag({ effectAllowed: "all", setData: vi.fn() }, {
+      hostProfileId: "other-profile", serverIdentity: "server", path: "/repo/file",
+    });
+    await act(async () => {
+      nativeDrag.handler?.({ payload: { type: "enter", paths: [], position: { x: 20, y: 20 } } });
+      nativeDrag.handler?.({ payload: { type: "drop", paths: [], position: { x: 20, y: 20 } } });
+      await Promise.resolve();
+    });
+    expect(view.onPaste).not.toHaveBeenCalled();
+    expect(transferClient.start).not.toHaveBeenCalled();
+    expect(alertText(view.renderer.root.findByProps({ role: "alert" }))).toContain("same host");
   });
 
   it("waits for every verified remote completion and preserves the drop order", async () => {
@@ -693,7 +746,8 @@ describe("u64-safe transfer presentation", () => {
 
   it("hit-tests a native drop against the box's own CSS pixels", () => {
     const element = { getBoundingClientRect: () => ({ left: 10, right: 110, top: 20, bottom: 120 }) };
-    expect(pointIsInside(element as HTMLElement, { x: 100, y: 120 })).toBe(true);
+    expect(pointIsInside(element as HTMLElement, { x: 100, y: 119 })).toBe(true);
+    expect(pointIsInside(element as HTMLElement, { x: 100, y: 120 })).toBe(false);
     expect(pointIsInside(element as HTMLElement, { x: 5, y: 5 })).toBe(false);
     // The regression, and the only point that discriminates: it is inside the
     // box, and halving it for a Retina display's device pixel ratio moves it
@@ -701,6 +755,17 @@ describe("u64-safe transfer presentation", () => {
     // nothing. A point further from an edge stays inside even when halved, so
     // it says nothing about this.
     expect(pointIsInside(element as HTMLElement, { x: 30, y: 35 })).toBe(true);
+  });
+
+  it("assigns a split boundary and an overlapping native point to one visible owner", () => {
+    const left = { getBoundingClientRect: () => ({ left: 0, right: 100, top: 0, bottom: 100 }), contains: () => false };
+    const right = { getBoundingClientRect: () => ({ left: 100, right: 200, top: 0, bottom: 100 }), contains: () => true };
+    expect(pointIsInside(left as unknown as HTMLElement, { x: 100, y: 50 })).toBe(false);
+    expect(pointIsInside(right as unknown as HTMLElement, { x: 100, y: 50 })).toBe(true);
+
+    const hit = {} as Element;
+    expect(pointIsInside(left as unknown as HTMLElement, { x: 50, y: 50 }, () => hit)).toBe(false);
+    expect(pointIsInside(right as unknown as HTMLElement, { x: 150, y: 50 }, () => hit)).toBe(true);
   });
 });
 

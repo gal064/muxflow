@@ -11,7 +11,7 @@ import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import { GitCommitForm } from "./GitCommitForm";
 import type { WorkspaceGitState } from "./useWorkspaceGit";
 import type { GitCommandResult, GitDiffTarget, GitMutationRequest, GitStatusEntry, GitStatusSnapshot } from "./types";
-import { writeInternalPathDrag } from "../terminal/internalPathDrag";
+import { cancelInternalPathDragSource, finishInternalPathDrag, writeInternalPathDrag } from "../terminal/internalPathDrag";
 
 interface Props {
   /**
@@ -31,6 +31,13 @@ type PendingDiscard = { entry: GitStatusEntry; target: GitDiffTarget; status: Gi
 
 export function GitSidebar(props: Props) {
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
+  useEffect(() => {
+    const dragScope = props.scope && {
+      hostProfileId: props.scope.hostProfileId,
+      serverIdentity: props.scope.serverIdentity,
+    };
+    return () => { if (dragScope) cancelInternalPathDragSource(dragScope); };
+  }, [props.scope?.hostProfileId, props.scope?.serverIdentity]);
   const onRefresh = () => void props.git.handle?.refresh();
   // Stage / unstage / discard are hover buttons on the row again, by product
   // decision: the panel is VS Code's Source Control list, and there the two
@@ -181,7 +188,11 @@ export function GitSidebar(props: Props) {
 
   const stagedCount = groups.staged.length;
   const dragEntry = props.scope ? (entry: GitStatusEntry, transfer: DataTransfer) => {
-    if (entry.absolutePath) writeInternalPathDrag(transfer, { serverIdentity: props.scope!.serverIdentity, path: entry.absolutePath });
+    if (entry.absolutePath) writeInternalPathDrag(transfer, {
+      hostProfileId: props.scope!.hostProfileId,
+      serverIdentity: props.scope!.serverIdentity,
+      path: entry.absolutePath,
+    });
   } : undefined;
   return <section className="git-sidebar" aria-label="Source Control">
     <header className="git-sidebar-header">
@@ -283,6 +294,7 @@ const GitGroup = memo(function GitGroup(props: {
             className="git-file"
             draggable={Boolean(props.onDrag && entry.absolutePath)}
             onDragStart={(event) => entry.absolutePath && props.onDrag?.(entry, event.dataTransfer)}
+            onDragEnd={finishInternalPathDrag}
             onClick={() => props.onOpen(entry, props.target)}
             // What "the selected change" means for the palette and for a bound
             // shortcut: whichever row the keyboard or the pointer last landed on.
