@@ -48,6 +48,16 @@ export type EchoLagIncident =
 
 export interface EchoLagProbeOptions {
   onIncident: (incident: EchoLagIncident) => void;
+  /**
+   * Every completed measurement, outlier or not.
+   *
+   * The incident above is the tail; this is the distribution. `inputLatencyStats`
+   * aggregates these into the one histogram record that says how a normal
+   * keystroke behaved, which is what an outlier has to be compared against. An
+   * abandoned measurement is deliberately not sampled: it never echoed, so it
+   * has no round trip to contribute.
+   */
+  onSample?: (paneId: string, lagMs: number) => void;
   /** Injected so tests can drive the clock independently of the timers. */
   now?: () => number;
 }
@@ -68,7 +78,7 @@ interface PendingEcho {
   timer: ReturnType<typeof setTimeout>;
 }
 
-export function createEchoLagProbe({ onIncident, now = () => Date.now() }: EchoLagProbeOptions): EchoLagProbe {
+export function createEchoLagProbe({ onIncident, onSample, now = () => Date.now() }: EchoLagProbeOptions): EchoLagProbe {
   const pending = new Map<string, PendingEcho>();
   const lastIncidentAt = new Map<string, number>();
   const lastKeyAt = new Map<string, number>();
@@ -119,6 +129,7 @@ export function createEchoLagProbe({ onIncident, now = () => Date.now() }: EchoL
       pending.delete(paneId);
       clearTimeout(open.timer);
       const lagMs = now() - open.t0;
+      onSample?.(paneId, lagMs);
       if (lagMs > ECHO_LAG_THRESHOLD_MS) {
         report({ kind: "input.echoLag", paneId, lagMs, inputCount: open.inputCount });
       }

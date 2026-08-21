@@ -196,7 +196,8 @@ export function App() {
   const {
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
-    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, optimisticWindow, profileRecovery,
+    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, inputLatencyReporter,
+    optimisticWindow, profileRecovery,
     profiles, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
     setProfileRecovery, setProfiles, setSelectedProfileId, setSshConfigPath, setSshTarget,
@@ -690,17 +691,29 @@ export function App() {
     // from a keystroke that left promptly and died server-side.
     void request.then(() => {
       const outboundMs = performance.now() - sentAt;
+      // The same span the outlier below reports, kept for every send this time:
+      // the journal's `send` segment is what the end-to-end histogram has to be
+      // decomposed against. A rejected send left nothing to measure. This site
+      // cannot tell a typed key from xterm's own reply to a program query — the
+      // probe's key gate is what knows that — so every dispatched batch is
+      // sampled, and the segment reads as "cost of leaving the app".
+      inputLatencyReporter.sample("send", outboundMs);
       if (outboundMs <= SLOW_SEND_THRESHOLD_MS) return;
       const previous = lastSlowSendAt.current.get(paneId);
       if (previous !== undefined && sentAt - previous < SLOW_SEND_INTERVAL_MS) return;
       lastSlowSendAt.current.set(paneId, sentAt);
       recordIncident("input.sendSlow", { paneId, ms: Math.round(outboundMs) });
     }).catch((error) => { if (clientIdRef.current === clientId) setStatus(String(error)); });
-  }, [clientId, echoLagProbe, hostState.canMutate]);
+  }, [clientId, echoLagProbe, hostState.canMutate, inputLatencyReporter]);
 
   const handleKeyActivity = useCallback((paneId: string) => {
     echoLagProbe.noteKey(paneId);
   }, [echoLagProbe]);
+
+  /** The render half of the same measurement — see `TerminalPane`'s sampler. */
+  const handlePaintSample = useCallback((_paneId: string, ms: number) => {
+    inputLatencyReporter.sample("paint", ms);
+  }, [inputLatencyReporter]);
 
   // Which workspace tmux sizes from is decided here and nowhere else, so it is
   // stated to the host as a fact rather than left to whichever event happened
@@ -1030,6 +1043,7 @@ export function App() {
               handleKeyActivity={handleKeyActivity}
               hub={hub}
               mountedPanes={mountedPanes}
+              onPaintSample={handlePaintSample}
               paneAttention={agentRuntime.rollups.byPane}
               panes={panes}
               performAction={performAction}

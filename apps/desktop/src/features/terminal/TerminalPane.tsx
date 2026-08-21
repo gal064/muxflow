@@ -43,6 +43,19 @@ let nextTransferRenderLifetime = 0;
 const PANE_HANDOFF_TIMEOUT_MS = 2_000;
 
 /**
+ * How often one pane may contribute a render-cost sample.
+ *
+ * The render segment of the typing-lag journal (`inputLatencyStats`) is timed
+ * around an xterm write completion, and this pane cannot tell which write is
+ * the echo of a keystroke — the correlation lives in the echo probe, one level
+ * up. Sampling every write would time a `yes` flood instead, and pay a clock
+ * read per chunk to do it; one sample per pane per interval keeps the
+ * distribution representative of paints a user is watching and the overhead
+ * fixed.
+ */
+export const PAINT_SAMPLE_INTERVAL_MS = 500;
+
+/**
  * Renders a pane at the grid tmux says it has, not the one its CSS box measures.
  *
  * tmux is authoritative: the program in the pane addressed the cursor against
@@ -171,6 +184,15 @@ interface Props {
    * this pane, and the tmux client size is computed from it (P12-U006).
    */
   onMeasurements: (measurements: TerminalMeasurements) => void;
+  /**
+   * How long delivered output took to reach the screen.
+   *
+   * The render segment of the typing-lag decomposition: from handing bytes to
+   * the renderer until its write completion fires. Journal-only, and sampled at
+   * most once per `PAINT_SAMPLE_INTERVAL_MS` per pane so a pane repainting at
+   * full speed cannot make its own measurement expensive.
+   */
+  onPaintSample?: (paneId: string, ms: number) => void;
   onController: (paneId: string, controller: TerminalPaneController | undefined) => void;
   onDiagnostic?: (message: string) => void;
   transferClient?: TerminalTransferClient;
@@ -187,6 +209,7 @@ export function TerminalPane({
   onKeyActivity,
   onFocus,
   onMeasurements,
+  onPaintSample,
   onController,
   onDiagnostic,
   transferClient,
@@ -207,6 +230,9 @@ export function TerminalPane({
   const keyActivityRef = useRef(onKeyActivity);
   const focusRef = useRef(onFocus);
   const measurementsRef = useRef(onMeasurements);
+  const paintSampleRef = useRef(onPaintSample);
+  /** When this pane last contributed a paint sample, for the throttle. */
+  const lastPaintSampledAtRef = useRef(0);
   const controllerRef = useRef(onController);
   const diagnosticRef = useRef(onDiagnostic);
   const clientIdRef = useRef(clientId);
@@ -239,6 +265,7 @@ export function TerminalPane({
   keyActivityRef.current = onKeyActivity;
   focusRef.current = onFocus;
   measurementsRef.current = onMeasurements;
+  paintSampleRef.current = onPaintSample;
   controllerRef.current = onController;
   diagnosticRef.current = onDiagnostic;
   clientIdRef.current = clientId;
@@ -528,7 +555,15 @@ export function TerminalPane({
         // Output reaching the renderer is proof the pane is not frozen.
         watchdog.noteHealthy();
         screenOnDisplay = undefined;
+        // Decided before the write and charged at the decision, so a burst of
+        // chunks inside one interval yields exactly one sample rather than one
+        // per chunk that happens to complete first.
+        const writtenAt = performance.now();
+        const sampling = Boolean(paintSampleRef.current)
+          && writtenAt - lastPaintSampledAtRef.current >= PAINT_SAMPLE_INTERVAL_MS;
+        if (sampling) lastPaintSampledAtRef.current = writtenAt;
         renderer.write(effect.data, () => {
+          if (sampling) paintSampleRef.current?.(pane.id, performance.now() - writtenAt);
           // Output is content, and for some panes it is the only content that
           // ever arrives: a pane already `ready` when it mounted never sees a
           // seed or a restore, so before this its first real screenful was

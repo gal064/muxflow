@@ -1,6 +1,6 @@
 use std::{
     sync::{Arc, Condvar, Mutex, atomic::Ordering, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tmux_agent_protocol::v1;
@@ -11,6 +11,34 @@ use super::{TerminalClient, input_epoch_is_current};
 
 pub(super) const INPUT_MESSAGE_BUDGET: usize = 512;
 pub(super) const INPUT_BYTE_BUDGET: usize = 4 * MAX_INPUT_REQUEST_BYTES;
+
+pub(super) const INPUT_LATENCY_BUCKETS: usize = 20;
+
+/// Upper bounds, in milliseconds, of every input-latency bucket.
+///
+/// SHARED WITH THE FRONTEND: `INPUT_LATENCY_BUCKET_BOUNDS_MS` in
+/// `src/features/terminal/inputLatencyStats.ts` is the same list in the same
+/// order, so the reporter can read these counts as if it had recorded them
+/// itself. The last bucket is unbounded — `Infinity` there, `u64::MAX` here —
+/// and changing either list without the other silently mislabels every native
+/// bucket in the journal.
+pub(super) const INPUT_LATENCY_BUCKET_BOUNDS_MS: [u64; INPUT_LATENCY_BUCKETS] = [
+    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 2048, 4096, u64::MAX,
+];
+
+/// The first bucket whose upper bound the measured queue time does not exceed.
+///
+/// Takes microseconds because the span being measured is routinely under a
+/// millisecond, and truncating it to whole milliseconds first would put every
+/// healthy keystroke in bucket zero.
+pub(super) fn input_latency_bucket(micros: u64) -> usize {
+    for (index, bound_ms) in INPUT_LATENCY_BUCKET_BOUNDS_MS.iter().enumerate() {
+        if *bound_ms == u64::MAX || micros <= bound_ms.saturating_mul(1_000) {
+            return index;
+        }
+    }
+    INPUT_LATENCY_BUCKETS - 1
+}
 
 #[derive(Default)]
 pub(super) struct StopSignal {
@@ -164,6 +192,9 @@ pub(super) enum ClientInputDispatch {
         pane_id: String,
         data: Vec<u8>,
         epoch: u64,
+        /// When `enqueue_input` accepted these bytes, so the pump can journal
+        /// how long they waited for the writer. Journal-only.
+        enqueued_at: Instant,
     },
     Barrier(mpsc::SyncSender<Result<(), String>>),
     Stop,
@@ -188,20 +219,27 @@ pub(super) fn run_client_input_dispatch(
                 pane_id,
                 mut data,
                 epoch,
+                enqueued_at,
             } => {
                 let mut message_count = 1;
+                // Every keystroke folded into this write waited its own time,
+                // and the histogram is about keystrokes, not writes. Empty for
+                // the common uncoalesced batch, so it costs no allocation.
+                let mut coalesced_at: Vec<Instant> = Vec::new();
                 while data.len() < DESKTOP_INPUT_COALESCE_BYTES {
                     match receiver.try_recv() {
                         Ok(ClientInputDispatch::Bytes {
                             pane_id: next_pane,
                             data: next_data,
                             epoch: next_epoch,
+                            enqueued_at: next_enqueued_at,
                         }) if next_pane == pane_id
                             && next_epoch == epoch
                             && data.len().saturating_add(next_data.len())
                                 <= DESKTOP_INPUT_COALESCE_BYTES =>
                         {
                             data.extend_from_slice(&next_data);
+                            coalesced_at.push(next_enqueued_at);
                             message_count += 1;
                         }
                         Ok(message) => {
@@ -225,10 +263,24 @@ pub(super) fn run_client_input_dispatch(
                         data,
                         ..Default::default()
                     });
-                    if let Err(error) = result
-                        && pending_error.is_none()
-                    {
-                        pending_error = Some(error);
+                    match result {
+                        // The bytes are on the bridge's stdin by the time the
+                        // write returns, so this is the whole native queue
+                        // segment: accepted here, physically written there. A
+                        // failed write measures nothing — those bytes never
+                        // left, and timing the failure would read as a fast
+                        // keystroke.
+                        Ok(()) => {
+                            client.record_input_latency(enqueued_at.elapsed());
+                            for queued_at in &coalesced_at {
+                                client.record_input_latency(queued_at.elapsed());
+                            }
+                        }
+                        Err(error) => {
+                            if pending_error.is_none() {
+                                pending_error = Some(error);
+                            }
+                        }
                     }
                     client.release_input_budget(message_count, dispatched_bytes);
                 } else {
@@ -418,6 +470,61 @@ mod tests {
         queue.complete(desired.version, stale_epoch, Ok(()));
         let error = receiver.blocking_recv().unwrap().unwrap_err();
         assert!(error.contains("connection changed"), "{error}");
+    }
+
+    #[test]
+    fn input_latency_buckets_hold_their_bounds_and_drain_to_zero() {
+        assert_eq!(input_latency_bucket(0), 0);
+        assert_eq!(input_latency_bucket(1_000), 0);
+        assert_eq!(input_latency_bucket(1_001), 1);
+        assert_eq!(input_latency_bucket(2_000), 1);
+        assert_eq!(input_latency_bucket(4_096_000), INPUT_LATENCY_BUCKETS - 2);
+        assert_eq!(input_latency_bucket(4_096_001), INPUT_LATENCY_BUCKETS - 1);
+
+        let client = TerminalClient::new();
+        client.record_input_latency(Duration::from_micros(300));
+        client.record_input_latency(Duration::from_millis(3));
+        client.record_input_latency(Duration::from_millis(3));
+        client.record_input_latency(Duration::from_millis(700));
+        let stats = client.drain_input_latency();
+        assert_eq!(stats.bucket_counts.len(), INPUT_LATENCY_BUCKETS);
+        assert_eq!(stats.bucket_counts[0], 1, "300 µs belongs in the 1 ms bucket");
+        assert_eq!(stats.bucket_counts[2], 2, "3 ms belongs in the 4 ms bucket");
+        assert_eq!(
+            stats.bucket_counts[15], 1,
+            "700 ms belongs in the 768 ms bucket"
+        );
+        assert_eq!(stats.bucket_counts.iter().sum::<u64>(), 4);
+        assert_eq!(stats.max_ms, 700);
+
+        // Reading is draining: the next window starts empty, so nothing is
+        // journalled twice.
+        let drained = client.drain_input_latency();
+        assert_eq!(drained.bucket_counts.iter().sum::<u64>(), 0);
+        assert_eq!(drained.max_ms, 0);
+    }
+
+    #[test]
+    fn a_failed_write_records_no_input_latency() {
+        let client = Arc::new(TerminalClient::new());
+        let (sender, receiver) = mpsc::sync_channel(8);
+        client.input_queue.lock().unwrap().sender = Some(sender.clone());
+        mark_input_reconnected(&client);
+        client.ready.store(true, Ordering::Release);
+        let worker = thread::spawn({
+            let client = Arc::clone(&client);
+            move || run_client_input_dispatch(client, receiver)
+        });
+
+        // No writer is attached, so the dispatch fails: those bytes never
+        // reached the bridge and have no queue time to report.
+        client.enqueue_input("%1".into(), b"typed".to_vec()).unwrap();
+        assert!(client.flush_input().is_err());
+        let stats = client.drain_input_latency();
+        assert_eq!(stats.bucket_counts.iter().sum::<u64>(), 0);
+
+        sender.send(ClientInputDispatch::Stop).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]
