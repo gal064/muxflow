@@ -46,6 +46,11 @@ vi.mock("./api", async (importOriginal) => ({
 const journal = vi.hoisted(() => ({ recordIncident: vi.fn((..._args: unknown[]) => undefined) }));
 vi.mock("../../diagnostics/incidents", () => ({ recordIncident: journal.recordIncident }));
 
+/** Every journal record except `link.epoch`, which any clean connect writes. */
+function incidentsBesidesEpochAdoption(): unknown[][] {
+  return journal.recordIncident.mock.calls.filter(([kind]) => kind !== "link.epoch");
+}
+
 interface HarnessRenderer {
   /** What xterm would be showing, with ESC c applied as a wipe. */
   screen: string;
@@ -584,7 +589,9 @@ describe("fresh connection", () => {
 
     expect(renderer().screen).toBe("BEFORE-CONNECT");
     expect(painted()).toBe(true);
-    expect(journal.recordIncident).not.toHaveBeenCalled();
+    // The hub journals its epoch adoption on every connect; only records
+    // beyond that benign line would mean this handshake misbehaved.
+    expect(incidentsBesidesEpochAdoption()).toEqual([]);
     await unmountPane(mounted);
   });
 
@@ -783,7 +790,7 @@ describe("a reveal the host refuses", () => {
     expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
     expect(journal.recordIncident).toHaveBeenCalledWith(
       "pane.revealRebuilt",
-      { paneId: "%1", error: `Error: ${STALE_EPOCH}` },
+      expect.objectContaining({ paneId: "%1", error: `Error: ${STALE_EPOCH}` }),
     );
     expect(renderer().screen).toBe("WOKE UP");
     expect(painted()).toBe(true);
@@ -829,7 +836,7 @@ describe("StrictMode", () => {
 
     expect(renderer().screen).toBe("STRICT SCREEN");
     expect(painted()).toBe(true);
-    expect(journal.recordIncident).not.toHaveBeenCalled();
+    expect(incidentsBesidesEpochAdoption()).toEqual([]);
     await unmountPane(mounted);
   });
 });
