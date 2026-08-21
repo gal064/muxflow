@@ -16,7 +16,7 @@ import { deriveAgentRollups } from "../agents/selectors";
 import { DisconnectedStrip, STRIP_APPEAR_DELAY_MS } from "./DisconnectedStrip";
 import type { ConnectionPhase } from "../../state/connectionReducer";
 import { RightPanel } from "./RightPanel";
-import type { ShellState } from "./types";
+import { defaultShellState, type ShellState } from "./types";
 import { SettingsDialog } from "./SettingsDialog";
 import { TitleBar } from "./TitleBar";
 
@@ -49,9 +49,10 @@ function fiveAgentRows(): WorkspaceRowModel[] {
 
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
   adapters={[]}
-  agents={buildAgentRows([agent({ displayName: "Codex one", lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "workspace")}
+  agents={buildAgentRows([agent({ displayName: "Codex one", windowName: "Review auth flow", lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", hostLabel: "remote-linux", tabIndex: 1 }), () => true, "workspace")}
   agentSort="workspace"
   agentsRatio={0.4}
+  compactWorkspaces={false}
   canMutate
   commandScope={commandScope}
   hostLabel="remote-linux"
@@ -99,7 +100,7 @@ describe("application shell accessibility contracts", () => {
     // The badge itself is decorative, so the count has to be in the row's own
     // accessible name or a screen reader never hears it.
     expect(sidebar()).toContain('aria-label="A very long workspace name, codex · blocked, 2 agents waiting"');
-    expect(sidebar()).toContain("Codex one, blocked, waiting, work, tab 1");
+    expect(sidebar()).toContain("Review auth flow, blocked, waiting, work, remote-linux, tab 1");
     const quiet = sidebar({
       agents: buildAgentRows([agent({ displayName: "Claude", lifecycle: "working" })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "workspace"),
       rows: [{ ...rows[0], unread: 0, attention: "working", working: true, agents: [], agentOverflow: 0 }],
@@ -125,6 +126,34 @@ describe("application shell accessibility contracts", () => {
     expect(sidebar()).not.toContain("more");
   });
 
+  it("keeps aggregate workspace status in compact mode while hiding agent lines", () => {
+    const html = sidebar({ compactWorkspaces: true, rows: fiveAgentRows() });
+    expect(html).not.toContain('class="workspace-activity"');
+    expect(html).toContain('aria-label="A very long workspace name, codex · blocked, 5 agents, 2 agents waiting"');
+    expect(html).toContain('class="spinner"');
+    expect(html).toContain('<span class="workspace-title"><span aria-hidden="true" class="spinner"></span><span aria-hidden="true" class="state-dot blocked">');
+    expect(html).toContain('class="badge badge-row">2');
+  });
+
+  it("nests workspace-ordered agents under host-qualified headings in keyboard order", () => {
+    const source = [
+      agent({ id: "one", windowName: "Plan rollout", sessionId: "$1", sessionName: "api" }),
+      agent({ id: "two", windowName: "Fix tests", sessionId: "$2", sessionName: "web", adapterId: "claude-code" }),
+    ];
+    const agents = buildAgentRows(source, (record) => ({
+      workspaceOrder: record.sessionId === "$1" ? 0 : 1,
+      workspaceName: record.sessionName,
+      hostLabel: "remote-linux",
+    }), () => true, "workspace");
+    const html = sidebar({ agents });
+    expect(html).toContain('class="agent-workspace-heading"');
+    expect(html).toContain('title="api · remote-linux"');
+    expect(html).toContain('title="web · remote-linux"');
+    expect(html.indexOf('data-agent-index="0"')).toBeLessThan(html.indexOf('data-agent-index="1"'));
+    expect(html).toContain('data-agent-icon="codex"');
+    expect(html).toContain('data-agent-icon="claude"');
+  });
+
   it("reaches the agent row actions from the command registry, on the last agent focused", async () => {
     const onSelectAgent = vi.fn();
     const onRenameAgent = vi.fn();
@@ -140,7 +169,7 @@ describe("application shell accessibility contracts", () => {
     }];
     let renderer!: ReturnType<typeof create>;
     const element = (rows: typeof agents, canMutate = true) => <WorkspaceSidebar
-      adapters={adapters} agents={rows} agentSort="workspace" agentsRatio={0.4} canMutate={canMutate} commandScope={commandScope}
+      adapters={adapters} agents={rows} agentSort="workspace" agentsRatio={0.4} canMutate={canMutate} commandScope={commandScope} compactWorkspaces={false}
       hostLabel="remote-linux" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
       onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop}
@@ -288,7 +317,7 @@ describe("application shell accessibility contracts", () => {
     const onWorkspaceCommand = vi.fn();
     const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
     const element = (scope: typeof commandScope) => <WorkspaceSidebar
-      adapters={[]} agents={[]} agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope}
+      adapters={[]} agents={[]} agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} compactWorkspaces={false}
       hostLabel="remote-linux" maxWidth={426} phase="connected" rows={rows} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
       onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
@@ -314,7 +343,7 @@ describe("application shell accessibility contracts", () => {
     );
     const element = (scope: typeof commandScope, displayName: string) => <WorkspaceSidebar
       adapters={[]} agents={agentRows.map((row) => ({ ...row, agent: { ...row.agent, displayName } }))}
-      agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} hostLabel="remote-linux" maxWidth={426}
+      agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} compactWorkspaces={false} hostLabel="remote-linux" maxWidth={426}
       phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
       onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
@@ -496,6 +525,19 @@ describe("saved host picker", () => {
     sshTarget=""
     {...overrides}
   />;
+
+  it("exposes the persisted compact workspace preference in workspace settings", async () => {
+    const onShell = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(settings({ onShell, shell: { ...defaultShellState, compactWorkspaces: true } })); });
+    const workspaceTab = renderer.root.findAllByType("button").find((node) => node.props.children === "Workspace")!;
+    await act(async () => { workspaceTab.props.onClick(); });
+    const toggle = renderer.root.findAllByType("input").find((node) => node.props.checked === true)!;
+    expect(toggle.props.type).toBe("checkbox");
+    await act(async () => { toggle.props.onChange({ target: { checked: false } }); });
+    expect(onShell).toHaveBeenCalledWith({ compactWorkspaces: false });
+    await act(async () => renderer.unmount());
+  });
 
   it("reports the OS notification permission and what the user would do about it", async () => {
     const soundsTab = (renderer: ReturnType<typeof create>) =>

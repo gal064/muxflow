@@ -4,7 +4,9 @@ import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { StateDot } from "../../ui/StateDot";
-import { needsAttention, nextSortMode, type AgentListRow, type AgentSortMode } from "../agents/agentsList";
+import { groupAgentRows, needsAttention, nextSortMode, type AgentListRow, type AgentSortMode } from "../agents/agentsList";
+import { AgentIcon } from "../agents/AgentIdentity";
+import { agentSessionLabel } from "../agents/agentLabels";
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPlacement, AgentRecord } from "../agents/types";
 import type { ConnectionPhase } from "../../state/connectionReducer";
 import { AGENTS_SECTION_MAX_RATIO, AGENTS_SECTION_MIN_RATIO, SIDEBAR_MIN_WIDTH } from "../shell/types";
@@ -19,6 +21,8 @@ interface WorkspaceSidebarProps {
   agents: readonly AgentListRow[];
   adapters: readonly AgentAdapterDescriptor[];
   agentSort: AgentSortMode;
+  /** Omits the per-agent detail lines inside each workspace summary. */
+  compactWorkspaces: boolean;
   /** Draws a shape as well as a color in each state dot. */
   stateGlyphs: boolean;
   /** Share of the sidebar's height given to the agents section. */
@@ -54,7 +58,7 @@ interface WorkspaceSidebarProps {
 }
 
 /**
- * The one 240px rail: workspaces on top, a flat agents list below, the host row
+ * The one 240px rail: workspaces on top, an agents list below, the host row
  * at the bottom. It replaces three columns (a 176px icon rail, a 246px
  * Explorer/Git sidebar, a 258px agents panel) that together took 680px of every
  * window regardless of size.
@@ -75,6 +79,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const container = useRef<HTMLElement>(null);
   const [displayedAgentsRatio, startAgentsRatioDrag] = useTransientDrag(props.agentsRatio, props.onAgentsRatio);
   const [displayedWidth, startWidthDrag] = useTransientDrag(props.width, props.onWidth);
+  const groupedAgents = props.agentSort === "workspace" ? groupAgentRows(props.agents) : [];
+  const agentIndexes = new Map(props.agents.map((row, index) => [row, index]));
 
   // Resolved against the live list every render: an agent whose pane closed
   // drops out of `props.agents`, and the palette must stop offering to focus it
@@ -127,6 +133,59 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     ));
   };
 
+  const renderAgentRow = (row: AgentListRow, index: number, key = row.agent.id) => {
+    const sessionLabel = agentSessionLabel(row.agent, props.adapters);
+    const detail = [
+      props.agentSort === "workspace" ? undefined : row.location.workspaceName,
+      row.location.tabIndex === undefined ? undefined : `tab ${row.location.tabIndex}`,
+      row.state,
+      row.routable ? undefined : "unmapped",
+    ].filter(Boolean).join(" · ");
+    return <div className="agent-row" key={key} role="listitem">
+      <button
+        aria-label={[
+          sessionLabel,
+          row.state,
+          needsAttention(row.state) ? "waiting" : undefined,
+          row.location.workspaceName,
+          row.location.hostLabel,
+          row.location.tabIndex === undefined ? undefined : `tab ${row.location.tabIndex}`,
+          row.routable ? undefined : "unmapped, navigation unavailable",
+        ].filter(Boolean).join(", ")}
+        className="agent-button"
+        data-agent-index={index}
+        aria-disabled={!row.routable}
+        data-unavailable={row.routable ? undefined : "true"}
+        onClick={() => { if (row.routable) props.onSelectAgent(row, props.commandScope); }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope });
+          setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
+        }}
+        onFocus={() => setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope })}
+        onPointerDown={() => setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope })}
+        onKeyDown={(event) => {
+          if (isContextMenuKey(event)) {
+            event.preventDefault();
+            setAgentMenu({ row, anchor: anchorForElement(event.currentTarget), scope: props.commandScope });
+            return;
+          }
+          focusRelative(event, "[data-agent-index]", index, props.agents.length);
+        }}
+        title={`${sessionLabel} · ${row.agent.displayName} · ${row.state} · ${row.location.workspaceName} · ${row.location.hostLabel || props.hostLabel}${row.routable ? "" : " · navigation unavailable"}`}
+        type="button"
+      >
+        <span className="agent-line">
+          <StateDot glyphs={props.stateGlyphs} state={row.state} />
+          <AgentIcon adapterId={row.agent.adapterId} />
+          <span className="agent-session-label">{sessionLabel}</span>
+        </span>
+        <span className="agent-detail">{detail}</span>
+      </button>
+      {needsAttention(row.state) && <span aria-hidden="true" className="badge badge-row">1</span>}
+    </div>;
+  };
+
   return <nav
     aria-label="Workspaces and agents"
     className="sidebar"
@@ -167,9 +226,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             >
               <span className="workspace-title">
                 {row.working && <span aria-hidden="true" className="spinner" />}
+                {props.compactWorkspaces && row.attention !== "none" && row.attention !== "working"
+                  && <StateDot glyphs={props.stateGlyphs} state={row.attention} />}
                 <span className="workspace-name">{row.session.name}</span>
               </span>
-              {row.agents.length > 0 && <span className="workspace-activity">
+              {!props.compactWorkspaces && row.agents.length > 0 && <span className="workspace-activity">
                 {row.agents.map((agent) => <span className="workspace-activity-line" key={agent.id}>
                   {/* Decorative: the button's own accessible name already
                       carries the loudest agent and the total. */}
@@ -251,64 +312,17 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       <div aria-labelledby="sidebar-agents-label" className="sidebar-scroll" role="list">
         {props.agents.length === 0
           ? <p className="quiet-empty">No agents detected.</p>
-          : props.agents.map((row, index) => <div className="agent-row" key={row.agent.id} role="listitem">
-            <button
-              // Same reason as the workspace row: the badge is decorative, and
-              // "waiting" is the whole point of this list.
-              aria-label={[
-                row.agent.displayName,
-                row.state,
-                needsAttention(row.state) ? "waiting" : undefined,
-                row.location.workspaceName,
-                row.location.tabIndex === undefined ? undefined : `tab ${row.location.tabIndex}`,
-                row.routable ? undefined : "unmapped, navigation unavailable",
-              ].filter(Boolean).join(", ")}
-              className="agent-button"
-              data-agent-index={index}
-              // `aria-disabled`, not `disabled`. `focus()` on a disabled button
-              // is a no-op, so an unmapped agent stopped ArrowDown dead and made
-              // every routable agent below it unreachable from the keyboard —
-              // and its own context menu, which still offers Rename, could never
-              // be opened. Same reasoning as the palette's unavailable rows.
-              aria-disabled={!row.routable}
-              data-unavailable={row.routable ? undefined : "true"}
-              onClick={() => { if (row.routable) props.onSelectAgent(row, props.commandScope); }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope });
-                setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
-              }}
-              // Focus and pointer both: macOS WebKit does not focus a button on
-              // click, so without the second one the palette's "selected agent"
-              // would ignore every agent the user clicked.
-              onFocus={() => setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope })}
-              onPointerDown={() => setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope })}
-              onKeyDown={(event) => {
-                if (isContextMenuKey(event)) {
-                  event.preventDefault();
-                  setAgentMenu({ row, anchor: anchorForElement(event.currentTarget), scope: props.commandScope });
-                  return;
-                }
-                focusRelative(event, "[data-agent-index]", index, props.agents.length);
-              }}
-              title={row.routable
-                ? `${row.agent.displayName} · ${row.state} · ${row.location.workspaceName}`
-                : `${row.agent.displayName} has no exact pane; navigation is unavailable`}
-              type="button"
-            >
-              <span className="agent-line">
-                {/* Decorative: the row button's own accessible name already
-                    says the state, and a role="img" here announced it twice. */}
-                <StateDot glyphs={props.stateGlyphs} state={row.state} />
-                <span className="agent-location">{row.location.workspaceName}</span>
-                {row.location.tabIndex !== undefined && <span className="agent-tab">{row.location.tabIndex}</span>}
-              </span>
-              <span className="agent-detail">
-                {row.agent.displayName} · {row.state}{row.routable ? "" : " · unmapped"}
-              </span>
-            </button>
-            {needsAttention(row.state) && <span aria-hidden="true" className="badge badge-row">1</span>}
-          </div>)}
+          : props.agentSort === "workspace"
+            ? groupedAgents.map((group) => {
+              const headingId = `agent-workspace-${encodeURIComponent(group.key)}`;
+              return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
+                <h3 className="agent-workspace-heading" id={headingId} title={`${group.workspaceName} · ${group.hostLabel}`}>
+                  <span>{group.workspaceName}</span><span className="agent-workspace-host">{group.hostLabel}</span>
+                </h3>
+                {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
+              </section>;
+            })
+            : props.agents.map((row, index) => renderAgentRow(row, index))}
       </div>
     </div>
 

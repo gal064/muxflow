@@ -59,6 +59,7 @@
     "agentSort": "status",
     "agentsSectionRatio": 0.42,
     "agentStateGlyphs": true,
+    "compactWorkspaces": true,
     "terminalScreenReader": true,
     "windowGeometry": {
       "x": 20,
