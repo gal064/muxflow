@@ -177,13 +177,13 @@ export const GHOSTTY_TEXT_OPTIONS = {
   drawBoldTextInBrightColors: false,
   fontWeight: "normal",
   fontWeightBold: "bold",
-  // JetBrains Mono advances 0.6em: 7.8 CSS px at the 13px default. WebGL
-  // floors that to 7 device px at 1x and 15 at 2x, narrowing the cell below
-  // the face's own advance. Spacing is added after the floor, so one restores
-  // the nearest device-pixel cell at both macOS display ratios (8px / 16px),
-  // matching Ghostty's rounded face advance.
-  letterSpacing: 1,
 } as const;
+
+// JetBrains Mono advances 0.6em: 7.8 CSS px at 13px. WebGL floors that to
+// whole device pixels, then adds this unscaled value; one therefore restores
+// an 8px cell at the display ratios we support. The DOM renderer does not
+// floor the advance, so TerminalRenderer applies this only while WebGL owns it.
+export const WEBGL_CELL_SPACING = 1;
 
 /**
  * The terminal's font, from the same tokens the rest of the app uses.

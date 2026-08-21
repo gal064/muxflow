@@ -6,7 +6,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { terminalScreenReaderMode } from "./accessibilityPreference";
 import { installAtlasFontSmoothing } from "./atlasFontSmoothing";
 import { watchAtlasStaleness } from "./atlasStaleProbe";
-import { GHOSTTY_TEXT_OPTIONS, searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
+import { GHOSTTY_TEXT_OPTIONS, searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme, WEBGL_CELL_SPACING } from "./theme";
 import {
   deviceSafeLineHeight,
   terminalMeasurements,
@@ -546,9 +546,11 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   disposeGpuRenderer(): void {
+    const hadWebgl = this.#webgl !== undefined;
     this.#webgl?.dispose();
     this.#webgl = undefined;
     for (const disposable of this.#webglDisposables.splice(0)) disposable.dispose();
+    if (hadWebgl && !this.#disposed) this.#terminal.options.letterSpacing = 0;
   }
 
   onSelectionChange(listener: () => void): () => void {
@@ -674,7 +676,10 @@ export class XtermRenderer implements TerminalRenderer {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
         webgl.dispose();
-        if (this.#webgl === webgl) this.#webgl = undefined;
+        if (this.#webgl === webgl) {
+          this.#webgl = undefined;
+          this.#terminal.options.letterSpacing = 0;
+        }
         for (const disposable of this.#webglDisposables.splice(0)) disposable.dispose();
         // Disposing the WebGL addon drops xterm back to the *DOM* renderer:
         // xterm 6 has no canvas renderer and no `@xterm/addon-canvas` is
@@ -705,6 +710,7 @@ export class XtermRenderer implements TerminalRenderer {
       this.#webglDisposables.push(webgl.onAddTextureAtlasCanvas(() => this.#repaintAfterAtlasChange()));
       this.#terminal.loadAddon(webgl);
       this.#webgl = webgl;
+      this.#terminal.options.letterSpacing = WEBGL_CELL_SPACING;
       this.#webglDisposables.push({ dispose: watchAtlasStaleness(this.#options.paneId, webgl) });
       this.#options.onDiagnostic?.(undefined);
     } catch (error) {
