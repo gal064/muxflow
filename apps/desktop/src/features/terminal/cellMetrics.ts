@@ -38,7 +38,13 @@ export interface TerminalBoxChrome {
  */
 export type MeasurableTerminal = Pick<Terminal, "options"> & {
   _core?: {
-    _renderService?: { dimensions?: { css?: { cell?: Partial<PixelBox> } } };
+    _coreBrowserService?: {
+      onDprChange?: (listener: () => void) => { dispose(): void };
+    };
+    _renderService?: {
+      dimensions?: { css?: { cell?: Partial<PixelBox> } };
+      onDimensionsChange?: (listener: () => void) => { dispose(): void };
+    };
   };
 };
 

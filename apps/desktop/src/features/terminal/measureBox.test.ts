@@ -32,6 +32,10 @@ describe("xterm cell metrics", () => {
       cellSize(terminal),
       "xterm moved _core._renderService.dimensions.css.cell; measureBox reads it",
     ).toBeDefined();
+    expect(
+      dprChangeEvent(terminal),
+      "xterm moved _core._coreBrowserService.onDprChange; fixed boxes would miss DPR metric changes",
+    ).toBeTypeOf("function");
     terminal.dispose();
   });
 
@@ -90,4 +94,10 @@ function cellSize(terminal: Terminal): { width: number; height: number } | undef
   return (terminal as unknown as {
     _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } };
   })._core?._renderService?.dimensions?.css?.cell;
+}
+
+function dprChangeEvent(terminal: Terminal): unknown {
+  return (terminal as unknown as {
+    _core?: { _coreBrowserService?: { onDprChange?: unknown } };
+  })._core?._coreBrowserService?.onDprChange;
 }

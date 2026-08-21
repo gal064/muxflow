@@ -111,6 +111,8 @@ export interface TerminalRenderer {
    * visible where an unanswerable callback was not.
    */
   measurements(): TerminalMeasurements | undefined;
+  /** Reports xterm cell-metric changes, including changes caused only by DPR. */
+  onMeasurementsChange(listener: () => void): () => void;
   /** Forces the grid tmux says this pane has, whatever the CSS box measured. */
   setGrid(size: TerminalSize): GridOutcome;
   focus(): void;
@@ -387,6 +389,35 @@ export class XtermRenderer implements TerminalRenderer {
     const host = element?.parentElement;
     if (!element || !host) return undefined;
     return terminalMeasurements(this.#terminal as MeasurableTerminal, host, element);
+  }
+
+  /**
+   * xterm observes device-pixel-ratio changes itself and recomputes its render
+   * dimensions. The host's CSS box does not necessarily change at the same
+   * time, so a ResizeObserver alone cannot tell the pane to remeasure.
+   */
+  onMeasurementsChange(listener: () => void): () => void {
+    const core = (this.#terminal as MeasurableTerminal)._core;
+    let disposed = false;
+    let pending = false;
+    const notify = () => {
+      if (pending) return;
+      pending = true;
+      queueMicrotask(() => {
+        pending = false;
+        if (!disposed) listener();
+      });
+    };
+    const dimensions = core?._renderService?.onDimensionsChange?.(notify);
+    // RenderService updates for DPR internally, but xterm 6 does not emit its
+    // dimensions event on that path. Its browser service does, so listen to
+    // both and coalesce them after xterm's synchronous update has completed.
+    const dpr = core?._coreBrowserService?.onDprChange?.(notify);
+    return () => {
+      disposed = true;
+      dimensions?.dispose();
+      dpr?.dispose();
+    };
   }
 
   /**
