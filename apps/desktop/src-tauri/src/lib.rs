@@ -179,6 +179,9 @@ pub fn run() {
         )
         .setup(|app| {
             power_events::start(app.handle().clone());
+            // Startup, because a kill or a crash never runs `RunEvent::Exit`:
+            // the debris those exits leave can only be cleaned by a later launch.
+            connection::spawn_orphan_reaper();
             let config_dir = app.path().app_config_dir()?;
             let profile_path = config_dir.join("profiles.json");
             app.manage(connection::ProfileStore::load(profile_path)?);
