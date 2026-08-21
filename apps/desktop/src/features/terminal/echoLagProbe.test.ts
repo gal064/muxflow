@@ -11,11 +11,17 @@ import {
 /** The injected clock is advanced by hand so a timer can fire at any lag. */
 function probeWithClock() {
   const incidents: EchoLagIncident[] = [];
+  const samples: Array<[string, number]> = [];
   let clock = 0;
-  const probe = createEchoLagProbe({ onIncident: (incident) => incidents.push(incident), now: () => clock });
+  const probe = createEchoLagProbe({
+    onIncident: (incident) => incidents.push(incident),
+    onSample: (paneId, lagMs) => samples.push([paneId, lagMs]),
+    now: () => clock,
+  });
   return {
     incidents,
     probe,
+    samples,
     advance(ms: number) {
       clock += ms;
       vi.advanceTimersByTime(ms);
@@ -192,6 +198,31 @@ describe("createEchoLagProbe", () => {
     advance(ECHO_TIMEOUT_MS * 2);
     expect(incidents).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("samples every echo that came back, fast or slow", () => {
+    const { advance, incidents, probe, samples, type } = probeWithClock();
+    type("%1");
+    advance(12);
+    probe.noteOutput("%1");
+    type("%2");
+    advance(ECHO_LAG_THRESHOLD_MS + 100);
+    probe.noteOutput("%2");
+    // The fast one is below the incident threshold and still a latency datum:
+    // the histogram exists to say what normal looks like.
+    expect(samples).toEqual([["%1", 12], ["%2", ECHO_LAG_THRESHOLD_MS + 100]]);
+    expect(incidents).toHaveLength(1);
+    probe.dispose();
+  });
+
+  it("samples nothing for a measurement that expired", () => {
+    const { advance, probe, samples, type } = probeWithClock();
+    type("%1");
+    type("%1");
+    advance(ECHO_TIMEOUT_MS);
+    // Nothing echoed, so there is no round trip to put in the distribution.
+    expect(samples).toEqual([]);
+    probe.dispose();
   });
 
   it("clears every armed timer on dispose", () => {
