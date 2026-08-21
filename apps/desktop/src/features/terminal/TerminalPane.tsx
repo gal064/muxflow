@@ -14,6 +14,8 @@ import {
   type TerminalViewportState,
 } from "./TerminalRenderer";
 import { terminalStateCache } from "./TerminalStateCache";
+import { readAtlasInvalidationCount } from "./atlasStaleProbe";
+import { notePaint, startLongTaskTracker } from "./paintTailProbe";
 import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./PaneRevealState";
 import { prepareTerminalSnapshot, requestTerminalSeed, setTerminalVisibility } from "./api";
 import { ownTerminalBytes } from "./TerminalBytes";
@@ -233,6 +235,12 @@ export function TerminalPane({
   const paintSampleRef = useRef(onPaintSample);
   /** When this pane last contributed a paint sample, for the throttle. */
   const lastPaintSampledAtRef = useRef(0);
+  // Our own live-output writes still sitting in xterm's buffer. xterm parses
+  // what it is handed in time-sliced batches, so a chunk's completion fires only
+  // after everything queued ahead of it has parsed — these two are how a slow
+  // paint that is really someone else's backlog says so.
+  const queuedWritesRef = useRef(0);
+  const queuedBytesRef = useRef(0);
   const controllerRef = useRef(onController);
   const diagnosticRef = useRef(onDiagnostic);
   const clientIdRef = useRef(clientId);
@@ -276,6 +284,9 @@ export function TerminalPane({
   } : undefined;
 
   useEffect(() => {
+    // Idempotent, and armed here rather than at import so a build that never
+    // mounts a terminal never installs an observer.
+    startLongTaskTracker();
     const terminalContainer = container.current;
     if (!terminalContainer) return;
     // Re-asserted rather than left to the JSX default: this element outlives a
@@ -562,8 +573,30 @@ export function TerminalPane({
         const sampling = Boolean(paintSampleRef.current)
           && writtenAt - lastPaintSampledAtRef.current >= PAINT_SAMPLE_INTERVAL_MS;
         if (sampling) lastPaintSampledAtRef.current = writtenAt;
+        // The histogram is throttled; the slow-paint probe is not, because the
+        // tail it exists to explain is exactly the sample a throttle would miss.
+        // Counted before the write and captured into locals, so the callback
+        // reports the depth its own chunk waited behind rather than the depth
+        // whenever it happens to run.
+        const bytes = effect.data.byteLength;
+        const queuedWrites = (queuedWritesRef.current += 1);
+        const queuedBytes = (queuedBytesRef.current += bytes);
+        const atlasBefore = readAtlasInvalidationCount(pane.id);
         renderer.write(effect.data, () => {
-          if (sampling) paintSampleRef.current?.(pane.id, performance.now() - writtenAt);
+          const paintMs = performance.now() - writtenAt;
+          queuedWritesRef.current -= 1;
+          queuedBytesRef.current -= bytes;
+          if (sampling) paintSampleRef.current?.(pane.id, paintMs);
+          const atlasAfter = readAtlasInvalidationCount(pane.id);
+          notePaint({
+            paneId: pane.id,
+            ms: paintMs,
+            startedAtMs: writtenAt,
+            bytes,
+            queuedWrites,
+            queuedBytes,
+            atlasDelta: atlasBefore !== undefined && atlasAfter !== undefined ? atlasAfter - atlasBefore : undefined,
+          });
           // Output is content, and for some panes it is the only content that
           // ever arrives: a pane already `ready` when it mounted never sees a
           // seed or a restore, so before this its first real screenful was
