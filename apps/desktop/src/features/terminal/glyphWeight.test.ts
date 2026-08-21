@@ -143,6 +143,8 @@ describe("the weights the terminal is allowed to draw", () => {
       expect(terminal.options.drawBoldTextInBrightColors).toBe(false);
       expect(terminal.options.fontWeight).toBe("normal");
       expect(terminal.options.fontWeightBold).toBe("bold");
+      expect(terminal.options.letterSpacing).toBe(1);
+      expect(terminal.options.lineHeight).toBe(1);
     } finally {
       terminal.dispose();
     }
@@ -157,5 +159,24 @@ describe("the weights the terminal is allowed to draw", () => {
     } finally {
       terminal.dispose();
     }
+  });
+});
+
+describe("the bundled face's cell", () => {
+  it("keeps the 0.6em advance on a whole device-pixel grid", () => {
+    const advance = 13 * 0.6;
+    for (const ratio of [1, 1.25, 1.5, 2, 3]) {
+      const deviceCell = Math.floor(advance * ratio) + GHOSTTY_TEXT_OPTIONS.letterSpacing;
+      expect(deviceCell / ratio, `${ratio}x cell`).toBe(8);
+    }
+  });
+
+  it("fails if WebGL stops adding spacing after flooring the face advance", () => {
+    // If xterm starts rounding the advance itself, our one-pixel correction
+    // becomes one pixel too wide and must be deleted rather than carried over.
+    expect(addonBundle, "WebGL no longer floors the measured face advance")
+      .toMatch(/char\.width=Math\.floor\([^;]+_charSizeService\.width[^;]+_devicePixelRatio\)/);
+    expect(addonBundle, "WebGL no longer adds integer spacing after the floor")
+      .toMatch(/cell\.width=[^;]+char\.width\+Math\.round\([^;]+letterSpacing\)/);
   });
 });

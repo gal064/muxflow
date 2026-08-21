@@ -95,7 +95,6 @@ export const CHROME_FALLBACKS = {
   "--chrome-faint": "#636b78",
   "--font-mono": '"JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace',
   "--term-font-size": "13px",
-  "--term-line-height": "1.42",
 } as const;
 
 /** A token `CHROME_FALLBACKS` — and therefore `theme.test.ts` — covers. */
@@ -161,53 +160,52 @@ export function searchDecorations(root: Element | undefined = globalThis.documen
 }
 
 /**
- * How heavy the terminal's text is allowed to get, as Ghostty answers it.
+ * The xterm options needed to render the bundled face like Ghostty.
  *
  * These are xterm option values rather than colours, so they cannot live in
  * `tokens.css`, but they are the same kind of fact as the palette above and
  * they are wrong in the same way when they drift: `bold-is-bright` is off in
  * Ghostty and xterm's `drawBoldTextInBrightColors` defaults to on, so a bold run
  * in the app was being emphasised twice — bold face *and* the bright half of
- * the palette — against a terminal that emphasises it once. The two weights are
- * xterm's own defaults, stated because they are the two the bundled faces
- * actually provide: anything else is synthesised, and a synthesised weight is
- * the other way this terminal has been heavier than its font.
+ * the palette — against a terminal that emphasises it once. The two weights
+ * are xterm's own defaults, stated because they are the two the bundled faces
+ * actually provide: anything else is synthesised. The spacing correction is
+ * documented beside its value because it compensates for xterm's renderer
+ * arithmetic rather than expressing a user preference.
  */
 export const GHOSTTY_TEXT_OPTIONS = {
   drawBoldTextInBrightColors: false,
   fontWeight: "normal",
   fontWeightBold: "bold",
+  // JetBrains Mono advances 0.6em: 7.8 CSS px at the 13px default. WebGL
+  // floors that to 7 device px at 1x and 15 at 2x, narrowing the cell below
+  // the face's own advance. Spacing is added after the floor, so one restores
+  // the nearest device-pixel cell at both macOS display ratios (8px / 16px),
+  // matching Ghostty's rounded face advance.
+  letterSpacing: 1,
 } as const;
 
 /**
  * The terminal's font, from the same tokens the rest of the app uses.
  *
- * `rowPitch` is the token's ratio *applied to the font size* — CSS's meaning of
- * `line-height`, and the meaning every other surface in the app gives
- * `--term-line-height`. It is deliberately not xterm's `lineHeight` option,
- * which multiplies the measured character cell instead; converting between the
- * two is `xtermLineHeight` in `./TerminalRenderer`, and passing this ratio to
- * xterm directly is what rendered 13 px rows at a ~1.86 pitch.
+ * Cell height deliberately stays at xterm's native `lineHeight: 1`. The
+ * measured JetBrains Mono face is the terminal cell Ghostty uses by default;
+ * adding a separate CSS-like row pitch creates extra leading and moves the
+ * baseline away from that default.
  */
 export function terminalFont(root: Element | undefined = globalThis.document?.documentElement): {
   fontFamily: string;
   fontSize: number;
-  rowPitch: number;
 } {
   const token = tokenWithFallback(root);
   // A token that is present but not a number is a case the fallback above
-  // cannot catch, so these two are re-checked against the literal after
-  // parsing: `--term-font-size: inherit` would otherwise size the grid `NaN`.
+  // cannot catch, so it is re-checked against the literal after parsing:
+  // `--term-font-size: inherit` would otherwise size the grid `NaN`.
   const size = Number.parseFloat(token("--term-font-size"));
-  const ratio = Number.parseFloat(token("--term-line-height"));
   const fontSize = Number.isFinite(size) && size > 0 ? size : Number.parseFloat(CHROME_FALLBACKS["--term-font-size"]);
-  const lineHeight = Number.isFinite(ratio) && ratio > 0
-    ? ratio
-    : Number.parseFloat(CHROME_FALLBACKS["--term-line-height"]);
   return {
     fontFamily: token("--font-mono"),
     fontSize,
-    rowPitch: fontSize * lineHeight,
   };
 }
 
