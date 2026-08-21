@@ -467,6 +467,22 @@ describe("binary terminal IPC", () => {
     expect(() => decodeTerminalEvent(frame(16, "%7", 1, Uint8Array.of(0xff)))).toThrow("UTF-8");
   });
 
+  it("decodes only bounded write-only terminal clipboard frames", () => {
+    expect(decodeTerminalEvent(frame(17, "terminal-clipboard", 22, textEncoder.encode("from tmux 🚀")))).toEqual({
+      kind: "clipboardWrite", text: "from tmux 🚀", sequence: 22,
+    });
+    expect(() => decodeTerminalEvent(frame(17, "terminal-clipboard", 0, textEncoder.encode("text")))).toThrow("nonzero");
+    expect(() => decodeTerminalEvent(frame(17, "wrong", 1, textEncoder.encode("text")))).toThrow("malformed");
+    expect(() => decodeTerminalEvent(frame(17, "terminal-clipboard", 1))).toThrow("malformed");
+    expect(() => decodeTerminalEvent(frame(17, "terminal-clipboard", 1, Uint8Array.of(0xff)))).toThrow("UTF-8");
+    expect(() => decodeTerminalEvent(frame(
+      17,
+      "terminal-clipboard",
+      1,
+      new Uint8Array(MAX_HOST_TERMINAL_INPUT_BYTES + 1),
+    ))).toThrow("oversized");
+  });
+
   it("keeps one initially-empty bridge lifecycle stable across session and topology UI changes", () => {
     const connection = { mode: "local" } as const;
     const initialKey = terminalBridgeKey(connection, 2);

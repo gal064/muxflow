@@ -18,6 +18,7 @@ import { resolveSelectedSession } from "../features/shell/model";
 import type { HostScopeToken } from "../features/shell/hostScope";
 import { recordPerfCounter } from "../perf/probe";
 import { recordIncident } from "../diagnostics/incidents";
+import { writeNativeTerminalClipboard } from "../features/terminal/terminalTransferApi";
 
 type ControllerArguments = {
   agentClient: TauriAgentClient;
@@ -349,6 +350,11 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
             setStatus("Terminal output stalled; reconnecting…");
             setConnectionEpoch((value) => value + 1);
           }
+        } else if (event.kind === "clipboardWrite") {
+          void writeNativeTerminalClipboard(event.text).catch((error) => {
+            recordIncident("clipboard.writeFailed", { error: String(error) });
+            setStatus(`Could not copy terminal selection: ${String(error)}`);
+          });
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
           recordIncident("link.bridgeDown", { kind: event.kind, detail });

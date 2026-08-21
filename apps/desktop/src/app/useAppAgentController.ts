@@ -99,6 +99,7 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
     client: options.agentClient,
     scope,
     focus,
+    topologyWindowIds: options.snapshot.windows.map((window) => window.id),
     soundPreferences: options.soundPreferences,
     onStatus: options.setStatus,
   });

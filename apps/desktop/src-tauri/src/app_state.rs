@@ -122,7 +122,11 @@ pub struct ShellPreferences {
     #[serde(default)]
     pub agent_state_glyphs: bool,
     #[serde(default)]
+    pub compact_workspaces: bool,
+    #[serde(default)]
     pub terminal_screen_reader: bool,
+    #[serde(default)]
+    pub copy_on_select: bool,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
 }
@@ -529,7 +533,9 @@ mod tests {
                 agent_sort: AgentSortMode::Status,
                 agents_section_ratio: Some(0.42),
                 agent_state_glyphs: true,
+                compact_workspaces: true,
                 terminal_screen_reader: false,
+                copy_on_select: false,
                 window_geometry: Some(WindowGeometry {
                     x: 20,
                     y: 30,
@@ -655,7 +661,12 @@ mod tests {
         assert_eq!(value.shell.panel_width, Some(320.0));
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
         assert!(value.shell.sidebar_collapsed && value.shell.panel_open);
-        assert!(value.shell.agent_state_glyphs && value.shell.terminal_screen_reader);
+        assert!(
+            value.shell.agent_state_glyphs
+                && value.shell.compact_workspaces
+                && value.shell.terminal_screen_reader
+                && value.shell.copy_on_select
+        );
         assert!(value.shell.window_geometry.is_some());
         assert_eq!(
             value.host_setup.get("local"),

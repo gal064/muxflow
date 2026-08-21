@@ -67,6 +67,9 @@ pub(super) enum TerminalEvent {
         pane_id: String,
         message: String,
     },
+    ClipboardWrite {
+        data: Vec<u8>,
+    },
     FileService {
         scope: String,
         payload: Vec<u8>,
@@ -175,6 +178,9 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
         }
         TerminalEvent::FlowPaused { pane_id, message } => {
             encode_bytes(16, pane_id, sequence, message.into_bytes())
+        }
+        TerminalEvent::ClipboardWrite { data } => {
+            encode_bytes(17, "terminal-clipboard".into(), sequence, data)
         }
         TerminalEvent::FileService { scope, payload } => encode_bytes(12, scope, sequence, payload),
         TerminalEvent::GitService { scope, payload } => encode_bytes(13, scope, sequence, payload),
@@ -287,5 +293,22 @@ mod tests {
     fn a_standalone_agent_event_frame_carries_the_sequence_it_consumed() {
         assert_eq!(agent_frame_sequence("claude-code:2f9a", 18), 18);
         assert_eq!(agent_frame_sequence("codex:live", u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn clipboard_write_frame_keeps_host_order_and_exact_text() {
+        let payload = "selected remotely 🚀".as_bytes().to_vec();
+        let frame = encode_event_with_sequence(
+            TerminalEvent::ClipboardWrite {
+                data: payload.clone(),
+            },
+            23,
+        );
+        assert_eq!(frame[0], 17);
+        let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+        assert_eq!(&frame[3..3 + label_len], b"terminal-clipboard");
+        let sequence_at = 3 + label_len;
+        assert_eq!(&frame[sequence_at..sequence_at + 8], &23_u64.to_be_bytes());
+        assert_eq!(&frame[sequence_at + 8..], payload);
     }
 }

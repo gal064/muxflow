@@ -821,6 +821,18 @@ fn process_event(
                 return Err(format!("host reported a stalled pane: {}", event.detail));
             }
         }
+        v1::EventKind::TerminalClipboardWrite => {
+            let data = event.detail.into_bytes();
+            if event.scope != "terminal-clipboard" || data.is_empty() || data.len() > 1024 * 1024 {
+                send_protocol_event(channel, event_sequence, TerminalEvent::ProtocolProgress)?;
+            } else {
+                send_protocol_event(
+                    channel,
+                    event_sequence,
+                    TerminalEvent::ClipboardWrite { data },
+                )?;
+            }
+        }
         v1::EventKind::TerminalSeedDiagnostic => {
             send_protocol_event(
                 channel,

@@ -31,6 +31,8 @@ export function nextSortMode(mode: AgentSortMode): AgentSortMode {
 export interface AgentLocation {
   workspaceOrder: number;
   workspaceName: string;
+  /** User-facing host identity, needed when workspace names collide. */
+  hostLabel?: string;
   tabIndex?: number;
 }
 
@@ -40,6 +42,30 @@ export interface AgentListRow {
   location: AgentLocation;
   /** A row is only clickable when it resolves to an exact live pane. */
   routable: boolean;
+}
+
+export interface AgentWorkspaceGroup {
+  key: string;
+  workspaceName: string;
+  hostLabel: string;
+  rows: AgentListRow[];
+}
+
+/**
+ * Groups an already workspace-ordered list without re-sorting its rows. The
+ * server identity is part of the key because a reconnect can reuse a profile
+ * and session id while still referring to a different tmux server.
+ */
+export function groupAgentRows(rows: readonly AgentListRow[]): AgentWorkspaceGroup[] {
+  const groups = new Map<string, AgentWorkspaceGroup>();
+  for (const row of rows) {
+    const hostLabel = row.location.hostLabel || row.agent.hostProfileId || "unknown host";
+    const key = [row.agent.hostProfileId, row.agent.serverIdentity, row.agent.sessionId].join("\0");
+    const existing = groups.get(key);
+    if (existing) existing.rows.push(row);
+    else groups.set(key, { key, workspaceName: row.location.workspaceName, hostLabel, rows: [row] });
+  }
+  return [...groups.values()];
 }
 
 /**
@@ -75,6 +101,11 @@ function byStatus(left: AgentListRow, right: AgentListRow): number {
 function byWorkspace(left: AgentListRow, right: AgentListRow): number {
   return left.location.workspaceOrder - right.location.workspaceOrder
     || left.location.workspaceName.localeCompare(right.location.workspaceName)
+    // Keep a workspace contiguous even when same-named workspaces on two
+    // hosts happen to have the same display order and tab indexes.
+    || left.agent.hostProfileId.localeCompare(right.agent.hostProfileId)
+    || left.agent.serverIdentity.localeCompare(right.agent.serverIdentity)
+    || left.agent.sessionId.localeCompare(right.agent.sessionId)
     || (left.location.tabIndex ?? Number.MAX_SAFE_INTEGER) - (right.location.tabIndex ?? Number.MAX_SAFE_INTEGER)
     || left.agent.displayName.localeCompare(right.agent.displayName)
     || left.agent.id.localeCompare(right.agent.id);

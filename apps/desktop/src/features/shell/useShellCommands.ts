@@ -93,7 +93,8 @@ export type ResolvedCommandTarget =
   | { kind: "session"; value?: Session }
   | { kind: "terminalTab"; value?: TmuxWindow; windows: readonly TmuxWindow[] }
   | { kind: "appTab"; value?: AppOwnedTab }
-  | { kind: "pane"; value?: Pane };
+  | { kind: "pane"; value?: Pane }
+  | { kind: "focusedSurface"; pane?: Pane; window?: TmuxWindow };
 
 /**
  * Resolve a command subject without mixing an explicit surface with whatever
@@ -146,6 +147,16 @@ export function resolveCommandTarget(
         kind: target.kind,
         value: scopeCurrent ? inputs.snapshot.panes.find((pane) => pane.id === target.id) : undefined,
       };
+    case "focusedSurface": {
+      const pane = scopeCurrent
+        ? inputs.snapshot.panes.find((candidate) => candidate.id === target.paneId)
+        : undefined;
+      return {
+        kind: target.kind,
+        pane,
+        window: pane ? inputs.snapshot.windows.find((candidate) => candidate.id === pane.windowId) : undefined,
+      };
+    }
   }
 }
 
@@ -201,10 +212,12 @@ export function useShellCommands(options: ShellCommandOptions): {
     const targetSession = resolvedTarget.kind === "session" ? resolvedTarget.value
       : resolvedTarget.kind === "ambient" ? resolvedTarget.session : undefined;
     const targetWindow = resolvedTarget.kind === "terminalTab" ? resolvedTarget.value
+      : resolvedTarget.kind === "focusedSurface" ? resolvedTarget.window
       : resolvedTarget.kind === "ambient" ? resolvedTarget.window : undefined;
     const targetAppTab = resolvedTarget.kind === "appTab" ? resolvedTarget.value
       : resolvedTarget.kind === "ambient" ? resolvedTarget.appTab : undefined;
     const targetPane = resolvedTarget.kind === "pane" ? resolvedTarget.value
+      : resolvedTarget.kind === "focusedSurface" ? resolvedTarget.pane
       : resolvedTarget.kind === "ambient" ? resolvedTarget.pane : undefined;
     const targetWindows = resolvedTarget.kind === "terminalTab" || resolvedTarget.kind === "ambient"
       ? resolvedTarget.windows : [];
@@ -227,7 +240,15 @@ export function useShellCommands(options: ShellCommandOptions): {
     }
     if (definition.destructive) {
       if (!options.serverIdentity) return;
-      const close = closeTarget(commandId, { targetSession, targetWindow, targetPane });
+      // The ambient Close command (keyboard, palette or application menu)
+      // closes the focused pane while a terminal tab is split. An explicit tab
+      // target is the tab context menu's "Close tab" and remains whole-tab.
+      const paneFirst = commandId === "window.close"
+        && (resolvedTarget.kind === "ambient" || resolvedTarget.kind === "focusedSurface")
+        && targetWindow
+        && targetPane
+        && options.snapshot.panes.filter((pane) => pane.windowId === targetWindow.id).length > 1;
+      const close = closeTarget(paneFirst ? "pane.close" : commandId, { targetSession, targetWindow, targetPane });
       if (!close) return;
       // One dispatch, so `confirmed: true` and the authoritative precondition
       // are stamped in exactly one place whether or not a dialog is involved.
