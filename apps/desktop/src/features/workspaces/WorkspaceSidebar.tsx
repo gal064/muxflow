@@ -165,6 +165,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               }}
               type="button"
             >
+              {index < 9 && <span aria-hidden="true" className="workspace-shortcut-index">{index + 1}</span>}
               <span className="workspace-title">
                 {row.working && <span aria-hidden="true" className="spinner" />}
                 <span className="workspace-name">{row.session.name}</span>

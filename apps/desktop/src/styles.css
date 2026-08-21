@@ -288,6 +288,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .workspace-button.active .workspace-activity { color: var(--accent-ink); }
 .workspace-button.active .workspace-meta,
 .workspace-button.active .workspace-activity-more { color: color-mix(in srgb, var(--accent-ink) 72%, transparent); }
+.workspace-shortcut-index {
+  width: 12px; flex: 0 0 auto;
+  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
+  font-variant-numeric: tabular-nums; text-align: center;
+}
 
 .spinner {
   width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%;
@@ -490,8 +495,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-size: 5px; font-weight: 700; line-height: 1; color: var(--chrome-bg);
 }
 .tab-dot.blocked { background: var(--state-blocked); }
-.tab-dot.done { background: var(--state-done); }
-.tab-dot.working { background: var(--state-working); }
+.tab-dot.done { background: var(--ok); }
+.tab-agent-spinner { width: 8px; height: 8px; color: var(--state-working); }
 /* Same rule as the sidebar dot, glyph suppression included: a tab whose agent
    state is unknown must not look like a tab whose agent is doing something. */
 .tab-dot.unknown { background: transparent; border: 1px dashed var(--state-unknown); }

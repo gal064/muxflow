@@ -47,6 +47,7 @@ import {
   PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
 } from "../features/shell/types";
 import {
+  agentPresenceIsCurrent,
   combineWorkspaceTabs,
   closeAppTab,
   mountedAppTabIds,
@@ -54,12 +55,16 @@ import {
   openFileTab,
   openGitDiffTab,
   pinAppTab,
+  selectableTabs,
   selectAppTab,
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
+  tabsEligibleAtBulkCloseCommit,
   tabsToCloseOthers,
+  tabsToCloseNonAgent,
   tabsToCloseRight,
   type CombinedTab,
+  type AgentPresenceSnapshot,
   type PendingShellTab,
 } from "../features/shell/model";
 import { useContextMenusOpen } from "../ui/ContextMenu";
@@ -226,7 +231,11 @@ export function App() {
   // A bulk close waiting on its one summary dialog. Closing tabs the user is
   // *not* looking at is not the single close's "the surface's disappearance is
   // the confirmation" case, so it asks — once, for the whole set.
-  const [pendingBulkClose, setPendingBulkClose] = useState<{ tabs: CombinedTab[]; scope: HostScopeToken }>();
+  const [pendingBulkClose, setPendingBulkClose] = useState<{
+    tabs: CombinedTab[];
+    scope: HostScopeToken;
+    protectAgents: boolean;
+  }>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
@@ -496,9 +505,33 @@ export function App() {
   // session until its ack names one, and drawing it anywhere before that would
   // put it in the workspace being navigated away from.
   const pendingTabHere = pendingTab && pendingTab.sessionId === activeSessionId ? pendingTab : undefined;
+  const acceptedAgentTopology = agentRuntime.state.authoritative
+    && agentRuntime.state.hostProfileId === currentHostProfileId
+    && agentRuntime.state.serverIdentity === hostState.serverIdentity
+    && agentRuntime.state.connectionEpoch === agentScope?.connectionEpoch
+    ? agentRuntime.topologyAuthority
+    : undefined;
+  const currentAgentTopology = agentScope ? {
+    hostProfileId: agentScope.hostProfileId,
+    serverIdentity: agentScope.serverIdentity,
+    connectionEpoch: agentScope.connectionEpoch,
+    topologyGeneration: hostState.generation,
+  } : undefined;
+  const agentPresence: AgentPresenceSnapshot = {
+    accepted: acceptedAgentTopology,
+    current: currentAgentTopology,
+    byWindow: agentRuntime.rollups.byWindow,
+  };
+  const agentPresenceRef = useRef(agentPresence);
+  agentPresenceRef.current = agentPresence;
   const combinedTabs = useMemo(
-    () => combineWorkspaceTabs(windows, workspaceAppTabs, agentRuntime.rollups.byWindow, pendingTabHere),
-    [agentRuntime.rollups.byWindow, pendingTabHere, windows, workspaceAppTabs],
+    () => combineWorkspaceTabs(
+      windows, workspaceAppTabs, agentRuntime.rollups.byWindow, pendingTabHere, {
+        accepted: acceptedAgentTopology,
+        current: currentAgentTopology,
+      },
+    ),
+    [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, pendingTabHere, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
   const grid = useMemo(() => windowGrid(panes), [panes]);
@@ -627,7 +660,9 @@ export function App() {
       if (next) selectCombinedTab(next);
     },
     selectTabByIndex: (index) => {
-      const tab = combinedTabs[index];
+      // Pending create placeholders are visible feedback, not shortcut
+      // targets. The numbers drawn in the strip use this same real-tab order.
+      const tab = selectableTabs(combinedTabs)[index];
       if (tab) selectCombinedTab(tab);
     },
     selectWorkspaceByIndex: (index) => {
@@ -791,7 +826,7 @@ export function App() {
    * anything is closed: a set that cannot be saved must not lose half of itself
    * on the way to the failure message.
    */
-  const closeTabSet = async (tabs: readonly CombinedTab[], scope: HostScopeToken) => {
+  const closeTabSet = async (tabs: readonly CombinedTab[], scope: HostScopeToken, protectAgents: boolean) => {
     if (!sameHostConnection(scope, hostScopeRef.current)) {
       setStatus("Closing those tabs was cancelled because its host scope changed.");
       return;
@@ -810,23 +845,47 @@ export function App() {
       const appTab = workspaceAppTabs.find((item) => item.id === tab.id);
       if (appTab) closeWorkspaceAppTab(appTab, scope);
     }
-    for (const tab of tabs) {
-      if (tab.kind !== "terminal") continue;
-      const terminalWindow = windows.find((item) => item.id === tab.id);
+    const terminalTabs = tabs.filter((tab): tab is Extract<CombinedTab, { kind: "terminal" }> => tab.kind === "terminal");
+    for (const [index, tab] of terminalTabs.entries()) {
+      // Each terminal is checked immediately before its own awaited mutation.
+      // The first close can take long enough for a newly detected agent to
+      // protect a later tab in the same batch.
+      if (tabsEligibleAtBulkCloseCommit([tab], protectAgents, agentPresenceRef.current).length === 0) continue;
+      const terminalWindow = snapshotRef.current.windows.find((item) => item.id === tab.id);
+      if (!terminalWindow) continue;
       // No captured precondition: each close advances the topology generation,
       // so one stamped before the first would refuse every close after it.
-      if (terminalWindow) await performAction({
+      const result = await performAction({
         kind: "closeWindow", sessionId: terminalWindow.sessionId, windowId: terminalWindow.id, confirmed: true,
       });
       if (!sameHostConnection(scope, hostScopeRef.current)) return;
+      if (!result) return;
+      if (protectAgents && index < terminalTabs.length - 1) {
+        // The close advanced tmux topology. Absence in the previous agent
+        // snapshot proves nothing about even a surviving window: another
+        // client may have split a new agent pane into it. Wait for the runtime
+        // request paired with the reconciled topology before considering the
+        // next destructive mutation.
+        const deadline = Date.now() + 2_000;
+        while (sameHostConnection(scope, hostScopeRef.current)
+          && !agentPresenceIsCurrent(agentPresenceRef.current, result.topologyGeneration)
+          && Date.now() < deadline) {
+          await new Promise((resolve) => globalThis.setTimeout(resolve, 16));
+        }
+        if (!sameHostConnection(scope, hostScopeRef.current)) return;
+        if (!agentPresenceIsCurrent(agentPresenceRef.current, result.topologyGeneration)) {
+          setStatus("Stopped closing tabs because current agent status was unavailable; remaining terminals were left open.");
+          return;
+        }
+      }
     }
   };
 
   /** Terminal windows in the set mean one dialog for the set; app tabs alone close on the spot. */
-  const bulkCloseTabs = (tabs: CombinedTab[], scope: HostScopeToken) => {
+  const bulkCloseTabs = (tabs: CombinedTab[], scope: HostScopeToken, protectAgents = false) => {
     if (tabs.length === 0) return;
-    if (tabs.some((tab) => tab.kind === "terminal")) setPendingBulkClose({ tabs, scope });
-    else void closeTabSet(tabs, scope);
+    if (tabs.some((tab) => tab.kind === "terminal")) setPendingBulkClose({ tabs, scope, protectAgents });
+    else void closeTabSet(tabs, scope, protectAgents);
   };
 
   const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {
@@ -959,11 +1018,15 @@ export function App() {
       <section className="workspace" aria-label={activeSession ? `Workspace ${activeSession.name}` : "Workspace"}>
         <TabStrip
           activeKey={activeCombinedTabKey}
+          activePaneId={activePane?.id}
+          activeTerminalPaneCount={panes.length}
           canMutate={hostState.canMutate && Boolean(activeSession)}
           canSplit={hostState.canMutate && Boolean(activePane) && !selectedAppTab}
           commandScope={currentHostScope}
           onClose={closeCombinedTab}
+          onCloseCurrent={(paneId, scope) => void runCommand("window.close", { kind: "focusedSurface", paneId, scope })}
           onCloseOthers={(tab, scope) => bulkCloseTabs(tabsToCloseOthers(combinedTabs, tab.key), scope)}
+          onCloseNonAgent={(scope) => bulkCloseTabs(tabsToCloseNonAgent(combinedTabs), scope, true)}
           onCloseRight={(tab, scope) => bulkCloseTabs(tabsToCloseRight(combinedTabs, tab.key), scope)}
           onDownloadTab={(tab) => {
             const appTab = workspaceAppTabs.find((item) => item.id === tab.id);
@@ -1188,7 +1251,7 @@ export function App() {
       onConfirm={() => {
         const pending = pendingBulkClose;
         setPendingBulkClose(undefined);
-        void closeTabSet(pending.tabs, pending.scope);
+        void closeTabSet(pending.tabs, pending.scope, pending.protectAgents);
       }}
       title={`Close ${pendingBulkClose.tabs.length} ${pendingBulkClose.tabs.length === 1 ? "tab" : "tabs"}?`}
     />}
