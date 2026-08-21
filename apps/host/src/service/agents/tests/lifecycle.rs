@@ -116,7 +116,69 @@ fn codex_denial_and_cancellation_resolve_pending_approval() {
                 .pending_approval_keys
                 .is_empty()
         );
+        drop(state);
+        if sequence == "cancelled" {
+            let state_path = runtime.state_path.clone();
+            drop(runtime);
+            let runtime = AgentRuntime::isolated(state_path);
+            assert_eq!(
+                ingest_fixture(&runtime, &topology, &events[2]).lifecycle,
+                v1::AgentLifecycleState::Idle as i32,
+                "a late tool event cannot revive a cancelled session after restart"
+            );
+        }
     }
+}
+
+#[test]
+fn identical_concurrent_approvals_resolve_one_observed_request_at_a_time() {
+    let runtime = runtime("codex-identical-approvals");
+    let topology = topology("codex");
+    let events = codex_approval_fixture("identical");
+    for permission in &events[..2] {
+        assert_eq!(
+            ingest_fixture(&runtime, &topology, permission).lifecycle,
+            v1::AgentLifecycleState::Blocked as i32
+        );
+    }
+    let state_path = runtime.state_path.clone();
+    drop(runtime);
+    let runtime = AgentRuntime::isolated(state_path);
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[2]).lifecycle,
+        v1::AgentLifecycleState::Blocked as i32,
+        "one completion cannot resolve two identical observed requests"
+    );
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[3]).lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+}
+
+#[test]
+fn claude_non_approval_blocks_keep_their_existing_lifecycle_transitions() {
+    let runtime = runtime("claude-notification-is-not-codex-approval");
+    let topology = topology("claude");
+    let mut notification = event("claude-idle-prompt", 0, "Notification");
+    notification.adapter = v1::AgentAdapterKind::ClaudeCode.into();
+    notification.adapter_id = "claude-code".into();
+    notification.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "Notification",
+        "notification_type": "idle_prompt"
+    }))
+    .unwrap();
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &notification).lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+    let mut working = event("claude-pre-tool", 0, "PreToolUse");
+    working.adapter = v1::AgentAdapterKind::ClaudeCode.into();
+    working.adapter_id = "claude-code".into();
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &working).lifecycle,
+        v1::AgentLifecycleState::Working as i32,
+        "Codex approval persistence must not change Claude notification semantics"
+    );
 }
 
 #[test]

@@ -41,6 +41,9 @@ pub(crate) trait AgentAdapter: Send + Sync {
     fn executable(&self) -> &'static str;
     fn hook_relative_path(&self) -> &'static str;
     fn hook_events(&self) -> &'static [&'static str];
+    fn hook_timeout_seconds(&self, _event: &str) -> u64 {
+        5
+    }
     fn hook_trust_guidance(&self) -> &'static str;
     fn identifies_process(&self, command: &str) -> bool;
     fn launch(&self, native_session_id: Option<&str>) -> LaunchSpec;
@@ -149,6 +152,10 @@ impl AgentAdapter for CodexAdapter {
         "Codex will review the exact hook hash; approve it in Codex. This installer never edits or bypasses hook trust state."
     }
 
+    fn hook_timeout_seconds(&self, event: &str) -> u64 {
+        if event == "SessionEnd" { 3 } else { 5 }
+    }
+
     fn identifies_process(&self, command: &str) -> bool {
         command_basename(command) == "codex"
     }
@@ -163,6 +170,15 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str> {
+        let event = hook_event_name(payload)?;
+        let approval_effect = match event {
+            "PermissionRequest" => ApprovalEffect::Pending,
+            "PostToolUse" => ApprovalEffect::ResolveMatching,
+            "UserPromptSubmit" | "Stop" | "SessionEnd" | "SessionStart" => {
+                ApprovalEffect::ResolveAll
+            }
+            _ => ApprovalEffect::None,
+        };
         parse_common_hook(
             payload,
             &[
@@ -176,6 +192,7 @@ impl AgentAdapter for CodexAdapter {
                 ("SessionEnd", v1::AgentLifecycleState::Idle),
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
+            approval_effect,
         )
     }
 }
@@ -258,12 +275,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
             } else {
                 v1::AgentLifecycleState::Unknown
             };
-            return Ok(parsed(payload, lifecycle));
+            return Ok(parsed(payload, lifecycle, ApprovalEffect::None));
         }
         if event == "Stop"
             && (nonempty(payload.get("background_tasks")) || nonempty(payload.get("session_crons")))
         {
-            return Ok(parsed(payload, v1::AgentLifecycleState::Working));
+            return Ok(parsed(
+                payload,
+                v1::AgentLifecycleState::Working,
+                ApprovalEffect::None,
+            ));
         }
         parse_common_hook(
             payload,
@@ -279,6 +300,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 ("StopFailure", v1::AgentLifecycleState::Idle),
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
+            ApprovalEffect::None,
         )
     }
 }
@@ -367,33 +389,22 @@ fn nonempty(value: Option<&Value>) -> bool {
 fn parse_common_hook(
     payload: &Value,
     mappings: &[(&str, v1::AgentLifecycleState)],
+    approval_effect: ApprovalEffect,
 ) -> Result<ParsedHook, &'static str> {
     let event = hook_event_name(payload)?;
     let lifecycle = mappings
         .iter()
         .find_map(|(candidate, lifecycle)| (*candidate == event).then_some(*lifecycle))
         .unwrap_or(v1::AgentLifecycleState::Unknown);
-    Ok(parsed(payload, lifecycle))
+    Ok(parsed(payload, lifecycle, approval_effect))
 }
 
-fn parsed(payload: &Value, lifecycle: v1::AgentLifecycleState) -> ParsedHook {
+fn parsed(
+    payload: &Value,
+    lifecycle: v1::AgentLifecycleState,
+    approval_effect: ApprovalEffect,
+) -> ParsedHook {
     let event_name = hook_event_name(payload).unwrap_or_default();
-    let approval_effect = if lifecycle == v1::AgentLifecycleState::Blocked {
-        ApprovalEffect::Pending
-    } else {
-        match event_name {
-            // This is the only supported hook that proves a particular tool
-            // passed its approval boundary and completed.
-            "PostToolUse" => ApprovalEffect::ResolveMatching,
-            // Codex exposes no denial event. Stop/SessionEnd are its observable
-            // denial or cancellation boundaries; the other two start a fresh
-            // lifecycle and cannot inherit an older pending request.
-            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" | "SessionStart" => {
-                ApprovalEffect::ResolveAll
-            }
-            _ => ApprovalEffect::None,
-        }
-    };
     ParsedHook {
         native_session_id: payload
             .get("session_id")

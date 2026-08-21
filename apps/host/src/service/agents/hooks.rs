@@ -576,6 +576,7 @@ fn add_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter, helper_p
         .expect("review validated hooks object");
     let command = adapter.hook_command(helper_path);
     for event in adapter.hook_events() {
+        let timeout = adapter.hook_timeout_seconds(event);
         let groups = hooks
             .entry((*event).to_owned())
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -583,7 +584,7 @@ fn add_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter, helper_p
             .as_array_mut()
             .expect("review validated event array")
             .push(serde_json::json!({
-                "hooks": [{"type": "command", "command": command, "timeout": 5}]
+                "hooks": [{"type": "command", "command": command, "timeout": timeout}]
             }));
     }
 }
@@ -669,6 +670,8 @@ fn managed_entries_are_current(
                         .get("command")
                         .and_then(Value::as_str)
                         .is_some_and(|command| command == expected)
+                        && command.get("timeout").and_then(Value::as_u64)
+                            == Some(adapter.hook_timeout_seconds(event))
                 })
         })
 }
@@ -993,6 +996,19 @@ mod tests {
             managed_entry_count(&installed, adapter),
             adapter.hook_events().len()
         );
+        let managed_timeout = |event: &str| {
+            installed["hooks"][event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().unwrap())
+                .find(|hook| hook["command"] == review.proposed_command)
+                .unwrap()["timeout"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(managed_timeout("SessionEnd"), 3);
+        assert_eq!(managed_timeout("PermissionRequest"), 5);
         assert!(installed["hooks"].get("Notification").is_none());
         assert!(installed.to_string().contains("keep-me"));
         let repeated = manager
