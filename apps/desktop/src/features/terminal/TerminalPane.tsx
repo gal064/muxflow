@@ -16,6 +16,7 @@ import {
 import { terminalStateCache } from "./TerminalStateCache";
 import { readAtlasInvalidationCount } from "./atlasStaleProbe";
 import { notePaint, startLongTaskTracker } from "./paintTailProbe";
+import { createGridMismatchProbe, type GridMismatchProbe } from "./gridMismatchProbe";
 import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./PaneRevealState";
 import { prepareTerminalSnapshot, requestTerminalSeed, setTerminalVisibility } from "./api";
 import { ownTerminalBytes } from "./TerminalBytes";
@@ -164,6 +165,30 @@ export function refitPaneGridToBox(
   return reconcilePaneGrid(renderer, pane, measured);
 }
 
+/**
+ * Tells the mismatch probe what a reconcile just left on screen.
+ *
+ * `reconcilePaneGrid` renders at tmux's numbers, except when they are not a
+ * usable grid at all — then it falls back to the measurement, and a terminal
+ * rendering at its own box size is the one state that cannot be the clipped
+ * pane the probe watches for. That rejection rule lives in
+ * `TerminalRenderer.setGrid`; mirroring it here costs a comparison and keeps the
+ * probe out of the sizing path entirely.
+ */
+function noteReconciledGrid(
+  probe: GridMismatchProbe | undefined,
+  pane: Pane,
+  measured: TerminalSize | undefined,
+): void {
+  if (!probe) return;
+  const usable = Number.isInteger(pane.width) && Number.isInteger(pane.height) && pane.width >= 2 && pane.height >= 2;
+  if (!usable) {
+    probe.clear(pane.id);
+    return;
+  }
+  probe.noteGrids(pane.id, { columns: pane.width, rows: pane.height }, measured);
+}
+
 function visibleSeedDiagnostic(message: string | undefined): string | undefined {
   // These are expected capability limits on supported tmux versions. Keep the
   // pane-scoped diagnostic in the event stream without permanently covering
@@ -286,6 +311,9 @@ export function TerminalPane({
   // `refitPaneGridToBox` compares against; written only where tmux's grid is
   // applied, so an optimistic fit can never move it.
   const gridForBoxRef = useRef<TerminalSize | undefined>(undefined);
+  // Journal-only, and owned by the mount effect: a torn-down pane has no grid
+  // left to disagree with, and a fresh mount remeasures everything it watches.
+  const gridMismatchProbeRef = useRef<GridMismatchProbe | undefined>(undefined);
   const lastRevealKeyRef = useRef<string | undefined>(undefined);
   // Bumped only by an explicit re-assertion. The reveal is otherwise still once
   // per (client, epoch); this is what lets the watchdog step past that latch
@@ -336,6 +364,10 @@ export function TerminalPane({
     startLongTaskTracker();
     const terminalContainer = container.current;
     if (!terminalContainer) return;
+    const gridMismatch = createGridMismatchProbe({
+      onIncident: ({ kind, ...detail }) => recordIncident(kind, detail),
+    });
+    gridMismatchProbeRef.current = gridMismatch;
     // Re-asserted rather than left to the JSX default: this element outlives a
     // remount that reuses the DOM node, and a node still carrying "true" from
     // the previous renderer would show the new one's empty first frame.
@@ -464,6 +496,7 @@ export function TerminalPane({
     const measuredAtOpen = renderer.measure();
     reportGrid(reconcilePaneGrid(renderer, pane, measuredAtOpen));
     gridForBoxRef.current = measuredAtOpen;
+    noteReconciledGrid(gridMismatch, pane, measuredAtOpen);
     const interceptPaste = (event: ClipboardEvent) => {
       // Native Edit > Paste bypasses the app command and targets xterm's
       // textarea. Own plain text in capture phase so xterm cannot wrap it in a
@@ -795,7 +828,19 @@ export function TerminalPane({
       // The refit prefers the box only while the box has moved away from the
       // measurement tmux's grid was applied for; the topology effect below
       // hands authority back the moment tmux answers.
-      reportGrid(refitPaneGridToBox(renderer, paneRef.current, renderer.measure(), gridForBoxRef.current));
+      const measured = renderer.measure();
+      const anchor = gridForBoxRef.current;
+      reportGrid(refitPaneGridToBox(renderer, paneRef.current, measured, anchor));
+      // The same question the refit just asked itself. A box that has moved away
+      // from the measurement tmux's grid was applied for is a box the terminal
+      // was just fitted to, so whatever tmux's numbers say there is nothing on
+      // screen for the user to see cut off; the mismatch this journals is the
+      // one where tmux's grid is what the pane is rendering at.
+      const fittedToBox = Boolean(
+        measured && anchor && (measured.columns !== anchor.columns || measured.rows !== anchor.rows),
+      );
+      if (fittedToBox) gridMismatch.clear(paneRef.current.id);
+      else noteReconciledGrid(gridMismatch, paneRef.current, measured);
       // Re-read rather than report once: xterm rounds a cell to whole device
       // pixels, so moving the window between displays of different pixel
       // ratios changes it with no remount.
@@ -829,6 +874,10 @@ export function TerminalPane({
       // `setTerminalVisibility(false)` below), and a pane on its way to hidden
       // has no reveal left to disbelieve. No void timer may outlive its mount.
       cancelRevealVoidWatch(revealVoidTimerRef);
+      // Same reasoning for the grid tripwire: a hidden or unmounted pane is not
+      // showing a mismatch to anyone, and its successor arms its own.
+      gridMismatch.dispose();
+      if (gridMismatchProbeRef.current === gridMismatch) gridMismatchProbeRef.current = undefined;
       initialPaint.abandon();
       watchdog.stop();
       if (watchdogRef.current === watchdog) watchdogRef.current = undefined;
@@ -1121,6 +1170,9 @@ export function TerminalPane({
       // well as in `revealForCurrentEpoch`, which returns early when this epoch
       // has no checkpoint yet.
       cancelRevealVoidWatch(revealVoidTimerRef);
+      // The grid being disagreed with belonged to the epoch that just ended; the
+      // reveal below reseeds this pane and reconciles it again from scratch.
+      gridMismatchProbeRef.current?.clear(pane.id);
       revealForCurrentEpoch();
     });
     return () => {
@@ -1164,6 +1216,7 @@ export function TerminalPane({
     // box change is judged against this measurement instead of the pre-drag
     // one. This is the only other place the anchor moves.
     gridForBoxRef.current = measured;
+    noteReconciledGrid(gridMismatchProbeRef.current, pane, measured);
     if (report) console.warn(report);
   }, [pane.id, pane.width, pane.height]);
 
