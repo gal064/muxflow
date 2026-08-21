@@ -1,5 +1,215 @@
 use super::*;
 
+fn codex_approval_fixture(sequence: &str) -> Vec<v1::AgentHookEvent> {
+    let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../../../../../tests/integration/agents/fixtures/codex-approval-sequences.json"
+    ))
+    .unwrap();
+    fixture[sequence]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|payload| {
+            crate::hook::build_event(
+                v1::AgentAdapterKind::Codex,
+                serde_json::to_vec(payload).unwrap(),
+                "%7",
+                "server-a",
+                now_millis(),
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+fn ingest_fixture(
+    runtime: &AgentRuntime,
+    topology: &tmux_control::TmuxSnapshot,
+    event: &v1::AgentHookEvent,
+) -> v1::AgentRecord {
+    runtime
+        .ingest_hook_with_context(event, "server-a", Some(topology))
+        .unwrap()
+        .agent
+        .unwrap()
+}
+
+/// Codex 0.148's PermissionRequest has no tool_use_id. The canonical hook
+/// boundary therefore correlates with the stable fields both sides do expose:
+/// turn_id, tool_name and tool_input. A parallel tool completing must not erase
+/// the approval; the corresponding PostToolUse is the first observable proof
+/// that the approved tool resumed.
+#[test]
+fn real_codex_approval_order_stays_blocked_until_the_matching_tool_resolves() {
+    let runtime = runtime("codex-real-approval-order");
+    let topology = topology("codex");
+    let events = codex_approval_fixture("approved");
+
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[0]).lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    ingest_fixture(&runtime, &topology, &events[1]);
+    let blocked = ingest_fixture(&runtime, &topology, &events[2]);
+    assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+    assert_eq!(blocked.attention_kind, "blocked");
+    let state_path = runtime.state_path.clone();
+    assert!(
+        !runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .pending_approvals
+            .is_empty()
+    );
+    drop(runtime);
+    let runtime = AgentRuntime::isolated(state_path);
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Blocked as i32,
+        "the pending approval must survive a daemon restart"
+    );
+
+    for unrelated in &events[3..=4] {
+        assert_eq!(
+            ingest_fixture(&runtime, &topology, unrelated).lifecycle,
+            v1::AgentLifecycleState::Blocked as i32,
+            "an unrelated tool lifecycle event cannot resolve the pending approval"
+        );
+    }
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[5]).lifecycle,
+        v1::AgentLifecycleState::Working as i32,
+        "the matching PostToolUse proves approval and tool completion"
+    );
+    let completed = ingest_fixture(&runtime, &topology, &events[6]);
+    assert_eq!(completed.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(completed.attention_kind, "completed");
+}
+
+/// Codex exposes no distinct denial hook. A denied request ends at Stop; an
+/// aborted session ends at SessionEnd. Both are supported observable terminal
+/// boundaries and both must clear the durable pending state.
+#[test]
+fn codex_denial_and_cancellation_resolve_pending_approval() {
+    for sequence in ["denied", "cancelled"] {
+        let runtime = runtime(&format!("codex-{sequence}-approval"));
+        let topology = topology("codex");
+        let events = codex_approval_fixture(sequence);
+        assert_eq!(
+            ingest_fixture(&runtime, &topology, &events[0]).lifecycle,
+            v1::AgentLifecycleState::Blocked as i32
+        );
+        let resolved = ingest_fixture(&runtime, &topology, &events[1]);
+        assert_eq!(resolved.lifecycle, v1::AgentLifecycleState::Idle as i32);
+        let state = runtime.state.lock().unwrap();
+        assert!(
+            state
+                .agents
+                .values()
+                .next()
+                .unwrap()
+                .pending_approvals
+                .is_empty()
+        );
+        drop(state);
+        if sequence == "cancelled" {
+            let state_path = runtime.state_path.clone();
+            drop(runtime);
+            let runtime = AgentRuntime::isolated(state_path);
+            assert_eq!(
+                ingest_fixture(&runtime, &topology, &events[2]).lifecycle,
+                v1::AgentLifecycleState::Idle as i32,
+                "a late tool event cannot revive a cancelled session after restart"
+            );
+        }
+    }
+}
+
+#[test]
+fn identical_concurrent_approvals_resolve_one_observed_request_at_a_time() {
+    let runtime = runtime("codex-identical-approvals");
+    let topology = topology("codex");
+    let events = codex_approval_fixture("identical");
+    for permission in &events[..2] {
+        assert_eq!(
+            ingest_fixture(&runtime, &topology, permission).lifecycle,
+            v1::AgentLifecycleState::Blocked as i32
+        );
+    }
+    let state_path = runtime.state_path.clone();
+    drop(runtime);
+    let runtime = AgentRuntime::isolated(state_path);
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[2]).lifecycle,
+        v1::AgentLifecycleState::Blocked as i32,
+        "one completion cannot resolve two identical observed requests"
+    );
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[3]).lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+}
+
+#[test]
+fn a_pre_change_blocked_record_never_matches_an_unrelated_tool_completion() {
+    let runtime = runtime("codex-legacy-unknown-approval");
+    let topology = topology("codex");
+    let events = codex_approval_fixture("approved");
+    ingest_fixture(&runtime, &topology, &events[2]);
+    let state_path = runtime.state_path.clone();
+    drop(runtime);
+
+    let mut stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    for record in stored["agents"].as_object_mut().unwrap().values_mut() {
+        record.as_object_mut().unwrap().remove("pending_approvals");
+    }
+    std::fs::write(&state_path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+    let runtime = AgentRuntime::isolated(state_path);
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[4]).lifecycle,
+        v1::AgentLifecycleState::Blocked as i32,
+        "unknown legacy identity must wait for a conservative terminal resolver"
+    );
+    let stop = codex_approval_fixture("denied");
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &stop[1]).lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn claude_non_approval_blocks_keep_their_existing_lifecycle_transitions() {
+    let runtime = runtime("claude-notification-is-not-codex-approval");
+    let topology = topology("claude");
+    let mut notification = event("claude-idle-prompt", 0, "Notification");
+    notification.adapter = v1::AgentAdapterKind::ClaudeCode.into();
+    notification.adapter_id = "claude-code".into();
+    notification.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "Notification",
+        "notification_type": "idle_prompt"
+    }))
+    .unwrap();
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &notification).lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+    let mut working = event("claude-pre-tool", 0, "PreToolUse");
+    working.adapter = v1::AgentAdapterKind::ClaudeCode.into();
+    working.adapter_id = "claude-code".into();
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &working).lifecycle,
+        v1::AgentLifecycleState::Working as i32,
+        "Codex approval persistence must not change Claude notification semantics"
+    );
+}
+
 #[test]
 fn hook_expiry_retires_an_unmapped_record_without_touching_direct_detection() {
     let runtime = runtime("expired-evidence");
