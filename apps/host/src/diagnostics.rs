@@ -397,6 +397,28 @@ pub fn write_terminal_sizing_handoff_log(
     eprintln!("{line}");
 }
 
+/// Names every reclaim of the per-window pointer tmux sizes from.
+///
+/// The claim is a `switch-client` this daemon issues on its own control client
+/// and the only symptom of it working is that the user's pane stops being
+/// letterboxed, so this line is the whole record that it happened. It is also
+/// how the gate is audited from a log: one line per claim, and a session that
+/// nobody else is attached to should produce none, because each claim costs a
+/// topology reconcile. Paired with `terminalSizingHandoff` it says whether a
+/// size was asserted and then whether tmux was told to follow it.
+///
+/// tmux session identifiers (`$3`) are the server's own ordinals: not names, not
+/// paths, not hostnames, and not terminal content. This stays inside the privacy
+/// declaration above.
+pub fn write_sizing_latest_claim_log(session_id: &str) {
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "sizingLatestClaim",
+        "sessionId": session_id,
+    });
+    eprintln!("{line}");
+}
+
 /// Names every flow-control resume tmux refused, and what was done about it.
 ///
 /// A retried rejection is deliberately not an event: the host is still handling
