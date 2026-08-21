@@ -63,7 +63,7 @@ fn real_codex_approval_order_stays_blocked_until_the_matching_tool_resolves() {
             .values()
             .next()
             .unwrap()
-            .pending_approval_keys
+            .pending_approvals
             .is_empty()
     );
     drop(runtime);
@@ -113,7 +113,7 @@ fn codex_denial_and_cancellation_resolve_pending_approval() {
                 .values()
                 .next()
                 .unwrap()
-                .pending_approval_keys
+                .pending_approvals
                 .is_empty()
         );
         drop(state);
@@ -152,6 +152,35 @@ fn identical_concurrent_approvals_resolve_one_observed_request_at_a_time() {
     assert_eq!(
         ingest_fixture(&runtime, &topology, &events[3]).lifecycle,
         v1::AgentLifecycleState::Working as i32
+    );
+}
+
+#[test]
+fn a_pre_change_blocked_record_never_matches_an_unrelated_tool_completion() {
+    let runtime = runtime("codex-legacy-unknown-approval");
+    let topology = topology("codex");
+    let events = codex_approval_fixture("approved");
+    ingest_fixture(&runtime, &topology, &events[2]);
+    let state_path = runtime.state_path.clone();
+    drop(runtime);
+
+    let mut stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    for record in stored["agents"].as_object_mut().unwrap().values_mut() {
+        record.as_object_mut().unwrap().remove("pending_approvals");
+    }
+    std::fs::write(&state_path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+    let runtime = AgentRuntime::isolated(state_path);
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &events[4]).lifecycle,
+        v1::AgentLifecycleState::Blocked as i32,
+        "unknown legacy identity must wait for a conservative terminal resolver"
+    );
+    let stop = codex_approval_fixture("denied");
+    assert_eq!(
+        ingest_fixture(&runtime, &topology, &stop[1]).lifecycle,
+        v1::AgentLifecycleState::Idle as i32
     );
 }
 

@@ -384,10 +384,38 @@ fn approval_key(value: &serde_json::Value) -> Option<String> {
         hasher.update(&(part.len() as u64).to_le_bytes());
         hasher.update(part);
     }
-    let encoded = serde_json::to_vec(tool_input).ok()?;
+    // Bash PermissionRequest adds request-only `description` metadata for
+    // justifications and managed-network approvals. PostToolUse does not. The
+    // command is the stable tool identity shared by both contracts; hashing
+    // the whole permission input would strand the pending request.
+    let tool_identity = if tool_name == "Bash" {
+        tool_input.get("command").unwrap_or(tool_input)
+    } else {
+        tool_input
+    };
+    let encoded = serde_json::to_vec(&canonical_json(tool_identity)).ok()?;
     hasher.update(&(encoded.len() as u64).to_le_bytes());
     hasher.update(&encoded);
     Some(format!("v1:{}", hasher.finalize().to_hex()))
+}
+
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(canonical_json).collect())
+        }
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), canonical_json(value)))
+                    .collect(),
+            )
+        }
+        value => value.clone(),
+    }
 }
 
 fn nonempty_json(value: &serde_json::Value) -> bool {
@@ -759,7 +787,7 @@ mod tests {
 
     #[test]
     fn approval_correlation_is_stable_and_keeps_vendor_input_private() {
-        let build = |event: &str, command: &str| {
+        let build = |event: &str, tool_input: serde_json::Value| {
             build_event(
                 v1::AgentAdapterKind::Codex,
                 serde_json::to_vec(&serde_json::json!({
@@ -767,7 +795,7 @@ mod tests {
                     "session_id": "session-private",
                     "turn_id": "turn-7",
                     "tool_name": "Bash",
-                    "tool_input": {"command": command},
+                    "tool_input": tool_input,
                     "tool_use_id": "not-shared"
                 }))
                 .unwrap(),
@@ -777,9 +805,18 @@ mod tests {
             )
             .unwrap()
         };
-        let permission = build("PermissionRequest", "curl secret.example");
-        let matching = build("PostToolUse", "curl secret.example");
-        let unrelated = build("PostToolUse", "pwd");
+        let permission = build(
+            "PermissionRequest",
+            serde_json::json!({
+                "description": "Allow network access to a private host",
+                "command": "curl secret.example"
+            }),
+        );
+        let matching = build(
+            "PostToolUse",
+            serde_json::json!({"command": "curl secret.example"}),
+        );
+        let unrelated = build("PostToolUse", serde_json::json!({"command": "pwd"}));
         let normalized = |event: &v1::AgentHookEvent| {
             serde_json::from_slice::<serde_json::Value>(&event.payload_json).unwrap()
         };
