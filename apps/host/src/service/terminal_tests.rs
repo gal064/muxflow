@@ -13,17 +13,23 @@ fn start_long_lived_attachment(
     output_credit: Arc<OutputCredit>,
     emission_order: Arc<Mutex<()>>,
 ) -> anyhow::Result<TerminalAttachment> {
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let clipboard = Arc::new(ClipboardNotificationSender::start(
+        event_tx.clone(),
+        Arc::clone(&overflowed),
+    ));
     TerminalAttachment::start_with_command(
         "$1",
         &["%1".into()],
         AttachmentRuntime {
             event_tx,
-            overflowed: Arc::new(AtomicBool::new(false)),
+            overflowed,
             resources,
             terminal_generation: generation,
             output_credit,
             emission_order,
             topology_trigger: TopologyOutputTrigger::default(),
+            clipboard,
         },
         long_lived_attachment_command(),
     )

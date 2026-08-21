@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 
 use super::startup::ProcessStartup;
 use super::{
-    ControlStreamReader, ControlWrite, FlowControl, OutputCredit, SequencerControl,
-    TerminalAttachment, queue_capture, read_control_stream, validate_tmux_id,
+    ClipboardNotificationSender, ControlStreamReader, ControlWrite, FlowControl, OutputCredit,
+    SequencerControl, TerminalAttachment, queue_capture, read_control_stream, validate_tmux_id,
     write_capture_request_resuming,
 };
 use crate::service::snapshot::tmux_command;
@@ -29,6 +29,7 @@ pub(super) struct AttachmentRuntime {
     pub(super) output_credit: Arc<OutputCredit>,
     pub(super) emission_order: Arc<Mutex<()>>,
     pub(super) topology_trigger: TopologyOutputTrigger,
+    pub(super) clipboard: Arc<ClipboardNotificationSender>,
 }
 
 impl TerminalAttachment {
@@ -54,6 +55,7 @@ impl TerminalAttachment {
             output_credit,
             emission_order,
             topology_trigger,
+            clipboard,
         } = runtime;
         validate_tmux_id(session_id, '$')?;
         if pane_ids.is_empty() {
@@ -132,6 +134,7 @@ impl TerminalAttachment {
                     output_credit: reader_output_credit,
                     emission_order: reader_emission_order,
                     topology_trigger,
+                    clipboard,
                 });
                 reader_stopped.store(true, Ordering::Release);
             },

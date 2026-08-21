@@ -24,6 +24,8 @@ use super::SequencerControl;
 use super::topology_output_trigger::TopologyOutputTrigger;
 mod degradation;
 use degradation::{pane_resource_event, report_pane_degradations};
+mod clipboard;
+use clipboard::ClipboardNotificationSender;
 mod flow_control;
 use flow_control::{FlowControl, resume_command, take_injected_rejection};
 mod input;
@@ -303,6 +305,9 @@ pub(super) struct TerminalClients {
     /// wake topology reconciliation; see
     /// [`crate::service::topology_output_trigger`].
     topology_trigger: TopologyOutputTrigger,
+    /// One worker per desktop connection. tmux broadcasts paste-buffer changes
+    /// to every attached session client, so sharing also deduplicates them.
+    clipboard: Option<Arc<ClipboardNotificationSender>>,
 }
 
 impl TerminalClients {
@@ -312,6 +317,7 @@ impl TerminalClients {
     ) -> Self {
         Self {
             topology_trigger,
+            clipboard: None,
             clients: HashMap::new(),
             visible_session: None,
             last_size: None,
@@ -337,6 +343,12 @@ impl TerminalClients {
         overflowed: Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
         let desired: HashSet<_> = pane_ids.iter().cloned().collect();
+        let clipboard = Arc::clone(self.clipboard.get_or_insert_with(|| {
+            Arc::new(ClipboardNotificationSender::start(
+                event_tx.clone(),
+                Arc::clone(&overflowed),
+            ))
+        }));
         let committed = self
             .clients
             .get(session_id)
@@ -402,6 +414,7 @@ impl TerminalClients {
                 output_credit: Arc::clone(&self.output_credit),
                 emission_order: Arc::clone(&self.emission_order),
                 topology_trigger: self.topology_trigger.clone(),
+                clipboard,
             },
         ) {
             Ok(attachment) => attachment,

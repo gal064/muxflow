@@ -60,6 +60,7 @@
     "agentsSectionRatio": 0.42,
     "agentStateGlyphs": true,
     "terminalScreenReader": true,
+    "copyOnSelect": true,
     "windowGeometry": {
       "x": 20,
       "y": 30,

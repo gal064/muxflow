@@ -55,6 +55,7 @@ struct Harness {
     output_credit: Arc<super::OutputCredit>,
     emission_order: Arc<Mutex<()>>,
     topology_trigger: TopologyOutputTrigger,
+    clipboard: ClipboardNotificationSender,
 }
 
 impl Harness {
@@ -63,6 +64,8 @@ impl Harness {
         let (writer, writes) = std_mpsc::channel();
         let (sender, events) = mpsc::channel(64);
         let state = StreamState::new(pane_ids, Arc::clone(&flow));
+        let clipboard =
+            ClipboardNotificationSender::start(sender.clone(), Arc::new(AtomicBool::new(false)));
         (
             state,
             Self {
@@ -80,6 +83,7 @@ impl Harness {
                 output_credit: Arc::new(super::OutputCredit::negotiated(false)),
                 emission_order: Arc::new(Mutex::new(())),
                 topology_trigger: TopologyOutputTrigger::default(),
+                clipboard,
             },
         )
     }
@@ -95,6 +99,7 @@ impl Harness {
             output_credit: &self.output_credit,
             emission_order: &self.emission_order,
             topology_trigger: &self.topology_trigger,
+            clipboard: &self.clipboard,
         }
     }
 
@@ -421,10 +426,12 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
     )));
     let generation = Arc::new(AtomicU64::new(0));
     let (writer, _writes) = std_mpsc::channel();
-    let stopped = AtomicBool::new(false);
+    let stopped = Arc::new(AtomicBool::new(false));
     let output_credit = super::OutputCredit::negotiated(false);
     let emission_order = Arc::new(Mutex::new(()));
     let topology_trigger = TopologyOutputTrigger::default();
+    let clipboard =
+        ClipboardNotificationSender::start(sender.clone(), Arc::new(AtomicBool::new(false)));
     state.finish_block(
         tag,
         StreamRuntime {
@@ -437,6 +444,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
             output_credit: &output_credit,
             emission_order: &emission_order,
             topology_trigger: &topology_trigger,
+            clipboard: &clipboard,
         },
     );
     assert!(matches!(state.command_block, CommandBlock::None));
