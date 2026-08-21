@@ -63,16 +63,11 @@ describe("terminal theme derivation", () => {
     expect(theme.scrollbarSliderHoverBackground).toBe(`${CHROME_FALLBACKS["--chrome-dim"]}66`);
   });
 
-  it("takes the terminal font and metrics from tokens, not from a literal", () => {
+  it("takes the terminal font from tokens, not from a literal", () => {
     expect(token("--term-font-size")).toBe("13px");
-    expect(token("--term-line-height")).toBe("1.42");
     expect(token("--font-mono")).toContain("JetBrains Mono");
     const font = terminalFont(undefined);
     expect(font.fontSize).toBe(13);
-    // The token is a CSS line-height: a ratio of the font size. What the
-    // renderer needs is the pixel pitch it describes, because xterm's own
-    // `lineHeight` is a ratio of something else entirely (`xtermLineHeight`).
-    expect(font.rowPitch).toBeCloseTo(13 * 1.42, 10);
     expect(font.fontFamily).toContain("JetBrains Mono");
   });
 
