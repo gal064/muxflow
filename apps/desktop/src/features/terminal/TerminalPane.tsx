@@ -388,7 +388,14 @@ export function TerminalPane({
       });
     };
     terminalContainer.addEventListener("paste", interceptPaste, true);
-    const noteKeyActivity = () => {
+    const noteKeyActivity = (event: KeyboardEvent) => {
+      // A bare modifier must not vouch for input: wheel scrolling a TUI also
+      // produces terminal input (the wheel is translated into sequences for
+      // the program), and a Shift or Cmd pressed around a scroll opened the
+      // echo probe's gate for input the user never typed — journalling a
+      // five-second "stall" nobody felt when the program had nothing to
+      // redraw. Only a key that can become bytes counts as typing.
+      if (event.key === "Shift" || event.key === "Meta" || event.key === "Alt" || event.key === "Control") return;
       // Capture phase and observation only: this must see the key even when
       // something below stops the event, and must never alter what xterm does
       // with it.
