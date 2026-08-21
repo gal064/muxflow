@@ -16,6 +16,8 @@ import type {
   OpenFile,
   ResolveRootOptions,
   TextFile,
+  TerminalFileResolution,
+  TerminalFilePaneRoute,
   TransferStatus,
   WorkspaceEvent,
   WriteTextRequest,
@@ -88,6 +90,31 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       if (response.rootUnchanged) recordPerfCounter("explorer.rootProbeUnchanged");
       return mapRoot(response.activeRoot);
     }, "files.resolveActiveRoot");
+  }
+
+  async resolveTerminalFile(
+    scope: FileWorkspaceScope,
+    path: string,
+    pane: TerminalFilePaneRoute,
+  ): Promise<TerminalFileResolution> {
+    return this.#request(scope, {
+      operation: "resolveTerminalFile", operationId: crypto.randomUUID(), paneId: scope.paneId, path,
+      expectedServerIdentity: scope.serverIdentity, expectedTopologyGeneration: String(scope.generation),
+      expectedSessionId: pane.sessionId, expectedWindowId: pane.windowId, expectedCwd: pane.cwd,
+    }, (response) => {
+      if (!response.activeRoot || !response.metadata?.path) throw new Error("Host omitted the resolved terminal file.");
+      if (response.activeRoot.serverIdentity !== scope.serverIdentity || response.activeRoot.paneId !== scope.paneId) {
+        throw new Error("Host resolved the terminal file for a stale pane scope.");
+      }
+      if (!/^(?:0|[1-9]\d*)$/u.test(response.activeRoot.topologyGeneration)) {
+        throw new Error("Host returned a malformed terminal file topology generation.");
+      }
+      return {
+        path: response.metadata.path,
+        root: mapRoot(response.activeRoot),
+        topologyGeneration: response.activeRoot.topologyGeneration,
+      };
+    }, "files.resolveTerminalFile");
   }
 
   async listDirectory(scope: FileWorkspaceScope, root: ActiveRoot, directory: string, options: ListDirectoryOptions = {}): Promise<DirectoryListing> {

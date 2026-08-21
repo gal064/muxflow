@@ -36,6 +36,7 @@ type TerminalWorkspaceSurfaceProps = {
   handleKeyActivity(paneId: string): void;
   /** A terminal reported what it turns pixels into. */
   onMeasurements(measurements: TerminalMeasurements): void;
+  onOpenFilePath(paneId: string, path: string): void;
   performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
   setStatus(message: string): void;
 };
@@ -67,6 +68,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         onInput={props.handleInput}
         onKeyActivity={props.handleKeyActivity}
         onMeasurements={props.onMeasurements}
+        onOpenFilePath={props.onOpenFilePath}
         transferClient={props.terminalTransferClient}
         transferRegistry={props.terminalTransferRegistry}
         transferScope={props.terminalTransferScope}

@@ -120,7 +120,10 @@ pub(crate) async fn handle_request(
             return;
         }
 
-        (Handler::ActiveRoot, Some(v1::Operation::ResolveActiveRoot)) => {
+        (
+            Handler::ActiveRoot,
+            Some(v1::Operation::ResolveActiveRoot | v1::Operation::ResolveTerminalFile),
+        ) => {
             super::active_root_dispatch::handle(
                 request_id,
                 request,

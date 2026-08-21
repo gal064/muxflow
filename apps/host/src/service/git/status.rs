@@ -218,13 +218,18 @@ pub(super) fn read_status_cancellable(
         if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             bail!("Git status refresh cancelled");
         }
+        validate_git_path(&entry.path)?;
+        entry.absolute_path = Path::new(&identity.worktree_root)
+            .join(OsStr::from_bytes(&entry.path))
+            .to_str()
+            .unwrap_or_default()
+            .to_owned();
         entry.binary = binary.contains(&entry.path)
             || (entry.untracked && worktree.entry(&entry.path)?.sample_is_binary()?);
         entry.symlink = entry.index_mode == 0o120000
             || entry.worktree_mode == 0o120000
             || entry.head_mode == 0o120000;
         if !entry.symlink {
-            validate_git_path(&entry.path)?;
             entry.symlink = worktree
                 .entry(&entry.path)?
                 .metadata()?
