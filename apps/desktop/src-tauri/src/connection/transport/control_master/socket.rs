@@ -73,7 +73,7 @@ pub(super) fn ssh_profile_control_socket_in(
     Ok(directory.join(format!("profile-{}.sock", &key[..20])))
 }
 
-fn process_socket_namespace() -> &'static str {
+pub(super) fn process_socket_namespace() -> &'static str {
     static NAMESPACE: OnceLock<String> = OnceLock::new();
     NAMESPACE.get_or_init(|| {
         let nonce = Uuid::new_v4().simple().to_string();

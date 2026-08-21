@@ -88,11 +88,11 @@ pub(crate) mod profiles;
 pub use profiles::ProfileStore;
 pub(crate) mod helper;
 mod transport;
-pub(crate) use transport::close_all_control_masters;
 use transport::{
     SshLease, acquire_control_master, acquire_control_master_for_socket, host_helper_path,
     ssh_profile_control_socket,
 };
+pub(crate) use transport::{close_all_control_masters, spawn_orphan_reaper};
 
 pub(crate) struct TerminalClient {
     bulk_scope: Uuid,

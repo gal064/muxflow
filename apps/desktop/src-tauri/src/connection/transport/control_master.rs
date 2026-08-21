@@ -170,7 +170,13 @@ mod socket;
 pub(in crate::connection) use socket::ssh_profile_control_socket;
 #[cfg(test)]
 use socket::{control_socket_binds, ssh_profile_control_socket_in};
-use socket::{validate_control_socket, validated_control_socket_identity};
+use socket::{
+    process_socket_namespace, validate_control_socket, validated_control_socket_identity,
+};
+
+#[path = "control_master/orphans.rs"]
+mod orphans;
+pub(crate) use orphans::spawn_orphan_reaper;
 
 pub(in crate::connection) fn acquire_control_master_for_socket(
     target: &str,
@@ -892,6 +898,14 @@ pub(crate) fn close_all_control_masters() {
     };
     for master in masters {
         close_master(&master);
+    }
+    // The namespace directory is created under `temp_dir()` even when the
+    // socket itself ends up under the `/tmp` fallback, so both candidates are
+    // removed here. Plain `remove_dir`: only an already-empty namespace goes.
+    let namespace = process_socket_namespace();
+    let uid = unsafe { libc::geteuid() };
+    for root in orphans::orphan_sweep_roots() {
+        let _ = fs::remove_dir(root.join(format!("muxflow-{uid}")).join(namespace));
     }
 }
 
