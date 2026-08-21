@@ -188,10 +188,9 @@ export const GHOSTTY_TEXT_OPTIONS = {
 /**
  * The terminal's font, from the same tokens the rest of the app uses.
  *
- * Cell height deliberately stays at xterm's native `lineHeight: 1`. The
- * measured JetBrains Mono face is the terminal cell Ghostty uses by default;
- * adding a separate CSS-like row pitch creates extra leading and moves the
- * baseline away from that default.
+ * The renderer starts from xterm's native height and only raises a fractional-
+ * DPR row when needed to keep its CSS and device-pixel canvases congruent. It
+ * does not impose a separate CSS-like leading token on the bundled face.
  */
 export function terminalFont(root: Element | undefined = globalThis.document?.documentElement): {
   fontFamily: string;
