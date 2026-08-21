@@ -307,6 +307,104 @@ fn a_failed_turn_ends_the_turn_and_asks_for_a_human() {
     );
 }
 
+/// Ingests one Claude Code hook with a payload written out in full, which is
+/// what the notification and background-work cases turn on.
+fn claude_hook(
+    runtime: &AgentRuntime,
+    topology: &tmux_control::TmuxSnapshot,
+    id: &str,
+    payload: serde_json::Value,
+) -> v1::AgentEvent {
+    let mut value = event(id, 0, "");
+    value.adapter = v1::AgentAdapterKind::ClaudeCode.into();
+    value.adapter_id = "claude-code".into();
+    value.payload_json = serde_json::to_vec(&payload).unwrap();
+    runtime
+        .ingest_hook_with_context(&value, "server-a", Some(topology))
+        .unwrap()
+}
+
+/// A `Stop` ends the turn even when background tasks outlive it, and the
+/// terminal flag that idle Stop sets is what keeps Claude Code's routine idle
+/// notification — which fires roughly a minute after every idle turn — from
+/// being read as an agent asking for a human.
+#[test]
+fn background_work_neither_extends_the_turn_nor_disarms_the_notification_guard() {
+    let runtime = runtime("stop-with-background-work");
+    let topology = topology("claude");
+    claude_hook(
+        &runtime,
+        &topology,
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    let stopped = claude_hook(
+        &runtime,
+        &topology,
+        "stop",
+        serde_json::json!({
+            "hook_event_name": "Stop",
+            "background_tasks": [{"command": "sleep 300", "status": "running"}]
+        }),
+    )
+    .agent
+    .unwrap();
+    assert_eq!(stopped.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .get(&stopped.agent_id)
+            .unwrap()
+            .hook_terminal,
+        "an idle Stop is what arms the guard against late events"
+    );
+
+    claude_hook(
+        &runtime,
+        &topology,
+        "idle-notification",
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "idle_prompt"
+        }),
+    );
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Idle as i32,
+        "the idle nag after a finished turn is not a blocked agent"
+    );
+}
+
+/// The other half: with no terminal Stop behind it, an idle prompt really is
+/// the agent waiting on a human, and must still read as blocked.
+#[test]
+fn an_idle_prompt_inside_a_live_turn_still_asks_for_a_human() {
+    let runtime = runtime("idle-prompt-mid-turn");
+    let topology = topology("claude");
+    claude_hook(
+        &runtime,
+        &topology,
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    let blocked = claude_hook(
+        &runtime,
+        &topology,
+        "idle-notification",
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "idle_prompt"
+        }),
+    )
+    .agent
+    .unwrap();
+    assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+    assert_eq!(blocked.attention_kind, "blocked");
+}
+
 /// A subagent finishing is the parent still working, not the parent done.
 #[test]
 fn a_finished_subagent_does_not_end_its_parents_turn() {

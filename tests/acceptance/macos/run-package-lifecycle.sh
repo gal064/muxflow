@@ -2,7 +2,8 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd -P)
-source_app="$repo/target/release/bundle/macos/Muxflow.app"
+release_target=${CARGO_TARGET_DIR:-"$repo/tmp/work/cache/release-target/macos"}
+source_app="$release_target/release/bundle/macos/Muxflow.app"
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 work="$repo/tmp/work/phase10/package-$run_id"
 applications="$work/Applications"

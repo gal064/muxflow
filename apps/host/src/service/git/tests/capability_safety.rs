@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn missing_parent_is_optional_but_symlinked_parent_remains_unsafe() {
+    let fixture = Fixture::new("optional-missing-parent");
+    let root = WorktreeRoot::capture(fixture.root.to_str().unwrap()).unwrap();
+
+    assert!(
+        root.entry_if_parent_exists(b"missing/leaf")
+            .unwrap()
+            .is_none()
+    );
+
+    std::os::unix::fs::symlink(&fixture.root, fixture.root.join("symlinked-parent")).unwrap();
+    assert!(
+        root.entry_if_parent_exists(b"symlinked-parent/leaf")
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("unavailable or unsafe")
+    );
+}
+
+#[test]
 fn descriptor_bound_worktree_entry_resists_outside_root_parent_symlink_swap() {
     let fixture = Fixture::new("symlink-swap");
     fixture.write("parent/victim", b"inside\n");

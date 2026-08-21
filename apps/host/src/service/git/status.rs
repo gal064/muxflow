@@ -224,16 +224,32 @@ pub(super) fn read_status_cancellable(
             .to_str()
             .unwrap_or_default()
             .to_owned();
-        entry.binary = binary.contains(&entry.path)
-            || (entry.untracked && worktree.entry(&entry.path)?.sample_is_binary()?);
+        // A tracked entry with no worktree mode was absent when Git captured
+        // status. Its leaf or any parent may therefore be gone legitimately.
+        // Other entries retain the strict parent requirement so a concurrent
+        // disappearance still invalidates their snapshot.
+        let worktree_entry = if !entry.untracked && !entry.ignored && entry.worktree_mode == 0 {
+            worktree.entry_if_parent_exists(&entry.path)?
+        } else {
+            Some(worktree.entry(&entry.path)?)
+        };
+        entry.binary = binary.contains(&entry.path);
+        if entry.untracked && !entry.binary {
+            entry.binary = match worktree_entry.as_ref() {
+                Some(current) => current.sample_is_binary()?,
+                None => false,
+            };
+        }
         entry.symlink = entry.index_mode == 0o120000
             || entry.worktree_mode == 0o120000
             || entry.head_mode == 0o120000;
         if !entry.symlink {
-            entry.symlink = worktree
-                .entry(&entry.path)?
-                .metadata()?
-                .is_some_and(|metadata| metadata.is_symlink());
+            entry.symlink = match worktree_entry.as_ref() {
+                Some(current) => current
+                    .metadata()?
+                    .is_some_and(|metadata| metadata.is_symlink()),
+                None => false,
+            };
         }
     }
     let mut content_identity = blake3::Hasher::new();
@@ -249,9 +265,16 @@ pub(super) fn read_status_cancellable(
         // Hashing changed worktree entries makes content edits authoritative
         // even when porcelain XY/mode fields remain exactly the same.
         if entry.worktree_status != "." || entry.untracked || entry.conflicted {
-            worktree
-                .entry(&entry.path)?
-                .hash_identity(&mut content_identity, cancellation)?;
+            let worktree_entry = if !entry.untracked && !entry.ignored && entry.worktree_mode == 0 {
+                worktree.entry_if_parent_exists(&entry.path)?
+            } else {
+                Some(worktree.entry(&entry.path)?)
+            };
+            if let Some(current) = worktree_entry {
+                current.hash_identity(&mut content_identity, cancellation)?;
+            } else {
+                content_identity.update(b"missing\0");
+            }
         }
     }
     Ok(bound_status_snapshot(v1::GitStatusSnapshot {

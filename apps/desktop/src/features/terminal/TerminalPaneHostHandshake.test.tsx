@@ -54,6 +54,10 @@ function incidentsBesidesEpochAdoption(): unknown[][] {
 interface HarnessRenderer {
   /** What xterm would be showing, with ESC c applied as a wipe. */
   screen: string;
+  /** The grid the terminal renders at, as `setGrid` left it. */
+  grid: { columns: number; rows: number };
+  /** What the CSS box measures, which only a test with a box in mind sets. */
+  measured: { columns: number; rows: number } | undefined;
   /** One entry per renderer call, in order, for asserting on repaints. */
   log: string[];
   /** Runs xterm completions and the frames they unblock to quiescence. */
@@ -79,6 +83,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     screen = "";
     log: string[] = [];
     grid: Size = { columns: 80, rows: 24 };
+    measured: Size | undefined = undefined;
     #frames: Array<() => void> = [];
     #xtermPending: Array<() => void> = [];
     #generations = new TerminalGenerationWatermark();
@@ -128,7 +133,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     }
 
     open(): void {}
-    measure(): Size | undefined { return undefined; }
+    measure(): Size | undefined { return this.measured; }
     measurements(): undefined { return undefined; }
     setGrid(size: Size): { kind: "applied"; size: Size } | { kind: "unchanged" } | { kind: "rejected"; reason: string } {
       if (size.columns < 2 || size.rows < 2) return { kind: "rejected", reason: `${size.columns}x${size.rows} is unusable` };
@@ -198,12 +203,13 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
   return { ...original, XtermRenderer: HarnessXtermRenderer };
 });
 
-import { TerminalPane } from "./TerminalPane";
+import { REVEAL_VOID_MAX_ATTEMPTS, REVEAL_VOID_TIMEOUT_MS, TerminalPane } from "./TerminalPane";
 import { TerminalEventHub } from "./TerminalEventHub";
 import { terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { resetPerfProbe } from "../../perf/probe";
 import { REVEAL_RETRY_DELAY_MS, STALE_REVEAL_EPOCH_CODE } from "./revealRetry";
+import { GRID_MISMATCH_SUSTAIN_MS } from "./gridMismatchProbe";
 import type { TerminalEvent } from "./api";
 
 const encoder = new TextEncoder();
@@ -534,6 +540,12 @@ async function settle(milliseconds = 10): Promise<void> {
   });
 }
 
+/** tmux resized this pane: the same props change the app would push. */
+async function updatePane(mounted: ReactTestRenderer, pane: Pane): Promise<void> {
+  await act(async () => { mounted.update(paneElement(pane, false)); });
+  await settle();
+}
+
 async function unmountPane(mounted: ReactTestRenderer): Promise<void> {
   await act(async () => { await mounted.unmount(); });
   await settle();
@@ -820,6 +832,162 @@ describe("a reveal the host refuses", () => {
     expect(renderer().screen).toBe("COMING UP");
     expect(painted()).toBe(true);
     await unmountPane(mounted);
+  });
+});
+
+// The failure that produced no error anywhere: the host takes the reveal, and
+// then never streams the pane. The desktop's whole recovery apparatus triggers
+// on rejections, so three separate episodes in one evening — heavy tmux session
+// churn racing pane creation — left a pane that mounted, showed a cursor, sent
+// every keystroke to tmux and received nothing back, with an incident journal
+// that had literally nothing to say about it. Only the absence of content
+// distinguishes this from a working pane.
+describe("a reveal the host accepts and never answers", () => {
+  /** `pane.revealVoid` records only, in order. */
+  function voidIncidents(): unknown[][] {
+    return journal.recordIncident.mock.calls.filter(([kind]) => kind === "pane.revealVoid");
+  }
+
+  /**
+   * Takes every reveal without acting on it, and leaves hides alone.
+   *
+   * This is the shape of the bug: the call resolves, so nothing on this side
+   * can tell it apart from a reveal that worked.
+   */
+  function acceptRevealsSilently(): void {
+    const deliver = api.setTerminalVisibility.getMockImplementation()!;
+    api.setTerminalVisibility.mockImplementation(async (...args: unknown[]) => {
+      if (args[2] !== true) return deliver(...args);
+      // One turn of latency, like the transport itself.
+      await Promise.resolve();
+      return undefined;
+    });
+  }
+
+  it("reseeds a pane whose reveal produced nothing, and stops once it paints", async () => {
+    host.announceEpoch();
+    host.output("%1", "STRANDED SCREEN");
+    host.capture("%1");
+    acceptRevealsSilently();
+
+    const mounted = await mountPane(fixturePane("%1"));
+
+    // Nothing is wrong yet: a host that is merely slow gets the whole window,
+    // and a pane that is still inside it must stay silent.
+    await settle(REVEAL_VOID_TIMEOUT_MS - 1_000);
+    expect(voidIncidents()).toEqual([]);
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+
+    await settle(1_000);
+
+    expect(voidIncidents()).toEqual([
+      ["pane.revealVoid", { paneId: "%1", msWaited: REVEAL_VOID_TIMEOUT_MS, attempt: 0 }],
+    ]);
+    // The checkpoint-free recovery, exactly once: the host answers it by
+    // forcing the pane visible and capturing it.
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+    // And it is a real recovery, not just a journal line.
+    expect(renderer().screen).toBe("STRANDED SCREEN");
+    expect(painted()).toBe(true);
+
+    // Content is what ends the wait: with a screen on the terminal, no later
+    // expiry may fire and no second seed may go out.
+    await settle(REVEAL_VOID_TIMEOUT_MS * (REVEAL_VOID_MAX_ATTEMPTS + 1));
+    expect(voidIncidents()).toHaveLength(1);
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+    await unmountPane(mounted);
+  });
+
+  it("gives up after its bounded attempts when nothing ever answers", async () => {
+    host.announceEpoch();
+    host.output("%1", "NEVER DELIVERED");
+    acceptRevealsSilently();
+    // A host that takes the seed request and does nothing with it either. The
+    // pane must not turn that into an unbounded reseed loop.
+    api.requestTerminalSeed.mockImplementation(async () => { await Promise.resolve(); });
+
+    const mounted = await mountPane(fixturePane("%1"));
+    await settle(REVEAL_VOID_TIMEOUT_MS * REVEAL_VOID_MAX_ATTEMPTS);
+
+    expect(voidIncidents()).toHaveLength(REVEAL_VOID_MAX_ATTEMPTS);
+    expect(voidIncidents().map(([, detail]) => (detail as { attempt: number }).attempt))
+      .toEqual([...Array(REVEAL_VOID_MAX_ATTEMPTS).keys()]);
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(REVEAL_VOID_MAX_ATTEMPTS);
+
+    // Then silence: `PaneDegradedWatchdog` is the outer net from here.
+    await settle(REVEAL_VOID_TIMEOUT_MS * 4);
+    expect(voidIncidents()).toHaveLength(REVEAL_VOID_MAX_ATTEMPTS);
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(REVEAL_VOID_MAX_ATTEMPTS);
+    await unmountPane(mounted);
+  });
+
+  it("says nothing about an ordinary handshake", async () => {
+    host.announceEpoch();
+    host.output("%1", "PROMPT ANSWER");
+    host.capture("%1");
+
+    const mounted = await mountPane(fixturePane("%1"));
+    expect(renderer().screen).toBe("PROMPT ANSWER");
+
+    // Well past every expiry the void watch could ever arm.
+    await settle(REVEAL_VOID_TIMEOUT_MS * (REVEAL_VOID_MAX_ATTEMPTS + 1));
+
+    expect(incidentsBesidesEpochAdoption()).toEqual([]);
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+    await unmountPane(mounted);
+  });
+
+  it("takes its timer with it when the pane unmounts first", async () => {
+    host.announceEpoch();
+    acceptRevealsSilently();
+
+    const mounted = await mountPane(fixturePane("%1"));
+    // Gone before the wait is up: a timer that survived its mount would reseed
+    // a pane that no longer exists, on a connection it no longer owns.
+    await unmountPane(mounted);
+    api.requestTerminalSeed.mockClear();
+    await settle(REVEAL_VOID_TIMEOUT_MS * (REVEAL_VOID_MAX_ATTEMPTS + 1));
+
+    expect(voidIncidents()).toEqual([]);
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+  });
+});
+
+describe("a pane rendering at a grid its box disagrees with", () => {
+  function gridMismatches(): unknown[][] {
+    return journal.recordIncident.mock.calls.filter(([kind]) => kind === "pane.gridMismatch");
+  }
+
+  it("journals the disagreement once it has outlived any round trip", async () => {
+    host.announceEpoch();
+    host.output("%1", "SCREEN");
+    host.capture("%1");
+    const mounted = await mountPane(fixturePane("%1"));
+
+    // tmux resized the pane to 30 rows while this box still measures 18 — the
+    // transient window every drag opens, here with nothing ever closing it.
+    renderer().measured = { columns: 80, rows: 18 };
+    await updatePane(mounted, { ...fixturePane("%1"), height: 30 });
+    expect(gridMismatches()).toEqual([]);
+
+    await settle(GRID_MISMATCH_SUSTAIN_MS);
+    expect(gridMismatches()).toEqual([[
+      "pane.gridMismatch",
+      expect.objectContaining({ paneId: "%1", tmuxColumns: 80, tmuxRows: 30, measuredColumns: 80, measuredRows: 18 }),
+    ]]);
+    await unmountPane(mounted);
+  });
+
+  it("says nothing about a pane that was hidden while it disagreed", async () => {
+    host.announceEpoch();
+    host.capture("%1");
+    const mounted = await mountPane(fixturePane("%1"));
+    renderer().measured = { columns: 80, rows: 18 };
+    await updatePane(mounted, { ...fixturePane("%1"), height: 30 });
+
+    await unmountPane(mounted);
+    await settle(GRID_MISMATCH_SUSTAIN_MS * 2);
+    expect(gridMismatches()).toEqual([]);
   });
 });
 

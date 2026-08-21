@@ -50,17 +50,18 @@ source_digest=$(
       -type f -not -path '*/target/*' -not -path '*/tmp/*' -print0
   fi | LC_ALL=C sort -z -u | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
 )
-cache_dir="$work_root/cache/compatible-host/$arch/$source_digest"
-target_dir="$cache_dir/target"
-cached_binary="$cache_dir/muxflow-host"
-mkdir -p "$cache_dir"
-exec 9>"$cache_dir/build.lock"
+architecture_cache="$work_root/cache/compatible-host/$arch"
+artifact_dir="$architecture_cache/artifacts/$source_digest"
+target_dir="$architecture_cache/target"
+cached_binary="$artifact_dir/muxflow-host"
+mkdir -p "$artifact_dir" "$target_dir"
+exec 9>"$architecture_cache/build.lock"
 if command -v flock >/dev/null 2>&1; then
   flock 9
 else
   # macOS ships no flock(1). mkdir is atomic on every filesystem these gates
   # use, so it provides the same mutual exclusion for the shared cache entry.
-  lock_dir="$cache_dir/build.lock.d"
+  lock_dir="$architecture_cache/build.lock.d"
   until mkdir "$lock_dir" 2>/dev/null; do sleep 1; done
   trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
 fi
@@ -73,7 +74,7 @@ docker run --rm --platform "$docker_platform" --user "$(id -u):$(id -g)" \
   -e CARGO_HOME=/artifact-cache/cargo-home \
   -e SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1704067200}" \
   -e RUSTFLAGS='--remap-path-prefix=/workspace=/workspace/muxflow --remap-path-prefix=/artifact-build=/workspace/target' \
-  -v "$repo_root:/workspace:ro" -v "$cache_dir:/artifact-build" \
+  -v "$repo_root:/workspace:ro" -v "$target_dir:/artifact-build/target" \
   -v "$work_root/cache:/artifact-cache" \
   -w /workspace rust:1.97.1-slim-bookworm \
   cargo build --locked --release --bin muxflow-host \
