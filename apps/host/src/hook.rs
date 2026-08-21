@@ -344,11 +344,6 @@ fn build_event(
     if !notification_type.is_empty() {
         normalized.insert("notification_type".into(), notification_type.into());
     }
-    for field in ["background_tasks", "session_crons"] {
-        if value.get(field).is_some_and(nonempty_json) {
-            normalized.insert(field.into(), serde_json::json!([true]));
-        }
-    }
     Ok(v1::AgentHookEvent {
         adapter: adapter.into(),
         adapter_id: crate::service::agents::adapters::adapter(adapter)
@@ -363,17 +358,6 @@ fn build_event(
         source_sequence_authoritative: false,
         origin_server_identity: origin_server_identity.into(),
     })
-}
-
-fn nonempty_json(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Array(value) => !value.is_empty(),
-        serde_json::Value::Object(value) => !value.is_empty(),
-        serde_json::Value::String(value) => !value.is_empty(),
-        serde_json::Value::Number(value) => value.as_u64().is_some_and(|value| value > 0),
-        serde_json::Value::Bool(value) => *value,
-        _ => false,
-    }
 }
 
 async fn send(
@@ -726,7 +710,9 @@ mod tests {
         )
         .unwrap();
         let payload = String::from_utf8(event.payload_json).unwrap();
-        assert!(payload.contains("background_tasks"));
+        // Only the fields lifecycle is decided from survive. Background work
+        // is not one of them: a Stop ends the turn whatever is still running.
+        assert!(!payload.contains("background_tasks"));
         assert!(!payload.contains("private"));
         assert!(!payload.contains("secret"));
         assert!(!payload.contains("prompt"));

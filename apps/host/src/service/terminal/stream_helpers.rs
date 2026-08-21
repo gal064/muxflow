@@ -95,6 +95,9 @@ pub(in crate::service::terminal) struct OutputEmission<'a> {
     pub(in crate::service::terminal) output_credit: &'a OutputCredit,
     pub(in crate::service::terminal) emission_order: &'a Mutex<()>,
     pub(in crate::service::terminal) topology_trigger: &'a TopologyOutputTrigger,
+    /// When the control-stream read that produced this batch returned; the
+    /// start of the output leg this emission ends.
+    pub(in crate::service::terminal) read_started: std::time::Instant,
 }
 
 impl OutputEmission<'_> {
@@ -105,7 +108,14 @@ impl OutputEmission<'_> {
         // the desktop without waiting for the safety tick. The call is a few
         // atomic operations and must stay that way.
         self.topology_trigger.note_output();
-        let admitted = {
+        // Both survive the record they describe, so a slow leg can name its
+        // pane and its size. The pane id is a tmux ordinal — one short-string
+        // clone per emitted batch, which is roughly one per control-stream
+        // read, on a path that already copies the batch itself into the pane's
+        // recovery material.
+        let leg_bytes = data.len();
+        let leg_pane_id = pane_id.clone();
+        let (admitted, leg) = {
             let _emission = self.emission_order.lock().unwrap();
             let generation = self.terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
             let (visible, degradations) =
@@ -123,7 +133,7 @@ impl OutputEmission<'_> {
             // Resource ownership is released before channel backpressure. The
             // emission fence stays held so a reveal transition and its recovery
             // event cannot be overtaken by output that observes Visible.
-            visible
+            let admitted = visible
                 && emit_terminal(
                     self.sender,
                     self.overflowed,
@@ -133,8 +143,19 @@ impl OutputEmission<'_> {
                     generation,
                     self.stopped,
                     self.output_credit,
-                )
+                );
+            // The end of the output leg, read here rather than after the fence
+            // because everything the leg covers has now happened and nothing
+            // else has: `admit` and the sequencer's own backpressure are part of
+            // it, the delivery window below is not. A record nothing admitted
+            // has no leg — there is no emission to have been slow.
+            (admitted, admitted.then(|| self.read_started.elapsed()))
         };
+        // Reported with the fence released: the measurement is two instructions
+        // and belongs under it, writing a log line is I/O and does not.
+        if let Some(elapsed) = leg {
+            crate::diagnostics::record_slow_output_leg(elapsed, leg_bytes, &leg_pane_id);
+        }
         // Flow control, after the fence: this reader waits for its own record
         // to fit the window, holding nothing. Waiting under the fence is what
         // froze every pane — and, through `set_visibility`, the terminal mutex
