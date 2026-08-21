@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetAtlasProbeForTests,
   __sampleAtlasProbeForTests,
+  readAtlasInvalidationCount,
   watchAtlasStaleness,
 } from "./atlasStaleProbe";
 
@@ -124,6 +125,27 @@ describe("the atlas invalidation rate line", () => {
     __sampleAtlasProbeForTests();
     __sampleAtlasProbeForTests();
     expect(recorded.filter((r) => r.kind === "render.atlasInvalidations")).toHaveLength(0);
+  });
+});
+
+describe("the invalidation count read on demand", () => {
+  it("reads the registered pane's current count, and moves with it", () => {
+    const pane = addon(3, 3);
+    const stop = watchAtlasStaleness("pane-1", pane);
+    expect(readAtlasInvalidationCount("pane-1")).toBe(3);
+
+    pane._renderer._charAtlas._requestClearModel = 4;
+    expect(readAtlasInvalidationCount("pane-1")).toBe(4);
+
+    // A pane that has gone away has no count, and neither does one that never
+    // registered or whose addon no longer has the field.
+    stop();
+    expect(readAtlasInvalidationCount("pane-1")).toBeUndefined();
+    expect(readAtlasInvalidationCount("never-mounted")).toBeUndefined();
+    watchAtlasStaleness("pane-2", { _renderer: { _charAtlas: {} } });
+    expect(readAtlasInvalidationCount("pane-2")).toBeUndefined();
+    watchAtlasStaleness("pane-3", undefined);
+    expect(readAtlasInvalidationCount("pane-3")).toBeUndefined();
   });
 });
 
