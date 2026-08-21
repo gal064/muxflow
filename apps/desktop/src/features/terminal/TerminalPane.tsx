@@ -846,7 +846,14 @@ export function TerminalPane({
           // a remount must not restore it as if it were current. Nothing already
           // painted is touched: this only invalidates the *next* mount's base.
           terminalStateCache.delete(pane.id);
-          recordIncident("pane.revealRebuilt", { paneId: pane.id, error: String(error).slice(0, 200) });
+          // hubEpoch dates the frontend's knowledge at rejection time: a fresh
+          // hub epoch here means a stale checkpoint outlived the epoch frame; a
+          // stale one means the frame itself was late (blank-panes.md, 04:38).
+          recordIncident("pane.revealRebuilt", {
+            paneId: pane.id,
+            hubEpoch: hub.generationEpoch,
+            error: String(error).slice(0, 200),
+          });
           // The host still believes this pane is hidden in the epoch it has
           // moved to, and the seed below is what re-asserts otherwise. Keep the
           // time bound armed anyway: if that epoch's frame never reaches this
@@ -854,6 +861,9 @@ export function TerminalPane({
           watchdogRef.current?.note("revealFailed");
           if (clientIdRef.current === clientId) {
             void requestTerminalSeed(clientId, pane.id).catch((seedError) => {
+              // A reseed that fails is invisible everywhere else, and in the
+              // 04:38 episode three reseeds went out with no proof any landed.
+              recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(seedError).slice(0, 200) });
               diagnosticRef.current?.(`Could not reseed ${pane.id} after a stale visibility epoch: ${String(seedError)}`);
             });
           }

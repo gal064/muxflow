@@ -150,6 +150,10 @@ export class TerminalEventHub {
     if (admission.kind === "stale") return admission;
     if (epochChanged && event.kind === "generationEpoch") {
       this.#generationEpoch = event.epoch;
+      // The adoption timestamp is the answer to "was the epoch frame late, or
+      // was a stale checkpoint built after it arrived" — the open question the
+      // 2026-08-21 04:38 sleep episode left (docs/bugs/blank-panes.md).
+      recordIncident("link.epoch", { epoch: event.epoch });
       this.#clearPaneState();
     }
     if (event.kind !== "generationEpoch" || epochChanged) {
