@@ -223,11 +223,11 @@ describe("application shell accessibility contracts", () => {
 
   it("renders combined terminal/app tabs as one selected tablist", () => {
     const html = renderToStaticMarkup(<TabStrip
-      activeKey="app:file" canMutate canSplit commandScope={commandScope} stateGlyphs={false} onClose={noop}
-      onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
+      activeKey="app:file" activeTerminalPaneCount={1} canMutate canSplit commandScope={commandScope} stateGlyphs={false} onClose={noop}
+      onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
       onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
       tabs={[
-        { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked" },
+        { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked", agentPresence: "present" },
         { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: true, canMoveLeft: false, canMoveRight: false },
       ]}
     />);
@@ -245,13 +245,72 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('class="tab-title tab-title-preview"');
   });
 
+  it("shows positional shortcut numbers on only the first nine workspaces and tabs", () => {
+    const manyRows = Array.from({ length: 10 }, (_, index): WorkspaceRowModel => ({
+      ...rows[0],
+      session: { ...session, id: `$${index + 1}`, name: `workspace-${index + 1}`, order: index },
+      active: index === 0,
+      attention: "none",
+      unread: 0,
+      working: false,
+      agents: [],
+    }));
+    const workspaceHtml = sidebar({ rows: manyRows });
+    expect(workspaceHtml.match(/class="workspace-shortcut-index"/g)).toHaveLength(9);
+    expect(workspaceHtml).toContain('class="workspace-shortcut-index">9</span>');
+
+    const manyTabs = Array.from({ length: 10 }, (_, index) => ({
+      key: `app:file-${index}` as const,
+      kind: "app" as const,
+      id: `file-${index}`,
+      title: `file-${index}.ts`,
+      appKind: "file" as const,
+      resource: `/r/file-${index}.ts`,
+      order: index,
+      preview: false,
+      canMoveLeft: index > 0,
+      canMoveRight: index < 9,
+    }));
+    const tabHtml = renderToStaticMarkup(<TabStrip
+      activeKey={manyTabs[0].key} activeTerminalPaneCount={0} canMutate canSplit={false}
+      commandScope={commandScope} stateGlyphs={false} onClose={noop} onCloseCurrent={noop}
+      onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop}
+      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
+      tabs={[...manyTabs, { key: "pending:create", kind: "pending", title: "Creating" }]}
+    />);
+    expect(tabHtml.match(/class="tab-index"/g)).toHaveLength(9);
+    expect(tabHtml).toContain('class="tab-index">9</span>');
+  });
+
+  it("renders a working spinner and distinct blocked, unread-complete, and idle tab marks", () => {
+    const states = ["working", "blocked", "done", "idle"] as const;
+    const html = renderToStaticMarkup(<TabStrip
+      activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate canSplit commandScope={commandScope}
+      stateGlyphs={false} onClose={noop} onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop}
+      onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop} onPin={noop}
+      onRenameTerminal={noop} onSelect={noop} onSplit={noop}
+      tabs={states.map((attention, index) => ({
+        key: `terminal:@${index + 1}` as const, kind: "terminal" as const, id: `@${index + 1}`,
+        title: attention, index: index + 1, activeInTmux: index === 0, zoomed: false,
+        canMoveLeft: index > 0, canMoveRight: index < states.length - 1, attention, agentPresence: "present" as const,
+      }))}
+    />);
+    expect(html).toContain('class="spinner tab-agent-spinner"');
+    expect(html).not.toContain('class="tab-dot working"');
+    expect(html).toContain('class="tab-dot blocked"');
+    expect(html).toContain('class="tab-dot done"');
+    expect(html).toContain('class="tab-dot idle"');
+    expect(stylesCss).toContain(".tab-dot.done { background: var(--ok); }");
+    expect(stylesCss).toContain("@media (prefers-reduced-motion: no-preference)");
+  });
+
   it("keeps a tab menu command bound to the connection scope that opened it", async () => {
     const onClose = vi.fn();
-    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none" } as const;
+    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent" } as const;
     const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
     const element = (scope: typeof commandScope) => <TabStrip
-      activeKey={tab.key} canMutate canSplit commandScope={scope} stateGlyphs={false} onClose={onClose}
-      onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
+      activeKey={tab.key} activeTerminalPaneCount={1} canMutate canSplit commandScope={scope} stateGlyphs={false} onClose={onClose}
+      onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
       onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} tabs={[tab]}
     />;
     let renderer!: ReturnType<typeof create>;
@@ -263,19 +322,86 @@ describe("application shell accessibility contracts", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("makes the active split tab's menu Close use the same pane-first command as the keyboard", async () => {
+    const onClose = vi.fn();
+    const onCloseCurrent = vi.fn();
+    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent" } as const;
+    const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
+    const element = (scope: typeof commandScope, paneId: string) => <TabStrip
+      activeKey={tab.key} activePaneId={paneId} activeTerminalPaneCount={2} canMutate canSplit commandScope={scope}
+      stateGlyphs={false} onClose={onClose} onCloseCurrent={onCloseCurrent} onCloseNonAgent={noop}
+      onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
+      onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} tabs={[tab]}
+    />;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(element(commandScope, "%1")); });
+    await act(async () => renderer.root.findByProps({ role: "tab" }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    await act(async () => renderer.update(element(replacementScope, "%recycled")));
+    const close = renderer.root.findByProps({ "data-menu-item": "close" });
+    expect(close.findByType("span").children.join("")).toBe("Close Pane");
+    await act(async () => close.props.onClick());
+    expect(onCloseCurrent).toHaveBeenCalledWith("%1", commandScope);
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
+  it("keeps an open tab menu's close label and action aligned after external tab activation", async () => {
+    const onClose = vi.fn();
+    const onCloseCurrent = vi.fn();
+    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent" } as const;
+    const element = (activeKey: string) => <TabStrip
+      activeKey={activeKey} activePaneId="%1" activeTerminalPaneCount={2} canMutate canSplit commandScope={commandScope}
+      stateGlyphs={false} onClose={onClose} onCloseCurrent={onCloseCurrent} onCloseNonAgent={noop}
+      onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
+      onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} tabs={[tab]}
+    />;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(element(tab.key)); });
+    await act(async () => renderer.root.findByProps({ role: "tab" }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    await act(async () => renderer.update(element("terminal:@2")));
+    const close = renderer.root.findByProps({ "data-menu-item": "close" });
+    expect(close.findByType("span").children.join("")).toBe("Close tab…");
+    await act(async () => close.props.onClick());
+    expect(onClose).toHaveBeenCalledWith(tab, commandScope);
+    expect(onCloseCurrent).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
+  it("closes an active app tab instead of its covered terminal pane", async () => {
+    const onClose = vi.fn();
+    const onCloseCurrent = vi.fn();
+    const tab = {
+      key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown",
+      resource: "/r/README.md", order: 0, preview: false, canMoveLeft: false, canMoveRight: false,
+    } as const;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<TabStrip
+      activeKey={tab.key} activePaneId="%covered" activeTerminalPaneCount={2} canMutate canSplit={false}
+      commandScope={commandScope} stateGlyphs={false} onClose={onClose} onCloseCurrent={onCloseCurrent}
+      onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
+      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} tabs={[tab]}
+    />); });
+    await act(async () => renderer.root.findByProps({ role: "tab" }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    await act(async () => renderer.root.findByProps({ "data-menu-item": "close" }).props.onClick());
+    expect(onClose).toHaveBeenCalledWith(tab, commandScope);
+    expect(onCloseCurrent).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
   it("offers the bulk closes and Download only where they have something to do", async () => {
     const onCloseOthers = vi.fn();
     const onCloseRight = vi.fn();
     const onDownloadTab = vi.fn();
+    const onCloseNonAgent = vi.fn();
     const strip = [
-      { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: true, attention: "none" },
-      { key: "terminal:@2", kind: "terminal", id: "@2", title: "logs", index: 2, activeInTmux: false, zoomed: false, canMoveLeft: true, canMoveRight: false, attention: "none" },
+      { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: true, attention: "none", agentPresence: "absent" },
+      { key: "terminal:@2", kind: "terminal", id: "@2", title: "logs", index: 2, activeInTmux: false, zoomed: false, canMoveLeft: true, canMoveRight: false, attention: "none", agentPresence: "absent" },
       { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: false, canMoveLeft: false, canMoveRight: true },
       { key: "app:diff", kind: "app", id: "diff", title: "a.ts (staged)", appKind: "gitDiff", resource: "staged:a.ts", order: 1, preview: false, canMoveLeft: true, canMoveRight: false },
     ] as const;
     const element = (canMutate: boolean) => <TabStrip
-      activeKey="app:file" canMutate={canMutate} canSplit commandScope={commandScope} stateGlyphs={false}
-      onClose={noop} onCloseOthers={onCloseOthers} onCloseRight={onCloseRight} onDownloadTab={onDownloadTab}
+      activeKey="app:file" activeTerminalPaneCount={1} canMutate={canMutate} canSplit commandScope={commandScope} stateGlyphs={false}
+      onClose={noop} onCloseCurrent={noop} onCloseNonAgent={onCloseNonAgent} onCloseOthers={onCloseOthers} onCloseRight={onCloseRight} onDownloadTab={onDownloadTab}
       onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop}
       tabs={[...strip]}
     />;
@@ -292,9 +418,13 @@ describe("application shell accessibility contracts", () => {
     await openMenuOn(renderer, 2);
     expect(item(renderer, "closeOthers")[0].props.disabled).toBe(false);
     expect(item(renderer, "closeRight")[0].props.disabled).toBe(false);
+    expect(item(renderer, "closeNonAgent")[0].props.disabled).toBe(false);
     expect(item(renderer, "download")).toHaveLength(1);
     await act(async () => item(renderer, "closeRight")[0].props.onClick());
     expect(onCloseRight).toHaveBeenCalledWith(strip[2], commandScope);
+    await openMenuOn(renderer, 2);
+    await act(async () => item(renderer, "closeNonAgent")[0].props.onClick());
+    expect(onCloseNonAgent).toHaveBeenCalledWith(commandScope);
 
     // The last tab, and a diff: nothing to its right, and no file behind it.
     await openMenuOn(renderer, 3);
@@ -308,6 +438,7 @@ describe("application shell accessibility contracts", () => {
     await openMenuOn(renderer, 2);
     expect(item(renderer, "closeOthers")[0].props.disabled).toBe(true);
     expect(item(renderer, "closeRight")[0].props.disabled).toBe(false);
+    expect(item(renderer, "closeNonAgent")[0].props.disabled).toBe(true);
     await act(async () => item(renderer, "download")[0].props.onClick());
     expect(onDownloadTab).toHaveBeenCalledWith(strip[2]);
     await act(async () => renderer.unmount());

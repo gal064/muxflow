@@ -31,7 +31,10 @@ const ambientSession: Session = { ...session, id: "$ambient", name: "ambient" };
 const ambientWindow: TmuxWindow = { ...window, id: "@ambient", sessionId: ambientSession.id };
 const ambientPane: Pane = { ...pane, id: "%ambient", sessionId: ambientSession.id, windowId: ambientWindow.id };
 const ambientAppTab: PersistedAppState["appTabs"][number] = { ...appTab, id: "tab-ambient", sessionId: ambientSession.id };
-const target = <T extends Omit<CommandTarget, "scope">>(value: T): CommandTarget => ({ ...value, scope: hostScope } as CommandTarget);
+type UnscopedCommandTarget = CommandTarget extends infer Target
+  ? Target extends { scope: HostScopeToken } ? Omit<Target, "scope"> : never
+  : never;
+const target = (value: UnscopedCommandTarget): CommandTarget => ({ ...value, scope: hostScope } as CommandTarget);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -46,6 +49,7 @@ function resolvedIds(resolved: ReturnType<typeof resolveCommandTarget>) {
     case "terminalTab": return [undefined, resolved.value?.id, undefined, undefined];
     case "appTab": return [undefined, undefined, resolved.value?.id, undefined];
     case "pane": return [undefined, undefined, undefined, resolved.value?.id];
+    case "focusedSurface": return [undefined, resolved.window?.id, undefined, resolved.pane?.id];
   }
 }
 
@@ -125,6 +129,7 @@ describe("shell commands", () => {
     [target({ kind: "terminalTab", id: "@1" }), "terminalTab", [undefined, "@1", undefined, undefined]],
     [target({ kind: "appTab", id: "tab-1" }), "appTab", [undefined, undefined, "tab-1", undefined]],
     [target({ kind: "pane", id: "%1" }), "pane", [undefined, undefined, undefined, "%1"]],
+    [{ kind: "focusedSurface", paneId: "%1", scope: hostScope } as CommandTarget, "focusedSurface", [undefined, "@1", undefined, "%1"]],
   ])("resolves %s as an isolated %s command target", (target, kind, expected) => {
     const resolved = resolveCommandTarget({
       activePane: ambientPane,
@@ -146,6 +151,7 @@ describe("shell commands", () => {
     target({ kind: "terminalTab", id: "@missing" }),
     target({ kind: "appTab", id: "tab-missing" }),
     target({ kind: "pane", id: "%missing" }),
+    { kind: "focusedSurface", paneId: "%missing", scope: hostScope } as CommandTarget,
   ])("never substitutes ambient state for stale explicit target $kind", (target) => {
     const resolved = resolveCommandTarget({
       activePane: ambientPane,
@@ -180,6 +186,31 @@ describe("shell commands", () => {
       { kind: "closePane", sessionId: "$1", windowId: "@1", paneId: "%1", confirmed: true },
       { serverIdentity: "server-a", generation: 8 },
     );
+  });
+
+  it("routes ambient Close through the focused pane until it is the last pane", async () => {
+    const secondPane: Pane = { ...pane, id: "%2", index: 1, active: false, left: 40, width: 40 };
+    const split = await run("window.close", { snapshot: { ...snapshot, panes: [pane, secondPane] } });
+    expect(split.performAction).toHaveBeenCalledWith(
+      { kind: "closePane", sessionId: "$1", windowId: "@1", paneId: "%1", confirmed: true },
+      { serverIdentity: "server-a", generation: 8 },
+    );
+
+    const last = await run("window.close");
+    expect(last.performAction).toHaveBeenCalledWith(
+      { kind: "closeWindow", sessionId: "$1", windowId: "@1", confirmed: true },
+      { serverIdentity: "server-a", generation: 8 },
+    );
+  });
+
+  it("rejects a menu-captured focused surface after its host scope is replaced", async () => {
+    const secondPane: Pane = { ...pane, id: "%2", index: 1, active: false, left: 40, width: 40 };
+    const stale: CommandTarget = { kind: "focusedSurface", paneId: "%1", scope: hostScope };
+    const { performAction } = await run("window.close", {
+      hostScope: { ...hostScope, connectionEpoch: 2, serverIdentity: "server-b" },
+      snapshot: { ...snapshot, panes: [pane, secondPane] },
+    }, stale);
+    expect(performAction).not.toHaveBeenCalled();
   });
 
   it("still confirms closing a whole workspace", async () => {

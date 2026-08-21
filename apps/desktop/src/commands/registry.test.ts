@@ -124,6 +124,20 @@ describe("command registry", () => {
     expect(keyFromCode("IntlBackslash")).toBeUndefined();
   });
 
+  it("resolves macOS Control-number from the physical digit while a terminal has focus", () => {
+    const controlCharacter = {
+      key: "\u0004", code: "Digit4", ctrlKey: true, altKey: false, shiftKey: false, metaKey: false,
+      isComposing: false, keyCode: 52,
+    } as KeyboardEvent;
+    expect(shortcutFromEvent(controlCharacter)).toBe("Ctrl+4");
+    expect(commandForKeyboardEvent(controlCharacter, "mac", {})?.id).toBe("tab.select4");
+
+    // Only the nine registered selectors are consumed. A neighbouring terminal
+    // Control sequence remains terminal input rather than an application key.
+    const controlZero = { ...controlCharacter, key: "\u0000", code: "Digit0", keyCode: 48 } as KeyboardEvent;
+    expect(commandForKeyboardEvent(controlZero, "mac", {})).toBeUndefined();
+  });
+
   it("resolves every default binding back from the keystroke that produces it", () => {
     // The gap this closes: nothing round-tripped a binding through a real
     // KeyboardEvent, so `Meta+Shift+[` sat in the registry, rendered as ⌘⇧[ in
