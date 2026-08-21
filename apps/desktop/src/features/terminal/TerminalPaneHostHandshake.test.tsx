@@ -130,6 +130,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     open(): void {}
     measure(): Size | undefined { return undefined; }
     measurements(): undefined { return undefined; }
+    onMeasurementsChange(): () => void { return () => undefined; }
     setGrid(size: Size): { kind: "applied"; size: Size } | { kind: "unchanged" } | { kind: "rejected"; reason: string } {
       if (size.columns < 2 || size.rows < 2) return { kind: "rejected", reason: `${size.columns}x${size.rows} is unusable` };
       if (this.grid.columns === size.columns && this.grid.rows === size.rows) return { kind: "unchanged" };

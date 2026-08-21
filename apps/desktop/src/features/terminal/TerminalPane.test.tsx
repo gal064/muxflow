@@ -42,10 +42,18 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     grid: Size = { columns: 80, rows: 24 };
     resizes: Size[] = [];
     #pendingRendered: Array<() => void> = [];
+    #measurementListeners = new Set<() => void>();
 
     open(): void {}
     measure(): Size | undefined { return this.measured; }
     measurements(): undefined { return undefined; }
+    onMeasurementsChange(listener: () => void): () => void {
+      this.#measurementListeners.add(listener);
+      return () => { this.#measurementListeners.delete(listener); };
+    }
+    emitMeasurementsChange(): void {
+      for (const listener of this.#measurementListeners) listener();
+    }
     setGrid(size: Size): { kind: "applied"; size: Size } | { kind: "unchanged" } | { kind: "rejected"; reason: string } {
       if (size.columns < 2 || size.rows < 2) return { kind: "rejected", reason: `${size.columns}x${size.rows} is unusable` };
       if (this.grid.columns === size.columns && this.grid.rows === size.rows) return { kind: "unchanged" };
@@ -463,6 +471,24 @@ describe("TerminalPane pane-paint span lifecycle", () => {
 // in both directions: the box may lead only while tmux has not answered for it,
 // and the moment tmux does, its numbers are what the terminal renders at.
 describe("TerminalPane grid during a resize", () => {
+  it("refits when xterm metrics change without a CSS-box resize", async () => {
+    renderers.config.measured = { columns: 80, rows: 24 };
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%dpr"), hub);
+    const renderer = renderers.created[0];
+
+    // Moving a fixed-size window between displays lets xterm recompute its
+    // device-pixel-rounded cell while ResizeObserver has nothing to report.
+    renderer.measured = { columns: 79, rows: 23 };
+    act(() => { renderer.emitMeasurementsChange(); });
+    expect(renderer.resizes).toEqual([{ columns: 79, rows: 23 }]);
+
+    await act(async () => mounted.unmount());
+    renderer.measured = { columns: 78, rows: 22 };
+    act(() => { renderer.emitMeasurementsChange(); });
+    expect(renderer.resizes).toEqual([{ columns: 79, rows: 23 }]);
+  });
+
   it("fits the terminal to its own box before tmux answers, then settles on tmux's grid", async () => {
     renderers.config.measured = { columns: 80, rows: 24 };
     const hub = new FakeHub();
