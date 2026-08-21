@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use anyhow::Context;
 use tmux_agent_protocol::v1;
 
+use super::store::PendingApproval;
 use super::{AgentRuntime, StoredAgent, adapters, identity, snapshot};
 use crate::service::snapshot::{discover_authoritative, server_identity};
 use adapters::ApprovalEffect;
@@ -215,16 +216,13 @@ impl AgentRuntime {
                 parsed.event_name.as_str(),
                 "SessionStart" | "UserPromptSubmit"
             );
-        let mut pending_approval_keys = previous
+        let mut pending_approvals = previous
             .as_ref()
-            .map(|record| record.pending_approval_keys.clone())
+            .map(|record| record.pending_approvals.clone())
             .unwrap_or_default();
-        let legacy_pending = adapter_id == "codex"
-            && previous_lifecycle == v1::AgentLifecycleState::Blocked
-            && pending_approval_keys.is_empty();
-        let approval_was_pending = legacy_pending || !pending_approval_keys.is_empty();
+        let approval_was_pending = !pending_approvals.is_empty();
         let approval_resolved = if terminal_late {
-            pending_approval_keys.clear();
+            pending_approvals.clear();
             true
         } else {
             match parsed.approval_effect {
@@ -233,24 +231,24 @@ impl AgentRuntime {
                     // in one turn therefore share a correlation digest, so
                     // this is deliberately a multiset: one completion can
                     // resolve only one observed request.
-                    pending_approval_keys.push(parsed.approval_key.clone());
+                    pending_approvals.push(PendingApproval::Key(parsed.approval_key.clone()));
                     false
                 }
                 ApprovalEffect::ResolveMatching => {
-                    if legacy_pending {
-                        true
-                    } else if let Some(index) = pending_approval_keys
+                    if let Some(index) = pending_approvals
                         .iter()
-                        .position(|key| key == &parsed.approval_key)
+                        .position(|pending| {
+                            matches!(pending, PendingApproval::Key(key) if key == &parsed.approval_key)
+                        })
                     {
-                        pending_approval_keys.remove(index);
-                        pending_approval_keys.is_empty()
+                        pending_approvals.remove(index);
+                        pending_approvals.is_empty()
                     } else {
                         false
                     }
                 }
                 ApprovalEffect::ResolveAll => {
-                    pending_approval_keys.clear();
+                    pending_approvals.clear();
                     true
                 }
                 ApprovalEffect::None => false,
@@ -346,7 +344,7 @@ impl AgentRuntime {
             latest_source_generation,
             present: true,
             hook_terminal,
-            pending_approval_keys,
+            pending_approvals,
             lifecycle_observed_at_unix_millis: observed_now,
         };
         state.agents.insert(agent_id, record.clone());
