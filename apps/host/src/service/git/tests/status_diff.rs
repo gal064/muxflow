@@ -98,6 +98,28 @@ async fn status_models_initial_raw_ignored_mode_symlink_binary_and_rename_delete
 }
 
 #[tokio::test]
+async fn status_accepts_deleted_file_with_a_missing_parent_directory() {
+    let fixture = Fixture::new("deleted-parent");
+    fixture.write("removed/nested/file", b"tracked\n");
+    fixture.git(&["add", "."]);
+    fixture.git(&["commit", "-qm", "base"]);
+    fs::remove_dir_all(fixture.root.join("removed")).unwrap();
+
+    let status = GitService::new(Arc::new(AtomicBool::new(false)), 0)
+        .status(&fixture.request(), None)
+        .await
+        .unwrap();
+
+    assert!(status.authoritative);
+    assert!(
+        status
+            .entries
+            .iter()
+            .any(|entry| { entry.path == b"removed/nested/file" && entry.worktree_status == "D" })
+    );
+}
+
+#[tokio::test]
 async fn diff_preserves_crlf_missing_eof_binary_and_symlink_target() {
     let fixture = Fixture::new("diff");
     fixture.write("text", b"one\r\ntwo");
