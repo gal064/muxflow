@@ -45,8 +45,40 @@ export type MeasurableTerminal = Pick<Terminal, "options"> & {
       dimensions?: { css?: { cell?: Partial<PixelBox> } };
       onDimensionsChange?: (listener: () => void) => { dispose(): void };
     };
+    _charSizeService?: {
+      height?: number;
+      onCharSizeChange?: (listener: () => void) => { dispose(): void };
+    };
   };
 };
+
+/**
+ * Returns xterm's multiplier for the nearest practical row that is whole in
+ * both CSS and device pixels. WebGL otherwise rounds the backing canvas and
+ * its CSS height independently, stretching an odd-sized grid by one pixel at
+ * fractional DPR. The small bound keeps an unusual display ratio from buying
+ * correctness with conspicuously loose lines.
+ */
+export function deviceSafeLineHeight(
+  measuredCharHeight: number | undefined,
+  devicePixelRatio: number,
+): number | undefined {
+  if (!(measuredCharHeight !== undefined && measuredCharHeight > 0)) return undefined;
+  const ratio = devicePixelRatio > 0 ? devicePixelRatio : 1;
+  const deviceCharHeight = Math.ceil(measuredCharHeight * ratio);
+  const nativeCssHeight = deviceCharHeight / ratio;
+  const firstCssRow = Math.ceil(nativeCssHeight);
+  const lastCssRow = firstCssRow + 3;
+  for (let cssRow = firstCssRow; cssRow <= lastCssRow; cssRow += 1) {
+    const deviceRow = cssRow * ratio;
+    if (!Number.isInteger(deviceRow)) continue;
+    if (deviceRow === deviceCharHeight) return 1;
+    // xterm floors this product. Aim inside the target integer, not on the
+    // floating-point boundary below it.
+    return (deviceRow + 0.5) / deviceCharHeight;
+  }
+  return 1;
+}
 
 /** Everything needed to turn a pixel box into a terminal grid. */
 export interface TerminalMeasurements {

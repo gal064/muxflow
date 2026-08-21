@@ -2,7 +2,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { cellsForBox, terminalMeasurements } from "./TerminalRenderer";
+import { cellsForBox, deviceSafeLineHeight, terminalMeasurements } from "./TerminalRenderer";
 
 /**
  * The tmux client size is derived from cell metrics xterm does not expose
@@ -37,6 +37,25 @@ describe("xterm cell metrics", () => {
       "xterm moved _core._coreBrowserService.onDprChange; fixed boxes would miss DPR metric changes",
     ).toBeTypeOf("function");
     terminal.dispose();
+  });
+
+  it("keeps common fractional-DPR rows whole in both pixel spaces", () => {
+    const renderedDeviceRow = (charHeight: number, ratio: number) => {
+      const deviceChar = Math.ceil(charHeight * ratio);
+      return Math.floor(deviceChar * deviceSafeLineHeight(charHeight, ratio)!);
+    };
+    for (const ratio of [1, 1.25, 1.5, 1.75, 2, 2.5, 3]) {
+      const deviceRow = renderedDeviceRow(17, ratio);
+      const cssRow = deviceRow / ratio;
+      expect(Number.isInteger(cssRow), `${ratio}x CSS row`).toBe(true);
+      expect(deviceRow).toBeGreaterThanOrEqual(Math.ceil(17 * ratio));
+      expect(cssRow - 17, `${ratio}x row expansion`).toBeLessThanOrEqual(3);
+      for (const rows of [1, 7, 38, 39, 40, 53]) {
+        expect(Number.isInteger(rows * deviceRow / ratio), `${ratio}x at ${rows} rows`).toBe(true);
+      }
+    }
+    expect(deviceSafeLineHeight(undefined, 2)).toBeUndefined();
+    expect(deviceSafeLineHeight(0, 2)).toBeUndefined();
   });
 
   it("are read into the same cells FitAddon computes, chrome and all", () => {

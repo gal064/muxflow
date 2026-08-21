@@ -8,6 +8,7 @@ import { installAtlasFontSmoothing } from "./atlasFontSmoothing";
 import { watchAtlasStaleness } from "./atlasStaleProbe";
 import { GHOSTTY_TEXT_OPTIONS, searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
 import {
+  deviceSafeLineHeight,
   terminalMeasurements,
   type MeasurableTerminal,
   type TerminalMeasurements,
@@ -24,7 +25,7 @@ import { installOsc52ClipboardWrite } from "./osc52Clipboard";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
-export { cellsForBox, terminalMeasurements } from "./cellMetrics";
+export { cellsForBox, deviceSafeLineHeight, terminalMeasurements } from "./cellMetrics";
 
 export type TerminalInput =
   | { kind: "text"; data: string }
@@ -304,6 +305,16 @@ export class XtermRenderer implements TerminalRenderer {
 
   open(element: HTMLElement): void {
     this.#terminal.open(element);
+    this.#applyDeviceSafeLineHeight();
+    const core = (this.#terminal as MeasurableTerminal)._core;
+    const charSize = core?._charSizeService;
+    const charSizeSubscription = charSize?.onCharSizeChange?.(() => this.#applyDeviceSafeLineHeight());
+    if (charSizeSubscription) this.#disposables.push(charSizeSubscription);
+    const dprSubscription = core?._coreBrowserService?.onDprChange?.(() => {
+      // Let xterm finish updating its own DPR-dependent character metric first.
+      queueMicrotask(() => this.#applyDeviceSafeLineHeight());
+    });
+    if (dprSubscription) this.#disposables.push(dprSubscription);
     this.#mountWebgl();
     this.#discardFallbackAtlas();
   }
@@ -418,6 +429,15 @@ export class XtermRenderer implements TerminalRenderer {
       dimensions?.dispose();
       dpr?.dispose();
     };
+  }
+
+  #applyDeviceSafeLineHeight(): void {
+    if (this.#disposed) return;
+    const measured = (this.#terminal as MeasurableTerminal)._core?._charSizeService?.height;
+    const lineHeight = deviceSafeLineHeight(measured, window.devicePixelRatio);
+    if (lineHeight !== undefined && this.#terminal.options.lineHeight !== lineHeight) {
+      this.#terminal.options.lineHeight = lineHeight;
+    }
   }
 
   /**
