@@ -6,8 +6,9 @@ import { Terminal } from "@xterm/xterm";
 // the assertion that it still looks like this has to read the dependency, the
 // way `theme.test.ts` reads `tokens.css` for the same reason.
 import addonBundle from "@xterm/addon-webgl/lib/addon-webgl.mjs?raw";
+import xtermBundle from "@xterm/xterm/lib/xterm.mjs?raw";
 import { installAtlasFontSmoothing } from "./atlasFontSmoothing";
-import { GHOSTTY_TEXT_OPTIONS } from "./theme";
+import { GHOSTTY_TEXT_OPTIONS, WEBGL_CELL_SPACING } from "./theme";
 
 /**
  * The two halves of "the terminal's glyphs weigh what the font says they
@@ -143,7 +144,7 @@ describe("the weights the terminal is allowed to draw", () => {
       expect(terminal.options.drawBoldTextInBrightColors).toBe(false);
       expect(terminal.options.fontWeight).toBe("normal");
       expect(terminal.options.fontWeightBold).toBe("bold");
-      expect(terminal.options.letterSpacing).toBe(1);
+      expect(terminal.options.letterSpacing).toBe(0);
       expect(terminal.options.lineHeight).toBe(1);
     } finally {
       terminal.dispose();
@@ -166,9 +167,21 @@ describe("the bundled face's cell", () => {
   it("keeps the 0.6em advance on a whole device-pixel grid", () => {
     const advance = 13 * 0.6;
     for (const ratio of [1, 1.25, 1.5, 2, 3]) {
-      const deviceCell = Math.floor(advance * ratio) + GHOSTTY_TEXT_OPTIONS.letterSpacing;
+      const deviceCell = Math.floor(advance * ratio) + WEBGL_CELL_SPACING;
       expect(deviceCell / ratio, `${ratio}x cell`).toBe(8);
     }
+  });
+
+  it("leaves the DOM fallback at the face's native advance", () => {
+    const advance = 13 * 0.6;
+    for (const ratio of [1, 1.25, 1.5, 2, 3]) {
+      // DOM keeps the fractional character width. Its canvas-level round is
+      // spread across the grid instead of adding one pixel to every cell.
+      const canvas = Math.round(advance * ratio * 80);
+      expect(canvas / ratio / 80, `${ratio}x cell`).toBeCloseTo(advance, 2);
+    }
+    expect(xtermBundle, "DOM no longer preserves the measured advance")
+      .toMatch(/char\.width=this\._charSizeService\.width\*[A-Za-z_$][\w$]*[,;]/);
   });
 
   it("fails if WebGL stops adding spacing after flooring the face advance", () => {
