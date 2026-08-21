@@ -281,6 +281,15 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     let disposed = false;
     let startedClient: string | undefined;
     let recoveringFlowStall = false;
+    // The design says dirty→snapshot is instant: the daemon's topology actor
+    // wakes on the notification and pushes as soon as tmux answers. The user
+    // measures ~5s from `cd` to the Explorer moving, and the tab name — pure
+    // snapshot apply, no Explorer machinery — lags identically, so the missing
+    // seconds are somewhere in notification→snapshot→apply. These two records
+    // decompose that span from the desktop's side; the tmux-side rename time
+    // comes from polling the server during a supervised `cd`.
+    let topologyDirtyAt: number | undefined;
+    let topologyDirtyName: string | undefined;
     const scope = terminalBridgeScope();
     void startTerminal(scope.sessionId, scope.paneIds, connection, (event) => {
       if (disposed) return;
@@ -290,6 +299,14 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
           terminalEpochRef.current = event.epoch;
           setTerminalEpoch(event.epoch);
         } else if (event.kind === "topologyDirty") {
+          // First dirty of a burst wins: the snapshot that answers a burst
+          // answers all of it, and the span worth measuring starts at the
+          // notification that started the daemon working.
+          if (topologyDirtyAt === undefined) {
+            topologyDirtyAt = Date.now();
+            topologyDirtyName = event.name;
+          }
+          recordIncident("topo.dirty", { name: event.name });
           setStatus("Topology changed; reconciling…");
         } else if (event.kind === "flowPaused") {
           // Journal only — the host resumes the pane itself. This is the
@@ -331,6 +348,14 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
           if (event.state === "connected") setConnectionDetail("");
           setStatus(event.state === "connected" ? "Live" : `Connection ${event.state}…`);
         } else if (event.kind === "snapshot") {
+          if (topologyDirtyAt !== undefined) {
+            recordIncident("topo.snapshot", {
+              msSinceDirty: Date.now() - topologyDirtyAt,
+              answering: topologyDirtyName,
+            });
+            topologyDirtyAt = undefined;
+            topologyDirtyName = undefined;
+          }
           if (serverIdentityRef.current !== undefined && serverIdentityRef.current !== event.serverIdentity) {
             terminalStateCache.clear();
             hub.clearTerminalState();
