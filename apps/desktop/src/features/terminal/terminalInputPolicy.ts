@@ -1,11 +1,6 @@
 import { keyboardEventIsComposing, type Platform } from "../../commands/registry";
 import type { TerminalRenderer } from "./TerminalRenderer";
 
-const SHELL_COMMANDS = new Set([
-  "bash", "csh", "dash", "elvish", "fish", "ksh", "ksh93", "nu", "pwsh",
-  "sh", "tcsh", "xonsh", "zsh",
-]);
-
 type TerminalKeyEvent = Pick<KeyboardEvent,
   "altKey" | "ctrlKey" | "isComposing" | "key" | "keyCode" | "metaKey" | "shiftKey"
 >;
@@ -27,7 +22,12 @@ export function translateTerminalKey(event: TerminalKeyEvent, context: TerminalK
     && !event.metaKey && !event.ctrlKey && !event.altKey) {
     return "\n";
   }
-  if (context.platform !== "mac" || context.alternateScreen || !SHELL_COMMANDS.has(command)
+  // The alternate screen is the behavioral boundary: full-screen TUIs own
+  // their Command-Arrows, while normal-screen shells, wrappers, and agent
+  // composers all use the terminal's conventional Control-A/Control-E line
+  // controls. A process-name allowlist made an ordinary wrapper silently lose
+  // the shortcut and could never enumerate every interactive shell.
+  if (context.platform !== "mac" || context.alternateScreen
     || !event.metaKey || event.shiftKey || event.ctrlKey || event.altKey) return undefined;
   if (event.key === "ArrowLeft") return "\u0001";
   if (event.key === "ArrowRight") return "\u0005";

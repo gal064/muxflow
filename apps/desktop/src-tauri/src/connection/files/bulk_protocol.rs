@@ -6,9 +6,9 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, capability_names, encode_frame, envelope,
-    missing_host_capabilities,
+    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope,
     v1::{self, envelope::Payload},
+    validate_host_contract,
 };
 
 /// How long a cancellation will wait for a blocked pipe before giving up on
@@ -163,34 +163,18 @@ impl<'a> BulkProtocolClient<'a> {
                 Err(error) => return Err(error.to_string()),
             }
         };
+        let envelope_major = frame.protocol_major;
         let Some(Payload::ServerHello(hello)) = frame.payload else {
             return Err("bulk bridge omitted ServerHello".into());
         };
-        if hello.read_only {
-            return Err(format!(
-                "bulk bridge is read-only: {}",
-                hello.incompatibility
-            ));
-        }
+        validate_host_contract(envelope_major, &hello)
+            .map_err(|error| format!("bulk bridge handshake is incompatible: {error}"))?;
         if hello.server_identity != binding.expected_server_identity
             || hello.connection_epoch != binding.connection_epoch
         {
             return Err(
                 "bulk bridge handshake did not match its control identity/epoch binding".into(),
             );
-        }
-        // The same admission rule the control handshake applies, on the lane
-        // that actually carries the single-request file open. Checking it only
-        // on the control lane meant a helper that predated `OpenFileStream`
-        // could be admitted here and fail every open with an unknown-operation
-        // error — precisely the outcome `CAP_FILE_STREAM` exists to replace
-        // with a refusal that names what is missing.
-        let missing = missing_host_capabilities(hello.capabilities);
-        if missing != 0 {
-            return Err(format!(
-                "bulk bridge is missing required capabilities: {}",
-                capability_names(missing).join(", ")
-            ));
         }
         binding.validate()?;
         Ok(())

@@ -332,10 +332,17 @@ mod tests {
 
         // The deleted profile was also the last one used, so the pointer has to
         // move with it or the next launch reads a file it will call corrupt.
-        store.delete_profile_transactionally("ssh-remote-linux").unwrap();
+        store
+            .delete_profile_transactionally("ssh-remote-linux")
+            .unwrap();
         let reloaded = ProfileStore::load(path).unwrap();
         let value = reloaded.value.lock().unwrap();
-        assert!(!value.profiles.iter().any(|item| item.id == "ssh-remote-linux"));
+        assert!(
+            !value
+                .profiles
+                .iter()
+                .any(|item| item.id == "ssh-remote-linux")
+        );
         assert_eq!(value.last_profile_id.as_deref(), Some("local"));
         drop(value);
 

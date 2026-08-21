@@ -16,12 +16,12 @@ pub(super) struct ReconcileResult {
 /// is answered by exactly one piece of evidence. Two implementations of that
 /// question would eventually disagree, and the disagreement would show up as a
 /// row that either vanished while its agent worked or lingered after it died.
-pub(super) fn detect_all<'a>(
-    snapshot: &'a tmux_control::TmuxSnapshot,
+pub(super) fn detect_all(
+    snapshot: &tmux_control::TmuxSnapshot,
 ) -> BTreeMap<
     (String, String),
     (
-        &'a tmux_control::Pane,
+        &tmux_control::Pane,
         &'static dyn super::adapters::AgentAdapter,
     ),
 > {

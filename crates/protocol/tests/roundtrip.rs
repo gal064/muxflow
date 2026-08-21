@@ -581,12 +581,13 @@ fn terminal_file_resolution_round_trips_its_exact_pane_route() {
 /// refusing the connection and reporting the exact missing capability by name —
 /// not by a second, unexercised code path for opening files.
 #[test]
-fn single_request_file_opens_are_a_required_capability() {
+fn operation_additions_are_required_capabilities() {
     use tmux_agent_protocol::{
-        CAP_FILE_STREAM, CAP_TERMINAL_OUTPUT_CREDIT, HOST_CAPABILITIES, capability_names,
-        missing_host_capabilities,
+        CAP_FILE_STREAM, CAP_TERMINAL_FILE_RESOLUTION, CAP_TERMINAL_OUTPUT_CREDIT,
+        HOST_CAPABILITIES, capability_names, missing_host_capabilities,
     };
     assert_eq!(CAP_FILE_STREAM, 1 << 15);
+    assert_eq!(CAP_TERMINAL_FILE_RESOLUTION, 1 << 16);
     // Append-only: every previously assigned bit keeps its position.
     assert_eq!(CAP_TERMINAL_OUTPUT_CREDIT, 1 << 14);
 
@@ -605,6 +606,16 @@ fn single_request_file_opens_are_a_required_capability() {
     assert_eq!(
         capability_names(missing_host_capabilities(outdated)),
         vec!["fileStream"]
+    );
+    let pre_terminal_file_helper = HOST_CAPABILITIES & !CAP_TERMINAL_FILE_RESOLUTION;
+    assert_eq!(
+        missing_host_capabilities(pre_terminal_file_helper),
+        CAP_TERMINAL_FILE_RESOLUTION,
+        "a helper that cannot resolve terminal paths must be refused"
+    );
+    assert_eq!(
+        capability_names(missing_host_capabilities(pre_terminal_file_helper)),
+        vec!["terminalFileResolution"]
     );
     // Every required bit has a name, so no refusal can be unexplainable.
     assert!(!capability_names(HOST_CAPABILITIES).contains(&"unknown"));

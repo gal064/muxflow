@@ -24,7 +24,7 @@ fn bridge_reaps_itself_when_the_daemon_never_closes_after_client_eof() {
     let listener = UnixListener::bind(&socket).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
-        .args(["bridge", "--stdio", "--socket"])
+        .args(["bridge", "--stdio", "--no-start", "--socket"])
         .arg(&socket)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

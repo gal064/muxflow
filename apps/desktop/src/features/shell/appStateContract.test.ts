@@ -122,6 +122,8 @@ describe("reading state the previous build wrote", () => {
     expect(saved({ copyOnSelect: true }).shell.copyOnSelect).toBe(true);
     expect(saved({ copyOnSelect: false }).shell.copyOnSelect).toBe(false);
     expect(saved({}).shell.copyOnSelect).toBe(false);
+    expect(saved({ terminalApplicationClipboard: true }).shell.terminalApplicationClipboard).toBe(true);
+    expect(saved({}).shell.terminalApplicationClipboard).toBe(false);
   });
 
   it("leaves the rest of a legacy save alone while migrating the ordering", () => {

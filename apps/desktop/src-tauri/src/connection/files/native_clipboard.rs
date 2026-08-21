@@ -238,10 +238,8 @@ mod tests {
         );
         assert!(validated_native_clipboard_write(String::new()).is_err());
         assert!(
-            validated_native_clipboard_write(
-                "a".repeat(tmux_control::MAX_INPUT_REQUEST_BYTES + 1)
-            )
-            .is_err()
+            validated_native_clipboard_write("a".repeat(tmux_control::MAX_INPUT_REQUEST_BYTES + 1))
+                .is_err()
         );
     }
 

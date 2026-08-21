@@ -26,6 +26,7 @@ type TerminalWorkspaceSurfaceProps = {
   paneAttention?: ReadonlyMap<string, AgentAttentionRollup>;
   panes: Pane[];
   copyOnSelect?: boolean;
+  terminalApplicationClipboard?: boolean;
   platform?: Platform;
   /** Receives the tiled surface element the tmux client size is measured from. */
   surfaceRef: (element: HTMLElement | null) => void;
@@ -67,6 +68,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         clientId={props.clientId}
         pane={pane}
         copyOnSelect={Boolean(props.copyOnSelect)}
+        terminalApplicationClipboard={Boolean(props.terminalApplicationClipboard)}
         platform={props.platform ?? "linux"}
         hub={props.hub}
         onController={(paneId, controller) => { if (controller) props.controllers.current.set(paneId, controller); else props.controllers.current.delete(paneId); }}

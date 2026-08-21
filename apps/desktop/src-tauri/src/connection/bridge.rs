@@ -5,10 +5,10 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    CAP_TERMINAL_OUTPUT_CREDIT, HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR,
-    capability_names, envelope, missing_host_capabilities, read_frame_sync,
+    CAP_TERMINAL_OUTPUT_CREDIT, HELPER_VERSION, HOST_CAPABILITIES, capability_names, envelope,
+    missing_host_capabilities, read_frame_sync,
     v1::{self, envelope::Payload},
-    write_frame_sync,
+    validate_host_contract, write_frame_sync,
 };
 use uuid::Uuid;
 
@@ -461,9 +461,7 @@ fn event_follows_snapshot_barrier(frame: &v1::Envelope, accepted_sequence: u64) 
 /// The rule is [`missing_host_capabilities`] and lives in the protocol crate,
 /// so this decision and the error that explains it cannot disagree.
 pub(super) fn handshake_allows_snapshot(envelope_major: u32, hello: &v1::ServerHello) -> bool {
-    envelope_major == PROTOCOL_MAJOR
-        && !hello.read_only
-        && missing_host_capabilities(hello.capabilities) == 0
+    validate_host_contract(envelope_major, hello).is_ok()
 }
 
 fn read_until_response(

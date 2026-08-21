@@ -15,6 +15,10 @@ phase7_source_manifest() {
         -type f -print0
     fi | LC_ALL=C sort -z |
       while IFS= read -r -d '' path; do
+        # `git ls-files --cached` includes tracked paths deleted in the working
+        # tree. A review/QA run may legitimately validate that deletion before
+        # it is staged; only hash source files that actually exist.
+        [[ -f "$path" ]] || continue
         hash="$(sha256sum -- "$path" | cut -d ' ' -f1)"
         printf '%s\t%q\n' "$hash" "${path#./}"
       done

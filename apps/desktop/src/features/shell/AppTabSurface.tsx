@@ -77,6 +77,7 @@ export function AppTabSurface(props: Props) {
   }
   const download = () => props.onDownload(props.tab.resource, "file", root);
   const toolbar = (state: SaveState | undefined) => <EditorToolbar
+    canWrite={props.canWrite}
     download={download}
     mode={mode}
     onViewMode={props.onViewMode}
@@ -148,14 +149,15 @@ export function AppTabSurface(props: Props) {
  * `saveState` undefined means the file is still being read: the chip holds its
  * place in the row without claiming a state the tab cannot know yet.
  */
-function EditorToolbar({ download, mode, onViewMode, saveState, tab }: {
+function EditorToolbar({ canWrite, download, mode, onViewMode, saveState, tab }: {
+  canWrite: boolean;
   download(): void;
   mode: "source" | "preview" | "split";
   onViewMode(mode: "source" | "preview" | "split"): void;
   saveState: SaveState | undefined;
   tab: AppOwnedTab;
 }) {
-  const visibleSaveState = useVisibleSaveState(saveState);
+  const visibleSaveState = useVisibleSaveState(saveState, canWrite);
   return <header className="editor-toolbar">
     <code title={tab.resource}>{tab.resource}</code>
     <span className={`save-state${visibleSaveState ? ` ${visibleSaveState}` : ""}`} role="status">

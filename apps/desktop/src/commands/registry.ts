@@ -308,8 +308,8 @@ export function keyFromCode(code: string): string | undefined {
 }
 
 /** A modified top-row digit, including WebKit events whose `code` is blank. */
-function positionalDigitFromEvent(event: Pick<KeyboardEvent, "code" | "ctrlKey" | "key" | "keyCode" | "metaKey">): string | undefined {
-  if (!event.ctrlKey && !event.metaKey) return undefined;
+function positionalDigitFromEvent(event: Pick<KeyboardEvent, "altKey" | "code" | "ctrlKey" | "key" | "keyCode" | "metaKey">): string | undefined {
+  if (!event.altKey && !event.ctrlKey && !event.metaKey) return undefined;
   if (/^Digit[0-9]$/.test(event.code)) return event.code.slice(5);
   if (/^[0-9]$/.test(event.key)) return event.key;
   // WKWebView can pair a Control-character `key` with no physical `code`, but
@@ -363,7 +363,7 @@ export function keyboardEventIsComposing(
 }
 
 export function globalShortcutAllowed(
-  event: Pick<KeyboardEvent, "code" | "ctrlKey" | "key" | "keyCode" | "metaKey" | "target">,
+  event: Pick<KeyboardEvent, "altKey" | "code" | "ctrlKey" | "key" | "keyCode" | "metaKey" | "target">,
   overlayOpen: boolean,
   commandId?: CommandId,
 ): boolean {
@@ -396,6 +396,48 @@ export function shortcutCollisions(platform: Platform, overrides: ShortcutOverri
   return [...bindings.entries()]
     .filter(([, commandIds]) => commandIds.length > 1)
     .map(([shortcut, commandIds]) => ({ shortcut, commandIds }));
+}
+
+/**
+ * Migrates a keymap written by builds that allowed conflicting bindings.
+ *
+ * Only persisted overrides are removed; canonical defaults are never guessed
+ * away. Removing one override can reveal that command's default and therefore
+ * another collision, so repair continues until the active keymap is unique.
+ */
+export function repairShortcutCollisions(
+  platform: Platform,
+  overrides: ShortcutOverrides,
+  onDisplaced: (bindings: readonly { commandId: CommandId; shortcut: string }[]) => void = () => undefined,
+): ShortcutOverrides {
+  const repaired = { ...overrides };
+  const displaced: { commandId: CommandId; shortcut: string }[] = [];
+  let changed = false;
+  while (true) {
+    const collision = shortcutCollisions(platform, repaired)[0];
+    if (!collision) {
+      if (displaced.length > 0) onDisplaced(displaced);
+      return changed ? repaired : overrides;
+    }
+    const explicit = collision.commandIds.filter((commandId) =>
+      Object.prototype.hasOwnProperty.call(repaired, commandId) && repaired[commandId] !== null);
+    // One explicit customization wins over defaults introduced later. If two
+    // old customizations conflict, preserve the first registry binding and
+    // report the one that must be disabled so the repair is recoverable.
+    const keep = explicit[0];
+    for (const commandId of collision.commandIds) {
+      if (commandId === keep) continue;
+      const prior = repaired[commandId];
+      if (typeof prior === "string") displaced.push({ commandId, shortcut: prior });
+      repaired[commandId] = null;
+      changed = true;
+    }
+    if (!keep && collision.commandIds.length > 0) {
+      // Defensive only: platform defaults are asserted collision-free.
+      repaired[collision.commandIds[0]] = null;
+      changed = true;
+    }
+  }
 }
 
 export function currentPlatform(userAgent = navigator.userAgent): Platform {

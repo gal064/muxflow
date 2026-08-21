@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     fs::{self, OpenOptions},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -7,6 +8,12 @@ use std::{
 };
 
 use anyhow::{Context, bail};
+use tmux_agent_protocol::{
+    HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, envelope, missing_host_capabilities,
+    read_frame,
+    v1::{self, envelope::Payload},
+    write_frame,
+};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -14,6 +21,8 @@ use tokio::{
     sync::oneshot,
     time::{sleep, timeout},
 };
+
+use crate::daemon;
 
 /// How long the bridge keeps draining the daemon after its own stdin closed.
 ///
@@ -75,7 +84,7 @@ pub async fn run(socket_path: PathBuf, auto_start: bool) -> anyhow::Result<()> {
 }
 
 async fn connect(path: &Path, auto_start: bool) -> anyhow::Result<UnixStream> {
-    if let Ok(stream) = UnixStream::connect(path).await {
+    if let Some(stream) = existing_daemon(path, auto_start).await? {
         return Ok(stream);
     }
     if !auto_start {
@@ -100,6 +109,119 @@ async fn connect(path: &Path, auto_start: bool) -> anyhow::Result<UnixStream> {
         sleep(Duration::from_millis(20)).await;
     }
     bail!("host daemon did not create {}", path.display())
+}
+
+/// Uses a current daemon as-is and cooperatively retires an outdated one before
+/// the packaged helper starts its replacement. The probe has its own connection
+/// because the desktop must still own the real connection's first ClientHello.
+async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option<UnixStream>> {
+    let Ok(mut probe) = UnixStream::connect(path).await else {
+        return Ok(None);
+    };
+    if !auto_start {
+        return Ok(Some(probe));
+    }
+    let compatibility = timeout(Duration::from_secs(2), daemon_compatibility(&mut probe))
+        .await
+        .context("host daemon compatibility probe timed out")??;
+    drop(probe);
+    match compatibility {
+        DaemonCompatibility::Compatible => return Ok(UnixStream::connect(path).await.ok()),
+        DaemonCompatibility::AppOutdated => {
+            bail!(
+                "the running host daemon is newer than this app; update the app before reconnecting"
+            )
+        }
+        DaemonCompatibility::Unknown => {
+            bail!(
+                "could not safely determine whether the running host daemon is older than this app"
+            )
+        }
+        DaemonCompatibility::DaemonOutdated { force: false } => {
+            let stopped = timeout(Duration::from_secs(2), daemon::stop(path.to_owned())).await;
+            if !matches!(stopped, Ok(Ok(()))) {
+                daemon::retire_verified(path)
+                    .await
+                    .context("retire incompatible host daemon after cooperative shutdown failed")?;
+            }
+        }
+        DaemonCompatibility::DaemonOutdated { force: true } => {
+            daemon::retire_verified(path)
+                .await
+                .context("retire old-protocol host daemon")?;
+        }
+    }
+    for _ in 0..100 {
+        if UnixStream::connect(path).await.is_err() {
+            return Ok(None);
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    bail!(
+        "incompatible host daemon did not release {}",
+        path.display()
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DaemonCompatibility {
+    Compatible,
+    DaemonOutdated { force: bool },
+    AppOutdated,
+    Unknown,
+}
+
+async fn daemon_compatibility(stream: &mut UnixStream) -> anyhow::Result<DaemonCompatibility> {
+    write_frame(
+        stream,
+        &envelope(
+            1,
+            0,
+            Payload::ClientHello(v1::ClientHello {
+                desktop_version: HELPER_VERSION.into(),
+                requested_capabilities: HOST_CAPABILITIES,
+                expected_helper_version: HELPER_VERSION.into(),
+                ..Default::default()
+            }),
+        ),
+    )
+    .await?;
+    let response = read_frame(stream)
+        .await?
+        .context("daemon closed during compatibility probe")?;
+    match response.protocol_major.cmp(&PROTOCOL_MAJOR) {
+        Ordering::Less => return Ok(DaemonCompatibility::DaemonOutdated { force: true }),
+        Ordering::Greater => return Ok(DaemonCompatibility::AppOutdated),
+        Ordering::Equal => {}
+    }
+    let Some(Payload::ServerHello(hello)) = response.payload else {
+        return Ok(DaemonCompatibility::Unknown);
+    };
+    match release_ordinal(&hello.helper_version).zip(release_ordinal(HELPER_VERSION)) {
+        Some((daemon, current)) if daemon > current => return Ok(DaemonCompatibility::AppOutdated),
+        Some((daemon, current)) if daemon < current => {
+            return Ok(DaemonCompatibility::DaemonOutdated { force: false });
+        }
+        None if hello.helper_version != HELPER_VERSION => return Ok(DaemonCompatibility::Unknown),
+        _ => {}
+    }
+    if missing_host_capabilities(hello.capabilities) != 0 {
+        // Required bits are append-only. A same-release daemon missing one is
+        // an older build of that release, never evidence that the app is old.
+        return Ok(DaemonCompatibility::DaemonOutdated { force: false });
+    }
+    Ok(if hello.read_only {
+        DaemonCompatibility::Unknown
+    } else {
+        DaemonCompatibility::Compatible
+    })
+}
+
+fn release_ordinal(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.trim().split('.');
+    let mut next = || parts.next()?.parse::<u64>().ok();
+    let ordinal = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(ordinal)
 }
 
 /// Bytes the daemon's stderr log keeps before the next spawn starts it over.
@@ -152,6 +274,7 @@ fn daemon_stderr(socket_path: &Path) -> Stdio {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use tokio::net::UnixListener;
 
     fn temporary_runtime() -> PathBuf {
         let root = std::env::temp_dir().join(format!("ade-bridge-{}", uuid::Uuid::new_v4()));
@@ -200,6 +323,75 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("daemon.stderr.log")).unwrap();
         drop(daemon_stderr(&root.join("host.sock")));
         assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_old_running_daemon_is_stopped_before_the_packaged_one_starts() {
+        let root = temporary_runtime();
+        let socket = root.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut probe, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut probe).await.unwrap().unwrap();
+            let mut hello = envelope(
+                1,
+                0,
+                Payload::ServerHello(v1::ServerHello {
+                    helper_version: HELPER_VERSION.into(),
+                    capabilities: HOST_CAPABILITIES
+                        & !tmux_agent_protocol::CAP_TERMINAL_FILE_RESOLUTION,
+                    ..Default::default()
+                }),
+            );
+            hello.protocol_major = PROTOCOL_MAJOR;
+            write_frame(&mut probe, &hello).await.unwrap();
+            drop(probe);
+
+            let (mut shutdown, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut shutdown).await.unwrap().unwrap();
+            let mut hello = envelope(
+                1,
+                0,
+                Payload::ServerHello(v1::ServerHello {
+                    helper_version: HELPER_VERSION.into(),
+                    ..Default::default()
+                }),
+            );
+            hello.protocol_major = PROTOCOL_MAJOR;
+            write_frame(&mut shutdown, &hello).await.unwrap();
+            let request = read_frame(&mut shutdown).await.unwrap().unwrap();
+            assert!(
+                matches!(request.payload, Some(Payload::Request(v1::Request {
+                operation,
+                ..
+            })) if operation == v1::Operation::ShutdownDaemon as i32)
+            );
+            write_frame(
+                &mut shutdown,
+                &envelope(
+                    request.request_id,
+                    0,
+                    Payload::Response(v1::Response {
+                        ok: true,
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            drop(shutdown);
+            drop(listener);
+            fs::remove_file(&socket).unwrap();
+        });
+
+        assert!(
+            existing_daemon(&root.join("host.sock"), true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.await.unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }

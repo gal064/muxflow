@@ -18,13 +18,14 @@ import { resolveSelectedSession } from "../features/shell/model";
 import type { HostScopeToken } from "../features/shell/hostScope";
 import { recordPerfCounter } from "../perf/probe";
 import { recordIncident } from "../diagnostics/incidents";
-import { writeNativeTerminalClipboard } from "../features/terminal/terminalTransferApi";
+import { writeTerminalApplicationClipboard } from "../features/terminal/terminalTransferApi";
 
 type ControllerArguments = {
   agentClient: TauriAgentClient;
   fileClient: TauriFileWorkspaceClient;
   gitClient: TauriGitWorkspaceClient;
   setStatus: Dispatch<SetStateAction<string>>;
+  terminalApplicationClipboardEnabled?: boolean;
   /**
    * Called when an SSH bridge dies with a handshake failure, which is the one
    * connection error that is usually not a connection problem at all: a host
@@ -37,12 +38,21 @@ type ControllerArguments = {
   onHandshakeFailure?(connection: ConnectionSpec): void;
 };
 
-export function useAppConnectionController({ agentClient, fileClient, gitClient, setStatus, onHandshakeFailure }: ControllerArguments) {
+export function useAppConnectionController({
+  agentClient,
+  fileClient,
+  gitClient,
+  setStatus,
+  terminalApplicationClipboardEnabled = false,
+  onHandshakeFailure,
+}: ControllerArguments) {
   // Through a ref, because the bridge effect is keyed on the connection alone:
   // a callback the shell rebuilds every render must not be able to tear the
   // bridge down and start it again.
   const handshakeFailureRef = useRef(onHandshakeFailure);
   handshakeFailureRef.current = onHandshakeFailure;
+  const terminalApplicationClipboardEnabledRef = useRef(terminalApplicationClipboardEnabled);
+  terminalApplicationClipboardEnabledRef.current = terminalApplicationClipboardEnabled;
   const [hostState, dispatchHost] = useReducer(connectionReducer, initialHostState);
   const snapshot = useMemo(() => denormalizeSnapshot(hostState), [hostState]);
   const snapshotRef = useRef(snapshot);
@@ -351,9 +361,12 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
             setConnectionEpoch((value) => value + 1);
           }
         } else if (event.kind === "clipboardWrite") {
-          void writeNativeTerminalClipboard(event.text).catch((error) => {
+          void writeTerminalApplicationClipboard(
+            terminalApplicationClipboardEnabledRef.current,
+            event.text,
+          ).catch((error) => {
             recordIncident("clipboard.writeFailed", { error: String(error) });
-            setStatus(`Could not copy terminal selection: ${String(error)}`);
+            setStatus(`A terminal application could not write the clipboard: ${String(error)}`);
           });
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;

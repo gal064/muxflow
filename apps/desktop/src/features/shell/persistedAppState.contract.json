@@ -62,6 +62,7 @@
     "compactWorkspaces": true,
     "terminalScreenReader": true,
     "copyOnSelect": true,
+    "terminalApplicationClipboard": true,
     "windowGeometry": {
       "x": 20,
       "y": 30,

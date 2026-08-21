@@ -47,6 +47,15 @@ export interface TerminalFilePaneRoute {
   cwd: string;
 }
 
+/** The narrow file capability used by terminal-link navigation. */
+export interface TerminalFileResolver {
+  resolveTerminalFile(
+    scope: FileWorkspaceScope,
+    path: string,
+    pane: TerminalFilePaneRoute,
+  ): Promise<TerminalFileResolution>;
+}
+
 export type FileKind = "file" | "directory" | "symlink";
 
 export interface FileEntry {
