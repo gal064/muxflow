@@ -435,7 +435,6 @@ export function TerminalPane({
     };
     terminalContainer.addEventListener("keydown", handleTerminalKeyDown, true);
     const disposeCopyOnSelect = installTerminalCopyOnSelect({
-      container: terminalContainer,
       renderer,
       enabled: () => copyOnSelectRef.current,
       write: writeNativeTerminalClipboard,
