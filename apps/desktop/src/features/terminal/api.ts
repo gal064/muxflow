@@ -476,6 +476,17 @@ const MEASUREMENT_INVOKE_WAIT_MS = 250;
 
 const bridgeAcknowledgements = new Map<string, BridgeAcknowledgements>();
 const deliveryAcknowledgements = new Map<string, DeliveryAcknowledgements>();
+/**
+ * How each live client was connected, for the concurrency journal only.
+ *
+ * Two live clients are legitimate while a host switch is in flight — the old
+ * bridge is stopped asynchronously while the new one is already starting — so
+ * the count alone cannot separate that from a leak. The mode is the cheapest
+ * thing at the call site that tells "the same host, twice" apart from "a local
+ * host and a remote one", and unlike the profile id or the target it carries no
+ * hostname into the journal.
+ */
+const clientConnectionModes = new Map<string, ConnectionSpec["mode"]>();
 
 interface BridgeFinalTotals {
   cumulativeFrameCount: number;
@@ -644,6 +655,9 @@ export async function startTerminal(
   const acknowledgements = new BridgeAcknowledgements(measurementEnabled);
   const delivery = new DeliveryAcknowledgements();
   channel.onmessage = (frame) => handleTerminalFrame(frame, onEvent, acknowledgements, delivery);
+  // Held outside the try so the failure path can still reach a client the
+  // native side has already started: see `abandonStartedClient`.
+  let startedClientId: string | undefined;
   try {
     const startRequest = {
       sessionId, paneIds, connection, measurementId: acknowledgements.measurementId,
@@ -652,17 +666,71 @@ export async function startTerminal(
     const clientId = await measurePerfRequest("workflow.connect", "terminal", boundary, async (request) => {
       const value = await invoke<string>("start_terminal", request);
       if (!value) throw new Error("Native terminal startup omitted its client ID.");
+      // Recorded here rather than from the awaited result: the client is alive
+      // the instant this resolves, and the request boundary keeps accounting
+      // afterwards, so a throw from the boundary itself must still find the id.
+      startedClientId = value;
       return value;
     });
     bridgeAcknowledgements.set(clientId, acknowledgements);
     delivery.attach(clientId);
     deliveryAcknowledgements.set(clientId, delivery);
+    clientConnectionModes.set(clientId, connection.mode);
+    journalConcurrentClients();
     return clientId;
   } catch (error) {
+    if (startedClientId !== undefined) abandonStartedClient(startedClientId);
     delivery.close();
     await acknowledgements.close();
     throw error;
   }
+}
+
+/**
+ * Stops a native client whose id the caller will never learn.
+ *
+ * The invariant: no native client may outlive the caller's knowledge of its id.
+ * `start_terminal` resolving is the point the native side owns a live supervisor
+ * thread — it holds the ssh carrier, reconnects on its own backoff, mints
+ * connection epochs and attaches tmux control clients — and `stop_terminal` is
+ * keyed by that id alone. Anything that throws between the id being minted and
+ * `startTerminal` returning it therefore has exactly one place left where the
+ * client can still be reached: here.
+ *
+ * The registrations are dropped first so the caller's own close of the channels
+ * stays the only one, and the stop itself is fire-and-forget — the caller must
+ * see the startup failure, not a secondary failure to clean up after it, so a
+ * failing stop is journalled rather than raised.
+ */
+function abandonStartedClient(clientId: string): void {
+  bridgeAcknowledgements.delete(clientId);
+  deliveryAcknowledgements.delete(clientId);
+  clientConnectionModes.delete(clientId);
+  const boundary = { clientId };
+  void measurePerfRequest(
+    "terminal.stop", "terminal", boundary, (request) => invoke<void>("stop_terminal", request),
+  ).catch((error) => recordIncident("terminal.abandonedClientStopFailed", { message: String(error) }));
+}
+
+/**
+ * Journals the moment a second native client becomes live.
+ *
+ * Every extra client is an independent ssh carrier, reconnect schedule and tmux
+ * control attachment, so "how many bridges were actually running" is the first
+ * question any reconnect-storm report has to answer — and nothing in the app
+ * could answer it before. One line per registration that finds company is
+ * enough: the ids are opaque native UUIDs, and the modes say whether the
+ * overlap is the legitimate kind (a local host beside a remote one, or a host
+ * switch whose old bridge has not finished stopping) or the same host twice.
+ */
+function journalConcurrentClients(): void {
+  const clientIds = [...bridgeAcknowledgements.keys()];
+  if (clientIds.length <= 1) return;
+  recordIncident("terminal.multiClient", {
+    count: clientIds.length,
+    clientIds,
+    modes: clientIds.map((id) => clientConnectionModes.get(id) ?? "unknown"),
+  });
 }
 
 export async function stopTerminal(clientId: string): Promise<void> {
@@ -678,6 +746,7 @@ export async function stopTerminal(clientId: string): Promise<void> {
   } finally {
     bridgeAcknowledgements.delete(clientId);
     deliveryAcknowledgements.delete(clientId);
+    clientConnectionModes.delete(clientId);
     delivery?.close();
     await acknowledgements?.close(stopped);
   }

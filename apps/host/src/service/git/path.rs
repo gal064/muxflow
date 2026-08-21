@@ -171,6 +171,21 @@ impl WorktreeRoot {
     }
 
     pub(super) fn entry(&self, path: &[u8]) -> anyhow::Result<WorktreeEntry> {
+        self.entry_if_parent_exists(path)?
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))
+            .context("Git path parent is unavailable or unsafe")
+    }
+
+    /// Resolves an entry without weakening the no-follow parent walk.
+    ///
+    /// Git status legitimately names deleted files after their entire parent
+    /// directory has disappeared. That is an absent worktree entry, not an
+    /// unsafe path. Only `NotFound` becomes `None`; symlinks, permission
+    /// failures, and every other parent-open error still fail closed.
+    pub(super) fn entry_if_parent_exists(
+        &self,
+        path: &[u8],
+    ) -> anyhow::Result<Option<WorktreeEntry>> {
         validate_git_path(path)?;
         let value = Path::new(OsStr::from_bytes(path));
         let leaf = value
@@ -183,9 +198,12 @@ impl WorktreeRoot {
             let Component::Normal(name) = component else {
                 bail!("Git path contains an unsafe component");
             };
-            parent = open_directory(parent.as_raw_fd(), name.as_bytes())?;
+            let Some(next) = open_directory_if_exists(parent.as_raw_fd(), name.as_bytes())? else {
+                return Ok(None);
+            };
+            parent = next;
         }
-        Ok(WorktreeEntry { parent, leaf })
+        Ok(Some(WorktreeEntry { parent, leaf }))
     }
 }
 
@@ -444,7 +462,7 @@ fn ensure_same_entry_snapshot(before: &EntryMetadata, after: &EntryMetadata) -> 
     Ok(())
 }
 
-fn open_directory(parent: i32, name: &[u8]) -> anyhow::Result<File> {
+fn open_directory_if_exists(parent: i32, name: &[u8]) -> anyhow::Result<Option<File>> {
     let name = CString::new(name).context("Git path contains NUL")?;
     // SAFETY: openat uses a live parent fd and C string and returns an owned fd.
     let fd = unsafe {
@@ -455,8 +473,11 @@ fn open_directory(parent: i32, name: &[u8]) -> anyhow::Result<File> {
         )
     };
     if fd < 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("Git path parent is unavailable or unsafe");
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(error).context("Git path parent is unavailable or unsafe");
     }
     // SAFETY: the successful `openat` returned a uniquely owned fd.
     if let Err(error) = retain_across_exec(fd) {
@@ -464,7 +485,7 @@ fn open_directory(parent: i32, name: &[u8]) -> anyhow::Result<File> {
         unsafe { libc::close(fd) };
         return Err(error);
     }
-    Ok(unsafe { File::from_raw_fd(fd) })
+    Ok(Some(unsafe { File::from_raw_fd(fd) }))
 }
 
 fn retain_across_exec(fd: i32) -> anyhow::Result<()> {

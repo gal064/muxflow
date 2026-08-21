@@ -49,7 +49,7 @@ and x86_64 SSH targets.
 
 ```sh
 pnpm release:macos
-release/macos/install.sh "$PWD/target/release/bundle/macos/Muxflow.app"
+release/macos/install.sh "$PWD/tmp/work/cache/release-target/macos/release/bundle/macos/Muxflow.app"
 open "$HOME/Applications/Muxflow.app"
 release/macos/uninstall.sh
 ```

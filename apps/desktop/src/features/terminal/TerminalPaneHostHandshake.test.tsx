@@ -54,6 +54,10 @@ function incidentsBesidesEpochAdoption(): unknown[][] {
 interface HarnessRenderer {
   /** What xterm would be showing, with ESC c applied as a wipe. */
   screen: string;
+  /** The grid the terminal renders at, as `setGrid` left it. */
+  grid: { columns: number; rows: number };
+  /** What the CSS box measures, which only a test with a box in mind sets. */
+  measured: { columns: number; rows: number } | undefined;
   /** One entry per renderer call, in order, for asserting on repaints. */
   log: string[];
   /** Runs xterm completions and the frames they unblock to quiescence. */
@@ -79,6 +83,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     screen = "";
     log: string[] = [];
     grid: Size = { columns: 80, rows: 24 };
+    measured: Size | undefined = undefined;
     #frames: Array<() => void> = [];
     #xtermPending: Array<() => void> = [];
     #generations = new TerminalGenerationWatermark();
@@ -128,7 +133,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     }
 
     open(): void {}
-    measure(): Size | undefined { return undefined; }
+    measure(): Size | undefined { return this.measured; }
     measurements(): undefined { return undefined; }
     onMeasurementsChange(): () => void { return () => undefined; }
     setGrid(size: Size): { kind: "applied"; size: Size } | { kind: "unchanged" } | { kind: "rejected"; reason: string } {
@@ -205,6 +210,7 @@ import { terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { resetPerfProbe } from "../../perf/probe";
 import { REVEAL_RETRY_DELAY_MS, STALE_REVEAL_EPOCH_CODE } from "./revealRetry";
+import { GRID_MISMATCH_SUSTAIN_MS } from "./gridMismatchProbe";
 import type { TerminalEvent } from "./api";
 
 const encoder = new TextEncoder();
@@ -533,6 +539,12 @@ async function settle(milliseconds = 10): Promise<void> {
     await vi.advanceTimersByTimeAsync(0);
     pumpAll();
   });
+}
+
+/** tmux resized this pane: the same props change the app would push. */
+async function updatePane(mounted: ReactTestRenderer, pane: Pane): Promise<void> {
+  await act(async () => { mounted.update(paneElement(pane, false)); });
+  await settle();
 }
 
 async function unmountPane(mounted: ReactTestRenderer): Promise<void> {
@@ -939,6 +951,44 @@ describe("a reveal the host accepts and never answers", () => {
 
     expect(voidIncidents()).toEqual([]);
     expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+  });
+});
+
+describe("a pane rendering at a grid its box disagrees with", () => {
+  function gridMismatches(): unknown[][] {
+    return journal.recordIncident.mock.calls.filter(([kind]) => kind === "pane.gridMismatch");
+  }
+
+  it("journals the disagreement once it has outlived any round trip", async () => {
+    host.announceEpoch();
+    host.output("%1", "SCREEN");
+    host.capture("%1");
+    const mounted = await mountPane(fixturePane("%1"));
+
+    // tmux resized the pane to 30 rows while this box still measures 18 — the
+    // transient window every drag opens, here with nothing ever closing it.
+    renderer().measured = { columns: 80, rows: 18 };
+    await updatePane(mounted, { ...fixturePane("%1"), height: 30 });
+    expect(gridMismatches()).toEqual([]);
+
+    await settle(GRID_MISMATCH_SUSTAIN_MS);
+    expect(gridMismatches()).toEqual([[
+      "pane.gridMismatch",
+      expect.objectContaining({ paneId: "%1", tmuxColumns: 80, tmuxRows: 30, measuredColumns: 80, measuredRows: 18 }),
+    ]]);
+    await unmountPane(mounted);
+  });
+
+  it("says nothing about a pane that was hidden while it disagreed", async () => {
+    host.announceEpoch();
+    host.capture("%1");
+    const mounted = await mountPane(fixturePane("%1"));
+    renderer().measured = { columns: 80, rows: 18 };
+    await updatePane(mounted, { ...fixturePane("%1"), height: 30 });
+
+    await unmountPane(mounted);
+    await settle(GRID_MISMATCH_SUSTAIN_MS * 2);
+    expect(gridMismatches()).toEqual([]);
   });
 });
 
