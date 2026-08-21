@@ -4,12 +4,19 @@
  * A reveal is how a mounted pane tells the host it is visible, and the host
  * starts every connection with all panes hidden — so a reveal that never lands
  * leaves the pane receiving no output at all. Two windows during a connection
- * (re)start reject it deterministically: `start_terminal` answers with the new
- * client id before the SSH handshake, so a reveal issued then carries a
- * terminal epoch the host has already moved past, and the bridge publishes its
- * request writer one round trip after it announces the epoch, so the reveal
- * that epoch triggers arrives before there is anything to write to. Neither is
- * a conflict to recover from; both clear on their own within a round trip.
+ * (re)start reject it deterministically, and they need opposite answers.
+ *
+ * The bridge publishes its request writer one round trip after it announces the
+ * epoch, so the reveal that epoch triggers can arrive before there is anything
+ * to write to. That is not a conflict and it clears on its own: resend.
+ *
+ * The other one does not clear by resending. `start_terminal` answers with the
+ * new client id before the SSH handshake, and the bridge stamps its new epoch
+ * into the client before it announces it, so a reveal issued in that window
+ * carries a checkpoint epoch the host has already moved past — and no attempt
+ * can re-stamp it, because the frame that would is the one still in flight.
+ * That refusal replaces the request instead of repeating it; see
+ * `STALE_REVEAL_EPOCH_CODE`.
  */
 
 /**
@@ -21,10 +28,32 @@
  * turns a fast retry back into a two-second freeze.
  */
 export const TRANSIENT_REVEAL_ERRORS = [
-  "stale connection epoch",
   "host bridge is disconnected",
   "terminal client is no longer attached",
 ] as const;
+
+/**
+ * The one refusal a retry can never satisfy.
+ *
+ * A reveal carries a visibility checkpoint, and the checkpoint's epoch is the
+ * one the frontend hub last saw on a `generationEpoch` frame. The host stamps
+ * its own epoch into `client.terminal_epoch` *before* it publishes that frame
+ * (connection/bridge.rs), so between a reconnect and the frame landing here
+ * this side can only build checkpoints the host has already moved past —
+ * exactly the sleep/wake window. Resending such a request is deterministic
+ * failure: nothing between attempts can re-stamp the checkpoint, because only
+ * the frame this side is still waiting for carries the new epoch. It was in the
+ * transient list until it burned eight attempts over two seconds after every
+ * wake, and the pane recovered from an unrelated fallback ~16s later.
+ *
+ * Matched on the structured code `connection.rs` prefixes the message with
+ * (`STALE_VISIBILITY_EPOCH_CODE`), not on the human sentence behind it.
+ */
+export const STALE_REVEAL_EPOCH_CODE = "terminal_visibility_epoch_rejected";
+
+export function isStaleEpochRevealError(error: unknown): boolean {
+  return String(error).includes(STALE_REVEAL_EPOCH_CODE);
+}
 
 /**
  * Fast enough that the pane is revealed within a frame or two of the bridge
@@ -41,10 +70,12 @@ export function isTransientRevealError(error: unknown): boolean {
 
 /**
  * `ignore` when the failed attempt was superseded or its pane unmounted,
- * `retry` for a transport that is still coming up, `degrade` for everything
- * else — a real conflict the watchdog and a host seed have to resolve.
+ * `retry` for a transport that is still coming up, `rebuild` when the request
+ * itself is unsendable and has to be replaced by the checkpoint-free seed path,
+ * `degrade` for everything else — a real conflict the watchdog and a host seed
+ * have to resolve.
  */
-export type RevealFailureAction = "ignore" | "retry" | "degrade";
+export type RevealFailureAction = "ignore" | "retry" | "rebuild" | "degrade";
 
 export function revealFailureAction(input: {
   error: unknown;
@@ -57,6 +88,9 @@ export function revealFailureAction(input: {
   // owns the outcome, and marking the pane degraded from here can latch a
   // by-then-healthy pane into the watchdog's retry loop.
   if (!input.current) return "ignore";
+  // Before the retry budget is even consulted: this attempt's checkpoint is the
+  // thing the host refused, so every attempt built from it fails identically.
+  if (isStaleEpochRevealError(input.error)) return "rebuild";
   if (!isTransientRevealError(input.error)) return "degrade";
   return input.retriesUsed < REVEAL_RETRY_LIMIT ? "retry" : "degrade";
 }

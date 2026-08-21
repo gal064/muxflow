@@ -197,6 +197,7 @@ import { TerminalEventHub } from "./TerminalEventHub";
 import { terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { resetPerfProbe } from "../../perf/probe";
+import { REVEAL_RETRY_DELAY_MS, STALE_REVEAL_EPOCH_CODE } from "./revealRetry";
 import type { TerminalEvent } from "./api";
 
 const encoder = new TextEncoder();
@@ -727,6 +728,89 @@ describe("the redundant restore a tab switch used to repaint", () => {
     await settle();
 
     expect(api.requestTerminalSeed).toHaveBeenCalled();
+    await unmountPane(mounted);
+  });
+});
+
+describe("a reveal the host refuses", () => {
+  /** Exactly what `terminal_visibility_request` returns for a stale epoch. */
+  const STALE_EPOCH =
+    `${STALE_REVEAL_EPOCH_CODE}: terminal visibility checkpoint belongs to a stale connection epoch`;
+
+  /** Reveal calls only, in order, as `[clientId, paneId, visible, ...]`. */
+  function reveals(): unknown[][] {
+    return api.setTerminalVisibility.mock.calls.filter((call) => call[2] === true);
+  }
+
+  /**
+   * Fails the first `count` reveals with `error` and lets everything else —
+   * including every hide — through to the real host.
+   */
+  function refuseReveals(error: string, count: number): void {
+    const deliver = api.setTerminalVisibility.getMockImplementation()!;
+    let refused = 0;
+    api.setTerminalVisibility.mockImplementation(async (...args: unknown[]) => {
+      if (args[2] === true && refused < count) {
+        refused += 1;
+        // One turn of latency, like the transport itself: the refusal must not
+        // land inside the caller's own stack.
+        await Promise.resolve();
+        throw new Error(error);
+      }
+      return deliver(...args);
+    });
+  }
+
+  // The sleep/wake episode: the bridge reconnects, stamps its new epoch into
+  // the client, and this side is still building checkpoints from the epoch
+  // frame it has not received yet. Every reveal from that window is refused
+  // identically, so replaying it burned eight attempts and ~2s and changed
+  // nothing.
+  it("takes the checkpoint-free seed path instead of replaying a stale epoch", async () => {
+    host.announceEpoch();
+    host.output("%1", "WOKE UP");
+    host.capture("%1");
+    refuseReveals(STALE_EPOCH, Number.MAX_SAFE_INTEGER);
+
+    const mounted = await mountPane(fixturePane("%1"));
+    await settle(REVEAL_RETRY_DELAY_MS * 4);
+
+    // The point of the fix: one refused attempt, never a second identical one.
+    expect(reveals()).toHaveLength(1);
+    expect(journal.recordIncident).not.toHaveBeenCalledWith("pane.revealRetry", expect.anything());
+    // And one fresh seed — the recovery that carries no checkpoint at all, and
+    // which the host answers by forcing the pane visible and capturing it.
+    expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+    expect(journal.recordIncident).toHaveBeenCalledWith(
+      "pane.revealRebuilt",
+      { paneId: "%1", error: `Error: ${STALE_EPOCH}` },
+    );
+    expect(renderer().screen).toBe("WOKE UP");
+    expect(painted()).toBe(true);
+    await unmountPane(mounted);
+  });
+
+  // The other half of the split, unchanged: a transport that is merely coming
+  // up still heals by resending the same request.
+  it("still retries a transport that is only coming up", async () => {
+    host.announceEpoch();
+    host.output("%1", "COMING UP");
+    host.capture("%1");
+    refuseReveals("host bridge is disconnected", 1);
+
+    const mounted = await mountPane(fixturePane("%1"));
+    await settle(REVEAL_RETRY_DELAY_MS * 2);
+
+    expect(reveals()).toHaveLength(2);
+    expect(journal.recordIncident).toHaveBeenCalledWith(
+      "pane.revealRetry",
+      { paneId: "%1", attempt: 0, error: "Error: host bridge is disconnected" },
+    );
+    expect(journal.recordIncident).not.toHaveBeenCalledWith("pane.revealRebuilt", expect.anything());
+    // The retry landed, so nothing had to be recovered from a seed.
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+    expect(renderer().screen).toBe("COMING UP");
+    expect(painted()).toBe(true);
     await unmountPane(mounted);
   });
 });

@@ -349,7 +349,18 @@ fn terminal_seed_command_builds_a_scoped_validated_request() {
 
 #[test]
 fn visibility_handoff_rejects_stale_epoch_and_preserves_cutoff() {
-    assert!(terminal_visibility_request("%1".into(), false, Vec::new(), 6, 10, 7).is_err());
+    let stale = terminal_visibility_request("%1".into(), false, Vec::new(), 6, 10, 7).unwrap_err();
+    // The desktop branches on this prefix to skip a retry series that cannot
+    // ever succeed, so the code — not just the sentence — is the contract.
+    assert!(
+        stale.starts_with("terminal_visibility_epoch_rejected: "),
+        "{stale}"
+    );
+    assert!(
+        terminal_visibility_request("%1".into(), false, Vec::new(), 0, 10, 0)
+            .unwrap_err()
+            .starts_with("terminal_visibility_epoch_rejected: "),
+    );
     let request =
         terminal_visibility_request("%1".into(), false, b"snapshot".to_vec(), 7, 42, 7).unwrap();
     assert_eq!(request.terminal_epoch, 7);

@@ -831,6 +831,34 @@ export function TerminalPane({
           retriesUsed,
         });
         if (action === "ignore") return;
+        if (action === "rebuild") {
+          // The host refused this request's *checkpoint*, not the reveal, and
+          // nothing on this side can build a newer one: the epoch comes from
+          // the hub, and the hub only learns the new epoch from the frame that
+          // is still in flight. So drop the checkpoint and take the one
+          // recovery that never carries one — a fresh host seed, which the host
+          // answers by forcing this pane visible and capturing it, in a single
+          // round trip. Retrying instead spent eight identical attempts over
+          // two seconds and left the pane stale until an unrelated fallback
+          // rescued it ~16s after wake.
+          lastRevealKeyRef.current = undefined;
+          // The cached screen was serialized under the same superseded epoch, so
+          // a remount must not restore it as if it were current. Nothing already
+          // painted is touched: this only invalidates the *next* mount's base.
+          terminalStateCache.delete(pane.id);
+          recordIncident("pane.revealRebuilt", { paneId: pane.id, error: String(error).slice(0, 200) });
+          // The host still believes this pane is hidden in the epoch it has
+          // moved to, and the seed below is what re-asserts otherwise. Keep the
+          // time bound armed anyway: if that epoch's frame never reaches this
+          // side, the watchdog is the only thing left to re-assert visibility.
+          watchdogRef.current?.note("revealFailed");
+          if (clientIdRef.current === clientId) {
+            void requestTerminalSeed(clientId, pane.id).catch((seedError) => {
+              diagnosticRef.current?.(`Could not reseed ${pane.id} after a stale visibility epoch: ${String(seedError)}`);
+            });
+          }
+          return;
+        }
         if (action === "retry") {
           // The latch stays held: this key is still the pane's live reveal, and
           // the retry re-runs under it rather than announcing a new attempt.
