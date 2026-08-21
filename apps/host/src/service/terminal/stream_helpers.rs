@@ -32,6 +32,12 @@ pub(super) fn emit_resnapshot(
     );
 }
 
+/// Queues one terminal record, charging the delivery window for it.
+///
+/// Returns whether the record was admitted, which is the caller's debt to the
+/// window: after releasing the emission fence, a control reader that admitted
+/// must [`OutputCredit::await_window`] before it emits again. Admission itself
+/// never waits — see the `output_credit` module docs.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_terminal(
     sender: &mpsc::Sender<SequencerControl>,
@@ -42,20 +48,20 @@ pub(super) fn emit_terminal(
     generation: u64,
     stopped: &AtomicBool,
     output_credit: &OutputCredit,
-) {
+) -> bool {
     // Terminal bytes are lossless and already arrive on the dedicated control
     // reader thread. Let the bounded sequencer queue propagate socket pressure
     // back to that reader; tmux can then apply its own pause/continue protocol.
     // A nonblocking send here turned a normal 100 ms / 100 Mbit bandwidth-delay
     // window into a full-connection resync as soon as 1,024 records accumulated.
     let charge = OutputCharge::terminal(data.len());
-    let Ok(reservation) = output_credit.reserve(charge, stopped) else {
+    let Ok(reservation) = output_credit.admit(charge, stopped) else {
         // A stopped attachment is a deliberate local teardown; only a closed
         // credit is a connection-wide loss worth the overflow resync.
         if !stopped.load(Ordering::Acquire) {
             overflowed.store(true, Ordering::Release);
         }
-        return;
+        return false;
     };
     if sender
         .blocking_send(SequencerControl::OrderedEvent(v1::HostEvent {
@@ -72,8 +78,10 @@ pub(super) fn emit_terminal(
         .is_err()
     {
         overflowed.store(true, Ordering::Release);
+        false
     } else {
         reservation.commit();
+        true
     }
 }
 
@@ -89,35 +97,43 @@ pub(in crate::service::terminal) struct OutputEmission<'a> {
 
 impl OutputEmission<'_> {
     pub(in crate::service::terminal) fn record(self, pane_id: String, data: Vec<u8>) {
-        let _emission = self.emission_order.lock().unwrap();
-        let generation = self.terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let (visible, degradations) =
-            with_active_resources(self.resources, self.stopped, |resources| {
-                let visible = resources.record_output(&pane_id, &data, generation)
-                    == OutputDisposition::Visible;
-                // Recording output is what pushes the store past its budgets,
-                // so it is also where a pane — this one or another — loses its
-                // recovery material. Taken here and reported below, with the
-                // store's lock released.
-                (visible, resources.take_degradations())
-            })
-            .unwrap_or((false, Vec::new()));
-        emit_pane_degradations(self.sender, self.overflowed, degradations);
-        // Resource ownership is released before either credit or channel
-        // backpressure. The emission fence stays held so a reveal transition
-        // and its recovery event cannot be overtaken by output that observes
-        // Visible.
-        if visible {
-            emit_terminal(
-                self.sender,
-                self.overflowed,
-                v1::EventKind::TerminalOutput,
-                pane_id,
-                data,
-                generation,
-                self.stopped,
-                self.output_credit,
-            );
+        let admitted = {
+            let _emission = self.emission_order.lock().unwrap();
+            let generation = self.terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
+            let (visible, degradations) =
+                with_active_resources(self.resources, self.stopped, |resources| {
+                    let visible = resources.record_output(&pane_id, &data, generation)
+                        == OutputDisposition::Visible;
+                    // Recording output is what pushes the store past its
+                    // budgets, so it is also where a pane — this one or another
+                    // — loses its recovery material. Taken here and reported
+                    // below, with the store's lock released.
+                    (visible, resources.take_degradations())
+                })
+                .unwrap_or((false, Vec::new()));
+            emit_pane_degradations(self.sender, self.overflowed, degradations);
+            // Resource ownership is released before channel backpressure. The
+            // emission fence stays held so a reveal transition and its recovery
+            // event cannot be overtaken by output that observes Visible.
+            visible
+                && emit_terminal(
+                    self.sender,
+                    self.overflowed,
+                    v1::EventKind::TerminalOutput,
+                    pane_id,
+                    data,
+                    generation,
+                    self.stopped,
+                    self.output_credit,
+                )
+        };
+        // Flow control, after the fence: this reader waits for its own record
+        // to fit the window, holding nothing. Waiting under the fence is what
+        // froze every pane — and, through `set_visibility`, the terminal mutex
+        // behind it. Output for a hidden pane admits nothing and so waits for
+        // nothing; it keeps feeding the pane's recovery material as before.
+        if admitted {
+            self.output_credit.await_window(self.stopped);
         }
     }
 }

@@ -68,10 +68,10 @@ fn every_attachment_worker_spawn_failure_reaps_the_child_and_allows_retry() {
 /// in `stop()` the waiter parks forever and `Drop`'s `join_workers` hangs the
 /// service thread.
 #[test]
-fn stopping_one_attachment_unparks_its_reserve_waiter_before_the_join() {
+fn stopping_one_attachment_unparks_its_credit_waiter_before_the_join() {
     let output_credit = Arc::new(OutputCredit::negotiated(true));
     output_credit
-        .reserve(
+        .admit(
             OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
             &AtomicBool::new(false),
         )
@@ -92,14 +92,13 @@ fn stopping_one_attachment_unparks_its_reserve_waiter_before_the_join() {
     let credit = Arc::clone(&output_credit);
     let (sender, receiver) = std_mpsc::channel();
     std::thread::spawn(move || {
-        sender
-            .send(credit.reserve(OutputCharge::terminal(1), &stopped).is_err())
-            .unwrap();
+        credit.await_window(&stopped);
+        sender.send(()).unwrap();
     });
     assert!(receiver.recv_timeout(Duration::from_millis(20)).is_err());
     attachment.stop();
     drop(attachment);
-    assert!(receiver.recv_timeout(Duration::from_secs(1)).unwrap());
+    receiver.recv_timeout(Duration::from_secs(1)).unwrap();
     // The rest of the connection still holds a live, un-closed window.
     output_credit
         .acknowledge(OutputCharge {
@@ -109,16 +108,13 @@ fn stopping_one_attachment_unparks_its_reserve_waiter_before_the_join() {
         .unwrap();
 }
 
+/// The fence's whole purpose, pinned at the one point a reveal can still be
+/// held up: the ordered event queue. The recovery event must reach the queue
+/// before output that has already observed the new visibility, however long
+/// the queue makes the reveal wait for a slot.
 #[test]
-fn blocked_reveal_recovery_is_admitted_before_concurrent_visible_output() {
+fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
     let output_credit = Arc::new(OutputCredit::negotiated(true));
-    output_credit
-        .reserve(
-            OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
-            &AtomicBool::new(false),
-        )
-        .unwrap()
-        .commit();
     let mut clients = TerminalClients::new(Arc::clone(&output_credit));
     let pane_id = "%1".to_owned();
     let session_id = "$1".to_owned();
@@ -139,7 +135,17 @@ fn blocked_reveal_recovery_is_admitted_before_concurrent_visible_output() {
             )
             .unwrap();
     }
-    let (events, mut receiver) = mpsc::channel(8);
+    // One slot, already taken: the reveal reaches its ordered send holding the
+    // fence and stays there until the queue drains, which is the interleaving
+    // this test needs and the only one the fence still has to survive.
+    let (events, mut receiver) = mpsc::channel(1);
+    events
+        .try_send(SequencerControl::OrderedEvent(v1::HostEvent {
+            kind: v1::EventKind::TopologyDirty.into(),
+            scope: "topology".into(),
+            ..Default::default()
+        }))
+        .unwrap();
     let attachment = start_long_lived_attachment(
         events.clone(),
         Arc::clone(&clients.resources),
@@ -186,7 +192,7 @@ fn blocked_reveal_recovery_is_admitted_before_concurrent_visible_output() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "reveal never reached credit wait"
+            "reveal never reached its ordered send"
         );
         std::thread::yield_now();
     }
@@ -208,25 +214,24 @@ fn blocked_reveal_recovery_is_admitted_before_concurrent_visible_output() {
         }
         .record("%1".into(), vec![b'O']);
     });
-    assert!(
-        receiver.try_recv().is_err(),
-        "output overtook blocked recovery"
+    // Freeing the slot releases the reveal's send, and only then can the output
+    // thread take the fence at all.
+    let SequencerControl::OrderedEvent(filler) = receiver.blocking_recv().unwrap() else {
+        panic!("queue did not start with the filler event");
+    };
+    assert_eq!(
+        v1::EventKind::try_from(filler.kind).unwrap(),
+        v1::EventKind::TopologyDirty
     );
-    output_credit
-        .acknowledge(OutputCharge {
-            bytes: OUTPUT_WINDOW_BYTES,
-            records: 1,
-        })
-        .unwrap();
-    reveal.join().unwrap().unwrap();
-    output.join().unwrap();
 
     let SequencerControl::OrderedEvent(recovery) = receiver.blocking_recv().unwrap() else {
         panic!("reveal did not emit ordered recovery");
     };
-    let SequencerControl::OrderedEvent(output) = receiver.blocking_recv().unwrap() else {
+    let SequencerControl::OrderedEvent(output_event) = receiver.blocking_recv().unwrap() else {
         panic!("visible output was not ordered after recovery");
     };
+    reveal.join().unwrap().unwrap();
+    output.join().unwrap();
     assert_eq!(
         v1::EventKind::try_from(recovery.kind).unwrap(),
         v1::EventKind::PaneResource
@@ -236,15 +241,148 @@ fn blocked_reveal_recovery_is_admitted_before_concurrent_visible_output() {
         vec![b'S']
     );
     assert_eq!(
-        v1::EventKind::try_from(output.kind).unwrap(),
+        v1::EventKind::try_from(output_event.kind).unwrap(),
         v1::EventKind::TerminalOutput
     );
-    assert_eq!(output.terminal.unwrap().data, vec![b'O']);
+    assert_eq!(output_event.terminal.unwrap().data, vec![b'O']);
     assert!(
         receiver.try_recv().is_err(),
         "recovery/output was emitted more than once"
     );
     drop(shared);
+}
+
+/// Next ordered event, or a named failure — never an unbounded wait, so a
+/// regression reports the step it stalled at instead of hanging the suite.
+fn ordered_event_within(
+    receiver: &mut mpsc::Receiver<SequencerControl>,
+    timeout: Duration,
+    expectation: &str,
+) -> v1::HostEvent {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(message) = receiver.try_recv() {
+            let SequencerControl::OrderedEvent(event) = message else {
+                panic!("expected an ordered event: {expectation}");
+            };
+            return event;
+        }
+        assert!(std::time::Instant::now() < deadline, "{expectation}");
+        std::thread::yield_now();
+    }
+}
+
+/// The production wedge, rebuilt: a full delivery window, a control reader
+/// already parked waiting for it, and a visibility transition arriving on the
+/// connection's inline dispatch — the very thread that has to read the
+/// acknowledgement the window is waiting for. Nothing here ever acknowledges,
+/// and the transition must still finish. If either the reader's wait moves back
+/// under the emission fence or `set_visibility` waits for credit again, this
+/// test hangs exactly the way the daemon did.
+#[test]
+fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
+    let output_credit = Arc::new(OutputCredit::negotiated(true));
+    output_credit
+        .admit(
+            OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .commit();
+    let mut clients = TerminalClients::new(Arc::clone(&output_credit));
+    clients.generation.store(1, Ordering::Release);
+    clients.resources.lock().unwrap().ensure("%1", true, 0);
+    let (events, mut receiver) = mpsc::channel(8);
+    let attachment = start_long_lived_attachment(
+        events.clone(),
+        Arc::clone(&clients.resources),
+        Arc::clone(&clients.generation),
+        Arc::clone(&output_credit),
+        Arc::clone(&clients.emission_order),
+    )
+    .unwrap();
+    clients.clients.insert("$1".into(), attachment);
+
+    let reader_events = events.clone();
+    let reader_overflowed = Arc::new(AtomicBool::new(false));
+    let reader_resources = Arc::clone(&clients.resources);
+    let reader_generation = Arc::clone(&clients.generation);
+    let reader_credit = Arc::clone(&output_credit);
+    let emission_order = Arc::clone(&clients.emission_order);
+    let reader_emission_order = Arc::clone(&clients.emission_order);
+    let reader_stopped = Arc::new(AtomicBool::new(false));
+    let parked_reader_stopped = Arc::clone(&reader_stopped);
+    let reader = std::thread::spawn(move || {
+        TestOutputEmission {
+            sender: &reader_events,
+            overflowed: &reader_overflowed,
+            resources: &reader_resources,
+            terminal_generation: &reader_generation,
+            stopped: &parked_reader_stopped,
+            output_credit: &reader_credit,
+            emission_order: &reader_emission_order,
+        }
+        .record("%1".into(), vec![b'O']);
+    });
+    // The reader's record is on the queue, so it has released the fence and is
+    // now paying for it in `await_window` — where it will stay for the rest of
+    // the test, because no acknowledgement is ever sent.
+    let output_event = ordered_event_within(
+        &mut receiver,
+        Duration::from_secs(5),
+        "reader never admitted its output on a full window",
+    );
+    assert_eq!(
+        v1::EventKind::try_from(output_event.kind).unwrap(),
+        v1::EventKind::TerminalOutput
+    );
+    // The invariant itself, before anything else depends on it: a reader that
+    // is waiting for delivery credit holds no emission fence.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while emission_order.try_lock().is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a reader waiting for delivery credit kept the emission fence"
+        );
+        std::thread::yield_now();
+    }
+
+    let (done, finished) = std_mpsc::channel();
+    let visibility_events = events.clone();
+    std::thread::spawn(move || {
+        let result = clients.set_visibility(
+            "%1",
+            VisibilityChange {
+                visible: false,
+                serialized_snapshot: vec![b'S'],
+                checkpoint: VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 1,
+                },
+            },
+            &visibility_events,
+            &AtomicBool::new(false),
+        );
+        done.send(result.is_ok()).unwrap();
+        clients
+    });
+    assert!(
+        finished.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "visibility transition failed on a full delivery window"
+    );
+    let recovery = ordered_event_within(
+        &mut receiver,
+        Duration::from_secs(5),
+        "hide did not emit its recovery event",
+    );
+    assert_eq!(
+        v1::EventKind::try_from(recovery.kind).unwrap(),
+        v1::EventKind::PaneResource
+    );
+
+    reader_stopped.store(true, Ordering::Release);
+    output_credit.wake_waiters();
+    reader.join().unwrap();
 }
 
 #[test]
