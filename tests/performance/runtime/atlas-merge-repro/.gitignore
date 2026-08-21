@@ -1,0 +1,5 @@
+# Built from apps/desktop/node_modules, so the addon under test is the patched
+# one that actually ships. Rebuilt by the command in README.md.
+bundle.js
+xterm.css
+evidence/

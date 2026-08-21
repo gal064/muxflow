@@ -112,6 +112,31 @@ describe("the atlas invalidation count", () => {
     expect(addonBundle).not.toContain("this._requestClearModel=!0");
   });
 
+  it("announces itself to every pane whenever it is raised mid-paint", () => {
+    // Marking the model stale only fixes the *next* frame, and the two
+    // invalidations that can happen inside a paint — a page merge and the first
+    // oversized glyph, both reached through the glyph lookup of the row being
+    // drawn — leave the current frame half pre-merge and half post-merge. A
+    // pane whose output has stopped never draws another frame, so that half-
+    // corrupt frame is what the user keeps looking at. `TerminalRenderer`
+    // schedules the repaint that answers it off this event, so both sites
+    // raising the count must still fire it.
+    expect(addonBundle.split("this._requestClearModel++,this._onAddTextureAtlasCanvas.fire(")).toHaveLength(2 + 1);
+    // The third site, `clearTexture()`, deliberately has no such pairing: it is
+    // reachable only from `Terminal.clearTextureAtlas`, which never runs inside
+    // a frame, so the count alone is enough there.
+    expect(addonBundle).toContain("this._didWarmUp=!1,this._requestClearModel++");
+  });
+
+  it("reaches the pane through the addon's public event, atlas to renderer to addon", () => {
+    // The chain the repaint depends on, and the reason it needs no patch of our
+    // own: the shared atlas has no reference to its owners, but every
+    // `WebglRenderer` subscribes to it when it acquires it, and every
+    // `WebglAddon` republishes its renderer's copy.
+    expect(addonBundle).toMatch(/forward\(\w+\.onAddTextureAtlasCanvas,this\._onAddTextureAtlasCanvas\)/u);
+    expect(addonBundle).toContain("forward(this._renderer.onAddTextureAtlasCanvas,this._onAddTextureAtlasCanvas)");
+  });
+
   it("is forgotten when a renderer is handed a different atlas", () => {
     // A different atlas is a different coordinate space and starts its own
     // count, so the count this renderer last acted on means nothing against it.
