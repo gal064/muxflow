@@ -7,7 +7,15 @@ pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting
 /// it as current would leave a transition that can never arrive.
-pub(crate) const MANAGED_VERSION: u32 = 3;
+pub(crate) const MANAGED_VERSION: u32 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalEffect {
+    None,
+    Pending,
+    ResolveMatching,
+    ResolveAll,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedHook {
@@ -15,6 +23,8 @@ pub(crate) struct ParsedHook {
     pub lifecycle: v1::AgentLifecycleState,
     pub authority_millis: i64,
     pub event_name: String,
+    pub approval_key: String,
+    pub approval_effect: ApprovalEffect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +41,9 @@ pub(crate) trait AgentAdapter: Send + Sync {
     fn executable(&self) -> &'static str;
     fn hook_relative_path(&self) -> &'static str;
     fn hook_events(&self) -> &'static [&'static str];
+    fn hook_timeout_seconds(&self, _event: &str) -> u64 {
+        5
+    }
     fn hook_trust_guidance(&self) -> &'static str;
     fn identifies_process(&self, command: &str) -> bool;
     fn launch(&self, native_session_id: Option<&str>) -> LaunchSpec;
@@ -110,10 +123,10 @@ impl AgentAdapter for CodexAdapter {
         ".codex/hooks.json"
     }
 
-    /// Measured against a real `~/.codex/hooks.json` (Codex CLI 0.128 and
-    /// 0.147): Codex fires `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
-    /// `PermissionRequest`, `PostToolUse`, `Stop`, `SubagentStart` and
-    /// `SubagentStop`.
+    /// Measured against a real `~/.codex/hooks.json` and checked against the
+    /// Codex CLI 0.148 hook contract: Codex fires `SessionStart`,
+    /// `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`,
+    /// `PostToolUse`, `Stop`, `SubagentStart` and `SubagentStop`.
     ///
     /// Two events Claude Code has are absent from that surface and are
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
@@ -131,11 +144,16 @@ impl AgentAdapter for CodexAdapter {
             "PostToolUse",
             "SubagentStop",
             "Stop",
+            "SessionEnd",
         ]
     }
 
     fn hook_trust_guidance(&self) -> &'static str {
         "Codex will review the exact hook hash; approve it in Codex. This installer never edits or bypasses hook trust state."
+    }
+
+    fn hook_timeout_seconds(&self, event: &str) -> u64 {
+        if event == "SessionEnd" { 3 } else { 5 }
     }
 
     fn identifies_process(&self, command: &str) -> bool {
@@ -152,6 +170,15 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str> {
+        let event = hook_event_name(payload)?;
+        let approval_effect = match event {
+            "PermissionRequest" => ApprovalEffect::Pending,
+            "PostToolUse" => ApprovalEffect::ResolveMatching,
+            "UserPromptSubmit" | "Stop" | "SessionEnd" | "SessionStart" => {
+                ApprovalEffect::ResolveAll
+            }
+            _ => ApprovalEffect::None,
+        };
         parse_common_hook(
             payload,
             &[
@@ -162,8 +189,10 @@ impl AgentAdapter for CodexAdapter {
                 // A subagent finishing says the parent is still mid-turn.
                 ("SubagentStop", v1::AgentLifecycleState::Working),
                 ("Stop", v1::AgentLifecycleState::Idle),
+                ("SessionEnd", v1::AgentLifecycleState::Idle),
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
+            approval_effect,
         )
     }
 }
@@ -246,12 +275,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
             } else {
                 v1::AgentLifecycleState::Unknown
             };
-            return Ok(parsed(payload, lifecycle));
+            return Ok(parsed(payload, lifecycle, ApprovalEffect::None));
         }
         if event == "Stop"
             && (nonempty(payload.get("background_tasks")) || nonempty(payload.get("session_crons")))
         {
-            return Ok(parsed(payload, v1::AgentLifecycleState::Working));
+            return Ok(parsed(
+                payload,
+                v1::AgentLifecycleState::Working,
+                ApprovalEffect::None,
+            ));
         }
         parse_common_hook(
             payload,
@@ -267,6 +300,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 ("StopFailure", v1::AgentLifecycleState::Idle),
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
+            ApprovalEffect::None,
         )
     }
 }
@@ -355,16 +389,22 @@ fn nonempty(value: Option<&Value>) -> bool {
 fn parse_common_hook(
     payload: &Value,
     mappings: &[(&str, v1::AgentLifecycleState)],
+    approval_effect: ApprovalEffect,
 ) -> Result<ParsedHook, &'static str> {
     let event = hook_event_name(payload)?;
     let lifecycle = mappings
         .iter()
         .find_map(|(candidate, lifecycle)| (*candidate == event).then_some(*lifecycle))
         .unwrap_or(v1::AgentLifecycleState::Unknown);
-    Ok(parsed(payload, lifecycle))
+    Ok(parsed(payload, lifecycle, approval_effect))
 }
 
-fn parsed(payload: &Value, lifecycle: v1::AgentLifecycleState) -> ParsedHook {
+fn parsed(
+    payload: &Value,
+    lifecycle: v1::AgentLifecycleState,
+    approval_effect: ApprovalEffect,
+) -> ParsedHook {
+    let event_name = hook_event_name(payload).unwrap_or_default();
     ParsedHook {
         native_session_id: payload
             .get("session_id")
@@ -374,7 +414,13 @@ fn parsed(payload: &Value, lifecycle: v1::AgentLifecycleState) -> ParsedHook {
             .to_owned(),
         lifecycle,
         authority_millis: HOOK_AUTHORITY_MILLIS,
-        event_name: hook_event_name(payload).unwrap_or_default().to_owned(),
+        event_name: event_name.to_owned(),
+        approval_key: payload
+            .get("approval_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        approval_effect,
     }
 }
 
@@ -456,11 +502,11 @@ mod tests {
         assert_eq!(descriptors.len(), 2);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
-        assert_eq!(codex.hook_events().len(), 7);
+        assert_eq!(codex.hook_events().len(), 8);
         assert_eq!(codex.descriptor(home, &observed[0].1).id, "codex");
         assert_eq!(
             codex.hook_command(Path::new("/opt/muxflow-host")),
-            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 3"
+            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 4"
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));
