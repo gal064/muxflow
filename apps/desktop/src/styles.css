@@ -305,6 +305,19 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 0; border-radius: var(--radius-control);
   background: transparent; color: inherit; text-align: left;
 }
+.agent-workspace-group { margin: 0 5px 5px; }
+.agent-workspace-heading {
+  display: flex; align-items: baseline; gap: 6px; min-width: 0;
+  margin: 3px 4px 1px; padding: 5px 0 3px;
+  border-bottom: 1px solid var(--chrome-hairline);
+  font-size: var(--type-label); font-weight: 600; color: var(--chrome-dim);
+}
+.agent-workspace-heading > span:first-child,
+.agent-session-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-workspace-host {
+  margin-left: auto; flex: 0 0 auto;
+  font-family: var(--font-mono); font-size: var(--type-meta); font-weight: 400; color: var(--chrome-faint);
+}
 .agent-button:hover:not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
 /* Reachable by keyboard, still clearly not actionable — see the note at the
    call site for why this is not `disabled`. */
@@ -313,6 +326,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   display: flex; align-items: center; gap: 6px; min-width: 0;
   font-size: 11.5px; font-weight: var(--weight-row); color: var(--chrome-ink);
 }
+.agent-icon { width: 13px; height: 13px; flex: 0 0 auto; color: var(--chrome-dim); }
+.agent-icon.codex { fill: currentColor; }
+.agent-icon.claude, .agent-icon.generic { fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.35; }
+.agent-icon.generic circle:nth-of-type(n+2) { fill: currentColor; stroke: none; }
+.agent-session-label { min-width: 0; }
 .agent-location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-tab { font-family: var(--font-mono); font-size: var(--type-label); font-weight: 400; color: var(--chrome-faint); }
 .agent-detail {

@@ -471,10 +471,11 @@ export function App() {
     snapshot,
     activeSessionId,
     agents: agentRuntime.agents,
+    adapters: agentRuntime.adapters,
     attentionByWorkspace: agentRuntime.rollups.byWorkspace,
     activeBranch: workspaceGit.status?.repository.headName,
     home,
-  }), [activeSessionId, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, snapshot, workspaceGit.status]);
+  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, snapshot, workspaceGit.status]);
   const agentRows = useMemo(() => {
     const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
     const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
@@ -484,12 +485,13 @@ export function App() {
       (record) => ({
         workspaceOrder: orderBySession.get(record.sessionId) ?? Number.MAX_SAFE_INTEGER,
         workspaceName: record.sessionName || "unknown workspace",
+        hostLabel,
         tabIndex: windowIndexById.get(record.windowId),
       }),
       (record) => Boolean(record.paneId) && paneIds.has(record.paneId),
       appState.shell.agentSort,
     );
-  }, [agentRuntime.agents, appState.shell.agentSort, sidebarRows, snapshot.panes, snapshot.windows]);
+  }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, sidebarRows, snapshot.panes, snapshot.windows]);
   const unread = useMemo(() => unreadCount(agentRows), [agentRows]);
 
   // Only in its own workspace's strip: a create-session placeholder has no
@@ -919,6 +921,7 @@ export function App() {
         agents={agentRows}
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}
+        compactWorkspaces={appState.shell.compactWorkspaces}
         canMutate={hostState.canMutate}
         commandScope={currentHostScope}
         hookNotice={agentHostSetup.notice}
