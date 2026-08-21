@@ -219,19 +219,21 @@ impl AgentRuntime {
             .as_ref()
             .map(|record| record.pending_approval_keys.clone())
             .unwrap_or_default();
-        let legacy_pending = previous_lifecycle == v1::AgentLifecycleState::Blocked
+        let legacy_pending = adapter_id == "codex"
+            && previous_lifecycle == v1::AgentLifecycleState::Blocked
             && pending_approval_keys.is_empty();
+        let approval_was_pending = legacy_pending || !pending_approval_keys.is_empty();
         let approval_resolved = if terminal_late {
             pending_approval_keys.clear();
             true
         } else {
             match parsed.approval_effect {
                 ApprovalEffect::Pending => {
-                    if !parsed.approval_key.is_empty()
-                        && !pending_approval_keys.contains(&parsed.approval_key)
-                    {
-                        pending_approval_keys.push(parsed.approval_key.clone());
-                    }
+                    // A PermissionRequest has no tool_use_id. Identical tools
+                    // in one turn therefore share a correlation digest, so
+                    // this is deliberately a multiset: one completion can
+                    // resolve only one observed request.
+                    pending_approval_keys.push(parsed.approval_key.clone());
                     false
                 }
                 ApprovalEffect::ResolveMatching => {
@@ -254,8 +256,7 @@ impl AgentRuntime {
                 ApprovalEffect::None => false,
             }
         };
-        let approval_pending = (previous_lifecycle == v1::AgentLifecycleState::Blocked
-            && !approval_resolved)
+        let approval_pending = (approval_was_pending && !approval_resolved)
             || parsed.approval_effect == ApprovalEffect::Pending;
         let lifecycle = if terminal_late {
             // `hook_terminal` means a terminal Stop was already committed.
@@ -273,8 +274,10 @@ impl AgentRuntime {
             "SessionStart" | "UserPromptSubmit"
         ) {
             false
-        } else if matches!(parsed.event_name.as_str(), "Stop" | "StopFailure")
-            && parsed.lifecycle == v1::AgentLifecycleState::Idle
+        } else if matches!(
+            parsed.event_name.as_str(),
+            "Stop" | "StopFailure" | "SessionEnd"
+        ) && parsed.lifecycle == v1::AgentLifecycleState::Idle
         {
             true
         } else {
