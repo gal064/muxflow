@@ -136,6 +136,25 @@ export function watchAtlasStaleness(paneId: string | undefined, addon: unknown):
   };
 }
 
+/**
+ * The shared atlas's invalidation count as one pane's addon currently reads it,
+ * or `undefined` when that pane has no registered addon or the addon no longer
+ * has the shape this reads.
+ *
+ * Sampled either side of a write by `paintTailProbe`: a count that moved across
+ * a slow paint is the atlas rebuilding mid-frame, which is one of the three
+ * things a slow paint can be. Same contract as the rest of this module — a
+ * private field read through optional chaining, silent when it is gone.
+ */
+export function readAtlasInvalidationCount(paneId: string): number | undefined {
+  for (const registration of registrations) {
+    if (registration.paneId !== paneId) continue;
+    const count = registration.subject?._renderer?._charAtlas?._requestClearModel;
+    if (typeof count === "number") return count;
+  }
+  return undefined;
+}
+
 /** Test seam. Resets the module to the state a fresh app launch starts in. */
 export function __resetAtlasProbeForTests(override?: Partial<AtlasProbeTimers>): void {
   if (handle !== undefined) timers.clearInterval(handle);

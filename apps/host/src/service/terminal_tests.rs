@@ -220,6 +220,7 @@ fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
             output_credit: &output_credit_clone,
             emission_order: &emission_order,
             topology_trigger: &TopologyOutputTrigger::default(),
+            read_started: std::time::Instant::now(),
         }
         .record("%1".into(), vec![b'O']);
     });
@@ -332,6 +333,7 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
             output_credit: &reader_credit,
             emission_order: &reader_emission_order,
             topology_trigger: &TopologyOutputTrigger::default(),
+            read_started: std::time::Instant::now(),
         }
         .record("%1".into(), vec![b'O']);
     });
@@ -1122,6 +1124,7 @@ fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
         output_credit: &output_credit,
         emission_order: &emission_order,
         topology_trigger: &TopologyOutputTrigger::default(),
+        read_started: std::time::Instant::now(),
     }
     .record("%1".into(), vec![b'o'; 64]);
 

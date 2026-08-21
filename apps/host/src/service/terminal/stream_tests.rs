@@ -99,6 +99,7 @@ impl Harness {
             output_credit: &self.output_credit,
             emission_order: &self.emission_order,
             topology_trigger: &self.topology_trigger,
+            read_started: std::time::Instant::now(),
             clipboard: &self.clipboard,
         }
     }
@@ -444,6 +445,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
             output_credit: &output_credit,
             emission_order: &emission_order,
             topology_trigger: &topology_trigger,
+            read_started: std::time::Instant::now(),
             clipboard: &clipboard,
         },
     );

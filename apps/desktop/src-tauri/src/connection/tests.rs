@@ -479,6 +479,7 @@ fn full_input_channel_does_not_block_shutdown_while_resize_flush_waits() {
             pane_id: "%1".into(),
             data: vec![1],
             epoch: 0,
+            enqueued_at: std::time::Instant::now(),
         })
         .unwrap();
     client.input_queue.lock().unwrap().sender = Some(dispatcher);
@@ -526,6 +527,7 @@ fn abandoned_input_barrier_cannot_consume_a_failed_write() {
             pane_id: "%1".into(),
             data: b"accepted".to_vec(),
             epoch: 0,
+            enqueued_at: std::time::Instant::now(),
         })
         .unwrap();
     let (abandoned_tx, abandoned_rx) = mpsc::sync_channel(1);

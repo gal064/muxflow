@@ -8,7 +8,8 @@ import { hostProfileId } from "../features/shell/types";
 import { useDesktopResumeRecovery } from "../features/shell/useDesktopResumeRecovery";
 import { TerminalEventHub } from "../features/terminal/TerminalEventHub";
 import { createEchoLagProbe } from "../features/terminal/echoLagProbe";
-import { fetchLinkStats, requestTerminalSeed, startTerminal, stopTerminal, terminalBridgeKey, terminalBridgeScope } from "../features/terminal/api";
+import { createInputLatencyReporter } from "../features/terminal/inputLatencyStats";
+import { fetchInputLatencyStats, fetchLinkStats, requestTerminalSeed, startTerminal, stopTerminal, terminalBridgeKey, terminalBridgeScope } from "../features/terminal/api";
 import { terminalStateCache } from "../features/terminal/TerminalStateCache";
 import { connectionReducer, denormalizeSnapshot, initialHostState } from "../state/connectionReducer";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
@@ -114,7 +115,25 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
    * link counters are read only once an outlier has already been decided, and
    * a failed read still leaves the lag itself in the journal.
    */
+  /**
+   * The distribution behind the outliers, one record per minute of typing.
+   *
+   * Lives beside the echo probe because it is the same measurement seen whole:
+   * the probe's completed round trips are its `endToEnd` segment, the send site
+   * and the pane's write callback are the two ends the app can time itself, and
+   * the native queue's own histogram is polled from here — where the live
+   * client id is — and drained into the same record.
+   */
+  const inputLatencyReporter = useMemo(() => createInputLatencyReporter({
+    recordIncident,
+    fetchRustHistogram: () => {
+      const currentClientId = clientIdRef.current;
+      return currentClientId ? fetchInputLatencyStats(currentClientId) : Promise.resolve(null);
+    },
+  }), []);
+  useEffect(() => () => inputLatencyReporter.dispose(), [inputLatencyReporter]);
   const echoLagProbe = useMemo(() => createEchoLagProbe({
+    onSample: (_paneId, lagMs) => inputLatencyReporter.sample("endToEnd", lagMs),
     onIncident: ({ kind, ...detail }) => {
       const currentClientId = clientIdRef.current;
       if (!currentClientId) {
@@ -124,7 +143,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
       void fetchLinkStats(currentClientId)
         .then((stats) => recordIncident(kind, stats ? { ...detail, ...stats } : detail));
     },
-  }), []);
+  }), [inputLatencyReporter]);
   useEffect(() => () => echoLagProbe.dispose(), [echoLagProbe]);
   const hub = useMemo(() => new TerminalEventHub(
     (paneId, reason) => {
@@ -417,7 +436,8 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
   return {
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
-    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, profileRecovery,
+    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, inputLatencyReporter,
+    profileRecovery,
     optimisticWindow,
     profiles, profilesHydrated, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,

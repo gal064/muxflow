@@ -34,8 +34,9 @@ use delivery_ack::{flush_delivery_ack, forfeit_delivery_charge};
 mod dispatch;
 mod operations;
 use dispatch::{
-    ClientInputDispatch, ClientInputQueue, INPUT_BYTE_BUDGET, INPUT_MESSAGE_BUDGET, ResizeQueue,
-    StopSignal, TerminalSize, run_client_input_dispatch, run_client_resize_dispatch,
+    ClientInputDispatch, ClientInputQueue, INPUT_BYTE_BUDGET, INPUT_LATENCY_BUCKETS,
+    INPUT_MESSAGE_BUDGET, ResizeQueue, StopSignal, TerminalSize, input_latency_bucket,
+    run_client_input_dispatch, run_client_resize_dispatch,
 };
 use operations::{Bound, OperationClaim, OperationLane, OperationRegistry};
 mod writer;
@@ -120,6 +121,17 @@ pub(crate) struct TerminalClient {
     /// a connection that has never read one. Journal-only, and written once per
     /// frame with a relaxed store so the read loop stays lock-free.
     last_host_frame_at: AtomicU64,
+    /// How long accepted input waited between `enqueue_input` and its bytes
+    /// reaching the bridge's stdin, bucketed by `INPUT_LATENCY_BUCKET_BOUNDS_MS`.
+    ///
+    /// Journal-only and lock-free: the input pump records one relaxed increment
+    /// per keystroke, and `input_latency_stats` drains the whole window by
+    /// swapping every counter to zero. The frontend owns the other three
+    /// segments of the same measurement — see `inputLatencyStats.ts`.
+    input_latency_buckets: [AtomicU64; INPUT_LATENCY_BUCKETS],
+    /// The largest queue time observed in the current window, in microseconds;
+    /// no bucket can recover it, and it is reported in whole milliseconds.
+    input_latency_max_micros: AtomicU64,
 }
 
 /// A process-wide monotonic base, so "when did the last frame arrive" fits in
@@ -161,12 +173,42 @@ impl TerminalClient {
             delivery_ack_serialization: Mutex::new(()),
             pending_delivery_ack: Mutex::new(None),
             last_host_frame_at: AtomicU64::new(0),
+            input_latency_buckets: [const { AtomicU64::new(0) }; INPUT_LATENCY_BUCKETS],
+            input_latency_max_micros: AtomicU64::new(0),
         }
     }
 
     pub(super) fn note_host_frame(&self) {
         self.last_host_frame_at
             .store(monotonic_millis(), Ordering::Relaxed);
+    }
+
+    /// One keystroke's queue time, from the input pump. Never blocks.
+    fn record_input_latency(&self, waited: Duration) {
+        let micros = waited.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.input_latency_buckets[input_latency_bucket(micros)].fetch_add(1, Ordering::Relaxed);
+        self.input_latency_max_micros
+            .fetch_max(micros, Ordering::Relaxed);
+    }
+
+    /// Reads the current window and starts a new one.
+    ///
+    /// Draining is the point: the frontend folds each window into one journal
+    /// record, so counts left behind would be reported again in the next one.
+    fn drain_input_latency(&self) -> InputLatencyStats {
+        InputLatencyStats {
+            bucket_counts: self
+                .input_latency_buckets
+                .iter()
+                .map(|bucket| bucket.swap(0, Ordering::AcqRel))
+                .collect(),
+            // Rounded up, so a window whose slowest keystroke queued for 300 µs
+            // reports 1 ms rather than a zero that reads as "no samples".
+            max_ms: self
+                .input_latency_max_micros
+                .swap(0, Ordering::AcqRel)
+                .div_ceil(1_000),
+        }
     }
 
     fn start_dispatchers(self: &Arc<Self>, client_id: &str) -> Result<(), String> {
@@ -273,6 +315,9 @@ impl TerminalClient {
                         pane_id,
                         data,
                         epoch: self.input_epoch.load(Ordering::Acquire),
+                        // The accepted path only: refused bytes never queued,
+                        // so they have no queue time to measure.
+                        enqueued_at: Instant::now(),
                     })
                     .map_err(|error| match error {
                         mpsc::TrySendError::Full(_) => {
@@ -900,6 +945,33 @@ pub fn terminal_link_stats(
         acked_records: acked.records,
         ms_since_last_host_event: monotonic_millis().saturating_sub(last_frame_at),
     })
+}
+
+/// One window of native input-queue latency, for the journal.
+///
+/// `bucket_counts` is one count per `INPUT_LATENCY_BUCKET_BOUNDS_MS` entry, in
+/// that order; the frontend reads them with the same bounds and turns the pair
+/// into the `rustQueue` segment of a single `input.latency` record. Reading
+/// drains, so each count is reported exactly once.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputLatencyStats {
+    bucket_counts: Vec<u64>,
+    max_ms: u64,
+}
+
+/// Reads *and resets* this connection's input-queue histogram.
+///
+/// Never fails: this is diagnostics polled on a timer while the app may already
+/// be reconnecting, and a client that has gone away is simply a window with
+/// nothing in it. `None` (null in the webview) means "no stats", exactly as
+/// `fetchLinkStats` treats its own failure.
+#[tauri::command]
+pub fn input_latency_stats(
+    client_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Option<InputLatencyStats> {
+    Some(get_client(&clients, &client_id).ok()?.drain_input_latency())
 }
 
 fn get_client(
