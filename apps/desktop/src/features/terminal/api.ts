@@ -8,6 +8,7 @@ import type { WireGitEvent } from "../git/api";
 import type { WireAgentEvent, WireAgentSnapshot } from "../agents/api";
 import type { OperationRecorder } from "../../perf/operations";
 import { copyTerminalBytes, ownTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
+import type { RustInputLatencyHistogram } from "./inputLatencyStats";
 
 interface SequencedTerminalEvent {
   sequence: number;
@@ -811,6 +812,21 @@ export interface TerminalLinkStats {
 export async function fetchLinkStats(clientId: string): Promise<TerminalLinkStats | null> {
   try {
     return await invoke<TerminalLinkStats>("terminal_link_stats", { clientId });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads and drains the native input queue's latency histogram.
+ *
+ * Same contract as `fetchLinkStats`: unmeasured, never rejecting, `null` when
+ * the stats are unavailable. The native command drains what it returns, so a
+ * caller that discards the answer discards that window's counts.
+ */
+export async function fetchInputLatencyStats(clientId: string): Promise<RustInputLatencyHistogram | null> {
+  try {
+    return await invoke<RustInputLatencyHistogram | null>("input_latency_stats", { clientId });
   } catch {
     return null;
   }

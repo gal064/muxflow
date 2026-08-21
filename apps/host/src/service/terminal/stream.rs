@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc,
     },
+    time::Instant,
 };
 
 use tmux_agent_protocol::v1;
@@ -109,7 +110,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
     let mut state = StreamState::new(&pane_ids, flow);
     let mut buffer = [0_u8; 64 * 1024];
     let mut pending_output = PendingOutput::default();
-    let runtime = || StreamRuntime {
+    let runtime = |read_started: Instant| StreamRuntime {
         writer: &writer,
         sender: &event_tx,
         overflowed: &overflowed,
@@ -119,11 +120,18 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         output_credit: &output_credit,
         emission_order: &emission_order,
         topology_trigger: &topology_trigger,
+        read_started,
     };
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(length) => {
+                // One timestamp for the whole iteration, taken the instant the
+                // bytes are in hand. Every `%output` record parsed below became
+                // available to this daemon at exactly this moment, so one
+                // reading covers them all and the loop pays a single clock read
+                // per 64 KiB rather than one per record.
+                let read_started = Instant::now();
                 while let Ok(control) = controls.try_recv() {
                     state.apply_control(control);
                 }
@@ -132,18 +140,18 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                     match record {
                         Ok(ControlRecord::Output { pane_id, data }) => {
                             for output in pending_output.push(pane_id, data) {
-                                state.handle(output, runtime());
+                                state.handle(output, runtime(read_started));
                             }
                         }
                         Ok(record) => {
                             if let Some(output) = pending_output.take() {
-                                state.handle(output, runtime());
+                                state.handle(output, runtime(read_started));
                             }
-                            state.handle(record, runtime());
+                            state.handle(record, runtime(read_started));
                         }
                         Err(error) => {
                             if let Some(output) = pending_output.take() {
-                                state.handle(output, runtime());
+                                state.handle(output, runtime(read_started));
                             }
                             emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
                             state.resnapshot_all(&writer);
@@ -155,7 +163,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                 // sustained pane flood becomes roughly one sequencer entry per
                 // read while a lone keystroke echo is still published now.
                 if let Some(output) = pending_output.take() {
-                    state.handle(output, runtime());
+                    state.handle(output, runtime(read_started));
                 }
             }
             Err(_) => break,
@@ -301,6 +309,10 @@ struct StreamRuntime<'a> {
     output_credit: &'a OutputCredit,
     emission_order: &'a Arc<Mutex<()>>,
     topology_trigger: &'a TopologyOutputTrigger,
+    /// When the control-stream read that produced this record returned. Carried
+    /// only so the output leg — read to sequencer admission — can be measured
+    /// where it ends, which is inside `OutputEmission::record`.
+    read_started: Instant,
 }
 
 impl StreamState {
@@ -339,6 +351,7 @@ impl StreamState {
             output_credit,
             emission_order,
             topology_trigger,
+            read_started,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             return;
@@ -375,6 +388,7 @@ impl StreamState {
                     output_credit,
                     emission_order,
                     topology_trigger,
+                    read_started,
                 }
                 .record(pane_id, data),
             },
@@ -432,6 +446,7 @@ impl StreamState {
                     output_credit,
                     emission_order,
                     topology_trigger,
+                    read_started,
                 },
             ),
             ControlRecord::Error { tag, arguments } => {
@@ -629,6 +644,9 @@ impl StreamState {
             // Seed and replay emission below is a reconnect artefact, not fresh
             // pane activity, so it deliberately does not feed the trigger.
             topology_trigger: _,
+            // Same reason: a seed's latency is a reconnect cost, not the echo
+            // leg the output measurement is about.
+            read_started: _,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             self.command_block = CommandBlock::None;
