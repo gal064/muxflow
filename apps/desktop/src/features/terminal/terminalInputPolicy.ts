@@ -48,7 +48,6 @@ export async function copyCompletedTerminalSelection(
 }
 
 interface CopyOnSelectOptions {
-  container: HTMLElement;
   renderer: Pick<TerminalRenderer, "getSelection" | "hasSelection" | "onSelectionChange">;
   enabled: () => boolean;
   write: (text: string) => void | Promise<void>;
@@ -56,55 +55,17 @@ interface CopyOnSelectOptions {
 }
 
 /**
- * Copies only a selection changed by the pointer gesture that just ended.
- *
- * Looking only at `hasSelection()` on mouseup is insufficient: xterm retains a
- * prior selection across several unrelated clicks, which could overwrite a
- * newer clipboard value. Its selection-change event is the authoritative
- * distinction between such a click and a gesture that finalized selection.
+ * Copies xterm's current non-empty selection whenever xterm says it changed.
+ * A click that merely leaves an old selection in place emits no change; a
+ * click that clears it is rejected by `copyCompletedTerminalSelection`.
  */
 export function installTerminalCopyOnSelect({
-  container,
   renderer,
   enabled,
   write,
   onError,
 }: CopyOnSelectOptions): () => void {
-  const ownerDocument = container.ownerDocument;
-  let gestureActive = false;
-  let selectionChanged = false;
-  let disposed = false;
-
-  const selectionDisposable = renderer.onSelectionChange(() => {
-    if (gestureActive) selectionChanged = true;
+  return renderer.onSelectionChange(() => {
+    void copyCompletedTerminalSelection(renderer, enabled(), write).catch(onError);
   });
-  const finishGesture = () => {
-    ownerDocument.removeEventListener("mouseup", finishGesture, true);
-    const completedGesture = gestureActive;
-    // xterm completes its pointer handling in this same mouseup dispatch.
-    queueMicrotask(() => {
-      const shouldCopy = completedGesture && selectionChanged;
-      gestureActive = false;
-      selectionChanged = false;
-      if (!shouldCopy) return;
-      if (disposed) return;
-      void copyCompletedTerminalSelection(renderer, enabled(), write).catch(onError);
-    });
-  };
-  const beginGesture = (event: MouseEvent) => {
-    if (event.button !== 0 && event.button !== 2) return;
-    ownerDocument.removeEventListener("mouseup", finishGesture, true);
-    gestureActive = true;
-    selectionChanged = false;
-    ownerDocument.addEventListener("mouseup", finishGesture, true);
-  };
-
-  container.addEventListener("mousedown", beginGesture, true);
-  return () => {
-    disposed = true;
-    gestureActive = false;
-    container.removeEventListener("mousedown", beginGesture, true);
-    ownerDocument.removeEventListener("mouseup", finishGesture, true);
-    selectionDisposable();
-  };
 }
