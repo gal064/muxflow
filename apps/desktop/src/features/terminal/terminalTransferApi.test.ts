@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { TauriTerminalTransferClient, writeNativeTerminalClipboard } from "./terminalTransferApi";
+import {
+  TauriTerminalTransferClient,
+  writeNativeTerminalClipboard,
+  writeTerminalApplicationClipboard,
+} from "./terminalTransferApi";
 import type { TerminalTransferScope } from "./terminalTransfers";
 
 const channels = vi.hoisted(() => [] as Array<{ onmessage?: (value: unknown) => void }>);
@@ -31,14 +35,24 @@ describe("TauriTerminalTransferClient", () => {
     expect(invoke).toHaveBeenCalledTimes(1);
   });
 
-  it("serializes clipboard writes so an older worker cannot finish last", async () => {
+  it("gates terminal-application clipboard requests behind explicit opt-in", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await expect(writeTerminalApplicationClipboard(false, "untrusted remote text")).resolves.toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+    await expect(writeTerminalApplicationClipboard(true, "selected remote text")).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith("write_native_terminal_clipboard", { text: "selected remote text" });
+  });
+
+  it("keeps at most one pending clipboard write and applies the newest text", async () => {
     let finishFirst: (() => void) | undefined;
     vi.mocked(invoke)
       .mockImplementationOnce(() => new Promise<void>((resolve) => { finishFirst = resolve; }))
       .mockResolvedValueOnce(undefined);
 
     const first = writeNativeTerminalClipboard("older selection");
-    const second = writeNativeTerminalClipboard("newest selection");
+    const skipped = writeNativeTerminalClipboard("intermediate selection");
+    const newest = writeNativeTerminalClipboard("newest selection");
+    expect(skipped).toBe(newest);
     await Promise.resolve();
     await Promise.resolve();
     expect(invoke).toHaveBeenCalledTimes(1);
@@ -46,8 +60,10 @@ describe("TauriTerminalTransferClient", () => {
 
     finishFirst?.();
     await first;
-    await second;
+    await skipped;
+    await newest;
     expect(invoke).toHaveBeenNthCalledWith(2, "write_native_terminal_clipboard", { text: "newest selection" });
+    expect(invoke).toHaveBeenCalledTimes(2);
   });
 
   it("uses the tokenized preflight command and resolves only its terminal scoped event", async () => {

@@ -128,6 +128,8 @@ pub struct ShellPreferences {
     #[serde(default)]
     pub copy_on_select: bool,
     #[serde(default)]
+    pub terminal_application_clipboard: bool,
+    #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
 }
 
@@ -536,6 +538,7 @@ mod tests {
                 compact_workspaces: true,
                 terminal_screen_reader: false,
                 copy_on_select: false,
+                terminal_application_clipboard: false,
                 window_geometry: Some(WindowGeometry {
                     x: 20,
                     y: 30,
@@ -666,6 +669,7 @@ mod tests {
                 && value.shell.compact_workspaces
                 && value.shell.terminal_screen_reader
                 && value.shell.copy_on_select
+                && value.shell.terminal_application_clipboard
         );
         assert!(value.shell.window_geometry.is_some());
         assert_eq!(

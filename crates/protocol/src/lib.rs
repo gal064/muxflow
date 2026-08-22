@@ -122,6 +122,9 @@ pub const CAP_TERMINAL_OUTPUT_CREDIT: u64 = 1 << 14;
 /// that passed version checks but predated this operation would connect
 /// cleanly and then fail every file open with an unknown-operation error.
 pub const CAP_FILE_STREAM: u64 = 1 << 15;
+/// Resolves explicit terminal-output paths against the authoritative pane cwd.
+/// Required so a desktop cannot offer operation 46 to a helper that predates it.
+pub const CAP_TERMINAL_FILE_RESOLUTION: u64 = 1 << 16;
 pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_ORDERED_EVENTS
     | CAP_CANCELLATION
@@ -137,10 +140,11 @@ pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_AGENTS
     | CAP_TERMINAL_UPLOAD
     | CAP_TERMINAL_OUTPUT_CREDIT
-    | CAP_FILE_STREAM;
+    | CAP_FILE_STREAM
+    | CAP_TERMINAL_FILE_RESOLUTION;
 
 /// Every required capability, with the name a refusal reports it by.
-const CAPABILITY_NAMES: [(u64, &str); 16] = [
+const CAPABILITY_NAMES: [(u64, &str); 17] = [
     (CAP_SNAPSHOTS, "snapshots"),
     (CAP_ORDERED_EVENTS, "orderedEvents"),
     (CAP_CANCELLATION, "cancellation"),
@@ -157,6 +161,7 @@ const CAPABILITY_NAMES: [(u64, &str); 16] = [
     (CAP_TERMINAL_UPLOAD, "terminalUpload"),
     (CAP_TERMINAL_OUTPUT_CREDIT, "terminalOutputCredit"),
     (CAP_FILE_STREAM, "fileStream"),
+    (CAP_TERMINAL_FILE_RESOLUTION, "terminalFileResolution"),
 ];
 
 /// Which required capabilities `advertised` does not carry.
@@ -182,6 +187,61 @@ pub fn capability_names(mask: u64) -> Vec<&'static str> {
         named.push("unknown");
     }
     named
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostContractError {
+    ProtocolMajor { advertised: u32, required: u32 },
+    ReadOnly(String),
+    MissingCapabilities(u64),
+}
+
+impl std::fmt::Display for HostContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProtocolMajor {
+                advertised,
+                required,
+            } => {
+                write!(
+                    formatter,
+                    "host protocol major {advertised} does not match required {required}"
+                )
+            }
+            Self::ReadOnly(reason) if reason.is_empty() => {
+                formatter.write_str("host bridge is read-only")
+            }
+            Self::ReadOnly(reason) => write!(formatter, "host bridge is read-only: {reason}"),
+            Self::MissingCapabilities(mask) => write!(
+                formatter,
+                "host helper is missing required capabilities: {}",
+                capability_names(*mask).join(", "),
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HostContractError {}
+
+/** The common writable-host admission contract for control and bulk lanes. */
+pub fn validate_host_contract(
+    envelope_major: u32,
+    hello: &v1::ServerHello,
+) -> Result<(), HostContractError> {
+    if envelope_major != PROTOCOL_MAJOR {
+        return Err(HostContractError::ProtocolMajor {
+            advertised: envelope_major,
+            required: PROTOCOL_MAJOR,
+        });
+    }
+    if hello.read_only {
+        return Err(HostContractError::ReadOnly(hello.incompatibility.clone()));
+    }
+    let missing = missing_host_capabilities(hello.capabilities);
+    if missing != 0 {
+        return Err(HostContractError::MissingCapabilities(missing));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Error)]

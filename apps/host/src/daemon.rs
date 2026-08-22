@@ -1,12 +1,13 @@
 use std::{
     fs,
-    io::ErrorKind,
-    os::unix::fs::{FileTypeExt, PermissionsExt},
-    path::PathBuf,
+    io::{ErrorKind, Read},
+    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{Context, bail};
+use serde::Deserialize;
 use tokio::{
     net::{UnixListener, UnixStream},
     sync::mpsc,
@@ -16,7 +17,7 @@ use tokio::{
 use tmux_agent_protocol::{
     PROTOCOL_MAJOR, envelope, read_frame,
     v1::{self, envelope::Payload},
-    write_frame,
+    validate_host_contract, write_frame,
 };
 
 use crate::{
@@ -238,6 +239,73 @@ pub async fn stop(socket_path: PathBuf) -> anyhow::Result<()> {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonMetadata {
+    pid: u32,
+    process_start_time: u64,
+    executable: PathBuf,
+}
+
+/**
+ * Retires a daemon that cannot speak the current cooperative-shutdown protocol.
+ *
+ * The caller must already have established that the daemon is older. This
+ * function independently proves the PID still names the process recorded by
+ * the private runtime metadata before sending a bounded SIGTERM.
+ */
+pub async fn retire_verified(socket_path: &Path) -> anyhow::Result<()> {
+    let runtime = socket_path
+        .parent()
+        .context("daemon socket has no parent directory")?;
+    let metadata_path = runtime.join("daemon.json");
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&metadata_path)
+        .context("open daemon metadata without following links")?;
+    let file_metadata = file.metadata().context("inspect daemon metadata")?;
+    if !file_metadata.file_type().is_file()
+        || file_metadata.uid() != unsafe { libc::geteuid() }
+        || file_metadata.mode() & 0o077 != 0
+    {
+        bail!("refusing unsafe daemon metadata");
+    }
+    let mut encoded = Vec::new();
+    file.by_ref().take(16 * 1024).read_to_end(&mut encoded)?;
+    let recorded: DaemonMetadata =
+        serde_json::from_slice(&encoded).context("decode daemon metadata")?;
+    let live_start =
+        process_start_time(recorded.pid).context("verify daemon process start time")?;
+    let live_executable = process_executable(recorded.pid).context("verify daemon executable")?;
+    if live_start != recorded.process_start_time || live_executable != recorded.executable {
+        bail!("daemon metadata no longer identifies the live process");
+    }
+
+    let pid = i32::try_from(recorded.pid).context("daemon PID exceeds pid_t")?;
+    // SAFETY: the PID's start time and executable were matched immediately
+    // above; SIGTERM requests the daemon's ordinary process cleanup path.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("terminate verified daemon");
+    }
+    for _ in 0..100 {
+        match process_start_time(recorded.pid) {
+            Err(_) => {
+                return remove_if_stale_after_transport_error(
+                    socket_path,
+                    anyhow::anyhow!("retired daemon left a live endpoint"),
+                )
+                .await;
+            }
+            Ok(start) if start != recorded.process_start_time => {
+                bail!("daemon PID was reused while waiting for retirement");
+            }
+            Ok(_) => sleep(Duration::from_millis(20)).await,
+        }
+    }
+    bail!("verified daemon did not exit after SIGTERM")
+}
+
 /// A dropped Unix listener can leave a full kernel listen backlog of queued
 /// connections that accept writes and then reset. Drain beyond Linux's common
 /// 128-entry default; a live endpoint keeps replenishing the queue and is never
@@ -283,13 +351,12 @@ pub async fn check(socket_path: PathBuf) -> anyhow::Result<()> {
     let frame = read_frame(&mut stream)
         .await?
         .context("daemon closed during handshake")?;
-    if frame.protocol_major != PROTOCOL_MAJOR {
-        bail!("daemon protocol major is incompatible");
-    }
+    let envelope_major = frame.protocol_major;
     let Some(Payload::ServerHello(hello)) = frame.payload else {
         bail!("daemon did not return ServerHello");
     };
-    if hello.read_only || hello.helper_version != tmux_agent_protocol::HELPER_VERSION {
+    validate_host_contract(envelope_major, &hello)?;
+    if hello.helper_version != tmux_agent_protocol::HELPER_VERSION {
         bail!("daemon helper version handshake is incompatible");
     }
     println!(
@@ -372,6 +439,42 @@ fn process_start_time(pid: u32) -> anyhow::Result<u64> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn process_start_time(_pid: u32) -> anyhow::Result<u64> {
     bail!("process start-time identity is unsupported on this platform")
+}
+
+#[cfg(target_os = "linux")]
+fn process_executable(pid: u32) -> anyhow::Result<PathBuf> {
+    let path = fs::read_link(format!("/proc/{pid}/exe"))?;
+    let displayed = path.to_string_lossy();
+    Ok(PathBuf::from(
+        displayed.strip_suffix(" (deleted)").unwrap_or(&displayed),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn process_executable(pid: u32) -> anyhow::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut bytes = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `bytes` is writable for its declared length and proc_pidpath
+    // writes at most that many bytes for the exact PID.
+    let written = unsafe {
+        libc::proc_pidpath(
+            i32::try_from(pid).context("process ID exceeds Darwin pid_t")?,
+            bytes.as_mut_ptr().cast(),
+            u32::try_from(bytes.len()).context("process path buffer exceeds u32")?,
+        )
+    };
+    if written <= 0 {
+        return Err(std::io::Error::last_os_error()).context("inspect Darwin process executable");
+    }
+    bytes.truncate(usize::try_from(written).context("negative Darwin process path length")?);
+    Ok(PathBuf::from(OsString::from_vec(bytes)))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_executable(_pid: u32) -> anyhow::Result<PathBuf> {
+    bail!("process executable identity is unsupported on this platform")
 }
 
 #[cfg(test)]

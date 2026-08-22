@@ -207,7 +207,8 @@ pub fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             v1::Operation::TerminalInput,
             v1::Request {
                 scope: pane.id.clone(),
-                data: b"printf x >> /tmp/muxflow-phase1-input-count # PHASE1_PROTOCOL_INPUT_OK\r".to_vec(),
+                data: b"printf x >> /tmp/muxflow-phase1-input-count # PHASE1_PROTOCOL_INPUT_OK\r"
+                    .to_vec(),
                 ..Default::default()
             },
         )?;

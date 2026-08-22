@@ -362,10 +362,7 @@ mod tests {
         fs::write(&pointer, daemon_runtime.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(
             candidate_runtime_dirs(hook_environment, 4242),
-            vec![
-                PathBuf::from("/run/user/4242/muxflow"),
-                daemon_runtime
-            ],
+            vec![PathBuf::from("/run/user/4242/muxflow"), daemon_runtime],
             "the recorded directory must end the list"
         );
         fs::remove_dir_all(home).unwrap();

@@ -2,7 +2,7 @@ import type { Pane, Session, TmuxSnapshot, Window } from "../../app/types";
 import { compareAgents, displayState } from "../agents/selectors";
 import { needsAttention } from "../agents/agentsList";
 import { agentSessionLabel } from "../agents/agentLabels";
-import type { AgentAdapterDescriptor, AgentAttentionRollup, AgentDisplayState, AgentRecord } from "../agents/types";
+import type { AgentAdapterDescriptor, AgentAdapterId, AgentAttentionRollup, AgentDisplayState, AgentRecord } from "../agents/types";
 import { orderedSessions } from "../shell/model";
 
 /**
@@ -39,6 +39,7 @@ export interface WorkspaceRowModel {
 /** One agent line on a workspace row. */
 export interface WorkspaceRowAgent {
   id: string;
+  adapterId: AgentAdapterId;
   name: string;
   state: AgentDisplayState;
 }
@@ -81,7 +82,12 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
       attention,
       unread: unreadBySession.get(session.id) ?? 0,
       working: (rollup?.working ?? 0) > 0,
-      agents: shown.map((agent) => ({ id: agent.id, name: agentSessionLabel(agent, inputs.adapters ?? []), state: displayState(agent) })),
+      agents: shown.map((agent) => ({
+        id: agent.id,
+        adapterId: agent.adapterId,
+        name: agentSessionLabel(agent, inputs.adapters ?? []),
+        state: displayState(agent),
+      })),
       agentOverflow: (here?.total ?? 0) - shown.length,
       branch: active ? inputs.activeBranch : undefined,
       path: abbreviateHome(sessionPath(inputs.snapshot, session.id), inputs.home),

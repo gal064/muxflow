@@ -476,9 +476,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
     };
     unscoped_verb("install");
     assert!(
-        fs::read_to_string(&settings)
-            .unwrap()
-            .contains("muxflow"),
+        fs::read_to_string(&settings).unwrap().contains("muxflow"),
         "the unscoped install did not wire the adapter that is present"
     );
     let removed = unscoped_verb("uninstall");
@@ -494,9 +492,7 @@ fn cli_reports_installs_and_reverses_wiring_against_an_isolated_home() {
         "unscoped uninstall did nothing: {removed}"
     );
     assert!(
-        !fs::read_to_string(&settings)
-            .unwrap()
-            .contains("muxflow"),
+        !fs::read_to_string(&settings).unwrap().contains("muxflow"),
         "a managed entry survived an unscoped uninstall"
     );
     fs::remove_dir_all(home).unwrap();

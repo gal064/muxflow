@@ -14,14 +14,21 @@
 /**
  * Above the point where an echo stops feeling instant on a remote link.
  *
- * Lowered from 400 once the histograms established the healthy baseline
- * (16-32ms typical): the open question moved from "are there huge stalls"
- * to "which leg do the 100-300ms spikes live in", and a spike can only be
- * attributed if it produces its own record with link context attached. The
- * per-pane incident interval below keeps the worst case to a few lines a
- * minute.
+ * It sat at 100 for a measurement campaign: the histograms had established the
+ * healthy baseline (16-32ms typical), and the open question was which leg the
+ * 100-300ms spikes lived in — a question only per-spike records with link
+ * context attached could answer. That campaign has concluded. Every leg
+ * measured flat during the spikes (desktop send, Rust queue, daemon, network,
+ * tmux), which attributes them to the agent process's own repaint while it is
+ * busy — not to anything this app can fix or needs to keep watching. So the
+ * threshold returns to "worth a journal line" territory at 250.
+ *
+ * Nothing is lost below it: every echo that comes back still reaches `onSample`
+ * and lands in the `inputLatencyStats` histograms, so the full latency
+ * distribution is intact. What 250 drops is only the per-spike journal lines
+ * for a range now proven benign.
  */
-export const ECHO_LAG_THRESHOLD_MS = 100;
+export const ECHO_LAG_THRESHOLD_MS = 250;
 
 /**
  * When a pending measurement is abandoned.

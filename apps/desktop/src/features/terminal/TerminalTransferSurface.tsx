@@ -1,5 +1,4 @@
-import { getCurrentWebview, type DragDropEvent as DragDropPayload } from "@tauri-apps/api/webview";
-import { useEffect, useId, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode, type RefObject } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import type { TerminalTransferClient, TerminalTransferProgress, TerminalTransferScope, UploadCollisionPolicy, UploadPreflight } from "./terminalTransfers";
 import {
@@ -16,7 +15,8 @@ import {
 import { canCancelTransfer, isTerminalTransferState, transferStateLabel } from "../transfers/transferState";
 import { SurfaceError } from "../../ui/SurfaceError";
 import { useTerminalTransferRegistry, type TerminalTransferRegistry } from "./terminalTransferRegistry";
-import { readInternalPathDrop } from "./internalPathDrag";
+import { consumeNativeInternalPathDrop, readInternalPathDrop } from "./internalPathDrag";
+import { registerNativeDragDropTarget } from "./nativeDragDropCoordinator";
 
 interface PendingReview {
   items: UploadPreflight[];
@@ -57,9 +57,18 @@ export interface TerminalTransferSurfaceController {
 export function pointIsInside(
   element: Pick<HTMLElement, "getBoundingClientRect">,
   point: { x: number; y: number },
+  hitTest?: (x: number, y: number) => Element | null,
 ): boolean {
   const rect = element.getBoundingClientRect();
-  return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+  // Half-open edges assign a split boundary to exactly one adjacent pane.
+  if (point.x < rect.left || point.x >= rect.right || point.y < rect.top || point.y >= rect.bottom) return false;
+  // Native events are window-global. When panes overlap during layout, only
+  // the surface containing the topmost DOM hit owns the event.
+  const ownerDocument = (element as unknown as Pick<HTMLElement, "ownerDocument">).ownerDocument;
+  const resolveHit = hitTest ?? ownerDocument?.elementFromPoint?.bind(ownerDocument);
+  const hit = resolveHit?.(point.x, point.y) ?? null;
+  const owner = element as unknown as Pick<HTMLElement, "contains">;
+  return !hit || typeof owner.contains !== "function" || owner.contains(hit);
 }
 
 export function basename(path: string): string {
@@ -319,36 +328,40 @@ export function TerminalTransferSurface({
   // rather than during render: a render React discards must not leave a handler
   // behind that closes over state it threw away.
   const nativeDragDropRef = useRef<{
-    handle(payload: DragDropPayload): void;
+    drop(paths: string[]): void;
     fail(reason: unknown): void;
-  }>({ handle: () => undefined, fail: () => undefined });
-  const handleNativeDragDrop = (payload: DragDropPayload) => {
-    if (!target.current) return;
-    if (payload.type === "leave") return setDragging(false);
-    // `enter` fires once, when the cursor crosses the *window*, so a drag that
-    // begins over one pane and ends over another would light up the pane it
-    // entered and leave the pane it landed on dark. Every position the drag
-    // reports is re-tested, so the highlight follows the cursor.
-    const inside = pointIsInside(target.current, payload.position);
-    if (payload.type === "enter" || payload.type === "over") return setDragging(inside);
-    setDragging(false);
-    if (inside) void acceptPaths(payload.paths).catch(fail);
+  }>({ drop: () => undefined, fail: () => undefined });
+  const handleNativeDrop = (paths: string[]) => {
+    if (paths.length === 0) {
+      const internal = consumeNativeInternalPathDrop(scope && {
+        hostProfileId: scope.hostProfileId,
+        serverIdentity: scope.serverIdentity,
+      });
+      if (internal.kind === "accepted") {
+        setError(undefined);
+        onPaste(internal.shellText);
+      } else if (internal.kind === "handled") {
+        return;
+      } else if (internal.kind === "rejected") {
+        fail(new Error(internal.reason));
+      } else {
+        fail(new Error("The WebView did not provide file paths."));
+      }
+      return;
+    }
+    void acceptPaths(paths).catch(fail);
   };
-  useEffect(() => {
-    nativeDragDropRef.current = { handle: handleNativeDragDrop, fail };
+  useLayoutEffect(() => {
+    nativeDragDropRef.current = { drop: handleNativeDrop, fail };
   });
 
   useEffect(() => {
-    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void getCurrentWebview().onDragDropEvent((event) => {
-      if (!disposed) nativeDragDropRef.current.handle(event.payload);
-    }).then((release) => {
-      if (disposed) release();
-      else unlisten = release;
-    }).catch((reason) => nativeDragDropRef.current.fail(reason));
-    return () => { disposed = true; unlisten?.(); };
+    return registerNativeDragDropTarget({
+      owns: (point) => Boolean(target.current && pointIsInside(target.current, point)),
+      setDragging,
+      drop: (paths) => nativeDragDropRef.current.drop(paths),
+      fail: (reason) => nativeDragDropRef.current.fail(reason),
+    });
   }, [target]);
 
   const onPasteCapture = (event: ClipboardEvent<HTMLElement>) => {
@@ -436,12 +449,16 @@ export function TerminalTransferSurface({
   const onDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     setDragging(false);
-    const internal = readInternalPathDrop(event.dataTransfer, scope?.serverIdentity);
+    const internal = readInternalPathDrop(event.dataTransfer, scope && {
+      hostProfileId: scope.hostProfileId,
+      serverIdentity: scope.serverIdentity,
+    });
     if (internal.kind === "accepted") {
       setError(undefined);
       onPaste(internal.shellText);
       return;
     }
+    if (internal.kind === "handled") return;
     if (internal.kind === "rejected") {
       fail(new Error(internal.reason));
       return;

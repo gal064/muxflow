@@ -26,7 +26,6 @@ import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../f
 import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
 import { emitTestNotification, notificationPermissionStatus } from "../features/agents/notifications";
 import { TauriFileWorkspaceClient } from "../features/files/api";
-import { editorFlushRegistry } from "../features/files/editorFlushRegistry";
 import { reconcileDownloadStatus, type ActiveDownloadStatus } from "../features/files/downloadStatus";
 import { ignoredPathsFromStatus } from "../features/files/ignoredPaths";
 import type { FileEntry } from "../features/files/types";
@@ -47,7 +46,6 @@ import {
   PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
 } from "../features/shell/types";
 import {
-  agentPresenceIsCurrent,
   combineWorkspaceTabs,
   closeAppTab,
   mountedAppTabIds,
@@ -55,11 +53,11 @@ import {
   openFileTab,
   openGitDiffTab,
   pinAppTab,
+  retirePendingTab,
   selectableTabs,
   selectAppTab,
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
-  tabsEligibleAtBulkCloseCommit,
   tabsToCloseOthers,
   tabsToCloseNonAgent,
   tabsToCloseRight,
@@ -73,7 +71,6 @@ import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
 import type { ConnectionSpec, HostProfile, Pane } from "./types";
-import { currentTerminalFilePane } from "./terminalFileOpenRoute";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
 import { useAppRecoveryController } from "./useAppRecoveryController";
@@ -92,6 +89,8 @@ import { useMissingHelperRecovery } from "./useMissingHelperRecovery";
 import { useAppFileActions } from "./useAppFileActions";
 import { AppNoticeLayer } from "./AppNoticeLayer";
 import { AppRightPanel } from "./AppRightPanel";
+import { useBulkTabClose } from "./useBulkTabClose";
+import { useTerminalFileOpen } from "./useTerminalFileOpen";
 
 const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then((module) => ({ default: module.AppTabSurface })));
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
@@ -186,6 +185,8 @@ export function App() {
   const agentClient = useMemo(() => new TauriAgentClient(), []);
   const fileClient = useMemo(() => new TauriFileWorkspaceClient(), []);
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
+  const platform = useMemo(() => currentPlatform(), []);
+  const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus, platform);
   // One shared observation per repository, for the sidebar and every diff tab.
   const gitRepositories = useMemo(() => new GitRepositoryStore(gitClient), [gitClient]);
   // The connection controller reports a handshake failure; what to do about one
@@ -196,6 +197,7 @@ export function App() {
     agentClient,
     fileClient,
     gitClient,
+    terminalApplicationClipboardEnabled: appState.shell.terminalApplicationClipboard,
     onHandshakeFailure: (failed) => onHandshakeFailure.current(failed),
     setStatus,
   });
@@ -209,7 +211,6 @@ export function App() {
     setProfileRecovery, setProfiles, setSelectedProfileId, setSshConfigPath, setSshTarget,
     snapshot, snapshotRef, sshConfigPath, sshTarget, terminalEpoch, windows,
   } = connectionController;
-  const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus);
   const [helperState, dispatchHelper] = useReducer(helperUpgradeReducer, initialHelperUpgradeState);
   const [profileResetConfirmation, setProfileResetConfirmation] = useState(false);
   const [hostDeleteConfirmation, setHostDeleteConfirmation] = useState<HostProfile>();
@@ -252,7 +253,6 @@ export function App() {
   const historyStep = useRef(false);
   const controllers = useRef(new Map<string, TerminalPaneController>());
   const lastSlowSendAt = useRef(new Map<string, number>());
-  const platform = useMemo(() => currentPlatform(), []);
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
   const currentHelperConnectionKey = helperConnectionKey(connection);
   const terminalTransferClient = useMemo(() => new TauriTerminalTransferClient(), []);
@@ -509,6 +509,16 @@ export function App() {
   // session until its ack names one, and drawing it anywhere before that would
   // put it in the workspace being navigated away from.
   const pendingTabHere = pendingTab && pendingTab.sessionId === activeSessionId ? pendingTab : undefined;
+  // Where the placeholder actually retires, from the same window list the strip
+  // draws it against. Only for the workspace on screen: another workspace's
+  // window list is not in `windows`, so retiring its placeholder here would be
+  // retiring it on no evidence at all. The identity check keeps a create that
+  // started in the meantime — the second of two quick clicks — from being
+  // retired by the first one's snapshot.
+  useEffect(() => {
+    if (!pendingTabHere) return;
+    setPendingTab((current) => (current === pendingTabHere ? retirePendingTab(current, windows) : current));
+  }, [pendingTabHere, windows]);
   const acceptedAgentTopology = agentRuntime.state.authoritative
     && agentRuntime.state.hostProfileId === currentHostProfileId
     && agentRuntime.state.serverIdentity === hostState.serverIdentity
@@ -525,6 +535,7 @@ export function App() {
     accepted: acceptedAgentTopology,
     current: currentAgentTopology,
     byWindow: agentRuntime.rollups.byWindow,
+    hasUnmappedAgents: agentRuntime.agents.some((agent) => !agent.windowId || !agent.sessionId || !agent.paneId),
   };
   const agentPresenceRef = useRef(agentPresence);
   agentPresenceRef.current = agentPresence;
@@ -640,6 +651,25 @@ export function App() {
       tabSessionId: tab.sessionId,
     });
   };
+  const closeTabSet = useBulkTabClose({
+    agentPresenceRef,
+    closeAppTab: closeWorkspaceAppTab,
+    hostScopeRef,
+    performAction,
+    setStatus,
+    snapshotRef,
+    workspaceAppTabs,
+  });
+  const openTerminalFilePath = useTerminalFileOpen({
+    clientIdRef,
+    fileClient,
+    fileScope,
+    hostScopeRef,
+    selectLocalAppTab: shellNavigation.selectLocalAppTab,
+    setAppState,
+    setStatus,
+    snapshotRef,
+  });
   const { commandContext, runCommand } = useShellCommands({
     activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
 
@@ -705,9 +735,9 @@ export function App() {
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (!globalShortcutAllowed(event, modalOpen)) return;
       const command = commandForKeyboardEvent(event, platform, shortcuts);
-      if (!command || !commandAvailable(command, commandContext)) return;
+      if (!command || !globalShortcutAllowed(event, modalOpen, command.id)) return;
+      if (!commandAvailable(command, commandContext)) return;
       event.preventDefault();
       event.stopPropagation();
       void runCommand(command.id);
@@ -835,108 +865,12 @@ export function App() {
     void runCommand("window.close", { kind: tab.kind === "app" ? "appTab" : "terminalTab", id: tab.id, scope });
   };
 
-  /**
-   * Closes a set of tabs, once the set is settled and any confirmation is past.
-   *
-   * The flush happens once for the whole set rather than per tab, and before
-   * anything is closed: a set that cannot be saved must not lose half of itself
-   * on the way to the failure message.
-   */
-  const closeTabSet = async (tabs: readonly CombinedTab[], scope: HostScopeToken, protectAgents: boolean) => {
-    if (!sameHostConnection(scope, hostScopeRef.current)) {
-      setStatus("Closing those tabs was cancelled because its host scope changed.");
-      return;
-    }
-    try {
-      await editorFlushRegistry.flushAll();
-    } catch (error) {
-      if (sameHostConnection(scope, hostScopeRef.current)) {
-        setStatus(`Could not close those tabs because an editor did not save: ${String(error)}`);
-      }
-      return;
-    }
-    if (!sameHostConnection(scope, hostScopeRef.current)) return;
-    for (const tab of tabs) {
-      if (tab.kind !== "app") continue;
-      const appTab = workspaceAppTabs.find((item) => item.id === tab.id);
-      if (appTab) closeWorkspaceAppTab(appTab, scope);
-    }
-    const terminalTabs = tabs.filter((tab): tab is Extract<CombinedTab, { kind: "terminal" }> => tab.kind === "terminal");
-    for (const [index, tab] of terminalTabs.entries()) {
-      // Each terminal is checked immediately before its own awaited mutation.
-      // The first close can take long enough for a newly detected agent to
-      // protect a later tab in the same batch.
-      if (tabsEligibleAtBulkCloseCommit([tab], protectAgents, agentPresenceRef.current).length === 0) continue;
-      const terminalWindow = snapshotRef.current.windows.find((item) => item.id === tab.id);
-      if (!terminalWindow) continue;
-      // No captured precondition: each close advances the topology generation,
-      // so one stamped before the first would refuse every close after it.
-      const result = await performAction({
-        kind: "closeWindow", sessionId: terminalWindow.sessionId, windowId: terminalWindow.id, confirmed: true,
-      });
-      if (!sameHostConnection(scope, hostScopeRef.current)) return;
-      if (!result) return;
-      if (protectAgents && index < terminalTabs.length - 1) {
-        // The close advanced tmux topology. Absence in the previous agent
-        // snapshot proves nothing about even a surviving window: another
-        // client may have split a new agent pane into it. Wait for the runtime
-        // request paired with the reconciled topology before considering the
-        // next destructive mutation.
-        const deadline = Date.now() + 2_000;
-        while (sameHostConnection(scope, hostScopeRef.current)
-          && !agentPresenceIsCurrent(agentPresenceRef.current, result.topologyGeneration)
-          && Date.now() < deadline) {
-          await new Promise((resolve) => globalThis.setTimeout(resolve, 16));
-        }
-        if (!sameHostConnection(scope, hostScopeRef.current)) return;
-        if (!agentPresenceIsCurrent(agentPresenceRef.current, result.topologyGeneration)) {
-          setStatus("Stopped closing tabs because current agent status was unavailable; remaining terminals were left open.");
-          return;
-        }
-      }
-    }
-  };
-
   /** Terminal windows in the set mean one dialog for the set; app tabs alone close on the spot. */
   const bulkCloseTabs = (tabs: CombinedTab[], scope: HostScopeToken, protectAgents = false) => {
     if (tabs.length === 0) return;
     if (tabs.some((tab) => tab.kind === "terminal")) setPendingBulkClose({ tabs, scope, protectAgents });
     else void closeTabSet(tabs, scope, protectAgents);
   };
-
-  const openTerminalFilePath = useCallback(async (paneId: string, candidate: string) => {
-    const pane = snapshotRef.current.panes.find((item) => item.id === paneId);
-    const capturedHost = hostScopeRef.current;
-    const liveClientId = clientIdRef.current;
-    if (!pane || !fileScope || !liveClientId || !capturedHost.serverIdentity) {
-      setStatus("Reconnect the terminal before opening a file path.");
-      return;
-    }
-    const scope = { ...fileScope, clientId: liveClientId, paneId, sessionId: pane.sessionId };
-    try {
-      const resolved = await fileClient.resolveTerminalFile(scope, candidate, {
-        sessionId: pane.sessionId, windowId: pane.windowId, cwd: pane.currentPath,
-      });
-      if (clientIdRef.current !== liveClientId || !sameHostConnection(capturedHost, hostScopeRef.current)) return;
-      const livePane = currentTerminalFilePane(
-        pane, snapshotRef.current.panes, hostScopeRef.current.generation, resolved.topologyGeneration,
-      );
-      if (!livePane) return;
-      const session = snapshotRef.current.sessions.find((item) => item.id === livePane.sessionId);
-      if (!session) return;
-      const kind = /\.md(?:own)?$/i.test(resolved.path) ? "markdown" as const : "file" as const;
-      shellNavigation.selectLocalAppTab(session.id, livePane.windowId, `file:${resolved.root.token}:${resolved.path}`, () => {
-        setAppState((current) => openFileTab(
-          current, capturedHost.hostProfileId, capturedHost.serverIdentity!, session,
-          resolved.path, kind, resolved.root, { preview: false },
-        ));
-      });
-    } catch (error) {
-      if (clientIdRef.current === liveClientId && sameHostConnection(capturedHost, hostScopeRef.current)) {
-        setStatus(`Could not open ${candidate}: ${String(error)}`);
-      }
-    }
-  }, [clientIdRef, fileClient, fileScope, hostScopeRef, setAppState, shellNavigation, snapshotRef]);
 
   const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {
     if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || entry.kind === "directory"
@@ -1137,6 +1071,7 @@ export function App() {
               beginDividerDrag={beginDividerDrag}
               clientId={clientId}
               copyOnSelect={appState.shell.copyOnSelect}
+              terminalApplicationClipboard={appState.shell.terminalApplicationClipboard}
               controllers={controllers}
               focusPane={focusTerminalPane}
               onMeasurements={onMeasurements}

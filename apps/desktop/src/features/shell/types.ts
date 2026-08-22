@@ -85,6 +85,8 @@ export interface ShellState {
   terminalScreenReader: boolean;
   /** Copies a completed, non-empty terminal selection to the system clipboard. */
   copyOnSelect: boolean;
+  /** Allows terminal programs to write the system clipboard through OSC 52. */
+  terminalApplicationClipboard: boolean;
   /** Physical geometry plus the capture scale, used to preserve logical size across monitors. */
   windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
 }
@@ -121,6 +123,7 @@ export const defaultShellState: ShellState = {
   compactWorkspaces: false,
   terminalScreenReader: false,
   copyOnSelect: false,
+  terminalApplicationClipboard: false,
 };
 
 export const defaultAppState: PersistedAppState = {
@@ -165,6 +168,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       compactWorkspaces: Boolean(shell?.compactWorkspaces),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
       copyOnSelect: Boolean(shell?.copyOnSelect),
+      terminalApplicationClipboard: Boolean(shell?.terminalApplicationClipboard),
       ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
         ? { windowGeometry: shell.windowGeometry } : {}),
     },

@@ -67,12 +67,7 @@ impl StagingDirectory {
         let home_fd = open_directory_path(home, "HOME")?;
         validate_owned_directory(&home_fd, "HOME")?;
         let cache = open_or_create_child(&home_fd, OsStr::new(".cache"), false, "cache parent")?;
-        let app = open_or_create_child(
-            &cache,
-            OsStr::new("muxflow"),
-            true,
-            "private app cache",
-        )?;
+        let app = open_or_create_child(&cache, OsStr::new("muxflow"), true, "private app cache")?;
         let uploads =
             open_or_create_child(&app, OsStr::new("uploads"), true, "private upload staging")?;
         let metadata = uploads.metadata()?;

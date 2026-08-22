@@ -26,6 +26,7 @@ type TerminalWorkspaceSurfaceProps = {
   paneAttention?: ReadonlyMap<string, AgentAttentionRollup>;
   panes: Pane[];
   copyOnSelect?: boolean;
+  terminalApplicationClipboard?: boolean;
   platform?: Platform;
   /** Receives the tiled surface element the tmux client size is measured from. */
   surfaceRef: (element: HTMLElement | null) => void;
@@ -39,9 +40,9 @@ type TerminalWorkspaceSurfaceProps = {
   handleKeyActivity(paneId: string): void;
   /** A terminal reported what it turns pixels into. */
   onMeasurements(measurements: TerminalMeasurements): void;
+  onOpenFilePath(paneId: string, path: string): void;
   /** How long one write took to reach the screen — journal-only, throttled. */
   onPaintSample?(paneId: string, ms: number): void;
-  onOpenFilePath(paneId: string, path: string): void;
   performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
   setStatus(message: string): void;
 };
@@ -67,6 +68,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         clientId={props.clientId}
         pane={pane}
         copyOnSelect={Boolean(props.copyOnSelect)}
+        terminalApplicationClipboard={Boolean(props.terminalApplicationClipboard)}
         platform={props.platform ?? "linux"}
         hub={props.hub}
         onController={(paneId, controller) => { if (controller) props.controllers.current.set(paneId, controller); else props.controllers.current.delete(paneId); }}
@@ -75,8 +77,8 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         onInput={props.handleInput}
         onKeyActivity={props.handleKeyActivity}
         onMeasurements={props.onMeasurements}
-        onPaintSample={props.onPaintSample}
         onOpenFilePath={props.onOpenFilePath}
+        onPaintSample={props.onPaintSample}
         transferClient={props.terminalTransferClient}
         transferRegistry={props.terminalTransferRegistry}
         transferScope={props.terminalTransferScope}

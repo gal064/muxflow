@@ -3,9 +3,10 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TerminalTransferClient, TerminalTransferProgress, TerminalTransferScope, UploadCollisionPolicy, UploadPreflight, VerifiedTerminalUpload } from "./terminalTransfers";
 import { TerminalTransferSurface, formatBytes, pointIsInside, progressPercent, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
-import { INTERNAL_PATH_DRAG_TYPE } from "./internalPathDrag";
+import { consumeNativeInternalPathDrop, INTERNAL_PATH_DRAG_TYPE, writeInternalPathDrag } from "./internalPathDrag";
 
 const nativeDrag = vi.hoisted(() => ({ handler: undefined as ((event: { payload: Record<string, unknown> }) => void) | undefined }));
+const mountedRenderers: ReactTestRenderer[] = [];
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({
     onDragDropEvent: vi.fn(async (handler: (event: { payload: Record<string, unknown> }) => void) => {
@@ -41,6 +42,7 @@ async function mounted(mode: "local" | "ssh", transferClient: TerminalTransferCl
   await act(async () => {
     renderer = create(<StrictMode><TerminalTransferSurface client={transferClient} onController={onController} onPaste={onPaste} scope={scope(mode)} target={{ current: targetCurrent }}><div /></TerminalTransferSurface></StrictMode>);
   });
+  mountedRenderers.push(renderer!);
   return { renderer: renderer!, onPaste };
 }
 
@@ -69,6 +71,19 @@ function pathFile(path: string, type: string): File {
   }) as File;
 }
 
+function internalTransfer(source: { hostProfileId: string; serverIdentity: string; path: string }) {
+  const values = new Map<string, string>();
+  const transfer = {
+    effectAllowed: "all" as DataTransfer["effectAllowed"],
+    files: [] as File[],
+    get types() { return [...values.keys()]; },
+    getData: (type: string) => values.get(type) ?? "",
+    setData: (type: string, value: string) => { values.set(type, value); },
+  };
+  writeInternalPathDrag(transfer, source);
+  return transfer;
+}
+
 function pngImage(width = 2, height = 3): Blob {
   const bytes = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 0, 0, 0, 0, 0);
   const view = new DataView(bytes.buffer);
@@ -85,7 +100,12 @@ function jpegImage(width = 2, height = 3): Blob {
 
 describe("TerminalTransferSurface", () => {
   beforeEach(() => { Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true }); nativeDrag.handler = undefined; });
-  afterEach(() => { Reflect.deleteProperty(globalThis, "window"); });
+  afterEach(async () => {
+    await act(async () => {
+      for (const renderer of mountedRenderers.splice(0)) renderer.unmount();
+    });
+    Reflect.deleteProperty(globalThis, "window");
+  });
 
   it("pastes inspected local paths once, escaped, and never adds Enter", async () => {
     const transferClient = client();
@@ -226,6 +246,7 @@ describe("TerminalTransferSurface", () => {
         target={{ current: null }}
       ><div /></TerminalTransferSurface>);
     });
+    mountedRenderers.push(renderer!);
     await act(async () => { expect(await controller!.pasteClipboard()).toBe(true); });
     expect(alertText(renderer!.root.findByProps({ role: "alert" }))).toContain("25 MiB");
     expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining("25 MiB"));
@@ -253,11 +274,11 @@ describe("TerminalTransferSurface", () => {
   it("routes a same-host internal row drop directly through terminal input", async () => {
     const transferClient = client();
     const view = await mounted("ssh", transferClient);
-    const payload = JSON.stringify({ version: 1, serverIdentity: "server", path: "/repo/a b;$(nope)" });
+    const dataTransfer = internalTransfer({ hostProfileId: "profile", serverIdentity: "server", path: "/repo/a b;$(nope)" });
     await act(async () => {
       view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onDrop({
         preventDefault: vi.fn(),
-        dataTransfer: { files: [], types: [INTERNAL_PATH_DRAG_TYPE], getData: (type: string) => type === INTERNAL_PATH_DRAG_TYPE ? payload : "" },
+        dataTransfer,
       });
     });
     expect(view.onPaste).toHaveBeenCalledWith("'/repo/a b;$(nope)'");
@@ -269,11 +290,11 @@ describe("TerminalTransferSurface", () => {
   it("rejects a cross-host internal row drop without partial terminal input", async () => {
     const transferClient = client();
     const view = await mounted("ssh", transferClient);
-    const payload = JSON.stringify({ version: 1, serverIdentity: "other-server", path: "/repo/file" });
+    const dataTransfer = internalTransfer({ hostProfileId: "other-profile", serverIdentity: "server", path: "/repo/file" });
     await act(async () => {
       view.renderer.root.findByProps({ className: "terminal-transfer-surface" }).props.onDrop({
         preventDefault: vi.fn(),
-        dataTransfer: { files: [], types: [INTERNAL_PATH_DRAG_TYPE], getData: () => payload },
+        dataTransfer,
       });
     });
     expect(view.onPaste).not.toHaveBeenCalled();
@@ -293,6 +314,103 @@ describe("TerminalTransferSurface", () => {
     expect(transferClient.stageClipboardPng).not.toHaveBeenCalled();
     expect(vi.mocked(transferClient.start).mock.calls.map((call) => call[1])).toEqual(["/tmp/first.png", "/tmp/second.txt"]);
     expect(view.onPaste).toHaveBeenCalledWith("'/remote/first.png' '/remote/second.txt'");
+  });
+
+  it("ignores a window-global native drop when another visible surface owns the DOM point", async () => {
+    Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
+    const transferClient = client();
+    const target = {
+      getBoundingClientRect: () => ({ left: 0, right: 200, top: 0, bottom: 200 }),
+      ownerDocument: { elementFromPoint: () => ({}) },
+      contains: () => false,
+    } as unknown as HTMLElement;
+    const view = await mounted("local", transferClient, vi.fn(), undefined, target);
+    await act(async () => {
+      nativeDrag.handler?.({ payload: { type: "drop", paths: ["/tmp/covered.txt"], position: { x: 20, y: 20 } } });
+      await Promise.resolve();
+    });
+    expect(transferClient.inspectLocalPaths).not.toHaveBeenCalled();
+    expect(view.onPaste).not.toHaveBeenCalled();
+  });
+
+  it("bridges a macOS native empty-path event back to the active internal row drag", async () => {
+    Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
+    const transferClient = client();
+    const target = { getBoundingClientRect: () => ({ left: 0, right: 200, top: 0, bottom: 200 }) } as HTMLElement;
+    const view = await mounted("local", transferClient, vi.fn(), undefined, target);
+    writeInternalPathDrag({ effectAllowed: "all", setData: vi.fn() }, {
+      hostProfileId: "profile", serverIdentity: "server", path: "/repo/a b;$(nope)",
+    });
+    await act(async () => {
+      nativeDrag.handler?.({ payload: { type: "enter", paths: [], position: { x: 20, y: 20 } } });
+      nativeDrag.handler?.({ payload: { type: "drop", paths: [], position: { x: 20, y: 20 } } });
+      await Promise.resolve();
+    });
+    expect(view.onPaste).toHaveBeenCalledWith("'/repo/a b;$(nope)'");
+    expect(transferClient.inspectLocalPaths).not.toHaveBeenCalled();
+    expect(transferClient.start).not.toHaveBeenCalled();
+  });
+
+  it("retires a claimed internal source when its native drop completes off-pane", async () => {
+    Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
+    const target = { getBoundingClientRect: () => ({ left: 0, right: 200, top: 0, bottom: 200 }) } as HTMLElement;
+    const view = await mounted("local", client(), vi.fn(), undefined, target);
+    writeInternalPathDrag({ effectAllowed: "all", setData: vi.fn() }, {
+      hostProfileId: "profile", serverIdentity: "server", path: "/repo/first",
+    });
+    await act(async () => {
+      nativeDrag.handler?.({ payload: { type: "enter", paths: [], position: { x: 20, y: 20 } } });
+      nativeDrag.handler?.({ payload: { type: "drop", paths: [], position: { x: 220, y: 20 } } });
+      await Promise.resolve();
+    });
+
+    expect(view.onPaste).not.toHaveBeenCalled();
+    expect(consumeNativeInternalPathDrop({ hostProfileId: "profile", serverIdentity: "server" })).toEqual({ kind: "absent" });
+  });
+
+  it("routes one window-global native drop to the owning pane exactly once", async () => {
+    Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
+    const leftPaste = vi.fn();
+    const rightPaste = vi.fn();
+    const left = { getBoundingClientRect: () => ({ left: 0, right: 100, top: 0, bottom: 100 }) } as HTMLElement;
+    const right = { getBoundingClientRect: () => ({ left: 100, right: 200, top: 0, bottom: 100 }) } as HTMLElement;
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<>
+        <TerminalTransferSurface client={client()} onPaste={leftPaste} scope={scope("local")} target={{ current: left }}><div /></TerminalTransferSurface>
+        <TerminalTransferSurface client={client()} onPaste={rightPaste} scope={{ ...scope("local"), paneId: "%2" }} target={{ current: right }}><div /></TerminalTransferSurface>
+      </>);
+    });
+    writeInternalPathDrag({ effectAllowed: "all", setData: vi.fn() }, {
+      hostProfileId: "profile", serverIdentity: "server", path: "/repo/right",
+    });
+    await act(async () => {
+      nativeDrag.handler?.({ payload: { type: "enter", paths: [], position: { x: 150, y: 20 } } });
+      nativeDrag.handler?.({ payload: { type: "drop", paths: [], position: { x: 150, y: 20 } } });
+      await Promise.resolve();
+    });
+    expect(leftPaste).not.toHaveBeenCalled();
+    expect(rightPaste).toHaveBeenCalledOnce();
+    expect(rightPaste).toHaveBeenCalledWith("'/repo/right'");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("rejects a cross-host macOS native internal drag without partial input", async () => {
+    Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
+    const transferClient = client();
+    const target = { getBoundingClientRect: () => ({ left: 0, right: 200, top: 0, bottom: 200 }) } as HTMLElement;
+    const view = await mounted("ssh", transferClient, vi.fn(), undefined, target);
+    writeInternalPathDrag({ effectAllowed: "all", setData: vi.fn() }, {
+      hostProfileId: "other-profile", serverIdentity: "server", path: "/repo/file",
+    });
+    await act(async () => {
+      nativeDrag.handler?.({ payload: { type: "enter", paths: [], position: { x: 20, y: 20 } } });
+      nativeDrag.handler?.({ payload: { type: "drop", paths: [], position: { x: 20, y: 20 } } });
+      await Promise.resolve();
+    });
+    expect(view.onPaste).not.toHaveBeenCalled();
+    expect(transferClient.start).not.toHaveBeenCalled();
+    expect(alertText(view.renderer.root.findByProps({ role: "alert" }))).toContain("same host");
   });
 
   it("waits for every verified remote completion and preserves the drop order", async () => {
@@ -693,7 +811,8 @@ describe("u64-safe transfer presentation", () => {
 
   it("hit-tests a native drop against the box's own CSS pixels", () => {
     const element = { getBoundingClientRect: () => ({ left: 10, right: 110, top: 20, bottom: 120 }) };
-    expect(pointIsInside(element as HTMLElement, { x: 100, y: 120 })).toBe(true);
+    expect(pointIsInside(element as HTMLElement, { x: 100, y: 119 })).toBe(true);
+    expect(pointIsInside(element as HTMLElement, { x: 100, y: 120 })).toBe(false);
     expect(pointIsInside(element as HTMLElement, { x: 5, y: 5 })).toBe(false);
     // The regression, and the only point that discriminates: it is inside the
     // box, and halving it for a Retina display's device pixel ratio moves it
@@ -701,6 +820,17 @@ describe("u64-safe transfer presentation", () => {
     // nothing. A point further from an edge stays inside even when halved, so
     // it says nothing about this.
     expect(pointIsInside(element as HTMLElement, { x: 30, y: 35 })).toBe(true);
+  });
+
+  it("assigns a split boundary and an overlapping native point to one visible owner", () => {
+    const left = { getBoundingClientRect: () => ({ left: 0, right: 100, top: 0, bottom: 100 }), contains: () => false };
+    const right = { getBoundingClientRect: () => ({ left: 100, right: 200, top: 0, bottom: 100 }), contains: () => true };
+    expect(pointIsInside(left as unknown as HTMLElement, { x: 100, y: 50 })).toBe(false);
+    expect(pointIsInside(right as unknown as HTMLElement, { x: 100, y: 50 })).toBe(true);
+
+    const hit = {} as Element;
+    expect(pointIsInside(left as unknown as HTMLElement, { x: 50, y: 50 }, () => hit)).toBe(false);
+    expect(pointIsInside(right as unknown as HTMLElement, { x: 150, y: 50 }, () => hit)).toBe(true);
   });
 });
 
