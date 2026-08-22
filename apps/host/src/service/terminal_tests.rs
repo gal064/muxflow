@@ -760,6 +760,30 @@ fn color_reports_are_capability_gated_for_tmux_33() {
     ));
 }
 
+#[test]
+fn control_client_palette_matches_terminal_theme_tokens() {
+    let tokens = include_str!("../../../desktop/src/tokens.css");
+    let token = |name: &str| {
+        tokens
+            .lines()
+            .find_map(|line| {
+                let (candidate, value) = line.trim().strip_suffix(';')?.split_once(':')?;
+                (candidate == name).then_some(value.trim())
+            })
+            .unwrap_or_else(|| panic!("missing terminal theme token {name}"))
+    };
+    let osc_rgb = |hex: &str| {
+        let hex = hex
+            .strip_prefix('#')
+            .unwrap_or_else(|| panic!("terminal theme token is not hexadecimal: {hex}"));
+        assert_eq!(hex.len(), 6, "terminal theme token must be 24-bit RGB");
+        format!("{0}{0}/{1}{1}/{2}{2}", &hex[0..2], &hex[2..4], &hex[4..6])
+    };
+
+    assert_eq!(TERMINAL_FOREGROUND_OSC_RGB, osc_rgb(token("--term-fg")));
+    assert_eq!(TERMINAL_BACKGROUND_OSC_RGB, osc_rgb(token("--term-bg")));
+}
+
 /// The bound is a blast radius, not the fix for P12-U006: the sizes that
 /// actually damaged the user's windows (108x298, 108x314) are *inside* it,
 /// and what stops those is the desktop no longer deriving the client size
@@ -856,6 +880,22 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
     let written = String::from_utf8(stdin).unwrap();
     assert_eq!(written.matches("__ADE_MEMBERSHIP__").count(), 1);
     assert_eq!(written.matches("__ADE_CAPTURE__").count(), 1);
+}
+
+#[test]
+fn malformed_membership_id_has_no_partial_effects() {
+    let mut current = HashSet::from(["%1".into()]);
+    let desired = HashSet::from(["%2:'; display-message -p __INJECTED__; #".into()]);
+    let (stream_tx, stream_rx) = std_mpsc::channel();
+    let mut stdin = Vec::new();
+
+    assert!(apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin, true).is_err());
+    assert_eq!(current, HashSet::from(["%1".into()]));
+    assert!(stdin.is_empty());
+    assert!(matches!(
+        stream_rx.try_recv(),
+        Err(std_mpsc::TryRecvError::Empty)
+    ));
 }
 
 #[test]

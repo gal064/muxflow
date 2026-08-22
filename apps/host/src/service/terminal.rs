@@ -50,6 +50,12 @@ use attachment_startup::tmux_supports_control_color_reports;
 /// the other and never a user's screen.
 const TERMINAL_CLIENT_CELL_BOUNDS: std::ops::RangeInclusive<u32> = 2..=500;
 
+// tmux's OSC report syntax uses four hexadecimal digits per channel. These
+// mirror `--term-fg` and `--term-bg` in the desktop's canonical `tokens.css`;
+// `control_client_palette_matches_terminal_theme_tokens` guards that boundary.
+const TERMINAL_FOREGROUND_OSC_RGB: &str = "ffff/ffff/ffff";
+const TERMINAL_BACKGROUND_OSC_RGB: &str = "2828/2c2c/3434";
+
 pub(super) struct TerminalAttachment {
     pane_ids: HashSet<String>,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -271,6 +277,12 @@ fn apply_membership_update(
     if added.is_empty() && removed.is_empty() {
         return Ok(Vec::new());
     }
+    // Every added ID is interpolated into the control stream below. Validate
+    // the whole batch before notifying the reader or writing even a marker so
+    // a malformed membership update has no partial effects.
+    for pane_id in &added {
+        validate_tmux_id(pane_id, '%')?;
+    }
     send_authoritative_membership(stream_tx, desired)
         .map_err(|_| anyhow::anyhow!("terminal stream coordinator is disconnected"))?;
     let write_result = (|| -> anyhow::Result<()> {
@@ -313,11 +325,11 @@ fn apply_membership_update(
 fn write_terminal_color_reports(stdin: &mut impl Write, pane_id: &str) -> std::io::Result<()> {
     writeln!(
         stdin,
-        "refresh-client -r '{pane_id}:\x1b]10;rgb:ffff/ffff/ffff\x1b\\'"
+        "refresh-client -r '{pane_id}:\x1b]10;rgb:{TERMINAL_FOREGROUND_OSC_RGB}\x1b\\'"
     )?;
     writeln!(
         stdin,
-        "refresh-client -r '{pane_id}:\x1b]11;rgb:2828/2c2c/3434\x1b\\'"
+        "refresh-client -r '{pane_id}:\x1b]11;rgb:{TERMINAL_BACKGROUND_OSC_RGB}\x1b\\'"
     )
 }
 
