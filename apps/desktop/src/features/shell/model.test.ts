@@ -189,7 +189,7 @@ describe("application shell model", () => {
     }));
     const rollups = deriveAgentRollups([
       agent({ id: "working", windowId: "@1", lifecycle: "working" }),
-      agent({ id: "blocked", windowId: "@2", lifecycle: "blocked" }),
+      agent({ id: "blocked", windowId: "@2", lifecycle: "blocked", adapterId: "claude-code" }),
       agent({ id: "idle", windowId: "@3", lifecycle: "idle" }),
       agent({ id: "unknown", windowId: "@4", lifecycle: "unknown" }),
       agent({ id: "done", windowId: "@5", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 2, seenGeneration: 1 }),
@@ -211,6 +211,10 @@ describe("application shell model", () => {
         ["terminal:@1", "present"], ["terminal:@2", "present"], ["terminal:@3", "present"],
         ["terminal:@4", "present"], ["terminal:@5", "present"], ["terminal:@6", "absent"],
       ]);
+    // Each tab also carries whose agent it is, so the strip can draw the mark
+    // the sidebar draws; an empty window has nobody to name.
+    expect(strip.filter((tab) => tab.kind === "terminal").map((tab) => tab.agentAdapterId))
+      .toEqual(["codex", "claude-code", "codex", "codex", "codex", undefined]);
     expect(tabsToCloseNonAgent(strip).map((tab) => tab.key)).toEqual(["terminal:@6", "app:a", "app:b"]);
     expect(tabsToCloseNonAgent(strip.filter((tab) => tab.kind === "terminal" && tab.agentPresence === "present"))).toEqual([]);
 

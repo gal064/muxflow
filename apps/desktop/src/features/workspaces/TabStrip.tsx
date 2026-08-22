@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../../ui/Icon";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
+import { AgentIcon } from "../agents/AgentIdentity";
 import { fileIcon } from "../files/fileIcons";
 import {
   selectableTabs, tabsToCloseNonAgent, tabsToCloseOthers, tabsToCloseRight,
@@ -200,6 +201,14 @@ export function TabStrip(props: TabStripProps) {
           >
             {shortcutIndex !== undefined && <span aria-hidden="true" className="tab-index">{shortcutIndex}</span>}
             {tab.kind === "app" && <TabGlyph tab={tab} />}
+            {/* The document tab's glyph slot, spent on the adapter mark: a
+                terminal tab's "type" is whichever agent is living in it. Purely
+                decorative — the dot below reports the state and the title names
+                the window — and drawn only for an agent this snapshot can
+                actually prove is there, so an unknown presence shows nothing
+                rather than a mark that may have no agent behind it. */}
+            {tab.kind === "terminal" && tab.agentPresence === "present" && tab.agentAdapterId !== undefined
+              && <AgentIcon adapterId={tab.agentAdapterId} />}
             <span className={tab.kind === "app" && tab.preview ? "tab-title tab-title-preview" : "tab-title"}>{tab.title}</span>
             {tab.kind === "terminal" && tab.zoomed && <span aria-label="Pane zoomed" className="tab-zoom"><Icon name="zoom" size={11} /></span>}
             {/* Spinner for working, dot for everything else — and dots for

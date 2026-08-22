@@ -18,6 +18,7 @@ import { deriveAgentRollups } from "../agents/selectors";
 import { DisconnectedStrip, STRIP_APPEAR_DELAY_MS } from "./DisconnectedStrip";
 import type { ConnectionPhase } from "../../state/connectionReducer";
 import { RightPanel } from "./RightPanel";
+import type { CombinedTab } from "./model";
 import { defaultShellState, type ShellState } from "./types";
 import { SettingsDialog } from "./SettingsDialog";
 import { TitleBar } from "./TitleBar";
@@ -602,6 +603,34 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('class="tab-dot idle"');
     expect(stylesCss).toContain(".tab-dot.done { background: var(--ok); }");
     expect(stylesCss).toContain("@media (prefers-reduced-motion: no-preference)");
+  });
+
+  it("names the agent in a terminal tab with its adapter mark, and only when there is one", () => {
+    const terminal = (id: string, extra: Partial<Extract<CombinedTab, { kind: "terminal" }>>) => ({
+      key: `terminal:${id}` as const, kind: "terminal" as const, id, title: `window ${id}`,
+      index: 1, activeInTmux: false, zoomed: false, canMoveLeft: false, canMoveRight: false,
+      attention: "none" as const, agentPresence: "absent" as const, ...extra,
+    });
+    const html = renderToStaticMarkup(<TabStrip
+      activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate canSplit commandScope={commandScope}
+      stateGlyphs={false} onClose={noop} onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop}
+      onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop} onPin={noop}
+      onRenameTerminal={noop} onSelect={noop} onSplit={noop}
+      tabs={[
+        terminal("@1", { attention: "working", agentAdapterId: "codex", agentPresence: "present" }),
+        terminal("@2", {}),
+        // An agent that cannot be proved present must not be drawn: the mark
+        // would claim an agent this snapshot cannot vouch for.
+        terminal("@3", { agentAdapterId: "codex", agentPresence: "unknown" }),
+      ]}
+    />);
+    // Identity in the glyph slot, state in the dot — the same separation the
+    // sidebar keeps. Decorative: the title and the indicator carry the meaning.
+    expect(html).toMatch(/data-agent-icon="codex"[\s\S]*?<span class="tab-title">window @1<\/span>/);
+    expect(html).toContain('aria-hidden="true" class="agent-icon codex"');
+    expect(html).toContain('class="spinner tab-agent-spinner"');
+    expect(html.match(/data-agent-icon=/g)).toHaveLength(1);
+    expect(stylesCss).toContain(".tab-select .agent-icon { color: inherit; }");
   });
 
   it("keeps a tab menu command bound to the connection scope that opened it", async () => {

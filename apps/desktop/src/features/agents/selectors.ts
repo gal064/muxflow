@@ -51,7 +51,7 @@ export function deriveAgentRollups(agents: readonly AgentRecord[]): AgentRollups
 
 export function rollup(agents: readonly AgentRecord[]): AgentAttentionRollup {
   let result = emptyRollup();
-  for (const agent of agents) result = combineRollups(result, singleRollup(displayState(agent)));
+  for (const agent of agents) result = combineRollups(result, singleRollup(agent));
   return result;
 }
 
@@ -63,13 +63,19 @@ function emptyRollup(): AgentAttentionRollup {
   return { state: "none", blocked: 0, working: 0, done: 0, unknown: 0, idle: 0, total: 0 };
 }
 
-function singleRollup(state: AgentDisplayState): AgentAttentionRollup {
-  return { ...emptyRollup(), state, [state]: 1, total: 1 };
+function singleRollup(agent: AgentRecord): AgentAttentionRollup {
+  const state = displayState(agent);
+  return { ...emptyRollup(), state, [state]: 1, total: 1, adapterId: agent.adapterId };
 }
 
 function combineRollups(left: AgentAttentionRollup, right: AgentAttentionRollup): AgentAttentionRollup {
+  // One agent decides both halves of the group's identity. Ties go to `left`,
+  // which is the accumulator, so the winner is the first agent at the winning
+  // priority in whatever order the caller supplied.
+  const loudest = priority[left.state] >= priority[right.state] ? left : right;
   return {
-    state: priority[left.state] >= priority[right.state] ? left.state : right.state,
+    state: loudest.state,
+    adapterId: loudest.adapterId,
     blocked: left.blocked + right.blocked,
     working: left.working + right.working,
     done: left.done + right.done,

@@ -596,6 +596,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
    inline color, so there is no rule here per document kind. */
 .tab-glyph { display: inline-flex; }
+/* The terminal tab's adapter mark, in the slot a document tab spends on its
+   file glyph. 12px is the global size and already matches the file glyph, so
+   only the ink is scoped: the sidebar's flat `--chrome-dim` would leave the
+   mark dimmer than its own title on the active tab, which is the one tab whose
+   ink is raised. `inherit` makes it follow the tab, both states at once. */
+.tab-select .agent-icon { color: inherit; }
 .tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A preview tab is the one the next single click will replace. Italic is how
    VS Code says so, and the strip is on the sans stack, so it just works. */
