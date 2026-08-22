@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostProfile, Session } from "../../app/types";
 import { rowCommandRegistry } from "../../commands/rowCommands";
 import { agent } from "../agents/testFixtures";
-import type { AgentAdapterDescriptor } from "../agents/types";
+import type { AgentAdapterDescriptor, AgentDisplayState } from "../agents/types";
 import { buildAgentRows } from "../agents/agentsList";
 import { HookReviewDialog } from "../agents/HookReviewDialog";
 import { WorkspaceSidebar } from "../workspaces/WorkspaceSidebar";
@@ -30,6 +30,28 @@ const rows: WorkspaceRowModel[] = [{
   agents: [{ id: "a1", adapterId: "codex", name: "codex", state: "blocked" }], agentOverflow: 0,
   branch: "main*", path: "~/dev/muxflow",
 }];
+
+/** One workspace holding exactly these agent states, through the real builder. */
+function workspaceOf(...states: AgentDisplayState[]): WorkspaceRowModel[] {
+  const agents = states.map((state, index) => agent({
+    id: `a${index}`, sessionId: "$1", displayName: `agent ${index}`, updatedAt: states.length - index,
+    ...(state === "done"
+      ? { lifecycle: "idle" as const, attentionKind: "completed" as const, attentionGeneration: 4, seenGeneration: 1 }
+      : { lifecycle: state }),
+  }));
+  return workspaceRows({
+    snapshot: { sessions: [session], windows: [], panes: [] },
+    activeSessionId: session.id,
+    agents,
+    attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
+  });
+}
+
+/** What a compact row draws between its shortcut number and its name. */
+function workspaceTitleIndicator(html: string): string {
+  const title = html.slice(html.indexOf('class="workspace-title"'), html.indexOf('<span class="workspace-name"'));
+  return title.slice(title.indexOf("</span>") + "</span>".length);
+}
 
 /** One workspace holding five agents, through the real row builder. */
 function fiveAgentRows(): WorkspaceRowModel[] {
@@ -177,10 +199,11 @@ describe("application shell accessibility contracts", () => {
     expect(html).not.toContain('class="workspace-activity"');
     expect(html).toContain('aria-label="A very long workspace name, codex · blocked, 5 agents, 2 agents waiting"');
     // The number is inside the title now, in front of the name — the row's
-    // address rather than a column of digits beside it. No title spinner beside
-    // it: the cluster below already spins one ring per working agent, and two
-    // animations for one 24px row is one motion too many.
-    expect(html).toContain('<span class="workspace-title"><span aria-hidden="true" class="workspace-shortcut-index">1</span><span class="workspace-name">');
+    // address rather than a column of digits beside it — and the workspace's
+    // own state sits between the two. This workspace holds a blocked agent, so
+    // that is what the row says about itself; the spinner belongs to the
+    // cluster's working mark and not to the title.
+    expect(html).toContain('<span class="workspace-title"><span aria-hidden="true" class="workspace-shortcut-index">1</span><span aria-hidden="true" class="state-dot workspace-state blocked">!</span><span class="workspace-name">');
     expect(html).not.toContain('class="spinner"');
     expect(html).toContain('class="spinner agent-mark-badge working"');
     // The non-compact row has no cluster to carry it, so it keeps the spinner.
@@ -195,6 +218,57 @@ describe("application shell accessibility contracts", () => {
     // Inline at the far right of the one line, not floated over it.
     expect(html).toContain('class="badge badge-inline">2');
     expect(html.slice(0, html.indexOf("section-divider"))).not.toContain('class="badge badge-row"');
+  });
+
+  it("gives a compact row one workspace-level indicator for its loudest state", () => {
+    // The bug this covers: a compact row said nothing about the workspace at
+    // all. The only marks on it were the per-agent cluster out at the right
+    // edge, so "this workspace is blocked" had to be read off a 6px badge on
+    // one of three icons — while the non-compact row had carried a title
+    // spinner all along. One indicator, at the loudest state, in the title.
+    const indicator = (...states: AgentDisplayState[]) =>
+      workspaceTitleIndicator(sidebar({ compactWorkspaces: true, rows: workspaceOf(...states) }));
+    // Blocked outranks everything, done outranks working, and each of the three
+    // is asserted against a workspace that also holds the states it beats — the
+    // ranking is the point, not the single-agent case.
+    expect(indicator("blocked", "done", "working", "idle")).toBe('<span aria-hidden="true" class="state-dot workspace-state blocked">!</span>');
+    expect(indicator("done", "working", "idle")).toBe('<span aria-hidden="true" class="state-dot workspace-state done">✓</span>');
+    // Working is a process, not a condition, so it spins — the same 9px title
+    // spinner the non-compact row draws, in the same place, inheriting the ink
+    // of whichever row it is on.
+    expect(indicator("working", "idle", "unknown")).toBe('<span aria-hidden="true" class="spinner"></span>');
+    // Nothing to say, nothing drawn. A dot beside the name is "look here", and
+    // a workspace of idle agents is the resting state of every quiet row in a
+    // long list.
+    expect(indicator("idle")).toBe("");
+    expect(indicator("unknown")).toBe("");
+    expect(indicator()).toBe("");
+    // With the glyph option on the state stops depending on colour, working
+    // included — and the quiet states stay quiet, since a shape for "nothing is
+    // happening" is still a mark on a row that has nothing to report.
+    const glyphed = (...states: AgentDisplayState[]) =>
+      workspaceTitleIndicator(sidebar({ compactWorkspaces: true, stateGlyphs: true, rows: workspaceOf(...states) }));
+    expect(glyphed("blocked")).toBe('<span aria-hidden="true" class="state-dot workspace-state blocked glyphs">!</span>');
+    expect(glyphed("working")).toBe('<span aria-hidden="true" class="state-dot workspace-state working glyphs">•</span>');
+    expect(glyphed("idle")).toBe("");
+    // Non-compact is unchanged: its agent lines report blocked and done in
+    // words, so the title still spins for working alone and stays empty for a
+    // blocked workspace that is not running anything.
+    const wide = (...states: AgentDisplayState[]) => workspaceTitleIndicator(sidebar({ rows: workspaceOf(...states) }));
+    expect(wide("working")).toBe('<span aria-hidden="true" class="spinner"></span>');
+    expect(wide("blocked")).toBe("");
+    expect(wide("blocked", "working")).toBe('<span aria-hidden="true" class="spinner"></span>');
+    // The indicator is decorative in both modes: `rowLabel` is the row's whole
+    // accessible name and already names the loudest agent and its state.
+    expect(sidebar({ compactWorkspaces: true, rows: workspaceOf("blocked") }))
+      .toContain('aria-label="A very long workspace name, agent 0 · blocked, 1 agent waiting"');
+
+    // A done workspace takes the bright notification green the badges and the
+    // tab strip use, not the muted teal the static state palette paints. Both
+    // fills sit within about 1.5:1 of the accent block, so the active row rings
+    // them in the knockout ink rather than leaving them to dissolve into it.
+    expect(stylesCss).toContain(".state-dot.workspace-state.done { background: var(--ok); }");
+    expect(stylesCss).toContain(".workspace-button.active .state-dot.workspace-state { box-shadow: 0 0 0 1.5px var(--accent-ink); }");
   });
 
   it("nests workspace-ordered agents under host-qualified headings in keyboard order", () => {

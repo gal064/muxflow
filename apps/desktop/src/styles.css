@@ -324,6 +324,22 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
   font-variant-numeric: tabular-nums; text-align: center;
 }
+/* The compact row's workspace-level state, beside the name. It takes the plain
+   8px `.state-dot` and the plain 9px `.spinner`, so the indicator is the same
+   size in both modes and a size larger than the 6px per-agent badges out at the
+   right edge — the difference in size is what says one is about the workspace
+   and the others are about single agents.
+   Done is a notification here, the same way it is on a badge and on a tab, so
+   it takes the bright green rather than the muted teal `.state-dot.done` paints
+   for the static state palette. Three classes, so it wins wherever it sits
+   relative to that rule. */
+.state-dot.workspace-state.done { background: var(--ok); }
+/* Both fills land within 1.5:1 of the accent block the active row is painted
+   with — the one row the eye is already on is the one where a red and a green
+   dot would dissolve. The knockout ink the shortcut index and the adapter icons
+   already flip to, drawn as a ring rather than a fill, keeps the dot a distinct
+   object without touching the colour that says which state it is. */
+.workspace-button.active .state-dot.workspace-state { box-shadow: 0 0 0 1.5px var(--accent-ink); }
 
 .spinner {
   width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%;
