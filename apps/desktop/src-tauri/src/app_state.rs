@@ -130,6 +130,8 @@ pub struct ShellPreferences {
     #[serde(default)]
     pub terminal_application_clipboard: bool,
     #[serde(default)]
+    pub terminal_font_size: Option<u8>,
+    #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
 }
 
@@ -539,6 +541,7 @@ mod tests {
                 terminal_screen_reader: false,
                 copy_on_select: false,
                 terminal_application_clipboard: false,
+                terminal_font_size: Some(13),
                 window_geometry: Some(WindowGeometry {
                     x: 20,
                     y: 30,
@@ -663,6 +666,7 @@ mod tests {
         assert_eq!(value.shell.sidebar_width, Some(260.0));
         assert_eq!(value.shell.panel_width, Some(320.0));
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
+        assert_eq!(value.shell.terminal_font_size, Some(17));
         assert!(value.shell.sidebar_collapsed && value.shell.panel_open);
         assert!(
             value.shell.agent_state_glyphs

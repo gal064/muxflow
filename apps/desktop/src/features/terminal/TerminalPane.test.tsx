@@ -41,6 +41,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     /** Mirrors the real renderer: `setGrid` is the only writer of cols/rows. */
     grid: Size = { columns: 80, rows: 24 };
     resizes: Size[] = [];
+    fontSizes: number[] = [];
     #pendingRendered: Array<() => void> = [];
     #measurementListeners = new Set<() => void>();
 
@@ -54,6 +55,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     emitMeasurementsChange(): void {
       for (const listener of this.#measurementListeners) listener();
     }
+    setFontSize(fontSize: number): void { this.fontSizes.push(fontSize); }
     setGrid(size: Size): { kind: "applied"; size: Size } | { kind: "unchanged" } | { kind: "rejected"; reason: string } {
       if (size.columns < 2 || size.rows < 2) return { kind: "rejected", reason: `${size.columns}x${size.rows} is unusable` };
       if (this.grid.columns === size.columns && this.grid.rows === size.rows) return { kind: "unchanged" };
@@ -246,7 +248,7 @@ function awaitSeedResource(paneId: string, hostOwnsTheRequest: boolean): PaneEve
   };
 }
 
-function paneElement(pane: Pane, hub: FakeHub, clientId: string, appFocused: boolean) {
+function paneElement(pane: Pane, hub: FakeHub, clientId: string, appFocused: boolean, terminalFontSize = 13) {
   return <TerminalPane
     appFocused={appFocused}
     clientId={clientId}
@@ -256,6 +258,7 @@ function paneElement(pane: Pane, hub: FakeHub, clientId: string, appFocused: boo
     onFocus={() => undefined}
     onMeasurements={() => undefined}
     onController={() => undefined}
+    terminalFontSize={terminalFontSize}
   />;
 }
 
@@ -311,6 +314,20 @@ afterEach(() => {
 });
 
 describe("TerminalPane pane-paint span lifecycle", () => {
+  it("updates font size on the existing renderer", async () => {
+    const pane = fixturePane("%font");
+    const hub = new FakeHub();
+    const mounted = await mountPane(pane, hub);
+    const renderer = renderers.created[0];
+    expect(renderer.fontSizes.at(-1)).toBe(13);
+
+    await act(async () => { mounted.update(paneElement(pane, hub, "client-a", true, 18)); });
+
+    expect(renderers.created).toHaveLength(1);
+    expect(renderer.fontSizes.at(-1)).toBe(18);
+    await act(async () => { mounted.unmount(); });
+  });
+
   it("restores the active pane keyboard target when the app returns to the foreground", async () => {
     const pane = fixturePane("%focus");
     const hub = new FakeHub();

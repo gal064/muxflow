@@ -267,6 +267,7 @@ interface Props {
   onOpenFilePath?: (paneId: string, path: string) => void;
   copyOnSelect?: boolean;
   terminalApplicationClipboard?: boolean;
+  terminalFontSize?: number;
   platform?: Platform;
   transferClient?: TerminalTransferClient;
   transferRegistry?: TerminalTransferRegistry;
@@ -288,6 +289,7 @@ export function TerminalPane({
   onOpenFilePath,
   copyOnSelect = false,
   terminalApplicationClipboard = false,
+  terminalFontSize = 13,
   platform = "linux",
   transferClient,
   transferRegistry,
@@ -429,6 +431,7 @@ export function TerminalPane({
     let rendererActive = true;
     let rendererEpoch: number | undefined;
     const renderer = new XtermRenderer({
+      fontSize: terminalFontSize,
       paneId: pane.id,
       onDiagnostic: (message) => {
         if (!rendererActive) return;
@@ -1005,6 +1008,17 @@ export function TerminalPane({
       );
     };
   }, [hub, pane.id]);
+
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    renderer.setFontSize(terminalFontSize);
+    const measured = renderer.measure();
+    const report = refitPaneGridToBox(renderer, paneRef.current, measured, gridForBoxRef.current);
+    if (report) console.warn(report);
+    const measurements = renderer.measurements();
+    if (measurements) measurementsRef.current(measurements);
+  }, [terminalFontSize]);
 
   useEffect(() => {
     if (!clientId) return;
