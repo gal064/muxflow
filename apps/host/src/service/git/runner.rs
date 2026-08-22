@@ -16,7 +16,7 @@ use std::{
 };
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-use std::{ffi::CString, os::unix::ffi::OsStrExt as _, path::PathBuf};
+use std::{ffi::CString, path::PathBuf};
 
 use anyhow::{Context, bail};
 #[cfg(test)]
