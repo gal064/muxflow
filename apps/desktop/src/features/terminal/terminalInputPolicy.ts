@@ -7,6 +7,7 @@ type TerminalKeyEvent = Pick<KeyboardEvent,
 
 export interface TerminalKeyContext {
   alternateScreen: boolean;
+  applicationCursorKeys: boolean;
   currentCommand: string;
   platform: Platform;
 }
@@ -22,15 +23,18 @@ export function translateTerminalKey(event: TerminalKeyEvent, context: TerminalK
     && !event.metaKey && !event.ctrlKey && !event.altKey) {
     return "\n";
   }
-  // The alternate screen is the behavioral boundary: full-screen TUIs own
-  // their Command-Arrows, while normal-screen shells, wrappers, and agent
-  // composers all use the terminal's conventional Control-A/Control-E line
-  // controls. A process-name allowlist made an ordinary wrapper silently lose
+  // Command-Arrow always means line start/end; the screen only picks the
+  // encoding. Normal-screen shells and wrappers read the conventional readline
+  // Control-A/Control-E, while full-screen programs — including the agent
+  // composers, which run on the alternate screen — read Home/End, sent as SS3
+  // when the program asked for application cursor keys (DECCKM) and as CSI
+  // otherwise. A process-name allowlist made an ordinary wrapper silently lose
   // the shortcut and could never enumerate every interactive shell.
-  if (context.platform !== "mac" || context.alternateScreen
+  if (context.platform !== "mac"
     || !event.metaKey || event.shiftKey || event.ctrlKey || event.altKey) return undefined;
-  if (event.key === "ArrowLeft") return "\u0001";
-  if (event.key === "ArrowRight") return "\u0005";
+  const cursorKeyPrefix = context.applicationCursorKeys ? "O" : "[";
+  if (event.key === "ArrowLeft") return context.alternateScreen ? `\u001b${cursorKeyPrefix}H` : "\u0001";
+  if (event.key === "ArrowRight") return context.alternateScreen ? `\u001b${cursorKeyPrefix}F` : "\u0005";
   return undefined;
 }
 

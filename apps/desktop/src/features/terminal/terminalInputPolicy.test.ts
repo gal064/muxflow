@@ -10,6 +10,7 @@ import {
   copyCompletedTerminalSelection,
   installTerminalCopyOnSelect,
   translateTerminalKey,
+  type TerminalKeyContext,
 } from "./terminalInputPolicy";
 
 const key = (overrides: Partial<KeyboardEvent> = {}) => ({
@@ -24,38 +25,73 @@ const key = (overrides: Partial<KeyboardEvent> = {}) => ({
 }) as KeyboardEvent;
 
 describe("terminal input translation", () => {
+  const context = (overrides: Partial<TerminalKeyContext> = {}): TerminalKeyContext => ({
+    alternateScreen: false,
+    applicationCursorKeys: false,
+    currentCommand: "zsh",
+    platform: "mac",
+    ...overrides,
+  });
+  const left = key({ key: "ArrowLeft", keyCode: 37, metaKey: true });
+  const right = key({ key: "ArrowRight", keyCode: 39, metaKey: true });
+
   it("turns Shift-Enter into Control-J only for Codex", () => {
     const shiftedEnter = key({ key: "Enter", shiftKey: true });
-    expect(translateTerminalKey(shiftedEnter, { alternateScreen: false, currentCommand: "codex", platform: "mac" }))
-      .toBe("\n");
-    expect(translateTerminalKey(shiftedEnter, { alternateScreen: false, currentCommand: "node", platform: "mac" }))
+    expect(translateTerminalKey(shiftedEnter, context({ currentCommand: "codex" }))).toBe("\n");
+    expect(translateTerminalKey(shiftedEnter, context({ currentCommand: "node" }))).toBeUndefined();
+    expect(translateTerminalKey(shiftedEnter, context({ currentCommand: "zsh" }))).toBeUndefined();
+    expect(translateTerminalKey(shiftedEnter, context({ alternateScreen: true, currentCommand: "vim" })))
       .toBeUndefined();
-    expect(translateTerminalKey(shiftedEnter, { alternateScreen: false, currentCommand: "zsh", platform: "mac" }))
-      .toBeUndefined();
-    expect(translateTerminalKey(shiftedEnter, { alternateScreen: true, currentCommand: "vim", platform: "mac" }))
-      .toBeUndefined();
-    expect(translateTerminalKey(key(), { alternateScreen: false, currentCommand: "codex", platform: "mac" }))
-      .toBeUndefined();
+    expect(translateTerminalKey(key(), context({ currentCommand: "codex" }))).toBeUndefined();
   });
 
-  it("maps bare macOS Command-Arrows in normal-screen terminal contexts", () => {
-    const left = key({ key: "ArrowLeft", keyCode: 37, metaKey: true });
-    const right = key({ key: "ArrowRight", keyCode: 39, metaKey: true });
-    expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "/bin/zsh", platform: "mac" })).toBe("\u0001");
-    expect(translateTerminalKey(right, { alternateScreen: false, currentCommand: "fish", platform: "mac" })).toBe("\u0005");
-    expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "codex", platform: "mac" })).toBe("\u0001");
-    expect(translateTerminalKey(right, { alternateScreen: false, currentCommand: "shell-wrapper", platform: "mac" })).toBe("\u0005");
-    expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "zsh", platform: "linux" })).toBeUndefined();
-    expect(translateTerminalKey(left, { alternateScreen: true, currentCommand: "zsh", platform: "mac" })).toBeUndefined();
-    expect(translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, altKey: true }), {
-      alternateScreen: false, currentCommand: "zsh", platform: "mac",
-    })).toBeUndefined();
+  it("sends the readline line controls on the normal screen", () => {
+    expect(translateTerminalKey(left, context({ currentCommand: "/bin/zsh" }))).toBe("\u0001");
+    expect(translateTerminalKey(right, context({ currentCommand: "fish" }))).toBe("\u0005");
+    expect(translateTerminalKey(left, context({ currentCommand: "codex" }))).toBe("\u0001");
+    expect(translateTerminalKey(right, context({ currentCommand: "shell-wrapper" }))).toBe("\u0005");
+  });
+
+  it("sends Home/End on the alternate screen, in the program's cursor key mode", () => {
+    const alternate = { alternateScreen: true };
+    expect(translateTerminalKey(left, context({ ...alternate, applicationCursorKeys: true }))).toBe("\u001bOH");
+    expect(translateTerminalKey(right, context({ ...alternate, applicationCursorKeys: true }))).toBe("\u001bOF");
+    expect(translateTerminalKey(left, context(alternate))).toBe("\u001b[H");
+    expect(translateTerminalKey(right, context(alternate))).toBe("\u001b[F");
+  });
+
+  it("translates the event a packaged macOS Claude Code pane actually delivers", () => {
+    // Measured in the packaged app. tmux reports Claude Code's foreground
+    // command as its version-numbered binary, so the command never identifies
+    // the program and must not affect the translation.
+    const packaged = key({ key: "ArrowLeft", keyCode: 37, metaKey: true, isComposing: false });
+    expect(translateTerminalKey(packaged, {
+      alternateScreen: true,
+      applicationCursorKeys: false,
+      currentCommand: "2.1.238",
+      platform: "mac",
+    })).toBe("\u001b[H");
+  });
+
+  it("leaves other platforms and modified Command-Arrows alone", () => {
+    expect(translateTerminalKey(left, context({ platform: "linux" }))).toBeUndefined();
+    expect(translateTerminalKey(left, context({ alternateScreen: true, platform: "linux" }))).toBeUndefined();
+    expect(translateTerminalKey(key({ key: "ArrowLeft" }), context())).toBeUndefined();
+    for (const modifier of ["altKey", "ctrlKey", "shiftKey"] as const) {
+      expect(translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, [modifier]: true }), context()), modifier)
+        .toBeUndefined();
+      expect(
+        translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, [modifier]: true }), context({ alternateScreen: true })),
+        modifier,
+      ).toBeUndefined();
+    }
   });
 
   it("never translates IME/composition events", () => {
-    const context = { alternateScreen: false, currentCommand: "zsh", platform: "mac" as const };
-    expect(translateTerminalKey(key({ shiftKey: true, isComposing: true }), context)).toBeUndefined();
-    expect(translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, keyCode: 229 }), context)).toBeUndefined();
+    expect(translateTerminalKey(key({ shiftKey: true, isComposing: true }), context())).toBeUndefined();
+    expect(translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, keyCode: 229 }), context())).toBeUndefined();
+    expect(translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, keyCode: 229 }), context({ alternateScreen: true })))
+      .toBeUndefined();
   });
 });
 

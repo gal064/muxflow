@@ -122,6 +122,8 @@ export interface TerminalRenderer {
   hasSelection(): boolean;
   onSelectionChange(listener: () => void): () => void;
   isAlternateScreenActive(): boolean;
+  /** DECCKM: whether cursor keys must be sent as SS3 rather than CSI. */
+  isApplicationCursorMode(): boolean;
   paste(text: string): void;
   search(query: string, direction?: "next" | "previous"): boolean;
   clearSearch(): void;
@@ -561,6 +563,10 @@ export class XtermRenderer implements TerminalRenderer {
 
   isAlternateScreenActive(): boolean {
     return this.#terminal.buffer.active.type === "alternate";
+  }
+
+  isApplicationCursorMode(): boolean {
+    return this.#terminal.modes.applicationCursorKeysMode;
   }
 
   dispose(): void {
