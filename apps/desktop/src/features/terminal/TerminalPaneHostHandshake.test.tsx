@@ -136,6 +136,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     measure(): Size | undefined { return this.measured; }
     measurements(): undefined { return undefined; }
     onMeasurementsChange(): () => void { return () => undefined; }
+    setFontSize(): void {}
     setGrid(size: Size): { kind: "applied"; size: Size } | { kind: "unchanged" } | { kind: "rejected"; reason: string } {
       if (size.columns < 2 || size.rows < 2) return { kind: "rejected", reason: `${size.columns}x${size.rows} is unusable` };
       if (this.grid.columns === size.columns && this.grid.rows === size.rows) return { kind: "unchanged" };

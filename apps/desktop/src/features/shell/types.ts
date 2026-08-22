@@ -17,6 +17,8 @@ export const PANEL_MAX_WINDOW_FRACTION = 1 / 2;
 export const AGENTS_SECTION_DEFAULT_RATIO = 0.42;
 export const AGENTS_SECTION_MIN_RATIO = 0.15;
 export const AGENTS_SECTION_MAX_RATIO = 0.75;
+export const TERMINAL_FONT_SIZE_MIN = 10;
+export const TERMINAL_FONT_SIZE_MAX = 20;
 
 export interface AppOwnedTab {
   id: string;
@@ -87,6 +89,8 @@ export interface ShellState {
   copyOnSelect: boolean;
   /** Allows terminal programs to write the system clipboard through OSC 52. */
   terminalApplicationClipboard: boolean;
+  /** Terminal text size in integer CSS pixels. */
+  terminalFontSize: number;
   /** Physical geometry plus the capture scale, used to preserve logical size across monitors. */
   windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
 }
@@ -124,6 +128,7 @@ export const defaultShellState: ShellState = {
   terminalScreenReader: false,
   copyOnSelect: false,
   terminalApplicationClipboard: false,
+  terminalFontSize: 13,
 };
 
 export const defaultAppState: PersistedAppState = {
@@ -169,6 +174,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
       copyOnSelect: Boolean(shell?.copyOnSelect),
       terminalApplicationClipboard: Boolean(shell?.terminalApplicationClipboard),
+      terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
       ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
         ? { windowGeometry: shell.windowGeometry } : {}),
     },
@@ -227,6 +233,11 @@ export function clampedPanelWidth(value: unknown): number {
 export function clampedAgentsRatio(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return AGENTS_SECTION_DEFAULT_RATIO;
   return Math.min(AGENTS_SECTION_MAX_RATIO, Math.max(AGENTS_SECTION_MIN_RATIO, value));
+}
+
+export function clampedTerminalFontSize(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return defaultShellState.terminalFontSize;
+  return Math.min(TERMINAL_FONT_SIZE_MAX, Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(value)));
 }
 
 /** The sidebar may never eat more than a third of the window (cmux rule). */
