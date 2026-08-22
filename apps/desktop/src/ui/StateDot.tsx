@@ -38,6 +38,12 @@ export function StateDot({ state, glyphs, className = "state-dot", label }: {
    */
   label?: string;
 }) {
+  // Idle draws nothing — quiet is the resting state, the rule the sidebar's
+  // mark badge already follows. The span stays and the stylesheet hides it, so
+  // the slot keeps its width and nothing beside it moves when the state later
+  // becomes a spinner or a dot. Decorative even where the caller passes a
+  // label: there is no mark here to name.
+  if (state === "idle") return <span aria-hidden="true" className={`${className} idle`} />;
   return <span
     aria-hidden={label ? undefined : "true"}
     aria-label={label}

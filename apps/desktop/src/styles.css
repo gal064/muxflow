@@ -325,10 +325,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-variant-numeric: tabular-nums; text-align: center;
 }
 /* The compact row's workspace-level state, beside the name. It takes the plain
-   8px `.state-dot` and the plain 9px `.spinner`, so the indicator is the same
-   size in both modes and a size larger than the 6px per-agent badges out at the
-   right edge — the difference in size is what says one is about the workspace
-   and the others are about single agents.
+   8px `.state-dot`, and the rule below brings the spinner to the same 8px, so
+   the indicator is one size in both modes and a size larger than the 6px
+   per-agent badges out at the right edge — the difference in size is what says
+   one is about the workspace and the others are about single agents.
    Done is a notification here, the same way it is on a badge and on a tab, so
    it takes the bright green rather than the muted teal `.state-dot.done` paints
    for the static state palette. Three classes, so it wins wherever it sits
@@ -340,6 +340,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    already flip to, drawn as a ring rather than a fill, keeps the dot a distinct
    object without touching the colour that says which state it is. */
 .workspace-button.active .state-dot.workspace-state { box-shadow: 0 0 0 1.5px var(--accent-ink); }
+/* The working branch of that same indicator, sized to the dot it stands in for
+   rather than to the plain 9px spinner: they are one indicator a state apart,
+   so an agent finishing must not nudge the workspace name by a pixel. */
+.workspace-title .spinner { width: 8px; height: 8px; }
 
 .spinner {
   width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%;
@@ -481,7 +485,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    the color. */
 .state-dot.unknown { background: transparent; border: 1.5px dashed var(--state-unknown); }
 .state-dot.unknown.glyphs { color: var(--state-unknown); }
-.state-dot.idle, .state-dot.none { border: 1.5px solid var(--chrome-faint); color: var(--chrome-faint); }
+/* Idle draws nothing at all — quiet is the resting state, the same rule the
+   mark badge follows — but the box survives being hidden, so the slot is still
+   there when the state turns into a spinner or a dot and no title beside it
+   ever moves. `visibility`, never `display: none`, for exactly that reason. */
+.state-dot.idle, .state-dot.none, .tab-dot.idle { visibility: hidden; }
 
 /* The agents section's one honest line, when this host cannot report status at
    all. Quiet, because it is a fact and not an alarm — and text rather than a
@@ -623,11 +631,14 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   .tab-pending-dot { animation: none; opacity: 0.6; }
 }
 .tab-zoom { display: inline-flex; color: var(--chrome-faint); }
+/* Sized to `.tab-agent-spinner` below rather than to itself: the dot and the
+   spinner are the same agent's indicator one state apart, so a working tab
+   that finishes must not shift its own title by the difference. */
 .tab-dot {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%;
+  width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%;
   background: var(--accent);
-  font-size: 5px; font-weight: 700; line-height: 1; color: var(--chrome-bg);
+  font-size: 6px; font-weight: 700; line-height: 1; color: var(--chrome-bg);
 }
 .tab-dot.blocked { background: var(--state-blocked); }
 .tab-dot.done { background: var(--ok); }
@@ -636,7 +647,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    state is unknown must not look like a tab whose agent is doing something. */
 .tab-dot.unknown { background: transparent; border: 1px dashed var(--state-unknown); }
 .tab-dot.unknown.glyphs { color: var(--state-unknown); }
-.tab-dot.idle { background: transparent; border: 1px solid var(--chrome-faint); }
 .tab-close {
   display: inline-flex; align-items: center; justify-content: center;
   width: 18px; padding: 0; margin-right: 4px;
@@ -1421,7 +1431,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
     background: Canvas; color: ButtonText; font-size: 9px;
   }
   .state-dot:not(.glyphs), .tab-dot:not(.glyphs) { color: ButtonText; }
-  .state-dot.idle, .tab-dot.idle { border-style: dashed; }
   /* The mark badge is 6px and cannot hold a glyph, so here it keeps what a
      shape can carry at that size: filled for the two states that want a human,
      outlined for the two that do not, dashed for the one nothing has reported.
