@@ -289,6 +289,11 @@ describe("application shell accessibility contracts", () => {
     // sized to the dot it stands in for; the plain 9px spinner moved the
     // workspace name by a pixel every time an agent finished.
     expect(stylesCss).toContain(".workspace-title .spinner { width: 8px; height: 8px; }");
+    // And under forced colors, where the dot grows to 11px to hold a glyph, so
+    // does the spinner that replaces it — otherwise the invariant holds in the
+    // default mode only and the name slides 3px there on every state change.
+    const forcedColors = stylesCss.slice(stylesCss.indexOf("@media (forced-colors: active)"));
+    expect(forcedColors).toContain(".workspace-title .spinner { width: 11px; height: 11px; }");
   });
 
   it("nests workspace-ordered agents under host-qualified headings in keyboard order", () => {

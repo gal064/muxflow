@@ -11,6 +11,7 @@ import type { TerminalTransferConnectionScope } from "../features/terminal/termi
 import type { AgentAttentionRollup } from "../features/agents/types";
 import type { Platform } from "../commands/registry";
 import { needsAttention } from "../features/agents/agentsList";
+import { stripAgentStatusGlyphs } from "../features/agents/agentLabels";
 import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 
 type TerminalWorkspaceSurfaceProps = {
@@ -50,7 +51,7 @@ type TerminalWorkspaceSurfaceProps = {
 /** Memoized terminal-only boundary: unrelated root notices/dialogs never revisit live panes. */
 export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
   const { activePane, activeWindow, grid } = props;
-  return <div className="terminal-window" ref={props.surfaceRef} aria-label={activeWindow ? `Terminal tab ${activeWindow.name}` : "Terminal"}>
+  return <div className="terminal-window" ref={props.surfaceRef} aria-label={activeWindow ? `Terminal tab ${stripAgentStatusGlyphs(activeWindow.name)}` : "Terminal"}>
     {props.mountedPanes.map((pane) => {
       // The floating `%N · cmd` badge is gone: it overlapped the pane's own
       // output, and the pane's identity is already in the tab strip and the

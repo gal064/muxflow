@@ -1426,13 +1426,14 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   /* Four state colors become one system color here, so the shape carries the
      encoding whether or not the user turned the glyph option on. The dots grow
      to fit a legible glyph — and the tab's spinner grows with them, because a
-     dot and a spinner are one indicator a state apart and a tab title must not
-     move when an agent starts working. */
+     dot and a spinner are one indicator a state apart and neither a tab title
+     nor a workspace name may move when an agent starts working. */
   .state-dot, .tab-dot {
     width: 11px; height: 11px; overflow: visible;
     background: Canvas; color: ButtonText; font-size: 9px;
   }
   .tab-agent-spinner { width: 11px; height: 11px; }
+  .workspace-title .spinner { width: 11px; height: 11px; }
   .state-dot:not(.glyphs), .tab-dot:not(.glyphs) { color: ButtonText; }
   /* The mark badge is 6px and cannot hold a glyph, so here it keeps what a
      shape can carry at that size: filled for the two states that want a human,

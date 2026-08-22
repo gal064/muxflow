@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { agentSessionLabel, stripAgentStatusGlyphs } from "./agentLabels";
 import { agent } from "./testFixtures";
+import type { AgentAdapterDescriptor } from "./types";
 
 describe("agent status glyph stripping", () => {
   // Claude Code and Codex animate a status glyph at the front of their tmux
@@ -39,5 +40,17 @@ describe("agent status glyph stripping", () => {
     // generic word still falls through to the assigned name.
     expect(agentSessionLabel(agent({ windowName: "⠦ codex", displayName: "Nightly triage" }), []))
       .toBe("Nightly triage");
+  });
+
+  it("falls through a title that is only a ticker frame", () => {
+    // A starting agent's title is the spinner frame alone. A tab has nothing
+    // better to show and keeps it; a sidebar row has the assigned name.
+    expect(agentSessionLabel(agent({ windowName: "⠋", displayName: "Nightly triage" }), []))
+      .toBe("Nightly triage");
+    expect(agentSessionLabel(agent({ windowName: "⠋", displayName: "", adapterId: "codex" }),
+      [{ id: "codex", displayName: "Codex CLI" }] as AgentAdapterDescriptor[])).toBe("Codex CLI");
+    // And to the built-in name when the host named no adapters at all.
+    expect(agentSessionLabel(agent({ windowName: "⠋", displayName: "", adapterId: "codex" }), []))
+      .toBe("Codex");
   });
 });
