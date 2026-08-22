@@ -5,6 +5,7 @@ import {
   longTasksOverlapping,
   msSinceLastFrame,
   notePaint,
+  PAINT_SLOW_HIDDEN_THRESHOLD_MS,
   PAINT_SLOW_INCIDENT_INTERVAL_MS,
   PAINT_SLOW_THRESHOLD_MS,
   startLongTaskTracker,
@@ -232,6 +233,51 @@ describe("the stopped-frame-clock fingerprint", () => {
       stale?.(0);
       expect(frames).toHaveLength(0);
       expect(msSinceLastFrame()).toBeUndefined();
+    });
+  });
+});
+
+describe("the higher bar a hidden window has to clear", () => {
+  it("says nothing about a throttled paint, and does not charge it to the rate limit", () => {
+    withGlobals({ document: { visibilityState: "hidden", hasFocus: () => false } }, () => {
+      notePaint(paint({ ms: 100, startedAtMs: 0 }));
+      notePaint(paint({ ms: PAINT_SLOW_HIDDEN_THRESHOLD_MS - 1, startedAtMs: 10 }));
+      expect(slowPaints()).toHaveLength(0);
+
+      // Gated, not suppressed: neither paint was a finding, so neither spent the
+      // pane's interval nor counted itself into the next record's silence.
+      notePaint(paint({ ms: PAINT_SLOW_HIDDEN_THRESHOLD_MS, startedAtMs: 20 }));
+      expect(slowPaints()).toHaveLength(1);
+      expect(slowPaints()[0].detail).toMatchObject({ suppressed: 0 });
+    });
+  });
+
+  it("records a hidden paint slow enough to be more than throttling", () => {
+    withGlobals({ document: { visibilityState: "hidden", hasFocus: () => false } }, () => {
+      notePaint(paint({ ms: PAINT_SLOW_HIDDEN_THRESHOLD_MS + 50 }));
+      expect(slowPaints()).toHaveLength(1);
+      expect(slowPaints()[0].detail).toMatchObject({
+        ms: PAINT_SLOW_HIDDEN_THRESHOLD_MS + 50,
+        visibility: "hidden",
+      });
+    });
+  });
+
+  it("holds a visible window to the frame-budget threshold, focused or not", () => {
+    withGlobals({ document: { visibilityState: "visible", hasFocus: () => false } }, () => {
+      // A window nobody is typing into still paints, so a slow paint there is a
+      // real finding and must not be swallowed with the occluded ones.
+      notePaint(paint({ ms: PAINT_SLOW_THRESHOLD_MS, startedAtMs: 0 }));
+      expect(slowPaints()).toHaveLength(1);
+      expect(slowPaints()[0].detail).toMatchObject({ visibility: "visible", focused: false });
+    });
+  });
+
+  it("gates nothing where there is no document to ask", () => {
+    withGlobals({ document: undefined }, () => {
+      notePaint(paint({ ms: 100 }));
+      expect(slowPaints()).toHaveLength(1);
+      expect(slowPaints()[0].detail?.visibility).toBeUndefined();
     });
   });
 });
