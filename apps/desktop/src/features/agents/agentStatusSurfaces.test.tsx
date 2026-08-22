@@ -58,8 +58,13 @@ describe("the honest empty state", () => {
       onSetUpHost: noop,
     });
     expect(html).toContain("inductive");
-    expect(html).toContain("state-dot unknown");
-    expect(html).not.toContain("state-dot working");
+    // The neutral treatment rides on the adapter mark now, but it is the same
+    // dashed outline the dot drew and it is still not the working one.
+    expect(html).toContain("agent-mark-badge unknown");
+    expect(html).not.toContain("agent-mark-badge working");
+    // Unknown shares the Idle heading rather than claiming a group of its own:
+    // a gap in reporting is not a fifth thing an agent can be doing.
+    expect(html).toContain("<span>Idle</span>");
   });
 
   it("draws an unknown dot as an outline, and never as a visible glyph by default", () => {

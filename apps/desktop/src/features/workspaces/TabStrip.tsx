@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../../ui/Icon";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
-import { StateDot } from "../../ui/StateDot";
+import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
 import { fileIcon } from "../files/fileIcons";
 import {
   selectableTabs, tabsToCloseNonAgent, tabsToCloseOthers, tabsToCloseRight,
@@ -202,12 +202,16 @@ export function TabStrip(props: TabStripProps) {
             {tab.kind === "app" && <TabGlyph tab={tab} />}
             <span className={tab.kind === "app" && tab.preview ? "tab-title tab-title-preview" : "tab-title"}>{tab.title}</span>
             {tab.kind === "terminal" && tab.zoomed && <span aria-label="Pane zoomed" className="tab-zoom"><Icon name="zoom" size={11} /></span>}
-            {tab.kind === "terminal" && tab.attention === "working"
-              ? <span aria-label="Agent working" className="spinner tab-agent-spinner" role="img" />
-              : tab.kind === "terminal" && tab.attention !== "none" && <StateDot
+            {/* Spinner for working, dot for everything else — and dots for
+                everything once the glyph option is on, because a glyph needs
+                somewhere to sit. `AgentStateIndicator` is that one rule, shared
+                with the sidebar so the same agent cannot read as a process here
+                and a state there. */}
+            {tab.kind === "terminal" && tab.attention !== "none" && <AgentStateIndicator
               className="tab-dot"
               glyphs={props.stateGlyphs}
               label={`Agent ${tab.attention}`}
+              spinnerClassName="tab-agent-spinner"
               state={tab.attention}
             />}
           </button>

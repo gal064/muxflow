@@ -27,6 +27,19 @@ export function nextSortMode(mode: AgentSortMode): AgentSortMode {
   return mode === "workspace" ? "status" : "workspace";
 }
 
+/**
+ * What the toggle says, which is not what the mode is called.
+ *
+ * The persisted value stays `status` — it is in the app-state contract and two
+ * migrations already point at it — but "status" names the field the rows are
+ * keyed on rather than what the mode does for you, and the mode draws headings
+ * now: Blocked, Working, Done, Idle, in the order you should deal with them.
+ * That is a priority, so the button says priority.
+ */
+export function sortModeLabel(mode: AgentSortMode): string {
+  return mode === "status" ? "priority" : "workspace";
+}
+
 /** Where a row sits in the workspace list and in its workspace's tab strip. */
 export interface AgentLocation {
   workspaceOrder: number;
@@ -66,6 +79,51 @@ export function groupAgentRows(rows: readonly AgentListRow[]): AgentWorkspaceGro
     else groups.set(key, { key, workspaceName: row.location.workspaceName, hostLabel, rows: [row] });
   }
   return [...groups.values()];
+}
+
+/**
+ * The four buckets the priority order draws, in the order they are worth your
+ * attention.
+ *
+ * `unknown` shares Idle's bucket rather than getting a fifth heading: it means
+ * "nothing has told us what this is doing", which is a gap in reporting and
+ * not a fifth thing an agent can be busy with. A heading per reporting gap
+ * would put the least informative group on equal footing with Blocked.
+ */
+export const AGENT_STATUS_GROUPS = [
+  { key: "blocked", label: "Blocked", states: ["blocked"] },
+  { key: "working", label: "Working", states: ["working"] },
+  { key: "done", label: "Done", states: ["done"] },
+  { key: "idle", label: "Idle", states: ["idle", "unknown"] },
+] as const satisfies readonly { key: string; label: string; states: readonly AgentDisplayState[] }[];
+
+export interface AgentStatusGroup {
+  key: string;
+  label: string;
+  /** The state the heading's dot draws — the group's own, not any one row's. */
+  state: AgentDisplayState;
+  rows: AgentListRow[];
+}
+
+/**
+ * Buckets an already status-ordered list without re-sorting its rows.
+ *
+ * The bucket order is not the sort order: `compareAgents` ranks done-unread
+ * above working, because a finished agent is the one waiting on a human. That
+ * is right for "which single row does ⌘⇧U jump to" and wrong for a column you
+ * read top to bottom, where Working sitting between Blocked and Done is what
+ * makes the list scan as a queue. Rows keep their sorted order inside each
+ * bucket, so the loudest row in a group is still its first.
+ */
+export function groupAgentRowsByStatus(rows: readonly AgentListRow[]): AgentStatusGroup[] {
+  return AGENT_STATUS_GROUPS
+    .map((group) => ({
+      key: group.key,
+      label: group.label,
+      state: group.states[0] as AgentDisplayState,
+      rows: rows.filter((row) => (group.states as readonly AgentDisplayState[]).includes(row.state)),
+    }))
+    .filter((group) => group.rows.length > 0);
 }
 
 /**

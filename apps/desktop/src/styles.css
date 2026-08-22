@@ -176,6 +176,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .badge-corner { position: absolute; top: -1px; right: -3px; }
 .badge-row { position: absolute; top: 7px; right: 7px; pointer-events: none; }
+/* A compact workspace row is a single line of flex children, so the count can
+   simply be the last one. Floating it would have made it overlap the agent
+   cluster it sits next to, which is the reason `.badge-row` is absolute at
+   all: on a tall row there is nothing on that line to collide with. */
+.badge-inline { flex: 0 0 auto; }
 
 /* ── Disconnected strip ────────────────────────────────────────────────── */
 
@@ -258,26 +263,45 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .workspace-button:hover:not(.active) { background: var(--chrome-hover); }
 .workspace-button.active { background: var(--accent); }
+/* Compact rows are one line, so the row is a line: name on the left, the
+   agent cluster and any unread count pushed to the right edge. ~24px is the
+   Explorer's row budget, which is what makes a long workspace list scannable
+   at all — the column layout above would have made every row 32px. */
+.workspace-button.compact {
+  flex-direction: row; align-items: center; gap: 6px;
+  min-height: 24px; padding: 3px 8px; margin-bottom: 1px;
+}
 .workspace-title {
   display: flex; align-items: center; gap: 6px; min-width: 0;
   font-size: var(--type-row); font-weight: var(--weight-row); color: var(--chrome-ink);
 }
+.workspace-button.compact .workspace-title { flex: 1 1 auto; }
 .workspace-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 7px, not 5: each mark's badge overhangs its own box by 3.5px, so a tighter
+   gap has one agent's state sitting on the next agent's icon. */
+.workspace-agents { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; margin-left: auto; }
+.workspace-agents-more {
+  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
+  font-variant-numeric: tabular-nums;
+}
 /* Up to four single-line entries — three agents and the overflow count — not
    one wrapped paragraph. A clamped box would have let the second agent eat the
    third's line, which is the opposite of what listing three is for. */
 .workspace-activity {
-  --activity-dot: 8px; --activity-gap: 5px;
+  /* The gap is one wider than it was: the badge overhangs the mark's box by
+     3.5px, and at the old 5px it very nearly touched the name beside it. */
+  --activity-icon: 12px; --activity-gap: 6px;
   display: flex; flex-direction: column; gap: 1px; min-width: 0;
   font-size: var(--type-secondary); line-height: 1.35; color: var(--chrome-dim);
 }
 .workspace-activity-line { display: flex; align-items: center; gap: var(--activity-gap); min-width: 0; }
 .workspace-activity-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Indented to where the agent names above it start, since it stands in for
-   more of them and has no state dot of its own to take up the gap. Derived
-   from the dot and the gap so it stays aligned if either changes. */
+   more of them and has no mark of its own to take up the gap. Derived from the
+   mark and the gap so it stays aligned if either changes; the state now rides
+   on the mark rather than sitting beside it, so the mark is the whole indent. */
 .workspace-activity-more {
-  padding-inline-start: calc(var(--activity-dot) + var(--activity-gap));
+  padding-inline-start: calc(var(--activity-icon) + var(--activity-gap));
   color: var(--chrome-faint);
 }
 .workspace-meta {
@@ -287,7 +311,14 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .workspace-button.active .workspace-title,
 .workspace-button.active .workspace-activity { color: var(--accent-ink); }
 .workspace-button.active .workspace-meta,
+.workspace-button.active .workspace-agents-more,
 .workspace-button.active .workspace-activity-more { color: color-mix(in srgb, var(--accent-ink) 72%, transparent); }
+/* The active row is an accent block, so everything on it flips to the knockout
+   ink — including the two things that are not text. The shortcut number and
+   the adapter marks were reading at --chrome-faint and --chrome-dim against a
+   light accent, which is the one combination the palette has no contrast for. */
+.workspace-button.active .workspace-shortcut-index,
+.workspace-button.active .agent-icon { color: var(--accent-ink); }
 .workspace-shortcut-index {
   width: 12px; flex: 0 0 auto;
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
@@ -310,19 +341,37 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 0; border-radius: var(--radius-control);
   background: transparent; color: inherit; text-align: left;
 }
-.agent-workspace-group { margin: 0 5px 5px; }
+/* Groups are made of whitespace and nothing else. The rule under every heading
+   plus 5px of margin above it drew a boxed table of one- and two-row sections,
+   which spent more pixels on the borders than on the agents; 10px between
+   groups and 1px inside one says the same thing by proximity alone, and it says
+   it without adding a line to a sidebar that already has three. */
+.agent-workspace-group { margin: 0 5px 10px; }
 .agent-workspace-heading {
   display: flex; align-items: baseline; gap: 6px; min-width: 0;
-  margin: 3px 4px 1px; padding: 5px 0 3px;
-  border-bottom: 1px solid var(--chrome-hairline);
+  margin: 0 4px; padding: 2px 0 1px;
   font-size: var(--type-label); font-weight: 600; color: var(--chrome-dim);
 }
-.agent-workspace-heading > span:first-child,
+.agent-workspace-heading > span:not(.agent-group-count),
 .agent-session-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-workspace-host {
+/* Where the host label used to be. One connection is live at a time here, so
+   the host was the same word on every heading; the count is the thing that
+   differs, and it is what tells you a collapsed-looking group has six agents
+   in it. The host survives in the heading's `title`. */
+.agent-group-count {
   margin-left: auto; flex: 0 0 auto;
   font-family: var(--font-mono); font-size: var(--type-meta); font-weight: 400; color: var(--chrome-faint);
+  font-variant-numeric: tabular-nums;
 }
+/* The priority headings' state mark. Smaller than a row's dot on purpose: it
+   labels a group rather than reporting on one agent, and Working spins for the
+   same reason every other working indicator does. */
+/* Two classes, not one: `.state-dot` below is a single class too and comes
+   later in the file, so a bare `.agent-group-dot` lost the size it asks for and
+   every non-Working heading drew an 8px dot beside the Working heading's 7px
+   spinner. One size for every group-heading indicator. */
+.state-dot.agent-group-dot, .spinner.agent-group-dot { width: 7px; height: 7px; align-self: center; }
+.spinner.agent-group-dot { color: var(--state-working); }
 .agent-button:hover:not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
 /* Reachable by keyboard, still clearly not actionable — see the note at the
    call site for why this is not `disabled`. */
@@ -331,10 +380,52 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   display: flex; align-items: center; gap: 6px; min-width: 0;
   font-size: 11.5px; font-weight: var(--weight-row); color: var(--chrome-ink);
 }
-.agent-icon { width: 11px; height: 11px; flex: 0 0 auto; color: var(--chrome-dim); }
+.agent-icon { width: 12px; height: 12px; flex: 0 0 auto; color: var(--chrome-dim); }
 .agent-icon.codex { fill: currentColor; }
 .agent-icon.claude, .agent-icon.generic { fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.35; }
+/* Four strokes at 2, against Codex's solid mass. The eight-spoke asterisk at
+   1.35 was more ink than the blossom and less shape, and at 12px the spokes
+   merged into a blot; two weights that look equal is the point, not two
+   numbers that are equal. */
+.agent-icon.claude { stroke-width: 2; }
 .agent-icon.generic circle:nth-of-type(n+2) { fill: currentColor; stroke: none; }
+
+/* The adapter mark with its state docked to it — one object per agent instead
+   of a dot, a gap and an icon. The ring is the row's own background punched
+   out around the badge so it reads as a separate layer rather than a bite out
+   of the mark; it is a variable because "the row's background" is four
+   different tokens depending on which row and whether it is hovered. */
+.agent-mark { --badge-ring: var(--chrome-bg); position: relative; display: inline-flex; flex: 0 0 auto; }
+/* The glyph option's shape of the same wrapper: a full-size dot beside the icon
+   rather than a badge on it, held together by a gap of its own. The cluster
+   around it keeps one uniform gap, and that gap now separates agents rather
+   than alternating between "this agent's state" and "the next agent's icon". */
+.agent-mark-glyphs { align-items: center; gap: 3px; }
+.agent-button:hover:not(:disabled):not([data-unavailable]) .agent-mark,
+.workspace-button:hover:not(.active) .agent-mark { --badge-ring: var(--chrome-hover); }
+.workspace-button.active .agent-mark { --badge-ring: var(--accent); }
+.agent-mark-badge {
+  position: absolute; right: -2px; bottom: -2px;
+  width: 6px; height: 6px; border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--badge-ring);
+}
+.agent-mark-badge.blocked { background: var(--state-blocked); }
+.agent-mark-badge.done { background: var(--state-done); }
+/* Idle and unknown are outlines, not fills: an agent nobody is waiting on
+   should not put a coloured chip on the mark. Same distinction the dots make —
+   solid for idle-and-we-know-it, dashed for nothing-has-told-us. */
+.agent-mark-badge.idle { background: var(--badge-ring); border: 1.5px solid var(--chrome-faint); }
+.agent-mark-badge.unknown { background: var(--badge-ring); border: 1.5px dashed var(--state-unknown); }
+/* The two outline badges are the only part of a mark whose colour is carried by
+   a border, and on the active row that border is drawn against the accent
+   block: --chrome-faint lands near 2.1:1 there and --state-unknown near 2.4:1,
+   so both vanish on the one row the eye is already on. Same knockout flip the
+   shortcut index and the adapter icons make two rules up. */
+.workspace-button.active .agent-mark-badge.idle,
+.workspace-button.active .agent-mark-badge.unknown { border-color: color-mix(in srgb, var(--accent-ink) 65%, transparent); }
+/* `.spinner` supplies the ring and the animation; this only sizes and colours
+   it, and fills the middle so the mark does not show through the badge. */
+.agent-mark-badge.working { width: 7px; height: 7px; background: var(--badge-ring); color: var(--state-working); }
 .agent-session-label { min-width: 0; flex: 1 1 auto; }
 .agent-location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-tab { font-family: var(--font-mono); font-size: var(--type-label); font-weight: 400; color: var(--chrome-faint); }
@@ -882,9 +973,17 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .markdown-modes button:first-child { border-radius: 4px 0 0 4px; }
 .markdown-modes button:last-child { border-radius: 0 4px 4px 0; }
 .markdown-modes button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-wash); color: var(--chrome-ink-strong); }
-.save-state { padding: 2px 6px; border-radius: 9px; color: var(--chrome-faint); font-size: var(--type-label); }
-.save-state.saving, .save-state.dirty { color: var(--state-working); background: var(--chrome-raised); }
-.save-state.error { color: var(--danger-ink); background: var(--danger-wash); }
+/* The chip keeps its footprint whether or not it is saying anything: 72px is
+   the widest label ("Save failed") plus its padding and a little slack, so a
+   status appearing or leaving never shifts the buttons beside it. It fades
+   rather than blinks. */
+.save-state {
+  flex: 0 0 auto; min-width: 72px; padding: 2px 6px; border-radius: 9px;
+  color: var(--chrome-faint); font-size: var(--type-label); text-align: right;
+  opacity: 0; transition: opacity 160ms ease;
+}
+.save-state.saving, .save-state.dirty { color: var(--state-working); background: var(--chrome-raised); opacity: 1; }
+.save-state.error { color: var(--danger-ink); background: var(--danger-wash); opacity: 1; }
 .git-diff-toolbar { min-width: 0; }
 .git-diff-toolbar code { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-target {
@@ -1298,6 +1397,15 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   }
   .state-dot:not(.glyphs), .tab-dot:not(.glyphs) { color: ButtonText; }
   .state-dot.idle, .tab-dot.idle { border-style: dashed; }
+  /* The mark badge is 6px and cannot hold a glyph, so here it keeps what a
+     shape can carry at that size: filled for the two states that want a human,
+     outlined for the two that do not, dashed for the one nothing has reported.
+     Working is already a spinner and needs no help. The ring loses its meaning
+     when every background is Canvas, so it goes. */
+  .agent-mark-badge { box-shadow: none; background: Canvas; }
+  .agent-mark-badge:not(.working) { border: 1px solid ButtonText; }
+  .agent-mark-badge.blocked, .agent-mark-badge.done { background: ButtonText; }
+  .agent-mark-badge.unknown { border-style: dashed; }
   .link-strip { border-bottom: 2px solid ButtonText; }
   /* Read-only and reconnecting are two different situations and the colors
      that separate them do not survive here, so the words carry it. */

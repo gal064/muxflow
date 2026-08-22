@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import stylesCss from "../../styles.css?raw";
+import { act as domAct } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createRoot } from "react-dom/client";
 import { act, create } from "react-test-renderer";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostProfile, Session } from "../../app/types";
 import { rowCommandRegistry } from "../../commands/rowCommands";
 import { agent } from "../agents/testFixtures";
@@ -47,35 +49,73 @@ function fiveAgentRows(): WorkspaceRowModel[] {
   });
 }
 
-const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
-  adapters={[]}
-  agents={buildAgentRows([agent({ displayName: "Codex one", windowName: "Review auth flow", lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", hostLabel: "remote-linux", tabIndex: 1 }), () => true, "workspace")}
-  agentSort="workspace"
-  agentsRatio={0.4}
-  compactWorkspaces={false}
-  canMutate
-  commandScope={commandScope}
-  hostLabel="remote-linux"
-  latencyMs={41}
-  onAgentsRatio={noop}
-  onLaunchAgent={noop}
-  onOpenSettings={noop}
-  onRenameAgent={noop}
-  onResumeAgent={noop}
-  onReviewHooks={noop}
-  onSelectAgent={noop}
-  onSelectWorkspace={noop}
-  onSortMode={noop}
-  onWorkspaceCommand={noop}
-  phase="connected"
-  rows={rows}
-  maxWidth={426}
-  onWidth={noop}
-  stateGlyphs={false}
-  transport="ssh"
-  width={240}
-  {...overrides}
-/>);
+type SidebarProps = Parameters<typeof WorkspaceSidebar>[0];
+
+const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
+  adapters: [],
+  agents: buildAgentRows([agent({ displayName: "Codex one", windowName: "Review auth flow", lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", hostLabel: "remote-linux", tabIndex: 1 }), () => true, "workspace"),
+  agentSort: "workspace",
+  agentsRatio: 0.4,
+  compactWorkspaces: false,
+  canMutate: true,
+  commandScope,
+  hostLabel: "remote-linux",
+  latencyMs: 41,
+  onAgentsRatio: noop,
+  onLaunchAgent: noop,
+  onOpenSettings: noop,
+  onRenameAgent: noop,
+  onResumeAgent: noop,
+  onReviewHooks: noop,
+  onSelectAgent: noop,
+  onSelectWorkspace: noop,
+  onSortMode: noop,
+  onWorkspaceCommand: noop,
+  phase: "connected",
+  rows,
+  maxWidth: 426,
+  onWidth: noop,
+  stateGlyphs: false,
+  transport: "ssh",
+  width: 240,
+  ...overrides,
+});
+
+const sidebar = (overrides: Partial<SidebarProps> = {}) => renderToStaticMarkup(<WorkspaceSidebar {...sidebarProps(overrides)} />);
+
+/**
+ * The same sidebar in a real DOM, for the things that only exist there.
+ *
+ * The roving arrow keys resolve their next row by walking the rendered
+ * document, which is the whole point of the fix they cover: a static string and
+ * a react-test-renderer tree both hand back the element the component *thinks*
+ * comes next, and the defect was that the component thought wrong.
+ */
+const domMounts: Array<{ root: ReturnType<typeof createRoot>; host: HTMLElement }> = [];
+
+afterEach(async () => {
+  while (domMounts.length) {
+    const mounted = domMounts.pop()!;
+    await domAct(async () => mounted.root.unmount());
+    mounted.host.remove();
+  }
+});
+
+async function mountSidebar(overrides: Partial<SidebarProps> = {}): Promise<HTMLElement> {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  domMounts.push({ root, host });
+  await domAct(async () => root.render(<WorkspaceSidebar {...sidebarProps(overrides)} />));
+  return host;
+}
+
+/** An arrow key on whatever currently has focus, through React's real listener. */
+async function pressArrow(key: "ArrowUp" | "ArrowDown"): Promise<void> {
+  const active = document.activeElement as HTMLElement | null;
+  await domAct(async () => { active?.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key })); });
+}
 
 describe("application shell accessibility contracts", () => {
   it("renders one named sidebar holding both workspaces and agents", () => {
@@ -90,7 +130,9 @@ describe("application shell accessibility contracts", () => {
     expect(html).not.toContain("main*");
     expect(html).not.toContain("~/dev/muxflow");
     // The one control in the agents header names both its state and its effect.
-    expect(html).toContain("Agent ordering: workspace. Switch to status.");
+    // The persisted mode is still `status`; the word on the button is what the
+    // mode does — blocked first, then working, then done, then idle.
+    expect(html).toContain("Agent ordering: workspace. Switch to priority.");
     // The only resting connection indicator, and it is the way into settings.
     expect(html).toContain("Host remote-linux over ssh, connected. Open connection settings.");
     expect(html).toContain("41 ms");
@@ -120,6 +162,9 @@ describe("application shell accessibility contracts", () => {
     expect(busy).toContain("claude · done, unread");
     expect(busy).toContain("aider · working");
     expect(busy).toContain("…2 more");
+    // The line is a badged mark and the text, in that order — the state used
+    // to be a separate dot in front of the icon and is now docked to it.
+    expect(busy).toMatch(/class="agent-mark"><svg[^>]*data-agent-icon="codex"[\s\S]*?class="agent-mark-badge blocked"><\/span><\/span><span class="workspace-activity-text">codex · blocked/);
     // Four lines, one announcement: the label names the loudest and counts the
     // rest rather than reading every line of one list item.
     expect(busy).toContain('aria-label="A very long workspace name, codex · blocked, 5 agents, 2 agents waiting"');
@@ -131,9 +176,25 @@ describe("application shell accessibility contracts", () => {
     const html = sidebar({ compactWorkspaces: true, rows: fiveAgentRows() });
     expect(html).not.toContain('class="workspace-activity"');
     expect(html).toContain('aria-label="A very long workspace name, codex · blocked, 5 agents, 2 agents waiting"');
-    expect(html).toContain('class="spinner"');
-    expect(html).toContain('<span class="workspace-title"><span aria-hidden="true" class="spinner"></span><span aria-hidden="true" class="state-dot blocked">');
-    expect(html).toContain('class="badge badge-row">2');
+    // The number is inside the title now, in front of the name — the row's
+    // address rather than a column of digits beside it. No title spinner beside
+    // it: the cluster below already spins one ring per working agent, and two
+    // animations for one 24px row is one motion too many.
+    expect(html).toContain('<span class="workspace-title"><span aria-hidden="true" class="workspace-shortcut-index">1</span><span class="workspace-name">');
+    expect(html).not.toContain('class="spinner"');
+    expect(html).toContain('class="spinner agent-mark-badge working"');
+    // The non-compact row has no cluster to carry it, so it keeps the spinner.
+    expect(sidebar({ rows: fiveAgentRows() }))
+      .toContain('<span aria-hidden="true" class="spinner"></span><span class="workspace-name">');
+    // A cluster of badged marks stands in for the three agent lines: three at
+    // most, then a mono overflow count. Decorative — `rowLabel` above is the
+    // whole accessible name.
+    const cluster = html.slice(html.indexOf('class="workspace-agents"'), html.indexOf('class="badge badge-inline"'));
+    expect(cluster.match(/class="agent-mark"/g)).toHaveLength(3);
+    expect(cluster).toContain('class="workspace-agents-more">+2</span>');
+    // Inline at the far right of the one line, not floated over it.
+    expect(html).toContain('class="badge badge-inline">2');
+    expect(html.slice(0, html.indexOf("section-divider"))).not.toContain('class="badge badge-row"');
   });
 
   it("nests workspace-ordered agents under host-qualified headings in keyboard order", () => {
@@ -148,12 +209,111 @@ describe("application shell accessibility contracts", () => {
     }), () => true, "workspace");
     const html = sidebar({ agents });
     expect(html).toContain('class="agent-workspace-heading"');
+    // The host stays in the tooltip — one connection is live at a time, so on
+    // the line it was the same word on every heading — and the line's right
+    // edge carries the group's size instead.
     expect(html).toContain('title="api · remote-linux"');
     expect(html).toContain('title="web · remote-linux"');
+    expect(html).not.toContain('class="agent-workspace-host"');
+    expect(html).toContain('<span>api</span><span aria-hidden="true" class="agent-group-count">1</span>');
     expect(html.indexOf('data-agent-index="0"')).toBeLessThan(html.indexOf('data-agent-index="1"'));
     expect(html).toContain('data-agent-icon="codex"');
     expect(html).toContain('data-agent-icon="claude"');
     expect(html).toContain('<span class="agent-session-label">Plan rollout</span><span class="agent-detail">');
+  });
+
+  /**
+   * All four buckets populated, done and working both present.
+   *
+   * That last part is the whole fixture: `compareAgents` ranks done-unread
+   * above working, and the headings read Blocked → Working → Done → Idle, so
+   * this is the one shape in which the flat index order and the reading order
+   * disagree. A fixture without a done agent agrees with itself and proves
+   * nothing about either.
+   */
+  const priorityAgents = () => buildAgentRows([
+    agent({ id: "b", windowName: "Fix the build", sessionId: "$1", sessionName: "api", lifecycle: "blocked", updatedAt: 5 }),
+    agent({ id: "w", windowName: "Run the suite", sessionId: "$2", sessionName: "web", lifecycle: "working", updatedAt: 4 }),
+    agent({ id: "d", windowName: "Ship the patch", sessionId: "$2", sessionName: "web", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 4, seenGeneration: 1, updatedAt: 3 }),
+    agent({ id: "u", windowName: "Never reported", sessionId: "$2", sessionName: "web", lifecycle: "unknown", updatedAt: 2 }),
+    agent({ id: "i", windowName: "Nothing doing", sessionId: "$2", sessionName: "web", lifecycle: "idle", updatedAt: 1 }),
+  ], (record) => ({ workspaceOrder: 0, workspaceName: record.sessionName }), () => true, "status");
+
+  it("draws the priority order as real groups, keyed on the flat keyboard index", () => {
+    // The sort put blocked above working above idle and left it at that, so a
+    // list of twelve read as one undifferentiated column. Same clustering the
+    // workspace mode uses, keyed on what the agent is doing.
+    const html = sidebar({ agentSort: "status", agents: priorityAgents() });
+    expect(html).toContain(">priority</button>");
+    for (const label of ["Blocked", "Working", "Done", "Idle"]) expect(html, label).toContain(`<span>${label}</span>`);
+    // Blocked, working, done, idle — the reading order, and deliberately not
+    // the sort's done-outranks-working ranking, which is what puts Working
+    // between Blocked and Done here.
+    expect(html.indexOf(">Blocked<")).toBeLessThan(html.indexOf(">Working<"));
+    expect(html.indexOf(">Working<")).toBeLessThan(html.indexOf(">Done<"));
+    expect(html.indexOf(">Done<")).toBeLessThan(html.indexOf(">Idle<"));
+    // Unknown shares Idle's group rather than earning a fifth heading, so that
+    // group counts two.
+    expect(html).toContain('<span>Idle</span><span aria-hidden="true" class="agent-group-count">2</span>');
+    // The workspace is in each row's detail, because the grouping no longer
+    // says it.
+    expect(html).toContain("web · working");
+    // One flat index across every group — a per-group index would restart the
+    // roving walk at every heading — and it is *not* ascending in the document,
+    // because done sorts above working and reads below it. Which is exactly why
+    // `focusRelative` cannot treat the number as a document position.
+    expect([...html.matchAll(/data-agent-index="(\d+)"/g)].map((match) => match[1])).toEqual(["0", "2", "1", "3", "4"]);
+  });
+
+  it("walks every priority row exactly once with the arrow keys, across the group seams", async () => {
+    // `focusRelative` used to step the flat `data-agent-index` and then take
+    // the query result at that position: two different orders walked at once.
+    // With a done and a working agent both present, going down skipped the Done
+    // row and stuck at the bottom, and coming back up skipped the Working one.
+    const host = await mountSidebar({ agentSort: "status", agents: priorityAgents() });
+    expect([...host.querySelectorAll<HTMLElement>(".agent-workspace-heading")].map((node) => node.id))
+      .toEqual(["agent-status-blocked", "agent-status-working", "agent-status-done", "agent-status-idle"]);
+
+    const walkRows = [...host.querySelectorAll<HTMLElement>("[data-agent-index]")];
+    expect(walkRows.map((row) => row.querySelector(".agent-session-label")?.textContent))
+      .toEqual(["Fix the build", "Run the suite", "Ship the patch", "Never reported", "Nothing doing"]);
+    // The identity on each row is the flat index, and it does not ascend.
+    expect(walkRows.map((row) => row.dataset.agentIndex)).toEqual(["0", "2", "1", "3", "4"]);
+
+    walkRows[0].focus();
+    const down = [document.activeElement];
+    for (let step = 1; step < walkRows.length; step += 1) { await pressArrow("ArrowDown"); down.push(document.activeElement); }
+    expect(down).toEqual(walkRows);
+    // The end of the list is the end, not a wrap onto the top.
+    await pressArrow("ArrowDown");
+    expect(document.activeElement).toBe(walkRows.at(-1));
+
+    const up = [document.activeElement];
+    for (let step = 1; step < walkRows.length; step += 1) { await pressArrow("ArrowUp"); up.push(document.activeElement); }
+    expect(up).toEqual([...walkRows].reverse());
+    await pressArrow("ArrowUp");
+    expect(document.activeElement).toBe(walkRows[0]);
+  });
+
+  it("walks the workspace rows the same way", async () => {
+    // Same lookup, for uniformity: the workspace indexes happen to ascend in
+    // the document today, and the walk should not be the thing that depends on
+    // it staying that way.
+    const host = await mountSidebar({
+      rows: [0, 1, 2].map((index) => ({
+        ...rows[0],
+        session: { ...session, id: `$${index + 1}`, name: `work ${index + 1}`, order: index },
+        active: index === 0,
+      })),
+    });
+    const workspaceRowNodes = [...host.querySelectorAll<HTMLElement>("[data-workspace-index]")];
+    expect(workspaceRowNodes).toHaveLength(3);
+    workspaceRowNodes[0].focus();
+    const visited = [document.activeElement];
+    for (let step = 1; step < workspaceRowNodes.length; step += 1) { await pressArrow("ArrowDown"); visited.push(document.activeElement); }
+    expect(visited).toEqual(workspaceRowNodes);
+    await pressArrow("ArrowUp");
+    expect(document.activeElement).toBe(workspaceRowNodes[1]);
   });
 
   it("reaches the agent row actions from the command registry, on the last agent focused", async () => {
@@ -198,23 +358,69 @@ describe("application shell accessibility contracts", () => {
     await act(async () => { renderer.unmount(); });
   });
 
-  it("encodes every agent state in the dot's class, which is where the color comes from", () => {
-    // The dot has no background of its own: `.state-dot.working` and friends
-    // carry it. A dot rendered as bare `state-dot` is an invisible 8x8 box, and
-    // the agents section loses the whole encoding the mock is built around —
-    // which is exactly what shipped when this class stopped interpolating.
-    for (const [lifecycle, expected] of [["working", "working"], ["blocked", "blocked"], ["idle", "idle"]] as const) {
-      const html = sidebar({
-        agents: buildAgentRows([agent({ displayName: "A", lifecycle })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "workspace"),
-      });
-      expect(html, lifecycle).toContain(`class="state-dot ${expected}"`);
+  it("encodes every agent state in the mark's class, which is where the color comes from", () => {
+    // The badge has no background of its own: `.agent-mark-badge.blocked` and
+    // friends carry it. A badge rendered as a bare `agent-mark-badge` is an
+    // invisible 6px box, and the agents section loses the whole encoding the
+    // mock is built around — which is exactly what shipped when the dot's class
+    // stopped interpolating, one indicator ago.
+    const row = (lifecycle: "working" | "blocked" | "idle", stateGlyphs = false) => sidebar({
+      stateGlyphs,
+      agents: buildAgentRows([agent({ displayName: "A", lifecycle })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "workspace"),
+    });
+    for (const lifecycle of ["blocked", "idle"] as const) {
+      expect(row(lifecycle), lifecycle).toContain(`class="agent-mark-badge ${lifecycle}"`);
     }
+    // Working is the one state that is a process rather than a condition, so
+    // it spins — on the badge here, the same way it spins on a tab.
+    expect(row("working")).toContain('class="spinner agent-mark-badge working"');
+    expect(row("working")).not.toContain('class="agent-mark-badge working"');
+    // With the glyph option on the badge steps aside: 6px cannot hold a
+    // legible "!" or "✓", and the option exists so state does not depend on
+    // colour. Full-size dots come back, working included.
+    expect(row("working", true)).toContain('class="state-dot working glyphs"');
+    expect(row("blocked", true)).toContain('class="state-dot blocked glyphs"');
+    expect(row("blocked", true)).not.toContain("agent-mark-badge");
     // Every state the list can produce must have a rule to match, or the same
     // defect returns for one state instead of all of them.
     // Read the same way `theme.test.ts` reads `tokens.css`: the real file.
     for (const state of ["working", "blocked", "done", "unknown", "idle"]) {
       expect(stylesCss, state).toContain(`.state-dot.${state}`);
+      expect(stylesCss, state).toContain(`.agent-mark-badge.${state}`);
     }
+    // The ring is the row's own background punched out around the badge, and
+    // every row background it can sit on has to say which one it is.
+    expect(stylesCss).toContain("--badge-ring: var(--chrome-bg)");
+    expect(stylesCss).toContain(".workspace-button.active .agent-mark { --badge-ring: var(--accent); }");
+    // Idle and unknown are the two badges whose colour lives in a border, and
+    // on the active row that border is drawn against the accent block, where
+    // --chrome-faint and --state-unknown fall to roughly 2:1. They flip to the
+    // knockout ink there, like the shortcut index and the icons already do.
+    expect(stylesCss).toContain(".workspace-button.active .agent-mark-badge.idle,");
+    expect(stylesCss).toContain(".workspace-button.active .agent-mark-badge.unknown { border-color: color-mix(in srgb, var(--accent-ink) 65%, transparent); }");
+    // One size for every group-heading indicator. `.state-dot` is a single
+    // class and comes later in the file, so 7px has to win on specificity or
+    // the non-Working headings quietly draw an 8px dot next to a 7px spinner.
+    expect(stylesCss).toContain(".state-dot.agent-group-dot, .spinner.agent-group-dot { width: 7px; height: 7px;");
+    // With the glyph option on the mark is still one node, and the gap between
+    // its dot and its icon is its own — tighter than the gap the compact
+    // cluster puts between two agents.
+    expect(stylesCss).toContain(".agent-mark-glyphs { align-items: center; gap: 3px; }");
+    expect(stylesCss).toContain(".workspace-agents { display: flex; align-items: center; gap: 7px;");
+  });
+
+  it("keeps the compact cluster one node per agent with the glyph option on", () => {
+    // A two-node fragment put the dot and the icon straight into the cluster's
+    // flex row, which has one uniform gap: dot, icon, dot, icon at 7px apiece,
+    // no visible pairing, and three agents taking the width of six marks.
+    const html = sidebar({ compactWorkspaces: true, rows: fiveAgentRows(), stateGlyphs: true });
+    const cluster = html.slice(html.indexOf('class="workspace-agents"'), html.indexOf('class="badge badge-inline"'));
+    expect(cluster.match(/class="agent-mark agent-mark-glyphs"/g)).toHaveLength(3);
+    expect(cluster.match(/class="agent-icon/g)).toHaveLength(3);
+    expect(cluster.match(/class="state-dot /g)).toHaveLength(3);
+    // Every dot is inside a wrapper, so the cluster's own children are the
+    // three agents and the overflow count and nothing else.
+    expect(cluster).not.toMatch(/class="workspace-agents"><span class="state-dot/);
   });
 
   it("states empty sidebar sections in one line each", () => {
@@ -260,6 +466,9 @@ describe("application shell accessibility contracts", () => {
     const workspaceHtml = sidebar({ rows: manyRows });
     expect(workspaceHtml.match(/class="workspace-shortcut-index"/g)).toHaveLength(9);
     expect(workspaceHtml).toContain('class="workspace-shortcut-index">9</span>');
+    // Inside the title, in front of the name: the number addresses the row, and
+    // on its own line it read as a column of digits parallel to the names.
+    expect(workspaceHtml).toContain('<span class="workspace-title"><span aria-hidden="true" class="workspace-shortcut-index">9</span>');
 
     const manyTabs = Array.from({ length: 10 }, (_, index) => ({
       key: `app:file-${index}` as const,

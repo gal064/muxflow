@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentRows, groupAgentRows, jumpTarget, needsAttention, nextSortMode, unreadCount, type AgentLocation } from "./agentsList";
+import {
+  buildAgentRows, groupAgentRows, groupAgentRowsByStatus, jumpTarget, needsAttention, nextSortMode,
+  sortModeLabel, unreadCount, type AgentLocation,
+} from "./agentsList";
 import { agent } from "./testFixtures";
 import type { AgentRecord } from "./types";
 
@@ -56,6 +59,35 @@ describe("agents section ordering", () => {
   it("toggles between exactly two orderings", () => {
     expect(nextSortMode("workspace")).toBe("status");
     expect(nextSortMode("status")).toBe("workspace");
+    // The persisted value is `status` — it is in the app-state contract and two
+    // migrations point at it — but the button says what the mode does.
+    expect(sortModeLabel("status")).toBe("priority");
+    expect(sortModeLabel("workspace")).toBe("workspace");
+  });
+
+  it("buckets the priority order into the four groups you read top to bottom", () => {
+    const unknown = agent({ id: "unknown", lifecycle: "unknown" });
+    const rows = buildAgentRows([idle, working, done, blocked, unknown], locate, () => true, "status");
+    const groups = groupAgentRowsByStatus(rows);
+    // Not the sort's order: `compareAgents` ranks done-unread above working,
+    // which is right for "where does ⌘⇧U land" and wrong for a column read top
+    // to bottom, where Working between Blocked and Done is what makes it a
+    // queue. Unknown shares Idle's bucket — a gap in reporting is not a fifth
+    // thing an agent can be doing.
+    expect(groups.map((group) => [group.label, group.rows.map((row) => row.agent.id)])).toEqual([
+      ["Blocked", ["blocked"]],
+      ["Working", ["working"]],
+      ["Done", ["done"]],
+      ["Idle", ["unknown", "idle"]],
+    ]);
+    // Every group draws a state dot, and it is the group's state, not a row's.
+    expect(groups.map((group) => group.state)).toEqual(["blocked", "working", "done", "idle"]);
+    // An empty bucket is absent, not an empty heading.
+    expect(groupAgentRowsByStatus(buildAgentRows([working], locate, () => true, "status"))
+      .map((group) => group.key)).toEqual(["working"]);
+    expect(groupAgentRowsByStatus([])).toEqual([]);
+    // Rows keep their sorted order inside a bucket, and no row is lost.
+    expect(groups.flatMap((group) => group.rows)).toHaveLength(rows.length);
   });
 
   it("keeps agents whose workspace is not in the list last instead of dropping them", () => {
