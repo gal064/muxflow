@@ -774,7 +774,16 @@ describe("pending tab placeholder on create", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("upgrades the placeholder with the real window id rather than dropping it on the ack", async () => {
+  /**
+   * The ack hands the placeholder its window id and nothing else.
+   *
+   * Retirement is not this hook's to do: it happens in the shell, on the
+   * snapshot that names the window, and once (`retirePendingTab`). What this
+   * has to guarantee is that the successful path never publishes `undefined` —
+   * neither as a withdrawal, which would blink the strip empty between the ack
+   * and the snapshot, nor as a retirement it cannot make stick.
+   */
+  it("upgrades the placeholder with the real window id and leaves retirement to the shell", async () => {
     const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
       if (action.kind === "createWindow") return { sessionId: "$1", windowId: "@9", topologyGeneration: 2 };
       return { topologyGeneration: 3 };
@@ -785,11 +794,13 @@ describe("pending tab placeholder on create", () => {
     act(() => harness.navigation.createWindow("$1"));
     await flush();
 
-    // Not `undefined`: the ack names the window but the snapshot containing it
-    // has not arrived, and withdrawing here blinks the strip empty in between.
     expect(harness.setPendingTab).toHaveBeenLastCalledWith(
       expect.objectContaining({ sessionId: "$1", windowId: "@9" }),
     );
+    expect(
+      harness.setPendingTab.mock.calls.map(([pending]) => pending),
+      "a create that succeeded never withdraws its own placeholder",
+    ).not.toContain(undefined);
     await act(async () => renderer.unmount());
   });
 

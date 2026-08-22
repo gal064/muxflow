@@ -32,10 +32,12 @@ describe("requestReconciledTmuxAction", () => {
     expect(waitForNewerScope).toHaveBeenCalledOnce();
   });
 
-  it("never retries an explicit or destructive action", async () => {
+  it("never retries an action whose caller pinned a generation", async () => {
     for (const options of [
       { action: { kind: "renameSession", sessionId: "$1", name: "Work" } as const, capturedPrecondition: { serverIdentity: "server-a", generation: 2 } },
-      { action: { kind: "closeWindow", windowId: "@1", confirmed: true } as const, capturedPrecondition: undefined },
+      // A confirmed close carries the generation the dialog showed the person.
+      // Re-issuing against a newer one acts on a tmux they never saw.
+      { action: { kind: "closeWindow", windowId: "@1", confirmed: true } as const, capturedPrecondition: { serverIdentity: "server-a", generation: 3 } },
     ]) {
       const request = vi.fn().mockRejectedValue(new Error("stale topology: generation changed"));
       const waitForNewerScope = vi.fn(async () => scope(4));
@@ -50,6 +52,43 @@ describe("requestReconciledTmuxAction", () => {
       expect(request).toHaveBeenCalledOnce();
       expect(waitForNewerScope).not.toHaveBeenCalled();
     }
+  });
+
+  /**
+   * A bulk close is a run of destructive actions against one server, and each
+   * one moves the topology the next would have been measured against. The
+   * refusal is raised before tmux is touched — the host's `stale topology`
+   * bails all sit above the mutation — so re-issuing cannot close a second
+   * window; refusing to re-issue is what left survivors behind.
+   */
+  it("retries a destructive close that guards only the server identity", async () => {
+    const request = vi.fn()
+      .mockRejectedValueOnce(new Error("stale topology: external tmux structural mutation was reconciled before action"))
+      .mockResolvedValueOnce({ topologyGeneration: 6 });
+    const waitedFrom: HostScopeToken[] = [];
+    const waitForNewerScope = vi.fn(async (attempted: HostScopeToken) => {
+      waitedFrom.push(attempted);
+      return scope(6);
+    });
+
+    await requestReconciledTmuxAction({
+      clientId: "client",
+      action: { kind: "closeWindow", sessionId: "$1", windowId: "@2", confirmed: true },
+      capturedPrecondition: { serverIdentity: "server-a", generation: 0 },
+      initialScope: scope(5),
+      currentScope: () => scope(6),
+      request,
+      waitForNewerScope,
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    // Still guarding nothing but the server: a retry must not acquire the
+    // generation guard the caller deliberately did not ask for.
+    expect(request.mock.calls[0][2]).toEqual({ serverIdentity: "server-a", generation: 0 });
+    expect(request.mock.calls[1][2]).toEqual({ serverIdentity: "server-a", generation: 0 });
+    // Waited on the generation that was live when the refusal came, not on the
+    // stamped 0, which every generation is already newer than.
+    expect(waitedFrom[0]).toMatchObject({ generation: 5 });
   });
 
   it("bounds reconciliation to two retries", async () => {

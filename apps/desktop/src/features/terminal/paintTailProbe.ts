@@ -5,7 +5,7 @@ import { recordIncident } from "../../diagnostics/incidents";
  *
  * `inputLatencyStats` reports that the paint segment has a tail — a p50 of one
  * millisecond with rare samples of a quarter second — and a histogram cannot
- * say *why*. There are exactly three candidates behind an xterm write
+ * say *why*. There are exactly four candidates behind an xterm write
  * completion that took three frames to fire, and each leaves a different mark:
  *
  * - **Backlog.** xterm queues chunks and parses them in time-sliced batches, so
@@ -15,8 +15,16 @@ import { recordIncident } from "../../diagnostics/incidents";
  *   owned the loop while our chunk waited. Marked by `longTasks`.
  * - **Atlas work.** The shared glyph atlas was invalidated mid-window and the
  *   texture had to be rebuilt. Marked by `atlasDelta > 0`.
+ * - **A stopped frame clock.** macOS parks `requestAnimationFrame` for an
+ *   occluded, minimized, or off-Space window while timers and IPC keep running,
+ *   so anything paced by frames waits for the window to come back — which is a
+ *   wait of seconds or minutes, not milliseconds, and it is invisible to all
+ *   three fingerprints above. Marked by `msSinceLastFrame` far past a frame
+ *   period, next to `visibility: "hidden"` or `focused: false`. This is the one
+ *   cause where a huge `ms` with no long task and no atlas churn is the whole
+ *   story, and without the heartbeat it reads exactly like unexplained backlog.
  *
- * All three fingerprints ride on one `render.paintSlow` record, so a single
+ * All four fingerprints ride on one `render.paintSlow` record, so a single
  * journal line settles the question instead of a second measurement campaign.
  *
  * Always on, and priced for it: a paint under the threshold costs one
@@ -35,6 +43,23 @@ import { recordIncident } from "../../diagnostics/incidents";
  * above it.
  */
 export const PAINT_SLOW_THRESHOLD_MS = 48;
+
+/**
+ * The same question, asked of a window macOS is not painting.
+ *
+ * An occluded, minimized, or off-Space window has its frames throttled or
+ * parked outright, so its write completions routinely land at 48-115ms with
+ * nothing wrong: that is the OS being normal, not the app being slow. Since the
+ * write scheduler grew a 200ms timer fallback (`WRITE_FLUSH_FALLBACK_MS`), the
+ * app's own pacing contribution in a hidden window is bounded, which makes
+ * anything under roughly a quarter second there fully explained by the
+ * throttling. Journalling those buried the real records — they were most of one
+ * day's 91 `render.paintSlow` lines — so a hidden window has to clear this
+ * higher bar instead. A *visible* window is held to the 48ms threshold whether
+ * or not it has focus: an unfocused window still paints, so slowness there is a
+ * real finding.
+ */
+export const PAINT_SLOW_HIDDEN_THRESHOLD_MS = 250;
 
 /** How often one pane may contribute a slow-paint record. */
 export const PAINT_SLOW_INCIDENT_INTERVAL_MS = 5_000;
@@ -93,23 +118,125 @@ let tracking = false;
 /** Whether installation has been attempted; absence is permanent, so try once. */
 let attempted = false;
 const panes = new Map<string, PaneState>();
+/** `performance.now()` at the most recent animation frame, or never a frame. */
+let lastFrameAtMs: number | undefined;
+let heartbeatFrame: number | undefined;
+let heartbeatRunning = false;
 
 function remember(entry: LongTaskEntry): void {
   ring[ringNext] = entry;
   ringNext = (ringNext + 1) % LONG_TASK_RING_SIZE;
 }
 
+/** The paint clock, with a fallback so a WebView without one cannot throw. */
+function nowMs(): number {
+  try {
+    const clock = (globalThis as { performance?: { now?: () => number } }).performance;
+    if (typeof clock?.now === "function") return clock.now();
+  } catch {
+    // Fall through to the wall clock.
+  }
+  return Date.now();
+}
+
 /**
- * Installs the long-task observer, once per app launch.
+ * Keeps one self-rescheduling frame in flight, purely to timestamp it.
+ *
+ * This is the only way to see a stopped frame clock from inside a write
+ * completion: nothing else in the record moves when rAF is parked. One frame
+ * callback storing one number is small enough to leave running for the life of
+ * the app, and it is exactly as parked as the renderer it reports on — which is
+ * the measurement.
+ */
+function startFrameClockHeartbeat(): void {
+  if (heartbeatRunning) return;
+  try {
+    const request = (globalThis as {
+      requestAnimationFrame?: (callback: (time: number) => void) => number;
+    }).requestAnimationFrame;
+    // Headless and test environments have no frame clock at all. Absent is not
+    // stopped, so the field goes out undefined rather than as a huge gap.
+    if (typeof request !== "function") return;
+    heartbeatRunning = true;
+    const tick = () => {
+      if (!heartbeatRunning) return;
+      lastFrameAtMs = nowMs();
+      try {
+        heartbeatFrame = request.call(globalThis, tick);
+      } catch {
+        heartbeatRunning = false;
+        heartbeatFrame = undefined;
+      }
+    };
+    lastFrameAtMs = nowMs();
+    heartbeatFrame = request.call(globalThis, tick);
+  } catch {
+    heartbeatRunning = false;
+    heartbeatFrame = undefined;
+    lastFrameAtMs = undefined;
+  }
+}
+
+function stopFrameClockHeartbeat(): void {
+  heartbeatRunning = false;
+  try {
+    const cancel = (globalThis as { cancelAnimationFrame?: (handle: number) => void }).cancelAnimationFrame;
+    if (heartbeatFrame !== undefined && typeof cancel === "function") cancel.call(globalThis, heartbeatFrame);
+  } catch {
+    // A frame that refuses to be cancelled still checks `heartbeatRunning`.
+  }
+  heartbeatFrame = undefined;
+  lastFrameAtMs = undefined;
+}
+
+/**
+ * How long since the frame clock last ticked, or `undefined` where there is no
+ * frame clock to ask. Tens of milliseconds is a painting window; seconds is a
+ * window macOS has stopped painting.
+ */
+export function msSinceLastFrame(): number | undefined {
+  if (lastFrameAtMs === undefined) return undefined;
+  const elapsed = nowMs() - lastFrameAtMs;
+  if (!Number.isFinite(elapsed)) return undefined;
+  return Math.round(Math.max(0, elapsed));
+}
+
+/** `document.visibilityState`, or undefined where there is no document. */
+function readVisibility(): string | undefined {
+  try {
+    const state = (globalThis as { document?: { visibilityState?: string } }).document?.visibilityState;
+    return typeof state === "string" ? state : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `document.hasFocus()`, or undefined where there is no document to ask. */
+function readFocused(): boolean | undefined {
+  try {
+    const hasFocus = (globalThis as { document?: { hasFocus?: () => boolean } }).document?.hasFocus;
+    if (typeof hasFocus !== "function") return undefined;
+    const focused = hasFocus.call((globalThis as { document?: unknown }).document);
+    return typeof focused === "boolean" ? focused : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Installs the long-task observer and the frame-clock heartbeat, once per app
+ * launch.
  *
  * `longtask` is not in every WebView, and an absent API must cost the record
  * its long-task field and cost the app nothing — so construction and `observe`
  * are both guarded, and a failure leaves `tracking` false forever rather than
- * retrying on every pane mount.
+ * retrying on every pane mount. The heartbeat is armed alongside it and outside
+ * that guard, because a WebView without long tasks can still stop painting.
  */
 export function startLongTaskTracker(): void {
   if (attempted) return;
   attempted = true;
+  startFrameClockHeartbeat();
   try {
     const observerCtor = (globalThis as {
       PerformanceObserver?: new (callback: (list: { getEntries: () => LongTaskEntry[] }) => void) => {
@@ -144,6 +271,7 @@ export function disposeLongTaskTracker(): void {
   } catch {
     // Nothing to do about an observer that refuses to stop.
   }
+  stopFrameClockHeartbeat();
   observer = undefined;
   tracking = false;
   attempted = false;
@@ -189,6 +317,12 @@ export function notePaint(input: PaintSample): void {
   try {
     const { ms } = input;
     if (!Number.isFinite(ms) || ms < PAINT_SLOW_THRESHOLD_MS) return;
+    // Asked once, and reused for the record below. A window the OS has stopped
+    // painting has to clear the higher bar, and it drops out here — ahead of the
+    // rate-limit bookkeeping, because a paint that was never a finding must not
+    // spend the pane's interval or count itself as suppressed.
+    const visibility = readVisibility();
+    if (visibility !== undefined && visibility !== "visible" && ms < PAINT_SLOW_HIDDEN_THRESHOLD_MS) return;
     const startedAtMs = Number.isFinite(input.startedAtMs) ? input.startedAtMs : 0;
     const state = stateFor(input.paneId);
     if (state.lastRecordAtMs !== undefined && startedAtMs - state.lastRecordAtMs < PAINT_SLOW_INCIDENT_INTERVAL_MS) {
@@ -209,6 +343,10 @@ export function notePaint(input: PaintSample): void {
       queuedBytes: input.queuedBytes,
       atlasDelta: input.atlasDelta,
       longTasks: longTasksOverlapping(startedAtMs, startedAtMs + ms),
+      // Whether this window was being painted at all while the write waited.
+      visibility,
+      focused: readFocused(),
+      msSinceLastFrame: msSinceLastFrame(),
       suppressed,
     });
   } catch {
