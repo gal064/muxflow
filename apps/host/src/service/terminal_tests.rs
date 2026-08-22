@@ -27,6 +27,7 @@ fn start_long_lived_attachment(
             topology_trigger: TopologyOutputTrigger::default(),
         },
         long_lived_attachment_command(),
+        true,
     )
 }
 
@@ -111,6 +112,7 @@ fn clients_with_recorded_client(
             topology_trigger: TopologyOutputTrigger::default(),
         },
         recorded.command(),
+        true,
     )
     .unwrap();
     clients.clients.insert("$1".into(), attachment);
@@ -731,6 +733,59 @@ fn fresh_server_has_a_vacuous_input_fence_for_create_session_bootstrap() {
     clients.flush_input().unwrap();
 }
 
+#[test]
+fn control_client_reports_the_terminal_palette_before_its_first_capture() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    let written = recorded.written();
+    let foreground = written
+        .find("refresh-client -r '%1:\x1b]10;rgb:ffff/ffff/ffff\x1b\\'")
+        .unwrap();
+    let background = written
+        .find("refresh-client -r '%1:\x1b]11;rgb:2828/2c2c/3434\x1b\\'")
+        .unwrap();
+    let capture = written.find("__ADE_CAPTURE__").unwrap();
+    assert!(
+        foreground < background && background < capture,
+        "{written:?}"
+    );
+    clients.stop();
+}
+
+#[test]
+fn color_reports_are_capability_gated_for_tmux_33() {
+    assert!(tmux_supports_control_color_reports(
+        b"refresh-client (refresh) [-cDlLRSU] [-A pane:state] [-B name:what:format] [-C XxY] [-f flags] [-r pane:report] [-t target-client] [adjustment]\n"
+    ));
+    assert!(!tmux_supports_control_color_reports(
+        b"refresh-client (refresh) [-cDlLRSU] [-A pane:state] [-B name:what:format] [-C XxY] [-f flags] [-t target-client] [adjustment]\n"
+    ));
+}
+
+#[test]
+fn control_client_palette_matches_terminal_theme_tokens() {
+    let tokens = include_str!("../../../desktop/src/tokens.css");
+    let token = |name: &str| {
+        tokens
+            .lines()
+            .find_map(|line| {
+                let (candidate, value) = line.trim().strip_suffix(';')?.split_once(':')?;
+                (candidate == name).then_some(value.trim())
+            })
+            .unwrap_or_else(|| panic!("missing terminal theme token {name}"))
+    };
+    let osc_rgb = |hex: &str| {
+        let hex = hex
+            .strip_prefix('#')
+            .unwrap_or_else(|| panic!("terminal theme token is not hexadecimal: {hex}"));
+        assert_eq!(hex.len(), 6, "terminal theme token must be 24-bit RGB");
+        format!("{0}{0}/{1}{1}/{2}{2}", &hex[0..2], &hex[2..4], &hex[4..6])
+    };
+
+    assert_eq!(TERMINAL_FOREGROUND_OSC_RGB, osc_rgb(token("--term-fg")));
+    assert_eq!(TERMINAL_BACKGROUND_OSC_RGB, osc_rgb(token("--term-bg")));
+}
+
 /// The bound is a blast radius, not the fix for P12-U006: the sizes that
 /// actually damaged the user's windows (108x298, 108x314) are *inside* it,
 /// and what stops those is the desktop no longer deriving the client size
@@ -800,7 +855,7 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
 
     let unchanged = current.clone();
     assert!(
-        apply_membership_update(&mut current, &unchanged, &stream_tx, &mut stdin)
+        apply_membership_update(&mut current, &unchanged, &stream_tx, &mut stdin, true)
             .unwrap()
             .is_empty()
     );
@@ -812,7 +867,7 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
 
     let desired = HashSet::from(["%2".into()]);
     assert_eq!(
-        apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin).unwrap(),
+        apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin, true).unwrap(),
         vec!["%1".to_owned()]
     );
     match stream_rx.try_recv().unwrap() {
@@ -827,6 +882,22 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
     let written = String::from_utf8(stdin).unwrap();
     assert_eq!(written.matches("__ADE_MEMBERSHIP__").count(), 1);
     assert_eq!(written.matches("__ADE_CAPTURE__").count(), 1);
+}
+
+#[test]
+fn malformed_membership_id_has_no_partial_effects() {
+    let mut current = HashSet::from(["%1".into()]);
+    let desired = HashSet::from(["%2:'; display-message -p __INJECTED__; #".into()]);
+    let (stream_tx, stream_rx) = std_mpsc::channel();
+    let mut stdin = Vec::new();
+
+    assert!(apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin, true).is_err());
+    assert_eq!(current, HashSet::from(["%1".into()]));
+    assert!(stdin.is_empty());
+    assert!(matches!(
+        stream_rx.try_recv(),
+        Err(std_mpsc::TryRecvError::Empty)
+    ));
 }
 
 #[test]
@@ -861,7 +932,8 @@ fn failed_membership_batch_remains_retryable() {
     };
 
     assert!(
-        apply_membership_update(&mut current, &failed_desired, &stream_tx, &mut stdin,).is_err()
+        apply_membership_update(&mut current, &failed_desired, &stream_tx, &mut stdin, true,)
+            .is_err()
     );
     assert_eq!(current, HashSet::from(["%1".into()]));
 
@@ -894,7 +966,8 @@ fn failed_membership_batch_remains_retryable() {
     );
 
     assert_eq!(
-        apply_membership_update(&mut current, &next_desired, &stream_tx, &mut stdin).unwrap(),
+        apply_membership_update(&mut current, &next_desired, &stream_tx, &mut stdin, true,)
+            .unwrap(),
         vec!["%1".to_owned()]
     );
     assert_eq!(current, next_desired);

@@ -12,11 +12,12 @@ use anyhow::{Context, bail};
 use tmux_control::PaneResourceStore;
 use tokio::sync::mpsc;
 
+use super::capabilities::tmux_command_table;
 use super::startup::ProcessStartup;
 use super::{
     ControlStreamReader, ControlWrite, FlowControl, OutputCredit, SequencerControl,
     TerminalAttachment, queue_capture, read_control_stream, validate_tmux_id,
-    write_capture_request_resuming,
+    write_capture_request_resuming, write_terminal_color_reports,
 };
 use crate::service::snapshot::tmux_command;
 use crate::service::topology_output_trigger::TopologyOutputTrigger;
@@ -37,7 +38,14 @@ impl TerminalAttachment {
         pane_ids: &[String],
         runtime: AttachmentRuntime,
     ) -> anyhow::Result<Self> {
-        Self::start_with_command(session_id, pane_ids, runtime, tmux_command())
+        let reports_terminal_colors = control_color_reports_supported()?;
+        Self::start_with_command(
+            session_id,
+            pane_ids,
+            runtime,
+            tmux_command(),
+            reports_terminal_colors,
+        )
     }
 
     pub(super) fn start_with_command(
@@ -45,6 +53,7 @@ impl TerminalAttachment {
         pane_ids: &[String],
         runtime: AttachmentRuntime,
         mut command: Command,
+        reports_terminal_colors: bool,
     ) -> anyhow::Result<Self> {
         let AttachmentRuntime {
             event_tx,
@@ -100,6 +109,9 @@ impl TerminalAttachment {
         {
             let mut writer = stdin.lock().unwrap();
             for pane_id in pane_ids {
+                if reports_terminal_colors {
+                    write_terminal_color_reports(&mut *writer, pane_id)?;
+                }
                 queue_capture(&mut *writer, pane_id)?;
             }
             writer.flush()?;
@@ -147,8 +159,19 @@ impl TerminalAttachment {
             output_credit,
             workers,
             last_size: None,
+            reports_terminal_colors,
         })
     }
+}
+
+fn control_color_reports_supported() -> anyhow::Result<bool> {
+    Ok(tmux_supports_control_color_reports(tmux_command_table()?))
+}
+
+pub(super) fn tmux_supports_control_color_reports(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output)
+        .lines()
+        .any(|line| line.starts_with("refresh-client ") && line.contains("[-r pane:report]"))
 }
 
 /// Serialises reader-requested writes onto a thread that is allowed to block.
