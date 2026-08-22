@@ -251,11 +251,16 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                   the names rather than in front of them. */}
               <span className="workspace-title">
                 {index < 9 && <span aria-hidden="true" className="workspace-shortcut-index">{index + 1}</span>}
-                {/* Compact rows carry the cluster, whose working marks already
-                    spin one ring per agent; a title spinner beside them put two
-                    animations on one 24px line saying the same thing. The
-                    non-compact row has no cluster, so it keeps its spinner. */}
-                {row.working && !props.compactWorkspaces && <span aria-hidden="true" className="spinner" />}
+                {/* One workspace-level indicator, in the same place in both
+                    modes. Non-compact shows it for Working alone, because its
+                    agent lines below already report blocked and done in words;
+                    compact has only the right-edge cluster, whose marks are
+                    per-agent and read at 6px, so the row itself said nothing
+                    about the workspace at all. Here it is the loudest state
+                    across the workspace — see `workspaceIndicatorState`. */}
+                {props.compactWorkspaces
+                  ? <WorkspaceStateIndicator glyphs={props.stateGlyphs} row={row} />
+                  : row.working && <span aria-hidden="true" className="spinner" />}
                 <span className="workspace-name">{row.session.name}</span>
               </span>
               {/* Compact rows trade the per-agent lines for a cluster of
@@ -468,6 +473,39 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       onClose={() => setAgentMenu(undefined)}
     />}
   </nav>;
+}
+
+/**
+ * The compact row's workspace-level state, beside the workspace's name.
+ *
+ * Decorative on purpose: `rowLabel` below is the row's whole accessible name
+ * and already names the loudest agent and its state, so this would be the
+ * second announcement of one fact. `AgentStateIndicator` renders it
+ * `aria-hidden` whenever no `label` is passed, which is why none is.
+ */
+function WorkspaceStateIndicator({ row, glyphs }: { row: WorkspaceRowModel; glyphs: boolean }) {
+  const state = workspaceIndicatorState(row);
+  if (!state) return null;
+  return <AgentStateIndicator className="state-dot workspace-state" glyphs={glyphs} state={state} />;
+}
+
+/**
+ * The one state a workspace shows for itself: its loudest agent's.
+ *
+ * `row.attention` is already that — the rollup in `selectors.ts` combines by a
+ * priority that runs blocked > done > working > unknown > idle > none, which is
+ * the order this indicator wants and the same order the agents list sorts by.
+ * All this adds is where the row goes quiet: idle, unknown and none render
+ * nothing rather than a dot, because a workspace with nothing to say should not
+ * put a mark beside its name to say so. Deriving a second ranking here would
+ * mean a workspace row and the agent rows beneath it disagreeing about which
+ * agent is the loudest one.
+ */
+function workspaceIndicatorState(row: WorkspaceRowModel): AgentDisplayState | undefined {
+  switch (row.attention) {
+    case "blocked": case "done": case "working": return row.attention;
+    default: return undefined;
+  }
 }
 
 /** One agent's line, written the same way for the eye and for the label. */
