@@ -672,6 +672,19 @@ describe("saved host picker", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("updates terminal font size from the Terminal settings tab", async () => {
+    const onShell = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(settings({ onShell, shell: defaultShellState })); });
+    const terminalTab = renderer.root.findAllByType("button").find((node) => node.props.children === "Terminal")!;
+    await act(async () => { terminalTab.props.onClick(); });
+    const fontSize = renderer.root.findByProps({ "aria-label": "Terminal font size" });
+    expect(fontSize.props).toMatchObject({ min: 10, max: 20, step: "1", type: "number", value: 13 });
+    await act(async () => { fontSize.props.onChange({ target: { value: "18" } }); });
+    expect(onShell).toHaveBeenCalledWith({ terminalFontSize: 18 });
+    await act(async () => renderer.unmount());
+  });
+
   it("reports the OS notification permission and what the user would do about it", async () => {
     const soundsTab = (renderer: ReturnType<typeof create>) =>
       renderer.root.findAllByType("button").find((node) => node.props.children === "Sounds")!;

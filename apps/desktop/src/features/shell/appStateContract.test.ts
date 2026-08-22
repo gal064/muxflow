@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import contract from "./persistedAppState.contract.json";
 import {
-  clampedPanelWidth, defaultAppState, defaultShellState, normalizePersistedAppState,
+  clampedPanelWidth, clampedTerminalFontSize, defaultAppState, defaultShellState, normalizePersistedAppState,
   panelWidthForWindow, PANEL_MIN_WIDTH,
   type AppOwnedTab, type PersistedAppState, type WorkspaceUiRecord,
 } from "./types";
@@ -124,6 +124,15 @@ describe("reading state the previous build wrote", () => {
     expect(saved({}).shell.copyOnSelect).toBe(false);
     expect(saved({ terminalApplicationClipboard: true }).shell.terminalApplicationClipboard).toBe(true);
     expect(saved({}).shell.terminalApplicationClipboard).toBe(false);
+  });
+
+  it("restores a bounded integer terminal font size and defaults legacy saves", () => {
+    expect(saved({ terminalFontSize: 17 }).shell.terminalFontSize).toBe(17);
+    expect(saved({ terminalFontSize: 12.6 }).shell.terminalFontSize).toBe(13);
+    expect(saved({ terminalFontSize: 3 }).shell.terminalFontSize).toBe(10);
+    expect(saved({ terminalFontSize: 99 }).shell.terminalFontSize).toBe(20);
+    expect(saved({}).shell.terminalFontSize).toBe(13);
+    expect(clampedTerminalFontSize(Number.NaN)).toBe(13);
   });
 
   it("leaves the rest of a legacy save alone while migrating the ordering", () => {

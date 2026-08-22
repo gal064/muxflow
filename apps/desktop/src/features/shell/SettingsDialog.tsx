@@ -5,7 +5,7 @@ import type { HostProfile } from "../../app/types";
 import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
-import type { ShellState } from "./types";
+import { clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, type ShellState } from "./types";
 
 interface SettingsDialogProps {
   connectionMode: "local" | "ssh";
@@ -204,6 +204,18 @@ export function SettingsDialog(props: SettingsDialogProps) {
         </>}
 
         {tab === "terminal" && <>
+          <label>Font size
+            <input
+              aria-label="Terminal font size"
+              max={TERMINAL_FONT_SIZE_MAX}
+              min={TERMINAL_FONT_SIZE_MIN}
+              onChange={(event) => props.onShell({ terminalFontSize: clampedTerminalFontSize(Number(event.target.value)) })}
+              step="1"
+              type="number"
+              value={props.shell.terminalFontSize}
+            />
+          </label>
+          <p className="settings-hint">Applies to all open terminals.</p>
           <label className="settings-check">
             <input checked={props.shell.copyOnSelect} onChange={(event) => props.onShell({ copyOnSelect: event.target.checked })} type="checkbox" />
             Copy on select
