@@ -36,6 +36,18 @@ describe("xterm cell metrics", () => {
       dprChangeEvent(terminal),
       "xterm moved _core._coreBrowserService.onDprChange; fixed boxes would miss DPR metric changes",
     ).toBeTypeOf("function");
+    expect(
+      charSize(terminal),
+      "xterm moved _core._charSizeService; the renderer reads .height and .onCharSizeChange",
+    ).toBeDefined();
+    expect(
+      charSize(terminal)?.onCharSizeChange,
+      "xterm moved _core._charSizeService.onCharSizeChange; line-height refits would silently stop",
+    ).toBeTypeOf("function");
+    expect(
+      dimensionsChangeEvent(terminal),
+      "xterm moved _core._renderService.onDimensionsChange; DPR-driven refits would silently stop",
+    ).toBeTypeOf("function");
     terminal.dispose();
   });
 
@@ -119,4 +131,16 @@ function dprChangeEvent(terminal: Terminal): unknown {
   return (terminal as unknown as {
     _core?: { _coreBrowserService?: { onDprChange?: unknown } };
   })._core?._coreBrowserService?.onDprChange;
+}
+
+function charSize(terminal: Terminal): { height?: number; onCharSizeChange?: unknown } | undefined {
+  return (terminal as unknown as {
+    _core?: { _charSizeService?: { height?: number; onCharSizeChange?: unknown } };
+  })._core?._charSizeService;
+}
+
+function dimensionsChangeEvent(terminal: Terminal): unknown {
+  return (terminal as unknown as {
+    _core?: { _renderService?: { onDimensionsChange?: unknown } };
+  })._core?._renderService?.onDimensionsChange;
 }
