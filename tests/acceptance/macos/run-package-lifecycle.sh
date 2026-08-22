@@ -19,7 +19,7 @@ trap cleanup EXIT
 [[ $(uname -s) == Darwin && -d "$source_app" ]]
 mkdir -p "$applications" "$(dirname "$candidate")"
 printf 'preserve-me\n' >"$config_fixture"
-ADE_MACOS_APPLICATIONS_DIR="$applications" release/macos/install.sh "$source_app" >/dev/null
+ADE_MACOS_APPLICATIONS_DIR="$applications" release/macos/install.sh >/dev/null
 ditto --noqtn "$source_app" "$candidate"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 2' "$candidate/Contents/Info.plist"
 codesign --force --deep --sign - "$candidate" >/dev/null

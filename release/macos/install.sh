@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source_app=${1:-}
-applications=${ADE_MACOS_APPLICATIONS_DIR:-"$HOME/Applications"}
+repo=$(cd "$(dirname "$0")/../.." && pwd -P)
+work_root=${ADE_WORK_ROOT:-"$repo/tmp/work"}
+release_target=${CARGO_TARGET_DIR:-"$work_root/cache/release-target/macos"}
+[[ "$release_target" == /* ]] || release_target="$repo/$release_target"
+source_app=${1:-"$release_target/release/bundle/macos/Muxflow.app"}
+applications=${ADE_MACOS_APPLICATIONS_DIR:-/Applications}
 name='Muxflow.app'
 owner='dev.muxflow.desktop:1'
 
 [[ "$source_app" == /* && -d "$source_app" && ! -L "$source_app" ]] || {
-  echo "usage: install.sh /absolute/path/to/Muxflow.app" >&2; exit 64;
+  echo "usage: install.sh [/absolute/path/to/Muxflow.app]" >&2
+  echo "default package not found at $source_app" >&2
+  exit 64
 }
 [[ "$applications" == /* && "$applications" != / && "$applications" != *$'\n'* ]] || {
   echo "unsafe applications directory" >&2; exit 64;
