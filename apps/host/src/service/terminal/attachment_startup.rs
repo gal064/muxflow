@@ -2,7 +2,7 @@ use std::{
     io::Write,
     process::{ChildStdin, Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc,
     },
@@ -16,7 +16,7 @@ use super::startup::ProcessStartup;
 use super::{
     ControlStreamReader, ControlWrite, FlowControl, OutputCredit, SequencerControl,
     TerminalAttachment, queue_capture, read_control_stream, validate_tmux_id,
-    write_capture_request_resuming,
+    write_capture_request_resuming, write_terminal_color_reports,
 };
 use crate::service::snapshot::tmux_command;
 use crate::service::topology_output_trigger::TopologyOutputTrigger;
@@ -37,7 +37,14 @@ impl TerminalAttachment {
         pane_ids: &[String],
         runtime: AttachmentRuntime,
     ) -> anyhow::Result<Self> {
-        Self::start_with_command(session_id, pane_ids, runtime, tmux_command())
+        let reports_terminal_colors = control_color_reports_supported()?;
+        Self::start_with_command(
+            session_id,
+            pane_ids,
+            runtime,
+            tmux_command(),
+            reports_terminal_colors,
+        )
     }
 
     pub(super) fn start_with_command(
@@ -45,6 +52,7 @@ impl TerminalAttachment {
         pane_ids: &[String],
         runtime: AttachmentRuntime,
         mut command: Command,
+        reports_terminal_colors: bool,
     ) -> anyhow::Result<Self> {
         let AttachmentRuntime {
             event_tx,
@@ -100,6 +108,9 @@ impl TerminalAttachment {
         {
             let mut writer = stdin.lock().unwrap();
             for pane_id in pane_ids {
+                if reports_terminal_colors {
+                    write_terminal_color_reports(&mut *writer, pane_id)?;
+                }
                 queue_capture(&mut *writer, pane_id)?;
             }
             writer.flush()?;
@@ -147,8 +158,35 @@ impl TerminalAttachment {
             output_credit,
             workers,
             last_size: None,
+            reports_terminal_colors,
         })
     }
+}
+
+fn control_color_reports_supported() -> anyhow::Result<bool> {
+    static SUPPORTS_REPORTS: OnceLock<bool> = OnceLock::new();
+    if let Some(value) = SUPPORTS_REPORTS.get() {
+        return Ok(*value);
+    }
+    let output = tmux_command()
+        .arg("list-commands")
+        .output()
+        .context("inspect tmux control-client color support")?;
+    if !output.status.success() {
+        bail!(
+            "inspect tmux control-client color support: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let value = tmux_supports_control_color_reports(&output.stdout);
+    let _ = SUPPORTS_REPORTS.set(value);
+    Ok(*SUPPORTS_REPORTS.get().unwrap_or(&value))
+}
+
+pub(super) fn tmux_supports_control_color_reports(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output)
+        .lines()
+        .any(|line| line.starts_with("refresh-client ") && line.contains("[-r pane:report]"))
 }
 
 /// Serialises reader-requested writes onto a thread that is allowed to block.

@@ -41,6 +41,8 @@ mod startup;
 use startup::{join_workers, stop_process};
 mod attachment_startup;
 use attachment_startup::AttachmentRuntime;
+#[cfg(test)]
+use attachment_startup::tmux_supports_control_color_reports;
 
 /// Cells a control client may be resized to on either axis. See
 /// [`TerminalAttachment::resize`]; the desktop refuses the same range before it
@@ -70,6 +72,10 @@ pub(super) struct TerminalAttachment {
     /// it remembers one. So the carry-across is needed exactly once per client
     /// per size, and a workspace switched away from and back costs nothing.
     last_size: Option<(u32, u32)>,
+    /// Whether this tmux exposes the control-mode OSC-report bridge added after
+    /// 3.3. Older supported releases keep their existing fallback instead of
+    /// receiving a command-line option they do not understand.
+    reports_terminal_colors: bool,
 }
 
 pub(super) struct VisibilityChange {
@@ -144,7 +150,13 @@ impl TerminalAttachment {
     ) -> anyhow::Result<()> {
         let update = {
             let mut stdin = self.stdin.lock().unwrap();
-            apply_membership_update(&mut self.pane_ids, pane_ids, &self.stream_tx, &mut *stdin)
+            apply_membership_update(
+                &mut self.pane_ids,
+                pane_ids,
+                &self.stream_tx,
+                &mut *stdin,
+                self.reports_terminal_colors,
+            )
         };
         let removed = match update {
             Ok(removed) => removed,
@@ -253,6 +265,7 @@ fn apply_membership_update(
     desired: &HashSet<String>,
     stream_tx: &std_mpsc::Sender<StreamControl>,
     stdin: &mut impl Write,
+    reports_terminal_colors: bool,
 ) -> anyhow::Result<Vec<String>> {
     let (added, removed) = membership_delta(current, desired);
     if added.is_empty() && removed.is_empty() {
@@ -263,6 +276,9 @@ fn apply_membership_update(
     let write_result = (|| -> anyhow::Result<()> {
         writeln!(stdin, "display-message -p '__ADE_MEMBERSHIP__'")?;
         for pane_id in &added {
+            if reports_terminal_colors {
+                write_terminal_color_reports(stdin, pane_id)?;
+            }
             queue_capture(stdin, pane_id)?;
         }
         stdin.flush()?;
@@ -281,6 +297,28 @@ fn apply_membership_update(
     // delta; treating it as an exact no-op would strand panes without seeds.
     current.clone_from(desired);
     Ok(removed)
+}
+
+/// Gives tmux the palette its control client cannot discover from a TTY.
+///
+/// tmux consumes an application's OSC 10/11 query before pane output reaches
+/// xterm. A `-C` client has no terminal of its own, so without these documented
+/// `refresh-client -r` reports tmux answers black; Codex then derives its
+/// `rgb(30,30,30)` composer from that false background. These values mirror the
+/// fixed terminal palette in `apps/desktop/src/features/terminal/theme.ts`.
+///
+/// The reports must be separate commands: tmux accepts `-r` once per
+/// `refresh-client` invocation, so repeating the option retains only the last
+/// report.
+fn write_terminal_color_reports(stdin: &mut impl Write, pane_id: &str) -> std::io::Result<()> {
+    writeln!(
+        stdin,
+        "refresh-client -r '{pane_id}:\x1b]10;rgb:ffff/ffff/ffff\x1b\\'"
+    )?;
+    writeln!(
+        stdin,
+        "refresh-client -r '{pane_id}:\x1b]11;rgb:2828/2c2c/3434\x1b\\'"
+    )
 }
 
 fn send_authoritative_membership(
