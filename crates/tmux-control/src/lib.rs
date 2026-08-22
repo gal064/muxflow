@@ -18,7 +18,7 @@ pub use discovery::{
     discover_with, discover_with_socket_name, parse_batched_discovery,
 };
 pub use input::{DESKTOP_INPUT_COALESCE_BYTES, HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
-pub use layout::{LayoutAxis, LayoutGeneration, LayoutNode, LayoutParseError, parse_layout};
+pub use layout::{LayoutAxis, LayoutNode, LayoutParseError, parse_layout};
 pub use replay::{
     BufferedOutput, OutputDisposition, PaneDegradation, PaneDegradationCause, PaneResource,
     PaneResourceState, PaneResourceStore, ReplayBatch, ScreenSeeder, VisibilityCheckpoint,
