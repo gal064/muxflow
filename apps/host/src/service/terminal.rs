@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 
 use super::SequencerControl;
 use super::topology_output_trigger::TopologyOutputTrigger;
+mod capabilities;
 mod degradation;
 use degradation::{pane_resource_event, report_pane_degradations};
 mod flow_control;

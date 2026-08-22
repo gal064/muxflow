@@ -2,7 +2,7 @@ use std::{
     io::Write,
     process::Stdio,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -13,6 +13,7 @@ use tmux_control::{HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
 use uuid::Uuid;
 
 use super::super::snapshot::tmux_command;
+use super::capabilities::tmux_command_table;
 use super::{queue_input, validate_tmux_id};
 
 pub(super) type InputCompletion = (u64, Result<(), String>);
@@ -299,32 +300,9 @@ fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
 }
 
 fn paste_buffer_needs_unsanitized_flag() -> Result<bool, String> {
-    static SUPPORTS_FLAG: OnceLock<bool> = OnceLock::new();
-    cache_successful_probe(&SUPPORTS_FLAG, || {
-        let output = tmux_command()
-            .arg("list-commands")
-            .output()
-            .map_err(|error| format!("failed to inspect tmux paste semantics: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "failed to inspect tmux paste semantics: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        Ok(paste_buffer_supports_unsanitized_flag(&output.stdout))
-    })
-}
-
-fn cache_successful_probe(
-    cache: &OnceLock<bool>,
-    probe: impl FnOnce() -> Result<bool, String>,
-) -> Result<bool, String> {
-    if let Some(value) = cache.get() {
-        return Ok(*value);
-    }
-    let value = probe()?;
-    let _ = cache.set(value);
-    Ok(*cache.get().unwrap_or(&value))
+    tmux_command_table()
+        .map(paste_buffer_supports_unsanitized_flag)
+        .map_err(|error| error.to_string())
 }
 
 fn paste_buffer_supports_unsanitized_flag(output: &[u8]) -> bool {
@@ -356,17 +334,6 @@ mod tests {
         assert!(!paste_buffer_supports_unsanitized_flag(
             b"send-keys (send) [-FHlMRX] [key ...]\n"
         ));
-    }
-
-    #[test]
-    fn transient_probe_failure_is_retried_and_only_success_is_cached() {
-        let cache = OnceLock::new();
-        assert_eq!(
-            cache_successful_probe(&cache, || Err("tmux temporarily unavailable".into())),
-            Err("tmux temporarily unavailable".into())
-        );
-        assert_eq!(cache_successful_probe(&cache, || Ok(true)), Ok(true));
-        assert_eq!(cache_successful_probe(&cache, || Ok(false)), Ok(true));
     }
 
     #[test]
