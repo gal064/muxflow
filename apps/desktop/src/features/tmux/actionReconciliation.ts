@@ -1,6 +1,5 @@
 import { sameHostConnection, type HostScopeToken } from "../shell/hostScope";
 import {
-  isDestructiveTmuxAction,
   isStaleTmuxTopologyError,
   requestTmuxAction,
   type AuthoritativePrecondition,
@@ -64,9 +63,25 @@ async function waitForNewerActionScope(
 }
 
 /**
- * Retries only non-destructive actions whose implicit topology generation went
- * stale while the user was interacting. Confirmed destructive actions and
- * callers with an explicit captured precondition remain exactly-once.
+ * Retries an action whose topology generation went stale while the user was
+ * interacting, against the newer authoritative generation.
+ *
+ * The one thing never retried is an action whose caller pinned a generation:
+ * that stamp is a consent snapshot — the topology a confirmation dialog showed
+ * the person — and re-issuing against a newer one would quietly act on a
+ * different tmux than the one they agreed to. A caller that stamps only the
+ * server identity (`generation: 0`, the host's "no generation guard") has
+ * pinned nothing, so it reconciles like the implicit stamp does.
+ *
+ * Destructiveness no longer blocks a retry. Every refusal
+ * `isStaleTmuxTopologyError` classifies is raised before the action's tmux
+ * command runs: the host's three `stale topology` bails sit above the mutation
+ * match in `service/tmux_actions.rs`, and the dispatcher's reconciliation
+ * refusal in `requests/tmux_action_dispatch.rs` returns before `execute` is
+ * even spawned. Nothing was executed, so a retry cannot double-execute — and
+ * every failure that *can* follow a mutation is reported as `outcome unknown`,
+ * which this deliberately does not match. Revisit if the host ever grows a
+ * stale-topology bail after execution.
  */
 export async function requestReconciledTmuxAction({
   clientId,
@@ -82,10 +97,15 @@ export async function requestReconciledTmuxAction({
     serverIdentity: initialScope.serverIdentity,
     generation: initialScope.generation,
   };
+  /** A caller-pinned generation is consent; only that makes an action exactly-once. */
+  const pinsGeneration = Boolean(capturedPrecondition) && precondition.generation !== 0;
   let attemptedScope: HostScopeToken = {
     ...initialScope,
     serverIdentity: precondition.serverIdentity,
-    generation: precondition.generation,
+    // The live generation, not the stamped one: an identity-only precondition
+    // stamps 0, and waiting for "newer than 0" would return the current scope
+    // immediately and re-issue with nothing reconciled.
+    generation: precondition.generation || initialScope.generation,
   };
 
   for (let retry = 0; ; retry += 1) {
@@ -95,8 +115,7 @@ export async function requestReconciledTmuxAction({
       return result;
     } catch (error) {
       const mayRetry = retry < ACTION_RECONCILE_RETRIES
-        && !capturedPrecondition
-        && !isDestructiveTmuxAction(action)
+        && !pinsGeneration
         && isStaleTmuxTopologyError(error);
       if (!mayRetry) throw error;
       const refreshed = await waitForNewerScope(attemptedScope, currentScope);
@@ -104,7 +123,10 @@ export async function requestReconciledTmuxAction({
       attemptedScope = refreshed;
       precondition = {
         serverIdentity: refreshed.serverIdentity,
-        generation: refreshed.generation,
+        // The caller's shape survives the retry: one that guarded nothing but
+        // the server keeps guarding nothing but the server, rather than
+        // acquiring a generation guard it never asked for.
+        generation: precondition.generation === 0 ? 0 : refreshed.generation,
       };
     }
   }

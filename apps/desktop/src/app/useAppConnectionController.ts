@@ -315,11 +315,16 @@ export function useAppConnectionController({
     // wakes on the notification and pushes as soon as tmux answers. The user
     // measures ~5s from `cd` to the Explorer moving, and the tab name — pure
     // snapshot apply, no Explorer machinery — lags identically, so the missing
-    // seconds are somewhere in notification→snapshot→apply. These two records
-    // decompose that span from the desktop's side; the tmux-side rename time
-    // comes from polling the server during a supervised `cd`.
+    // seconds are somewhere in notification→snapshot→apply. One `topo.snapshot`
+    // line per answered burst decomposes that span from the desktop's side: the
+    // span itself, the name from the notification that started the burst, and
+    // how many dirty notifications the burst contained. The per-event dirty
+    // lines were folded in here because they tripled the journal without adding
+    // a fact this record does not already carry. The tmux-side rename time comes
+    // from polling the server during a supervised `cd`.
     let topologyDirtyAt: number | undefined;
     let topologyDirtyName: string | undefined;
+    let topologyDirtyCount = 0;
     const scope = terminalBridgeScope();
     void startTerminal(scope.sessionId, scope.paneIds, connection, (event) => {
       if (disposed) return;
@@ -336,7 +341,7 @@ export function useAppConnectionController({
             topologyDirtyAt = Date.now();
             topologyDirtyName = event.name;
           }
-          recordIncident("topo.dirty", { name: event.name });
+          topologyDirtyCount += 1;
           setStatus("Topology changed; reconciling…");
         } else if (event.kind === "flowPaused") {
           // Journal only — the host resumes the pane itself. This is the
@@ -390,9 +395,11 @@ export function useAppConnectionController({
             recordIncident("topo.snapshot", {
               msSinceDirty: Date.now() - topologyDirtyAt,
               answering: topologyDirtyName,
+              dirtyCount: topologyDirtyCount,
             });
             topologyDirtyAt = undefined;
             topologyDirtyName = undefined;
+            topologyDirtyCount = 0;
           }
           if (serverIdentityRef.current !== undefined && serverIdentityRef.current !== event.serverIdentity) {
             terminalStateCache.clear();

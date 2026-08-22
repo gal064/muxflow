@@ -53,6 +53,7 @@ import {
   openFileTab,
   openGitDiffTab,
   pinAppTab,
+  retirePendingTab,
   selectableTabs,
   selectAppTab,
   setMarkdownViewMode,
@@ -508,6 +509,16 @@ export function App() {
   // session until its ack names one, and drawing it anywhere before that would
   // put it in the workspace being navigated away from.
   const pendingTabHere = pendingTab && pendingTab.sessionId === activeSessionId ? pendingTab : undefined;
+  // Where the placeholder actually retires, from the same window list the strip
+  // draws it against. Only for the workspace on screen: another workspace's
+  // window list is not in `windows`, so retiring its placeholder here would be
+  // retiring it on no evidence at all. The identity check keeps a create that
+  // started in the meantime — the second of two quick clicks — from being
+  // retired by the first one's snapshot.
+  useEffect(() => {
+    if (!pendingTabHere) return;
+    setPendingTab((current) => (current === pendingTabHere ? retirePendingTab(current, windows) : current));
+  }, [pendingTabHere, windows]);
   const acceptedAgentTopology = agentRuntime.state.authoritative
     && agentRuntime.state.hostProfileId === currentHostProfileId
     && agentRuntime.state.serverIdentity === hostState.serverIdentity

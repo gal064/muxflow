@@ -9,6 +9,28 @@ interface QueuedWrite {
   onRendered?: () => void;
 }
 
+/**
+ * How long a queued write may wait for a frame that may never arrive.
+ *
+ * The frame clock is not a liveness guarantee. macOS parks
+ * `requestAnimationFrame` for a window that is occluded, minimized, or on
+ * another Space, while timers and IPC keep running — so a queue that only ever
+ * flushes from a frame stops flushing at all. Production journals show this
+ * queue holding output for 7s, 59s, 545s and 19s with no long task and no atlas
+ * churn behind it, every burst landing at once the moment the window came back.
+ *
+ * Parsing into a canvas nobody is painting costs almost nothing and is what
+ * keeps everything hanging off the write callback current: the reveal latch, the
+ * generation checkpoints, and the queue bound that would otherwise overflow and
+ * force a reseed on a chatty background pane.
+ *
+ * 200ms is an order of magnitude past a 60Hz frame, so a live frame clock always
+ * wins the race and this timer is cancelled before it can fire; and it still
+ * floors an occluded pane's drain at five frame budgets a second, well past what
+ * a background pane produces.
+ */
+export const WRITE_FLUSH_FALLBACK_MS = 200;
+
 function joinChunks(pieces: Uint8Array[], length: number): Uint8Array {
   if (pieces.length === 1) return pieces[0];
   const joined = new Uint8Array(length);
@@ -25,6 +47,9 @@ export class TerminalWriteScheduler {
   readonly #queue: Array<QueuedWrite | undefined> = [];
   #queueHead = 0;
   #frame?: number;
+  #fallbackTimer?: ReturnType<typeof setTimeout>;
+  /** Whether a flush is owed, by either the frame or the fallback timer. */
+  #flushArmed = false;
   #disposed = false;
   #pendingBytes = 0;
   #inFlightBytes = 0;
@@ -35,6 +60,8 @@ export class TerminalWriteScheduler {
   #accepting = true;
   #immediateWriteUsed = false;
   #immediateResetFrame?: number;
+  #immediateResetTimer?: ReturnType<typeof setTimeout>;
+  #immediateResetArmed = false;
   readonly #drainWaiters = new Set<() => void>();
 
   constructor(
@@ -89,8 +116,7 @@ export class TerminalWriteScheduler {
     this.clear();
     this.#disposed = true;
     this.#accepting = false;
-    if (this.#immediateResetFrame !== undefined) this.cancelFrame(this.#immediateResetFrame);
-    this.#immediateResetFrame = undefined;
+    this.#cancelImmediateWriteReset();
     this.#pendingBytes = 0;
     this.#inFlightBytes = 0;
     this.#inFlightRecords = 0;
@@ -164,8 +190,7 @@ export class TerminalWriteScheduler {
     this.#queueHead = 0;
     this.#queuedBackingBytes = 0;
     this.#pendingBytes = this.#inFlightBytes;
-    if (this.#frame !== undefined) this.cancelFrame(this.#frame);
-    this.#frame = undefined;
+    this.#cancelFlush();
     this.#notifyPendingBytes();
   }
 
@@ -174,7 +199,7 @@ export class TerminalWriteScheduler {
   }
 
   #schedule(): void {
-    if (this.#disposed || this.#inFlightBytes || this.#frame !== undefined || this.#queueLength() === 0) return;
+    if (this.#disposed || this.#inFlightBytes || this.#flushArmed || this.#queueLength() === 0) return;
     if (this.#flushEmptyPrefix()) {
       this.#schedule();
       return;
@@ -185,8 +210,40 @@ export class TerminalWriteScheduler {
       this.#flush();
       return;
     }
-    this.#frame = this.requestFrame(() => this.#flush());
+    this.#armFlush();
+  }
+
+  /**
+   * Races a frame against a wall-clock floor, whichever comes first.
+   *
+   * The frame stays the coalescer — it is what keeps a busy pane to one write
+   * per painted frame — and the timer only substitutes for a frame clock that
+   * has stopped (see `WRITE_FLUSH_FALLBACK_MS`). Both land on the same guarded
+   * entry point, so the loser of the race is a no-op rather than a second flush.
+   */
+  #armFlush(): void {
+    this.#flushArmed = true;
+    this.#fallbackTimer = setTimeout(() => this.#runScheduledFlush(), WRITE_FLUSH_FALLBACK_MS);
+    const frame = this.requestFrame(() => this.#runScheduledFlush());
+    // A frame seam that ran the callback inline already spent this arming; the
+    // handle it returned belongs to nothing and must not be left behind.
+    if (this.#flushArmed) this.#frame = frame;
+    else this.cancelFrame(frame);
     this.measurements?.add("terminal.scheduler.framesRequested");
+  }
+
+  #runScheduledFlush(): void {
+    if (!this.#flushArmed) return;
+    this.#cancelFlush();
+    this.#flush();
+  }
+
+  #cancelFlush(): void {
+    this.#flushArmed = false;
+    if (this.#frame !== undefined) this.cancelFrame(this.#frame);
+    this.#frame = undefined;
+    if (this.#fallbackTimer !== undefined) clearTimeout(this.#fallbackTimer);
+    this.#fallbackTimer = undefined;
   }
 
   #flushEmptyPrefix(): boolean {
@@ -210,19 +267,40 @@ export class TerminalWriteScheduler {
     return true;
   }
 
+  /**
+   * Releases the once-per-frame immediate write, on the same race as a flush.
+   *
+   * A latch that only a frame can clear is a latch an occluded window holds for
+   * the whole occlusion, which would leave the very first queued record — the
+   * one carrying a new pane's reveal — waiting on the frame clock again.
+   */
   #armImmediateWriteReset(): void {
-    if (this.#immediateResetFrame !== undefined) return;
-    this.#immediateResetFrame = this.requestFrame(() => {
-      this.#immediateResetFrame = undefined;
-      this.#immediateWriteUsed = false;
-      this.#schedule();
-    });
+    if (this.#immediateResetArmed) return;
+    this.#immediateResetArmed = true;
+    this.#immediateResetTimer = setTimeout(() => this.#runImmediateWriteReset(), WRITE_FLUSH_FALLBACK_MS);
+    const frame = this.requestFrame(() => this.#runImmediateWriteReset());
+    if (this.#immediateResetArmed) this.#immediateResetFrame = frame;
+    else this.cancelFrame(frame);
     this.measurements?.add("terminal.scheduler.framesRequested");
+  }
+
+  #runImmediateWriteReset(): void {
+    if (!this.#immediateResetArmed) return;
+    this.#cancelImmediateWriteReset();
+    this.#immediateWriteUsed = false;
+    this.#schedule();
+  }
+
+  #cancelImmediateWriteReset(): void {
+    this.#immediateResetArmed = false;
+    if (this.#immediateResetFrame !== undefined) this.cancelFrame(this.#immediateResetFrame);
+    this.#immediateResetFrame = undefined;
+    if (this.#immediateResetTimer !== undefined) clearTimeout(this.#immediateResetTimer);
+    this.#immediateResetTimer = undefined;
   }
 
   /** Coalesces at most one frame budget while keeping one xterm write in flight. */
   #flush(): void {
-    this.#frame = undefined;
     if (this.#disposed || this.#inFlightBytes || this.#queueLength() === 0) return;
     this.measurements?.add("terminal.scheduler.framesFlushed");
     const pieces: Uint8Array[] = [];

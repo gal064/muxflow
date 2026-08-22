@@ -3,6 +3,7 @@ import { editorFlushRegistry } from "../features/files/editorFlushRegistry";
 import { sameHostConnection, sameHostScope, type HostScopeToken } from "../features/shell/hostScope";
 import {
   agentPresenceIsCurrent,
+  bulkCloseOutcomeStatus,
   tabsEligibleAtBulkCloseCommit,
   type AgentPresenceSnapshot,
   type CombinedTab,
@@ -27,9 +28,9 @@ interface BulkTabCloseOptions {
 /**
  * Closes a settled set of tabs after its one confirmation.
  *
- * Saving happens once, before any mutation. Terminal closes then advance one
- * authoritative precondition through the batch and re-check protected agents
- * immediately before each destructive request.
+ * Saving happens once, before any mutation. Terminal closes use an identity-only
+ * precondition and re-check protected agents immediately before each destructive
+ * request.
  */
 export function useBulkTabClose(options: BulkTabCloseOptions) {
   const {
@@ -60,10 +61,8 @@ export function useBulkTabClose(options: BulkTabCloseOptions) {
     const terminalTabs = tabs.filter(
       (tab): tab is Extract<CombinedTab, { kind: "terminal" }> => tab.kind === "terminal",
     );
-    let precondition: AuthoritativePrecondition = {
-      serverIdentity: scope.serverIdentity,
-      generation: scope.generation,
-    };
+    let closed = 0;
+    let failed = 0;
     for (const [index, tab] of terminalTabs.entries()) {
       // The first close can take long enough for a newly detected agent to
       // protect a later tab in the same batch.
@@ -73,18 +72,21 @@ export function useBulkTabClose(options: BulkTabCloseOptions) {
       const terminalWindow = snapshotRef.current.windows.find((item) => item.id === tab.id);
       if (!terminalWindow) continue;
 
-      // The generation returned by one mutation is the precondition for the
-      // next; React need not have published the corresponding snapshot yet.
+      // Every close advances the generation once for dispatch and again for the
+      // tmux notification. Guard the server identity but not that moving
+      // generation, or every close after the first can be rejected as stale.
       const result = await performAction({
         kind: "closeWindow",
         sessionId: terminalWindow.sessionId,
         windowId: terminalWindow.id,
         confirmed: true,
-      }, precondition);
-      if (!sameHostConnection(scope, hostScopeRef.current) || !result) return;
-      const serverIdentity = hostScopeRef.current.serverIdentity;
-      if (!serverIdentity) return;
-      precondition = { serverIdentity, generation: result.topologyGeneration };
+      }, { serverIdentity: scope.serverIdentity, generation: 0 });
+      if (!sameHostConnection(scope, hostScopeRef.current)) return;
+      if (!result) {
+        failed += 1;
+        continue;
+      }
+      closed += 1;
 
       if (protectAgents && index < terminalTabs.length - 1) {
         // Absence in the previous agent snapshot proves nothing after tmux has
@@ -104,6 +106,10 @@ export function useBulkTabClose(options: BulkTabCloseOptions) {
         }
       }
     }
+
+    const outcome = bulkCloseOutcomeStatus(closed, failed);
+    if (outcome) setStatus(outcome);
+    if (failed > 0) return;
 
     // Local document tabs are lossless after the shared editor flush, but
     // commit them only once the stale-sensitive terminal transaction has been
