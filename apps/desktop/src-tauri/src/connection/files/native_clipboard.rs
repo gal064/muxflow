@@ -5,21 +5,16 @@ const MAX_NATIVE_TEXT_BYTES: usize = tmux_control::MAX_INPUT_REQUEST_BYTES;
 #[tauri::command]
 pub async fn write_native_terminal_clipboard(text: String) -> Result<(), String> {
     let text = validated_native_clipboard_write(text)?;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        tauri::async_runtime::spawn_blocking(move || {
-            use clipboard_rs::{Clipboard, ClipboardContext};
-            let clipboard = ClipboardContext::new()
-                .map_err(|error| format!("open native clipboard: {error}"))?;
-            clipboard
-                .set_text(text)
-                .map_err(|error| format!("write native clipboard text: {error}"))
-        })
-        .await
-        .map_err(|error| format!("native clipboard worker failed: {error}"))?
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    Err("native clipboard writes are unavailable on this platform".into())
+    tauri::async_runtime::spawn_blocking(move || {
+        use clipboard_rs::{Clipboard, ClipboardContext};
+        let clipboard =
+            ClipboardContext::new().map_err(|error| format!("open native clipboard: {error}"))?;
+        clipboard
+            .set_text(text)
+            .map_err(|error| format!("write native clipboard text: {error}"))
+    })
+    .await
+    .map_err(|error| format!("native clipboard worker failed: {error}"))?
 }
 
 fn validated_native_clipboard_write(text: String) -> Result<String, String> {
