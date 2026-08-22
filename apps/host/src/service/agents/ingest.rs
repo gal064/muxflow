@@ -3,10 +3,8 @@ use std::collections::VecDeque;
 use anyhow::Context;
 use tmux_agent_protocol::v1;
 
-use super::store::PendingApproval;
 use super::{AgentRuntime, StoredAgent, adapters, identity, snapshot};
 use crate::service::snapshot::{discover_authoritative, server_identity};
-use adapters::ApprovalEffect;
 
 pub(super) const MAX_HOOK_BYTES: usize = 256 * 1024;
 const MAX_DEDUPE_IDS: usize = 512;
@@ -216,54 +214,12 @@ impl AgentRuntime {
                 parsed.event_name.as_str(),
                 "SessionStart" | "UserPromptSubmit"
             );
-        let mut pending_approvals = previous
-            .as_ref()
-            .map(|record| record.pending_approvals.clone())
-            .unwrap_or_default();
-        let approval_was_pending = !pending_approvals.is_empty();
-        let approval_resolved = if terminal_late {
-            pending_approvals.clear();
-            true
-        } else {
-            match parsed.approval_effect {
-                ApprovalEffect::Pending => {
-                    // A PermissionRequest has no tool_use_id. Identical tools
-                    // in one turn therefore share a correlation digest, so
-                    // this is deliberately a multiset: one completion can
-                    // resolve only one observed request.
-                    pending_approvals.push(PendingApproval::Key(parsed.approval_key.clone()));
-                    false
-                }
-                ApprovalEffect::ResolveMatching => {
-                    if let Some(index) = pending_approvals
-                        .iter()
-                        .position(|pending| {
-                            matches!(pending, PendingApproval::Key(key) if key == &parsed.approval_key)
-                        })
-                    {
-                        pending_approvals.remove(index);
-                        pending_approvals.is_empty()
-                    } else {
-                        false
-                    }
-                }
-                ApprovalEffect::ResolveAll => {
-                    pending_approvals.clear();
-                    true
-                }
-                ApprovalEffect::None => false,
-            }
-        };
-        let approval_pending = (approval_was_pending && !approval_resolved)
-            || parsed.approval_effect == ApprovalEffect::Pending;
         let lifecycle = if terminal_late {
             // `hook_terminal` means a terminal Stop was already committed.
             // A late tool/subagent event cannot revive that turn, and an
             // inconsistent store written by an older build must not preserve
             // Working forever merely because every later Stop is also "late".
             v1::AgentLifecycleState::Idle
-        } else if approval_pending {
-            v1::AgentLifecycleState::Blocked
         } else {
             parsed.lifecycle
         };
@@ -272,10 +228,8 @@ impl AgentRuntime {
             "SessionStart" | "UserPromptSubmit"
         ) {
             false
-        } else if matches!(
-            parsed.event_name.as_str(),
-            "Stop" | "StopFailure" | "SessionEnd"
-        ) && parsed.lifecycle == v1::AgentLifecycleState::Idle
+        } else if matches!(parsed.event_name.as_str(), "Stop" | "StopFailure")
+            && parsed.lifecycle == v1::AgentLifecycleState::Idle
         {
             true
         } else {
@@ -344,7 +298,6 @@ impl AgentRuntime {
             latest_source_generation,
             present: true,
             hook_terminal,
-            pending_approvals,
             lifecycle_observed_at_unix_millis: observed_now,
         };
         state.agents.insert(agent_id, record.clone());

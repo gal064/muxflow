@@ -59,11 +59,6 @@ pub(super) struct StoredAgent {
     pub present: bool,
     #[serde(default)]
     pub hook_terminal: bool,
-    /// Approvals that have not produced a matching resolution event. Old
-    /// blocked Codex records lacked this field; `load` promotes those to the
-    /// explicit `Unknown` variant so an unrelated tool cannot clear them.
-    #[serde(default)]
-    pub pending_approvals: Vec<PendingApproval>,
     /// When something last said what this agent was *doing*.
     ///
     /// Distinct from `updated_at_unix_millis`, which also moves when the agent
@@ -74,13 +69,6 @@ pub(super) struct StoredAgent {
     /// those rather than treating them as infinitely old.
     #[serde(default)]
     pub lifecycle_observed_at_unix_millis: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "key")]
-pub(super) enum PendingApproval {
-    Unknown,
-    Key(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,19 +96,12 @@ pub(super) fn load(path: &Path) -> StoredState {
         .filter(|state: &StoredState| state.schema_version == STATE_SCHEMA_VERSION)
         .unwrap_or_default();
     for record in state.agents.values_mut() {
-        if record.adapter_id == "codex"
-            && record.lifecycle == tmux_agent_protocol::v1::AgentLifecycleState::Blocked as i32
-            && record.pending_approvals.is_empty()
-        {
-            record.pending_approvals.push(PendingApproval::Unknown);
-        }
         // A terminal hook is proof that the turn ended. Normalize the invalid
         // combination observed in a live schema-2 store (`hook_terminal: true`
         // with `lifecycle: working`) so the next daemon snapshot repairs the
         // UI immediately instead of waiting up to the stale-working TTL.
         if record.hook_terminal {
             record.lifecycle = tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32;
-            record.pending_approvals.clear();
         }
     }
     state
@@ -222,7 +203,6 @@ mod tests {
         // The field this phase added is absent from the file, and its default
         // is what the staleness sweep reads as "fall back to `updated_at`".
         assert_eq!(record.lifecycle_observed_at_unix_millis, 0);
-        assert!(record.pending_approvals.is_empty());
         fs::remove_file(path).unwrap();
     }
 
@@ -380,7 +360,6 @@ mod tests {
                 latest_source_generation: 0,
                 present: true,
                 hook_terminal: true,
-                pending_approvals: Vec::new(),
                 lifecycle_observed_at_unix_millis: 1,
             },
         );
