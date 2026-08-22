@@ -2,7 +2,7 @@ use std::{
     io::Write,
     process::{ChildStdin, Command, Stdio},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc,
     },
@@ -12,6 +12,7 @@ use anyhow::{Context, bail};
 use tmux_control::PaneResourceStore;
 use tokio::sync::mpsc;
 
+use super::capabilities::tmux_command_table;
 use super::startup::ProcessStartup;
 use super::{
     ControlStreamReader, ControlWrite, FlowControl, OutputCredit, SequencerControl,
@@ -164,23 +165,7 @@ impl TerminalAttachment {
 }
 
 fn control_color_reports_supported() -> anyhow::Result<bool> {
-    static SUPPORTS_REPORTS: OnceLock<bool> = OnceLock::new();
-    if let Some(value) = SUPPORTS_REPORTS.get() {
-        return Ok(*value);
-    }
-    let output = tmux_command()
-        .arg("list-commands")
-        .output()
-        .context("inspect tmux control-client color support")?;
-    if !output.status.success() {
-        bail!(
-            "inspect tmux control-client color support: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let value = tmux_supports_control_color_reports(&output.stdout);
-    let _ = SUPPORTS_REPORTS.set(value);
-    Ok(*SUPPORTS_REPORTS.get().unwrap_or(&value))
+    Ok(tmux_supports_control_color_reports(tmux_command_table()?))
 }
 
 pub(super) fn tmux_supports_control_color_reports(output: &[u8]) -> bool {
