@@ -368,9 +368,14 @@ describe("application shell accessibility contracts", () => {
       stateGlyphs,
       agents: buildAgentRows([agent({ displayName: "A", lifecycle })], () => ({ workspaceOrder: 0, workspaceName: "work" }), () => true, "workspace"),
     });
-    for (const lifecycle of ["blocked", "idle"] as const) {
-      expect(row(lifecycle), lifecycle).toContain(`class="agent-mark-badge ${lifecycle}"`);
-    }
+    expect(row("blocked")).toContain('class="agent-mark-badge blocked"');
+    // Idle is the resting state and docks nothing: a badge means "look here",
+    // and an agent nobody is waiting on must not compete for the eye. The
+    // fixture's workspace section has a blocked agent of its own, so this is
+    // asserted on the idle agent's row shape: the mark closes straight after
+    // the icon, with no badge before the session label.
+    expect(row("idle")).toContain('</svg></span><span class="agent-session-label">');
+    expect(row("blocked")).toContain('blocked"></span></span><span class="agent-session-label">');
     // Working is the one state that is a process rather than a condition, so
     // it spins — on the badge here, the same way it spins on a tab.
     expect(row("working")).toContain('class="spinner agent-mark-badge working"');
@@ -382,21 +387,31 @@ describe("application shell accessibility contracts", () => {
     expect(row("blocked", true)).toContain('class="state-dot blocked glyphs"');
     expect(row("blocked", true)).not.toContain("agent-mark-badge");
     // Every state the list can produce must have a rule to match, or the same
-    // defect returns for one state instead of all of them.
+    // defect returns for one state instead of all of them. Idle renders no
+    // badge at all, so it needs no badge rule — only its glyph-mode dot.
     // Read the same way `theme.test.ts` reads `tokens.css`: the real file.
     for (const state of ["working", "blocked", "done", "unknown", "idle"]) {
       expect(stylesCss, state).toContain(`.state-dot.${state}`);
+    }
+    for (const state of ["working", "blocked", "done", "unknown"]) {
       expect(stylesCss, state).toContain(`.agent-mark-badge.${state}`);
     }
+    expect(stylesCss).not.toContain(".agent-mark-badge.idle");
+    // Spinners are one neutral ink everywhere — motion says "working"; the
+    // state colours stay reserved for the static dots — and a done badge is a
+    // notification, so it takes the bright green rather than the muted teal.
+    expect(stylesCss).toContain(".agent-mark-badge.working { width: 7px; height: 7px; background: var(--badge-ring); color: var(--chrome-ink); }");
+    expect(stylesCss).toContain(".workspace-button.active .agent-mark-badge.working { color: var(--accent-ink); }");
+    expect(stylesCss).toContain(".agent-mark-badge.done { background: var(--ok); }");
+    expect(stylesCss).toContain(".tab-agent-spinner { width: 8px; height: 8px; color: var(--chrome-ink); }");
     // The ring is the row's own background punched out around the badge, and
     // every row background it can sit on has to say which one it is.
     expect(stylesCss).toContain("--badge-ring: var(--chrome-bg)");
     expect(stylesCss).toContain(".workspace-button.active .agent-mark { --badge-ring: var(--accent); }");
-    // Idle and unknown are the two badges whose colour lives in a border, and
-    // on the active row that border is drawn against the accent block, where
-    // --chrome-faint and --state-unknown fall to roughly 2:1. They flip to the
-    // knockout ink there, like the shortcut index and the icons already do.
-    expect(stylesCss).toContain(".workspace-button.active .agent-mark-badge.idle,");
+    // Unknown is the one badge whose colour lives in a border, and on the
+    // active row that border is drawn against the accent block, where
+    // --state-unknown falls to roughly 2:1. It flips to the knockout ink
+    // there, like the shortcut index and the icons already do.
     expect(stylesCss).toContain(".workspace-button.active .agent-mark-badge.unknown { border-color: color-mix(in srgb, var(--accent-ink) 65%, transparent); }");
     // One size for every group-heading indicator. `.state-dot` is a single
     // class and comes later in the file, so 7px has to win on specificity or
