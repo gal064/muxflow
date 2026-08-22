@@ -302,7 +302,7 @@ fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
 fn paste_buffer_needs_unsanitized_flag() -> Result<bool, String> {
     tmux_command_table()
         .map(paste_buffer_supports_unsanitized_flag)
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("{error:#}"))
 }
 
 fn paste_buffer_supports_unsanitized_flag(output: &[u8]) -> bool {

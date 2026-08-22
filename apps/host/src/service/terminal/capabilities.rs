@@ -26,10 +26,10 @@ pub(super) fn tmux_command_table() -> anyhow::Result<&'static [u8]> {
     .map(Vec::as_slice)
 }
 
-fn cache_successful_probe<'a, T>(
-    cache: &'a OnceLock<T>,
+fn cache_successful_probe<T>(
+    cache: &OnceLock<T>,
     probe: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<&'a T> {
+) -> anyhow::Result<&T> {
     if let Some(value) = cache.get() {
         return Ok(value);
     }
