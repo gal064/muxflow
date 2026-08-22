@@ -171,6 +171,19 @@ describe("one derivation, three surfaces", () => {
     ];
     for (const html of surfaces) expect(html).toMatch(/class="(state|tab)-dot [a-z]+ glyphs"/);
   });
+
+  it("spins for working in ⌘P too, rather than drawing a working-coloured dot", () => {
+    // The switcher had reached past the shared indicator to the dot underneath,
+    // so the one surface you meet by keyboard was the one saying "working" as a
+    // state while every other surface said it as a process.
+    const switcherRow = (attention: "working" | "blocked") => renderToStaticMarkup(<WorkspaceSwitcher
+      onClose={noop} onSelect={noop} stateGlyphs={false}
+      rows={[{ session, active: true, attention, unread: 0, working: attention === "working", agents: [], agentOverflow: 0 }]}
+    />);
+    expect(switcherRow("working")).toContain('<span aria-label="Agent working" class="spinner" role="img"></span>');
+    expect(switcherRow("working")).not.toContain("state-dot working");
+    expect(switcherRow("blocked")).toContain('class="state-dot blocked"');
+  });
 });
 
 describe("idle shows nothing, on every surface that draws state", () => {

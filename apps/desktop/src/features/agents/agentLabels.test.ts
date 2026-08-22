@@ -13,6 +13,9 @@ describe("agent status glyph stripping", () => {
     }
     // The emoji presentation variant Claude sometimes emits (✳ + U+FE0F).
     expect(stripAgentStatusGlyphs("✳️ Fix tests")).toBe("Fix tests");
+    // Text presentation (U+FE0E) is the one a TUI is likelier to ask for, and
+    // leaving it behind indents the label with an invisible character.
+    expect(stripAgentStatusGlyphs("✳︎ Fix tests")).toBe("Fix tests");
     // Consecutive frames left behind by a fast redraw still count as one prefix.
     expect(stripAgentStatusGlyphs("✳ ✶ Fix tests")).toBe("Fix tests");
     // Codex's completion title, exactly as sampled from a live tmux server.

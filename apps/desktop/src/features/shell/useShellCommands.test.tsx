@@ -123,6 +123,14 @@ describe("shell commands", () => {
     expect(result.createSession).toHaveBeenCalledWith("work");
   });
 
+  it("prefills a rename with the name the tab shows, not the one tmux stores", async () => {
+    // The raw name still carries the agent's status ticker; accepting the
+    // dialog unchanged would freeze one animation frame into the real name.
+    const result = await run("window.rename", { activeWindow: { ...window, name: "✳ Fix tests" } });
+    const prompt = result.setTextPrompt.mock.calls[0]?.[0];
+    expect(prompt).toMatchObject({ initialValue: "Fix tests" });
+  });
+
   it.each([
     [undefined, "ambient", ["$ambient", "@ambient", "tab-ambient", "%ambient"]],
     [target({ kind: "session", id: "$1" }), "session", ["$1", undefined, undefined, undefined]],

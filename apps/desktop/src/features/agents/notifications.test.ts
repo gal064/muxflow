@@ -44,6 +44,17 @@ describe("agent native notification policy", () => {
     expect(JSON.stringify(decision.notification)).not.toContain("secret-native");
   });
 
+  it("names the terminal the way every other surface names it", () => {
+    // The tab name still carries the CLI's own status ticker, which is a second
+    // report of the state this notification exists to deliver — and no font on
+    // the lock screen is guaranteed to have a glyph for it.
+    const blocked = agent({ lifecycle: "blocked", attentionGeneration: 4 });
+    const decision = decideAgentNotification(agent(), blocked, { focus, replayed: false, windowName: "✳ Fix tests" });
+    expect(decision.kind).toBe("emit");
+    if (decision.kind !== "emit") return;
+    expect(decision.notification.body).toContain("· Fix tests ·");
+  });
+
   it("shows unmapped attention explicitly without requesting or reporting a native action", async () => {
     const unmapped = agent({
       lifecycle: "blocked", attentionGeneration: 4, attentionKind: "blocked",
