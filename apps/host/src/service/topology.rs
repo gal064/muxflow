@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -22,6 +23,16 @@ use super::{SequencerControl, emit_event, reconcile_terminal_clients_if_open};
 /// opposite of "zero periodic round-trips at idle". Thirty seconds is still a
 /// backstop and is invisible at rest.
 const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long dirty marks pile up before the discovery pass that covers them.
+///
+/// An agent that animates its window title renames the window at its redraw
+/// rate, and tmux reports every rename as a topology notification. Each pass
+/// costs a tmux discovery and pushes a full snapshot to the desktop, which
+/// re-runs every generation-keyed effect it has; nothing else bounds the rate,
+/// because a pass that sees newer dirtiness starts the next one immediately.
+/// One interval of coalescing is the whole cost added to a real change.
+const DIRTY_SETTLE_INTERVAL: Duration = Duration::from_millis(60);
 
 #[derive(Clone, Default)]
 pub(super) struct TopologySignal {
@@ -83,150 +94,311 @@ pub(super) struct TopologyActor {
 
 impl TopologyActor {
     pub(super) fn spawn(self) {
-        tokio::spawn(async move {
-            let mut layout_generation = LayoutGeneration::default();
-            let mut discovery_failed = false;
-            let mut last_reconciled_epoch = 0;
-            while !self.closed.load(Ordering::Acquire) {
-                let notified = tokio::select! {
-                    _ = self.signal.notify.notified() => true,
-                    _ = sleep(SAFETY_RECONCILE_INTERVAL) => false,
-                };
-                // A teardown wake must not be answered with one last discovery
-                // pass; the connection this actor serves is already gone.
-                if self.closed.load(Ordering::Acquire) {
-                    break;
-                }
-                if !self.subscribed.load(Ordering::Acquire) {
-                    continue;
-                }
-                if notified && self.signal.epoch.load(Ordering::Acquire) == last_reconciled_epoch {
-                    continue;
-                }
-                if self.overflowed.swap(false, Ordering::AcqRel) {
-                    emit_event(
-                        &self.sender,
-                        &self.overflowed,
-                        v1::HostEvent {
-                            kind: v1::EventKind::ResyncRequired.into(),
-                            scope: "full".into(),
-                            detail: "event queue overflow".into(),
-                            ..Default::default()
-                        },
-                    );
-                }
+        tokio::spawn(self.run(|| async {
+            match tokio::task::spawn_blocking(discover_authoritative).await {
+                Ok(discovered) => discovered,
+                Err(error) => Err(error.into()),
+            }
+        }));
+    }
 
-                loop {
-                    let observed_epoch = self.signal.epoch.load(Ordering::Acquire);
-                    layout_generation.mark_dirty();
-                    let started_at = layout_generation
-                        .begin()
-                        .expect("topology actor owns the reconciliation pass");
-                    let guard = self.lock.lock().await;
-                    if notified && self.signal.acknowledges(observed_epoch) {
-                        drop(guard);
-                        if self.signal.epoch.load(Ordering::Acquire) != observed_epoch {
-                            layout_generation.mark_dirty();
-                        }
-                        if !layout_generation.finish(started_at) {
-                            last_reconciled_epoch = observed_epoch;
-                            break;
-                        }
-                        continue;
-                    }
-                    let discovered = tokio::task::spawn_blocking(discover_authoritative).await;
-                    match discovered {
-                        Ok(Ok((current, identity))) => {
-                            discovery_failed = false;
-                            let changed = self.baseline.lock().unwrap().as_ref().is_none_or(
-                                |(value, value_identity)| {
-                                    value != &current || value_identity != &identity
-                                },
-                            );
-                            if changed {
-                                *self.baseline.lock().unwrap() =
-                                    Some((current.clone(), identity.clone()));
-                                let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-                                let _ = self
-                                    .sender
-                                    .send(SequencerControl::OrderedEvent(v1::HostEvent {
-                                        kind: v1::EventKind::TopologySnapshot.into(),
-                                        scope: "topology".into(),
-                                        snapshot: Some(snapshot_from_identity(
-                                            current.clone(),
-                                            generation,
-                                            identity,
-                                        )),
-                                        ..Default::default()
-                                    }))
-                                    .await;
-                            } else if notified {
-                                // A tmux notification can describe a transient
-                                // change that has already settled back to the
-                                // authoritative baseline. Close the frontend's
-                                // reconciliation state even when no generation
-                                // change is needed.
-                                let generation = self.generation.load(Ordering::Acquire);
-                                let _ = self
-                                    .sender
-                                    .send(SequencerControl::OrderedEvent(v1::HostEvent {
-                                        kind: v1::EventKind::TopologySnapshot.into(),
-                                        scope: "topology".into(),
-                                        snapshot: Some(snapshot_from_identity(
-                                            current.clone(),
-                                            generation,
-                                            identity.clone(),
-                                        )),
-                                        detail: "topology reconciliation completed".into(),
-                                        ..Default::default()
-                                    }))
-                                    .await;
-                            }
-                            reconcile_terminal_clients_if_open(
-                                &self.closed,
-                                &self.terminal,
-                                &current,
-                                &self.sender,
-                                &self.overflowed,
-                            );
-                        }
-                        _ if !discovery_failed => {
-                            discovery_failed = true;
-                            emit_event(
-                                &self.sender,
-                                &self.overflowed,
-                                v1::HostEvent {
-                                    kind: v1::EventKind::ResyncRequired.into(),
-                                    scope: "full".into(),
-                                    detail: "tmux discovery failed".into(),
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                        _ => {}
-                    }
+    /// The reconciliation loop, over a caller-supplied discovery pass.
+    ///
+    /// Only the tests substitute the pass; they need one that cannot fork tmux
+    /// and that can be counted.
+    async fn run<Discover, Pass>(self, discover: Discover)
+    where
+        Discover: Fn() -> Pass + Send + 'static,
+        Pass: Future<Output = anyhow::Result<(tmux_control::TmuxSnapshot, String)>> + Send,
+    {
+        let mut layout_generation = LayoutGeneration::default();
+        let mut discovery_failed = false;
+        let mut last_reconciled_epoch = 0;
+        while !self.closed.load(Ordering::Acquire) {
+            let notified = tokio::select! {
+                _ = self.signal.notify.notified() => true,
+                _ = sleep(SAFETY_RECONCILE_INTERVAL) => false,
+            };
+            // A teardown wake must not be answered with one last discovery
+            // pass; the connection this actor serves is already gone.
+            if self.closed.load(Ordering::Acquire) {
+                break;
+            }
+            if !self.subscribed.load(Ordering::Acquire) {
+                continue;
+            }
+            if notified && self.signal.epoch.load(Ordering::Acquire) == last_reconciled_epoch {
+                continue;
+            }
+            if notified && !self.settle().await {
+                break;
+            }
+            if self.overflowed.swap(false, Ordering::AcqRel) {
+                emit_event(
+                    &self.sender,
+                    &self.overflowed,
+                    v1::HostEvent {
+                        kind: v1::EventKind::ResyncRequired.into(),
+                        scope: "full".into(),
+                        detail: "event queue overflow".into(),
+                        ..Default::default()
+                    },
+                );
+            }
+
+            loop {
+                let observed_epoch = self.signal.epoch.load(Ordering::Acquire);
+                layout_generation.mark_dirty();
+                let started_at = layout_generation
+                    .begin()
+                    .expect("topology actor owns the reconciliation pass");
+                let guard = self.lock.lock().await;
+                if notified && self.signal.acknowledges(observed_epoch) {
                     drop(guard);
-
                     if self.signal.epoch.load(Ordering::Acquire) != observed_epoch {
                         layout_generation.mark_dirty();
                     }
                     if !layout_generation.finish(started_at) {
-                        // This pass reconciled exactly the epoch captured at
-                        // its start. A dirty notification may arrive between
-                        // the comparison above and here; recording a newer
-                        // load would incorrectly consume that notification.
                         last_reconciled_epoch = observed_epoch;
                         break;
                     }
+                    continue;
+                }
+                let discovered = discover().await;
+                match discovered {
+                    Ok((current, identity)) => {
+                        discovery_failed = false;
+                        let changed = self.baseline.lock().unwrap().as_ref().is_none_or(
+                            |(value, value_identity)| {
+                                value != &current || value_identity != &identity
+                            },
+                        );
+                        if changed {
+                            *self.baseline.lock().unwrap() =
+                                Some((current.clone(), identity.clone()));
+                            let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                            let _ = self
+                                .sender
+                                .send(SequencerControl::OrderedEvent(v1::HostEvent {
+                                    kind: v1::EventKind::TopologySnapshot.into(),
+                                    scope: "topology".into(),
+                                    snapshot: Some(snapshot_from_identity(
+                                        current.clone(),
+                                        generation,
+                                        identity,
+                                    )),
+                                    ..Default::default()
+                                }))
+                                .await;
+                        } else if notified {
+                            // A tmux notification can describe a transient
+                            // change that has already settled back to the
+                            // authoritative baseline. Close the frontend's
+                            // reconciliation state even when no generation
+                            // change is needed.
+                            let generation = self.generation.load(Ordering::Acquire);
+                            let _ = self
+                                .sender
+                                .send(SequencerControl::OrderedEvent(v1::HostEvent {
+                                    kind: v1::EventKind::TopologySnapshot.into(),
+                                    scope: "topology".into(),
+                                    snapshot: Some(snapshot_from_identity(
+                                        current.clone(),
+                                        generation,
+                                        identity.clone(),
+                                    )),
+                                    detail: "topology reconciliation completed".into(),
+                                    ..Default::default()
+                                }))
+                                .await;
+                        }
+                        reconcile_terminal_clients_if_open(
+                            &self.closed,
+                            &self.terminal,
+                            &current,
+                            &self.sender,
+                            &self.overflowed,
+                        );
+                    }
+                    Err(_) if !discovery_failed => {
+                        discovery_failed = true;
+                        emit_event(
+                            &self.sender,
+                            &self.overflowed,
+                            v1::HostEvent {
+                                kind: v1::EventKind::ResyncRequired.into(),
+                                scope: "full".into(),
+                                detail: "tmux discovery failed".into(),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    Err(_) => {}
+                }
+                drop(guard);
+
+                if self.signal.epoch.load(Ordering::Acquire) != observed_epoch {
+                    layout_generation.mark_dirty();
+                }
+                if !layout_generation.finish(started_at) {
+                    // This pass reconciled exactly the epoch captured at
+                    // its start. A dirty notification may arrive between
+                    // the comparison above and here; recording a newer
+                    // load would incorrectly consume that notification.
+                    last_reconciled_epoch = observed_epoch;
+                    break;
+                }
+                // More dirtiness landed while this pass ran. Without a wait
+                // here the follow-up starts immediately, and a window title
+                // that renames itself several times a second keeps the actor
+                // in this loop at whatever rate tmux can answer.
+                if !self.settle().await {
+                    break;
                 }
             }
-        });
+        }
+    }
+
+    /// Lets the rest of a notification burst arrive before the pass that will
+    /// cover all of it. Returns false if the connection closed while waiting.
+    async fn settle(&self) -> bool {
+        sleep(DIRTY_SETTLE_INTERVAL).await;
+        !self.closed.load(Ordering::Acquire)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
+    use crate::service::OutputCredit;
+    use crate::service::terminal::TerminalClients;
+    use crate::service::topology_output_trigger::TopologyOutputTrigger;
+
+    /// A subscribed actor whose discovery pass counts itself, costs about what
+    /// a tmux fork costs, and answers with a different identity every time —
+    /// the way a window whose title animates makes every snapshot differ from
+    /// the one before it.
+    struct CountingActor {
+        signal: TopologySignal,
+        closed: Arc<AtomicBool>,
+        passes: Arc<AtomicU64>,
+        actor: tokio::task::JoinHandle<()>,
+        /// Kept alive: a dropped receiver would make every snapshot send fail
+        /// and change what the loop costs.
+        _events: mpsc::Receiver<SequencerControl>,
+    }
+
+    impl CountingActor {
+        fn spawn() -> Self {
+            let signal = TopologySignal::default();
+            let closed = Arc::new(AtomicBool::new(false));
+            let passes = Arc::new(AtomicU64::new(0));
+            let (sender, events) = mpsc::channel(4096);
+            let actor = TopologyActor {
+                closed: Arc::clone(&closed),
+                subscribed: Arc::new(AtomicBool::new(true)),
+                generation: Arc::new(AtomicU64::new(0)),
+                overflowed: Arc::new(AtomicBool::new(false)),
+                lock: Arc::new(tokio::sync::Mutex::new(())),
+                baseline: Arc::new(Mutex::new(None)),
+                terminal: Arc::new(Mutex::new(TerminalClients::new(
+                    Arc::new(OutputCredit::negotiated(false)),
+                    TopologyOutputTrigger::default(),
+                ))),
+                sender,
+                signal: signal.clone(),
+            };
+            let counter = Arc::clone(&passes);
+            let actor = tokio::spawn(actor.run(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    let pass = counter.fetch_add(1, Ordering::AcqRel);
+                    sleep(Duration::from_millis(1)).await;
+                    Ok((
+                        tmux_control::TmuxSnapshot::default(),
+                        format!("tmux:{pass}"),
+                    ))
+                }
+            }));
+            Self {
+                signal,
+                closed,
+                passes,
+                actor,
+                _events: events,
+            }
+        }
+
+        fn passes(&self) -> u64 {
+            self.passes.load(Ordering::Acquire)
+        }
+
+        async fn shutdown(self) {
+            self.closed.store(true, Ordering::Release);
+            self.signal.wake();
+            tokio::time::timeout(Duration::from_secs(5), self.actor)
+                .await
+                .expect("the actor must observe its closed flag")
+                .unwrap();
+        }
+    }
+
+    /// An agent animating a status glyph in its window title renames the window
+    /// at the CLI's redraw rate, and every rename is a topology notification.
+    /// Each pass forks tmux and pushes a snapshot the desktop re-renders from,
+    /// so the pass rate has to follow the settle interval and not the frame
+    /// rate. Measured without [`DIRTY_SETTLE_INTERVAL`], this burst produced
+    /// one pass per rename.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_animated_title_costs_passes_at_the_settle_rate_not_the_frame_rate() {
+        let harness = CountingActor::spawn();
+        let burst = Duration::from_millis(600);
+        let started = Instant::now();
+        let mut renames = 0;
+        while started.elapsed() < burst {
+            harness.signal.mark_dirty();
+            renames += 1;
+            sleep(Duration::from_millis(5)).await;
+        }
+        sleep(DIRTY_SETTLE_INTERVAL * 4).await;
+
+        let passes = harness.passes();
+        assert!(
+            passes >= 2,
+            "a sustained rename burst must keep reconciling, saw {passes} passes"
+        );
+        let ceiling = burst.as_millis() / DIRTY_SETTLE_INTERVAL.as_millis() + 4;
+        assert!(
+            u128::from(passes) <= ceiling,
+            "{renames} renames produced {passes} discovery passes"
+        );
+        harness.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_rename_costs_exactly_one_prompt_pass() {
+        let harness = CountingActor::spawn();
+        let started = Instant::now();
+        harness.signal.mark_dirty();
+        while harness.passes() == 0 {
+            assert!(
+                started.elapsed() < DIRTY_SETTLE_INTERVAL * 10,
+                "a lone rename waited {:?} for its discovery pass",
+                started.elapsed()
+            );
+            sleep(Duration::from_millis(2)).await;
+        }
+
+        sleep(DIRTY_SETTLE_INTERVAL * 4).await;
+        assert_eq!(
+            harness.passes(),
+            1,
+            "coalescing must not turn one rename into a repeating pass"
+        );
+        harness.shutdown().await;
+    }
 
     #[test]
     fn concurrent_dirty_coalesces_to_exactly_one_follow_up() {
