@@ -44,6 +44,23 @@ import { recordIncident } from "../../diagnostics/incidents";
  */
 export const PAINT_SLOW_THRESHOLD_MS = 48;
 
+/**
+ * The same question, asked of a window macOS is not painting.
+ *
+ * An occluded, minimized, or off-Space window has its frames throttled or
+ * parked outright, so its write completions routinely land at 48-115ms with
+ * nothing wrong: that is the OS being normal, not the app being slow. Since the
+ * write scheduler grew a 200ms timer fallback (`WRITE_FLUSH_FALLBACK_MS`), the
+ * app's own pacing contribution in a hidden window is bounded, which makes
+ * anything under roughly a quarter second there fully explained by the
+ * throttling. Journalling those buried the real records — they were most of one
+ * day's 91 `render.paintSlow` lines — so a hidden window has to clear this
+ * higher bar instead. A *visible* window is held to the 48ms threshold whether
+ * or not it has focus: an unfocused window still paints, so slowness there is a
+ * real finding.
+ */
+export const PAINT_SLOW_HIDDEN_THRESHOLD_MS = 250;
+
 /** How often one pane may contribute a slow-paint record. */
 export const PAINT_SLOW_INCIDENT_INTERVAL_MS = 5_000;
 
@@ -300,6 +317,12 @@ export function notePaint(input: PaintSample): void {
   try {
     const { ms } = input;
     if (!Number.isFinite(ms) || ms < PAINT_SLOW_THRESHOLD_MS) return;
+    // Asked once, and reused for the record below. A window the OS has stopped
+    // painting has to clear the higher bar, and it drops out here — ahead of the
+    // rate-limit bookkeeping, because a paint that was never a finding must not
+    // spend the pane's interval or count itself as suppressed.
+    const visibility = readVisibility();
+    if (visibility !== undefined && visibility !== "visible" && ms < PAINT_SLOW_HIDDEN_THRESHOLD_MS) return;
     const startedAtMs = Number.isFinite(input.startedAtMs) ? input.startedAtMs : 0;
     const state = stateFor(input.paneId);
     if (state.lastRecordAtMs !== undefined && startedAtMs - state.lastRecordAtMs < PAINT_SLOW_INCIDENT_INTERVAL_MS) {
@@ -321,7 +344,7 @@ export function notePaint(input: PaintSample): void {
       atlasDelta: input.atlasDelta,
       longTasks: longTasksOverlapping(startedAtMs, startedAtMs + ms),
       // Whether this window was being painted at all while the write waited.
-      visibility: readVisibility(),
+      visibility,
       focused: readFocused(),
       msSinceLastFrame: msSinceLastFrame(),
       suppressed,
