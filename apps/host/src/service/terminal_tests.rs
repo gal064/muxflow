@@ -26,6 +26,7 @@ fn start_long_lived_attachment(
             topology_trigger: TopologyOutputTrigger::default(),
         },
         long_lived_attachment_command(),
+        true,
     )
 }
 
@@ -109,6 +110,7 @@ fn clients_with_recorded_client(
             topology_trigger: TopologyOutputTrigger::default(),
         },
         recorded.command(),
+        true,
     )
     .unwrap();
     clients.clients.insert("$1".into(), attachment);
@@ -729,6 +731,35 @@ fn fresh_server_has_a_vacuous_input_fence_for_create_session_bootstrap() {
     clients.flush_input().unwrap();
 }
 
+#[test]
+fn control_client_reports_the_terminal_palette_before_its_first_capture() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    let written = recorded.written();
+    let foreground = written
+        .find("refresh-client -r '%1:\x1b]10;rgb:ffff/ffff/ffff\x1b\\'")
+        .unwrap();
+    let background = written
+        .find("refresh-client -r '%1:\x1b]11;rgb:2828/2c2c/3434\x1b\\'")
+        .unwrap();
+    let capture = written.find("__ADE_CAPTURE__").unwrap();
+    assert!(
+        foreground < background && background < capture,
+        "{written:?}"
+    );
+    clients.stop();
+}
+
+#[test]
+fn color_reports_are_capability_gated_for_tmux_33() {
+    assert!(tmux_supports_control_color_reports(
+        b"refresh-client (refresh) [-cDlLRSU] [-A pane:state] [-B name:what:format] [-C XxY] [-f flags] [-r pane:report] [-t target-client] [adjustment]\n"
+    ));
+    assert!(!tmux_supports_control_color_reports(
+        b"refresh-client (refresh) [-cDlLRSU] [-A pane:state] [-B name:what:format] [-C XxY] [-f flags] [-t target-client] [adjustment]\n"
+    ));
+}
+
 /// The bound is a blast radius, not the fix for P12-U006: the sizes that
 /// actually damaged the user's windows (108x298, 108x314) are *inside* it,
 /// and what stops those is the desktop no longer deriving the client size
@@ -798,7 +829,7 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
 
     let unchanged = current.clone();
     assert!(
-        apply_membership_update(&mut current, &unchanged, &stream_tx, &mut stdin)
+        apply_membership_update(&mut current, &unchanged, &stream_tx, &mut stdin, true)
             .unwrap()
             .is_empty()
     );
@@ -810,7 +841,7 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
 
     let desired = HashSet::from(["%2".into()]);
     assert_eq!(
-        apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin).unwrap(),
+        apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin, true).unwrap(),
         vec!["%1".to_owned()]
     );
     match stream_rx.try_recv().unwrap() {
@@ -859,7 +890,8 @@ fn failed_membership_batch_remains_retryable() {
     };
 
     assert!(
-        apply_membership_update(&mut current, &failed_desired, &stream_tx, &mut stdin,).is_err()
+        apply_membership_update(&mut current, &failed_desired, &stream_tx, &mut stdin, true,)
+            .is_err()
     );
     assert_eq!(current, HashSet::from(["%1".into()]));
 
@@ -892,7 +924,8 @@ fn failed_membership_batch_remains_retryable() {
     );
 
     assert_eq!(
-        apply_membership_update(&mut current, &next_desired, &stream_tx, &mut stdin).unwrap(),
+        apply_membership_update(&mut current, &next_desired, &stream_tx, &mut stdin, true,)
+            .unwrap(),
         vec!["%1".to_owned()]
     );
     assert_eq!(current, next_desired);
