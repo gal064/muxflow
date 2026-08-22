@@ -67,7 +67,10 @@ export function AgentMark({ adapterId, state, glyphs }: {
   return <span className="agent-mark">
     <AgentIcon adapterId={adapterId} />
     {/* `spinner` on the working badge is the same class the tab strip and the
-        workspace title use, so there is one ring animation in the app. */}
-    <span aria-hidden="true" className={state === "working" ? "spinner agent-mark-badge working" : `agent-mark-badge ${state}`} />
+        workspace title use, so there is one ring animation in the app. Idle
+        draws no badge at all: quiet is the resting state, and a mark with
+        nothing docked to it says "nothing needs you" better than any outline. */}
+    {state !== "idle"
+      && <span aria-hidden="true" className={state === "working" ? "spinner agent-mark-badge working" : `agent-mark-badge ${state}`} />}
   </span>;
 }

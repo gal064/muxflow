@@ -371,7 +371,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    every non-Working heading drew an 8px dot beside the Working heading's 7px
    spinner. One size for every group-heading indicator. */
 .state-dot.agent-group-dot, .spinner.agent-group-dot { width: 7px; height: 7px; align-self: center; }
-.spinner.agent-group-dot { color: var(--state-working); }
+.spinner.agent-group-dot { color: var(--chrome-dim); }
 .agent-button:hover:not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
 /* Reachable by keyboard, still clearly not actionable — see the note at the
    call site for why this is not `disabled`. */
@@ -410,22 +410,25 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   box-shadow: 0 0 0 1.5px var(--badge-ring);
 }
 .agent-mark-badge.blocked { background: var(--state-blocked); }
-.agent-mark-badge.done { background: var(--state-done); }
-/* Idle and unknown are outlines, not fills: an agent nobody is waiting on
-   should not put a coloured chip on the mark. Same distinction the dots make —
-   solid for idle-and-we-know-it, dashed for nothing-has-told-us. */
-.agent-mark-badge.idle { background: var(--badge-ring); border: 1.5px solid var(--chrome-faint); }
+/* A done badge is a notification — it must catch the eye, so it takes the
+   bright connection-green the tab strip's done dot already uses, not the
+   muted teal of the static state palette. */
+.agent-mark-badge.done { background: var(--ok); }
+/* Idle renders no badge at all — quiet is the resting state. Unknown keeps the
+   dashed outline the dots use for nothing-has-told-us. */
 .agent-mark-badge.unknown { background: var(--badge-ring); border: 1.5px dashed var(--state-unknown); }
-/* The two outline badges are the only part of a mark whose colour is carried by
-   a border, and on the active row that border is drawn against the accent
-   block: --chrome-faint lands near 2.1:1 there and --state-unknown near 2.4:1,
-   so both vanish on the one row the eye is already on. Same knockout flip the
-   shortcut index and the adapter icons make two rules up. */
-.workspace-button.active .agent-mark-badge.idle,
+/* The outline badge is the only part of a mark whose colour is carried by a
+   border, and on the active row that border is drawn against the accent block,
+   where --state-unknown lands near 2.4:1 and vanishes on the one row the eye
+   is already on. Same knockout flip the shortcut index and the adapter icons
+   make two rules up. */
 .workspace-button.active .agent-mark-badge.unknown { border-color: color-mix(in srgb, var(--accent-ink) 65%, transparent); }
 /* `.spinner` supplies the ring and the animation; this only sizes and colours
-   it, and fills the middle so the mark does not show through the badge. */
-.agent-mark-badge.working { width: 7px; height: 7px; background: var(--badge-ring); color: var(--state-working); }
+   it, and fills the middle so the mark does not show through the badge. Every
+   spinner in the app is the same neutral ink — motion alone says "working",
+   and the state colours stay reserved for the static dots. */
+.agent-mark-badge.working { width: 7px; height: 7px; background: var(--badge-ring); color: var(--chrome-ink); }
+.workspace-button.active .agent-mark-badge.working { color: var(--accent-ink); }
 .agent-session-label { min-width: 0; flex: 1 1 auto; }
 .agent-location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-tab { font-family: var(--font-mono); font-size: var(--type-label); font-weight: 400; color: var(--chrome-faint); }
@@ -606,7 +609,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .tab-dot.blocked { background: var(--state-blocked); }
 .tab-dot.done { background: var(--ok); }
-.tab-agent-spinner { width: 8px; height: 8px; color: var(--state-working); }
+.tab-agent-spinner { width: 8px; height: 8px; color: var(--chrome-ink); }
 /* Same rule as the sidebar dot, glyph suppression included: a tab whose agent
    state is unknown must not look like a tab whose agent is doing something. */
 .tab-dot.unknown { background: transparent; border: 1px dashed var(--state-unknown); }
