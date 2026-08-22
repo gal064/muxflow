@@ -1,40 +1,6 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Coalesces layout reconciliation without losing a mutation that arrives
-/// while a pass is in flight. Durable facts are always read at the start of a
-/// pass and exactly one follow-up is requested when its generation changes.
-#[derive(Debug, Default, Clone)]
-pub struct LayoutGeneration {
-    dirty_generation: u64,
-    reconciling: bool,
-}
-
-impl LayoutGeneration {
-    pub fn mark_dirty(&mut self) -> u64 {
-        self.dirty_generation = self.dirty_generation.saturating_add(1);
-        self.dirty_generation
-    }
-
-    pub fn begin(&mut self) -> Option<u64> {
-        if self.reconciling {
-            return None;
-        }
-        self.reconciling = true;
-        Some(self.dirty_generation)
-    }
-
-    /// Returns true when one follow-up pass is required.
-    pub fn finish(&mut self, started_at: u64) -> bool {
-        self.reconciling = false;
-        self.dirty_generation != started_at
-    }
-
-    pub fn current(&self) -> u64 {
-        self.dirty_generation
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LayoutAxis {
@@ -189,18 +155,5 @@ mod tests {
             parse_layout("ffff,80x24,0,0{"),
             Err(LayoutParseError::Invalid(_))
         ));
-    }
-
-    #[test]
-    fn generation_schedules_one_follow_up_for_changes_during_a_pass() {
-        let mut generation = LayoutGeneration::default();
-        generation.mark_dirty();
-        let started = generation.begin().unwrap();
-        assert!(generation.begin().is_none());
-        generation.mark_dirty();
-        generation.mark_dirty();
-        assert!(generation.finish(started));
-        let follow_up = generation.begin().unwrap();
-        assert!(!generation.finish(follow_up));
     }
 }

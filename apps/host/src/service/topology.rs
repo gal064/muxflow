@@ -3,10 +3,9 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tmux_agent_protocol::v1;
-use tmux_control::LayoutGeneration;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::sleep;
 
@@ -24,15 +23,29 @@ use super::{SequencerControl, emit_event, reconcile_terminal_clients_if_open};
 /// backstop and is invisible at rest.
 const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// How long dirty marks pile up before the discovery pass that covers them.
+/// How long a notified pass waits for the rest of its notification group.
 ///
-/// An agent that animates its window title renames the window at its redraw
-/// rate, and tmux reports every rename as a topology notification. Each pass
-/// costs a tmux discovery and pushes a full snapshot to the desktop, which
-/// re-runs every generation-keyed effect it has; nothing else bounds the rate,
-/// because a pass that sees newer dirtiness starts the next one immediately.
-/// One interval of coalescing is the whole cost added to a real change.
-const DIRTY_SETTLE_INTERVAL: Duration = Duration::from_millis(60);
+/// One structural change is several tmux notifications — closing a window
+/// emits four — and they land in the same millisecond. Absorbing them into one
+/// pass costs every real change this much latency, so it is deliberately far
+/// below what anyone can perceive; it is burst absorption, not rate limiting.
+const NOTIFICATION_BURST_WINDOW: Duration = Duration::from_millis(10);
+
+/// Floor on the spacing between the starts of two discovery passes.
+///
+/// Nothing about the notification source bounds its rate: an agent CLI that
+/// animates its window title renames the window at its redraw rate, and tmux
+/// reports every rename as a topology notification. Each pass costs a tmux
+/// discovery and pushes a full snapshot to the desktop, which re-runs every
+/// generation-keyed effect it has. Measuring the gap from the previous pass's
+/// start rather than its end means the first change after a quiet period waits
+/// only the burst window, while any sustained stream — whatever period it
+/// arrives at — is capped at four passes a second.
+const MIN_PASS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How often a wait re-checks `closed`, so a teardown leaves it promptly
+/// instead of after the full inter-pass gap.
+const CLOSE_CHECK_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Default)]
 pub(super) struct TopologySignal {
@@ -111,9 +124,9 @@ impl TopologyActor {
         Discover: Fn() -> Pass + Send + 'static,
         Pass: Future<Output = anyhow::Result<(tmux_control::TmuxSnapshot, String)>> + Send,
     {
-        let mut layout_generation = LayoutGeneration::default();
         let mut discovery_failed = false;
         let mut last_reconciled_epoch = 0;
+        let mut last_pass_started: Option<Instant> = None;
         while !self.closed.load(Ordering::Acquire) {
             let notified = tokio::select! {
                 _ = self.signal.notify.notified() => true,
@@ -130,8 +143,12 @@ impl TopologyActor {
             if notified && self.signal.epoch.load(Ordering::Acquire) == last_reconciled_epoch {
                 continue;
             }
-            if notified && !self.settle().await {
-                break;
+            if notified {
+                let ready_at = (Instant::now() + NOTIFICATION_BURST_WINDOW)
+                    .max(pass_gap_deadline(last_pass_started));
+                if !self.wait_until(ready_at).await {
+                    break;
+                }
             }
             if self.overflowed.swap(false, Ordering::AcqRel) {
                 emit_event(
@@ -148,22 +165,16 @@ impl TopologyActor {
 
             loop {
                 let observed_epoch = self.signal.epoch.load(Ordering::Acquire);
-                layout_generation.mark_dirty();
-                let started_at = layout_generation
-                    .begin()
-                    .expect("topology actor owns the reconciliation pass");
                 let guard = self.lock.lock().await;
                 if notified && self.signal.acknowledges(observed_epoch) {
                     drop(guard);
-                    if self.signal.epoch.load(Ordering::Acquire) != observed_epoch {
-                        layout_generation.mark_dirty();
-                    }
-                    if !layout_generation.finish(started_at) {
+                    if self.signal.epoch.load(Ordering::Acquire) == observed_epoch {
                         last_reconciled_epoch = observed_epoch;
                         break;
                     }
                     continue;
                 }
+                last_pass_started = Some(Instant::now());
                 let discovered = discover().await;
                 match discovered {
                     Ok((current, identity)) => {
@@ -237,10 +248,7 @@ impl TopologyActor {
                 }
                 drop(guard);
 
-                if self.signal.epoch.load(Ordering::Acquire) != observed_epoch {
-                    layout_generation.mark_dirty();
-                }
-                if !layout_generation.finish(started_at) {
+                if self.signal.epoch.load(Ordering::Acquire) == observed_epoch {
                     // This pass reconciled exactly the epoch captured at
                     // its start. A dirty notification may arrive between
                     // the comparison above and here; recording a newer
@@ -248,29 +256,41 @@ impl TopologyActor {
                     last_reconciled_epoch = observed_epoch;
                     break;
                 }
-                // More dirtiness landed while this pass ran. Without a wait
-                // here the follow-up starts immediately, and a window title
-                // that renames itself several times a second keeps the actor
-                // in this loop at whatever rate tmux can answer.
-                if !self.settle().await {
+                // More dirtiness landed while this pass ran, so the follow-up
+                // waits out the pass-rate floor rather than starting at
+                // whatever rate tmux can answer.
+                if !self.wait_until(pass_gap_deadline(last_pass_started)).await {
                     break;
                 }
             }
         }
     }
 
-    /// Lets the rest of a notification burst arrive before the pass that will
-    /// cover all of it. Returns false if the connection closed while waiting.
-    async fn settle(&self) -> bool {
-        sleep(DIRTY_SETTLE_INTERVAL).await;
-        !self.closed.load(Ordering::Acquire)
+    /// Sleeps until `deadline`. Returns false if the connection closed, which
+    /// a teardown wake makes visible within [`CLOSE_CHECK_INTERVAL`] rather
+    /// than after the whole wait.
+    async fn wait_until(&self, deadline: Instant) -> bool {
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return true;
+            }
+            sleep(remaining.min(CLOSE_CHECK_INTERVAL)).await;
+        }
     }
+}
+
+/// The earliest the next discovery pass may start, given when the previous one
+/// did. A first pass after a quiet period has no previous start to wait out.
+fn pass_gap_deadline(previous_pass: Option<Instant>) -> Instant {
+    previous_pass.map_or_else(Instant::now, |started| started + MIN_PASS_INTERVAL)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
     use crate::service::OutputCredit;
     use crate::service::terminal::TerminalClients;
@@ -345,36 +365,62 @@ mod tests {
         }
     }
 
-    /// An agent animating a status glyph in its window title renames the window
-    /// at the CLI's redraw rate, and every rename is a topology notification.
-    /// Each pass forks tmux and pushes a snapshot the desktop re-renders from,
-    /// so the pass rate has to follow the settle interval and not the frame
-    /// rate. Measured without [`DIRTY_SETTLE_INTERVAL`], this burst produced
-    /// one pass per rename.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_animated_title_costs_passes_at_the_settle_rate_not_the_frame_rate() {
+    /// Renames the window every `period` for `burst`, then waits for the last
+    /// pass the storm earned, and reports how many passes the whole run cost
+    /// against what [`MIN_PASS_INTERVAL`] permits over the same span.
+    async fn storm_passes_against_ceiling(period: Duration, burst: Duration) -> (u64, u128) {
         let harness = CountingActor::spawn();
-        let burst = Duration::from_millis(600);
         let started = Instant::now();
-        let mut renames = 0;
         while started.elapsed() < burst {
             harness.signal.mark_dirty();
-            renames += 1;
-            sleep(Duration::from_millis(5)).await;
+            sleep(period).await;
         }
-        sleep(DIRTY_SETTLE_INTERVAL * 4).await;
+        sleep(MIN_PASS_INTERVAL * 2).await;
 
         let passes = harness.passes();
+        // Two passes of slack: the storm's first pass owes nothing to the rate
+        // floor, and a real-time run drifts by a fraction of a gap.
+        let ceiling = started.elapsed().as_millis() / MIN_PASS_INTERVAL.as_millis() + 2;
+        harness.shutdown().await;
+        (passes, ceiling)
+    }
+
+    /// An agent animating a status glyph in its window title renames the window
+    /// at the CLI's redraw rate — 100ms is a typical frame period — and every
+    /// rename is a topology notification. Each pass forks tmux and pushes a
+    /// snapshot the desktop re-renders from, so the pass rate has to follow
+    /// [`MIN_PASS_INTERVAL`] and not the frame rate. Under a settle-only
+    /// design this burst produced one pass per rename, because every frame
+    /// arrived after the settle had already elapsed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_animated_title_costs_passes_at_the_pass_rate_not_the_frame_rate() {
+        let (passes, ceiling) =
+            storm_passes_against_ceiling(Duration::from_millis(100), Duration::from_secs(1)).await;
         assert!(
             passes >= 2,
-            "a sustained rename burst must keep reconciling, saw {passes} passes"
+            "a sustained rename storm must keep reconciling, saw {passes} passes"
         );
-        let ceiling = burst.as_millis() / DIRTY_SETTLE_INTERVAL.as_millis() + 4;
         assert!(
             u128::from(passes) <= ceiling,
-            "{renames} renames produced {passes} discovery passes"
+            "a 100ms rename storm produced {passes} discovery passes, over the {ceiling} the rate floor allows"
         );
-        harness.shutdown().await;
+    }
+
+    /// The same floor has to hold when notifications arrive far faster than a
+    /// pass can answer them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_notification_flood_is_bounded_by_the_same_pass_rate() {
+        let (passes, ceiling) =
+            storm_passes_against_ceiling(Duration::from_millis(5), Duration::from_millis(600))
+                .await;
+        assert!(
+            passes >= 2,
+            "a sustained rename storm must keep reconciling, saw {passes} passes"
+        );
+        assert!(
+            u128::from(passes) <= ceiling,
+            "a 5ms rename flood produced {passes} discovery passes, over the {ceiling} the rate floor allows"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -383,15 +429,17 @@ mod tests {
         let started = Instant::now();
         harness.signal.mark_dirty();
         while harness.passes() == 0 {
+            // A change arriving out of quiet owes nothing to the rate floor:
+            // it waits the burst window and nothing else.
             assert!(
-                started.elapsed() < DIRTY_SETTLE_INTERVAL * 10,
+                started.elapsed() < MIN_PASS_INTERVAL / 2,
                 "a lone rename waited {:?} for its discovery pass",
                 started.elapsed()
             );
-            sleep(Duration::from_millis(2)).await;
+            sleep(Duration::from_millis(1)).await;
         }
 
-        sleep(DIRTY_SETTLE_INTERVAL * 4).await;
+        sleep(MIN_PASS_INTERVAL * 3).await;
         assert_eq!(
             harness.passes(),
             1,
@@ -400,21 +448,24 @@ mod tests {
         harness.shutdown().await;
     }
 
+    /// A pass decides on its follow-up from a single comparison against the
+    /// epoch it started from, so any number of marks landing while it runs
+    /// costs exactly one more pass rather than one pass each.
     #[test]
     fn concurrent_dirty_coalesces_to_exactly_one_follow_up() {
         let signal = TopologySignal::default();
-        let mut generation = LayoutGeneration::default();
         signal.mark_dirty();
-        generation.mark_dirty();
-        let pass = generation.begin().unwrap();
+        let observed_epoch = signal.current_epoch();
         for _ in 0..100 {
             signal.mark_dirty();
         }
-        generation.mark_dirty();
-        assert!(generation.finish(pass));
-        let follow_up = generation.begin().unwrap();
-        assert!(!generation.finish(follow_up));
-        assert_eq!(signal.epoch.load(Ordering::Acquire), 101);
+        assert_ne!(signal.current_epoch(), observed_epoch);
+
+        // The follow-up observes all hundred at once, and finding nothing
+        // newer at its end ends the run.
+        let follow_up_epoch = signal.current_epoch();
+        assert_eq!(follow_up_epoch, 101);
+        assert_eq!(signal.current_epoch(), follow_up_epoch);
     }
 
     #[test]

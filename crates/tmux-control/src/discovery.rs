@@ -260,10 +260,12 @@ fn query<F>(execute: &mut F, subcommand: &str, format: &str) -> Result<Vec<Strin
 where
     F: FnMut(&[String]) -> Result<Output, std::io::Error>,
 {
-    // `-u` on every transport, local or SSH-forwarded: the server rewrites the
+    // `-u` on every query this unbatched path issues: the server rewrites the
     // non-ASCII bytes of a window name to `_` for clients whose locale claims no
     // UTF-8 support, and the clients we spawn inherit no `LANG`/`LC_*`. It is a
-    // global flag, so it leads the argv the transport receives.
+    // global flag, so it leads the argv the transport receives. Live transports
+    // do not come through here — they run the batched argv, which carries its
+    // own `-u` and its own coverage.
     let mut args = vec!["-u".to_owned(), subcommand.to_owned()];
     if subcommand != "list-sessions" {
         args.push("-a".into());
@@ -427,8 +429,10 @@ mod tests {
         assert!(parse_batched_discovery(b"", b"no server running", false).is_err());
     }
 
+    /// Covers the unbatched argv behind the `discover` diagnostic subcommand;
+    /// the batched argv every live transport runs is checked separately.
     #[test]
-    fn every_transport_asks_for_utf8_before_the_subcommand() {
+    fn the_diagnostic_argv_asks_for_utf8_before_each_subcommand() {
         // Every query must answer with a record it can parse: an empty
         // `list-sessions` short-circuits discovery, and the two argvs that
         // never ran would go unchecked.
