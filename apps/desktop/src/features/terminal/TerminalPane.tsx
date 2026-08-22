@@ -868,7 +868,7 @@ export function TerminalPane({
       const measurements = renderer.measurements();
       if (measurements) measurementsRef.current(measurements);
     };
-    const observer = new ResizeObserver(() => {
+    const reconcileBoxAndMetrics = () => {
       // A drag moves this box every frame while tmux is still a debounce and a
       // round trip away from hearing about it, so re-applying tmux's grid here
       // is a no-op that leaves the pane clipped or short for the whole drag.
@@ -892,8 +892,13 @@ export function TerminalPane({
       // pixels, so moving the window between displays of different pixel
       // ratios changes it with no remount.
       reportMeasurements();
-    });
+    };
+    const observer = new ResizeObserver(reconcileBoxAndMetrics);
     observer.observe(terminalContainer);
+    // xterm has its own DPR observer. Its render dimensions can therefore
+    // change while this fixed CSS box does not, which ResizeObserver cannot
+    // report. Follow xterm's metric events through the same guarded path.
+    const unsubscribeMeasurements = renderer.onMeasurementsChange(reconcileBoxAndMetrics);
 
     const controller: TerminalPaneController = {
       focus: () => renderer.focus(),
@@ -930,6 +935,7 @@ export function TerminalPane({
       if (watchdogRef.current === watchdog) watchdogRef.current = undefined;
       lastRevealKeyRef.current = undefined;
       observer.disconnect();
+      unsubscribeMeasurements();
       unsubscribeEvents();
       unsubscribeViewport();
       unsubscribeInput();
