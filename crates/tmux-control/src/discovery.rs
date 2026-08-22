@@ -260,7 +260,11 @@ fn query<F>(execute: &mut F, subcommand: &str, format: &str) -> Result<Vec<Strin
 where
     F: FnMut(&[String]) -> Result<Output, std::io::Error>,
 {
-    let mut args = vec![subcommand.to_owned()];
+    // `-u` on every transport, local or SSH-forwarded: the server rewrites the
+    // non-ASCII bytes of a window name to `_` for clients whose locale claims no
+    // UTF-8 support, and the clients we spawn inherit no `LANG`/`LC_*`. It is a
+    // global flag, so it leads the argv the transport receives.
+    let mut args = vec!["-u".to_owned(), subcommand.to_owned()];
     if subcommand != "list-sessions" {
         args.push("-a".into());
     }
@@ -424,6 +428,26 @@ mod tests {
     }
 
     #[test]
+    fn every_transport_asks_for_utf8_before_the_subcommand() {
+        let mut seen = Vec::new();
+        let _ = discover_with(|args| {
+            seen.push(args.to_vec());
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        });
+        assert!(!seen.is_empty());
+        for args in seen {
+            // Without `-u` the server would hand back window names whose
+            // non-ASCII bytes have been flattened to `_`.
+            assert_eq!(args[0], "-u");
+            assert!(args[1].starts_with("list-"), "unexpected argv: {args:?}");
+        }
+    }
+
+    #[test]
     fn parses_names_and_paths_without_whitespace_splitting() {
         let pane = parse_pane("$1__ADE_TMUX_FIELD_9C71__@2__ADE_TMUX_FIELD_9C71__%3__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__1__ADE_TMUX_FIELD_9C71__80__ADE_TMUX_FIELD_9C71__24__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__/tmp/a path__ADE_TMUX_FIELD_9C71__fish__ADE_TMUX_FIELD_9C71__123__ADE_TMUX_FIELD_9C71__").unwrap();
         assert_eq!(pane.current_path, "/tmp/a path");
@@ -460,7 +484,7 @@ mod tests {
             .join("\n");
         let started = Instant::now();
         let snapshot = discover_with(|args| {
-            let stdout = match args[0].as_str() {
+            let stdout = match args[1].as_str() {
                 "list-sessions" => sessions.as_bytes(),
                 "list-windows" => windows.as_bytes(),
                 "list-panes" => panes.as_bytes(),

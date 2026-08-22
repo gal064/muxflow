@@ -258,7 +258,7 @@ pub(super) fn server_identity() -> String {
 /// are meaningful only within that exact server.
 pub(crate) fn inherited_server_identity() -> Option<String> {
     std::env::var_os("TMUX")?;
-    let identity = server_identity_from_command(Command::new("tmux"));
+    let identity = server_identity_from_command(tmux_client());
     (identity != "tmux:none").then_some(identity)
 }
 
@@ -330,8 +330,21 @@ fn socket_server_identity(socket: &Path) -> anyhow::Result<String> {
     ))
 }
 
-pub(super) fn tmux_command() -> Command {
+/// A tmux client that is forced to speak UTF-8.
+///
+/// The server replaces every non-ASCII byte it sends — agent status glyphs in
+/// window names — with `_` for any client whose locale says it cannot render
+/// UTF-8, and the clients we spawn inherit no `LANG`/`LC_*` at all (a
+/// Dock-launched bundle, a non-interactive SSH exec session). `-u` is a global
+/// flag, so it must stay ahead of the subcommand callers append.
+fn tmux_client() -> Command {
     let mut command = Command::new("tmux");
+    command.arg("-u");
+    command
+}
+
+pub(super) fn tmux_command() -> Command {
+    let mut command = tmux_client();
     if let Some(name) = std::env::var_os("ADE_TMUX_SOCKET_NAME") {
         command.env_remove("TMUX").arg("-L").arg(name);
     }
@@ -351,6 +364,22 @@ mod tests {
         reorder_ids(&mut order, "$3", 99).unwrap();
         assert_eq!(order, ["$1", "$2", "$3"]);
         assert!(reorder_ids(&mut order, "$99", 0).is_err());
+    }
+
+    #[test]
+    fn spawned_tmux_clients_ask_for_utf8_before_their_subcommand() {
+        let mut command = tmux_command();
+        command.args(["list-windows", "-F", "#{window_name}"]);
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        // Without `-u` the server flattens the non-ASCII bytes of a window name
+        // to `_` for our locale-less clients.
+        let utf8 = args.iter().position(|value| value == "-u");
+        let subcommand = args.iter().position(|value| value == "list-windows");
+        assert!(utf8 < subcommand, "unexpected argv: {args:?}");
+        assert_eq!(utf8, Some(0));
     }
 
     #[test]
