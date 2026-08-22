@@ -172,3 +172,59 @@ describe("one derivation, three surfaces", () => {
     for (const html of surfaces) expect(html).toMatch(/class="(state|tab)-dot [a-z]+ glyphs"/);
   });
 });
+
+describe("idle shows nothing, on every surface that draws state", () => {
+  // One rule, swept rather than spot-checked: idle is the resting state, so no
+  // surface may put a mark beside a name to say an agent is doing nothing. The
+  // hollow grey circle the dots used to draw for it was the loudest thing on a
+  // quiet tab strip. Unknown is not idle and keeps its dashed outline: "nothing
+  // has told us" is a fact worth a mark.
+  //
+  // Every idle indicator is asserted as the empty hidden slot rather than as an
+  // absent element, because the slot is what keeps a tab the same width idle as
+  // it is working — the mark appears without moving the title it sits after.
+  const idleWindow = { id: "@1", sessionId: "$1", index: 0, name: "claude", active: true, layout: "", zoomed: false };
+  const idleRollups = deriveAgentRollups([agent({ id: "quiet", lifecycle: "idle" })]);
+
+  const tabStrip = (stateGlyphs: boolean) => renderToStaticMarkup(<TabStrip
+    activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate canSplit commandScope={commandScope}
+    onClose={noop} onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop}
+    onDownloadTab={noop} onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop}
+    onSelect={noop} onSplit={noop} stateGlyphs={stateGlyphs}
+    tabs={combineWorkspaceTabs([idleWindow] as never, [], idleRollups.byWindow)}
+  />);
+
+  it("draws an empty, hidden slot instead of a dot, with the glyph option on or off", () => {
+    for (const stateGlyphs of [false, true]) {
+      const html = tabStrip(stateGlyphs);
+      expect(html).toContain('<span aria-hidden="true" class="tab-dot idle"></span>');
+      // No glyph, no label, no title: an invisible box that announced "Agent
+      // idle" would be the same noise moved into the accessibility tree.
+      expect(html).not.toContain("Agent idle");
+    }
+    // The sidebar's Idle heading keeps the word and loses the circle — the text
+    // is the label, and the dot beside it was saying it a second time. The slot
+    // stays, so the four headings' words still line up with each other.
+    const heading = sidebar({ agents: rowsFor([agent({ id: "quiet", lifecycle: "idle" })]) });
+    expect(heading).toContain("<span>Idle</span>");
+    expect(heading).toContain('<span aria-hidden="true" class="state-dot agent-group-dot idle"></span>');
+    // The workspace switcher's rows share the same dot and the same rule.
+    const switcher = renderToStaticMarkup(<WorkspaceSwitcher
+      onClose={noop} onSelect={noop} stateGlyphs={false}
+      rows={[{ session, active: true, attention: "idle", unread: 0, working: false, agents: [], agentOverflow: 0 }]}
+    />);
+    expect(switcher).toContain('<span aria-hidden="true" class="state-dot idle"></span>');
+  });
+
+  it("hides the slot in the stylesheet, and leaves unknown its outline", () => {
+    // `visibility`, not `display: none` — the box has to survive being hidden
+    // or the slot it is reserving disappears with it.
+    expect(stylesCss).toContain(".state-dot.idle, .state-dot.none, .tab-dot.idle { visibility: hidden; }");
+    // The idle circle is gone from every mode, forced colors included, where it
+    // used to come back as a dashed border.
+    expect(stylesCss).not.toMatch(/\.(state|tab)-dot\.idle[^{]*\{[^}]*border/);
+    // Unknown is a different state and still draws.
+    expect(stylesCss).toContain(".state-dot.unknown { background: transparent; border: 1.5px dashed var(--state-unknown); }");
+    expect(stylesCss).toContain(".tab-dot.unknown { background: transparent; border: 1px dashed var(--state-unknown); }");
+  });
+});

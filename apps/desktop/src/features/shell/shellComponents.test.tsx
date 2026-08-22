@@ -270,6 +270,10 @@ describe("application shell accessibility contracts", () => {
     // them in the knockout ink rather than leaving them to dissolve into it.
     expect(stylesCss).toContain(".state-dot.workspace-state.done { background: var(--ok); }");
     expect(stylesCss).toContain(".workspace-button.active .state-dot.workspace-state { box-shadow: 0 0 0 1.5px var(--accent-ink); }");
+    // Working and done are one indicator a state apart, so the spinner is
+    // sized to the dot it stands in for; the plain 9px spinner moved the
+    // workspace name by a pixel every time an agent finished.
+    expect(stylesCss).toContain(".workspace-title .spinner { width: 8px; height: 8px; }");
   });
 
   it("nests workspace-ordered agents under host-qualified headings in keyboard order", () => {
@@ -583,7 +587,7 @@ describe("application shell accessibility contracts", () => {
     expect(tabHtml).toContain('class="tab-index">9</span>');
   });
 
-  it("renders a working spinner and distinct blocked, unread-complete, and idle tab marks", () => {
+  it("renders a working spinner and distinct blocked and unread-complete tab marks, and nothing for idle", () => {
     const states = ["working", "blocked", "done", "idle"] as const;
     const html = renderToStaticMarkup(<TabStrip
       activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate canSplit commandScope={commandScope}
@@ -600,7 +604,18 @@ describe("application shell accessibility contracts", () => {
     expect(html).not.toContain('class="tab-dot working"');
     expect(html).toContain('class="tab-dot blocked"');
     expect(html).toContain('class="tab-dot done"');
-    expect(html).toContain('class="tab-dot idle"');
+    // Idle is the resting state and shows no mark — the rule the sidebar's
+    // marks already follow. What it does keep is the slot: an empty, hidden,
+    // decorative span, so the tab is exactly as wide idle as it is working and
+    // the title does not jump when an agent starts or finishes.
+    expect(html).toContain('<span aria-hidden="true" class="tab-dot idle"></span>');
+    expect(html).not.toContain('aria-label="Agent idle"');
+    expect(stylesCss).toContain(".state-dot.idle, .state-dot.none, .tab-dot.idle { visibility: hidden; }");
+    // The reserved slot is only worth anything if the two marks that can fill
+    // it are the same size, so the dot is sized to the spinner rather than to
+    // the 6px it used to be.
+    expect(stylesCss).toContain(".tab-agent-spinner { width: 8px; height: 8px;");
+    expect(stylesCss).toMatch(/\.tab-dot \{[^}]*width: 8px; height: 8px;/);
     expect(stylesCss).toContain(".tab-dot.done { background: var(--ok); }");
     expect(stylesCss).toContain("@media (prefers-reduced-motion: no-preference)");
   });
