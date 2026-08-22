@@ -62,6 +62,8 @@ export interface TerminalRendererOptions {
    * for tests; every production caller takes the default.
    */
   drainTimeoutMs?: number;
+  /** Initial text size; all other Ghostty-oriented text options stay fixed. */
+  fontSize?: number;
   /** Receives write-only OSC 52 clipboard requests emitted by terminal apps. */
   onClipboardWrite?: (text: string) => void | Promise<void>;
   onClipboardWriteError?: (error: unknown) => void;
@@ -114,6 +116,8 @@ export interface TerminalRenderer {
   measurements(): TerminalMeasurements | undefined;
   /** Reports xterm cell-metric changes, including changes caused only by DPR. */
   onMeasurementsChange(listener: () => void): () => void;
+  /** Updates text metrics without replacing the terminal or its buffer. */
+  setFontSize(fontSize: number): void;
   /** Forces the grid tmux says this pane has, whatever the CSS box measured. */
   setGrid(size: TerminalSize): GridOutcome;
   focus(): void;
@@ -239,7 +243,7 @@ export class XtermRenderer implements TerminalRenderer {
       cursorStyle: "block",
       ...GHOSTTY_TEXT_OPTIONS,
       fontFamily: font.fontFamily,
-      fontSize: font.fontSize,
+      fontSize: options.fontSize ?? font.fontSize,
       ignoreBracketedPasteMode: false,
       macOptionClickForcesSelection: true,
       rightClickSelectsWord: true,
@@ -431,6 +435,12 @@ export class XtermRenderer implements TerminalRenderer {
       dimensions?.dispose();
       dpr?.dispose();
     };
+  }
+
+  setFontSize(fontSize: number): void {
+    if (this.#terminal.options.fontSize === fontSize) return;
+    this.#terminal.options.fontSize = fontSize;
+    this.#applyDeviceSafeLineHeight();
   }
 
   #applyDeviceSafeLineHeight(): void {

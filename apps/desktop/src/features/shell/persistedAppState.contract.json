@@ -63,6 +63,7 @@
     "terminalScreenReader": true,
     "copyOnSelect": true,
     "terminalApplicationClipboard": true,
+    "terminalFontSize": 17,
     "windowGeometry": {
       "x": 20,
       "y": 30,

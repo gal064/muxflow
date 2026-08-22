@@ -1072,6 +1072,7 @@ export function App() {
               clientId={clientId}
               copyOnSelect={appState.shell.copyOnSelect}
               terminalApplicationClipboard={appState.shell.terminalApplicationClipboard}
+              terminalFontSize={appState.shell.terminalFontSize}
               controllers={controllers}
               focusPane={focusTerminalPane}
               onMeasurements={onMeasurements}
