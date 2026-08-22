@@ -16,14 +16,21 @@ const GENERIC_TAB_NAME = /^(?:agent|codex|claude(?:-code)?)$/i;
    title someone deliberately starts with an emoji keeps it. */
 const AGENT_STATUS_GLYPHS = /^(?:[\u00B7\u2713-\u2718\u2722\u2733\u2736\u273B\u273D\u25D0-\u25D3\u2800-\u28FF][\uFE0E\uFE0F]?\s*)+/;
 
+function withoutStatusGlyphs(title: string): string {
+  return title.replace(AGENT_STATUS_GLYPHS, "").trim();
+}
+
 /** A tmux window title with any leading agent status ticker removed. */
 export function stripAgentStatusGlyphs(title: string): string {
-  return title.replace(AGENT_STATUS_GLYPHS, "").trim() || title.trim();
+  // A title that is nothing but the ticker keeps it: a tab with a blank name
+  // is worse than one showing a frame. Callers with a fallback of their own
+  // use `withoutStatusGlyphs` and let the empty string fall through instead.
+  return withoutStatusGlyphs(title) || title.trim();
 }
 
 /** The live tmux tab name, unless it is only a generic or machine identifier. */
 export function agentSessionLabel(agent: AgentRecord, adapters: readonly AgentAdapterDescriptor[]): string {
-  const tabName = stripAgentStatusGlyphs(agent.windowName);
+  const tabName = withoutStatusGlyphs(agent.windowName);
   if (tabName && !UUID_LIKE.test(tabName) && !GENERIC_TAB_NAME.test(tabName)) return tabName;
   const assignedName = agent.displayName.trim();
   if (assignedName && !UUID_LIKE.test(assignedName)) return assignedName;
