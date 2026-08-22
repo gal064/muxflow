@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-applications=${ADE_MACOS_APPLICATIONS_DIR:-"$HOME/Applications"}
+applications=${ADE_MACOS_APPLICATIONS_DIR:-/Applications}
 name='Muxflow.app'
 owner='dev.muxflow.desktop:1'
 [[ "$applications" == /* && "$applications" != / ]]
