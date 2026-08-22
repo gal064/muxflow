@@ -3,6 +3,7 @@ import { renderedPanes } from "../terminal/layout";
 import type { AppOwnedTab, PersistedAppState, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import type { AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
+import { stripAgentStatusGlyphs } from "../agents/agentLabels";
 
 export type CombinedTab =
   | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"]; agentPresence: TerminalAgentPresence }
@@ -160,7 +161,7 @@ export function combineWorkspaceTabs(
         key: `terminal:${window.id}`,
         kind: "terminal",
         id: window.id,
-        title: window.name,
+        title: stripAgentStatusGlyphs(window.name),
         index: window.index,
         activeInTmux: window.active,
         zoomed: Boolean(window.zoomed),
