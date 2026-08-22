@@ -2,11 +2,11 @@ import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../ap
 import { renderedPanes } from "../terminal/layout";
 import type { AppOwnedTab, PersistedAppState, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
-import type { AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
+import type { AgentAdapterId, AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
 import { stripAgentStatusGlyphs } from "../agents/agentLabels";
 
 export type CombinedTab =
-  | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"]; agentPresence: TerminalAgentPresence }
+  | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"]; agentAdapterId?: AgentAdapterId; agentPresence: TerminalAgentPresence }
   | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean }
   | { key: `pending:${string}`; kind: "pending"; title: string };
 export type SelectableTab = Exclude<CombinedTab, { kind: "pending" }>;
@@ -168,6 +168,9 @@ export function combineWorkspaceTabs(
         canMoveLeft: index > 0,
         canMoveRight: index < ordered.length - 1,
         attention: attention?.state ?? "none",
+        // Identity, not state: which adapter is in this window, so the strip can
+        // draw the same mark the sidebar draws for that agent.
+        agentAdapterId: attention?.adapterId,
         // Presence is deliberately independent of attention. Idle, unknown and
         // already-read agents are just as protected by Close All Non-Agent Tabs
         // as working, blocked and unread-complete agents.

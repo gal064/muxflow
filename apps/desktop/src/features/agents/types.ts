@@ -110,6 +110,13 @@ export interface AgentStoreState {
 
 export interface AgentAttentionRollup {
   state: "none" | AgentDisplayState;
+  /**
+   * Whose adapter the `state` came from — the loudest agent in the group, and
+   * the same one the state is reporting on. A rollup that says "blocked" and an
+   * icon taken from some other agent in the window would be two facts about two
+   * agents drawn as one. Absent only for an empty rollup.
+   */
+  adapterId?: AgentAdapterId;
   blocked: number;
   working: number;
   done: number;
