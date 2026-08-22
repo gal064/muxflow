@@ -3,9 +3,12 @@ import type { Session } from "../../app/types";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
-import { StateDot } from "../../ui/StateDot";
-import { groupAgentRows, needsAttention, nextSortMode, type AgentListRow, type AgentSortMode } from "../agents/agentsList";
-import { AgentIcon } from "../agents/AgentIdentity";
+import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
+import {
+  groupAgentRows, groupAgentRowsByStatus, needsAttention, nextSortMode, sortModeLabel,
+  type AgentListRow, type AgentSortMode,
+} from "../agents/agentsList";
+import { AgentMark } from "../agents/AgentIdentity";
 import { agentSessionLabel } from "../agents/agentLabels";
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPlacement, AgentRecord } from "../agents/types";
 import type { ConnectionPhase } from "../../state/connectionReducer";
@@ -80,6 +83,10 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const [displayedAgentsRatio, startAgentsRatioDrag] = useTransientDrag(props.agentsRatio, props.onAgentsRatio);
   const [displayedWidth, startWidthDrag] = useTransientDrag(props.width, props.onWidth);
   const groupedAgents = props.agentSort === "workspace" ? groupAgentRows(props.agents) : [];
+  const priorityAgents = props.agentSort === "workspace" ? [] : groupAgentRowsByStatus(props.agents);
+  // The flat position in `props.agents`, kept across every grouping: the roving
+  // arrow keys walk `[data-agent-index]` in document order, and a per-group
+  // index would restart the walk at every heading.
   const agentIndexes = new Map(props.agents.map((row, index) => [row, index]));
 
   // Resolved against the live list every render: an agent whose pane closed
@@ -116,12 +123,27 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   }, [focusedAgent, rowActions]);
   usePublishedRowCommands("agents", rowSource);
 
-  const focusRelative = (event: KeyboardEvent<HTMLElement>, selector: string, index: number, length: number) => {
+  /**
+   * The roving arrow keys, walked in document order.
+   *
+   * The number in the attribute is the row's flat position in `props.agents`,
+   * and in the priority mode that is deliberately *not* the reading order:
+   * `compareAgents` ranks done-unread above working, while the headings read
+   * Blocked → Working → Done → Idle. Stepping the number and then taking the
+   * query result at that position walked two orders at once, so a list holding
+   * both a done and a working agent skipped a row going down and stuck at the
+   * seam. The DOM is the only thing that knows the reading order, so the step
+   * happens in it: find where this row sits among the marked rows, move one,
+   * focus what is there. The attribute is then only an identity.
+   */
+  const focusRelative = (event: KeyboardEvent<HTMLElement>, attribute: string, index: number) => {
     const delta = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
     if (!delta) return;
     event.preventDefault();
-    const next = Math.max(0, Math.min(length - 1, index + delta));
-    container.current?.querySelectorAll<HTMLElement>(selector)[next]?.focus();
+    const ordered = [...container.current?.querySelectorAll<HTMLElement>(`[${attribute}]`) ?? []];
+    const here = ordered.findIndex((element) => element.getAttribute(attribute) === String(index));
+    if (here < 0) return;
+    ordered[Math.max(0, Math.min(ordered.length - 1, here + delta))]?.focus();
   };
 
   const startSectionDrag = (event: PointerEvent<HTMLElement>) => {
@@ -170,14 +192,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             setAgentMenu({ row, anchor: anchorForElement(event.currentTarget), scope: props.commandScope });
             return;
           }
-          focusRelative(event, "[data-agent-index]", index, props.agents.length);
+          focusRelative(event, "data-agent-index", index);
         }}
         title={`${sessionLabel} · ${row.agent.displayName} · ${row.state} · ${row.location.workspaceName} · ${row.location.hostLabel || props.hostLabel}${row.routable ? "" : " · navigation unavailable"}`}
         type="button"
       >
         <span className="agent-line">
-          <StateDot glyphs={props.stateGlyphs} state={row.state} />
-          <AgentIcon adapterId={row.agent.adapterId} />
+          {/* Icon and state are one object here — see `AgentMark`. */}
+          <AgentMark adapterId={row.agent.adapterId} glyphs={props.stateGlyphs} state={row.state} />
           <span className="agent-session-label">{sessionLabel}</span>
           <span className="agent-detail">{detail}</span>
         </span>
@@ -206,7 +228,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               // and counts the rest. Reading every line back would make a busy
               // workspace four announcements long for one list item.
               aria-label={rowLabel(row)}
-              className={row.active ? "workspace-button active" : "workspace-button"}
+              className={["workspace-button", row.active ? "active" : undefined, props.compactWorkspaces ? "compact" : undefined].filter(Boolean).join(" ")}
               data-workspace-index={index}
               onClick={() => props.onSelectWorkspace(row.session.id)}
               onContextMenu={(event) => {
@@ -220,23 +242,43 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                   setMenu({ session: row.session, anchor: anchorForElement(event.currentTarget), index, scope: props.commandScope });
                   return;
                 }
-                focusRelative(event, "[data-workspace-index]", index, props.rows.length);
+                focusRelative(event, "data-workspace-index", index);
               }}
               type="button"
             >
-              {index < 9 && <span aria-hidden="true" className="workspace-shortcut-index">{index + 1}</span>}
+              {/* Inside the title, not above it: the number is the row's
+                  address, and a line of its own put a column of digits beside
+                  the names rather than in front of them. */}
               <span className="workspace-title">
-                {row.working && <span aria-hidden="true" className="spinner" />}
-                {props.compactWorkspaces && row.attention !== "none" && row.attention !== "working"
-                  && <StateDot glyphs={props.stateGlyphs} state={row.attention} />}
+                {index < 9 && <span aria-hidden="true" className="workspace-shortcut-index">{index + 1}</span>}
+                {/* Compact rows carry the cluster, whose working marks already
+                    spin one ring per agent; a title spinner beside them put two
+                    animations on one 24px line saying the same thing. The
+                    non-compact row has no cluster, so it keeps its spinner. */}
+                {row.working && !props.compactWorkspaces && <span aria-hidden="true" className="spinner" />}
                 <span className="workspace-name">{row.session.name}</span>
               </span>
+              {/* Compact rows trade the per-agent lines for a cluster of
+                  badged marks on the same line: which adapters are here and
+                  how each is doing, in the width three words would have taken.
+                  Decorative, like the lines it replaces — `rowLabel` is the
+                  row's whole accessible name either way. */}
+              {props.compactWorkspaces && row.agents.length > 0 && <span aria-hidden="true" className="workspace-agents">
+                {row.agents.map((agent) => <AgentMark
+                  adapterId={agent.adapterId}
+                  glyphs={props.stateGlyphs}
+                  key={agent.id}
+                  state={agent.state}
+                />)}
+                {row.agentOverflow > 0 && <span className="workspace-agents-more">+{row.agentOverflow}</span>}
+              </span>}
+              {props.compactWorkspaces && row.unread > 0
+                && <span aria-hidden="true" className="badge badge-inline">{row.unread > 99 ? "99+" : row.unread}</span>}
               {!props.compactWorkspaces && row.agents.length > 0 && <span className="workspace-activity">
                 {row.agents.map((agent) => <span className="workspace-activity-line" key={agent.id}>
                   {/* Decorative: the button's own accessible name already
                       carries the loudest agent and the total. */}
-                  <StateDot glyphs={props.stateGlyphs} state={agent.state} />
-                  <AgentIcon adapterId={agent.adapterId} />
+                  <AgentMark adapterId={agent.adapterId} glyphs={props.stateGlyphs} state={agent.state} />
                   <span className="workspace-activity-text">{agentLine(agent)}</span>
                 </span>)}
                 {row.agentOverflow > 0 && <span className="workspace-activity-line workspace-activity-more">
@@ -249,7 +291,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                   match key, where they are something you search rather than
                   something you read once per row. */}
             </button>
-            {row.unread > 0 && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
+            {!props.compactWorkspaces && row.unread > 0
+              && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
           </div>)}
       </div>
     </div>
@@ -285,7 +328,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       <div className="section-head">
         <span className="section-label" id="sidebar-agents-label">Agents</span>
         <button
-          aria-label={`Agent ordering: ${props.agentSort}. Switch to ${nextSortMode(props.agentSort)}.`}
+          aria-label={`Agent ordering: ${sortModeLabel(props.agentSort)}. Switch to ${sortModeLabel(nextSortMode(props.agentSort))}.`}
           className="sort-toggle"
           onClick={() => props.onSortMode(nextSortMode(props.agentSort))}
           // The section's launch and hook actions are on its context menu; this
@@ -296,7 +339,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             setAgentMenu({ anchor: anchorForElement(event.currentTarget), scope: props.commandScope });
           }}
           type="button"
-        >{props.agentSort}</button>
+        >{sortModeLabel(props.agentSort)}</button>
       </div>
       {/* Above the list, not instead of it. The rows are real — a detected
           agent exists — and what is missing is any way to know what they are
@@ -317,14 +360,38 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           : props.agentSort === "workspace"
             ? groupedAgents.map((group) => {
               const headingId = `agent-workspace-${encodeURIComponent(group.key)}`;
+              // The host is in the tooltip and not on the line. One connection
+              // is live at a time on this branch, so printing it on every
+              // heading spent the row's whole right edge repeating a constant;
+              // the count that replaces it is the thing that differs. The
+              // tooltip keeps it for the day two connections do share a view.
               return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
                 <h3 className="agent-workspace-heading" id={headingId} title={`${group.workspaceName} · ${group.hostLabel}`}>
-                  <span>{group.workspaceName}</span><span className="agent-workspace-host">{group.hostLabel}</span>
+                  <span>{group.workspaceName}</span>
+                  <span aria-hidden="true" className="agent-group-count">{group.rows.length}</span>
                 </h3>
                 {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
               </section>;
             })
-            : props.agents.map((row, index) => renderAgentRow(row, index))}
+            // Priority: the same clustering, keyed on what the agent is doing
+            // rather than where it lives. The rows already carry the workspace
+            // name in their detail line whenever the sort is not by workspace.
+            : priorityAgents.map((group) => {
+              const headingId = `agent-status-${group.key}`;
+              return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
+                <h3 className="agent-workspace-heading" id={headingId}>
+                  <AgentStateIndicator
+                    className="state-dot agent-group-dot"
+                    glyphs={props.stateGlyphs}
+                    spinnerClassName="agent-group-dot"
+                    state={group.state}
+                  />
+                  <span>{group.label}</span>
+                  <span aria-hidden="true" className="agent-group-count">{group.rows.length}</span>
+                </h3>
+                {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
+              </section>;
+            })}
       </div>
     </div>
 
