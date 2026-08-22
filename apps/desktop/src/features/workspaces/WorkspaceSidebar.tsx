@@ -257,10 +257,12 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                     compact has only the right-edge cluster, whose marks are
                     per-agent and read at 6px, so the row itself said nothing
                     about the workspace at all. Here it is the loudest state
-                    across the workspace — see `workspaceIndicatorState`. */}
+                    across the workspace — see `workspaceIndicatorState`. Every
+                    row keeps the slot whether or not it has anything to say, so
+                    a state arriving cannot shift the name beside it. */}
                 {props.compactWorkspaces
                   ? <WorkspaceStateIndicator glyphs={props.stateGlyphs} row={row} />
-                  : row.working && <span aria-hidden="true" className="spinner" />}
+                  : row.working ? <span aria-hidden="true" className="spinner" /> : <HiddenStateSlot />}
                 <span className="workspace-name">{row.session.name}</span>
               </span>
               {/* Compact rows trade the per-agent lines for a cluster of
@@ -485,8 +487,20 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
  */
 function WorkspaceStateIndicator({ row, glyphs }: { row: WorkspaceRowModel; glyphs: boolean }) {
   const state = workspaceIndicatorState(row);
-  if (!state) return null;
+  if (!state) return <HiddenStateSlot />;
   return <AgentStateIndicator className="state-dot workspace-state" glyphs={glyphs} state={state} />;
+}
+
+/**
+ * The indicator's footprint with nothing in it.
+ *
+ * A quiet workspace draws no mark, but dropping the element moved the name by
+ * the dot plus the row's gap the moment an agent started working — and the
+ * whole point of one indicator in one place is that the names do not move. The
+ * stylesheet hides `.state-dot.idle` with `visibility`, so the box survives.
+ */
+function HiddenStateSlot() {
+  return <span aria-hidden="true" className="state-dot workspace-state idle" />;
 }
 
 /**

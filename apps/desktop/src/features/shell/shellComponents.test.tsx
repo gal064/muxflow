@@ -107,6 +107,19 @@ const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
 const sidebar = (overrides: Partial<SidebarProps> = {}) => renderToStaticMarkup(<WorkspaceSidebar {...sidebarProps(overrides)} />);
 
 /**
+ * Just the mark on the first agents-list row, out of a sidebar full of marks.
+ *
+ * The workspace rows above carry marks of their own, so a claim about one row's
+ * badge has to be made against that row's slice or it is answered by somebody
+ * else's badge. `agent-session-label` exists only on an agents-list row, and the
+ * mark is what sits immediately before it.
+ */
+function agentRowMark(html: string): string {
+  const label = html.indexOf('<span class="agent-session-label"');
+  return html.slice(html.lastIndexOf('<span class="agent-mark"', label), label);
+}
+
+/**
  * The same sidebar in a real DOM, for the things that only exist there.
  *
  * The roving arrow keys resolve their next row by walking the rendered
@@ -238,12 +251,14 @@ describe("application shell accessibility contracts", () => {
     // spinner the non-compact row draws, in the same place, inheriting the ink
     // of whichever row it is on.
     expect(indicator("working", "idle", "unknown")).toBe('<span aria-hidden="true" class="spinner"></span>');
-    // Nothing to say, nothing drawn. A dot beside the name is "look here", and
-    // a workspace of idle agents is the resting state of every quiet row in a
-    // long list.
-    expect(indicator("idle")).toBe("");
-    expect(indicator("unknown")).toBe("");
-    expect(indicator()).toBe("");
+    // Nothing to say, nothing drawn — but the slot stays, hidden, so the name
+    // beside it does not slide over the moment an agent starts working. A dot
+    // beside the name is "look here", and a workspace of idle agents is the
+    // resting state of every quiet row in a long list.
+    const quiet = '<span aria-hidden="true" class="state-dot workspace-state idle"></span>';
+    expect(indicator("idle")).toBe(quiet);
+    expect(indicator("unknown")).toBe(quiet);
+    expect(indicator()).toBe(quiet);
     // With the glyph option on the state stops depending on colour, working
     // included — and the quiet states stay quiet, since a shape for "nothing is
     // happening" is still a mark on a row that has nothing to report.
@@ -251,13 +266,13 @@ describe("application shell accessibility contracts", () => {
       workspaceTitleIndicator(sidebar({ compactWorkspaces: true, stateGlyphs: true, rows: workspaceOf(...states) }));
     expect(glyphed("blocked")).toBe('<span aria-hidden="true" class="state-dot workspace-state blocked glyphs">!</span>');
     expect(glyphed("working")).toBe('<span aria-hidden="true" class="state-dot workspace-state working glyphs">•</span>');
-    expect(glyphed("idle")).toBe("");
-    // Non-compact is unchanged: its agent lines report blocked and done in
-    // words, so the title still spins for working alone and stays empty for a
-    // blocked workspace that is not running anything.
+    expect(glyphed("idle")).toBe(quiet);
+    // Non-compact keeps its own rule: its agent lines report blocked and done in
+    // words, so the title spins for working alone. It obeys the same no-shift
+    // rule though — a row that is not working holds the same hidden slot.
     const wide = (...states: AgentDisplayState[]) => workspaceTitleIndicator(sidebar({ rows: workspaceOf(...states) }));
     expect(wide("working")).toBe('<span aria-hidden="true" class="spinner"></span>');
-    expect(wide("blocked")).toBe("");
+    expect(wide("blocked")).toBe(quiet);
     expect(wide("blocked", "working")).toBe('<span aria-hidden="true" class="spinner"></span>');
     // The indicator is decorative in both modes: `rowLabel` is the row's whole
     // accessible name and already names the loudest agent and its state.
@@ -450,11 +465,10 @@ describe("application shell accessibility contracts", () => {
     expect(row("blocked")).toContain('class="agent-mark-badge blocked"');
     // Idle is the resting state and docks nothing: a badge means "look here",
     // and an agent nobody is waiting on must not compete for the eye. The
-    // fixture's workspace section has a blocked agent of its own, so this is
-    // asserted on the idle agent's row shape: the mark closes straight after
-    // the icon, with no badge before the session label.
-    expect(row("idle")).toContain('</svg></span><span class="agent-session-label">');
-    expect(row("blocked")).toContain('blocked"></span></span><span class="agent-session-label">');
+    // fixture's workspace section has a blocked agent of its own, so the claim
+    // is made on the idle agent's own mark rather than on the whole document.
+    expect(agentRowMark(row("idle"))).not.toContain("agent-mark-badge");
+    expect(agentRowMark(row("blocked"))).toContain("agent-mark-badge blocked");
     // Working is the one state that is a process rather than a condition, so
     // it spins — on the badge here, the same way it spins on a tab.
     expect(row("working")).toContain('class="spinner agent-mark-badge working"');
@@ -616,6 +630,11 @@ describe("application shell accessibility contracts", () => {
     // the 6px it used to be.
     expect(stylesCss).toContain(".tab-agent-spinner { width: 8px; height: 8px;");
     expect(stylesCss).toMatch(/\.tab-dot \{[^}]*width: 8px; height: 8px;/);
+    // Including under forced colors, where the dot grows to hold a glyph: the
+    // spinner has to grow with it or the invariant holds in one mode only.
+    const forced = stylesCss.slice(stylesCss.indexOf("@media (forced-colors: active)"));
+    expect(forced).toMatch(/\.state-dot, \.tab-dot \{[^}]*width: 11px; height: 11px;/);
+    expect(forced).toContain(".tab-agent-spinner { width: 11px; height: 11px; }");
     expect(stylesCss).toContain(".tab-dot.done { background: var(--ok); }");
     expect(stylesCss).toContain("@media (prefers-reduced-motion: no-preference)");
   });
@@ -634,8 +653,10 @@ describe("application shell accessibility contracts", () => {
       tabs={[
         terminal("@1", { attention: "working", agentAdapterId: "codex", agentPresence: "present" }),
         terminal("@2", {}),
-        // An agent that cannot be proved present must not be drawn: the mark
-        // would claim an agent this snapshot cannot vouch for.
+        // The rollup names an adapter only where it found an agent, so the id
+        // is the evidence. Presence is a coarser, app-wide answer that turns
+        // "unknown" for a round trip after any topology change — gating the
+        // mark on it blinked the icon off every tab at once.
         terminal("@3", { agentAdapterId: "codex", agentPresence: "unknown" }),
       ]}
     />);
@@ -644,7 +665,10 @@ describe("application shell accessibility contracts", () => {
     expect(html).toMatch(/data-agent-icon="codex"[\s\S]*?<span class="tab-title">window @1<\/span>/);
     expect(html).toContain('aria-hidden="true" class="agent-icon codex"');
     expect(html).toContain('class="spinner tab-agent-spinner"');
-    expect(html.match(/data-agent-icon=/g)).toHaveLength(1);
+    // Two marks for the two tabs the rollup named an adapter for, and with both
+    // falling before @1's and @3's titles, none is left for @2.
+    expect(html.match(/data-agent-icon=/g)).toHaveLength(2);
+    expect(html).toMatch(/data-agent-icon="codex"[\s\S]*?window @1[\s\S]*?data-agent-icon="codex"[\s\S]*?window @3/);
     expect(stylesCss).toContain(".tab-select .agent-icon { color: inherit; }");
   });
 

@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import { fuzzyRank } from "../../commands/fuzzy";
 import { useModalDialog } from "../../commands/useModalDialog";
-import { StateDot } from "../../ui/StateDot";
+import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
 import { workspaceMetaLine, type WorkspaceRowModel } from "./workspaceRows";
 
 interface WorkspaceSwitcherProps {
@@ -85,7 +85,7 @@ export function WorkspaceSwitcher(props: WorkspaceSwitcherProps) {
           type="button"
         >
           <span className="palette-title">{row.session.name}</span>
-          {row.attention !== "none" && <StateDot glyphs={props.stateGlyphs} label={`Agent ${row.attention}`} state={row.attention} />}
+          {row.attention !== "none" && <AgentStateIndicator glyphs={props.stateGlyphs} label={`Agent ${row.attention}`} state={row.attention} />}
           {workspaceMetaLine(row) && <span className="palette-meta">{workspaceMetaLine(row)}</span>}
         </button>)}
       </div>

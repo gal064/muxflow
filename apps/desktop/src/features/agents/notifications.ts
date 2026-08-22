@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { stripAgentStatusGlyphs } from "./agentLabels";
 import type { AgentClient } from "./api";
 import type {
   AgentFocus,
@@ -116,7 +117,10 @@ export function decideAgentNotification(
     && context.focus.paneId === next.paneId;
   if (focusedPane) return { kind: "suppress", instrumentation: { ...base, outcome: "suppressed-focused" } };
   const workspace = safeNotificationLabel(context.workspaceName ?? next.sessionName, "Workspace", 96);
-  const terminal = safeNotificationLabel(context.windowName ?? next.windowName, "Terminal", 96);
+  // Stripped like every other surface names a tab: the ticker is a second
+  // report of the state this notification is already about, and the glyph has
+  // no font behind it in a notification body either.
+  const terminal = safeNotificationLabel(stripAgentStatusGlyphs(context.windowName ?? next.windowName), "Terminal", 96);
   const agent = safeNotificationLabel(next.displayName, "Agent", 96);
   return {
     kind: "emit",
