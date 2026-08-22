@@ -436,7 +436,7 @@ describe("AppTabSurface", () => {
     vi.useRealTimers();
   });
 
-  it("shows saving only after a write stays slow for 100ms", async () => {
+  it("shows saving only after a save stays owed for 1200ms", async () => {
     vi.useFakeTimers();
     const surface = await mount({
       bootstrap: listing([entry("/repo/note.txt", "g1")]),
@@ -446,9 +446,11 @@ describe("AppTabSurface", () => {
     const editor = surface.renderer.root.findByType(EditorStub);
     await act(async () => { editor.props.onChange("slow save"); });
 
+    // The delay is measured from the keystroke, so the autosave debounce
+    // counts against it rather than restarting it.
     await act(async () => { await vi.advanceTimersByTimeAsync(150); });
     expect(status()).toEqual([]);
-    await act(async () => { await vi.advanceTimersByTimeAsync(99); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_049); });
     expect(status()).toEqual([]);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(status()).toEqual(["Saving…"]);
