@@ -549,6 +549,7 @@ export function TerminalPane({
       keyActivityRef.current?.(pane.id);
       const translated = translateTerminalKey(event, {
         alternateScreen: renderer.isAlternateScreenActive(),
+        applicationCursorKeys: renderer.isApplicationCursorMode(),
         currentCommand: paneRef.current.currentCommand,
         platform: platformRef.current,
       });
