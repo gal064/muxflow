@@ -429,16 +429,30 @@ mod tests {
 
     #[test]
     fn every_transport_asks_for_utf8_before_the_subcommand() {
+        // Every query must answer with a record it can parse: an empty
+        // `list-sessions` short-circuits discovery, and the two argvs that
+        // never ran would go unchecked.
+        let answer = |subcommand: &str| match subcommand {
+            "list-sessions" => format!("$1{SEPARATOR}work{SEPARATOR}1{SEPARATOR}0"),
+            "list-windows" => format!(
+                "$1{SEPARATOR}@2{SEPARATOR}0{SEPARATOR}editor{SEPARATOR}1{SEPARATOR}b25d,80x24,0,0,2{SEPARATOR}0"
+            ),
+            _ => format!(
+                "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}"
+            ),
+        };
         let mut seen = Vec::new();
-        let _ = discover_with(|args| {
+        let snapshot = discover_with(|args| {
             seen.push(args.to_vec());
             Ok(Output {
                 status: std::process::ExitStatus::from_raw(0),
-                stdout: Vec::new(),
+                stdout: answer(&args[1]).into_bytes(),
                 stderr: Vec::new(),
             })
-        });
-        assert!(!seen.is_empty());
+        })
+        .unwrap();
+        assert_eq!(snapshot.windows.len(), 1);
+        assert_eq!(seen.len(), 3, "one argv per discovery query: {seen:?}");
         for args in seen {
             // Without `-u` the server would hand back window names whose
             // non-ASCII bytes have been flattened to `_`.

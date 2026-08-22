@@ -376,10 +376,16 @@ mod tests {
             .collect::<Vec<_>>();
         // Without `-u` the server flattens the non-ASCII bytes of a window name
         // to `_` for our locale-less clients.
-        let utf8 = args.iter().position(|value| value == "-u");
-        let subcommand = args.iter().position(|value| value == "list-windows");
+        let utf8 = args
+            .iter()
+            .position(|value| value == "-u")
+            .unwrap_or_else(|| panic!("no -u in argv: {args:?}"));
+        let subcommand = args
+            .iter()
+            .position(|value| value == "list-windows")
+            .unwrap_or_else(|| panic!("no subcommand in argv: {args:?}"));
+        assert_eq!(utf8, 0, "unexpected argv: {args:?}");
         assert!(utf8 < subcommand, "unexpected argv: {args:?}");
-        assert_eq!(utf8, Some(0));
     }
 
     #[test]
