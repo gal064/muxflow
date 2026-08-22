@@ -679,7 +679,10 @@ fn reads_never_mark_a_watch_dirty_but_every_change_kind_does() {
         EventKind::Access(AccessKind::Close(AccessMode::Read)),
         EventKind::Access(AccessKind::Any),
     ] {
-        assert!(!super::watch_service::marks_watch_dirty(&access), "{access:?}");
+        assert!(
+            !super::watch_service::marks_watch_dirty(&access),
+            "{access:?}"
+        );
     }
     for change in [
         EventKind::Any,
@@ -689,6 +692,9 @@ fn reads_never_mark_a_watch_dirty_but_every_change_kind_does() {
         EventKind::Remove(RemoveKind::File),
         EventKind::Other,
     ] {
-        assert!(super::watch_service::marks_watch_dirty(&change), "{change:?}");
+        assert!(
+            super::watch_service::marks_watch_dirty(&change),
+            "{change:?}"
+        );
     }
 }

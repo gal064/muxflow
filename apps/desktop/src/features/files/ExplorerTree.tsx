@@ -11,7 +11,7 @@ import { ExplorerEntryRow, ExplorerMoreRow, type ExplorerRowActions } from "./Ex
 import { DEFAULT_ROW_HEIGHT, mountedRowCount, rowWindow, scrollOffsetForRow } from "./explorerWindow";
 import type { ActiveRoot, DirectoryListing, FileEntry, FileMutation, TransferStatus } from "./types";
 import { recordPerfHighWater, recordPerfMilestone } from "../../perf/probe";
-import { writeInternalPathDrag } from "../terminal/internalPathDrag";
+import { cancelInternalPathDragSource, finishInternalPathDrag, writeInternalPathDrag } from "../terminal/internalPathDrag";
 
 interface Props {
   root?: ActiveRoot;
@@ -32,6 +32,7 @@ interface Props {
    */
   ignoredPaths?: ReadonlySet<string>;
   scopeIdentity: string;
+  hostProfileId?: string;
   serverIdentity?: string;
   disabled: boolean;
   error?: string;
@@ -78,6 +79,7 @@ const INERT_ROW_ACTIONS: ExplorerRowActions = {
   loadMore: () => undefined,
   moreKeyDown: () => undefined,
   drag: () => undefined,
+  dragEnd: () => undefined,
 };
 
 export function ExplorerTree(props: Props) {
@@ -106,6 +108,12 @@ export function ExplorerTree(props: Props) {
    * Blink the removal reports no blur at all, so there is nothing to look at.
    */
   const ownsFocus = useRef(false);
+  useEffect(() => {
+    const dragScope = props.hostProfileId && props.serverIdentity
+      ? { hostProfileId: props.hostProfileId, serverIdentity: props.serverIdentity }
+      : undefined;
+    return () => { if (dragScope) cancelInternalPathDragSource(dragScope); };
+  }, [props.hostProfileId, props.serverIdentity]);
   const rootName = props.root?.path.split("/").filter(Boolean).at(-1) ?? props.root?.path ?? "No active root";
   const hidden = showIgnored ? undefined : props.ignoredPaths;
   const rows = useMemo(() => props.root ? flattenTree(props.root.path, props.listings, props.expanded, hidden) : [], [hidden, props.expanded, props.listings, props.root]);
@@ -166,6 +174,7 @@ export function ExplorerTree(props: Props) {
     loadMore: (directory) => liveRowActions.current.loadMore(directory),
     moreKeyDown: (event, index) => liveRowActions.current.moreKeyDown(event, index),
     drag: (entry, transfer) => liveRowActions.current.drag(entry, transfer),
+    dragEnd: () => liveRowActions.current.dragEnd(),
   }), []);
 
   const focusRow = (index: number) => {
@@ -267,9 +276,10 @@ export function ExplorerTree(props: Props) {
       else if (event.key === "Home" || event.key === "End") { event.preventDefault(); focusRow(event.key === "Home" ? 0 : rows.length - 1); }
     },
     drag: (entry, transfer) => {
-      if (!props.serverIdentity) return;
-      writeInternalPathDrag(transfer, { serverIdentity: props.serverIdentity, path: entry.path });
+      if (!props.hostProfileId || !props.serverIdentity) return;
+      writeInternalPathDrag(transfer, { hostProfileId: props.hostProfileId, serverIdentity: props.serverIdentity, path: entry.path });
     },
+    dragEnd: finishInternalPathDrag,
   };
   useLayoutEffect(() => { liveRowActions.current = committedRowActions; });
 

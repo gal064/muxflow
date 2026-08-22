@@ -53,6 +53,7 @@ export function AppRightPanel(props: AppRightPanelProps) {
       onToggle={props.workspaceFiles.toggleDirectory}
       root={props.workspaceFiles.root}
       scopeIdentity={props.fileScope ? keyForScope(props.fileScope) : "disconnected"}
+      hostProfileId={props.workspaceFiles.stale ? undefined : props.fileScope?.hostProfileId}
       serverIdentity={props.workspaceFiles.stale ? undefined : props.fileScope?.serverIdentity}
       transfers={props.workspaceFiles.transfers}
     />}

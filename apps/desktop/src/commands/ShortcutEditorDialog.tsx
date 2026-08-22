@@ -42,7 +42,7 @@ export function ShortcutEditorDialog({ overrides, platform, onChange, onClose }:
           </label>;
         })}
       </div>
-      <footer><button onClick={() => setDraft({})} type="button">Restore defaults</button><button className="primary" disabled={unsafe.length > 0} onClick={() => { onChange(draft); onClose(); }} type="button">Done</button></footer>
+      <footer><button onClick={() => setDraft({})} type="button">Restore defaults</button><button className="primary" disabled={unsafe.length > 0 || conflicts.length > 0} onClick={() => { onChange(draft); onClose(); }} type="button">Done</button></footer>
     </section>
   </div>;
 }

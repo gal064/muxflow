@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import {
   appTabsForWorkspace,
+  bulkCloseOutcomeStatus,
   closeAppTab,
   combineWorkspaceTabs,
   discardServerAppState,
@@ -12,6 +13,7 @@ import {
   orderedSessions,
   pinAppTab,
   relocateFileTabs,
+  retirePendingTab,
   reconcileWorkspaceIdentity,
   recoverableAppTabCount,
   recoverAppTabsFromPreviousServer,
@@ -88,6 +90,43 @@ describe("application shell model", () => {
     ];
     expect(combineWorkspaceTabs(settled, [], undefined, { ...pending, windowId: "@2" }).map((tab) => tab.key))
       .toEqual(["terminal:@1", "terminal:@2"]);
+  });
+
+  /**
+   * The placeholder retires once and does not come back.
+   *
+   * Visibility alone is a live predicate, so an app-created window's
+   * placeholder reappeared the moment that window was closed — an italic
+   * "New window" tab standing for nothing, and undismissable: a placeholder has
+   * no context menu, the close path returns early for it, and the bulk-close
+   * helpers filter it out. The latch is what the shell steps its state through.
+   */
+  it("retires the placeholder for good once its window has been seen", () => {
+    const before: TmuxWindow[] = [
+      { id: "@1", sessionId: "$1", index: 1, name: "first", active: true, layout: "" },
+    ];
+    const after: TmuxWindow[] = [
+      ...before,
+      { id: "@2", sessionId: "$1", index: 2, name: "second", active: false, layout: "" },
+    ];
+    const acked = { key: "create-window:1", sessionId: "$1", windowId: "@2", title: "New window" };
+
+    // The ack is not the snapshot: held, or the strip blinks empty.
+    expect(retirePendingTab(acked, before)).toBe(acked);
+
+    const retired = retirePendingTab(acked, after);
+    expect(retired).toBeUndefined();
+
+    // The window it stood in for is closed again. Nothing to resurrect.
+    expect(retirePendingTab(retired, before)).toBeUndefined();
+    expect(combineWorkspaceTabs(before, [], undefined, retired).map((tab) => tab.key)).toEqual(["terminal:@1"]);
+  });
+
+  it("reports a bulk close that left survivors, and says nothing when it did not", () => {
+    expect(bulkCloseOutcomeStatus(7, 0)).toBeUndefined();
+    expect(bulkCloseOutcomeStatus(0, 0)).toBeUndefined();
+    expect(bulkCloseOutcomeStatus(5, 2)).toBe("Closed 5 of 7 tabs; 2 could not be closed.");
+    expect(bulkCloseOutcomeStatus(0, 1)).toBe("Closed 0 of 1 tab; 1 could not be closed.");
   });
 
   it("keeps replaced servers isolated and requires explicit unambiguous app-tab recovery", () => {
@@ -190,6 +229,10 @@ describe("application shell model", () => {
       .map((tab) => tab.key)).toEqual(["app:a", "app:b"]);
     expect(tabsEligibleAtBulkCloseCommit(captured, true, {
       accepted, current: { ...current, topologyGeneration: 10 }, byWindow: new Map(),
+    })
+      .map((tab) => tab.key)).toEqual(["app:a", "app:b"]);
+    expect(tabsEligibleAtBulkCloseCommit(captured, true, {
+      accepted, current, byWindow: new Map(), hasUnmappedAgents: true,
     })
       .map((tab) => tab.key)).toEqual(["app:a", "app:b"]);
     expect(tabsEligibleAtBulkCloseCommit(captured, false, {

@@ -38,12 +38,13 @@ describe("terminal input translation", () => {
       .toBeUndefined();
   });
 
-  it("maps bare macOS Command-Arrows only in shell panes", () => {
+  it("maps bare macOS Command-Arrows in normal-screen terminal contexts", () => {
     const left = key({ key: "ArrowLeft", keyCode: 37, metaKey: true });
     const right = key({ key: "ArrowRight", keyCode: 39, metaKey: true });
     expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "/bin/zsh", platform: "mac" })).toBe("\u0001");
     expect(translateTerminalKey(right, { alternateScreen: false, currentCommand: "fish", platform: "mac" })).toBe("\u0005");
-    expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "vim", platform: "mac" })).toBeUndefined();
+    expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "codex", platform: "mac" })).toBe("\u0001");
+    expect(translateTerminalKey(right, { alternateScreen: false, currentCommand: "shell-wrapper", platform: "mac" })).toBe("\u0005");
     expect(translateTerminalKey(left, { alternateScreen: false, currentCommand: "zsh", platform: "linux" })).toBeUndefined();
     expect(translateTerminalKey(left, { alternateScreen: true, currentCommand: "zsh", platform: "mac" })).toBeUndefined();
     expect(translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, altKey: true }), {
@@ -75,43 +76,69 @@ describe("copy on select", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
-  it("copies only when the current pointer gesture changed the selection", async () => {
-    const container = document.createElement("div");
-    document.body.append(container);
+  it("copies directly from xterm selection changes and reads the setting at event time", async () => {
     let notifySelectionChange: () => void = () => undefined;
+    let selection = "";
+    let enabled = false;
+    const disposeSelection = vi.fn();
     const write = vi.fn();
     const renderer = {
-      hasSelection: () => true,
-      getSelection: () => "current selection",
+      hasSelection: () => Boolean(selection),
+      getSelection: () => selection,
       onSelectionChange: (listener: () => void) => {
         notifySelectionChange = listener;
-        return () => undefined;
+        return disposeSelection;
       },
     };
     const dispose = installTerminalCopyOnSelect({
-      container,
       renderer,
-      enabled: () => true,
+      enabled: () => enabled,
       write,
       onError: vi.fn(),
     });
 
-    container.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, metaKey: true }));
-    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, metaKey: true }));
+    selection = "ignored while disabled";
+    notifySelectionChange();
     await Promise.resolve();
     expect(write).not.toHaveBeenCalled();
 
-    container.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
-    container.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
-    // xterm may finalize the selection later in the same mouseup dispatch;
-    // the controller keeps the gesture armed through that task.
+    enabled = true;
+    selection = "current selection";
     notifySelectionChange();
-    await Promise.resolve();
     await Promise.resolve();
     expect(write).toHaveBeenCalledOnce();
     expect(write).toHaveBeenCalledWith("current selection");
+
+    selection = "";
+    notifySelectionChange();
+    await Promise.resolve();
+    expect(write).toHaveBeenCalledOnce();
+
     dispose();
-    container.remove();
+    expect(disposeSelection).toHaveBeenCalledOnce();
+  });
+
+  it("reports native clipboard failures from a selection change", async () => {
+    let notifySelectionChange: () => void = () => undefined;
+    const failure = new Error("clipboard denied");
+    const onError = vi.fn();
+    installTerminalCopyOnSelect({
+      renderer: {
+        hasSelection: () => true,
+        getSelection: () => "selection",
+        onSelectionChange: (listener: () => void) => {
+          notifySelectionChange = listener;
+          return () => undefined;
+        },
+      },
+      enabled: () => true,
+      write: () => Promise.reject(failure),
+      onError,
+    });
+    notifySelectionChange();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onError).toHaveBeenCalledWith(failure);
   });
 });
 

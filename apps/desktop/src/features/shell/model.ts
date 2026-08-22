@@ -14,6 +14,8 @@ export interface AgentPresenceSnapshot {
   accepted?: AgentTopologyAuthority;
   current?: Omit<AgentTopologyAuthority, "coveredWindowIds">;
   byWindow: ReadonlyMap<string, AgentAttentionRollup>;
+  /** An authoritative live record exists but cannot prove which window owns it. */
+  hasUnmappedAgents?: boolean;
 }
 
 /** The exact ordered set addressed by Control-1…9 and drawn with numbers. */
@@ -35,7 +37,8 @@ export function agentPresenceIsCurrent(presence: AgentPresenceSnapshot, minimumG
 
 /** One canonical answer for both menu candidates and mutation-time rechecks. */
 export function terminalAgentPresence(windowId: string, presence: AgentPresenceSnapshot): TerminalAgentPresence {
-  if (!agentPresenceIsCurrent(presence) || !presence.accepted?.coveredWindowIds.has(windowId)) return "unknown";
+  if (presence.hasUnmappedAgents || !agentPresenceIsCurrent(presence)
+    || !presence.accepted?.coveredWindowIds.has(windowId)) return "unknown";
   return (presence.byWindow.get(windowId)?.total ?? 0) > 0 ? "present" : "absent";
 }
 
@@ -112,6 +115,30 @@ export function appTabsForWorkspace(
  */
 function pendingTabStillOpen(pending: PendingShellTab, windows: readonly TmuxWindow[]): boolean {
   return !pending.windowId || !windows.some((window) => window.id === pending.windowId);
+}
+
+/**
+ * The placeholder's one-way retirement, as a step over each window list.
+ *
+ * `pendingTabStillOpen` is a *live* predicate: it hides the placeholder while
+ * the window exists and shows it again the moment that window is closed. On its
+ * own that made an app-created window's placeholder come back — italic, titled
+ * "New window", with nothing behind it — the instant the real tab was closed,
+ * and nothing could dismiss it: a placeholder has no context menu, the close
+ * path returns early for it, and the bulk-close helpers filter it out.
+ *
+ * Feeding the result back in is what makes it a latch. Once the snapshot names
+ * the window, this returns `undefined` and keeps returning it, because
+ * `undefined` is the only thing left to step. The anti-blink contract is
+ * untouched: the placeholder still outlives the ack and retires only on the
+ * snapshot that contains its window.
+ */
+export function retirePendingTab(
+  pending: PendingShellTab | undefined,
+  windows: readonly TmuxWindow[],
+): PendingShellTab | undefined {
+  if (!pending) return undefined;
+  return pendingTabStillOpen(pending, windows) ? pending : undefined;
 }
 
 export function combineWorkspaceTabs(
@@ -211,6 +238,21 @@ export function tabsEligibleAtBulkCloseCommit(
   if (!protectAgents) return [...tabs];
   return tabs.filter((tab) => tab.kind === "app"
     || (tab.kind === "terminal" && terminalAgentPresence(tab.id, presence) === "absent"));
+}
+
+/**
+ * What a bulk close has to say when it did not close everything.
+ *
+ * A per-tab message would be one notice per survivor, each overwriting the
+ * last, and the loop that produced them kept only the final error — so seven
+ * tabs asked for, five gone, read as complete success. One sentence, counted,
+ * is the whole report; `undefined` means every tab closed and the strip is the
+ * message.
+ */
+export function bulkCloseOutcomeStatus(closed: number, failed: number): string | undefined {
+  if (failed <= 0) return undefined;
+  const attempted = closed + failed;
+  return `Closed ${closed} of ${attempted} ${attempted === 1 ? "tab" : "tabs"}; ${failed} could not be closed.`;
 }
 
 export function workspaceUiRecord(

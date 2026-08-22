@@ -410,6 +410,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
+    type CapturedBytes = Arc<Mutex<Vec<Vec<u8>>>>;
+
     fn ready_client() -> Arc<TerminalClient> {
         let client = Arc::new(TerminalClient::new());
         client.ready.store(true, Ordering::Release);
@@ -418,7 +420,7 @@ mod tests {
         client
     }
 
-    fn captured_channel() -> (Channel<InvokeResponseBody>, Arc<Mutex<Vec<Vec<u8>>>>) {
+    fn captured_channel() -> (Channel<InvokeResponseBody>, CapturedBytes) {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&sent);
         let channel = Channel::new(move |body| {
@@ -430,7 +432,12 @@ mod tests {
         (channel, sent)
     }
 
-    fn deferred(side: v1::GitDiffContentSide, frame_tag: u8, digest: &str, size: u64) -> DeferredSide {
+    fn deferred(
+        side: v1::GitDiffContentSide,
+        frame_tag: u8,
+        digest: &str,
+        size: u64,
+    ) -> DeferredSide {
         DeferredSide {
             side,
             frame_tag,
@@ -439,7 +446,7 @@ mod tests {
         }
     }
 
-    fn job(sides: Vec<DeferredSide>) -> (GitContentJob, Arc<Mutex<Vec<Vec<u8>>>>) {
+    fn job(sides: Vec<DeferredSide>) -> (GitContentJob, CapturedBytes) {
         let (channel, sent) = captured_channel();
         let job = GitContentJob {
             read_id: "read".into(),
@@ -543,8 +550,18 @@ mod tests {
         let old_body = b"0123456789";
         let new_body = b"abcd";
         let (job, sent) = job(vec![
-            deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "old-digest", old_body.len() as u64),
-            deferred(v1::GitDiffContentSide::New, SIDE_NEW, "new-digest", new_body.len() as u64),
+            deferred(
+                v1::GitDiffContentSide::Old,
+                SIDE_OLD,
+                "old-digest",
+                old_body.len() as u64,
+            ),
+            deferred(
+                v1::GitDiffContentSide::New,
+                SIDE_NEW,
+                "new-digest",
+                new_body.len() as u64,
+            ),
         ]);
         let total = stream_sides(&job, |request| {
             assert_eq!(request.operation, i32::from(v1::Operation::GitDiffContent));
@@ -564,13 +581,22 @@ mod tests {
         .unwrap();
         assert_eq!(total, (old_body.len() + new_body.len()) as u64);
         let frames = sent.lock().unwrap();
-        let decoded: Vec<_> = frames.iter().map(|frame| decode_chunk_frame(frame)).collect();
+        let decoded: Vec<_> = frames
+            .iter()
+            .map(|frame| decode_chunk_frame(frame))
+            .collect();
         // Every old-side frame precedes every new-side frame.
-        let switch = decoded.iter().position(|(tag, _, _)| *tag == SIDE_NEW).unwrap();
+        let switch = decoded
+            .iter()
+            .position(|(tag, _, _)| *tag == SIDE_NEW)
+            .unwrap();
         assert!(decoded[..switch].iter().all(|(tag, _, _)| *tag == SIDE_OLD));
         assert!(decoded[switch..].iter().all(|(tag, _, _)| *tag == SIDE_NEW));
         // Offsets are consecutive and the reassembled bytes are the bodies.
-        for (side_frames, body) in [(&decoded[..switch], &old_body[..]), (&decoded[switch..], &new_body[..])] {
+        for (side_frames, body) in [
+            (&decoded[..switch], &old_body[..]),
+            (&decoded[switch..], &new_body[..]),
+        ] {
             let mut reassembled = Vec::new();
             for (_, offset, data) in side_frames {
                 assert_eq!(*offset, reassembled.len() as u64);
@@ -586,12 +612,19 @@ mod tests {
     fn a_chunk_at_the_wrong_offset_is_refused() {
         let body = b"0123456789";
         for wrong_offset in [0u64, 8] {
-            let (job, sent) =
-                job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", body.len() as u64)]);
+            let (job, sent) = job(vec![deferred(
+                v1::GitDiffContentSide::Old,
+                SIDE_OLD,
+                "digest",
+                body.len() as u64,
+            )]);
             let mut requests = 0;
             let error = stream_sides(&job, |request| {
                 requests += 1;
-                assert!(requests <= 3, "the stream kept requesting past a corrupt chunk");
+                assert!(
+                    requests <= 3,
+                    "the stream kept requesting past a corrupt chunk"
+                );
                 let content = content_of(&request);
                 if requests == 1 {
                     return Ok(host_chunk(body, &content, 4));
@@ -613,7 +646,12 @@ mod tests {
     /// means the diff changed; the read refuses rather than substitutes.
     #[test]
     fn a_chunk_describing_a_different_total_size_is_refused() {
-        let (job, _sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", 10)]);
+        let (job, _sent) = job(vec![deferred(
+            v1::GitDiffContentSide::Old,
+            SIDE_OLD,
+            "digest",
+            10,
+        )]);
         let error = stream_sides(&job, |_request| {
             Ok(chunk_response(v1::GitDiffContentChunk {
                 offset: 0,
@@ -623,7 +661,10 @@ mod tests {
             }))
         })
         .unwrap_err();
-        assert!(error.contains("different size"), "unexpected error: {error}");
+        assert!(
+            error.contains("different size"),
+            "unexpected error: {error}"
+        );
     }
 
     /// A response that answers the operation but omits the chunk is a protocol
@@ -637,7 +678,12 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            let (job, sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", 10)]);
+            let (job, sent) = job(vec![deferred(
+                v1::GitDiffContentSide::Old,
+                SIDE_OLD,
+                "digest",
+                10,
+            )]);
             let error = stream_sides(&job, |_request| Ok(response.clone())).unwrap_err();
             assert!(error.contains("omitted"), "unexpected error: {error}");
             assert!(sent.lock().unwrap().is_empty());
@@ -647,11 +693,19 @@ mod tests {
     /// An empty non-final chunk would loop forever at the same offset.
     #[test]
     fn an_empty_chunk_that_is_not_last_is_refused_as_a_stall() {
-        let (job, _sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", 10)]);
+        let (job, _sent) = job(vec![deferred(
+            v1::GitDiffContentSide::Old,
+            SIDE_OLD,
+            "digest",
+            10,
+        )]);
         let mut requests = 0;
         let error = stream_sides(&job, |_request| {
             requests += 1;
-            assert!(requests <= 2, "the stream kept re-requesting a stalled offset");
+            assert!(
+                requests <= 2,
+                "the stream kept re-requesting a stalled offset"
+            );
             Ok(chunk_response(v1::GitDiffContentChunk {
                 offset: 0,
                 data: Vec::new(),
@@ -668,7 +722,12 @@ mod tests {
     #[test]
     fn a_body_shorter_or_longer_than_described_is_refused() {
         for data in [&b"0123"[..], &b"0123456789AB"[..]] {
-            let (job, _sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", 10)]);
+            let (job, _sent) = job(vec![deferred(
+                v1::GitDiffContentSide::Old,
+                SIDE_OLD,
+                "digest",
+                10,
+            )]);
             let error = stream_sides(&job, |_request| {
                 Ok(chunk_response(v1::GitDiffContentChunk {
                     offset: 0,
@@ -689,7 +748,12 @@ mod tests {
     #[test]
     fn cancellation_between_chunks_stops_the_read() {
         let body = b"0123456789";
-        let (job, sent) = job(vec![deferred(v1::GitDiffContentSide::Old, SIDE_OLD, "digest", body.len() as u64)]);
+        let (job, sent) = job(vec![deferred(
+            v1::GitDiffContentSide::Old,
+            SIDE_OLD,
+            "digest",
+            body.len() as u64,
+        )]);
         let cancellation = Arc::clone(&job.cancellation);
         let error = stream_sides(&job, |request| {
             let content = content_of(&request);
@@ -721,7 +785,10 @@ mod tests {
         let (channel, _sent) = captured_channel();
         let job = prepare(command(), channel, &profiles(), &ready_client()).unwrap();
         assert!(!job.read_id.is_empty());
-        assert_eq!(job.request.diff_target, i32::from(v1::GitDiffTarget::Unstaged));
+        assert_eq!(
+            job.request.diff_target,
+            i32::from(v1::GitDiffTarget::Unstaged)
+        );
         let described: Vec<_> = job
             .sides
             .iter()
@@ -738,8 +805,14 @@ mod tests {
     fn a_command_missing_its_identity_or_scope_is_refused() {
         type Break = (&'static str, Box<dyn Fn(&mut GitDiffContentCommand)>);
         let cases: Vec<Break> = vec![
-            ("an empty path", Box::new(|command| command.path = Vec::new())),
-            ("an empty root token", Box::new(|command| command.root_token = String::new())),
+            (
+                "an empty path",
+                Box::new(|command| command.path = Vec::new()),
+            ),
+            (
+                "an empty root token",
+                Box::new(|command| command.root_token = String::new()),
+            ),
             (
                 "no deferred side at all",
                 Box::new(|command| {

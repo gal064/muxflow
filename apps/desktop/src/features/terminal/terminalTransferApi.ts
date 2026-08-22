@@ -66,16 +66,55 @@ interface UploadOptions {
 interface WireCancelDisposition { disposition: string; phase: string }
 
 const PREFLIGHT_DEADLINE_MS = 30_000;
-let nativeClipboardWriteTail: Promise<unknown> = Promise.resolve();
 
-/** Writes text through one ordered native queue, independent of WebView gesture timing. */
-export async function writeNativeTerminalClipboard(text: string): Promise<void> {
-  if (!text) throw new Error("Refusing to replace the system clipboard with empty text.");
-  const write = nativeClipboardWriteTail
-    .catch(() => undefined)
-    .then(() => invoke("write_native_terminal_clipboard", { text }));
-  nativeClipboardWriteTail = write;
-  await write;
+type PendingNativeClipboardWrite = {
+  text: string;
+  completion: Promise<void>;
+  resolve(): void;
+  reject(error: unknown): void;
+};
+
+let nativeClipboardWriteActive = false;
+let pendingNativeClipboardWrite: PendingNativeClipboardWrite | undefined;
+
+/** Writes text through a bounded latest-wins queue, independent of WebView gesture timing. */
+export function writeNativeTerminalClipboard(text: string): Promise<void> {
+  if (!text) return Promise.reject(new Error("Refusing to replace the system clipboard with empty text."));
+  if (pendingNativeClipboardWrite) {
+    pendingNativeClipboardWrite.text = text;
+    return pendingNativeClipboardWrite.completion;
+  }
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const completion = new Promise<void>((fulfilled, rejected) => {
+    resolve = fulfilled;
+    reject = rejected;
+  });
+  pendingNativeClipboardWrite = { text, completion, resolve, reject };
+  if (!nativeClipboardWriteActive) void drainNativeClipboardWrites();
+  return completion;
+}
+
+async function drainNativeClipboardWrites(): Promise<void> {
+  nativeClipboardWriteActive = true;
+  while (pendingNativeClipboardWrite) {
+    const write = pendingNativeClipboardWrite;
+    pendingNativeClipboardWrite = undefined;
+    try {
+      await invoke("write_native_terminal_clipboard", { text: write.text });
+      write.resolve();
+    } catch (error) {
+      write.reject(error);
+    }
+  }
+  nativeClipboardWriteActive = false;
+}
+
+/** One canonical opt-in boundary for clipboard requests emitted by terminal applications. */
+export async function writeTerminalApplicationClipboard(enabled: boolean, text: string): Promise<boolean> {
+  if (!enabled) return false;
+  await writeNativeTerminalClipboard(text);
+  return true;
 }
 
 export class TauriTerminalTransferClient implements TerminalTransferClient {

@@ -429,6 +429,8 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
 
 #[test]
 fn incompatible_server_hello_enters_read_only_and_quarantines_its_snapshot() {
+    use tmux_agent_protocol::CAP_TERMINAL_FILE_RESOLUTION;
+
     let compatible = v1::ServerHello {
         read_only: false,
         capabilities: HOST_CAPABILITIES,
@@ -443,11 +445,19 @@ fn incompatible_server_hello_enters_read_only_and_quarantines_its_snapshot() {
     assert!(!handshake_allows_snapshot(PROTOCOL_MAJOR, &read_only));
     let missing_capability = v1::ServerHello {
         capabilities: 0,
-        ..compatible
+        ..compatible.clone()
     };
     assert!(!handshake_allows_snapshot(
         PROTOCOL_MAJOR,
         &missing_capability
+    ));
+    let pre_terminal_file_helper = v1::ServerHello {
+        capabilities: HOST_CAPABILITIES & !CAP_TERMINAL_FILE_RESOLUTION,
+        ..compatible
+    };
+    assert!(!handshake_allows_snapshot(
+        PROTOCOL_MAJOR,
+        &pre_terminal_file_helper
     ));
 }
 

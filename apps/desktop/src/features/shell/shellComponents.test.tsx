@@ -25,7 +25,7 @@ const commandScope = { hostProfileId: "remote", connectionKey: "ssh:remote", con
 const session: Session = { id: "$1", name: "A very long workspace name", windowCount: 3, attachedClients: 1, order: 0 };
 const rows: WorkspaceRowModel[] = [{
   session, active: true, attention: "blocked", unread: 2, working: true,
-  agents: [{ id: "a1", name: "codex", state: "blocked" }], agentOverflow: 0,
+  agents: [{ id: "a1", adapterId: "codex", name: "codex", state: "blocked" }], agentOverflow: 0,
   branch: "main*", path: "~/dev/muxflow",
 }];
 
@@ -116,6 +116,7 @@ describe("application shell accessibility contracts", () => {
     const busy = sidebar({ rows: fiveAgentRows() });
     expect(busy.match(/class="workspace-activity-line/g)).toHaveLength(4);
     expect(busy).toContain("codex · blocked");
+    expect(busy).toContain('data-agent-icon="codex"');
     expect(busy).toContain("claude · done, unread");
     expect(busy).toContain("aider · working");
     expect(busy).toContain("…2 more");
@@ -152,6 +153,7 @@ describe("application shell accessibility contracts", () => {
     expect(html.indexOf('data-agent-index="0"')).toBeLessThan(html.indexOf('data-agent-index="1"'));
     expect(html).toContain('data-agent-icon="codex"');
     expect(html).toContain('data-agent-icon="claude"');
+    expect(html).toContain('<span class="agent-session-label">Plan rollout</span><span class="agent-detail">');
   });
 
   it("reaches the agent row actions from the command registry, on the last agent focused", async () => {

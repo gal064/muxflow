@@ -264,12 +264,7 @@ impl Drop for FileOpenTiming {
 
 /// One would-be segment: its name, its two endpoints, and the lease-reuse tag
 /// only the lease segment carries.
-type FileOpenSegmentSpec = (
-    &'static str,
-    Option<Instant>,
-    Option<Instant>,
-    Option<bool>,
-);
+type FileOpenSegmentSpec = (&'static str, Option<Instant>, Option<Instant>, Option<bool>);
 
 /// Renders one open's completed segments, in the renderer sample shape
 /// (`t`/`name`/`ms`) plus the correlation the join needs. Each segment exists
@@ -314,8 +309,7 @@ fn file_open_segment_records(marks: &FileOpenMarks, timestamp: u128) -> Vec<Stri
             let (from, to) = (from?, to?);
             // The renderer rounds sample milliseconds to three decimals; the
             // native segments match so the log stays one series.
-            let ms =
-                (to.duration_since(from).as_secs_f64() * 1_000_000.0).round() / 1_000.0;
+            let ms = (to.duration_since(from).as_secs_f64() * 1_000_000.0).round() / 1_000.0;
             let mut record = serde_json::json!({
                 "t": timestamp,
                 "kind": "segment",

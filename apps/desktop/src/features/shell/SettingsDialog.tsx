@@ -209,6 +209,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Copy on select
           </label>
           <p className="settings-hint">Copies completed, non-empty terminal selections to the system clipboard.</p>
+          <label className="settings-check">
+            <input checked={props.shell.terminalApplicationClipboard} onChange={(event) => props.onShell({ terminalApplicationClipboard: event.target.checked })} type="checkbox" />
+            Allow terminal apps to copy
+          </label>
+          <p className="settings-hint">Allows terminal programs to replace the system clipboard using OSC 52. Off by default.</p>
         </>}
 
         {tab === "sounds" && <>

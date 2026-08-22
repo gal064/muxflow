@@ -6,9 +6,11 @@ import { AppStatePersistence } from "./appStatePersistence";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { defaultAppState, normalizePersistedAppState, type PersistedAppState } from "./types";
 import { captureWindowGeometry, restoredWindowGeometry } from "./windowGeometry";
+import { repairShortcutCollisions, type Platform } from "../../commands/registry";
 
 export function usePersistedAppState(
   report: (message: string) => void,
+  platform: Platform,
 ): {
   appState: PersistedAppState;
   appStateRecovery?: string;
@@ -29,7 +31,16 @@ export function usePersistedAppState(
   useEffect(() => {
     void invoke<unknown>("load_app_state").then((saved) => {
       const restored = normalizePersistedAppState(saved);
-      setState(restored);
+      const shortcutOverrides = repairShortcutCollisions(
+        platform,
+        restored.commands.shortcutOverrides,
+        (displaced) => report(`Disabled conflicting saved shortcuts: ${displaced
+          .map(({ commandId, shortcut }) => `${commandId} (${shortcut})`).join(", ")}.`),
+      );
+      setState(shortcutOverrides === restored.commands.shortcutOverrides ? restored : {
+        ...restored,
+        commands: { shortcutOverrides },
+      });
       loaded.current = true;
       const geometry = restored.shell.windowGeometry;
       if (geometry) {
@@ -49,7 +60,7 @@ export function usePersistedAppState(
       setRecovery(message);
       report(message);
     });
-  }, [report]);
+  }, [platform, report]);
 
   useEffect(() => {
     if (loaded.current) persistence.schedule(state);
@@ -88,11 +99,19 @@ export function usePersistedAppState(
 
   const reset = useCallback(async () => {
     const value = normalizePersistedAppState(await invoke<unknown>("reset_app_state"));
-    setState(value);
+    setState({
+      ...value,
+      commands: { shortcutOverrides: repairShortcutCollisions(
+        platform,
+        value.commands.shortcutOverrides,
+        (displaced) => report(`Disabled conflicting reset shortcuts: ${displaced
+          .map(({ commandId, shortcut }) => `${commandId} (${shortcut})`).join(", ")}.`),
+      ) },
+    });
     setRecovery(undefined);
     loaded.current = true;
     report("Saved shell state was reset; the invalid original was preserved for recovery.");
-  }, [report]);
+  }, [platform, report]);
 
   return { appState: state, appStateRecovery: recovery, resetAppState: reset, setAppState: setState };
 }

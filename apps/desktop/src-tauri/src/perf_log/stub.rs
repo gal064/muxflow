@@ -42,7 +42,11 @@ pub(crate) mod bridge {
         cumulative_frame_count: u64,
         cumulative_byte_length: u64,
     ) -> Result<(), String> {
-        let _ = (measurement_id, cumulative_frame_count, cumulative_byte_length);
+        let _ = (
+            measurement_id,
+            cumulative_frame_count,
+            cumulative_byte_length,
+        );
         Err(super::DISABLED.into())
     }
 

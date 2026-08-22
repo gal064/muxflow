@@ -45,8 +45,10 @@ describe("GitSidebar", () => {
     const values = new Map<string, string>();
     const dataTransfer = { effectAllowed: "all", setData: (type: string, value: string) => values.set(type, value) };
     gitRow(renderer, "changed.txt").props.onDragStart({ dataTransfer });
-    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!)).toEqual({ version: 1, serverIdentity: "s", path: "/repo/changed.txt" });
+    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!)).toMatchObject({ version: 1, hostProfileId: "local", serverIdentity: "s", path: "/repo/changed.txt" });
+    expect(JSON.parse(values.get(INTERNAL_PATH_DRAG_TYPE)!).gestureId).toEqual(expect.any(String));
     expect(gitRow(renderer, "changed.txt").props.draggable).toBe(true);
+    expect(gitRow(renderer, "changed.txt").props.onDragEnd).toBeTypeOf("function");
     await act(async () => { renderer.unmount(); });
   });
 

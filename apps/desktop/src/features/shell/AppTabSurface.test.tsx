@@ -427,7 +427,7 @@ describe("AppTabSurface", () => {
     const editor = surface.renderer.root.findByType(EditorStub);
     await act(async () => { editor.props.onChange("hello there"); });
     expect(status()).toHaveLength(1);
-    expect(status()[0].children).toEqual(["Unsaved"]);
+    expect(status()[0].children, "ordinary autosave debounce surfaced an unsaved warning").toEqual([]);
 
     await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
     expect(status()).toHaveLength(1);
@@ -447,9 +447,9 @@ describe("AppTabSurface", () => {
     await act(async () => { editor.props.onChange("slow save"); });
 
     await act(async () => { await vi.advanceTimersByTimeAsync(150); });
-    expect(status()).toEqual(["Unsaved"]);
+    expect(status()).toEqual([]);
     await act(async () => { await vi.advanceTimersByTimeAsync(99); });
-    expect(status()).toEqual(["Unsaved"]);
+    expect(status()).toEqual([]);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(status()).toEqual(["Saving…"]);
 

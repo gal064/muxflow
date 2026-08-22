@@ -18,7 +18,6 @@ use tokio::sync::mpsc;
 
 use super::super::{SequencerControl, emit_event};
 use super::OutputCredit;
-use super::clipboard::ClipboardNotificationSender;
 use super::correlation::{
     MarkerBlock, classify_marker_block, error_reason, marker_pane, wants_error_line,
 };
@@ -79,7 +78,6 @@ pub(super) struct ControlStreamReader {
     pub(super) output_credit: Arc<OutputCredit>,
     pub(super) emission_order: Arc<Mutex<()>>,
     pub(super) topology_trigger: TopologyOutputTrigger,
-    pub(super) clipboard: Arc<ClipboardNotificationSender>,
 }
 
 pub(super) enum StreamControl {
@@ -106,7 +104,6 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         output_credit,
         emission_order,
         topology_trigger,
-        clipboard,
     } = context;
     let mut reader = BufReader::new(stdout);
     let mut parser = ControlParser::default();
@@ -124,7 +121,6 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         emission_order: &emission_order,
         topology_trigger: &topology_trigger,
         read_started,
-        clipboard: clipboard.as_ref(),
     };
     loop {
         match reader.read(&mut buffer) {
@@ -317,7 +313,6 @@ struct StreamRuntime<'a> {
     /// only so the output leg — read to sequencer admission — can be measured
     /// where it ends, which is inside `OutputEmission::record`.
     read_started: Instant,
-    clipboard: &'a ClipboardNotificationSender,
 }
 
 impl StreamState {
@@ -357,7 +352,6 @@ impl StreamState {
             emission_order,
             topology_trigger,
             read_started,
-            clipboard,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             return;
@@ -453,7 +447,6 @@ impl StreamState {
                     emission_order,
                     topology_trigger,
                     read_started,
-                    clipboard,
                 },
             ),
             ControlRecord::Error { tag, arguments } => {
@@ -622,9 +615,6 @@ impl StreamState {
                     self.flow.cleared(&pane_id);
                 }
             }
-            ControlRecord::Notification { name, arguments } if name == "paste-buffer-changed" => {
-                clipboard.notify(&arguments);
-            }
             ControlRecord::Notification { name, .. } if is_topology_notification(&name) => {
                 emit_event(
                     sender,
@@ -657,7 +647,6 @@ impl StreamState {
             // Same reason: a seed's latency is a reconnect cost, not the echo
             // leg the output measurement is about.
             read_started: _,
-            clipboard: _,
         } = runtime;
         if stopped.load(Ordering::Acquire) {
             self.command_block = CommandBlock::None;

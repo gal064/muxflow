@@ -18,13 +18,14 @@ import { resolveSelectedSession } from "../features/shell/model";
 import type { HostScopeToken } from "../features/shell/hostScope";
 import { recordPerfCounter } from "../perf/probe";
 import { recordIncident } from "../diagnostics/incidents";
-import { writeNativeTerminalClipboard } from "../features/terminal/terminalTransferApi";
+import { writeTerminalApplicationClipboard } from "../features/terminal/terminalTransferApi";
 
 type ControllerArguments = {
   agentClient: TauriAgentClient;
   fileClient: TauriFileWorkspaceClient;
   gitClient: TauriGitWorkspaceClient;
   setStatus: Dispatch<SetStateAction<string>>;
+  terminalApplicationClipboardEnabled?: boolean;
   /**
    * Called when an SSH bridge dies with a handshake failure, which is the one
    * connection error that is usually not a connection problem at all: a host
@@ -37,12 +38,21 @@ type ControllerArguments = {
   onHandshakeFailure?(connection: ConnectionSpec): void;
 };
 
-export function useAppConnectionController({ agentClient, fileClient, gitClient, setStatus, onHandshakeFailure }: ControllerArguments) {
+export function useAppConnectionController({
+  agentClient,
+  fileClient,
+  gitClient,
+  setStatus,
+  terminalApplicationClipboardEnabled = false,
+  onHandshakeFailure,
+}: ControllerArguments) {
   // Through a ref, because the bridge effect is keyed on the connection alone:
   // a callback the shell rebuilds every render must not be able to tear the
   // bridge down and start it again.
   const handshakeFailureRef = useRef(onHandshakeFailure);
   handshakeFailureRef.current = onHandshakeFailure;
+  const terminalApplicationClipboardEnabledRef = useRef(terminalApplicationClipboardEnabled);
+  terminalApplicationClipboardEnabledRef.current = terminalApplicationClipboardEnabled;
   const [hostState, dispatchHost] = useReducer(connectionReducer, initialHostState);
   const snapshot = useMemo(() => denormalizeSnapshot(hostState), [hostState]);
   const snapshotRef = useRef(snapshot);
@@ -305,11 +315,16 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
     // wakes on the notification and pushes as soon as tmux answers. The user
     // measures ~5s from `cd` to the Explorer moving, and the tab name — pure
     // snapshot apply, no Explorer machinery — lags identically, so the missing
-    // seconds are somewhere in notification→snapshot→apply. These two records
-    // decompose that span from the desktop's side; the tmux-side rename time
-    // comes from polling the server during a supervised `cd`.
+    // seconds are somewhere in notification→snapshot→apply. One `topo.snapshot`
+    // line per answered burst decomposes that span from the desktop's side: the
+    // span itself, the name from the notification that started the burst, and
+    // how many dirty notifications the burst contained. The per-event dirty
+    // lines were folded in here because they tripled the journal without adding
+    // a fact this record does not already carry. The tmux-side rename time comes
+    // from polling the server during a supervised `cd`.
     let topologyDirtyAt: number | undefined;
     let topologyDirtyName: string | undefined;
+    let topologyDirtyCount = 0;
     const scope = terminalBridgeScope();
     void startTerminal(scope.sessionId, scope.paneIds, connection, (event) => {
       if (disposed) return;
@@ -326,7 +341,7 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
             topologyDirtyAt = Date.now();
             topologyDirtyName = event.name;
           }
-          recordIncident("topo.dirty", { name: event.name });
+          topologyDirtyCount += 1;
           setStatus("Topology changed; reconciling…");
         } else if (event.kind === "flowPaused") {
           // Journal only — the host resumes the pane itself. This is the
@@ -351,9 +366,12 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
             setConnectionEpoch((value) => value + 1);
           }
         } else if (event.kind === "clipboardWrite") {
-          void writeNativeTerminalClipboard(event.text).catch((error) => {
+          void writeTerminalApplicationClipboard(
+            terminalApplicationClipboardEnabledRef.current,
+            event.text,
+          ).catch((error) => {
             recordIncident("clipboard.writeFailed", { error: String(error) });
-            setStatus(`Could not copy terminal selection: ${String(error)}`);
+            setStatus(`A terminal application could not write the clipboard: ${String(error)}`);
           });
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
@@ -377,9 +395,11 @@ export function useAppConnectionController({ agentClient, fileClient, gitClient,
             recordIncident("topo.snapshot", {
               msSinceDirty: Date.now() - topologyDirtyAt,
               answering: topologyDirtyName,
+              dirtyCount: topologyDirtyCount,
             });
             topologyDirtyAt = undefined;
             topologyDirtyName = undefined;
+            topologyDirtyCount = 0;
           }
           if (serverIdentityRef.current !== undefined && serverIdentityRef.current !== event.serverIdentity) {
             terminalStateCache.clear();

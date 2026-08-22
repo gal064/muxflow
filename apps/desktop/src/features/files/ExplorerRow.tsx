@@ -21,6 +21,7 @@ export interface ExplorerRowActions {
   loadMore(directory: string): void;
   moreKeyDown(event: KeyboardEvent<HTMLElement>, index: number): void;
   drag(entry: FileEntry, transfer: DataTransfer): void;
+  dragEnd(): void;
 }
 
 interface EntryRowProps {
@@ -61,6 +62,7 @@ export const ExplorerEntryRow = memo(function ExplorerEntryRow(props: EntryRowPr
     }}
     onFocus={() => actions.focus(index)}
     onDragStart={(event) => { if (props.dragEnabled) actions.drag(entry, event.dataTransfer); }}
+    onDragEnd={actions.dragEnd}
     onKeyDown={(event) => actions.keyDown(event, index, depth, entry)}
     onPointerDown={() => actions.focus(index)}
     role="treeitem"
