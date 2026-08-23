@@ -23,15 +23,6 @@ function movableAppTab(tabs: readonly CombinedTab[], appTabId: string) {
   return found?.kind === "app" ? found : undefined;
 }
 
-/**
- * The label the strip is drawing for a window, for surfaces that must offer the
- * user what they can see. A window from another workspace is not in this strip;
- * its raw tmux name is then the only honest answer.
- */
-function terminalTabDisplayName(tabs: readonly CombinedTab[], window: TmuxWindow): string {
-  const found = tabs.find((tab) => tab.key === `terminal:${window.id}`);
-  return found?.kind === "terminal" ? found.title : window.name;
-}
 import { sameHostConnection, type HostScopeToken } from "./hostScope";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { shellAfterSidebarCommand } from "./responsiveShell";
@@ -339,12 +330,8 @@ export function useShellCommands(options: ShellCommandOptions): {
       }
       case "window.rename": {
         const scope = options.hostScope;
-        // Prefilled with exactly what the tab shows. For an agent's window that
-        // is the name without its status ticker, so accepting the dialog
-        // unchanged cannot freeze one frame of it into the real name; for every
-        // other window it is the raw tmux name, so a title someone deliberately
-        // wrote with a check mark or a middle dot survives the round trip.
-        if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: terminalTabDisplayName(options.combinedTabs, targetWindow), submit: (name) => {
+        // Display-only normalization must not rewrite the stored tmux name.
+        if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: targetWindow.name, submit: (name) => {
           options.setTextPrompt(undefined);
           if (!options.isHostScopeCurrent(scope)) return options.setStatus("Terminal-tab rename was cancelled because its host scope changed.");
           void options.performAction({ kind: "renameWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id, name });

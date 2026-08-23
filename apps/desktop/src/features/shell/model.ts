@@ -165,12 +165,11 @@ export function combineWorkspaceTabs(
         key: `terminal:${window.id}`,
         kind: "terminal",
         id: window.id,
-        // Only an agent's window has an agent's status ticker. The glyph set
-        // includes ·, check marks and braille, all of which a person may have
-        // typed into an ordinary window name on purpose, so anything the
-        // authority does not positively place an agent in keeps its name
-        // exactly as tmux stores it.
-        title: presence === "present" ? stripAgentStatusGlyphs(window.name) : window.name,
+        // Keep display normalization independent of agent authority. Animated
+        // titles advance tmux's topology generation before the corresponding
+        // agent snapshot arrives; keying this strip to `presence` therefore
+        // alternated between the raw glyph and the stripped title every frame.
+        title: stripAgentStatusGlyphs(window.name),
         index: window.index,
         activeInTmux: window.active,
         zoomed: Boolean(window.zoomed),
