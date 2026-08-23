@@ -147,7 +147,10 @@ export function combineWorkspaceTabs(
   appTabs: readonly AppOwnedTab[],
   attentionByWindow?: ReadonlyMap<string, AgentAttentionRollup>,
   pending?: PendingShellTab,
-  authority: Pick<AgentPresenceSnapshot, "accepted" | "current"> = {},
+  // `hasUnmappedAgents` belongs here as much as the authority stamps do:
+  // dropping it made the strip believe a window was empty while the
+  // commit-time recheck, reading the full snapshot, called it unknown.
+  authority: Omit<AgentPresenceSnapshot, "byWindow"> = {},
 ): CombinedTab[] {
   const agentPresence = {
     ...authority,
@@ -157,11 +160,17 @@ export function combineWorkspaceTabs(
     .sort((left, right) => left.index - right.index || left.id.localeCompare(right.id))
     .map((window, index, ordered) => {
       const attention = attentionByWindow?.get(window.id);
+      const presence = terminalAgentPresence(window.id, agentPresence);
       return {
         key: `terminal:${window.id}`,
         kind: "terminal",
         id: window.id,
-        title: stripAgentStatusGlyphs(window.name),
+        // Only an agent's window has an agent's status ticker. The glyph set
+        // includes ·, check marks and braille, all of which a person may have
+        // typed into an ordinary window name on purpose, so anything the
+        // authority does not positively place an agent in keeps its name
+        // exactly as tmux stores it.
+        title: presence === "present" ? stripAgentStatusGlyphs(window.name) : window.name,
         index: window.index,
         activeInTmux: window.active,
         zoomed: Boolean(window.zoomed),
@@ -174,7 +183,7 @@ export function combineWorkspaceTabs(
         // Presence is deliberately independent of attention. Idle, unknown and
         // already-read agents are just as protected by Close All Non-Agent Tabs
         // as working, blocked and unread-complete agents.
-        agentPresence: terminalAgentPresence(window.id, agentPresence),
+        agentPresence: presence,
       };
     });
   const ownedTabs: CombinedTab[] = [...appTabs]
@@ -252,11 +261,19 @@ export function tabsEligibleAtBulkCloseCommit(
  * tabs asked for, five gone, read as complete success. One sentence, counted,
  * is the whole report; `undefined` means every tab closed and the strip is the
  * message.
+ *
+ * A tab held back by the commit-time agent recheck is a survivor too, and
+ * saying nothing about it was the same silence in a quieter form: the close
+ * appeared to succeed while the terminal stayed.
  */
-export function bulkCloseOutcomeStatus(closed: number, failed: number): string | undefined {
-  if (failed <= 0) return undefined;
-  const attempted = closed + failed;
-  return `Closed ${closed} of ${attempted} ${attempted === 1 ? "tab" : "tabs"}; ${failed} could not be closed.`;
+export function bulkCloseOutcomeStatus(closed: number, failed: number, skipped = 0): string | undefined {
+  if (failed <= 0 && skipped <= 0) return undefined;
+  const attempted = closed + failed + skipped;
+  const survivors = [
+    failed > 0 ? `${failed} could not be closed` : undefined,
+    skipped > 0 ? `${skipped} still had an agent and ${skipped === 1 ? "was" : "were"} left open` : undefined,
+  ].filter((clause): clause is string => Boolean(clause));
+  return `Closed ${closed} of ${attempted} ${attempted === 1 ? "tab" : "tabs"}; ${survivors.join("; ")}.`;
 }
 
 export function workspaceUiRecord(

@@ -99,18 +99,22 @@ export function usePersistedAppState(
 
   const reset = useCallback(async () => {
     const value = normalizePersistedAppState(await invoke<unknown>("reset_app_state"));
+    // Status is a single line, so a displacement notice reported here would be
+    // overwritten by the reset notice below before anyone could read it. Carry
+    // it out of the repair and say both things once.
+    let displacedShortcuts = "";
     setState({
       ...value,
       commands: { shortcutOverrides: repairShortcutCollisions(
         platform,
         value.commands.shortcutOverrides,
-        (displaced) => report(`Disabled conflicting reset shortcuts: ${displaced
-          .map(({ commandId, shortcut }) => `${commandId} (${shortcut})`).join(", ")}.`),
+        (displaced) => { displacedShortcuts = ` Disabled conflicting reset shortcuts: ${displaced
+          .map(({ commandId, shortcut }) => `${commandId} (${shortcut})`).join(", ")}.`; },
       ) },
     });
     setRecovery(undefined);
     loaded.current = true;
-    report("Saved shell state was reset; the invalid original was preserved for recovery.");
+    report(`Saved shell state was reset; the invalid original was preserved for recovery.${displacedShortcuts}`);
   }, [platform, report]);
 
   return { appState: state, appStateRecovery: recovery, resetAppState: reset, setAppState: setState };

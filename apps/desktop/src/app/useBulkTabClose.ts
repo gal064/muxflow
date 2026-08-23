@@ -1,6 +1,6 @@
 import { useCallback, type MutableRefObject } from "react";
 import { editorFlushRegistry } from "../features/files/editorFlushRegistry";
-import { sameHostConnection, sameHostScope, type HostScopeToken } from "../features/shell/hostScope";
+import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 import {
   agentPresenceIsCurrent,
   bulkCloseOutcomeStatus,
@@ -53,7 +53,10 @@ export function useBulkTabClose(options: BulkTabCloseOptions) {
       }
       return;
     }
-    if (!sameHostScope(scope, hostScopeRef.current) || !scope.serverIdentity) {
+    // The connection, not the topology generation: an agent animating its
+    // title advances the generation several times a second, and a set captured
+    // before a confirmation would never survive to the commit.
+    if (!sameHostConnection(scope, hostScopeRef.current) || !scope.serverIdentity) {
       setStatus("Closing those tabs was cancelled because the terminal layout changed.");
       return;
     }
@@ -63,12 +66,18 @@ export function useBulkTabClose(options: BulkTabCloseOptions) {
     );
     let closed = 0;
     let failed = 0;
+    let skipped = 0;
     for (const [index, tab] of terminalTabs.entries()) {
       // The first close can take long enough for a newly detected agent to
-      // protect a later tab in the same batch.
+      // protect a later tab in the same batch. A tab held back this way is
+      // neither a success nor a failure, and counting it as neither is what
+      // made the whole close silently do nothing.
       if (tabsEligibleAtBulkCloseCommit(
         [tab], protectAgents, agentPresenceRef.current,
-      ).length === 0) continue;
+      ).length === 0) {
+        skipped += 1;
+        continue;
+      }
       const terminalWindow = snapshotRef.current.windows.find((item) => item.id === tab.id);
       if (!terminalWindow) continue;
 
@@ -107,9 +116,12 @@ export function useBulkTabClose(options: BulkTabCloseOptions) {
       }
     }
 
-    const outcome = bulkCloseOutcomeStatus(closed, failed);
+    const outcome = bulkCloseOutcomeStatus(closed, failed, skipped);
     if (outcome) setStatus(outcome);
-    if (failed > 0) return;
+    // A survivor of either kind leaves the set incomplete, and closing the
+    // editors of a set that kept its terminals is the half-close nobody asked
+    // for.
+    if (failed > 0 || skipped > 0) return;
 
     // Local document tabs are lossless after the shared editor flush, but
     // commit them only once the stale-sensitive terminal transaction has been

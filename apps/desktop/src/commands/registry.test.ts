@@ -58,8 +58,13 @@ describe("command registry", () => {
 
   it("repairs conflicts persisted by older builds without changing canonical defaults", () => {
     const defaultCollision = { "window.new": "Meta+1" } as const;
-    const repairedDefaultCollision = repairShortcutCollisions("mac", defaultCollision);
+    const defaultDisplaced = vi.fn();
+    const repairedDefaultCollision = repairShortcutCollisions("mac", defaultCollision, defaultDisplaced);
     expect(repairedDefaultCollision).toEqual({ "window.new": "Meta+1", "workspace.select1": null });
+    // The command that lost a binding here never had an override, so the null
+    // is the *default* being taken away permanently. Reporting only typed
+    // customizations left ⌘1 dead with nothing anywhere saying so.
+    expect(defaultDisplaced).toHaveBeenCalledWith([{ commandId: "workspace.select1", shortcut: "Meta+1" }]);
     expect(shortcutCollisions("mac", repairedDefaultCollision)).toEqual([]);
     expect(shortcutFor(commandRegistry.find((command) => command.id === "window.new")!, "mac", repairedDefaultCollision)).toBe("Meta+1");
 

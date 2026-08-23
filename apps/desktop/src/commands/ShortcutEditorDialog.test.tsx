@@ -22,4 +22,22 @@ describe("ShortcutEditorDialog", () => {
     expect(renderer.root.findByProps({ role: "alert" }).children.join(" ")).toContain("Conflicting shortcuts are disabled");
     await act(async () => { renderer.unmount(); });
   });
+
+  it("shows a removed binding as empty rather than as the default it no longer has", async () => {
+    // Collision repair stores an explicit null, which persists. Falling back to
+    // the default drew ⌘1 in the field while nothing in the app answered it,
+    // and the field is also where the user restores it.
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<ShortcutEditorDialog
+        onChange={vi.fn()}
+        onClose={vi.fn()}
+        overrides={{ "workspace.select1": null }}
+        platform="mac"
+      />);
+    });
+    const field = renderer.root.findByProps({ "aria-label": "Shortcut for Go to workspace 1" });
+    expect(field.props.value).toBe("");
+    await act(async () => { renderer.unmount(); });
+  });
 });

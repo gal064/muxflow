@@ -9,6 +9,20 @@ import type { HostScopeToken } from "./hostScope";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { defaultAppState, type PersistedAppState } from "./types";
 import { resolveCommandTarget, useShellCommands } from "./useShellCommands";
+import { combineWorkspaceTabs } from "./model";
+import type { AgentAttentionRollup } from "../agents/types";
+
+/** An authority that positively covers these windows at the live generation. */
+function agentAuthority(windowIds: readonly string[]) {
+  const current = { hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, topologyGeneration: 8 };
+  return { accepted: { ...current, coveredWindowIds: new Set(windowIds) }, current };
+}
+
+function agentInWindow(windowId: string): ReadonlyMap<string, AgentAttentionRollup> {
+  return new Map([[windowId, {
+    state: "working", adapterId: "codex", blocked: 0, working: 1, done: 0, unknown: 0, idle: 0, total: 1,
+  } satisfies AgentAttentionRollup]]);
+}
 
 const session: Session = { id: "$1", name: "muxflow", windowCount: 1, attachedClients: 1, order: 0 };
 const window: TmuxWindow = { id: "@1", sessionId: "$1", index: 1, name: "zsh", active: true, layout: "" };
@@ -124,11 +138,30 @@ describe("shell commands", () => {
   });
 
   it("prefills a rename with the name the tab shows, not the one tmux stores", async () => {
-    // The raw name still carries the agent's status ticker; accepting the
-    // dialog unchanged would freeze one animation frame into the real name.
-    const result = await run("window.rename", { activeWindow: { ...window, name: "✳ Fix tests" } });
+    // The raw name of an agent's window still carries its status ticker;
+    // accepting the dialog unchanged would freeze one animation frame into the
+    // real name.
+    const named = { ...window, name: "✳ Fix tests" };
+    const result = await run("window.rename", {
+      activeWindow: named,
+      windows: [named],
+      combinedTabs: combineWorkspaceTabs([named], [], agentInWindow("@1"), undefined, agentAuthority(["@1"])),
+    });
     const prompt = result.setTextPrompt.mock.calls[0]?.[0];
     expect(prompt).toMatchObject({ initialValue: "Fix tests" });
+  });
+
+  it("prefills a rename of an ordinary window with its exact tmux name", async () => {
+    // ✓ and · are agent ticker frames *and* ordinary punctuation. With no agent
+    // in the window the strip shows the name as typed, so the dialog must offer
+    // the same thing: accepting it silently renamed the real tmux window.
+    const named = { ...window, name: "✓ Deploy checklist" };
+    const result = await run("window.rename", {
+      activeWindow: named,
+      windows: [named],
+      combinedTabs: combineWorkspaceTabs([named], [], new Map(), undefined, agentAuthority(["@1"])),
+    });
+    expect(result.setTextPrompt.mock.calls[0]?.[0]).toMatchObject({ initialValue: "✓ Deploy checklist" });
   });
 
   it.each([

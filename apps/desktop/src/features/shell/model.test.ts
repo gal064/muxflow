@@ -125,8 +125,15 @@ describe("application shell model", () => {
   it("reports a bulk close that left survivors, and says nothing when it did not", () => {
     expect(bulkCloseOutcomeStatus(7, 0)).toBeUndefined();
     expect(bulkCloseOutcomeStatus(0, 0)).toBeUndefined();
+    expect(bulkCloseOutcomeStatus(7, 0, 0)).toBeUndefined();
     expect(bulkCloseOutcomeStatus(5, 2)).toBe("Closed 5 of 7 tabs; 2 could not be closed.");
     expect(bulkCloseOutcomeStatus(0, 1)).toBe("Closed 0 of 1 tab; 1 could not be closed.");
+    // A tab the commit-time recheck held back is a survivor too. Saying nothing
+    // about it read as a close that worked while the terminal was still there.
+    expect(bulkCloseOutcomeStatus(0, 0, 1)).toBe("Closed 0 of 1 tab; 1 still had an agent and was left open.");
+    expect(bulkCloseOutcomeStatus(3, 0, 2)).toBe("Closed 3 of 5 tabs; 2 still had an agent and were left open.");
+    expect(bulkCloseOutcomeStatus(3, 1, 2))
+      .toBe("Closed 3 of 6 tabs; 1 could not be closed; 2 still had an agent and were left open.");
   });
 
   it("keeps replaced servers isolated and requires explicit unambiguous app-tab recovery", () => {
@@ -243,6 +250,38 @@ describe("application shell model", () => {
       byWindow: new Map(),
     }))
       .toEqual(captured);
+
+    // The strip and the commit-time recheck read one snapshot. An authority
+    // holding an agent it cannot place makes both say "unknown"; when the strip
+    // was handed a narrowed authority it said "absent" and offered up a tab the
+    // recheck then refused, which is a close that quietly did nothing.
+    const unmapped = combineWorkspaceTabs(windows, [], rollups.byWindow, undefined, {
+      accepted, current, hasUnmappedAgents: true,
+    });
+    expect(unmapped.every((tab) => tab.kind !== "terminal" || tab.agentPresence === "unknown")).toBe(true);
+    expect(tabsToCloseNonAgent(unmapped)).toEqual([]);
+  });
+
+  it("strips an agent's status ticker but never an ordinary window's name", () => {
+    const windows: TmuxWindow[] = [
+      { id: "@1", sessionId: "$1", index: 1, name: "✳ Fix tests", active: true, layout: "" },
+      { id: "@2", sessionId: "$1", index: 2, name: "✓ Deploy checklist", active: false, layout: "" },
+    ];
+    const current = {
+      hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, topologyGeneration: 9,
+    };
+    const accepted = { ...current, coveredWindowIds: new Set(["@1", "@2"]) };
+    const rollups = deriveAgentRollups([agent({ id: "codex", windowId: "@1", lifecycle: "working" })]);
+    const strip = combineWorkspaceTabs(windows, [], rollups.byWindow, undefined, { accepted, current });
+    // ✓ and · are ticker frames *and* ordinary punctuation, so only the window
+    // an agent is authoritatively in loses its prefix. @2 is a name someone
+    // typed, and the Rename dialog offers exactly this back.
+    expect(strip.map((tab) => tab.title)).toEqual(["Fix tests", "✓ Deploy checklist"]);
+
+    // No authority at all: nothing is provably an agent's window, so nothing is
+    // rewritten.
+    expect(combineWorkspaceTabs(windows, [], rollups.byWindow).map((tab) => tab.title))
+      .toEqual(["✳ Fix tests", "✓ Deploy checklist"]);
   });
 
   it("prunes app state only when its session is definitively absent from the same server", () => {
