@@ -531,22 +531,27 @@ export function App() {
     connectionEpoch: agentScope.connectionEpoch,
     topologyGeneration: hostState.generation,
   } : undefined;
+  const hasUnmappedAgents = agentRuntime.agents.some((agent) => !agent.windowId || !agent.sessionId || !agent.paneId);
   const agentPresence: AgentPresenceSnapshot = {
     accepted: acceptedAgentTopology,
     current: currentAgentTopology,
     byWindow: agentRuntime.rollups.byWindow,
-    hasUnmappedAgents: agentRuntime.agents.some((agent) => !agent.windowId || !agent.sessionId || !agent.paneId),
+    hasUnmappedAgents,
   };
   const agentPresenceRef = useRef(agentPresence);
   agentPresenceRef.current = agentPresence;
   const combinedTabs = useMemo(
+    // The same authority the commit-time recheck reads, `hasUnmappedAgents`
+    // included: the strip and the recheck must not disagree about which
+    // windows are provably empty.
     () => combineWorkspaceTabs(
       windows, workspaceAppTabs, agentRuntime.rollups.byWindow, pendingTabHere, {
         accepted: acceptedAgentTopology,
         current: currentAgentTopology,
+        hasUnmappedAgents,
       },
     ),
-    [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, pendingTabHere, windows, workspaceAppTabs],
+    [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
   const grid = useMemo(() => windowGrid(panes), [panes]);

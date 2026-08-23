@@ -251,6 +251,12 @@ export function shortcutFor(command: CommandDefinition, platform: Platform, over
   return command.defaults?.[platform];
 }
 
+/** The binding a command would have with the keymap emptied, by id. */
+export function defaultShortcutFor(commandId: CommandId, platform: Platform): string | undefined {
+  const command = commandRegistry.find((item) => item.id === commandId);
+  return command && shortcutFor(command, platform, {});
+}
+
 export function normalizeShortcut(shortcut: string): string {
   const order = ["Ctrl", "Alt", "Shift", "Meta"];
   const parts = shortcut.split("+").filter(Boolean);
@@ -428,7 +434,12 @@ export function repairShortcutCollisions(
     for (const commandId of collision.commandIds) {
       if (commandId === keep) continue;
       const prior = repaired[commandId];
-      if (typeof prior === "string") displaced.push({ commandId, shortcut: prior });
+      // A command with no override loses its *default* here, and the explicit
+      // null that records that survives every later load. Reporting only the
+      // customizations someone typed left the rest disabled with no trace of
+      // what they used to be, so name the default that was taken away too.
+      const lost = typeof prior === "string" ? prior : defaultShortcutFor(commandId, platform);
+      if (lost) displaced.push({ commandId, shortcut: lost });
       repaired[commandId] = null;
       changed = true;
     }

@@ -4,7 +4,6 @@ import { createTmuxConfirmation, type PendingTmuxConfirmation } from "../../comm
 import type { PendingTextPrompt } from "../../commands/TextInputDialog";
 import { commandRegistry, selectionIndex, type CommandContext, type CommandId, type CommandTarget } from "../../commands/registry";
 import { rowCommandRegistry } from "../../commands/rowCommands";
-import { stripAgentStatusGlyphs } from "../agents/agentLabels";
 import { nextSortMode } from "../agents/agentsList";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
 import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
@@ -22,6 +21,16 @@ import type { AppOwnedTab, PersistedAppState } from "./types";
 function movableAppTab(tabs: readonly CombinedTab[], appTabId: string) {
   const found = tabs.find((tab) => tab.key === `app:${appTabId}`);
   return found?.kind === "app" ? found : undefined;
+}
+
+/**
+ * The label the strip is drawing for a window, for surfaces that must offer the
+ * user what they can see. A window from another workspace is not in this strip;
+ * its raw tmux name is then the only honest answer.
+ */
+function terminalTabDisplayName(tabs: readonly CombinedTab[], window: TmuxWindow): string {
+  const found = tabs.find((tab) => tab.key === `terminal:${window.id}`);
+  return found?.kind === "terminal" ? found.title : window.name;
 }
 import { sameHostConnection, type HostScopeToken } from "./hostScope";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
@@ -330,10 +339,12 @@ export function useShellCommands(options: ShellCommandOptions): {
       }
       case "window.rename": {
         const scope = options.hostScope;
-        // Prefilled with what the tab shows, not what tmux stores: the raw name
-        // still carries the agent's status ticker, and accepting the dialog
-        // unchanged would freeze one frame of it into the window's real name.
-        if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: stripAgentStatusGlyphs(targetWindow.name), submit: (name) => {
+        // Prefilled with exactly what the tab shows. For an agent's window that
+        // is the name without its status ticker, so accepting the dialog
+        // unchanged cannot freeze one frame of it into the real name; for every
+        // other window it is the raw tmux name, so a title someone deliberately
+        // wrote with a check mark or a middle dot survives the round trip.
+        if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: terminalTabDisplayName(options.combinedTabs, targetWindow), submit: (name) => {
           options.setTextPrompt(undefined);
           if (!options.isHostScopeCurrent(scope)) return options.setStatus("Terminal-tab rename was cancelled because its host scope changed.");
           void options.performAction({ kind: "renameWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id, name });

@@ -32,7 +32,12 @@ export function ShortcutEditorDialog({ overrides, platform, onChange, onClose }:
             with no default binding is precisely the one a user needs this
             dialog for. */}
         {commandsForSurface("shortcuts").map((command, index) => {
-          const value = draft[command.id] ?? shortcutFor(command, platform, {}) ?? "";
+          // An explicit `null` is a binding that was deliberately removed —
+          // usually by collision repair. Falling back to the default drew a
+          // shortcut that no longer fires anywhere, so a stored null shows the
+          // field empty, which is also how the user clears one.
+          const stored = Object.prototype.hasOwnProperty.call(draft, command.id) ? draft[command.id] : undefined;
+          const value = (stored === undefined ? shortcutFor(command, platform, {}) : stored) ?? "";
           return <label key={command.id}>
             <span><strong>{command.title}</strong><small>{command.group}</small></span>
             <span className="shortcut-field">
