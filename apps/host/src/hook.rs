@@ -14,6 +14,8 @@ use tokio::{
     time::{Duration, timeout},
 };
 
+mod codex_transcript;
+
 const MAX_HOOK_BYTES: usize = 256 * 1024;
 
 pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
@@ -37,7 +39,15 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
     let origin_server_identity =
         crate::service::snapshot::inherited_server_identity().unwrap_or_default();
     let now = now_millis();
-    let event = build_event(adapter, payload, &pane_id, &origin_server_identity, now)?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let event = build_event(
+        adapter,
+        payload,
+        &pane_id,
+        &origin_server_identity,
+        now,
+        home.as_deref(),
+    )?;
     deliver(&crate::paths::runtime_dir_candidates(), &event).await
 }
 
@@ -322,6 +332,7 @@ fn build_event(
     pane_id: &str,
     origin_server_identity: &str,
     now: i64,
+    home: Option<&Path>,
 ) -> anyhow::Result<v1::AgentHookEvent> {
     let value: serde_json::Value = serde_json::from_slice(&payload).context("parse hook JSON")?;
     let native_session_id = string_field(&value, &["session_id", "sessionId"]);
@@ -335,6 +346,8 @@ fn build_event(
         source_event_id
     };
     let event_name = string_field(&value, &["hook_event_name", "hookEventName", "event"]);
+    let codex_permission =
+        adapter == v1::AgentAdapterKind::Codex && event_name == "PermissionRequest";
     let notification_type = string_field(&value, &["notification_type", "notificationType"]);
     let mut normalized = serde_json::Map::new();
     normalized.insert("hook_event_name".into(), event_name.into());
@@ -343,6 +356,15 @@ fn build_event(
     }
     if !notification_type.is_empty() {
         normalized.insert("notification_type".into(), notification_type.into());
+    }
+    if codex_permission
+        && let Some(reviewer) =
+            home.and_then(|home| codex_transcript::approval_reviewer(&value, home))
+    {
+        normalized.insert(
+            crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD.into(),
+            reviewer.as_str().into(),
+        );
     }
     Ok(v1::AgentHookEvent {
         adapter: adapter.into(),
@@ -691,6 +713,7 @@ mod tests {
             "%12",
             "tmux:server-a",
             7,
+            None,
         )
         .unwrap();
         assert_eq!(event.pane_id, "%12");
@@ -707,6 +730,7 @@ mod tests {
             "%12",
             "tmux:server-a",
             7,
+            None,
         )
         .unwrap();
         let payload = String::from_utf8(event.payload_json).unwrap();
@@ -716,6 +740,55 @@ mod tests {
         assert!(!payload.contains("private"));
         assert!(!payload.contains("secret"));
         assert!(!payload.contains("prompt"));
+    }
+
+    #[test]
+    fn codex_reviewer_is_normalized_without_transcript_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join(".codex/sessions/2026/08/22");
+        fs::create_dir_all(&sessions).unwrap();
+        let transcript = sessions.join("rollout.jsonl");
+        fs::write(
+            &transcript,
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "turn-1",
+                    "approval_policy": "on-request",
+                    "approvals_reviewer": "auto_review"
+                }
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "session_id": "session-1",
+            "turn_id": "turn-1",
+            "transcript_path": transcript,
+            "prompt": "private prompt",
+            "api_token": "secret"
+        }))
+        .unwrap();
+        let event = build_event(
+            v1::AgentAdapterKind::Codex,
+            raw,
+            "%12",
+            "tmux:server-a",
+            7,
+            Some(home.path()),
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+        assert_eq!(
+            payload.get(crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD),
+            Some(&serde_json::Value::String("auto_review".into()))
+        );
+        let serialized = payload.to_string();
+        for private in ["transcript_path", "turn_id", "private prompt", "secret"] {
+            assert!(!serialized.contains(private));
+        }
     }
 
     #[tokio::test]
@@ -732,6 +805,7 @@ mod tests {
             "%7",
             "server-a",
             7,
+            None,
         )
         .unwrap();
 
@@ -757,6 +831,7 @@ mod tests {
             "%7",
             "server-a",
             7,
+            None,
         )
         .unwrap();
 
@@ -807,6 +882,7 @@ mod tests {
             "%7",
             "server-a",
             7,
+            None,
         )
         .unwrap();
         deliver(&[first.clone(), second.clone()], &event)
@@ -833,6 +909,7 @@ mod tests {
             "%7",
             "server-a",
             7,
+            None,
         )
         .unwrap();
         let threads = (0..64)

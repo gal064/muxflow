@@ -62,6 +62,49 @@ fn a_turn_that_starts_and_blocks_offline_replays_in_the_order_it_happened() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn replay_preserves_an_auto_review_permission_as_working() {
+    let dir = std::env::current_dir().unwrap().join("tmp").join(format!(
+        "phase13-auto-review-replay-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let runtime = AgentRuntime::isolated(dir.join("agents.json"));
+    let topology = topology("codex");
+    let mut permission = event("permission", 0, "PermissionRequest");
+    let mut payload = serde_json::json!({"hook_event_name": "PermissionRequest"});
+    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
+    permission.payload_json = serde_json::to_vec(&payload).unwrap();
+
+    for (name, hook) in [
+        (
+            "hook-fallback-codex-7-00000000000000000001-a.pb",
+            event("prompt", 0, "UserPromptSubmit"),
+        ),
+        (
+            "hook-fallback-codex-7-00000000000000000002-b.pb",
+            permission,
+        ),
+    ] {
+        fs::write(dir.join(name), hook.encode_to_vec()).unwrap();
+    }
+    let report = fallback::consume(&dir, |event| {
+        match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
+            Ok(_) => fallback::HookReplayDisposition::Applied,
+            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
+                fallback::HookReplayDisposition::Discarded
+            }
+            Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
+        }
+    })
+    .unwrap();
+    assert_eq!(report.applied, 2);
+    let record = &runtime.snapshot_for("server-a").agents[0];
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert_eq!(record.attention_generation, 0);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// The configuration probe reads the *daemon process's* `PATH`, and a
 /// daemon started by launchd or a non-login SSH exec has one without
 /// `~/.local/bin`. A running agent is proof its vendor is installed here —
