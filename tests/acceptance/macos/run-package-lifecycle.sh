@@ -39,16 +39,18 @@ ADE_MACOS_APPLICATIONS_DIR="$applications" release/macos/uninstall.sh >/dev/null
 [[ ! -e "$installed" ]]
 grep -Fxq preserve-me "$config_fixture"
 
-# Everything above pins ADE_MACOS_APPLICATIONS_DIR, so the location the scripts
-# actually pick on their own was never exercised — which is how the default
-# silently moved off the rootless ~/Applications. Overriding HOME keeps the real
-# default-path logic hermetic; /Applications is only ever read, never written.
+# Everything above pins ADE_MACOS_APPLICATIONS_DIR. The unpinned default is
+# /Applications, which a hermetic test must never write to, so the default is
+# pinned here textually and the per-user location for the cases below is set
+# up explicitly. /Applications is only ever read, never written.
+grep -Fq 'ADE_MACOS_APPLICATIONS_DIR:-/Applications}' release/macos/install.sh
 home="$work/home"
 home_applications="$home/Applications"
 home_installed="$home_applications/Muxflow.app"
 system_installed=/Applications/Muxflow.app
 mkdir -p "$home"
-HOME="$home" release/macos/install.sh >/dev/null
+HOME="$home" ADE_MACOS_APPLICATIONS_DIR="$home_applications" \
+  release/macos/install.sh >/dev/null
 [[ -d "$home_installed" ]]
 [[ ! -e "$installed" ]]
 
@@ -101,4 +103,4 @@ message=$(HOME="$home" release/macos/uninstall.sh "$home_applications" 2>&1 >/de
 grep -Fq "no Muxflow install found at $home_installed" <<<"$message"
 grep -Fxq preserve-me "$config_fixture"
 
-echo "PHASE10_PACKAGE_LIFECYCLE_PASS install=clean upgrade=pass rollback=restored uninstall=confined quarantine=preserved default=rootless"
+echo "PHASE10_PACKAGE_LIFECYCLE_PASS install=clean upgrade=pass rollback=restored uninstall=confined quarantine=preserved default=machine-wide"

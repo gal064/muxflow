@@ -69,11 +69,11 @@ Run `release/macos/build-package.sh` on a physical Apple-Silicon Mac with Xcode,
 Node 24, pnpm 11, Rust 1.97.1, and Docker. The script creates an arm64 `.app`
 and DMG, embeds a native Mach-O local helper, builds separate Debian 12 Linux
 ELF helpers for `aarch64` and `x86_64`, and runs format/architecture/package
-verification. Use `release/macos/install.sh` for a rootless transactional
-install or upgrade into `$HOME/Applications` and `release/macos/uninstall.sh`
-for confined removal. With no argument the installer publishes the bundle it
-just built; `ADE_MACOS_APPLICATIONS_DIR=/Applications` selects a machine-wide
-install instead, which requires an administrator account.
+verification. Use `release/macos/install.sh` for a transactional install
+or upgrade into `/Applications` and `release/macos/uninstall.sh` for confined
+removal. With no argument the installer publishes the bundle it just built;
+`ADE_MACOS_APPLICATIONS_DIR="$HOME/Applications"` selects a rootless per-user
+install instead.
 
 This artifact remains `UNSIGNED_INTERNAL` in the distribution sense and is
 `APPLE_SILICON_ONLY`: its ad-hoc identity provides no publisher trust.

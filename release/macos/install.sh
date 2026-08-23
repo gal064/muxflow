@@ -6,11 +6,12 @@ work_root=${ADE_WORK_ROOT:-"$repo/tmp/work"}
 release_target=${CARGO_TARGET_DIR:-"$work_root/cache/release-target/macos"}
 [[ "$release_target" == /* ]] || release_target="$repo/$release_target"
 source_app=${1:-"$release_target/release/bundle/macos/Muxflow.app"}
-# The install is rootless by contract: a plain user account cannot create the
-# transaction directory inside /Applications, so ~/Applications stays the
-# default and a machine-wide install is an explicit ADE_MACOS_APPLICATIONS_DIR
-# opt-in by someone who has already accepted needing admin rights.
-applications=${ADE_MACOS_APPLICATIONS_DIR:-"$HOME/Applications"}
+# The machine-wide /Applications is the default: it is where Spotlight, the
+# Dock and Launchpad look first, so a per-user copy alongside it is how stale
+# versions keep getting launched. The account must be able to write there (any
+# admin account can); a rootless per-user install remains available as an
+# explicit ADE_MACOS_APPLICATIONS_DIR="$HOME/Applications" opt-in.
+applications=${ADE_MACOS_APPLICATIONS_DIR:-/Applications}
 name='Muxflow.app'
 owner='dev.muxflow.desktop:1'
 
