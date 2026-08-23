@@ -97,11 +97,11 @@ fn client_hello_and_subscribe_are_written_before_the_first_read() {
         checked: false,
     };
 
-    let (_, initial, compatible, accepted_sequence) =
+    let (_, initial, admission, accepted_sequence) =
         handshake_and_snapshot(&mut writer, &mut reader, 9).unwrap();
 
     assert!(reader.checked);
-    assert!(compatible);
+    assert!(admission.is_ok());
     assert_eq!(accepted_sequence, 4);
     assert_eq!(initial.unwrap().accepted_sequence, 4);
 }
@@ -137,10 +137,15 @@ fn incompatible_handshake_drains_pipelined_subscribe_and_keeps_its_watermark() {
     let mut reader = Cursor::new(bytes);
     let mut writer = Vec::new();
 
-    let (_, initial, writable, accepted_sequence) =
+    let (_, initial, admission, accepted_sequence) =
         handshake_and_snapshot(&mut writer, &mut reader, 9).unwrap();
 
-    assert!(!writable);
+    // The refusal doubles as the reason the read-only path reports, so a
+    // quarantined handshake can never be silent.
+    assert!(
+        !admission.unwrap_err().to_string().is_empty(),
+        "a quarantined handshake must carry its reason"
+    );
     assert!(initial.is_none());
     assert_eq!(accepted_sequence, 17);
     assert_eq!(read_frame_sync(&mut reader).unwrap(), Some(later_event));

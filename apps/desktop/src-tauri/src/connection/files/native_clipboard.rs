@@ -1,17 +1,54 @@
+use clipboard_rs::ClipboardContext;
 use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
 
 const MAX_NATIVE_TEXT_BYTES: usize = tmux_control::MAX_INPUT_REQUEST_BYTES;
+
+/// The one clipboard context this process ever opens.
+///
+/// `ClipboardContext::new` is not a cheap handle: on X11 it opens two
+/// connections to the display server and spawns a thread parked in
+/// `wait_for_event` so the selection stays owned, and the type has no `Drop`, so
+/// nothing is ever given back. Copy-on-select makes a copy a per-mouse-up event,
+/// so a context per operation walked into Xorg's `MaxClients` (~128) and killed
+/// the clipboard for the rest of the session. clipboard-rs is written for the
+/// opposite lifetime — its own examples build one context and drive every
+/// operation through it, and each `Clipboard` method takes `&self` and does its
+/// own round trip — so read and write share this one.
+static CLIPBOARD: OnceLock<Mutex<Option<ClipboardContext>>> = OnceLock::new();
+
+/// Run `action` against the shared context, opening it on first use.
+///
+/// Creation failure and a poisoned lock are both reported to the caller: a
+/// clipboard that cannot be opened is an error the renderer can show, not a
+/// reason to take the process down. The context is left uncreated on failure so
+/// a later copy retries rather than inheriting one bad moment forever.
+fn with_clipboard<T>(
+    action: impl FnOnce(&ClipboardContext) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut slot = CLIPBOARD
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "native clipboard lock poisoned".to_string())?;
+    if slot.is_none() {
+        *slot = Some(
+            ClipboardContext::new().map_err(|error| format!("open native clipboard: {error}"))?,
+        );
+    }
+    let clipboard = slot.as_ref().ok_or("native clipboard is unavailable")?;
+    action(clipboard)
+}
 
 #[tauri::command]
 pub async fn write_native_terminal_clipboard(text: String) -> Result<(), String> {
     let text = validated_native_clipboard_write(text)?;
     tauri::async_runtime::spawn_blocking(move || {
-        use clipboard_rs::{Clipboard, ClipboardContext};
-        let clipboard =
-            ClipboardContext::new().map_err(|error| format!("open native clipboard: {error}"))?;
-        clipboard
-            .set_text(text)
-            .map_err(|error| format!("write native clipboard text: {error}"))
+        use clipboard_rs::Clipboard;
+        with_clipboard(|clipboard| {
+            clipboard
+                .set_text(text)
+                .map_err(|error| format!("write native clipboard text: {error}"))
+        })
     })
     .await
     .map_err(|error| format!("native clipboard worker failed: {error}"))?
@@ -49,13 +86,15 @@ pub async fn read_native_terminal_clipboard() -> Result<Option<Value>, String> {
 
 #[cfg(target_os = "linux")]
 fn read_linux_clipboard() -> Result<Option<Value>, String> {
-    use clipboard_rs::{Clipboard, ClipboardContext, ContentFormat};
-    use serde_json::json;
-
     // clipboard-rs bounds X11 reads to 500 ms by default and selects its
     // Wayland implementation at runtime when a native display is available.
-    let clipboard =
-        ClipboardContext::new().map_err(|error| format!("open native clipboard: {error}"))?;
+    with_clipboard(read_from_linux_clipboard)
+}
+
+#[cfg(target_os = "linux")]
+fn read_from_linux_clipboard(clipboard: &ClipboardContext) -> Result<Option<Value>, String> {
+    use clipboard_rs::{Clipboard, ContentFormat};
+    use serde_json::json;
 
     if clipboard.has(ContentFormat::Files) {
         let uris = clipboard
