@@ -262,7 +262,7 @@ describe("application shell model", () => {
     expect(tabsToCloseNonAgent(unmapped)).toEqual([]);
   });
 
-  it("strips an agent's status ticker but never an ordinary window's name", () => {
+  it("strips known status tickers without depending on agent authority", () => {
     const windows: TmuxWindow[] = [
       { id: "@1", sessionId: "$1", index: 1, name: "✳ Fix tests", active: true, layout: "" },
       { id: "@2", sessionId: "$1", index: 2, name: "✓ Deploy checklist", active: false, layout: "" },
@@ -273,15 +273,13 @@ describe("application shell model", () => {
     const accepted = { ...current, coveredWindowIds: new Set(["@1", "@2"]) };
     const rollups = deriveAgentRollups([agent({ id: "codex", windowId: "@1", lifecycle: "working" })]);
     const strip = combineWorkspaceTabs(windows, [], rollups.byWindow, undefined, { accepted, current });
-    // ✓ and · are ticker frames *and* ordinary punctuation, so only the window
-    // an agent is authoritatively in loses its prefix. @2 is a name someone
-    // typed, and the Rename dialog offers exactly this back.
-    expect(strip.map((tab) => tab.title)).toEqual(["Fix tests", "✓ Deploy checklist"]);
+    expect(strip.map((tab) => tab.title)).toEqual(["Fix tests", "Deploy checklist"]);
 
-    // No authority at all: nothing is provably an agent's window, so nothing is
-    // rewritten.
+    // A title redraw temporarily makes agent authority stale. The presentation
+    // stays identical instead of exposing the raw glyph until authority catches
+    // up, which was the source of the visible flicker.
     expect(combineWorkspaceTabs(windows, [], rollups.byWindow).map((tab) => tab.title))
-      .toEqual(["✳ Fix tests", "✓ Deploy checklist"]);
+      .toEqual(["Fix tests", "Deploy checklist"]);
   });
 
   it("prunes app state only when its session is definitively absent from the same server", () => {

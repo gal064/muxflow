@@ -137,10 +137,9 @@ describe("shell commands", () => {
     expect(result.createSession).toHaveBeenCalledWith("work");
   });
 
-  it("prefills a rename with the name the tab shows, not the one tmux stores", async () => {
-    // The raw name of an agent's window still carries its status ticker;
-    // accepting the dialog unchanged would freeze one animation frame into the
-    // real name.
+  it("prefills a rename with the raw tmux name", async () => {
+    // Status-glyph removal is presentation-only. The rename dialog exposes the
+    // actual stored value rather than silently deleting its first character.
     const named = { ...window, name: "✳ Fix tests" };
     const result = await run("window.rename", {
       activeWindow: named,
@@ -148,13 +147,13 @@ describe("shell commands", () => {
       combinedTabs: combineWorkspaceTabs([named], [], agentInWindow("@1"), undefined, agentAuthority(["@1"])),
     });
     const prompt = result.setTextPrompt.mock.calls[0]?.[0];
-    expect(prompt).toMatchObject({ initialValue: "Fix tests" });
+    expect(prompt).toMatchObject({ initialValue: "✳ Fix tests" });
   });
 
   it("prefills a rename of an ordinary window with its exact tmux name", async () => {
-    // ✓ and · are agent ticker frames *and* ordinary punctuation. With no agent
-    // in the window the strip shows the name as typed, so the dialog must offer
-    // the same thing: accepting it silently renamed the real tmux window.
+    // ✓ and · are agent ticker frames *and* ordinary punctuation. The strip
+    // hides a leading frame consistently, while rename still offers the exact
+    // stored value.
     const named = { ...window, name: "✓ Deploy checklist" };
     const result = await run("window.rename", {
       activeWindow: named,
