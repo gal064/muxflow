@@ -29,13 +29,13 @@ stops its local helper when possible, and preserves application configuration
 and all tmux sessions.
 
 With no argument it looks in both places the installer can publish to,
-`$HOME/Applications` (the default) and `/Applications` (the machine-wide
-opt-in), and removes whichever one holds the app. If neither does it says so
-and names both paths. If both do it refuses rather than guessing; pass the
-directory to act on:
+`/Applications` (the default) and `$HOME/Applications` (the per-user opt-in),
+and removes whichever one holds the app. If neither does it says so and names
+both paths. If both do it refuses rather than guessing; pass the directory to
+act on:
 
 ```sh
-release/macos/uninstall.sh /Applications
+release/macos/uninstall.sh "$HOME/Applications"
 ```
 
 `ADE_MACOS_APPLICATIONS_DIR` selects a single directory the same way, and an

@@ -16,12 +16,11 @@ owned() {
 applications=${1:-${ADE_MACOS_APPLICATIONS_DIR:-}}
 if [[ -z "$applications" ]]; then
   # No location was named, so search both places install.sh can publish to. The
-  # installer's default is ~/Applications and its documented machine-wide
-  # opt-in is /Applications; checking only one of them exits without removing
-  # anything and leaves the other copy's daemon running.
-  candidates=()
+  # installer's default is /Applications and its documented rootless opt-in is
+  # ~/Applications; checking only one of them exits without removing anything
+  # and leaves the other copy's daemon running.
+  candidates=(/Applications)
   [[ -z "${HOME:-}" ]] || candidates+=("$HOME/Applications")
-  candidates+=(/Applications)
   found=()
   for candidate in "${candidates[@]}"; do
     owned "$candidate" || continue

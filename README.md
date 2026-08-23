@@ -50,17 +50,18 @@ and x86_64 SSH targets.
 ```sh
 pnpm release:macos
 release/macos/install.sh
-open "$HOME/Applications/Muxflow.app"
+open /Applications/Muxflow.app
 release/macos/uninstall.sh
 ```
 
 `install.sh` defaults to the bundle just built under `tmp/work` and takes an
-absolute path to any other `Muxflow.app`. The installer is rootless, verifies
-ownership before upgrades, rolls back a failed publication, and preserves tmux
-sessions and application configuration. It installs to `$HOME/Applications`;
-set `ADE_MACOS_APPLICATIONS_DIR=/Applications` for a machine-wide install,
-which needs an administrator account. If a copy is left in the other location
-the installer names both paths so it can be removed deliberately.
+absolute path to any other `Muxflow.app`. The installer verifies ownership
+before upgrades, rolls back a failed publication, and preserves tmux sessions
+and application configuration. It installs to `/Applications`, which requires
+an account that can write there; set
+`ADE_MACOS_APPLICATIONS_DIR="$HOME/Applications"` for a rootless per-user
+install. If a copy is left in the other location the installer names both
+paths so it can be removed deliberately.
 
 Workspace names are tmux session names and terminal-tab names are tmux window
 names. Renaming either in the app updates tmux; renames made by another tmux
