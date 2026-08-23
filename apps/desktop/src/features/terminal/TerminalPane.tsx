@@ -444,6 +444,9 @@ export function TerminalPane({
         }
       },
       onOpenFilePath: (path) => openFilePathRef.current?.(pane.id, path),
+      // Which modifier opens one. `currentPlatform()` resolves before the first
+      // render, so the value the renderer is built with is the final one.
+      platform: platformRef.current,
       onClipboardWrite: async (text) => {
         await writeTerminalApplicationClipboard(terminalApplicationClipboardRef.current, text);
       },
@@ -1009,6 +1012,12 @@ export function TerminalPane({
     };
   }, [hub, pane.id]);
 
+  // Undebounced deliberately. A font size change re-measures the face and
+  // reflows the whole scrollback, which is lossy on a shrink, so it must not
+  // run per keystroke — and it does not: the only thing that writes this
+  // setting is the settings field, which holds what is being typed and commits
+  // one clamped value when the user is done with it (`TerminalFontSizeField`).
+  // A debounce here would only delay the single resize that follows.
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;

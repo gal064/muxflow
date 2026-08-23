@@ -169,21 +169,17 @@ export function searchDecorations(root: Element | undefined = globalThis.documen
  * in the app was being emphasised twice — bold face *and* the bright half of
  * the palette — against a terminal that emphasises it once. The two weights
  * are xterm's own defaults, stated because they are the two the bundled faces
- * actually provide: anything else is synthesised. The spacing correction is
- * documented beside its value because it compensates for xterm's renderer
- * arithmetic rather than expressing a user preference.
+ * actually provide: anything else is synthesised.
+ *
+ * The cell's own spacing correction is not here. It is a function of the
+ * measured advance and the display ratio rather than a preference, so it lives
+ * with the rest of that arithmetic as `deviceSafeCellSpacing` in `cellMetrics`.
  */
 export const GHOSTTY_TEXT_OPTIONS = {
   drawBoldTextInBrightColors: false,
   fontWeight: "normal",
   fontWeightBold: "bold",
 } as const;
-
-// JetBrains Mono advances 0.6em: 7.8 CSS px at 13px. WebGL floors that to
-// whole device pixels, then adds this unscaled value; one therefore restores
-// an 8px cell at the display ratios we support. The DOM renderer does not
-// floor the advance, so TerminalRenderer applies this only while WebGL owns it.
-export const WEBGL_CELL_SPACING = 1;
 
 /**
  * The terminal's font, from the same tokens the rest of the app uses.

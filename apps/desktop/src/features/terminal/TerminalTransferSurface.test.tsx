@@ -351,6 +351,28 @@ describe("TerminalTransferSurface", () => {
     expect(transferClient.start).not.toHaveBeenCalled();
   });
 
+  it("still drops an internal drag that left the window and came back", async () => {
+    Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
+    const transferClient = client();
+    const target = { getBoundingClientRect: () => ({ left: 0, right: 200, top: 0, bottom: 200 }) } as HTMLElement;
+    const view = await mounted("local", transferClient, vi.fn(), undefined, target);
+    writeInternalPathDrag({ effectAllowed: "all", setData: vi.fn() }, {
+      hostProfileId: "profile", serverIdentity: "server", path: "/repo/round-trip",
+    });
+    // A native leave used to retire the gesture, so the drop that followed had
+    // nothing to bridge and failed with "the WebView did not provide file
+    // paths" — on a drag the user never let go of.
+    await act(async () => {
+      nativeDrag.handler?.({ payload: { type: "enter", paths: [], position: { x: 20, y: 20 } } });
+      nativeDrag.handler?.({ payload: { type: "leave" } });
+      nativeDrag.handler?.({ payload: { type: "enter", paths: [], position: { x: 20, y: 20 } } });
+      nativeDrag.handler?.({ payload: { type: "drop", paths: [], position: { x: 20, y: 20 } } });
+      await Promise.resolve();
+    });
+    expect(view.onPaste).toHaveBeenCalledWith("'/repo/round-trip'");
+    expect(transferClient.inspectLocalPaths).not.toHaveBeenCalled();
+  });
+
   it("retires a claimed internal source when its native drop completes off-pane", async () => {
     Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {}, devicePixelRatio: 1 } });
     const target = { getBoundingClientRect: () => ({ left: 0, right: 200, top: 0, bottom: 200 }) } as HTMLElement;
@@ -831,6 +853,41 @@ describe("u64-safe transfer presentation", () => {
     const hit = {} as Element;
     expect(pointIsInside(left as unknown as HTMLElement, { x: 50, y: 50 }, () => hit)).toBe(false);
     expect(pointIsInside(right as unknown as HTMLElement, { x: 150, y: 50 }, () => hit)).toBe(true);
+  });
+
+  it("takes a drop landing on a pane's own dividers and cards, and no other pane's", () => {
+    // A pane frame, and the things it stacks over its terminal: the divider
+    // grips over its right and bottom edges, and the upload and error cards
+    // over its bottom-right corner. None of them is inside the terminal
+    // element, so `contains` alone threw those drops away.
+    const paneFrame = () => {
+      const frame = {} as Element;
+      frame.closest = ((selector: string) => (selector === ".pane-frame" ? frame : null)) as Element["closest"];
+      return frame;
+    };
+    const inPane = (frame: Element) => ({
+      closest: (selector: string) => (selector === ".pane-frame" ? frame : null),
+    }) as unknown as Element;
+    const ownFrame = paneFrame();
+    const otherFrame = paneFrame();
+    const terminal = {
+      getBoundingClientRect: () => ({ left: 0, right: 100, top: 0, bottom: 100 }),
+      closest: (selector: string) => (selector === ".pane-frame" ? ownFrame : null),
+      // Overlays are siblings of the terminal, never descendants of it.
+      contains: () => false,
+    } as unknown as HTMLElement;
+
+    // The right-hand 4px strip every pane spends on its divider grip.
+    expect(pointIsInside(terminal, { x: 97, y: 50 }, () => inPane(ownFrame))).toBe(true);
+    // And the bottom-right corner under a visible upload or error card.
+    expect(pointIsInside(terminal, { x: 90, y: 96 }, () => inPane(ownFrame))).toBe(true);
+    // A neighbouring pane drawn over this one still owns its own hit.
+    expect(pointIsInside(terminal, { x: 50, y: 50 }, () => inPane(otherFrame))).toBe(false);
+    // Something outside every pane — a dialog backdrop — falls back to
+    // containment, which refuses.
+    expect(pointIsInside(terminal, { x: 50, y: 50 }, () => inPane(null as unknown as Element))).toBe(false);
+    // No hit test available at all: the box is the whole answer.
+    expect(pointIsInside(terminal, { x: 50, y: 50 }, () => null)).toBe(true);
   });
 });
 

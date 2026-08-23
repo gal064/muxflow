@@ -6,8 +6,9 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { terminalScreenReaderMode } from "./accessibilityPreference";
 import { installAtlasFontSmoothing } from "./atlasFontSmoothing";
 import { watchAtlasStaleness } from "./atlasStaleProbe";
-import { GHOSTTY_TEXT_OPTIONS, searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme, WEBGL_CELL_SPACING } from "./theme";
+import { GHOSTTY_TEXT_OPTIONS, searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
 import {
+  deviceSafeCellSpacing,
   deviceSafeLineHeight,
   terminalMeasurements,
   type MeasurableTerminal,
@@ -21,11 +22,12 @@ import { settleWithin } from "./timeBound";
 import { recordPerfCounter } from "../../perf/probe";
 import { recordIncident } from "../../diagnostics/incidents";
 import { isTerminalFileLinkActivation, terminalFileLinkCellRange, terminalFileLinks } from "./terminalFilePaths";
+import type { Platform } from "../../commands/registry";
 import { installOsc52ClipboardWrite } from "./osc52Clipboard";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
-export { cellsForBox, deviceSafeLineHeight, terminalMeasurements } from "./cellMetrics";
+export { cellsForBox, deviceSafeCellSpacing, deviceSafeLineHeight, terminalMeasurements } from "./cellMetrics";
 
 export type TerminalInput =
   | { kind: "text"; data: string }
@@ -51,6 +53,12 @@ export interface TerminalRendererOptions {
   onDiagnostic?: (message: string | undefined) => void;
   onOpenLink?: (url: string) => void;
   onOpenFilePath?: (path: string) => void;
+  /**
+   * Which modifier opens a file link, via `isTerminalFileLinkActivation`. The
+   * renderer has no other reason to know the platform, and the default is the
+   * same one the pane's own prop takes.
+   */
+  platform?: Platform;
   /**
    * Asks the owner to fetch a fresh seed. Returning a promise lets the renderer
    * reopen its one-shot request latch when the request itself fails, so a pane
@@ -311,14 +319,14 @@ export class XtermRenderer implements TerminalRenderer {
 
   open(element: HTMLElement): void {
     this.#terminal.open(element);
-    this.#applyDeviceSafeLineHeight();
+    this.#applyDeviceSafeCell();
     const core = (this.#terminal as MeasurableTerminal)._core;
     const charSize = core?._charSizeService;
-    const charSizeSubscription = charSize?.onCharSizeChange?.(() => this.#applyDeviceSafeLineHeight());
+    const charSizeSubscription = charSize?.onCharSizeChange?.(() => this.#applyDeviceSafeCell());
     if (charSizeSubscription) this.#disposables.push(charSizeSubscription);
     const dprSubscription = core?._coreBrowserService?.onDprChange?.(() => {
       // Let xterm finish updating its own DPR-dependent character metric first.
-      queueMicrotask(() => this.#applyDeviceSafeLineHeight());
+      queueMicrotask(() => this.#applyDeviceSafeCell());
     });
     if (dprSubscription) this.#disposables.push(dprSubscription);
     this.#mountWebgl();
@@ -440,15 +448,29 @@ export class XtermRenderer implements TerminalRenderer {
   setFontSize(fontSize: number): void {
     if (this.#terminal.options.fontSize === fontSize) return;
     this.#terminal.options.fontSize = fontSize;
-    this.#applyDeviceSafeLineHeight();
+    this.#applyDeviceSafeCell();
   }
 
-  #applyDeviceSafeLineHeight(): void {
+  /**
+   * Re-derives both halves of the cell from the face xterm has just measured.
+   *
+   * They are applied together because they are the same fact in two axes and
+   * because the horizontal half depends on which renderer owns the terminal:
+   * WebGL floors the advance into device pixels and needs the loss back, the
+   * DOM renderer keeps the fraction and must stay at zero. Deriving it in one
+   * place is what keeps the column count from changing when a pane crosses that
+   * boundary on a lost context.
+   */
+  #applyDeviceSafeCell(): void {
     if (this.#disposed) return;
-    const measured = (this.#terminal as MeasurableTerminal)._core?._charSizeService?.height;
-    const lineHeight = deviceSafeLineHeight(measured, window.devicePixelRatio);
+    const charSize = (this.#terminal as MeasurableTerminal)._core?._charSizeService;
+    const lineHeight = deviceSafeLineHeight(charSize?.height, window.devicePixelRatio);
     if (lineHeight !== undefined && this.#terminal.options.lineHeight !== lineHeight) {
       this.#terminal.options.lineHeight = lineHeight;
+    }
+    const letterSpacing = this.#webgl ? deviceSafeCellSpacing(charSize?.width, window.devicePixelRatio) : 0;
+    if (this.#terminal.options.letterSpacing !== letterSpacing) {
+      this.#terminal.options.letterSpacing = letterSpacing;
     }
   }
 
@@ -726,7 +748,9 @@ export class XtermRenderer implements TerminalRenderer {
       this.#webglDisposables.push(webgl.onAddTextureAtlasCanvas(() => this.#repaintAfterAtlasChange()));
       this.#terminal.loadAddon(webgl);
       this.#webgl = webgl;
-      this.#terminal.options.letterSpacing = WEBGL_CELL_SPACING;
+      // The same derivation `setFontSize` and the DPR listener use, so a pane
+      // renders the same columns whichever renderer is currently mounted.
+      this.#applyDeviceSafeCell();
       this.#webglDisposables.push({ dispose: watchAtlasStaleness(this.#options.paneId, webgl) });
       this.#options.onDiagnostic?.(undefined);
     } catch (error) {
@@ -791,7 +815,9 @@ export class XtermRenderer implements TerminalRenderer {
             end: { x: cells.end + 1, y: bufferLineNumber },
           },
           activate: (event) => {
-            if (isTerminalFileLinkActivation(event)) this.#options.onOpenFilePath?.(link.text);
+            if (isTerminalFileLinkActivation(event, this.#options.platform ?? "linux")) {
+              this.#options.onOpenFilePath?.(link.text);
+            }
           },
         });
       }

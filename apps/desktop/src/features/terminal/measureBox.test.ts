@@ -51,23 +51,51 @@ describe("xterm cell metrics", () => {
     terminal.dispose();
   });
 
-  it("keeps common fractional-DPR rows whole in both pixel spaces", () => {
+  it("keeps a row whole in both pixel spaces for at most a CSS pixel of pitch", () => {
+    // Judged by what xterm would then render — it floors the multiplier into
+    // the measured character — rather than by the multiplier itself.
     const renderedDeviceRow = (charHeight: number, ratio: number) => {
       const deviceChar = Math.ceil(charHeight * ratio);
       return Math.floor(deviceChar * deviceSafeLineHeight(charHeight, ratio)!);
     };
+    // Two properties, swept over the ratios a display can report and the faces
+    // a monospace stack can measure.
     for (const ratio of [1, 1.25, 1.5, 1.75, 2, 2.5, 3]) {
+      for (const charHeight of [12, 15, 16.4, 17, 17.6, 18, 18.3, 19.2, 24]) {
+        const deviceChar = Math.ceil(charHeight * ratio);
+        const deviceRow = renderedDeviceRow(charHeight, ratio);
+        const label = `${ratio}x, ${charHeight}px face`;
+        // Never below the face: xterm refuses a multiplier under 1, and the row
+        // that clamp produces is a number nothing chose.
+        expect(deviceRow, label).toBeGreaterThanOrEqual(deviceChar);
+        // The budget. It is stated in the unit the app loses when it is
+        // exceeded — a pitch dragged further costs whole rows of terminal, and
+        // tmux is sized from the count.
+        expect((deviceRow - deviceChar) / ratio, `${label} pitch sacrifice`).toBeLessThanOrEqual(1);
+      }
+    }
+    // A 17px face, ratio by ratio: a whole row inside the budget is taken, and
+    // then `rows × cell` divides by the ratio exactly at every grid size.
+    for (const ratio of [1, 1.5, 2, 2.5, 3]) {
       const deviceRow = renderedDeviceRow(17, ratio);
-      const cssRow = deviceRow / ratio;
-      expect(Number.isInteger(cssRow), `${ratio}x CSS row`).toBe(true);
-      expect(deviceRow).toBeGreaterThanOrEqual(Math.ceil(17 * ratio));
-      expect(cssRow - 17, `${ratio}x row expansion`).toBeLessThanOrEqual(3);
+      expect(Number.isInteger(deviceRow / ratio), `${ratio}x CSS row`).toBe(true);
       for (const rows of [1, 7, 38, 39, 40, 53]) {
         expect(Number.isInteger(rows * deviceRow / ratio), `${ratio}x at ${rows} rows`).toBe(true);
       }
     }
+    // And the documented refusal, so that changing the budget has to change
+    // this test and say why. At 1.25 the nearest row whole in both spaces is a
+    // multiple of 4 CSS px, which would drag a 17.6px native pitch to 20: an
+    // 800px pane would show 40 rows where 45 fit, and tmux would be told 40.
+    expect(renderedDeviceRow(17, 1.25)).toBe(22);
+    expect(Math.floor(800 / (22 / 1.25))).toBe(45);
+    // 1.75 refuses for the same reason: 18 CSS px is 31.5 device px.
+    expect(renderedDeviceRow(17, 1.75)).toBe(30);
+    // Nothing measured, nothing derived: the caller leaves xterm alone.
     expect(deviceSafeLineHeight(undefined, 2)).toBeUndefined();
     expect(deviceSafeLineHeight(0, 2)).toBeUndefined();
+    // A nonsense ratio falls back to 1 rather than producing a nonsense cell.
+    expect(deviceSafeLineHeight(17, 0)).toBe(deviceSafeLineHeight(17, 1));
   });
 
   it("are read into the same cells FitAddon computes, chrome and all", () => {

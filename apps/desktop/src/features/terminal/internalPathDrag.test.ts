@@ -6,6 +6,7 @@ import {
   finishInternalPathDrag,
   INTERNAL_PATH_DRAG_TYPE,
   readInternalPathDrop,
+  releaseNativeInternalPathDrag,
   writeInternalPathDrag,
 } from "./internalPathDrag";
 
@@ -58,16 +59,47 @@ describe("internal path drag payload", () => {
     expect(consumeNativeInternalPathDrop({ hostProfileId: "remote", serverIdentity: "server-a" })).toMatchObject({ kind: "rejected" });
   });
 
-  it("clears an unclaimed drag at dragend but preserves a claimed native drag until drop", () => {
+  it("clears an unclaimed drag at dragend and retires a claimed one as delivered", () => {
     const data = transfer();
     writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
     finishInternalPathDrag();
     expect(claimNativeInternalPathDrag()).toBe(false);
 
+    // dragend ends the gesture, so nothing after it may produce input. The
+    // record survives only so a native callback delivered on the far side of
+    // dragend recognizes its own gesture as handled instead of reporting that
+    // the WebView gave no paths.
     writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
     expect(claimNativeInternalPathDrag()).toBe(true);
     finishInternalPathDrag();
-    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toMatchObject({ kind: "accepted" });
+    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "handled" });
+  });
+
+  it("keeps a drag that leaves the window and comes back droppable", () => {
+    const data = transfer();
+    writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
+    expect(claimNativeInternalPathDrag()).toBe(true);
+    // A native leave is the pointer crossing the window edge, not the end of
+    // the DOM gesture: dragging out and back in is one drag, and the re-entry
+    // re-claims the same record.
+    releaseNativeInternalPathDrag();
+    expect(claimNativeInternalPathDrag()).toBe(true);
+    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toMatchObject({
+      kind: "accepted",
+      path: "/repo/file",
+    });
+  });
+
+  it("does not resurrect a cancelled claimed drag into a later pathless drop", () => {
+    const data = transfer();
+    writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/secret" });
+    claimNativeInternalPathDrag();
+    // Dropped outside the app, or cancelled with Escape: dragend arrives with
+    // nothing having consumed the source. The unrelated pathless drop that
+    // follows — a text selection, an image — must not paste this path.
+    finishInternalPathDrag();
+    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "handled" });
+    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "absent" });
   });
 
   it("retires the native bridge when the same gesture reaches the DOM lane", () => {

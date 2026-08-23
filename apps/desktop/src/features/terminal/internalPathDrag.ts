@@ -71,14 +71,34 @@ export function consumeNativeInternalPathDrop(target: InternalPathDragTarget | u
 
 /** Retires a DOM-only or cancelled drag without racing a claimed native drop. */
 export function finishInternalPathDrag(): void {
+  if (!activeDrag?.nativeClaimed) {
+    activeDrag = undefined;
+    return;
+  }
   // A native callback and the DOM drop can be delivered on opposite sides of
-  // dragend. Keep a claimed gesture as a short-lived delivered tombstone so
-  // the later lane can recognize it as already handled instead of pasting or
-  // reporting an error. The next drag replaces it and expiry bounds it.
-  if (!activeDrag?.nativeClaimed) activeDrag = undefined;
+  // dragend. Keep a claimed gesture as a short-lived tombstone so the later
+  // lane recognizes it as already handled instead of pasting or reporting an
+  // error — delivered, because dragend is the end of the gesture and nothing
+  // after it may produce input. Without that flag a *cancelled* drag stayed
+  // pending for its whole 30s lifetime, and the next unrelated pathless drop —
+  // a text selection, an image — pasted the retired path into the shell.
+  activeDrag.delivery = "delivered";
 }
 
-/** A native leave means the claimed drag exited the application without dropping. */
+/**
+ * Drops the native lane's claim on the current gesture.
+ *
+ * A native leave means the pointer left the *window*, not that the drag is
+ * over: dragging out and back in is one uninterrupted DOM gesture, and the
+ * re-entry re-claims. Retiring the whole record here left the drop that
+ * followed with nothing to bridge, so it failed with "The WebView did not
+ * provide file paths." Only dragend retires a gesture.
+ */
+export function releaseNativeInternalPathDrag(): void {
+  if (activeDrag) activeDrag.nativeClaimed = false;
+}
+
+/** Retires the gesture outright, for a native drop no pane can own. */
 export function cancelNativeInternalPathDrag(): void {
   activeDrag = undefined;
 }
