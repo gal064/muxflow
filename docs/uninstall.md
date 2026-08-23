@@ -24,7 +24,19 @@ configuration/state directory. That separate destructive step is intentionally
 not part of package uninstall.
 # macOS
 
-Run `release/macos/uninstall.sh`. It removes only the ownership-marked app from
-`$HOME/Applications` (or the explicit `ADE_MACOS_APPLICATIONS_DIR`), stops its
-local helper when possible, and preserves application configuration and all
-tmux sessions.
+Run `release/macos/uninstall.sh`. It removes only the ownership-marked app,
+stops its local helper when possible, and preserves application configuration
+and all tmux sessions.
+
+With no argument it looks in both places the installer can publish to,
+`$HOME/Applications` (the default) and `/Applications` (the machine-wide
+opt-in), and removes whichever one holds the app. If neither does it says so
+and names both paths. If both do it refuses rather than guessing; pass the
+directory to act on:
+
+```sh
+release/macos/uninstall.sh /Applications
+```
+
+`ADE_MACOS_APPLICATIONS_DIR` selects a single directory the same way, and an
+explicit argument takes precedence over it.

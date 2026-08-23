@@ -39,4 +39,66 @@ ADE_MACOS_APPLICATIONS_DIR="$applications" release/macos/uninstall.sh >/dev/null
 [[ ! -e "$installed" ]]
 grep -Fxq preserve-me "$config_fixture"
 
-echo "PHASE10_PACKAGE_LIFECYCLE_PASS install=clean upgrade=pass rollback=restored uninstall=confined quarantine=preserved"
+# Everything above pins ADE_MACOS_APPLICATIONS_DIR, so the location the scripts
+# actually pick on their own was never exercised — which is how the default
+# silently moved off the rootless ~/Applications. Overriding HOME keeps the real
+# default-path logic hermetic; /Applications is only ever read, never written.
+home="$work/home"
+home_applications="$home/Applications"
+home_installed="$home_applications/Muxflow.app"
+system_installed=/Applications/Muxflow.app
+mkdir -p "$home"
+HOME="$home" release/macos/install.sh >/dev/null
+[[ -d "$home_installed" ]]
+[[ ! -e "$installed" ]]
+
+# A copy left behind in the other well-known location is named, not migrated.
+warning=$(HOME="$home" ADE_MACOS_APPLICATIONS_DIR="$applications" \
+  release/macos/install.sh 2>&1 >/dev/null)
+grep -Fq "$home_installed" <<<"$warning"
+[[ -d "$installed" ]]
+
+# Failing between "move the old app aside" and "move the new one in" must leave
+# the previous install in place; the backup is the only copy of it at that
+# instant, so a cleanup path that skipped the restore would destroy it.
+before=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$installed/Contents/Info.plist")
+if HOME="$home" ADE_MACOS_APPLICATIONS_DIR="$applications" ADE_PHASE10_TEST_FAIL_BEFORE_PUBLICATION=1 \
+  release/macos/install.sh "$candidate" >/dev/null 2>&1; then
+  echo "injected pre-publication failure unexpectedly succeeded" >&2
+  exit 1
+fi
+[[ -d "$installed" ]]
+[[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$installed/Contents/Info.plist") == "$before" ]]
+[[ -z $(find "$applications" -maxdepth 1 -name '.muxflow.install.*' -print -quit) ]]
+
+HOME="$home" release/macos/uninstall.sh "$applications" >/dev/null
+[[ ! -e "$installed" ]]
+
+if grep -Fxq 'dev.muxflow.desktop:1' "$system_installed/Contents/Resources/package-owner" 2>/dev/null; then
+  # This machine also carries a machine-wide install, so the no-argument form is
+  # genuinely ambiguous: it has to say so rather than pick one or exit silently.
+  message=$(HOME="$home" release/macos/uninstall.sh 2>&1 >/dev/null) && status=0 || status=$?
+  [[ $status == 64 ]]
+  grep -Fq "$home_installed" <<<"$message"
+  grep -Fq "$system_installed" <<<"$message"
+  [[ -d "$system_installed" ]]
+  HOME="$home" release/macos/uninstall.sh "$home_applications" >/dev/null
+  [[ -d "$system_installed" ]]
+else
+  HOME="$home" release/macos/uninstall.sh >/dev/null
+  # With nothing left anywhere, the no-argument form names both search paths.
+  message=$(HOME="$home" release/macos/uninstall.sh 2>&1 >/dev/null) && status=0 || status=$?
+  [[ $status != 0 ]]
+  grep -Fq "no Muxflow install found at $home_installed" <<<"$message"
+  grep -Fq "no Muxflow install found at $system_installed" <<<"$message"
+fi
+[[ ! -e "$home_installed" ]]
+
+# Nothing installed at the named location: an explicit message, not a silent
+# exit. This form always names a path, so it can never reach a real install.
+message=$(HOME="$home" release/macos/uninstall.sh "$home_applications" 2>&1 >/dev/null) && status=0 || status=$?
+[[ $status != 0 ]]
+grep -Fq "no Muxflow install found at $home_installed" <<<"$message"
+grep -Fxq preserve-me "$config_fixture"
+
+echo "PHASE10_PACKAGE_LIFECYCLE_PASS install=clean upgrade=pass rollback=restored uninstall=confined quarantine=preserved default=rootless"
