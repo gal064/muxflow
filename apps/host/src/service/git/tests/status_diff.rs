@@ -83,16 +83,16 @@ async fn status_models_initial_raw_ignored_mode_symlink_binary_and_rename_delete
         .iter()
         .find(|entry| entry.path == raw)
         .unwrap();
-    let expected_absolute = std::str::from_utf8(&raw)
-        .ok()
-        .and_then(|path| fixture.root.join(path).to_str().map(str::to_owned))
-        .unwrap_or_default();
-    assert_eq!(raw_entry.absolute_path, expected_absolute);
+    // Entries carry the repository-relative byte path and nothing more. The
+    // absolute path is that path joined to the root the snapshot already names
+    // once, which is what keeps a large repository inside the encoded bound.
+    assert_eq!(raw_entry.path, raw);
+    assert_eq!(
+        status.repository.as_ref().unwrap().worktree_root,
+        fixture.root.to_str().unwrap()
+    );
     assert!(status.entries.iter().any(|entry| entry.ignored));
-    assert!(status.entries.iter().any(|entry| {
-        entry.path == b"ignored-one"
-            && entry.absolute_path == fixture.root.join("ignored-one").to_str().unwrap()
-    }));
+    assert!(status.entries.iter().any(|entry| entry.path == b"ignored-one"));
     assert!(
         status
             .entries

@@ -17,7 +17,12 @@ export interface GitStatusEntry {
   /** Opaque base64 path identity. Never reconstruct this from displayPath. */
   path: string;
   displayPath: string;
-  /** Exact host-provided UTF-8 absolute path. Absent for non-UTF-8 Git paths. */
+  /**
+   * The repository's worktree root joined to `path`, derived here rather than
+   * carried per entry: the host already names that root once per snapshot, and
+   * repeating it on every entry inflated the encoded status against a bound
+   * that drops *every* entry once exceeded. Absent for non-UTF-8 Git paths.
+   */
   absolutePath?: string;
   originalPath?: string;
   displayOriginalPath?: string;

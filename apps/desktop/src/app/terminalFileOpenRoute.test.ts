@@ -8,6 +8,11 @@ describe("currentTerminalFilePane", () => {
     expect(currentTerminalFilePane(pane, [pane], 7, "7")).toBe(pane);
   });
 
+  it("keeps an unchanged pane whose topology advanced while the path resolved", () => {
+    const pane = makePane();
+    expect(currentTerminalFilePane(pane, [pane], 7, "9")).toBe(pane);
+  });
+
   it.each([
     ["generation", makePane(), 8, "7"],
     ["cwd", makePane({ currentPath: "/other" }), 7, "7"],

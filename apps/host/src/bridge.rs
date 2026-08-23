@@ -111,9 +111,10 @@ async fn connect(path: &Path, auto_start: bool) -> anyhow::Result<UnixStream> {
     bail!("host daemon did not create {}", path.display())
 }
 
-/// Uses a current daemon as-is and cooperatively retires an outdated one before
-/// the packaged helper starts its replacement. The probe has its own connection
-/// because the desktop must still own the real connection's first ClientHello.
+/// Uses a current daemon as-is and cooperatively retires one that is outdated —
+/// or that could not prove it is not — before the packaged helper starts its
+/// replacement. The probe has its own connection because the desktop must still
+/// own the real connection's first ClientHello.
 async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option<UnixStream>> {
     let Ok(mut probe) = UnixStream::connect(path).await else {
         return Ok(None);
@@ -121,9 +122,18 @@ async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option
     if !auto_start {
         return Ok(Some(probe));
     }
-    let compatibility = timeout(Duration::from_secs(2), daemon_compatibility(&mut probe))
-        .await
-        .context("host daemon compatibility probe timed out")??;
+    // A probe that timed out, died mid-frame or answered with something other
+    // than a ServerHello carries no evidence about versions. Failing the
+    // connection on it made every later reconnect fail the same way until the
+    // daemon was killed by hand, so an unproven daemon is retired exactly like
+    // an outdated one. Only an affirmative ServerHello saying the daemon is
+    // newer is allowed to refuse.
+    let compatibility = match timeout(Duration::from_secs(2), daemon_compatibility(&mut probe)).await
+    {
+        Ok(Ok(compatibility)) => compatibility,
+        // A transport failure or a timeout, in that order.
+        Ok(Err(_)) | Err(_) => DaemonCompatibility::Unknown,
+    };
     drop(probe);
     match compatibility {
         DaemonCompatibility::Compatible => return Ok(UnixStream::connect(path).await.ok()),
@@ -132,12 +142,7 @@ async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option
                 "the running host daemon is newer than this app; update the app before reconnecting"
             )
         }
-        DaemonCompatibility::Unknown => {
-            bail!(
-                "could not safely determine whether the running host daemon is older than this app"
-            )
-        }
-        DaemonCompatibility::DaemonOutdated { force: false } => {
+        DaemonCompatibility::Unknown | DaemonCompatibility::DaemonOutdated { force: false } => {
             let stopped = timeout(Duration::from_secs(2), daemon::stop(path.to_owned())).await;
             if !matches!(stopped, Ok(Ok(()))) {
                 daemon::retire_verified(path)
@@ -276,8 +281,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 
+    /// A short root, not the default tempdir: the sockets bound below must stay
+    /// under the platform's 104/108-byte limit, and macOS puts the default
+    /// tempdir 50+ bytes deep under /var/folders.
     fn temporary_runtime() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("ade-bridge-{}", uuid::Uuid::new_v4()));
+        let root = PathBuf::from("/tmp").join(format!("ade-bridge-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         root
     }
@@ -393,5 +401,74 @@ mod tests {
         );
         server.await.unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A daemon that cannot prove its version is retired, not refused forever.
+    ///
+    /// A probe that times out, hangs up mid-frame or answers with something
+    /// other than a ServerHello says nothing about versions. Failing the
+    /// connection on it left the daemon running, so every later reconnect
+    /// failed exactly the same way until someone killed it by hand.
+    #[tokio::test]
+    async fn a_daemon_that_cannot_prove_its_version_is_retired_rather_than_refused() {
+        let root = temporary_runtime();
+        let socket = root.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut probe, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut probe).await.unwrap().unwrap();
+            // No ServerHello at all: the daemon hangs up mid-probe.
+            drop(probe);
+
+            let (mut shutdown, _) = listener.accept().await.unwrap();
+            answer_cooperative_shutdown(&mut shutdown).await;
+            drop(shutdown);
+            drop(listener);
+            fs::remove_file(&socket).unwrap();
+        });
+
+        assert!(
+            existing_daemon(&root.join("host.sock"), true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.await.unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The handshake and reply `daemon::stop` expects from a cooperating daemon.
+    async fn answer_cooperative_shutdown(stream: &mut UnixStream) {
+        let _ = read_frame(stream).await.unwrap().unwrap();
+        let mut hello = envelope(
+            1,
+            0,
+            Payload::ServerHello(v1::ServerHello {
+                helper_version: HELPER_VERSION.into(),
+                ..Default::default()
+            }),
+        );
+        hello.protocol_major = PROTOCOL_MAJOR;
+        write_frame(stream, &hello).await.unwrap();
+        let request = read_frame(stream).await.unwrap().unwrap();
+        assert!(
+            matches!(request.payload, Some(Payload::Request(v1::Request {
+                operation,
+                ..
+            })) if operation == v1::Operation::ShutdownDaemon as i32)
+        );
+        write_frame(
+            stream,
+            &envelope(
+                request.request_id,
+                0,
+                Payload::Response(v1::Response {
+                    ok: true,
+                    ..Default::default()
+                }),
+            ),
+        )
+        .await
+        .unwrap();
     }
 }

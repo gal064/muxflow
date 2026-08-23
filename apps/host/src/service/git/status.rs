@@ -218,12 +218,6 @@ pub(super) fn read_status_cancellable(
         if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             bail!("Git status refresh cancelled");
         }
-        validate_git_path(&entry.path)?;
-        entry.absolute_path = Path::new(&identity.worktree_root)
-            .join(OsStr::from_bytes(&entry.path))
-            .to_str()
-            .unwrap_or_default()
-            .to_owned();
         // A tracked entry with no worktree mode was absent when Git captured
         // status. Its leaf or any parent may therefore be gone legitimately.
         // Other entries retain the strict parent requirement so a concurrent

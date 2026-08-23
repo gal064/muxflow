@@ -38,7 +38,7 @@ impl TerminalAttachment {
         pane_ids: &[String],
         runtime: AttachmentRuntime,
     ) -> anyhow::Result<Self> {
-        let reports_terminal_colors = control_color_reports_supported()?;
+        let reports_terminal_colors = control_color_reports_supported();
         Self::start_with_command(
             session_id,
             pane_ids,
@@ -164,8 +164,14 @@ impl TerminalAttachment {
     }
 }
 
-fn control_color_reports_supported() -> anyhow::Result<bool> {
-    Ok(tmux_supports_control_color_reports(tmux_command_table()?))
+/// Whether tmux will report a pane's terminal colours over the control stream.
+///
+/// A colour hint is decoration, so an unavailable command table degrades to
+/// "unsupported" rather than refusing to attach the terminal at all. The table
+/// itself is probed once per process and cached, so a successful attach costs
+/// no further tmux invocations.
+fn control_color_reports_supported() -> bool {
+    tmux_command_table().is_ok_and(tmux_supports_control_color_reports)
 }
 
 pub(super) fn tmux_supports_control_color_reports(output: &[u8]) -> bool {
