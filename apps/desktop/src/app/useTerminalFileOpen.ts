@@ -52,12 +52,18 @@ export function useTerminalFileOpen(options: TerminalFileOpenOptions) {
       const livePane = currentTerminalFilePane(
         pane,
         snapshotRef.current.panes,
-        hostScopeRef.current.generation,
+        scope.generation,
         resolved.topologyGeneration,
       );
-      if (!livePane) return;
+      if (!livePane) {
+        setStatus(`Could not open ${candidate}: that pane moved while the path was resolving.`);
+        return;
+      }
       const session = snapshotRef.current.sessions.find((item) => item.id === livePane.sessionId);
-      if (!session) return;
+      if (!session) {
+        setStatus(`Could not open ${candidate}: its session is no longer attached.`);
+        return;
+      }
       const kind = /\.md(?:own)?$/i.test(resolved.path) ? "markdown" as const : "file" as const;
       selectLocalAppTab(
         session.id,

@@ -66,7 +66,10 @@ export function GitSidebar(props: Props) {
   }, []);
   // Grouping is keyed on the entry list, not the snapshot: an authoritative
   // refresh that reports the same entries must not rebuild a thousand rows.
-  const groups = useMemo(() => groupEntries(props.git.status?.entries ?? []), [props.git.status?.entries]);
+  const groups = useMemo(
+    () => groupEntries(withAbsolutePaths(props.git.status?.repository.worktreeRoot, props.git.status?.entries ?? [])),
+    [props.git.status?.entries, props.git.status?.repository.worktreeRoot],
+  );
   const unavailable = props.disabled || !props.scope || !props.root
     || !props.git.handle || !props.git.status?.authoritative;
 
@@ -352,6 +355,35 @@ function GitEmpty({ detail, action }: { detail: string; action?: () => void }) {
   return <section aria-label="Source Control" className="git-sidebar">
     <p className="quiet-empty">{detail}{action && <> <button className="inline-action" onClick={action} type="button">Retry</button></>}</p>
   </section>;
+}
+
+/**
+ * Gives each entry the absolute path a same-host drag payload needs.
+ *
+ * The host used to send it per entry. It is the snapshot's own worktree root
+ * joined to the entry's path, and repeating a value that is already in the
+ * message inflated the encoded status against a host bound that clears *every*
+ * entry once it is exceeded — a large repository that used to list its changes
+ * returned none. Joining it here costs one base64 decode per entry and nothing
+ * on the wire.
+ *
+ * A path that is not valid UTF-8 gets no absolute path at all, which is what
+ * keeps a lossy display path from ever being dragged as if it were exact.
+ */
+function withAbsolutePaths(worktreeRoot: string | undefined, entries: readonly GitStatusEntry[]): GitStatusEntry[] {
+  return entries.map((entry) => {
+    const absolutePath = worktreeRoot && exactPath(entry.path);
+    return absolutePath ? { ...entry, absolutePath: `${worktreeRoot}/${absolutePath}` } : entry;
+  });
+}
+
+const exactPathDecoder = new TextDecoder("utf-8", { fatal: true });
+
+/** The entry's opaque byte path as text, or undefined when it is not UTF-8. */
+function exactPath(base64: string): string | undefined {
+  try {
+    return exactPathDecoder.decode(Uint8Array.from(atob(base64), (character) => character.charCodeAt(0)));
+  } catch { return undefined; }
 }
 
 function groupEntries(entries: GitStatusEntry[]) {

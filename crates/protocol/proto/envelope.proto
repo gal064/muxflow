@@ -668,9 +668,12 @@ message GitStatusEntry {
   bool symlink = 20;
   bool binary = 21;
   string rename_score = 22;
-  // Exact UTF-8 absolute worktree path for private same-host drag payloads.
-  // Empty when the Git byte path cannot be represented losslessly as UTF-8.
-  string absolute_path = 23;
+  // The absolute path is deliberately absent. It is `worktree_root` — already
+  // in this very message's repository — joined to `path`, and repeating it per
+  // entry inflated the encoded snapshot against a bound that clears *every*
+  // entry once exceeded. The client joins the two.
+  reserved 23;
+  reserved "absolute_path";
 }
 
 message GitStatusSnapshot {
