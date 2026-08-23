@@ -5,8 +5,8 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    CAP_TERMINAL_OUTPUT_CREDIT, HELPER_VERSION, HOST_CAPABILITIES, capability_names, envelope,
-    missing_host_capabilities, read_frame_sync,
+    CAP_TERMINAL_OUTPUT_CREDIT, HELPER_VERSION, HOST_CAPABILITIES, HostContractError, envelope,
+    read_frame_sync,
     v1::{self, envelope::Payload},
     validate_host_contract, write_frame_sync,
 };
@@ -170,7 +170,7 @@ fn run_bridge_once(
     }
     let mut reader = BufReader::new(stdout);
     let terminal_epoch = ((Uuid::new_v4().as_u128() as u64) & ((1_u64 << 53) - 1)).max(1);
-    let (hello, initial, negotiated_writable, mut sequence) =
+    let (hello, initial, admission, mut sequence) =
         handshake_and_snapshot(&mut stdin, &mut reader, terminal_epoch)
             .map_err(|error| with_bridge_diagnostic(error, diagnostic.as_ref()))?;
     if client.stop_signal.is_stopped() {
@@ -253,29 +253,19 @@ fn run_bridge_once(
             }
         }
     }
-    let missing_capabilities = missing_host_capabilities(hello.capabilities);
-    let read_only = !negotiated_writable;
+    let read_only = admission.is_err();
     client.read_only.store(read_only, Ordering::Release);
-    if read_only {
-        if !hello.incompatibility.is_empty() {
-            send_event(
-                channel,
-                TerminalEvent::Error {
-                    message: hello.incompatibility.clone(),
-                },
-            );
-        }
-        if missing_capabilities != 0 {
-            send_event(
-                channel,
-                TerminalEvent::Error {
-                    message: format!(
-                        "host helper is missing required capabilities: {}",
-                        capability_names(missing_capabilities).join(", ")
-                    ),
-                },
-            );
-        }
+    // The reason shown here *is* the refusal that put the connection in
+    // read-only, so there is no handshake the contract turns down without the
+    // user being told why. Recomputing the reason from the hello was how an
+    // envelope-major mismatch entered read-only with no error event at all.
+    if let Err(refusal) = admission {
+        send_event(
+            channel,
+            TerminalEvent::Error {
+                message: refusal.to_string(),
+            },
+        );
         send_event(
             channel,
             TerminalEvent::ConnectionState {
@@ -351,15 +341,25 @@ fn run_bridge_once(
         &hello.server_identity,
         channel,
         client,
-        negotiated_writable,
+        !read_only,
     )
 }
+
+/// The handshake outcome: the hello, the quarantined-or-accepted snapshot, the
+/// host contract's verdict — `Err` carrying the reason the connection may only
+/// be read-only — and the accepted sequence watermark.
+type HandshakeOutcome = (
+    v1::ServerHello,
+    Option<InitialHostState>,
+    Result<(), HostContractError>,
+    u64,
+);
 
 pub(super) fn handshake_and_snapshot(
     stdin: &mut impl Write,
     reader: &mut impl Read,
     connection_epoch: u64,
-) -> Result<(v1::ServerHello, Option<InitialHostState>, bool, u64), String> {
+) -> Result<HandshakeOutcome, String> {
     write_frame_sync(
         stdin,
         &envelope(
@@ -401,11 +401,11 @@ pub(super) fn handshake_and_snapshot(
     };
     let (response, buffered) = read_until_response_with_value(reader, 2)?;
     let accepted_sequence = response.accepted_sequence;
-    if !handshake_allows_snapshot(envelope_major, &hello) {
+    if let Err(refusal) = handshake_admission(envelope_major, &hello) {
         // Subscribe was intentionally pipelined, so its correlated response
         // must always be consumed. Keep its sequence watermark while
         // quarantining the incompatible snapshot and every later event.
-        return Ok((hello, None, false, accepted_sequence));
+        return Ok((hello, None, Err(refusal), accepted_sequence));
     }
     if !response.ok {
         return Err(format!(
@@ -440,7 +440,7 @@ pub(super) fn handshake_and_snapshot(
                 .filter(|frame| event_follows_snapshot_barrier(frame, accepted_sequence))
                 .collect(),
         }),
-        true,
+        Ok(()),
         accepted_sequence,
     ))
 }
@@ -449,19 +449,23 @@ fn event_follows_snapshot_barrier(frame: &v1::Envelope, accepted_sequence: u64) 
     matches!(&frame.payload, Some(Payload::Event(_))) && frame.sequence > accepted_sequence
 }
 
-/// Whether this helper may serve the app at all.
+/// Whether this helper may serve the app at all — and, when it may not, why.
 ///
 /// Every capability the desktop needs is required here, including the
 /// single-request file open: a helper that cannot serve one is refused at the
-/// handshake — and the read-only path above reports the missing capabilities by
-/// name, from [`capability_names`] — rather than being accepted and then found
-/// wanting one operation at a time. The daemon lives on a host the user
-/// upgrades separately from the app, so this is a real state.
+/// handshake rather than accepted and then found wanting one operation at a
+/// time. The daemon lives on a host the user upgrades separately from the app,
+/// so this is a real state.
 ///
-/// The rule is [`missing_host_capabilities`] and lives in the protocol crate,
-/// so this decision and the error that explains it cannot disagree.
-pub(super) fn handshake_allows_snapshot(envelope_major: u32, hello: &v1::ServerHello) -> bool {
-    validate_host_contract(envelope_major, hello).is_ok()
+/// The rule is [`validate_host_contract`] and lives in the protocol crate, and
+/// the refusal it returns is the message the read-only path above shows. The
+/// verdict and the explanation are therefore one value: nothing can be refused
+/// here and left unexplained there.
+pub(super) fn handshake_admission(
+    envelope_major: u32,
+    hello: &v1::ServerHello,
+) -> Result<(), HostContractError> {
+    validate_host_contract(envelope_major, hello)
 }
 
 fn read_until_response(

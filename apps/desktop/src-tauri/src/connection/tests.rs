@@ -440,25 +440,54 @@ fn incompatible_server_hello_enters_read_only_and_quarantines_its_snapshot() {
         read_only: true,
         ..Default::default()
     };
-    assert!(handshake_allows_snapshot(PROTOCOL_MAJOR, &compatible));
-    assert!(!handshake_allows_snapshot(PROTOCOL_MAJOR + 1, &compatible));
-    assert!(!handshake_allows_snapshot(PROTOCOL_MAJOR, &read_only));
+    assert!(handshake_admission(PROTOCOL_MAJOR, &compatible).is_ok());
+    assert!(handshake_admission(PROTOCOL_MAJOR + 1, &compatible).is_err());
+    assert!(handshake_admission(PROTOCOL_MAJOR, &read_only).is_err());
     let missing_capability = v1::ServerHello {
         capabilities: 0,
         ..compatible.clone()
     };
-    assert!(!handshake_allows_snapshot(
-        PROTOCOL_MAJOR,
-        &missing_capability
-    ));
+    assert!(handshake_admission(PROTOCOL_MAJOR, &missing_capability).is_err());
     let pre_terminal_file_helper = v1::ServerHello {
         capabilities: HOST_CAPABILITIES & !CAP_TERMINAL_FILE_RESOLUTION,
         ..compatible
     };
-    assert!(!handshake_allows_snapshot(
-        PROTOCOL_MAJOR,
-        &pre_terminal_file_helper
-    ));
+    assert!(handshake_admission(PROTOCOL_MAJOR, &pre_terminal_file_helper).is_err());
+}
+
+/// Every refusal carries the reason the user is shown. The regression: the
+/// boolean consolidated three checks while the message was recomputed from the
+/// capability mask alone, so a helper with every capability that disagreed on
+/// the envelope major was refused *and* explained by nothing — the app entered
+/// read-only in silence.
+#[test]
+fn every_handshake_refusal_names_its_reason() {
+    let full_capabilities = v1::ServerHello {
+        read_only: false,
+        capabilities: HOST_CAPABILITIES,
+        ..Default::default()
+    };
+    let refusals = [
+        handshake_admission(PROTOCOL_MAJOR + 1, &full_capabilities),
+        handshake_admission(
+            PROTOCOL_MAJOR,
+            &v1::ServerHello {
+                read_only: true,
+                ..full_capabilities.clone()
+            },
+        ),
+        handshake_admission(
+            PROTOCOL_MAJOR,
+            &v1::ServerHello {
+                capabilities: 0,
+                ..full_capabilities
+            },
+        ),
+    ];
+    for refusal in refusals {
+        let reason = refusal.expect_err("the hello is refused").to_string();
+        assert!(!reason.is_empty(), "a refusal without a reason is silent");
+    }
 }
 
 #[test]
@@ -588,15 +617,13 @@ fn a_helper_missing_the_file_stream_capability_is_refused_at_the_handshake() {
         read_only: false,
         ..Default::default()
     };
-    assert!(super::bridge::handshake_allows_snapshot(
-        PROTOCOL_MAJOR,
-        &hello(HOST_CAPABILITIES)
-    ));
+    assert!(super::bridge::handshake_admission(PROTOCOL_MAJOR, &hello(HOST_CAPABILITIES)).is_ok());
     assert!(
-        !super::bridge::handshake_allows_snapshot(
+        super::bridge::handshake_admission(
             PROTOCOL_MAJOR,
             &hello(HOST_CAPABILITIES & !CAP_FILE_STREAM)
-        ),
+        )
+        .is_err(),
         "an older helper was admitted and would fail every file open"
     );
 }

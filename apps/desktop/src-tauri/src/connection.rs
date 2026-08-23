@@ -991,7 +991,7 @@ mod bridge;
 use bridge::supervise_bridge;
 #[cfg(test)]
 use bridge::{
-    handshake_allows_snapshot, reconnect_delay_millis, reconnect_jitter, scoped_terminal_recovery,
+    handshake_admission, reconnect_delay_millis, reconnect_jitter, scoped_terminal_recovery,
     terminal_scope, validate_event_sequence,
 };
 
