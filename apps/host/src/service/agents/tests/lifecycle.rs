@@ -1,5 +1,88 @@
 use super::*;
 
+fn auto_review_permission(id: &str) -> v1::AgentHookEvent {
+    let mut permission = event(id, 0, "PermissionRequest");
+    let mut payload = serde_json::json!({"hook_event_name": "PermissionRequest"});
+    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
+    permission.payload_json = serde_json::to_vec(&payload).unwrap();
+    permission
+}
+
+#[test]
+fn auto_review_approval_stays_working_and_only_stop_requests_attention() {
+    let runtime = runtime("auto-review-approved");
+    let topology = topology("codex");
+    for (id, name) in [("prompt", "UserPromptSubmit"), ("pre", "PreToolUse")] {
+        let transition = runtime
+            .ingest_hook_with_context(&event(id, 0, name), "server-a", Some(&topology))
+            .unwrap();
+        assert!(!transition.notify);
+    }
+
+    let permission = runtime
+        .ingest_hook_with_context(
+            &auto_review_permission("permission"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!permission.notify);
+    assert_eq!(
+        permission.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+
+    let resumed = runtime
+        .ingest_hook_with_context(
+            &event("post", 0, "PostToolUse"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!resumed.notify);
+    let completed = runtime
+        .ingest_hook_with_context(&event("stop", 0, "Stop"), "server-a", Some(&topology))
+        .unwrap();
+    assert!(completed.notify);
+    assert_eq!(completed.reason, "completed");
+    assert_eq!(
+        completed.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn auto_review_denial_stays_working_until_stop_completes_the_turn() {
+    let runtime = runtime("auto-review-denied");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let permission = runtime
+        .ingest_hook_with_context(
+            &auto_review_permission("permission"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!permission.notify);
+    assert_eq!(
+        permission.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+
+    let completed = runtime
+        .ingest_hook_with_context(&event("stop", 0, "Stop"), "server-a", Some(&topology))
+        .unwrap();
+    assert!(completed.notify);
+    assert_eq!(completed.reason, "completed");
+    assert_eq!(completed.agent.unwrap().attention_kind, "completed");
+}
+
 #[test]
 fn hook_expiry_retires_an_unmapped_record_without_touching_direct_detection() {
     let runtime = runtime("expired-evidence");
