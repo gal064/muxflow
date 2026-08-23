@@ -1043,16 +1043,41 @@ describe("saved host picker", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("updates terminal font size from the Terminal settings tab", async () => {
+  it("commits a typed terminal font size once, when the field is done being typed into", async () => {
     const onShell = vi.fn();
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(settings({ onShell, shell: defaultShellState })); });
     const terminalTab = renderer.root.findAllByType("button").find((node) => node.props.children === "Terminal")!;
     await act(async () => { terminalTab.props.onClick(); });
-    const fontSize = renderer.root.findByProps({ "aria-label": "Terminal font size" });
-    expect(fontSize.props).toMatchObject({ min: 10, max: 20, step: "1", type: "number", value: 13 });
-    await act(async () => { fontSize.props.onChange({ target: { value: "18" } }); });
+    const field = () => renderer.root.findByProps({ "aria-label": "Terminal font size" });
+    expect(field().props).toMatchObject({ min: 10, max: 20, step: "1", type: "number", value: "13" });
+
+    // Typing "18" is two keystrokes, and the first of them is a 1. Clamping per
+    // keystroke turned that into 10 and then 20 — the size the user asked for
+    // was the one value the field could not produce.
+    await act(async () => { field().props.onChange({ target: { value: "1" } }); });
+    await act(async () => { field().props.onChange({ target: { value: "18" } }); });
+    expect(onShell).not.toHaveBeenCalled();
+    expect(field().props.value).toBe("18");
+    await act(async () => { field().props.onBlur(); });
+    expect(onShell).toHaveBeenCalledTimes(1);
     expect(onShell).toHaveBeenCalledWith({ terminalFontSize: 18 });
+
+    // Emptying the field is a step on the way to another number, not a request
+    // for a 0px terminal.
+    onShell.mockClear();
+    await act(async () => { field().props.onChange({ target: { value: "" } }); });
+    await act(async () => { field().props.onBlur(); });
+    expect(onShell).not.toHaveBeenCalled();
+    expect(field().props.value).toBe("13");
+
+    // Enter commits without waiting for the field to lose focus, and the clamp
+    // still owns the range.
+    const preventDefault = vi.fn();
+    await act(async () => { field().props.onChange({ target: { value: "99" } }); });
+    await act(async () => { field().props.onKeyDown({ key: "Enter", preventDefault }); });
+    expect(preventDefault).toHaveBeenCalled();
+    expect(onShell).toHaveBeenCalledWith({ terminalFontSize: 20 });
     await act(async () => renderer.unmount());
   });
 

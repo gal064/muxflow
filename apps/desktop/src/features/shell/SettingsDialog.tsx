@@ -205,13 +205,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
         {tab === "terminal" && <>
           <label>Font size
-            <input
-              aria-label="Terminal font size"
-              max={TERMINAL_FONT_SIZE_MAX}
-              min={TERMINAL_FONT_SIZE_MIN}
-              onChange={(event) => props.onShell({ terminalFontSize: clampedTerminalFontSize(Number(event.target.value)) })}
-              step="1"
-              type="number"
+            <TerminalFontSizeField
+              onCommit={(terminalFontSize) => props.onShell({ terminalFontSize })}
               value={props.shell.terminalFontSize}
             />
           </label>
@@ -255,6 +250,51 @@ export function SettingsDialog(props: SettingsDialogProps) {
       <footer><button className="primary" onClick={tab === "connection" ? props.onConnect : props.onClose} type="button">{tab === "connection" ? "Connect" : "Done"}</button></footer>
     </section>
   </div>;
+}
+
+/**
+ * The terminal font size, typed rather than clamped a keystroke at a time.
+ *
+ * A controlled number input that clamps inside `onChange` cannot be typed into.
+ * Select-all and type "18" and the field sees "1" — clamped up to the 10 px
+ * minimum — and then "108", clamped down to 20: asking for 18 gets 20, and the
+ * field can never be emptied, because `Number("")` is 0 and 0 clamps to 10.
+ * Every one of those invented values also reached every open terminal, each
+ * reflowing its whole scrollback.
+ *
+ * So the field keeps what is being typed, and the *size* changes only when the
+ * user is done with it: blur, or Enter. The clamp is unchanged; it just runs
+ * once, on a value the user actually chose.
+ */
+function TerminalFontSizeField({ value, onCommit }: { value: number; onCommit(size: number): void }) {
+  const [draft, setDraft] = useState<string>();
+  const commit = () => {
+    if (draft === undefined) return;
+    setDraft(undefined);
+    const typed = Number(draft);
+    // An empty or unparseable field is not a size: nothing is committed and the
+    // input goes back to showing the size still in force.
+    if (draft.trim() === "" || !Number.isFinite(typed)) return;
+    const size = clampedTerminalFontSize(typed);
+    if (size !== value) onCommit(size);
+  };
+  return <input
+    aria-label="Terminal font size"
+    max={TERMINAL_FONT_SIZE_MAX}
+    min={TERMINAL_FONT_SIZE_MIN}
+    onBlur={commit}
+    onChange={(event) => setDraft(event.target.value)}
+    onKeyDown={(event) => {
+      if (event.key !== "Enter") return;
+      // Enter is the commit, and nothing else: it must not also reach whatever
+      // the surrounding dialog does with it.
+      event.preventDefault();
+      commit();
+    }}
+    step="1"
+    type="number"
+    value={draft ?? String(value)}
+  />;
 }
 
 /**

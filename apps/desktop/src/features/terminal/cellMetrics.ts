@@ -47,17 +47,36 @@ export type MeasurableTerminal = Pick<Terminal, "options"> & {
     };
     _charSizeService?: {
       height?: number;
+      width?: number;
       onCharSizeChange?: (listener: () => void) => { dispose(): void };
     };
   };
 };
 
 /**
+ * How much of the face's own row pitch a row may give up to avoid being
+ * resampled.
+ *
+ * At a ratio of 1.25 the smallest row that is whole in both spaces is a
+ * multiple of 4 CSS px, which would drag a 17.6 px native pitch to 20 — 14% of
+ * every row, and 7 rows out of an 800 px pane. That is a worse trade than the
+ * resampling, so the snap is only taken when it is cheap, and the budget is
+ * stated here rather than falling out of an unbounded search for the next
+ * integer device row.
+ */
+const MAX_PITCH_SACRIFICE_PX = 1;
+
+/**
  * Returns xterm's multiplier for the nearest practical row that is whole in
  * both CSS and device pixels. WebGL otherwise rounds the backing canvas and
  * its CSS height independently, stretching an odd-sized grid by one pixel at
- * fractional DPR. The small bound keeps an unusual display ratio from buying
- * correctness with conspicuously loose lines.
+ * fractional DPR.
+ *
+ * The search starts at the face's own pitch — the measured character after
+ * xterm's ceil, back in CSS pixels — and never spends more than
+ * `MAX_PITCH_SACRIFICE_PX` of it. When nothing inside the budget is whole in
+ * both spaces the native pitch stands and the grid is stretched, which is the
+ * cheaper of the two defects: rows are what the tmux client size is counted in.
  */
 export function deviceSafeLineHeight(
   measuredCharHeight: number | undefined,
@@ -67,9 +86,10 @@ export function deviceSafeLineHeight(
   const ratio = devicePixelRatio > 0 ? devicePixelRatio : 1;
   const deviceCharHeight = Math.ceil(measuredCharHeight * ratio);
   const nativeCssHeight = deviceCharHeight / ratio;
-  const firstCssRow = Math.ceil(nativeCssHeight);
-  const lastCssRow = firstCssRow + 3;
-  for (let cssRow = firstCssRow; cssRow <= lastCssRow; cssRow += 1) {
+  // Ascending from the pitch is nearest-first, and every candidate is at least
+  // the face, so xterm's own below-1 clamp never takes over.
+  const lastCssRow = Math.floor(nativeCssHeight + MAX_PITCH_SACRIFICE_PX);
+  for (let cssRow = Math.ceil(nativeCssHeight); cssRow <= lastCssRow; cssRow += 1) {
     const deviceRow = cssRow * ratio;
     if (!Number.isInteger(deviceRow)) continue;
     if (deviceRow === deviceCharHeight) return 1;
@@ -78,6 +98,37 @@ export function deviceSafeLineHeight(
     return (deviceRow + 0.5) / deviceCharHeight;
   }
   return 1;
+}
+
+/**
+ * The `letterSpacing` that lands a WebGL cell on a whole device pixel, in the
+ * unscaled CSS-ish units xterm rounds and adds.
+ *
+ * WebGL computes `char.width = floor(advance × dpr)` and then
+ * `cell.width = char.width + round(letterSpacing)`, so the floor throws away up
+ * to a device pixel of the face's advance on every cell — 7.8 CSS px at 13 px
+ * becomes a 7.5 px cell on a 2× display, and the columns walk. Restoring
+ * exactly what the floor lost makes the cell `ceil(advance × dpr)` device
+ * pixels: the 8 px cell the 13 px face has always had, at every ratio.
+ *
+ * It is a correction, not a constant. A size whose advance is already whole in
+ * device pixels (10, 15 and 20 px on a 2× display) loses nothing to the floor,
+ * and a fixed +1 there would track every cell one device pixel wider than the
+ * face asks for — the horizontal twin of the stretch `deviceSafeLineHeight`
+ * avoids, and a column count tmux is then sized from.
+ *
+ * The DOM renderer keeps the fractional advance and must stay at zero, so this
+ * belongs to whoever owns the WebGL addon rather than to the font options.
+ */
+export function deviceSafeCellSpacing(
+  measuredCharWidth: number | undefined,
+  devicePixelRatio: number,
+): number {
+  if (!(measuredCharWidth !== undefined && measuredCharWidth > 0)) return 0;
+  const ratio = devicePixelRatio > 0 ? devicePixelRatio : 1;
+  const deviceAdvance = measuredCharWidth * ratio;
+  // Zero when the floor loses nothing; the difference is never more than one.
+  return Math.ceil(deviceAdvance) - Math.floor(deviceAdvance);
 }
 
 /** Everything needed to turn a pixel box into a terminal grid. */

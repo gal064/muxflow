@@ -8,7 +8,8 @@ import { Terminal } from "@xterm/xterm";
 import addonBundle from "@xterm/addon-webgl/lib/addon-webgl.mjs?raw";
 import xtermBundle from "@xterm/xterm/lib/xterm.mjs?raw";
 import { installAtlasFontSmoothing } from "./atlasFontSmoothing";
-import { GHOSTTY_TEXT_OPTIONS, WEBGL_CELL_SPACING } from "./theme";
+import { deviceSafeCellSpacing } from "./cellMetrics";
+import { GHOSTTY_TEXT_OPTIONS } from "./theme";
 
 /**
  * The two halves of "the terminal's glyphs weigh what the font says they
@@ -164,12 +165,47 @@ describe("the weights the terminal is allowed to draw", () => {
 });
 
 describe("the bundled face's cell", () => {
+  // What WebGL builds a cell from: it floors the advance into device pixels and
+  // then adds the rounded, unscaled letter spacing.
+  const webglDeviceCell = (fontSize: number, ratio: number) => {
+    const advance = fontSize * 0.6;
+    return Math.floor(advance * ratio) + Math.round(deviceSafeCellSpacing(advance, ratio));
+  };
+
   it("keeps the 0.6em advance on a whole device-pixel grid", () => {
-    const advance = 13 * 0.6;
     for (const ratio of [1, 1.25, 1.5, 2, 3]) {
-      const deviceCell = Math.floor(advance * ratio) + WEBGL_CELL_SPACING;
-      expect(deviceCell / ratio, `${ratio}x cell`).toBe(8);
+      expect(webglDeviceCell(13, ratio) / ratio, `${ratio}x cell`).toBe(8);
     }
+  });
+
+  it("adds back what the floor took, and nothing at the sizes it takes nothing", () => {
+    // The correction is a function of the measured advance, not a constant. At
+    // 13px the face advances 7.8 CSS px and every supported ratio floors away a
+    // fraction, so the cell is one device pixel wider than the floor — exactly
+    // today's 8px cell. At sizes whose advance is already whole in device
+    // pixels the floor loses nothing, and adding one anyway would track every
+    // cell wider than the face asks, changing the column count tmux is sized
+    // from.
+    for (const fontSize of [10, 13, 15, 20]) {
+      for (const ratio of [1, 1.25, 1.5, 2, 3]) {
+        const advance = fontSize * 0.6;
+        const label = `${fontSize}px at ${ratio}x`;
+        const cell = webglDeviceCell(fontSize, ratio);
+        expect(cell, label).toBe(Math.ceil(advance * ratio));
+        // Never narrower than the face, and never more than the device pixel
+        // the floor discarded.
+        expect(cell - advance * ratio, label).toBeGreaterThanOrEqual(0);
+        expect(cell - advance * ratio, label).toBeLessThan(1);
+      }
+    }
+    expect(deviceSafeCellSpacing(13 * 0.6, 2), "the 13px calibration is unchanged").toBe(1);
+    expect(deviceSafeCellSpacing(10 * 0.6, 2), "6px advance is already whole at 2x").toBe(0);
+    expect(deviceSafeCellSpacing(15 * 0.6, 2), "9px advance is already whole at 2x").toBe(0);
+    expect(deviceSafeCellSpacing(20 * 0.6, 2), "12px advance is already whole at 2x").toBe(0);
+    // Nothing measured, or a nonsense ratio: the DOM-renderer value, which is
+    // the one that changes no cell.
+    expect(deviceSafeCellSpacing(undefined, 2)).toBe(0);
+    expect(deviceSafeCellSpacing(13 * 0.6, 0)).toBe(deviceSafeCellSpacing(13 * 0.6, 1));
   });
 
   it("leaves the DOM fallback at the face's native advance", () => {

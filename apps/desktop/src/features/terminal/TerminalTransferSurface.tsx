@@ -67,8 +67,33 @@ export function pointIsInside(
   const ownerDocument = (element as unknown as Pick<HTMLElement, "ownerDocument">).ownerDocument;
   const resolveHit = hitTest ?? ownerDocument?.elementFromPoint?.bind(ownerDocument);
   const hit = resolveHit?.(point.x, point.y) ?? null;
-  const owner = element as unknown as Pick<HTMLElement, "contains">;
-  return !hit || typeof owner.contains !== "function" || owner.contains(hit);
+  // No hit test, or a point the document reports nothing for: the box is the
+  // whole answer. Said out loud, because the other reading of "unknown" — not
+  // mine — leaves a drop inside a visible pane with no owner and no message.
+  if (!hit) return true;
+  return elementOwnsHit(element, hit);
+}
+
+/** The pane a drop point belongs to, which is what owns a window-global event. */
+const PANE_SELECTOR = ".pane-frame";
+
+/**
+ * Whether a hit inside this element's box belongs to this element's pane.
+ *
+ * Containment alone is too strict: a pane frame stacks things over its terminal
+ * that are not inside it. The two divider grips cover the right and bottom 4 px
+ * of every pane at `z-index: 7`, and the transfer error and upload cards sit at
+ * 8 and 9 over its bottom-right corner — so the last few pixels of every pane,
+ * and every pixel under a visible upload, discarded the drop instead of taking
+ * it. All of them live in the same `.pane-frame`, and the pane is what the
+ * event is being attributed to, so that is what is compared.
+ */
+function elementOwnsHit(element: Pick<HTMLElement, "getBoundingClientRect">, hit: Element): boolean {
+  const owner = element as unknown as Partial<Pick<HTMLElement, "closest" | "contains">>;
+  const ownPane = typeof owner.closest === "function" ? owner.closest(PANE_SELECTOR) : null;
+  const hitPane = typeof hit.closest === "function" ? hit.closest(PANE_SELECTOR) : null;
+  if (ownPane && hitPane) return ownPane === hitPane;
+  return typeof owner.contains !== "function" || owner.contains(hit);
 }
 
 export function basename(path: string): string {

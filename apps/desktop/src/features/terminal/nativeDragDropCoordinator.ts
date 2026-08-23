@@ -1,5 +1,9 @@
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
-import { cancelNativeInternalPathDrag, claimNativeInternalPathDrag } from "./internalPathDrag";
+import {
+  cancelNativeInternalPathDrag,
+  claimNativeInternalPathDrag,
+  releaseNativeInternalPathDrag,
+} from "./internalPathDrag";
 
 type Point = { x: number; y: number };
 
@@ -56,7 +60,9 @@ function stopListener(): void {
 
 function routeNativeDragDrop(payload: DragDropEvent): void {
   if (payload.type === "leave") {
-    cancelNativeInternalPathDrag();
+    // The pointer left the window; the DOM drag it belongs to has not ended.
+    // Only the claim goes, so a drag out and back in still drops.
+    releaseNativeInternalPathDrag();
     for (const target of targets) target.setDragging(false);
     return;
   }
@@ -70,6 +76,11 @@ function routeNativeDragDrop(payload: DragDropEvent): void {
 
   for (const target of targets) target.setDragging(false);
   if (!owner) {
+    // The point is outside every registered pane — the sidebar, the tab strip,
+    // a dialog. Nothing here can accept it, and the gesture is over, so the
+    // claim is retired rather than left to expire into a later drop. A point
+    // *inside* a pane always finds one: `pointIsInside` attributes the hit to
+    // its pane rather than requiring the terminal element itself.
     cancelNativeInternalPathDrag();
     return;
   }
