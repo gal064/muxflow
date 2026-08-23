@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use tmux_agent_protocol::v1;
 
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
+pub(crate) const CODEX_APPROVAL_REVIEWER_FIELD: &str = "approval_reviewer";
 pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting
@@ -118,10 +119,10 @@ impl AgentAdapter for CodexAdapter {
     /// Two events Claude Code has are absent from that surface and are
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
     /// turn that ends in failure is indistinguishable from one that succeeds,
-    /// and there is no `Notification`, so `PermissionRequest` is the only
-    /// evidence of a blocked Codex agent. `SubagentStart` is deliberately not
-    /// taken: it says nothing `PreToolUse` has not already said, and every hook
-    /// costs a daemon connection.
+    /// and there is no `Notification`, so a `PermissionRequest` classified by
+    /// its normalized reviewer is the only evidence of a blocked Codex agent.
+    /// `SubagentStart` is deliberately not taken: it says nothing `PreToolUse`
+    /// has not already said, and every hook costs a daemon connection.
     fn hook_events(&self) -> &'static [&'static str] {
         &[
             "SessionStart",
@@ -152,10 +153,22 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str> {
+        let permission_lifecycle = if payload
+            .get(CODEX_APPROVAL_REVIEWER_FIELD)
+            .and_then(Value::as_str)
+            == Some("auto_review")
+        {
+            v1::AgentLifecycleState::Working
+        } else {
+            // Missing, unreadable and future reviewer values all preserve
+            // the safe behavior: a request that might need the user is
+            // blocked until another hook resolves it.
+            v1::AgentLifecycleState::Blocked
+        };
         parse_common_hook(
             payload,
             &[
-                ("PermissionRequest", v1::AgentLifecycleState::Blocked),
+                ("PermissionRequest", permission_lifecycle),
                 ("UserPromptSubmit", v1::AgentLifecycleState::Working),
                 ("PreToolUse", v1::AgentLifecycleState::Working),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
@@ -425,6 +438,26 @@ mod tests {
             .unwrap();
         assert_eq!(idle.lifecycle, v1::AgentLifecycleState::Idle);
         assert_eq!(idle.native_session_id, "claude-session-3");
+    }
+
+    #[test]
+    fn codex_permission_is_working_only_for_an_explicit_auto_reviewer() {
+        let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
+        for (reviewer, expected) in [
+            (Some("auto_review"), v1::AgentLifecycleState::Working),
+            (Some("user"), v1::AgentLifecycleState::Blocked),
+            (Some("future_reviewer"), v1::AgentLifecycleState::Blocked),
+            (None, v1::AgentLifecycleState::Blocked),
+        ] {
+            let mut payload = serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "session_id": "codex-session",
+            });
+            if let Some(reviewer) = reviewer {
+                payload[CODEX_APPROVAL_REVIEWER_FIELD] = reviewer.into();
+            }
+            assert_eq!(codex.parse_hook(&payload).unwrap().lifecycle, expected);
+        }
     }
 
     #[test]
