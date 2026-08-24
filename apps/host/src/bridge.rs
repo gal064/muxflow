@@ -128,12 +128,12 @@ async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option
     // daemon was killed by hand, so an unproven daemon is retired exactly like
     // an outdated one. Only an affirmative ServerHello saying the daemon is
     // newer is allowed to refuse.
-    let compatibility = match timeout(Duration::from_secs(2), daemon_compatibility(&mut probe)).await
-    {
-        Ok(Ok(compatibility)) => compatibility,
-        // A transport failure or a timeout, in that order.
-        Ok(Err(_)) | Err(_) => DaemonCompatibility::Unknown,
-    };
+    let compatibility =
+        match timeout(Duration::from_secs(2), daemon_compatibility(&mut probe)).await {
+            Ok(Ok(compatibility)) => compatibility,
+            // A transport failure or a timeout, in that order.
+            Ok(Err(_)) | Err(_) => DaemonCompatibility::Unknown,
+        };
     drop(probe);
     match compatibility {
         DaemonCompatibility::Compatible => return Ok(UnixStream::connect(path).await.ok()),
