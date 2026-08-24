@@ -333,14 +333,192 @@ fn pane_close_prunes_capture_state_without_disturbing_sibling() {
         pane_id: "%1".into(),
         lines: vec![b"stale".to_vec()],
     };
+    state.expected_capture = Some("%1".into());
+    state.expected_resume = Some("%1".into());
     state.pending_alternate = Some(("%1".into(), Vec::new(), 1));
+    state.pending_metadata = Some(PendingCaptureMetadata {
+        pane_id: "%1".into(),
+        visible_lines: Vec::new(),
+        saved_normal_lines: Vec::new(),
+        visible_boundary: 1,
+    });
     state.apply_control(StreamControl::Membership {
         pane_ids: vec!["%2".into()],
     });
     assert!(!state.pane_states.contains_key("%1"));
     assert!(state.pane_states.contains_key("%2"));
-    assert!(matches!(state.command_block, CommandBlock::None));
+    assert!(matches!(state.command_block, CommandBlock::Draining { .. }));
+    assert!(state.expected_capture.is_none());
+    assert!(state.expected_resume.is_none());
     assert!(state.pending_alternate.is_none());
+    assert!(state.pending_metadata.is_none());
+}
+
+#[test]
+fn pane_close_drains_every_in_flight_block_until_its_tmux_fence() {
+    let tag = CommandTag {
+        timestamp: 1,
+        number: 2,
+        flags: 1,
+    };
+    let blocks = [
+        CommandBlock::Unknown {
+            tag,
+            pane_id: Some("%1".into()),
+            lines: Vec::new(),
+        },
+        CommandBlock::Resume {
+            tag,
+            pane_id: "%1".into(),
+            lines: Vec::new(),
+        },
+        CommandBlock::CapturePrimary {
+            tag,
+            pane_id: "%1".into(),
+            lines: Vec::new(),
+        },
+        CommandBlock::CaptureAlternate {
+            tag,
+            pane_id: "%1".into(),
+            visible_lines: Vec::new(),
+            visible_boundary: 1,
+            lines: Vec::new(),
+        },
+        CommandBlock::CaptureMetadata {
+            tag,
+            pane_id: "%1".into(),
+            visible_lines: Vec::new(),
+            saved_normal_lines: Vec::new(),
+            visible_boundary: 1,
+            lines: Vec::new(),
+        },
+    ];
+
+    for block in blocks {
+        let mut state = StreamState::new(&["%1".into()], Arc::new(FlowControl::default()));
+        state.command_block = block;
+        state.apply_control(StreamControl::Membership {
+            pane_ids: Vec::new(),
+        });
+        assert!(state.active_tag_matches(tag));
+        assert!(matches!(state.command_block, CommandBlock::Draining { .. }));
+        assert!(!state.pane_states.contains_key("%1"));
+    }
+}
+
+#[test]
+fn pane_close_during_capture_keeps_parser_and_stream_correlation_aligned() {
+    let (mut state, mut harness) = Harness::new(&["%1".into(), "%2".into()]);
+    state.pane_states.insert("%2".into(), PaneSeedState::Live);
+    state.expected_capture = Some("%1".into());
+
+    let mut parser = ControlParser::default();
+    parser.push(b"%begin 1 2 1\n");
+    state.handle(parser.next_record().unwrap().unwrap(), harness.runtime());
+
+    state.apply_control(StreamControl::Membership {
+        pane_ids: vec!["%2".into()],
+    });
+    parser.push(b"captured row\n%end 1 2 1\n");
+    while let Some(record) = parser.next_record() {
+        state.handle(record.unwrap(), harness.runtime());
+    }
+
+    assert_eq!(harness.events(), Vec::new());
+    assert!(!state.pane_states.contains_key("%1"));
+    assert!(matches!(
+        state.pane_states.get("%2"),
+        Some(PaneSeedState::Live)
+    ));
+}
+
+#[test]
+fn pane_close_during_rejected_command_drains_the_stale_error() {
+    let (mut state, mut harness) = Harness::new(&["%1".into(), "%2".into()]);
+    let tag = CommandTag {
+        timestamp: 1,
+        number: 2,
+        flags: 1,
+    };
+    state.command_block = CommandBlock::Resume {
+        tag,
+        pane_id: "%1".into(),
+        lines: vec![b"pane disappeared".to_vec()],
+    };
+    state.apply_control(StreamControl::Membership {
+        pane_ids: vec!["%2".into()],
+    });
+    state.handle(
+        ControlRecord::Error {
+            tag,
+            arguments: "1 2 1".into(),
+        },
+        harness.runtime(),
+    );
+
+    assert_eq!(harness.events(), Vec::new());
+}
+
+#[test]
+fn pane_remove_and_readd_before_fence_cannot_publish_the_old_capture() {
+    let (mut state, mut harness) = Harness::new(&["%1".into()]);
+    let tag = CommandTag {
+        timestamp: 1,
+        number: 2,
+        flags: 1,
+    };
+    state.command_block = CommandBlock::CaptureMetadata {
+        tag,
+        pane_id: "%1".into(),
+        visible_lines: vec![b"obsolete".to_vec()],
+        saved_normal_lines: Vec::new(),
+        visible_boundary: 0,
+        lines: vec![b"1,1,0,0,0,0,0,0,0,0,0".to_vec()],
+    };
+
+    state.apply_control(StreamControl::Membership {
+        pane_ids: Vec::new(),
+    });
+    state.apply_control(StreamControl::Membership {
+        pane_ids: vec!["%1".into()],
+    });
+    state.handle(
+        ControlRecord::End {
+            tag,
+            arguments: "1 2 1".into(),
+        },
+        harness.runtime(),
+    );
+
+    assert_eq!(harness.events(), Vec::new());
+    assert!(matches!(
+        state.pane_states.get("%1"),
+        Some(PaneSeedState::Pending { .. })
+    ));
+    assert!(matches!(state.command_block, CommandBlock::None));
+}
+
+#[test]
+fn parser_error_inside_capture_drains_rows_until_the_matching_fence() {
+    let (mut state, mut harness) = Harness::new(&["%1".into()]);
+    state.expected_capture = Some("%1".into());
+    let mut parser = ControlParser::new(20);
+    parser.push(b"%begin 1 2 1\n123456789012345678901\nremaining row\n%end 1 2 1\n");
+
+    while let Some(record) = parser.next_record() {
+        match record {
+            Ok(record) => state.handle(record, harness.runtime()),
+            Err(_) => state.resnapshot_all(&harness.writer),
+        }
+    }
+
+    assert_eq!(harness.events(), Vec::new());
+    assert_eq!(harness.writes(), vec![("%1".into(), false)]);
+    assert!(matches!(state.command_block, CommandBlock::None));
+    assert!(matches!(
+        state.pane_states.get("%1"),
+        Some(PaneSeedState::Pending { .. })
+    ));
 }
 
 #[test]

@@ -244,6 +244,12 @@ pub(super) enum PaneSeedState {
 #[derive(Debug)]
 pub(super) enum CommandBlock {
     None,
+    /// The parser still has this command open, but its result is no longer
+    /// usable. Consume rows through the matching fence without interpreting
+    /// them or losing parser/stream correlation.
+    Draining {
+        tag: CommandTag,
+    },
     Unknown {
         tag: CommandTag,
         pane_id: Option<String>,
@@ -408,6 +414,7 @@ impl StreamState {
                 self.command_block = self.start_block(tag);
             }
             ControlRecord::CommandOutput(line) => match &mut self.command_block {
+                CommandBlock::Draining { .. } => {}
                 CommandBlock::Unknown { pane_id, lines, .. } => {
                     if pane_id.is_none() {
                         *pane_id = marker_pane(&line);
@@ -458,6 +465,14 @@ impl StreamState {
                         &scope,
                         format!("mismatched error command tag {}", tag.number),
                     );
+                }
+                if matches!(self.command_block, CommandBlock::Draining { .. }) {
+                    self.command_block = CommandBlock::None;
+                    self.expected_capture = None;
+                    self.expected_resume = None;
+                    self.pending_alternate = None;
+                    self.pending_metadata = None;
+                    return;
                 }
                 let scope = self.active_scope();
                 // Input acks are fire-and-forget on the desktop side, so a
@@ -664,6 +679,7 @@ impl StreamState {
             return;
         }
         match std::mem::replace(&mut self.command_block, CommandBlock::None) {
+            CommandBlock::Draining { .. } => {}
             CommandBlock::Unknown { pane_id, lines, .. } => {
                 match classify_marker_block(pane_id, &lines) {
                     MarkerBlock::Input { .. } => emit_resnapshot(
@@ -894,7 +910,8 @@ impl StreamState {
 
     fn active_tag_matches(&self, tag: CommandTag) -> bool {
         match &self.command_block {
-            CommandBlock::Unknown { tag: active, .. }
+            CommandBlock::Draining { tag: active }
+            | CommandBlock::Unknown { tag: active, .. }
             | CommandBlock::Resume { tag: active, .. }
             | CommandBlock::CapturePrimary { tag: active, .. }
             | CommandBlock::CaptureAlternate { tag: active, .. }
@@ -914,6 +931,18 @@ impl StreamState {
             | CommandBlock::CaptureAlternate { pane_id, .. }
             | CommandBlock::CaptureMetadata { pane_id, .. } => pane_id.clone(),
             _ => "terminal".into(),
+        }
+    }
+
+    fn active_tag(&self) -> Option<CommandTag> {
+        match &self.command_block {
+            CommandBlock::Draining { tag }
+            | CommandBlock::Unknown { tag, .. }
+            | CommandBlock::Resume { tag, .. }
+            | CommandBlock::CapturePrimary { tag, .. }
+            | CommandBlock::CaptureAlternate { tag, .. }
+            | CommandBlock::CaptureMetadata { tag, .. } => Some(*tag),
+            CommandBlock::None => None,
         }
     }
 
