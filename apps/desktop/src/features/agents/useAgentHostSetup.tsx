@@ -8,6 +8,8 @@ export interface AgentHostSetupOptions {
   adapters: readonly AgentAdapterDescriptor[];
   /** Live, mutable, authoritative — nothing is offered without all three. */
   connected: boolean;
+  /** False while another host-level consent flow owns the modal/setup lane. */
+  setupAllowed?: boolean;
   hostProfileId: string;
   /**
    * The connected host this render's adapters describe, or `undefined` when
@@ -67,7 +69,8 @@ function consentedHost(options: AgentHostSetupOptions): ConsentedHost | undefine
   // and nothing else: the install would happen, the answer would be lost on
   // quit, and the next launch would find configured hooks and no record of
   // agreeing to them. Consent that cannot be recorded is not consent.
-  return options.connected && options.hostIdentity && options.hostProfileId
+  return options.connected && options.setupAllowed !== false
+    && options.hostIdentity && options.hostProfileId
     && options.decisionsArePersistable
     ? { profileId: options.hostProfileId, identity: options.hostIdentity }
     : undefined;
@@ -114,8 +117,8 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // Two different questions. `offerable` is "is there anything left to set up",
   // which is what Settings and the sidebar's line ask about. Raising the modal
   // unasked needs the stronger one: this host reports nothing at all.
-  const offerable = options.connected && wiring.setupTargets.length > 0;
-  const promptable = options.connected && shouldPromptForSetup(wiring);
+  const offerable = options.connected && options.setupAllowed !== false && wiring.setupTargets.length > 0;
+  const promptable = options.connected && options.setupAllowed !== false && shouldPromptForSetup(wiring);
 
   /**
    * The question, as posed — one value, so no part of it can drift.
@@ -151,11 +154,11 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // A host that goes away takes its question with it, rather than leaving a
   // modal over a disconnected app that would act on the next host to connect.
   useEffect(() => {
-    if (!options.connected) {
+    if (!options.connected || options.setupAllowed === false) {
       questionEpoch.current += 1;
       setAsked(undefined);
     }
-  }, [options.connected]);
+  }, [options.connected, options.setupAllowed]);
 
   // Once per connection. The host's answer is idempotent, but reaching it is
   // two `tmux show-options` subprocesses over the link, and the effect below
@@ -343,7 +346,7 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
         ? `Updated the agent status hooks for ${named} on this host.`
         : `Could not update the agent status hooks for ${named} on this host.`);
     });
-  }, [assertNaming, install, options.connected, options.decision, options.decisionsArePersistable, options.hostIdentity, options.hostProfileId, wiring.setupTargets]);
+  }, [assertNaming, install, options.connected, options.decision, options.decisionsArePersistable, options.hostIdentity, options.hostProfileId, options.setupAllowed, wiring.setupTargets]);
 
   /**
    * `targets` is what the dialog listed, passed down from the render that

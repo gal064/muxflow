@@ -9,7 +9,16 @@ import { useDesktopResumeRecovery } from "../features/shell/useDesktopResumeReco
 import { TerminalEventHub } from "../features/terminal/TerminalEventHub";
 import { createEchoLagProbe } from "../features/terminal/echoLagProbe";
 import { createInputLatencyReporter } from "../features/terminal/inputLatencyStats";
-import { fetchInputLatencyStats, fetchLinkStats, requestTerminalSeed, startTerminal, stopTerminal, terminalBridgeKey, terminalBridgeScope } from "../features/terminal/api";
+import {
+  fetchInputLatencyStats,
+  fetchLinkStats,
+  requestTerminalSeed,
+  startTerminal,
+  stopTerminal,
+  terminalBridgeKey,
+  terminalBridgeScope,
+  type TerminalEvent,
+} from "../features/terminal/api";
 import { terminalStateCache } from "../features/terminal/TerminalStateCache";
 import { connectionReducer, denormalizeSnapshot, initialHostState } from "../state/connectionReducer";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
@@ -36,6 +45,11 @@ type ControllerArguments = {
    * shell is told and decides whether to offer the install.
    */
   onHandshakeFailure?(connection: ConnectionSpec): void;
+  /** The bridge transport changed state; helper digest reconciliation may react. */
+  onConnectionStateChanged?(
+    connection: ConnectionSpec,
+    state: Extract<TerminalEvent, { kind: "connectionState" }>["state"],
+  ): void;
 };
 
 export function useAppConnectionController({
@@ -45,12 +59,15 @@ export function useAppConnectionController({
   setStatus,
   terminalApplicationClipboardEnabled = false,
   onHandshakeFailure,
+  onConnectionStateChanged,
 }: ControllerArguments) {
   // Through a ref, because the bridge effect is keyed on the connection alone:
   // a callback the shell rebuilds every render must not be able to tear the
   // bridge down and start it again.
   const handshakeFailureRef = useRef(onHandshakeFailure);
   handshakeFailureRef.current = onHandshakeFailure;
+  const connectionStateChangedRef = useRef(onConnectionStateChanged);
+  connectionStateChangedRef.current = onConnectionStateChanged;
   const terminalApplicationClipboardEnabledRef = useRef(terminalApplicationClipboardEnabled);
   terminalApplicationClipboardEnabledRef.current = terminalApplicationClipboardEnabled;
   const [hostState, dispatchHost] = useReducer(connectionReducer, initialHostState);
@@ -387,6 +404,11 @@ export function useAppConnectionController({
             handshakeFailureRef.current?.(connection);
           }
         } else if (event.kind === "connectionState") {
+          // Let helper reconciliation observe the transport transition before
+          // publishing it to the shell. React batches both updates, so a live
+          // or read-only helper probe can arbitrate against other one-time host
+          // questions on that first settled render without delaying the bridge.
+          connectionStateChangedRef.current?.(connection, event.state);
           dispatchHost({ type: "connection", phase: event.state });
           if (event.state === "connected") setConnectionDetail("");
           setStatus(event.state === "connected" ? "Live" : `Connection ${event.state}…`);

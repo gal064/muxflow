@@ -36,8 +36,10 @@ import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
 import { emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
 import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
-import { helperConnectionKey, helperUpgradeReducer, initialHelperUpgradeState } from "../features/shell/helperUpgrade";
-import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
+import {
+  helperConnectionKey, helperOwnsHostSetupLane, helperUpgradeReducer, initialHelperUpgradeState,
+} from "../features/shell/helperUpgrade";
+import { sameHelperInstallConnection, sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 import { useShellCommands } from "../features/shell/useShellCommands";
 import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
@@ -85,7 +87,7 @@ import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
 import { useAppAgentController } from "./useAppAgentController";
 import { useAppShellChrome } from "./useAppShellChrome";
 import { useAppHostSettingsActions } from "./useAppHostSettingsActions";
-import { useMissingHelperRecovery } from "./useMissingHelperRecovery";
+import { useRemoteHelperRecovery } from "./useMissingHelperRecovery";
 import { useAppFileActions } from "./useAppFileActions";
 import { AppNoticeLayer } from "./AppNoticeLayer";
 import { AppRightPanel } from "./AppRightPanel";
@@ -189,16 +191,20 @@ export function App() {
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus, platform);
   // One shared observation per repository, for the sidebar and every diff tab.
   const gitRepositories = useMemo(() => new GitRepositoryStore(gitClient), [gitClient]);
-  // The connection controller reports a handshake failure; what to do about one
-  // is decided further down this component, with the helper reducer in hand.
-  // The indirection is what lets the two be defined in that order.
+  // The connection controller reports helper-relevant lifecycle points; what
+  // to do about them is decided further down this component, with the helper
+  // reducer in hand. The indirection lets the two be defined in that order.
   const onHandshakeFailure = useRef<(connection: ConnectionSpec) => void>(() => undefined);
+  const onConnectionStateChanged = useRef<NonNullable<
+    Parameters<typeof useAppConnectionController>[0]["onConnectionStateChanged"]
+  >>(() => undefined);
   const connectionController = useAppConnectionController({
     agentClient,
     fileClient,
     gitClient,
     terminalApplicationClipboardEnabled: appState.shell.terminalApplicationClipboard,
     onHandshakeFailure: (failed) => onHandshakeFailure.current(failed),
+    onConnectionStateChanged: (changed, state) => onConnectionStateChanged.current(changed, state),
     setStatus,
   });
   const {
@@ -258,10 +264,12 @@ export function App() {
   const terminalTransferClient = useMemo(() => new TauriTerminalTransferClient(), []);
   const terminalTransferRegistry = useTerminalTransferRegistry();
   const latency = useHostLatency();
-  useEffect(() => dispatchHelper({ type: "reset" }), [currentHelperConnectionKey]);
-  onHandshakeFailure.current = useMissingHelperRecovery({
+  useEffect(() => dispatchHelper({ type: "reset" }), [connectionEpoch, currentHelperConnectionKey]);
+  const remoteHelperRecovery = useRemoteHelperRecovery({
     connection, connectionEpoch, dispatchHelper, setConnectionDetail,
   });
+  onHandshakeFailure.current = remoteHelperRecovery.onHandshakeFailure;
+  onConnectionStateChanged.current = remoteHelperRecovery.onConnectionStateChanged;
   /**
    * The host whose agent status the *helper install* dialog already consented
    * to, waiting for the connection that install produces.
@@ -410,9 +418,10 @@ export function App() {
     currentScope: currentHostScope,
     dispatchHelper,
     helperState,
+    probeHelper: remoteHelperRecovery.probeManually,
     profiles,
     resetHost: () => dispatchHost({ type: "reset" }),
-    scopeIsCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
+    scopeIsCurrent: (scope) => sameHelperInstallConnection(scope, hostScopeRef.current),
     selectedProfileId,
     setConnection,
     setConnectionDetail,
@@ -461,6 +470,10 @@ export function App() {
     decision: appState.hostSetup[currentHostProfileId],
     decisionsArePersistable: appStateRecovery === undefined,
     hostCanMutate: hostState.canMutate,
+    // Helper compatibility owns the host-level consent lane while it is
+    // unresolved. Runtime observation stays live; only the separate one-time
+    // agent setup question waits, so two dialogs can never stack.
+    hostSetupAllowed: !helperOwnsHostSetupLane(helperState),
     hostLabel,
     profiles,
     recordDecision: recordHostSetupDecision,

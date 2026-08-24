@@ -57,12 +57,34 @@ printf '\n' >>"$legacy"
 chmod 0755 "$legacy"
 legacy_digest=$(shasum -a 256 "$legacy" | cut -d' ' -f1)
 artifact_digest=$(shasum -a 256 "$artifact" | cut -d' ' -f1)
+expected_version=$("$local_host" version | jq -r '.helperVersion')
+
+# The UI probe is evidence, not authority: another desktop can replace the
+# helper before this desktop's confirmation is accepted. The installer carries
+# its packaged version into the fresh pre-write probe and refuses that race.
+newer="$work/newer-helper"
+printf '%s\n' '#!/bin/sh' 'printf '\''{"helperVersion":"999.0.0"}\n'\''' >"$newer"
+chmod 0755 "$newer"
+ssh -F "$config" ade-phase10-docker \
+  'install -d -m 0700 $HOME/.local/bin; cat >$HOME/.local/bin/muxflow-host; chmod 0700 $HOME/.local/bin/muxflow-host' <"$newer"
+newer_digest=$(ssh -F "$config" ade-phase10-docker 'sha256sum $HOME/.local/bin/muxflow-host' | cut -d' ' -f1)
+if "$local_host" helper install ade-phase10-docker --config "$config" \
+  --artifact "$artifact" --digest "$artifact_digest" --expected-arch aarch64 \
+  --expected-version "$expected_version" --allow-upgrade >"$work/downgrade.out" 2>"$work/downgrade.err"; then
+  echo "newer remote helper was unexpectedly downgraded" >&2
+  exit 1
+fi
+rg 'newer than this app expects.*refusing downgrade' "$work/downgrade.err" >/dev/null
+remote_digest=$(ssh -F "$config" ade-phase10-docker 'sha256sum $HOME/.local/bin/muxflow-host' | cut -d' ' -f1)
+[[ "$remote_digest" == "$newer_digest" ]]
+ssh -F "$config" ade-phase10-docker 'rm -f $HOME/.local/bin/muxflow-host'
+
 "$local_host" helper install ade-phase10-docker --config "$config" \
   --artifact "$legacy" --digest "$legacy_digest" --expected-arch aarch64 >/dev/null
 ssh -F "$config" ade-phase10-docker '$HOME/.local/bin/muxflow-host bridge --stdio </dev/null >/dev/null 2>&1 || true'
 if ADE_PHASE1_TESTING=1 "$local_host" helper install ade-phase10-docker --config "$config" \
   --artifact "$artifact" --digest "$artifact_digest" --expected-arch aarch64 \
-  --allow-upgrade --test-fail-after-shutdown >/dev/null 2>&1; then
+  --expected-version "$expected_version" --allow-upgrade --test-fail-after-shutdown >/dev/null 2>&1; then
   echo "injected helper upgrade unexpectedly succeeded" >&2
   exit 1
 fi
@@ -70,7 +92,7 @@ remote_digest=$(ssh -F "$config" ade-phase10-docker 'sha256sum $HOME/.local/bin/
 [[ "$remote_digest" == "$legacy_digest" ]]
 "$local_host" helper install ade-phase10-docker --config "$config" \
   --artifact "$artifact" --digest "$artifact_digest" --expected-arch aarch64 \
-  --allow-upgrade >/dev/null
+  --expected-version "$expected_version" --allow-upgrade >/dev/null
 "$local_host" helper probe ade-phase10-docker --config "$config" \
   | jq -e '.operatingSystem == "Linux" and .architecture == "aarch64" and .compatible' >/dev/null
 
