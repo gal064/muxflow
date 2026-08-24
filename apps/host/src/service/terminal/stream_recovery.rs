@@ -39,8 +39,16 @@ impl StreamState {
                     {
                         self.pending_metadata = None;
                     }
-                    if self.active_scope() == pane_id {
-                        self.command_block = CommandBlock::None;
+                    // The parser still considers an in-flight tmux command
+                    // open until its matching `%end` or `%error`. Drain that
+                    // fence without retaining or publishing stale capture
+                    // rows. Clearing only the stream side made the remaining
+                    // rows look like unframed output; preserving the capture
+                    // itself let a remove/re-add publish an obsolete seed.
+                    if self.active_scope() == pane_id
+                        && let Some(tag) = self.active_tag()
+                    {
+                        self.command_block = CommandBlock::Draining { tag };
                     }
                 }
                 for pane_id in pane_ids {
@@ -61,7 +69,12 @@ impl StreamState {
         self.expected_resume = None;
         self.pending_alternate = None;
         self.pending_metadata = None;
-        self.command_block = CommandBlock::None;
+        if let Some(tag) = self.active_tag() {
+            // A parser error can occur inside an open command block. The
+            // parser retains that tag until the real fence, so the stream
+            // state must do the same while discarding the damaged payload.
+            self.command_block = CommandBlock::Draining { tag };
+        }
         for (pane_id, state) in &mut self.pane_states {
             *state = PaneSeedState::Pending {
                 buffered: Vec::new(),
