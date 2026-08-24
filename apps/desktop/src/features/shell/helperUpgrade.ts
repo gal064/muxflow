@@ -33,6 +33,8 @@ export type HelperUpgradeState =
 
 export type HelperUpgradeAction =
   | { type: "probe"; connectionKey: string }
+  | { type: "abandonProbe"; connectionKey: string }
+  | { type: "invalidateConnectionProbe"; connectionKey: string }
   | { type: "probeSucceeded"; connectionKey: string; probe: RemoteHelperProbe }
   | { type: "probeFailed"; connectionKey: string; message: string }
   | { type: "requestUpgrade" }
@@ -44,10 +46,26 @@ export type HelperUpgradeAction =
 
 export const initialHelperUpgradeState: HelperUpgradeState = { phase: "idle" };
 
+/** Host-level setup questions wait while helper compatibility owns the modal lane. */
+export function helperOwnsHostSetupLane(state: HelperUpgradeState): boolean {
+  return state.phase === "probing" || state.phase === "confirming" || state.phase === "upgrading";
+}
+
 export function helperUpgradeReducer(state: HelperUpgradeState, action: HelperUpgradeAction): HelperUpgradeState {
   switch (action.type) {
     case "reset": return initialHelperUpgradeState;
-    case "probe": return { phase: "probing", connectionKey: action.connectionKey };
+    // Replacing the helper can make the native supervisor reconnect before the
+    // install command returns. That fresh transport may probe, but it cannot
+    // take ownership away from the install whose result still has to land.
+    case "probe": return state.phase === "upgrading"
+      ? state : { phase: "probing", connectionKey: action.connectionKey };
+    case "abandonProbe": return state.phase === "probing" && state.connectionKey === action.connectionKey
+      ? initialHelperUpgradeState : state;
+    case "invalidateConnectionProbe": return "connectionKey" in state
+      && state.connectionKey === action.connectionKey
+      && state.phase !== "upgrading"
+      && state.phase !== "succeeded"
+      ? initialHelperUpgradeState : state;
     case "probeSucceeded": return state.phase === "probing" && state.connectionKey === action.connectionKey
       ? { phase: "ready", connectionKey: action.connectionKey, probe: action.probe } : state;
     case "probeFailed": return state.phase === "probing" && state.connectionKey === action.connectionKey

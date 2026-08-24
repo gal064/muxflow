@@ -297,6 +297,29 @@ describe("the one-time set-up prompt", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("pauses the setup lane without pretending the live host disconnected", async () => {
+    const setup = harness({ decision: "accepted", adapters: [adapter("claude-code", "partial")] });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    expect(setup.calls.applyHooks).toHaveBeenCalledTimes(1);
+    expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(1);
+
+    await act(async () => renderer.update(<setup.Harness
+      adapters={[adapter("claude-code", "partial")]}
+      decision="accepted"
+      setupAllowed={false}
+    />));
+    expect(setup.current.offerable).toBe(false);
+    await act(async () => renderer.update(<setup.Harness
+      adapters={[adapter("claude-code", "partial")]}
+      decision="accepted"
+      setupAllowed
+    />));
+    expect(setup.calls.applyHooks).toHaveBeenCalledTimes(1);
+    expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(1);
+    await act(async () => renderer.unmount());
+  });
+
   it("never installs for an adapter the consent dialog did not name", async () => {
     // Consent named the files it would touch. An adapter installed on the host
     // months later was in none of them, so it is offered rather than written.
