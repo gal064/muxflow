@@ -31,6 +31,8 @@ interface AppAgentControllerOptions {
   decision?: HostSetupDecision;
   decisionsArePersistable: boolean;
   hostCanMutate: boolean;
+  /** False while another host-level consent question owns the modal lane. */
+  hostSetupAllowed?: boolean;
   hostLabel: string;
   profiles: readonly HostProfile[];
   recordDecision(hostProfileId: string, decision: HostSetupDecision): void;
@@ -146,6 +148,7 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
     recordDecision: options.recordDecision,
     refreshWiring: runtime.refreshSnapshot,
     reviewHooks: runtime.reviewHooks,
+    setupAllowed: options.hostSetupAllowed,
   });
 
   return useMemo(() => ({ hostSetup, notificationActivation, runtime, scope, workflow }), [
