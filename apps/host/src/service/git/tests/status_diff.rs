@@ -92,7 +92,12 @@ async fn status_models_initial_raw_ignored_mode_symlink_binary_and_rename_delete
         fixture.root.to_str().unwrap()
     );
     assert!(status.entries.iter().any(|entry| entry.ignored));
-    assert!(status.entries.iter().any(|entry| entry.path == b"ignored-one"));
+    assert!(
+        status
+            .entries
+            .iter()
+            .any(|entry| entry.path == b"ignored-one")
+    );
     assert!(
         status
             .entries
