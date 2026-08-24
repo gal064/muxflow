@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sameHostConnection, sameHostScope, type HostScopeToken } from "./hostScope";
+import { sameHelperInstallConnection, sameHostConnection, sameHostScope, type HostScopeToken } from "./hostScope";
 
 const token: HostScopeToken = { hostProfileId: "local", connectionKey: "local", connectionEpoch: 1, serverIdentity: "server", generation: 2 };
 
@@ -31,5 +31,13 @@ describe("host scope token", () => {
       { hostProfileId: "other" }, { connectionKey: "ssh:other" }, { connectionEpoch: 2 },
       { serverIdentity: "other" },
     ]) expect(sameHostConnection(token, { ...token, ...changed })).toBe(false);
+  });
+
+  it("lets a first helper install establish only its previously absent server identity", () => {
+    const beforeFirstHandshake = { ...token, serverIdentity: undefined };
+    expect(sameHelperInstallConnection(beforeFirstHandshake, token)).toBe(true);
+    expect(sameHelperInstallConnection(token, { ...token, serverIdentity: "other" })).toBe(false);
+    expect(sameHelperInstallConnection(beforeFirstHandshake, { ...token, connectionEpoch: 2 })).toBe(false);
+    expect(sameHelperInstallConnection(beforeFirstHandshake, { ...token, connectionKey: "ssh:other" })).toBe(false);
   });
 });

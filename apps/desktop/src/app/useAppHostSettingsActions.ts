@@ -1,12 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, type Dispatch, type SetStateAction } from "react";
-import {
-  helperConnectionKey,
-  type HelperInstallReport,
-  type HelperUpgradeAction,
-  type HelperUpgradeState,
-  type RemoteHelperProbe,
-} from "../features/shell/helperUpgrade";
+import { helperConnectionKey, type HelperInstallReport, type HelperUpgradeAction, type HelperUpgradeState } from "../features/shell/helperUpgrade";
 import { profileIdForSshConnection } from "../features/shell/hostProfiles";
 import type { HostScopeToken } from "../features/shell/hostScope";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
@@ -18,6 +12,7 @@ interface HostSettingsActionsOptions {
   currentScope: HostScopeToken;
   dispatchHelper: Dispatch<HelperUpgradeAction>;
   helperState: HelperUpgradeState;
+  probeHelper(): void;
   profiles: readonly HostProfile[];
   resetHost(): void;
   scopeIsCurrent(scope: HostScopeToken): boolean;
@@ -55,21 +50,6 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     if (profile.connection.mode === "ssh") {
       options.setSshTarget(profile.connection.target);
       options.setSshConfigPath(profile.connection.configPath ?? "");
-    }
-  }, [options]);
-
-  const probeHelper = useCallback(async () => {
-    if (options.connection.mode !== "ssh") return;
-    const scope = options.currentScope;
-    const connectionKey = helperConnectionKey(options.connection);
-    options.dispatchHelper({ type: "probe", connectionKey });
-    try {
-      const probe = await invoke<RemoteHelperProbe>("probe_remote_helper", { connection: options.connection });
-      if (!options.scopeIsCurrent(scope)) return;
-      options.dispatchHelper({ type: "probeSucceeded", connectionKey, probe });
-    } catch (error) {
-      if (!options.scopeIsCurrent(scope)) return;
-      options.dispatchHelper({ type: "probeFailed", connectionKey, message: String(error) });
     }
   }, [options]);
 
@@ -167,6 +147,6 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
   }, [options]);
 
   return {
-    confirmHelperInstall, connect, deleteSavedProfile, probeHelper, selectProfile, switchHostProfile,
+    confirmHelperInstall, connect, deleteSavedProfile, probeHelper: options.probeHelper, selectProfile, switchHostProfile,
   };
 }

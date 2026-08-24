@@ -156,7 +156,22 @@ fn install_remote_helper_inner(
         return Err("remote helper installation requires an SSH profile".into());
     };
     validate_ssh_target(&target)?;
-    let probe = run_remote_probe_with_lease(&target, config_path.as_deref(), &lease)?;
+    let mut probe = run_remote_probe_with_lease(&target, config_path.as_deref(), &lease)?;
+    settle_compatibility(&mut probe);
+    if probe
+        .get("appOutdated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "remote helper {} is newer than this app expects {}; refusing downgrade",
+            probe
+                .get("helperVersion")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown"),
+            HELPER_VERSION,
+        ));
+    }
     let remote_arch = probe
         .get("architecture")
         .and_then(serde_json::Value::as_str)
@@ -172,6 +187,8 @@ fn install_remote_helper_inner(
             &digest,
             "--expected-arch",
             normalize_architecture(remote_arch),
+            "--expected-version",
+            HELPER_VERSION,
         ]);
     if let Some(control_socket) = lease.control_socket() {
         command.arg("--control-socket").arg(control_socket);
