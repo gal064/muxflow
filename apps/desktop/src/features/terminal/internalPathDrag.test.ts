@@ -59,20 +59,37 @@ describe("internal path drag payload", () => {
     expect(consumeNativeInternalPathDrop({ hostProfileId: "remote", serverIdentity: "server-a" })).toMatchObject({ kind: "rejected" });
   });
 
-  it("clears an unclaimed drag at dragend and retires a claimed one as delivered", () => {
+  it("clears an unclaimed drag at dragend and keeps a claimed accepted one for the native drop", () => {
     const data = transfer();
     writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
-    finishInternalPathDrag();
+    finishInternalPathDrag(true);
     expect(claimNativeInternalPathDrag()).toBe(false);
 
-    // dragend ends the gesture, so nothing after it may produce input. The
-    // record survives only so a native callback delivered on the far side of
-    // dragend recognizes its own gesture as handled instead of reporting that
-    // the WebView gave no paths.
+    // On macOS wry reports the drop through Tauri's async native event, which
+    // arrives after WebKit's synchronous dragend. The claimed gesture must
+    // still deliver once, then read as handled.
     writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
     expect(claimNativeInternalPathDrag()).toBe(true);
-    finishInternalPathDrag();
+    finishInternalPathDrag(true);
+    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toMatchObject({
+      kind: "accepted",
+      path: "/repo/file",
+    });
     expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "handled" });
+  });
+
+  it("expires an accepted drag whose native drop never arrives", () => {
+    vi.useFakeTimers();
+    try {
+      const data = transfer();
+      writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
+      claimNativeInternalPathDrag();
+      finishInternalPathDrag(true);
+      vi.advanceTimersByTime(2_001);
+      expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "absent" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps a drag that leaves the window and comes back droppable", () => {
@@ -94,11 +111,10 @@ describe("internal path drag payload", () => {
     const data = transfer();
     writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/secret" });
     claimNativeInternalPathDrag();
-    // Dropped outside the app, or cancelled with Escape: dragend arrives with
-    // nothing having consumed the source. The unrelated pathless drop that
-    // follows — a text selection, an image — must not paste this path.
-    finishInternalPathDrag();
-    expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "handled" });
+    // Dropped outside the app, or cancelled with Escape: dragend reports
+    // dropEffect "none". The unrelated pathless drop that follows — a text
+    // selection, an image — must not paste this path.
+    finishInternalPathDrag(false);
     expect(consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" })).toEqual({ kind: "absent" });
   });
 

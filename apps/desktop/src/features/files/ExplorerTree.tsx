@@ -174,7 +174,7 @@ export function ExplorerTree(props: Props) {
     loadMore: (directory) => liveRowActions.current.loadMore(directory),
     moreKeyDown: (event, index) => liveRowActions.current.moreKeyDown(event, index),
     drag: (entry, transfer) => liveRowActions.current.drag(entry, transfer),
-    dragEnd: () => liveRowActions.current.dragEnd(),
+    dragEnd: (accepted) => liveRowActions.current.dragEnd(accepted),
   }), []);
 
   const focusRow = (index: number) => {

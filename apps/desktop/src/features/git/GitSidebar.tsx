@@ -297,7 +297,7 @@ const GitGroup = memo(function GitGroup(props: {
             className="git-file"
             draggable={Boolean(props.onDrag && entry.absolutePath)}
             onDragStart={(event) => entry.absolutePath && props.onDrag?.(entry, event.dataTransfer)}
-            onDragEnd={finishInternalPathDrag}
+            onDragEnd={(event) => finishInternalPathDrag(event.dataTransfer.dropEffect !== "none")}
             onClick={() => props.onOpen(entry, props.target)}
             // What "the selected change" means for the palette and for a bound
             // shortcut: whichever row the keyboard or the pointer last landed on.

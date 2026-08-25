@@ -19,6 +19,8 @@ interface ActiveInternalPathDrag {
 }
 
 const ACTIVE_DRAG_MILLIS = 30_000;
+/** How long an accepted drag waits after dragend for the native drop event. */
+const ACCEPTED_DRAG_GRACE_MILLIS = 2_000;
 let activeDrag: ActiveInternalPathDrag | undefined;
 let nextGestureId = 0;
 
@@ -69,20 +71,24 @@ export function consumeNativeInternalPathDrop(target: InternalPathDragTarget | u
   return resolveInternalPathSource(drag.source, target);
 }
 
-/** Retires a DOM-only or cancelled drag without racing a claimed native drop. */
-export function finishInternalPathDrag(): void {
-  if (!activeDrag?.nativeClaimed) {
+/**
+ * dragend. `accepted` is `dropEffect !== "none"`: a target took the drop.
+ *
+ * A cancelled gesture (Escape, dropped outside every target) is retired at
+ * once, so the next unrelated pathless drop — a text selection, an image —
+ * cannot paste a retired path. An accepted, claimed gesture stays *pending*:
+ * on macOS wry reports the drop through Tauri's async native event, which
+ * lands after WebKit's synchronous dragend, so marking it delivered here made
+ * the native drop read as already handled and nothing pasted. The wait is
+ * bounded tightly instead so a native drop that never arrives cannot leak.
+ */
+export function finishInternalPathDrag(accepted: boolean): void {
+  if (!activeDrag) return;
+  if (!accepted || !activeDrag.nativeClaimed) {
     activeDrag = undefined;
     return;
   }
-  // A native callback and the DOM drop can be delivered on opposite sides of
-  // dragend. Keep a claimed gesture as a short-lived tombstone so the later
-  // lane recognizes it as already handled instead of pasting or reporting an
-  // error — delivered, because dragend is the end of the gesture and nothing
-  // after it may produce input. Without that flag a *cancelled* drag stayed
-  // pending for its whole 30s lifetime, and the next unrelated pathless drop —
-  // a text selection, an image — pasted the retired path into the shell.
-  activeDrag.delivery = "delivered";
+  activeDrag.expiresAt = Date.now() + ACCEPTED_DRAG_GRACE_MILLIS;
 }
 
 /**
