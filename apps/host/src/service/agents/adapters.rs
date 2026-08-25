@@ -4,6 +4,7 @@ use tmux_agent_protocol::v1;
 
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
 pub(crate) const CODEX_APPROVAL_REVIEWER_FIELD: &str = "approval_reviewer";
+pub(crate) const CODEX_APPROVAL_TURN_ID_FIELD: &str = "approval_turn_id";
 pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting
@@ -157,6 +158,10 @@ impl AgentAdapter for CodexAdapter {
             .get(CODEX_APPROVAL_REVIEWER_FIELD)
             .and_then(Value::as_str)
             == Some("auto_review")
+            && payload
+                .get(CODEX_APPROVAL_TURN_ID_FIELD)
+                .and_then(Value::as_str)
+                .is_some_and(|turn_id| !turn_id.is_empty())
         {
             v1::AgentLifecycleState::Working
         } else {
@@ -453,11 +458,29 @@ mod tests {
                 "hook_event_name": "PermissionRequest",
                 "session_id": "codex-session",
             });
+            payload[CODEX_APPROVAL_TURN_ID_FIELD] = "turn-1".into();
             if let Some(reviewer) = reviewer {
                 payload[CODEX_APPROVAL_REVIEWER_FIELD] = reviewer.into();
             }
             assert_eq!(codex.parse_hook(&payload).unwrap().lifecycle, expected);
         }
+        let missing_turn = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            CODEX_APPROVAL_REVIEWER_FIELD: "auto_review",
+        });
+        assert_eq!(
+            codex.parse_hook(&missing_turn).unwrap().lifecycle,
+            v1::AgentLifecycleState::Blocked
+        );
+        let malformed_reviewer = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            CODEX_APPROVAL_TURN_ID_FIELD: "turn-1",
+            CODEX_APPROVAL_REVIEWER_FIELD: {},
+        });
+        assert_eq!(
+            codex.parse_hook(&malformed_reviewer).unwrap().lifecycle,
+            v1::AgentLifecycleState::Blocked
+        );
     }
 
     #[test]

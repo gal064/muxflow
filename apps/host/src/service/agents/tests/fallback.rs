@@ -74,7 +74,12 @@ fn replay_preserves_an_auto_review_permission_as_working() {
     let mut permission = event("permission", 0, "PermissionRequest");
     let mut payload = serde_json::json!({"hook_event_name": "PermissionRequest"});
     payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
+    payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = "turn-1".into();
     permission.payload_json = serde_json::to_vec(&payload).unwrap();
+    let mut cached = event("cached-permission", 0, "PermissionRequest");
+    let mut cached_payload = serde_json::json!({"hook_event_name": "PermissionRequest"});
+    cached_payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = "turn-1".into();
+    cached.payload_json = serde_json::to_vec(&cached_payload).unwrap();
 
     for (name, hook) in [
         (
@@ -85,6 +90,7 @@ fn replay_preserves_an_auto_review_permission_as_working() {
             "hook-fallback-codex-7-00000000000000000002-b.pb",
             permission,
         ),
+        ("hook-fallback-codex-7-00000000000000000003-c.pb", cached),
     ] {
         fs::write(dir.join(name), hook.encode_to_vec()).unwrap();
     }
@@ -98,7 +104,7 @@ fn replay_preserves_an_auto_review_permission_as_working() {
         }
     })
     .unwrap();
-    assert_eq!(report.applied, 2);
+    assert_eq!(report.applied, 3);
     let record = &runtime.snapshot_for("server-a").agents[0];
     assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
     assert_eq!(record.attention_generation, 0);

@@ -18,6 +18,7 @@ const MAX_TRANSCRIPT_TAIL_BYTES: u64 = 1024 * 1024;
 pub(super) enum ApprovalReviewer {
     AutoReview,
     User,
+    Unknown,
 }
 
 impl ApprovalReviewer {
@@ -25,6 +26,7 @@ impl ApprovalReviewer {
         match self {
             Self::AutoReview => "auto_review",
             Self::User => "user",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -34,7 +36,9 @@ impl ApprovalReviewer {
 /// Hook input is untrusted. The transcript must resolve to a regular JSONL file
 /// below this user's Codex session root, and only a bounded tail is inspected.
 /// Every failure returns `None`; the adapter treats that as a human request so
-/// an unreadable vendor detail can never hide a real approval from the user.
+/// an unreadable vendor detail can never hide a real approval from the user. A
+/// matched context with an unknown reviewer remains explicit so it cannot use
+/// an earlier cached auto-review result.
 pub(super) fn approval_reviewer(payload: &Value, home: &Path) -> Option<ApprovalReviewer> {
     let turn_id = string_field(payload, &["turn_id", "turnId"])?;
     let supplied_path = Path::new(string_field(
@@ -76,14 +80,16 @@ pub(super) fn approval_reviewer(payload: &Value, home: &Path) -> Option<Approval
         {
             continue;
         }
-        return match record
-            .pointer("/payload/approvals_reviewer")
-            .and_then(Value::as_str)
-        {
-            Some("auto_review") => Some(ApprovalReviewer::AutoReview),
-            Some("user") => Some(ApprovalReviewer::User),
-            _ => None,
-        };
+        return Some(
+            match record
+                .pointer("/payload/approvals_reviewer")
+                .and_then(Value::as_str)
+            {
+                Some("auto_review") => ApprovalReviewer::AutoReview,
+                Some("user") => ApprovalReviewer::User,
+                _ => ApprovalReviewer::Unknown,
+            },
+        );
     }
     None
 }
@@ -262,7 +268,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             approval_reviewer(&payload(&transcript, "turn"), home.path()),
-            None
+            Some(ApprovalReviewer::Unknown)
         );
         assert_eq!(
             approval_reviewer(

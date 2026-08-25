@@ -209,6 +209,37 @@ impl AgentRuntime {
         let attention = previous
             .as_ref()
             .map_or(0, |record| record.attention_generation);
+        let codex_permission = adapter.id() == "codex" && parsed.event_name == "PermissionRequest";
+        let approval_turn_id = if codex_permission {
+            payload
+                .get(adapters::CODEX_APPROVAL_TURN_ID_FIELD)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+        } else {
+            ""
+        };
+        let approval_reviewer_present = codex_permission
+            && payload
+                .get(adapters::CODEX_APPROVAL_REVIEWER_FIELD)
+                .is_some();
+        let approval_reviewer = if codex_permission {
+            payload
+                .get(adapters::CODEX_APPROVAL_REVIEWER_FIELD)
+                .and_then(serde_json::Value::as_str)
+        } else {
+            None
+        };
+        let cached_auto_review = codex_permission
+            && !approval_reviewer_present
+            && !approval_turn_id.is_empty()
+            && previous
+                .as_ref()
+                .is_some_and(|record| record.codex_auto_review_turn_id == approval_turn_id);
+        let parsed_lifecycle = if cached_auto_review {
+            v1::AgentLifecycleState::Working
+        } else {
+            parsed.lifecycle
+        };
         let terminal_late = previous.as_ref().is_some_and(|record| record.hook_terminal)
             && !matches!(
                 parsed.event_name.as_str(),
@@ -221,7 +252,7 @@ impl AgentRuntime {
             // Working forever merely because every later Stop is also "late".
             v1::AgentLifecycleState::Idle
         } else {
-            parsed.lifecycle
+            parsed_lifecycle
         };
         let hook_terminal = if matches!(
             parsed.event_name.as_str(),
@@ -273,6 +304,17 @@ impl AgentRuntime {
         } else {
             latest_sequence
         };
+        let codex_auto_review_turn_id =
+            if approval_reviewer == Some("auto_review") && !approval_turn_id.is_empty() {
+                approval_turn_id.to_owned()
+            } else if approval_reviewer_present {
+                String::new()
+            } else {
+                previous
+                    .as_ref()
+                    .map(|record| record.codex_auto_review_turn_id.clone())
+                    .unwrap_or_default()
+            };
         let record = StoredAgent {
             agent_id: agent_id.clone(),
             adapter: adapter.legacy_kind() as i32,
@@ -298,6 +340,7 @@ impl AgentRuntime {
             latest_source_generation,
             present: true,
             hook_terminal,
+            codex_auto_review_turn_id,
             lifecycle_observed_at_unix_millis: observed_now,
         };
         state.agents.insert(agent_id, record.clone());
