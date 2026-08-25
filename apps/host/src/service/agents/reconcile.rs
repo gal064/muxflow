@@ -114,6 +114,7 @@ pub(super) fn topology(
                 latest_source_generation: 0,
                 present: true,
                 hook_terminal: false,
+                codex_auto_review_turn_id: String::new(),
                 // Process detection proves a process exists; it is not an
                 // observation of what that process is doing, so it starts no
                 // staleness clock.

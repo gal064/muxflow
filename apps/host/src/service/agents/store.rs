@@ -59,6 +59,10 @@ pub(super) struct StoredAgent {
     pub present: bool,
     #[serde(default)]
     pub hook_terminal: bool,
+    /// The exact Codex turn whose transcript identified native auto-review.
+    /// A missing reviewer may reuse this only when its turn ID matches.
+    #[serde(default)]
+    pub codex_auto_review_turn_id: String,
     /// When something last said what this agent was *doing*.
     ///
     /// Distinct from `updated_at_unix_millis`, which also moves when the agent
@@ -319,6 +323,7 @@ mod tests {
         assert_eq!(record.attention_kind, "completed");
         assert_eq!(record.seen_generation, 1);
         assert_eq!(record.route.pane_id, "%1");
+        assert!(record.codex_auto_review_turn_id.is_empty());
         fs::remove_file(path).unwrap();
     }
 
@@ -360,6 +365,7 @@ mod tests {
                 latest_source_generation: 0,
                 present: true,
                 hook_terminal: true,
+                codex_auto_review_turn_id: String::new(),
                 lifecycle_observed_at_unix_millis: 1,
             },
         );

@@ -4,8 +4,184 @@ fn auto_review_permission(id: &str) -> v1::AgentHookEvent {
     let mut permission = event(id, 0, "PermissionRequest");
     let mut payload = serde_json::json!({"hook_event_name": "PermissionRequest"});
     payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
+    payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = "turn-1".into();
     permission.payload_json = serde_json::to_vec(&payload).unwrap();
     permission
+}
+
+fn permission_for_turn(id: &str, turn_id: &str, reviewer: Option<&str>) -> v1::AgentHookEvent {
+    let mut permission = event(id, 0, "PermissionRequest");
+    let mut payload = serde_json::json!({"hook_event_name": "PermissionRequest"});
+    payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = turn_id.into();
+    if let Some(reviewer) = reviewer {
+        payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = reviewer.into();
+    }
+    permission.payload_json = serde_json::to_vec(&payload).unwrap();
+    permission
+}
+
+#[test]
+fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("auto-review-cache-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let topology = topology("codex");
+    {
+        let runtime = AgentRuntime::isolated(path.clone());
+        let confirmed = runtime
+            .ingest_hook_with_context(
+                &permission_for_turn("confirmed", "turn-1", Some("auto_review")),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert!(!confirmed.notify);
+        assert_eq!(
+            confirmed.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Working as i32
+        );
+
+        let cached = runtime
+            .ingest_hook_with_context(
+                &permission_for_turn("cached", "turn-1", None),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert!(!cached.notify);
+        assert_eq!(
+            cached.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Working as i32
+        );
+    }
+
+    let restarted = AgentRuntime::isolated(path);
+    let cached = restarted
+        .ingest_hook_with_context(
+            &permission_for_turn("cached-after-restart", "turn-1", None),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!cached.notify);
+    assert_eq!(
+        cached.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+
+    let cold_turn = restarted
+        .ingest_hook_with_context(
+            &permission_for_turn("different-turn", "turn-2", None),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(cold_turn.notify);
+    assert_eq!(
+        cold_turn.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+}
+
+#[test]
+fn explicit_non_auto_reviewer_overrides_the_same_turn_cache() {
+    for reviewer in ["user", "future_reviewer"] {
+        let runtime = runtime(&format!("auto-review-override-{reviewer}"));
+        let topology = topology("codex");
+        runtime
+            .ingest_hook_with_context(
+                &permission_for_turn("confirmed", "turn-1", Some("auto_review")),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        let overridden = runtime
+            .ingest_hook_with_context(
+                &permission_for_turn("overridden", "turn-1", Some(reviewer)),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert!(overridden.notify);
+        assert_eq!(
+            overridden.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Blocked as i32
+        );
+        assert!(
+            runtime
+                .state
+                .lock()
+                .unwrap()
+                .agents
+                .values()
+                .all(|record| record.codex_auto_review_turn_id.is_empty())
+        );
+    }
+}
+
+#[test]
+fn malformed_reviewer_cannot_reuse_the_same_turn_cache() {
+    let runtime = runtime("auto-review-malformed-reviewer");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &permission_for_turn("confirmed", "turn-1", Some("auto_review")),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+
+    let mut malformed = permission_for_turn("malformed", "turn-1", None);
+    let mut payload: serde_json::Value = serde_json::from_slice(&malformed.payload_json).unwrap();
+    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = serde_json::json!({});
+    malformed.payload_json = serde_json::to_vec(&payload).unwrap();
+    let blocked = runtime
+        .ingest_hook_with_context(&malformed, "server-a", Some(&topology))
+        .unwrap();
+
+    assert!(blocked.notify);
+    assert_eq!(
+        blocked.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .all(|record| record.codex_auto_review_turn_id.is_empty())
+    );
+}
+
+#[test]
+fn missing_or_different_turn_id_cannot_reuse_the_cache() {
+    for (turn_id, reviewer) in [("", None), ("turn-2", None), ("", Some("auto_review"))] {
+        let runtime = runtime(&format!("auto-review-cache-miss-{turn_id}-{reviewer:?}"));
+        let topology = topology("codex");
+        runtime
+            .ingest_hook_with_context(
+                &permission_for_turn("confirmed", "turn-1", Some("auto_review")),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        let missed = runtime
+            .ingest_hook_with_context(
+                &permission_for_turn("missed", turn_id, reviewer),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert!(missed.notify);
+        assert_eq!(
+            missed.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Blocked as i32
+        );
+    }
 }
 
 #[test]

@@ -357,14 +357,22 @@ fn build_event(
     if !notification_type.is_empty() {
         normalized.insert("notification_type".into(), notification_type.into());
     }
-    if codex_permission
-        && let Some(reviewer) =
+    if codex_permission {
+        let turn_id = string_field(&value, &["turn_id", "turnId"]);
+        if !turn_id.is_empty() {
+            normalized.insert(
+                crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD.into(),
+                turn_id.into(),
+            );
+        }
+        if let Some(reviewer) =
             home.and_then(|home| codex_transcript::approval_reviewer(&value, home))
-    {
-        normalized.insert(
-            crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD.into(),
-            reviewer.as_str().into(),
-        );
+        {
+            normalized.insert(
+                crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD.into(),
+                reviewer.as_str().into(),
+            );
+        }
     }
     Ok(v1::AgentHookEvent {
         adapter: adapter.into(),
@@ -785,10 +793,15 @@ mod tests {
             payload.get(crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD),
             Some(&serde_json::Value::String("auto_review".into()))
         );
+        assert_eq!(
+            payload.get(crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD),
+            Some(&serde_json::Value::String("turn-1".into()))
+        );
         let serialized = payload.to_string();
-        for private in ["transcript_path", "turn_id", "private prompt", "secret"] {
+        for private in ["transcript_path", "private prompt", "secret"] {
             assert!(!serialized.contains(private));
         }
+        assert!(payload.get("turn_id").is_none());
     }
 
     #[tokio::test]
