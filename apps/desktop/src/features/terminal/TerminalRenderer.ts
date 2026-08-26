@@ -811,7 +811,9 @@ export class XtermRenderer implements TerminalRenderer {
         text,
         range: {
           start: { x: start, y: bufferLineNumber },
-          end: { x: start + text.length, y: bufferLineNumber },
+          // xterm's range is inclusive at both ends; one past the text
+          // would make the cell after the URL a live link.
+          end: { x: start + text.length - 1, y: bufferLineNumber },
         },
         activate: (event) => this.#activateLink(event, text),
       });
