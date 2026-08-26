@@ -9,7 +9,7 @@ describe("agent status glyph stripping", () => {
   // font lacks several of these glyphs (WebKitGTK renders them as an
   // underscore-like box), so labels drop the ticker rather than render it.
   it("removes each agent status ticker the CLIs actually emit", () => {
-    for (const glyph of ["·", "✢", "✳", "✶", "✻", "✽", "◐", "◓", "◑", "◒", "⠦", "⠋", "⣷", "✓", "✗"]) {
+    for (const glyph of ["·", "✢", "✳", "✶", "✻", "✽", "◐", "◓", "◑", "◒", "⠦", "⠋", "⣷", "✓", "✗", "[ . ]", "[ ! ]"]) {
       expect(stripAgentStatusGlyphs(`${glyph} Fix tests`), glyph).toBe("Fix tests");
     }
     // The emoji presentation variant Claude sometimes emits (✳ + U+FE0F).
@@ -22,6 +22,12 @@ describe("agent status glyph stripping", () => {
     // Codex's completion title, exactly as sampled from a live tmux server.
     expect(stripAgentStatusGlyphs("✓ Update customize.py for oma… · gpt-5.6-sol · ~/dev"))
       .toBe("Update customize.py for oma… · gpt-5.6-sol · ~/dev");
+    // Codex's action-required title, including the session ID suffix observed
+    // while the marker alternated live between `[ . ]` and `[ ! ]`.
+    expect(stripAgentStatusGlyphs("[ . ] Action Required | 01a03cb0-7122-7410-a867-f5c95d64faa5"))
+      .toBe("Action Required | 01a03cb0-7122-7410-a867-f5c95d64faa5");
+    expect(stripAgentStatusGlyphs("[ ! ] Action Required | 01a03cb0-7122-7410-a867-f5c95d64faa5"))
+      .toBe("Action Required | 01a03cb0-7122-7410-a867-f5c95d64faa5");
   });
 
   it("leaves deliberate names alone", () => {
