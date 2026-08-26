@@ -31,104 +31,30 @@ fn write_crafted_journal(
 }
 
 #[test]
-fn destination_diagnostic_classifies_without_recording_the_path() {
-    let root = std::env::temp_dir().join(format!("ade-dl-diagnostic-{}", Uuid::new_v4()));
-    fs::create_dir(&root).unwrap();
-    let destination = root.join("private-report-name.pdf");
-    let directory = File::open(&root).unwrap();
-    let diagnostic = destination_parent_diagnostic(
-        &destination,
-        None,
-        ParentOpenDiagnostic {
-            attempts: 1,
-            first_errno: None,
-            final_errno: None,
-        },
-        Some(&directory),
-    );
-    let serialized = serde_json::to_string(&diagnostic).unwrap();
-
-    assert_eq!(diagnostic["parentClass"], "temporaryDirectory");
-    assert_eq!(diagnostic["parentExists"], true);
-    assert_eq!(diagnostic["parentKind"], "directory");
-    assert!(!serialized.contains(root.to_str().unwrap()));
-    assert!(!serialized.contains("private-report-name.pdf"));
-    fs::remove_dir_all(&root).unwrap();
-}
-
-#[test]
-fn destination_diagnostic_preserves_original_and_retry_denial_facts() {
-    let root = std::env::temp_dir().join(format!("ade-dl-missing-parent-{}", Uuid::new_v4()));
-    let destination = root.join("report.pdf");
-    let diagnostic = destination_parent_diagnostic(
-        &destination,
-        Some("destination parent is unavailable or unsafe: Operation not permitted (os error 1)"),
-        ParentOpenDiagnostic {
-            attempts: 2,
-            first_errno: Some(libc::EPERM),
-            final_errno: Some(libc::EPERM),
-        },
-        None,
-    );
-
-    assert!(diagnostic["parentExists"].is_null());
-    assert_eq!(diagnostic["parentKind"], "notProbed");
-    assert!(diagnostic["readAccess"].is_null());
-    assert_eq!(diagnostic["parentOpenAttempts"], 2);
-    assert_eq!(diagnostic["parentOpenFirstErrno"], libc::EPERM);
-    assert_eq!(diagnostic["parentOpenFinalErrno"], libc::EPERM);
-    assert_eq!(diagnostic["parentOpenRecovered"], false);
-    assert_eq!(
-        diagnostic["admissionErrorClass"],
-        "parentUnavailableOrUnsafe"
-    );
-}
-
-#[test]
-fn rejected_relative_destination_is_not_probed_against_the_process_cwd() {
-    let diagnostic = destination_parent_diagnostic(
-        Path::new("renderer-controlled/report.pdf"),
-        Some("download destination path must be absolute"),
-        ParentOpenDiagnostic::default(),
-        None,
-    );
-
-    assert_eq!(diagnostic["parentAbsolute"], false);
-    assert_eq!(diagnostic["parentClass"], "relativeRejected");
-    assert_eq!(diagnostic["parentKind"], "notProbed");
-    assert!(diagnostic["readAccess"].is_null());
-    assert_eq!(diagnostic["statvfsSucceeded"], false);
-}
-
-#[test]
 fn transient_eperm_retries_the_identical_safe_parent_open_once() {
     let root = std::env::temp_dir().join(format!("ade-dl-eperm-retry-{}", Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
     inject_parent_open_eperm(1);
 
-    let reserved = ReservedDestination::reserve_observed(
+    let reserved = ReservedDestination::reserve(
         &root.join("report.pdf"),
         DownloadCollisionPolicy::Fail,
         Arc::default(),
     )
     .unwrap();
-    let diagnostic = reserved.parent_open_diagnostic();
-
-    assert_eq!(diagnostic.attempts, 2);
-    assert_eq!(diagnostic.first_errno, Some(libc::EPERM));
-    assert_eq!(diagnostic.final_errno, None);
+    assert_eq!(remaining_injected_parent_open_eperm(), 0);
     drop(reserved);
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn repeated_eperm_fails_after_one_retry_and_preserves_both_errno_values() {
+fn repeated_eperm_fails_after_one_retry() {
     let root = std::env::temp_dir().join(format!("ade-dl-eperm-stop-{}", Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
     let destination = root.join("report.pdf");
     inject_parent_open_eperm(2);
 
-    let failure = match ReservedDestination::reserve_observed(
+    let failure = match ReservedDestination::reserve(
         &destination,
         DownloadCollisionPolicy::Fail,
         Arc::default(),
@@ -136,14 +62,8 @@ fn repeated_eperm_fails_after_one_retry_and_preserves_both_errno_values() {
         Ok(_) => panic!("two injected denials must exhaust the bounded retry"),
         Err(failure) => failure,
     };
-    let parent_open = failure.parent_open_diagnostic();
-    let diagnostic =
-        destination_parent_diagnostic(&destination, Some(failure.as_str()), parent_open, None);
-
-    assert_eq!(parent_open.attempts, 2);
-    assert_eq!(parent_open.first_errno, Some(libc::EPERM));
-    assert_eq!(parent_open.final_errno, Some(libc::EPERM));
-    assert_eq!(diagnostic["parentOpenRecovered"], false);
+    assert_eq!(remaining_injected_parent_open_eperm(), 0);
+    assert!(failure.contains("Operation not permitted"));
     fs::remove_dir_all(root).unwrap();
 }
 

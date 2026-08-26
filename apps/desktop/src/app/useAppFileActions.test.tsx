@@ -10,12 +10,10 @@ import { defaultAppState } from "../features/shell/types";
 import { useAppFileActions } from "./useAppFileActions";
 
 const picker = vi.hoisted(() => ({ choose: vi.fn() }));
-const journal = vi.hoisted(() => ({ record: vi.fn() }));
 vi.mock("../features/files/downloadFlow", async (importOriginal) => ({
   ...await importOriginal<typeof import("../features/files/downloadFlow")>(),
   chooseDownloadDestination: picker.choose,
 }));
-vi.mock("../diagnostics/incidents", () => ({ recordIncident: journal.record }));
 
 const root: ActiveRoot = {
   token: "root-a", paneId: "%1", cwd: "/work", path: "/work", gitWorktree: false, revision: "1",
@@ -49,7 +47,6 @@ function Harness(props: { client: FileWorkspaceClient; scope?: FileWorkspaceScop
 
 describe("useAppFileActions", () => {
   beforeEach(() => {
-    journal.record.mockClear();
     picker.choose.mockReset();
   });
 
@@ -68,11 +65,6 @@ describe("useAppFileActions", () => {
     });
 
     expect(startDownload).toHaveBeenCalledWith(expect.anything(), root, expect.objectContaining({ path: "/work/report" }));
-    expect(journal.record).toHaveBeenCalledWith("download.requested", expect.objectContaining({
-      origin: "fileSurface", currentScopePresent: true, currentRootPresent: true,
-      scopeKeyMatch: true, rootMatch: false, rootTokenMatch: false, rootPathMatch: false, rootPaneMatch: true,
-    }));
-    expect(journal.record).not.toHaveBeenCalledWith("download.workspaceRejected", expect.anything());
   });
 
   it("downloads a restored file tab before the live Explorer root is reacquired", async () => {
@@ -89,11 +81,6 @@ describe("useAppFileActions", () => {
     });
 
     expect(startDownload).toHaveBeenCalled();
-    expect(journal.record).toHaveBeenCalledWith("download.requested", expect.objectContaining({
-      currentScopePresent: true, currentRootPresent: false,
-      scopeKeyMatch: true, rootMatch: false, rootTokenMatch: false, rootPathMatch: false, rootPaneMatch: false,
-    }));
-    expect(journal.record).not.toHaveBeenCalledWith("download.workspaceRejected", expect.anything());
   });
 
   it("keeps Explorer downloads bound to the live Explorer root", async () => {
@@ -106,9 +93,6 @@ describe("useAppFileActions", () => {
     });
 
     expect(picker.choose).not.toHaveBeenCalled();
-    expect(journal.record).toHaveBeenCalledWith("download.workspaceRejected", expect.objectContaining({
-      origin: "explorer", stage: "prePicker", scopeKeyMatch: true, rootMatch: false,
-    }));
   });
 
   it("does not start a download after the save panel outlives its host scope", async () => {
