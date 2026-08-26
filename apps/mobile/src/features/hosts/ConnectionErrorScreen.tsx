@@ -29,14 +29,14 @@ export function ConnectionErrorScreen({ failure, hostId }: ConnectionErrorScreen
         router.push("/key");
         return;
       case "reconnect":
-        if (host) connectHost(host);
+        if (host) void connectHost(host).catch(() => undefined);
         return;
       case "forgetHostKey":
         if (!host) return;
         // §9.10: forgetting the key is what lets the user re-trust — the next
         // connection presents the new fingerprint in the trust dialog.
         hostsStore.getState().setTrustedHostKeyFingerprint(host.id, null);
-        connectHost(host);
+        void connectHost(host).catch(() => undefined);
     }
   };
 

@@ -8,7 +8,7 @@ import { createTerminalWindow } from "../../src/features/terminal/createWindow";
 import { activePaneForWindow } from "../../src/features/terminal/panes";
 import { getConnection, toast } from "../../src/session/connectionManager";
 import { sessionStore } from "../../src/store/sessionStore";
-import { ConnectionStrip } from "../../src/ui/components/ConnectionStrip";
+import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
 import { ListRow } from "../../src/ui/components/ListRow";
 import { StatusPill } from "../../src/ui/components/StatusPill";
 import { useSession } from "../../src/ui/hooks";
