@@ -13,14 +13,22 @@ export interface TapTarget {
   paneId: string;
   sessionId: string;
   attentionGeneration: bigint;
+  /**
+   * Beyond §13's `data`: pane and session ids are tmux ids, and `%12` exists on
+   * every host. Without the identity of the tmux server the notification came
+   * from, a tap that outlives a host switch would open an unrelated pane
+   * somewhere else and acknowledge a generation there.
+   */
+  serverIdentity: string;
 }
 
-export function encodePayload(data: NotificationToPost["data"]): NotificationPayload {
+export function encodePayload(data: NotificationToPost["data"], serverIdentity: string): NotificationPayload {
   return {
     agentId: data.agentId,
     paneId: data.paneId,
     sessionId: data.sessionId,
     attentionGeneration: data.attentionGeneration.toString(),
+    serverIdentity,
   };
 }
 
@@ -32,7 +40,13 @@ export function decodePayload(data: unknown): TapTarget | undefined {
   if (agentId === undefined || paneId === undefined) return undefined;
   const generation = generationField(record.attentionGeneration);
   if (generation === undefined) return undefined;
-  return { agentId, paneId, sessionId: stringField(record.sessionId) ?? "", attentionGeneration: generation };
+  return {
+    agentId,
+    paneId,
+    sessionId: stringField(record.sessionId) ?? "",
+    attentionGeneration: generation,
+    serverIdentity: stringField(record.serverIdentity) ?? "",
+  };
 }
 
 function stringField(value: unknown): string | undefined {

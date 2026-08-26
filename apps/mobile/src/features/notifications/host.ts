@@ -13,6 +13,8 @@ export interface NotificationPayload {
   sessionId: string;
   /** Decimal string. */
   attentionGeneration: string;
+  /** Which tmux server the ids above belong to (see `TapTarget`). */
+  serverIdentity: string;
 }
 
 export interface AgentNotification {

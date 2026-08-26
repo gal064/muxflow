@@ -59,7 +59,9 @@ export function createExpoNotificationHost(): NotificationHost {
           title: notification.title,
           body: notification.body,
           data: { ...notification.data },
-          sound: "default",
+          // No `sound` here: from API 26 the channel owns sound and vibration
+          // (`ExpoNotificationBuilder.applySoundsAndVibrations`), and minSdk is
+          // 26. `color` tints the small icon in the status bar and shade.
           color: colors.accent,
           priority: Notifications.AndroidNotificationPriority.HIGH,
         },
@@ -80,10 +82,12 @@ export function createExpoNotificationHost(): NotificationHost {
         if (target) listener(target);
       };
       // A tap that cold-started the app is waiting here, not on the listener.
-      // It is cleared once handled: the response is read off the Activity's
-      // launch intent, which Android hands back verbatim when it restores the
-      // task from Recents — without this the app would re-route and re-
-      // acknowledge a generation the user dealt with hours ago.
+      // Clearing it afterwards drops the module's in-memory copy so nothing
+      // else in the app can read the same tap a second time. (It does not
+      // scrub the Activity's launch intent, so a process re-created from
+      // Recents on that intent still sees it — the mark-seen it re-sends is
+      // idempotent on the host, and the route it re-opens is the one the
+      // notification named.)
       const launch = Notifications.getLastNotificationResponse();
       if (launch) {
         deliver(launch);

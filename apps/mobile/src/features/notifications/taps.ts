@@ -59,6 +59,10 @@ export function createTapMarkSeen(send: MarkSeenSink): TapMarkSeen {
 export const connectionMarkSeenSink: MarkSeenSink = (target) => {
   const connection = getConnection();
   if (!connection || connection.state !== "connected") return false;
+  // A held tap must not be flushed at whichever host happens to be connected
+  // next: agent ids are hashed with the server identity, so it would be a
+  // no-op there and stay unacknowledged here.
+  if (target.serverIdentity && connection.serverIdentity !== target.serverIdentity) return false;
   connection
     .request(agentMarkSeen(target.agentId, target.attentionGeneration, connection.serverIdentity))
     .catch((error: unknown) => {

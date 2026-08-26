@@ -46,6 +46,16 @@ export function onAgentTransition(listener: (transition: AgentTransition) => voi
   return () => listeners.delete(listener);
 }
 
+/**
+ * §13 runs the decision rule "for every AGENT_STATE event and for every agent
+ * in a reconciling snapshot". `HostConnection` does that for the Subscribe
+ * snapshot; a pull-to-refresh snapshot (§9.3) reconciles outside it, so
+ * `features/agents/refresh.ts` publishes its transitions here.
+ */
+export function emitAgentTransition(transition: AgentTransition): void {
+  for (const listener of listeners) listener(transition);
+}
+
 export function onToast(listener: (message: string) => void): () => void {
   toasts.add(listener);
   return () => toasts.delete(listener);
