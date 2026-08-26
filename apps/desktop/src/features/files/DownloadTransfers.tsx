@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { DownloadActions } from "./DownloadActions";
 import type { TransferStatus } from "./types";
-import { canCancelTransfer, transferStateLabel } from "../transfers/transferState";
+import { canCancelTransfer, isTerminalTransferState, transferStateLabel } from "../transfers/transferState";
 
 /**
  * The Explorer's downloads list.
@@ -16,14 +16,26 @@ import { canCancelTransfer, transferStateLabel } from "../transfers/transferStat
  * every other thing that can go wrong with a transfer is already reported
  * there, next to the file it happened to.
  */
-export function DownloadTransfers({ transfers, onCancelTransfer }: {
+export function DownloadTransfers({ transfers, onCancelTransfer, onClearFinishedTransfers }: {
   transfers: readonly TransferStatus[];
   onCancelTransfer(id: string): Promise<void>;
+  onClearFinishedTransfers(): void;
 }) {
   const [openError, setOpenError] = useState<{ id: string; message: string }>();
   if (transfers.length === 0) return null;
+  const hasFinishedTransfers = transfers.some((transfer) => isTerminalTransferState(transfer.state));
   return <section aria-label="Downloads" className="transfers">
-    <h3>Downloads</h3>
+    <header className="transfers-header">
+      <h3>Downloads</h3>
+      {hasFinishedTransfers && <button
+        aria-label="Clear finished downloads"
+        onClick={() => {
+          setOpenError(undefined);
+          onClearFinishedTransfers();
+        }}
+        type="button"
+      >Clear all</button>}
+    </header>
     {transfers.map((transfer) => <div aria-label={`Download ${transfer.path}: ${transferStateLabel(transfer.state)}`} className={`transfer ${transfer.state}`} key={transfer.id}>
       <span>{transfer.path.split("/").at(-1)}</span><small>{transferStateLabel(transfer.state)}</small>
       {transfer.totalBytes ? <progress aria-label={`Download progress for ${transfer.path}`} aria-valuetext={formatTransfer(transfer)} data-completed-bytes={transfer.completedBytes} data-total-bytes={transfer.totalBytes} max={1000} value={transferPermille(transfer.completedBytes, transfer.totalBytes)} /> : <progress aria-label={`Download progress for ${transfer.path}`} data-completed-bytes={transfer.completedBytes} />}

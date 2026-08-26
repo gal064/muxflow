@@ -50,6 +50,7 @@ interface Props {
    */
   onDownload(intent: DownloadIntent): Promise<void>;
   onCancelTransfer(id: string): Promise<void>;
+  onClearFinishedTransfers(): void;
   onRefresh(path?: string): void;
   onLoadMore(path: string): void;
 }
@@ -481,7 +482,11 @@ export function ExplorerTree(props: Props) {
       label={menu.entry ? `Actions for ${menu.entry.name}` : "Explorer actions"}
       onClose={() => setMenu(undefined)}
     />}
-    <DownloadTransfers onCancelTransfer={props.onCancelTransfer} transfers={props.transfers} />
+    <DownloadTransfers
+      onCancelTransfer={props.onCancelTransfer}
+      onClearFinishedTransfers={props.onClearFinishedTransfers}
+      transfers={props.transfers}
+    />
     {pending && <ExplorerMutationDialog
       disabled={props.disabled}
       onClose={() => setPending(undefined)}

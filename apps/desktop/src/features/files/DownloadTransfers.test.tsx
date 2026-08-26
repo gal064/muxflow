@@ -20,9 +20,16 @@ const transfers: TransferStatus[] = [
   { id: "stale", scopeKey: "scope", path: "/r/stale.bin", destination: "/Users/test/Downloads/stale.bin", kind: "file", state: "failed", outcome: "published", failureKind: "staleScope", completedBytes: "9", filesCompleted: "1" },
 ];
 
-const render = async (rows: readonly TransferStatus[] = transfers) => {
+const render = async (
+  rows: readonly TransferStatus[] = transfers,
+  onClearFinishedTransfers = vi.fn(),
+) => {
   let renderer!: ReturnType<typeof create>;
-  await act(async () => { renderer = create(<DownloadTransfers onCancelTransfer={vi.fn()} transfers={rows} />); });
+  await act(async () => { renderer = create(<DownloadTransfers
+    onCancelTransfer={vi.fn()}
+    onClearFinishedTransfers={onClearFinishedTransfers}
+    transfers={rows}
+  />); });
   return renderer;
 };
 
@@ -84,5 +91,19 @@ describe("DownloadTransfers", () => {
     expect(markup).not.toContain("Cancel download /r/report.pdf");
     expect(markup).not.toContain("Cancel download /r/failed");
     await act(async () => { renderer.unmount(); });
+  });
+
+  it("offers one clear action when finished downloads exist and routes it without touching active rows", async () => {
+    const clearFinished = vi.fn();
+    const renderer = await render(transfers, clearFinished);
+    const button = renderer.root.findByProps({ "aria-label": "Clear finished downloads" });
+    expect(button.props.children).toBe("Clear all");
+    await act(async () => { button.props.onClick(); });
+    expect(clearFinished).toHaveBeenCalledTimes(1);
+    await act(async () => { renderer.unmount(); });
+
+    const activeOnly = await render([transfers[1]]);
+    expect(activeOnly.root.findAllByProps({ "aria-label": "Clear finished downloads" })).toHaveLength(0);
+    await act(async () => { activeOnly.unmount(); });
   });
 });
