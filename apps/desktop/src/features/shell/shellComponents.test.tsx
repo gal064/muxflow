@@ -905,35 +905,55 @@ describe("application shell accessibility contracts", () => {
   });
 
   it("disables the bell when it has nowhere to go, and says so", () => {
-    const bell = (html: string) => html.slice(html.indexOf("bar-button-badged") - 200).split("</button>")[0];
-    const enabled = bell(renderToStaticMarkup(<TitleBar
-      canJump canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
-      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={1}
-    />));
-    expect(enabled).not.toContain("disabled");
+    const onBell = vi.fn();
+    const bell = (canJump: boolean, unread: number) => {
+      const html = renderToStaticMarkup(<TitleBar
+        canJump={canJump} canMutate onBell={onBell} onNewWorkspace={noop} onTogglePanel={noop}
+        onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={unread}
+      />);
+      const badged = html.indexOf("bar-button-badged");
+      return html.slice(html.lastIndexOf("<button", badged)).split("</button>")[0];
+    };
+    const enabled = bell(true, 1);
+    expect(enabled).not.toContain("aria-disabled");
     expect(enabled).toContain("1 agent waiting; go to the next one");
     expect(enabled).toContain('title="Go to the next agent waiting (blocked first, then unread completed)"');
 
-    // Nothing waiting at all: no badge, and the control is inert rather than a
-    // click that quietly does nothing.
-    const idle = bell(renderToStaticMarkup(<TitleBar
-      canJump={false} canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
-      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={0}
-    />));
-    expect(idle).toContain("disabled");
+    // Nothing waiting at all: no badge, and the control reads as frozen rather
+    // than as a click that quietly does nothing.
+    const idle = bell(false, 0);
+    expect(idle).toContain('aria-disabled="true"');
     expect(idle).toContain('aria-label="No agents waiting"');
     expect(idle).toContain('title="No agents waiting"');
     expect(idle).not.toContain("badge-corner");
+    // `aria-disabled`, not `disabled`: the browser suppresses tooltips and
+    // focus on a disabled button, which would hide the explanation exactly
+    // when it is the only thing the control has to offer.
+    expect(idle).not.toContain(" disabled");
 
     // Waiting but unreachable — the badge stays honest, the label explains why
     // the bell will not move.
-    const stranded = bell(renderToStaticMarkup(<TitleBar
-      canJump={false} canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
-      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={2}
-    />));
-    expect(stranded).toContain("disabled");
+    const stranded = bell(false, 2);
+    expect(stranded).toContain('aria-disabled="true"');
     expect(stranded).toContain("2 agents waiting, none reachable right now");
     expect(stranded).toContain("badge-corner");
+  });
+
+  it("swallows a click on the bell that has nowhere to go", () => {
+    const onBell = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    const bar = (canJump: boolean) => <TitleBar
+      canJump={canJump} canMutate onBell={onBell} onNewWorkspace={noop} onTogglePanel={noop}
+      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={2}
+    />;
+    act(() => { renderer = create(bar(false)); });
+    const button = () => renderer.root.findByProps({ className: "bar-button bar-button-badged" });
+    act(() => button().props.onClick());
+    expect(onBell).not.toHaveBeenCalled();
+    act(() => { renderer.update(bar(true)); });
+    act(() => button().props.onClick());
+    expect(onBell).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
   });
 
   it("reserves traffic-light room on macOS only, because only macOS overlays them", () => {

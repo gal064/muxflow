@@ -62,9 +62,12 @@ export function TitleBar(props: TitleBarProps) {
     <div className="titlebar-spacer" data-tauri-drag-region />
     <button
       aria-label={bellLabel}
+      // `aria-disabled`, never `disabled`. A disabled button takes no mouse
+      // events and holds no focus, so neither the tooltip nor the label would
+      // reach anyone — and explaining itself is the entire point of the state.
+      aria-disabled={!props.canJump || undefined}
       className="bar-button bar-button-badged"
-      disabled={!props.canJump}
-      onClick={props.onBell}
+      onClick={() => { if (props.canJump) props.onBell(); }}
       title={bellHint}
       type="button"
     >
