@@ -172,6 +172,12 @@ importers:
       '@types/react':
         specifier: 19.2.18
         version: 19.2.18
+      '@xterm/addon-fit':
+        specifier: 0.11.0
+        version: 0.11.0
+      '@xterm/xterm':
+        specifier: 6.0.0
+        version: 6.0.0(patch_hash=2d72a78c3f0e59895f61c47732f6cceccd230620d83c905f7eacd8aea6eddcb1)
       dompurify:
         specifier: 3.4.13
         version: 3.4.13

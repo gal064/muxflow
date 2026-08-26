@@ -3,6 +3,7 @@
 
 import { createStore, type StoreApi } from "zustand/vanilla";
 import {
+  AgentHookWiring,
   AgentLifecycleState,
   type AgentAdapterDescriptor as ProtoAgentAdapterDescriptor,
   type AgentEvent,
@@ -35,6 +36,8 @@ export interface ConnectionSlice {
   message?: string | undefined;
   /** Which reconnect attempt is in progress (1-based) while `reconnecting`/`sshConnecting`; 0 once connected. */
   attempt: number;
+  /** While `reconnecting`: when the next dial is due (epoch ms), for the strip countdown (§9). */
+  retryAtMs?: number | undefined;
 }
 
 export interface Session { id: string; name: string; windowCount: number; order: number }
@@ -77,9 +80,13 @@ export interface Agent {
   route: AgentRoute;
 }
 
+export type AgentHookWiringState = "unspecified" | "wired" | "partial" | "notWired" | "unavailable" | "absent";
+
 export interface AgentAdapterDescriptor {
   id: string;
   displayName: string;
+  /** §9.3.1: the empty state mentions hook setup when no adapter is wired. */
+  hookWiring: AgentHookWiringState;
 }
 
 export interface SessionState {
@@ -278,5 +285,22 @@ export function agentFromProto(record: ProtoAgentRecord): Agent {
 }
 
 function adapterFromProto(descriptor: ProtoAgentAdapterDescriptor): AgentAdapterDescriptor {
-  return { id: descriptor.id, displayName: descriptor.displayName };
+  return { id: descriptor.id, displayName: descriptor.displayName, hookWiring: hookWiringFromProto(descriptor.hookWiring) };
+}
+
+function hookWiringFromProto(value: AgentHookWiring): AgentHookWiringState {
+  switch (value) {
+    case AgentHookWiring.WIRED:
+      return "wired";
+    case AgentHookWiring.PARTIAL:
+      return "partial";
+    case AgentHookWiring.NOT_WIRED:
+      return "notWired";
+    case AgentHookWiring.UNAVAILABLE:
+      return "unavailable";
+    case AgentHookWiring.ABSENT:
+      return "absent";
+    default:
+      return "unspecified";
+  }
 }
