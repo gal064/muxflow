@@ -87,6 +87,11 @@ describe("summarizeSurfaceError", () => {
     const rejected = summarizeSurfaceError("git_push_rejected: ! [rejected] master -> master (non-fast-forward)");
     expect(rejected.summary).toBe("The remote rejected the push (non-fast-forward?). Pull or rebase first.");
     expect(rejected.detail).toContain("non-fast-forward");
+    // The state every unpublished branch is in, and the code does not carry one
+    // of the suffixes that opts a rejection into being rewritten at all.
+    const missing = summarizeSurfaceError("git_no_upstream: no upstream branch is configured for the current branch; run `git push -u` in a terminal once");
+    expect(missing.summary).toBe("This branch has no upstream yet; run git push -u in a terminal once, then retry.");
+    expect(missing.detail).toContain("git push -u");
   });
 
   it("keeps a multi-line diagnostic's first line as the summary and the whole thing as detail", () => {

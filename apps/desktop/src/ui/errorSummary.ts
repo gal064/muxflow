@@ -56,6 +56,7 @@ const CODE_SUMMARY: readonly (readonly [RegExp, string])[] = [
 const CODE_OVERRIDE_SUMMARY: readonly (readonly [RegExp, string])[] = [
   [/^git_auth_failed$/, "Push needs authentication that Muxflow cannot provide interactively; run git push in a terminal once, then retry."],
   [/^git_push_rejected$/, "The remote rejected the push (non-fast-forward?). Pull or rebase first."],
+  [/^git_no_upstream$/, "This branch has no upstream yet; run git push -u in a terminal once, then retry."],
 ];
 
 /**
@@ -100,7 +101,10 @@ export function summarizeSurfaceError(raw: string): SurfaceErrorText {
   // advice would throw away the half that says which pane. An app-authored
   // line is shown as written; it only gains a disclosure if it is long or
   // multi-line.
-  const structured = code !== undefined && (/_(rejected|unavailable|failed)$/.test(code) || matched(CODE_SUMMARY, code) !== undefined);
+  const structured = code !== undefined
+    && (/_(rejected|unavailable|failed)$/.test(code)
+      || matched(CODE_SUMMARY, code) !== undefined
+      || matched(CODE_OVERRIDE_SUMMARY, code) !== undefined);
   const summary = structured
     ? matched(CODE_OVERRIDE_SUMMARY, code!) ?? matched(REASON_SUMMARY, reason) ?? matched(CODE_SUMMARY, code!) ?? firstSentence(reason)
     : firstSentence(stripped);
