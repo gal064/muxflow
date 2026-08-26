@@ -68,9 +68,10 @@ Claude Code: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `Notification`.
 
 Codex: the same, minus `StopFailure` and `Notification`, which its hook surface
-does not have (measured against Codex CLI 0.128 and 0.147). A Codex turn that
-ends in failure is therefore indistinguishable from one that succeeds, and
-`PermissionRequest` is the only evidence of a blocked Codex agent. Recorded
+does not have (measured against Codex CLI 0.128, 0.147 and 0.149.1). A Codex
+turn that ends in failure is therefore indistinguishable from one that
+succeeds. A user-reviewed `PermissionRequest` and
+`PreToolUse(request_user_input)` are the observed blocked signals. Recorded
 rather than faked.
 
 A `Working` state that receives no further event for fifteen minutes decays to
@@ -85,9 +86,11 @@ package uninstaller refuses to remove the helper while a known managed marker
 is present, preventing silently broken agent configuration.
 
 Hooks submit compact state JSON through the private daemon socket and never send
-prompt text, terminal output, file contents, or credentials. Malformed or stale
-events are rejected; a temporarily unavailable daemon retains only a bounded,
-atomic latest-state record.
+prompt text, terminal output, tool input, file contents, or credentials. The
+normalized Codex `PreToolUse` payload retains only the tool name needed to
+distinguish a question from ordinary work. Malformed or stale events are
+rejected; a temporarily unavailable daemon retains only a bounded, atomic
+latest-state record.
 
 For validation, use installed `codex --version` / `codex --help` and
 `claude --version` / `claude --help` only. Release QA must not send prompts or

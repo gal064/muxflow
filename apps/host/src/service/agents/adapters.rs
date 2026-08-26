@@ -112,18 +112,19 @@ impl AgentAdapter for CodexAdapter {
         ".codex/hooks.json"
     }
 
-    /// Measured against a real `~/.codex/hooks.json` (Codex CLI 0.128 and
-    /// 0.147): Codex fires `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+    /// Measured against a real `~/.codex/hooks.json` (Codex CLI 0.128, 0.147
+    /// and 0.149.1): Codex fires `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
     /// `PermissionRequest`, `PostToolUse`, `Stop`, `SubagentStart` and
     /// `SubagentStop`.
     ///
     /// Two events Claude Code has are absent from that surface and are
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
     /// turn that ends in failure is indistinguishable from one that succeeds,
-    /// and there is no `Notification`, so a `PermissionRequest` classified by
-    /// its normalized reviewer is the only evidence of a blocked Codex agent.
-    /// `SubagentStart` is deliberately not taken: it says nothing `PreToolUse`
-    /// has not already said, and every hook costs a daemon connection.
+    /// and there is no `Notification`. A `PermissionRequest` classified by its
+    /// normalized reviewer and `PreToolUse(request_user_input)` are the two
+    /// observed signals that a Codex agent is blocked. `SubagentStart` is
+    /// deliberately not taken: it says nothing `PreToolUse` has not already
+    /// said, and every hook costs a daemon connection.
     fn hook_events(&self) -> &'static [&'static str] {
         &[
             "SessionStart",
@@ -154,6 +155,12 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str> {
+        let pre_tool_lifecycle =
+            if payload.get("tool_name").and_then(Value::as_str) == Some("request_user_input") {
+                v1::AgentLifecycleState::Blocked
+            } else {
+                v1::AgentLifecycleState::Working
+            };
         let permission_lifecycle = if payload
             .get(CODEX_APPROVAL_REVIEWER_FIELD)
             .and_then(Value::as_str)
@@ -175,7 +182,7 @@ impl AgentAdapter for CodexAdapter {
             &[
                 ("PermissionRequest", permission_lifecycle),
                 ("UserPromptSubmit", v1::AgentLifecycleState::Working),
-                ("PreToolUse", v1::AgentLifecycleState::Working),
+                ("PreToolUse", pre_tool_lifecycle),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
                 // A subagent finishing says the parent is still mid-turn.
                 ("SubagentStop", v1::AgentLifecycleState::Working),
@@ -481,6 +488,32 @@ mod tests {
             codex.parse_hook(&malformed_reviewer).unwrap().lifecycle,
             v1::AgentLifecycleState::Blocked
         );
+    }
+
+    #[test]
+    fn codex_question_is_the_only_pre_tool_event_that_blocks() {
+        let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
+        for (tool_name, expected) in [
+            (
+                Some(serde_json::json!("request_user_input")),
+                v1::AgentLifecycleState::Blocked,
+            ),
+            (
+                Some(serde_json::json!("Bash")),
+                v1::AgentLifecycleState::Working,
+            ),
+            (None, v1::AgentLifecycleState::Working),
+            (
+                Some(serde_json::json!({})),
+                v1::AgentLifecycleState::Working,
+            ),
+        ] {
+            let mut payload = serde_json::json!({"hook_event_name": "PreToolUse"});
+            if let Some(tool_name) = tool_name {
+                payload["tool_name"] = tool_name;
+            }
+            assert_eq!(codex.parse_hook(&payload).unwrap().lifecycle, expected);
+        }
     }
 
     #[test]
