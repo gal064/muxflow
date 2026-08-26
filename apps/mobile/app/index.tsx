@@ -169,7 +169,7 @@ function DevBridgeLink() {
         void connectHost(DEV_HOST).catch(() => undefined);
         router.push("/home");
       }}
-      style={{ marginTop: 8 }}
+      style={{ alignSelf: "center", marginTop: 8 }}
     >
       <Text style={styles.keyLinkLabel}>Dev: connect to 10.0.2.2:7777</Text>
     </Pressable>
