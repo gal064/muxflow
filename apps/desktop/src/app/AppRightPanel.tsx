@@ -45,6 +45,7 @@ export function AppRightPanel(props: AppRightPanelProps) {
       onCancelTransfer={async (id) => {
         if (props.fileScope) await props.fileClient.cancelTransfer(props.fileScope, id);
       }}
+      onClearFinishedTransfers={props.workspaceFiles.clearFinishedTransfers}
       onDownload={props.onDownload}
       onLoadMore={props.workspaceFiles.loadMore}
       onMutate={props.onMutate}

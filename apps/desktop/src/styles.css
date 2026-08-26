@@ -864,7 +864,13 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    tab order at the exact moment somebody is standing on it. */
 .load-more-files[aria-disabled="true"] { opacity: .6; cursor: default; }
 .transfers { max-height: 180px; padding: 7px; border-top: 1px solid var(--chrome-hairline); overflow: auto; }
-.transfers h3 { margin: 0 0 5px; color: var(--chrome-dim); font-size: var(--type-label); letter-spacing: .07em; text-transform: uppercase; }
+.transfers-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
+.transfers h3 { margin: 0; color: var(--chrome-dim); font-size: var(--type-label); letter-spacing: .07em; text-transform: uppercase; }
+.transfers-header button {
+  padding: 0; border: 0; background: transparent;
+  color: var(--chrome-dim); font-size: var(--type-meta);
+}
+.transfers-header button:hover { color: var(--chrome-ink); }
 .transfer {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 7px;
   padding: 5px; border-radius: 4px; background: var(--chrome-raised); font-size: var(--type-meta);

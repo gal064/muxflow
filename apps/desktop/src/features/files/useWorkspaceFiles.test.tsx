@@ -1185,6 +1185,30 @@ describe("useWorkspaceFiles", () => {
       } }));
     });
     expect(current?.transfers[0]).toMatchObject({ state: "completed", outcome: "published", completedBytes: "3" });
+    await act(async () => {
+      listeners.forEach((listener) => listener({ kind: "transfer", transfer: {
+        id: "failed", scopeKey: transferScopeKey, path: "/repo/failed", kind: "file", state: "failed",
+        outcome: "notPublished", completedBytes: "1", filesCompleted: "0",
+      } }));
+      listeners.forEach((listener) => listener({ kind: "transfer", transfer: {
+        id: "cancelled", scopeKey: transferScopeKey, path: "/repo/cancelled", kind: "file", state: "cancelled",
+        outcome: "notPublished", completedBytes: "1", filesCompleted: "0",
+      } }));
+      listeners.forEach((listener) => listener({ kind: "transfer", transfer: {
+        id: "still-running", scopeKey: transferScopeKey, path: "/repo/running", kind: "file", state: "running",
+        completedBytes: "1", filesCompleted: "0",
+      } }));
+    });
+    expect(current?.transfers.map((transfer) => transfer.state)).toEqual(["running", "cancelled", "failed", "completed"]);
+    await act(async () => { current?.clearFinishedTransfers(); });
+    expect(current?.transfers).toMatchObject([{ id: "still-running", state: "running" }]);
+    await act(async () => {
+      listeners.forEach((listener) => listener({ kind: "transfer", transfer: {
+        id: "failed", scopeKey: transferScopeKey, path: "/repo/failed", kind: "file", state: "failed",
+        outcome: "notPublished", completedBytes: "1", filesCompleted: "0", cleanupStatus: "removed",
+      } }));
+    });
+    expect(current?.transfers).toMatchObject([{ id: "still-running", state: "running" }]);
     await act(async () => { renderer.unmount(); });
   });
 
@@ -1210,6 +1234,13 @@ describe("useWorkspaceFiles", () => {
     } }); });
     await act(async () => { renderer.update(<Harness scope={two} />); await Promise.resolve(); });
     expect(current?.transfers[0]).toMatchObject({ state: "failed", outcome: "unknown", failureKind: "staleScope" });
+    await act(async () => { current?.clearFinishedTransfers(); });
+    expect(current?.transfers).toEqual([]);
+    await act(async () => { listener?.({ kind: "transfer", transfer: {
+      id: "download", scopeKey: keyForTransferConnection(two), path: "/repo/new", kind: "file", state: "running",
+      completedBytes: "1", filesCompleted: "0",
+    } }); });
+    expect(current?.transfers[0]).toMatchObject({ id: "download", path: "/repo/new", state: "running" });
     await act(async () => { renderer.unmount(); });
   });
 

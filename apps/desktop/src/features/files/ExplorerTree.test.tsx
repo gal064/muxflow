@@ -2,11 +2,12 @@
 // jsdom, because opening a row action's dialog goes through `useModalDialog`,
 // which manages real focus.
 import { renderToStaticMarkup } from "react-dom/server";
+import type { ComponentProps } from "react";
 import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import { rowCommandRegistry } from "../../commands/rowCommands";
 import { enablePerfProbe, perfHighWaterSnapshot, resetPerfProbe } from "../../perf/probe";
-import { ExplorerTree } from "./ExplorerTree";
+import { ExplorerTree as ExplorerTreeView } from "./ExplorerTree";
 import type { ActiveRoot, DirectoryListing } from "./types";
 import { INTERNAL_PATH_DRAG_TYPE } from "../terminal/internalPathDrag";
 
@@ -21,6 +22,13 @@ const listing: DirectoryListing = {
     { path: "/r/link", name: "link", kind: "symlink", sizeBytes: "0", modifiedMillis: "1", generation: "1", executable: false, expandable: false, targetKind: "directory", symlinkTarget: "/outside" },
   ],
 };
+
+type ExplorerTreeProps = ComponentProps<typeof ExplorerTreeView>;
+function ExplorerTree(props: Omit<ExplorerTreeProps, "onClearFinishedTransfers"> & {
+  onClearFinishedTransfers?: ExplorerTreeProps["onClearFinishedTransfers"];
+}) {
+  return <ExplorerTreeView onClearFinishedTransfers={() => undefined} {...props} />;
+}
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 

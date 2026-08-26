@@ -876,7 +876,16 @@ export function useWorkspaceFiles(
    * change at all and was never masked; it still is not.
    */
   const stale = state.scopeKey !== selectionKey;
-  return { ...state, stale, transfers: downloads.transfers, toggleDirectory, refresh, recordTransfer, loadMore };
+  return {
+    ...state,
+    stale,
+    transfers: downloads.transfers,
+    clearFinishedTransfers: downloads.clearFinishedTransfers,
+    toggleDirectory,
+    refresh,
+    recordTransfer,
+    loadMore,
+  };
 }
 
 /** The connection and root capability a cached listing belongs to. */
