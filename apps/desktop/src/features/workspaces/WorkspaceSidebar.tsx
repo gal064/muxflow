@@ -308,41 +308,41 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             {!props.compactWorkspaces && row.unread > 0
               && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
           </div>)}
-        {/* Under the list, not among it: archived rows are not selectable,
-            carry no number and show no agents, so they must not read as one
-            more workspace. Hidden altogether when there is nothing archived. */}
-        {props.archivedWorkspaces.length > 0 && <div className="archived-workspaces">
-          <button
-            aria-controls="sidebar-archived-list"
-            aria-expanded={archivedOpen}
-            className="archived-toggle"
-            onClick={() => setArchivedOpen((open) => !open)}
-            type="button"
-          >
-            <span aria-hidden="true" className="archived-chevron">{archivedOpen ? "▾" : "▸"}</span>
-            Archived ({props.archivedWorkspaces.length})
-          </button>
-          {archivedOpen && <div aria-label="Archived workspaces" className="archived-list" id="sidebar-archived-list" role="list">
-            {props.archivedWorkspaces.map((session) => <div
-              className="archived-row"
-              key={session.id}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setArchivedMenu({ session, anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
-              }}
-              role="listitem"
-            >
-              <span className="archived-name" title={session.name}>{session.name}</span>
-              <button
-                aria-label={`Unarchive ${session.name}`}
-                className="bar-button"
-                onClick={() => props.onUnarchiveWorkspace(session, props.commandScope)}
-                type="button"
-              >Unarchive</button>
-            </div>)}
-          </div>}
-        </div>}
       </div>
+      {/* Under the list, not among it: archived rows are not selectable,
+          carry no number and show no agents, so they must not read as one
+          more workspace. Hidden altogether when there is nothing archived. */}
+      {props.archivedWorkspaces.length > 0 && <div className="archived-workspaces">
+        <button
+          aria-controls="sidebar-archived-list"
+          aria-expanded={archivedOpen}
+          className="archived-toggle"
+          onClick={() => setArchivedOpen((open) => !open)}
+          type="button"
+        >
+          <span aria-hidden="true" className="archived-chevron">{archivedOpen ? "▾" : "▸"}</span>
+          Archived ({props.archivedWorkspaces.length})
+        </button>
+        {archivedOpen && <div aria-label="Archived workspaces" className="archived-list" id="sidebar-archived-list" role="list">
+          {props.archivedWorkspaces.map((session) => <div
+            className="archived-row"
+            key={session.id}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setArchivedMenu({ session, anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
+            }}
+            role="listitem"
+          >
+            <span className="archived-name" title={session.name}>{session.name}</span>
+            <button
+              aria-label={`Unarchive ${session.name}`}
+              className="bar-button"
+              onClick={() => props.onUnarchiveWorkspace(session, props.commandScope)}
+              type="button"
+            >Unarchive</button>
+          </div>)}
+        </div>}
+      </div>}
     </div>
 
     <div
