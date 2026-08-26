@@ -10,15 +10,19 @@ import { NOTICE_DISMISS_MS, type StatusNotice } from "../features/shell/statusNo
  */
 async function shellChrome(initial: string) {
   let notice: StatusNotice | undefined;
-  function Harness({ status }: { status: string }) {
-    notice = useAppShellChrome(status).notice;
+  let sequence = 0;
+  function Harness({ status, sequence }: { status: string; sequence: number }) {
+    notice = useAppShellChrome(status, sequence).notice;
     return null;
   }
   let renderer!: ReturnType<typeof create>;
-  await act(async () => { renderer = create(<Harness status={initial} />); });
+  await act(async () => { renderer = create(<Harness sequence={sequence} status={initial} />); });
   return {
     get notice() { return notice; },
-    async setStatus(status: string) { await act(async () => renderer.update(<Harness status={status} />)); },
+    async setStatus(status: string) {
+      sequence += 1;
+      await act(async () => renderer.update(<Harness sequence={sequence} status={status} />));
+    },
     async unmount() { await act(async () => renderer.unmount()); },
   };
 }
@@ -57,6 +61,21 @@ describe("status notice lifecycle", () => {
     // notice that outranks everything after it.
     await chrome.setStatus("Helper installed. Version 0.2.0.");
     expect(chrome.notice?.message).toBe("Helper installed. Version 0.2.0.");
+    await chrome.unmount();
+  });
+
+  it("re-shows the same message when it is set again after being dismissed", async () => {
+    // A workspace create refused twice for the same directory is two refusals.
+    // Keyed on the string alone, the second one never re-fired the effect and
+    // the user saw nothing.
+    const chrome = await shellChrome("Live");
+    await chrome.setStatus("tmux_action_rejected: workspace start directory /x does not exist or is not a directory");
+    const first = chrome.notice;
+    expect(first?.severity).toBe("problem");
+    await act(async () => { chrome.notice; });
+    await chrome.setStatus("tmux_action_rejected: workspace start directory /x does not exist or is not a directory");
+    expect(chrome.notice?.id).not.toBe(first?.id);
+    expect(chrome.notice?.message).toBe(first?.message);
     await chrome.unmount();
   });
 });

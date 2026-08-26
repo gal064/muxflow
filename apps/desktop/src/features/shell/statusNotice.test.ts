@@ -85,4 +85,9 @@ describe("consequential bookkeeping failures", () => {
     expect(noticeForStatus("Could not mark the file read-only", 4)?.severity).toBe("problem");
     expect(noticeForStatus("Could not save application tabs; changes will be retried: nope", 5)?.severity).toBe("problem");
   });
+
+  it("treats a host's coded rejection as a problem even without a word boundary", () => {
+    const notice = noticeForStatus("tmux_action_rejected: workspace start directory /x does not exist or is not a directory", 1);
+    expect(notice?.severity).toBe("problem");
+  });
 });

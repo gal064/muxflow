@@ -169,10 +169,17 @@ function AppTabFrame({ tab }: { tab: AppOwnedTab }) {
 }
 
 export function App() {
-  const [status, setStatus] = useState("Discovering local tmux…");
+  // The sequence rides along with the text so that the same message twice —
+  // a create refused for the same reason after its notice was dismissed — is
+  // two notices, not one that the second attempt silently fails to re-show.
+  const [statusState, setStatusState] = useState({ text: "Discovering local tmux…", sequence: 0 });
+  const status = statusState.text;
+  const setStatus = useCallback((text: string) => {
+    setStatusState((current) => ({ text, sequence: current.sequence + 1 }));
+  }, []);
   const {
     compactViewport, completedDownload, notice, setCompletedDownload, setNotice, windowWidth,
-  } = useAppShellChrome(status);
+  } = useAppShellChrome(status, statusState.sequence);
   const [hostSessionSelection, setHostSessionSelection] = useState<{
     clientId: string;
     sessionId: string;
