@@ -835,7 +835,11 @@ mod tests {
 
         let mut value = sample_state();
         value.pinned_tabs.push(value.pinned_tabs[0].clone());
-        assert!(validate(&value).unwrap_err().contains("duplicate pinned tab"));
+        assert!(
+            validate(&value)
+                .unwrap_err()
+                .contains("duplicate pinned tab")
+        );
 
         // Same workspace, another tab: two pins, not a duplicate.
         let mut value = sample_state();
@@ -868,7 +872,11 @@ mod tests {
                 ..value.pinned_tabs[0].clone()
             })
             .collect();
-        assert!(validate(&value).unwrap_err().contains("too many pinned tabs"));
+        assert!(
+            validate(&value)
+                .unwrap_err()
+                .contains("too many pinned tabs")
+        );
 
         // A file written before pinning existed loads with nothing pinned.
         let legacy: PersistedAppState = serde_json::from_value(serde_json::json!({
