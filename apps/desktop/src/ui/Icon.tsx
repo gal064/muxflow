@@ -35,6 +35,8 @@ export type IconName =
   | "closeNonAgent"
   | "check"
   | "more"
+  | "arrowLeft"
+  | "arrowRight"
   | "chevronRight"
   | "chevronDown"
   | "file"
@@ -102,6 +104,8 @@ const paths: Record<IconName, ReactElement> = {
     <circle cx="8" cy="8" r=".9" />
     <circle cx="12.4" cy="8" r=".9" />
   </>,
+  arrowLeft: <path d="M12.25 8h-8.5M7.5 4.25 3.75 8l3.75 3.75" />,
+  arrowRight: <path d="M3.75 8h8.5M8.5 4.25 12.25 8 8.5 11.75" />,
   chevronRight: <path d="M6.25 3.75 10.5 8l-4.25 4.25" />,
   chevronDown: <path d="M3.75 6.25 8 10.5l4.25-4.25" />,
   file: <>

@@ -4,11 +4,13 @@ import {
   appTabsForWorkspace,
   bulkCloseOutcomeStatus,
   closeAppTab,
+  closeTransientGitDiff,
   combineWorkspaceTabs,
   discardServerAppState,
   mountedAppTabIds,
   mountedTerminalPanes,
   openFileTab,
+  findGitDiffTab,
   openGitDiffTab,
   orderedSessions,
   pinAppTab,
@@ -307,6 +309,92 @@ describe("application shell model", () => {
       expect.objectContaining({ gitTarget: "staged", gitPath: "YSBmaWxl", rootPath: "/repo", rootToken: "root-token" }),
       expect.objectContaining({ gitTarget: "unstaged", gitPath: "YSBmaWxl", rootPath: "/repo", rootToken: "root-token" }),
     ]));
+  });
+
+  it("opens a single-clicked Git diff as transient, promotes it on a pinned open, and never demotes it", () => {
+    const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
+    const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
+    const root = { path: "/repo", token: "root-token" };
+    const open = (state: PersistedAppState, preview: boolean) =>
+      openGitDiffTab(state, "local", "server-a", sessions[1], entry, "unstaged", status, root, { preview });
+    const find = (state: PersistedAppState) => findGitDiffTab(state, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged");
+
+    const transient = open(defaultAppState, true);
+    expect(transient.appTabs).toHaveLength(1);
+    expect(find(transient)).toMatchObject({ kind: "gitDiff", preview: true });
+    expect(transient.workspaceUi[0].selectedAppTabId).toBe(find(transient)!.id);
+
+    // A second single click keeps the same transient tab.
+    const again = open(transient, true);
+    expect(again.appTabs).toHaveLength(1);
+    expect(find(again)).toMatchObject({ id: find(transient)!.id, preview: true });
+
+    // A pinned open promotes it in place; a later single click does not demote it.
+    const pinned = open(again, false);
+    expect(pinned.appTabs).toHaveLength(1);
+    expect(find(pinned)!.id).toBe(find(transient)!.id);
+    expect(find(pinned)!.preview).toBeUndefined();
+    expect(find(open(pinned, true))!.preview).toBeUndefined();
+
+    // A file preview does not take over the transient diff's slot: the diff
+    // is closed by navigation, not rewritten into a file.
+    const withFile = openFileTab(transient, "local", "server-a", sessions[1], "/repo/a.ts", "file", { path: "/repo", token: "root", revision: "1" }, { preview: true });
+    expect(withFile.appTabs).toHaveLength(2);
+    expect(find(withFile)).toMatchObject({ kind: "gitDiff", preview: true });
+
+    // The strip's double-click pins a transient diff the same way.
+    expect(find(pinAppTab(transient, "local", find(transient)!.id))!.preview).toBeUndefined();
+
+    // Without the option the tab is pinned, as every caller before this option was.
+    expect(find(openGitDiffTab(defaultAppState, "local", "server-a", sessions[1], entry, "unstaged", status, root))!.preview).toBeUndefined();
+  });
+
+  it("closes a transient diff on navigation away, and leaves a pinned one where it is", () => {
+    const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
+    const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
+    const transient = openGitDiffTab(tabs, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
+    const transientId = findGitDiffTab(transient, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged")!.id;
+    const left = closeTransientGitDiff(transient, "local", transientId);
+    expect(left.appTabs.map((tab) => tab.id)).toEqual(tabs.appTabs.map((tab) => tab.id));
+    expect(left.workspaceUi[0].selectedAppTabId).toBeUndefined();
+
+    const pinned = pinAppTab(transient, "local", transientId);
+    expect(closeTransientGitDiff(pinned, "local", transientId)).toBe(pinned);
+    // A file tab and an id that is already gone are not this rule's business.
+    expect(closeTransientGitDiff(tabs, "local", "a")).toBe(tabs);
+    expect(closeTransientGitDiff(left, "local", transientId)).toBe(left);
+  });
+
+  it("does not resurrect a closed transient diff when its open commit runs a second time", () => {
+    const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
+    const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
+    // The shape of the commit the shell hands the navigation coordinator: the
+    // first commit opens, every later one only re-selects what is there. The
+    // decision is made per commit, and the updater itself stays pure — React
+    // runs it twice under StrictMode and keeps the second result.
+    let committed = false;
+    const find = (state: PersistedAppState) => findGitDiffTab(state, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged");
+    const commit = (): ((current: PersistedAppState) => PersistedAppState) => {
+      const replay = committed;
+      committed = true;
+      return (current) => {
+        if (!replay) return openGitDiffTab(current, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
+        const opened = find(current);
+        return opened ? selectAppTab(current, "local", "server-a", sessions[1], opened.id) : current;
+      };
+    };
+    const first = commit();
+    first(defaultAppState);
+    const opened = first(defaultAppState);
+    expect(opened.appTabs).toHaveLength(1);
+    const closed = closeAppTab(opened, "local", find(opened)!.id);
+    expect(closed.appTabs).toHaveLength(0);
+    const replay = commit();
+    expect(replay(closed)).toBe(closed);
+    // A replay while the tab is still open only re-selects it.
+    const reselected = replay(selectAppTab(opened, "local", "server-a", sessions[1], undefined));
+    expect(reselected.appTabs).toHaveLength(1);
+    expect(reselected.workspaceUi[0].selectedAppTabId).toBe(find(opened)!.id);
   });
 
   it("opens one root-scoped file tab and preserves it across root changes", () => {

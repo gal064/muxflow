@@ -533,7 +533,11 @@ export function openFileTab(
   // The slot is reused, not the record: everything that described the previous
   // file — its markdown view mode, its root snapshot — is replaced, and only
   // the tab's identity and position survive.
-  const reusable = options.preview ? state.appTabs.find((tab) => inWorkspace(tab) && tab.preview) : undefined;
+  // A transient Git diff is not this slot: it closes on the next navigation
+  // rather than being rewritten into a file, and its identity is a diff's.
+  const reusable = options.preview
+    ? state.appTabs.find((tab) => inWorkspace(tab) && tab.preview && tab.kind !== "gitDiff")
+    : undefined;
   if (reusable) {
     const appTabs = state.appTabs.map((tab) => tab.id === reusable.id
       ? { id: tab.id, hostProfileId: tab.hostProfileId, serverIdentity: tab.serverIdentity, sessionId: tab.sessionId, sessionName: tab.sessionName, order: tab.order, preview: true, ...details }
@@ -610,6 +614,31 @@ export function relocateFileTabs(
   return changed ? { ...state, appTabs } : state;
 }
 
+/** The one Git diff tab a workspace holds for this repository, path and side. */
+export function findGitDiffTab(
+  state: PersistedAppState,
+  currentHostProfileId: string,
+  currentServerIdentity: string,
+  sessionId: string,
+  repositoryId: string,
+  path: string,
+  target: GitDiffTarget,
+): AppOwnedTab | undefined {
+  return state.appTabs.find((tab) => tab.hostProfileId === currentHostProfileId
+    && tab.serverIdentity === currentServerIdentity
+    && tab.sessionId === sessionId
+    && tab.kind === "gitDiff"
+    && tab.gitRepositoryId === repositoryId
+    && tab.gitPath === path
+    && tab.gitTarget === target);
+}
+
+/**
+ * A single click opens the diff as a transient tab (`preview`), which the
+ * shell closes on the next navigation; a double-click, the context menu and
+ * the palette open it pinned. As with files, a tab is only ever promoted by a
+ * pinned open, never demoted by a transient one.
+ */
 export function openGitDiffTab(
   state: PersistedAppState,
   currentHostProfileId: string,
@@ -619,14 +648,11 @@ export function openGitDiffTab(
   target: GitDiffTarget,
   status: GitStatusSnapshot,
   root: { path: string; token: string },
+  options: { preview?: boolean } = {},
 ): PersistedAppState {
-  const existing = state.appTabs.find((tab) => tab.hostProfileId === currentHostProfileId
-    && tab.serverIdentity === currentServerIdentity
-    && tab.sessionId === session.id
-    && tab.kind === "gitDiff"
-    && tab.gitRepositoryId === status.repository.id
-    && tab.gitPath === entry.path
-    && tab.gitTarget === target);
+  const existing = findGitDiffTab(
+    state, currentHostProfileId, currentServerIdentity, session.id, status.repository.id, entry.path, target,
+  );
   const resource = `${target}:${entry.displayPath}`;
   const details = {
     resource,
@@ -640,17 +666,20 @@ export function openGitDiffTab(
     gitStatusGeneration: status.generation,
     gitSourceGeneration: status.sourceGeneration,
   };
-  const tab: AppOwnedTab = existing ? { ...existing, ...details } : {
-    id: crypto.randomUUID(),
-    hostProfileId: currentHostProfileId,
-    serverIdentity: currentServerIdentity,
-    sessionId: session.id,
-    sessionName: session.name,
-    kind: "gitDiff",
-    order: state.appTabs.filter((candidate) => candidate.hostProfileId === currentHostProfileId
-      && candidate.serverIdentity === currentServerIdentity && candidate.sessionId === session.id).length,
-    ...details,
-  };
+  const tab: AppOwnedTab = existing
+    ? options.preview || !existing.preview ? { ...existing, ...details } : withoutPreview({ ...existing, ...details })
+    : {
+      id: crypto.randomUUID(),
+      hostProfileId: currentHostProfileId,
+      serverIdentity: currentServerIdentity,
+      sessionId: session.id,
+      sessionName: session.name,
+      kind: "gitDiff",
+      order: state.appTabs.filter((candidate) => candidate.hostProfileId === currentHostProfileId
+        && candidate.serverIdentity === currentServerIdentity && candidate.sessionId === session.id).length,
+      ...(options.preview ? { preview: true } : {}),
+      ...details,
+    };
   const appTabs = existing ? state.appTabs.map((candidate) => candidate.id === tab.id ? tab : candidate) : [...state.appTabs, tab];
   return selectAppTab({ ...state, appTabs }, currentHostProfileId, currentServerIdentity, session, tab.id);
 }
@@ -667,6 +696,16 @@ export function setMarkdownViewMode(
       ? { ...tab, viewMode }
       : tab),
   };
+}
+
+/**
+ * The transient-diff rule: a single-clicked Git diff the user has navigated
+ * away from is closed. Anything else — a pinned diff, a file, a tab already
+ * gone — is left exactly as it is, and returns the same state object.
+ */
+export function closeTransientGitDiff(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {
+  const tab = state.appTabs.find((item) => item.hostProfileId === currentHostProfileId && item.id === tabId);
+  return tab?.kind === "gitDiff" && tab.preview ? closeAppTab(state, currentHostProfileId, tabId) : state;
 }
 
 export function closeAppTab(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {

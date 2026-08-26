@@ -751,6 +751,24 @@ describe("shell navigation hook cross-kind ownership", () => {
   });
 });
 
+describe("creating a window over a document tab", () => {
+  it("selects the created window in the same workspace and only deselects the document", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind === "createWindow") return { sessionId: "$1", windowId: "@9", topologyGeneration: 2 };
+      return { topologyGeneration: 3 };
+    });
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+    act(() => harness.navigation.createWindow("$1"));
+    await flush();
+    expect(performAction).toHaveBeenCalledExactlyOnceWith({ kind: "createWindow", sessionId: "$1" });
+    expect(harness.setAppTab).toHaveBeenCalledExactlyOnceWith("$1", undefined);
+    expect(harness.setActiveSessionId).toHaveBeenLastCalledWith("$1");
+    expect(harness.setActiveWindowId).toHaveBeenLastCalledWith("@9");
+    await act(async () => renderer.unmount());
+  });
+});
+
 describe("pending tab placeholder on create", () => {
   it("puts a placeholder up before the create round trip is answered", async () => {
     const created = deferred<TmuxActionResult | undefined>();

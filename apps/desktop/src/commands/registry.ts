@@ -136,11 +136,10 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "view.showGit", title: "Show Source Control", group: "View", defaults: { mac: "Meta+Shift+G", linux: "Ctrl+Shift+G" } },
   { id: "focus.workspaces", title: "Focus workspace list", group: "View" },
   { id: "focus.tabs", title: "Focus tab strip", group: "View" },
-  // The mock draws these as titlebar arrows. They are commands instead: the
-  // phase caps resting chrome, and two arrows that are usually both disabled
-  // are the first thing that cap should spend.
-  { id: "focus.back", title: "Back to the previous terminal", group: "View", defaults: { mac: "Meta+[", linux: "Ctrl+[" } },
-  { id: "focus.forward", title: "Forward again", group: "View", defaults: { mac: "Meta+]", linux: "Ctrl+]" } },
+  // The titlebar's Back and Forward arrows run these same commands; the
+  // history they walk covers terminal and document tabs alike.
+  { id: "focus.back", title: "Back", group: "View", defaults: { mac: "Meta+[", linux: "Ctrl+[" } },
+  { id: "focus.forward", title: "Forward", group: "View", defaults: { mac: "Meta+]", linux: "Ctrl+]" } },
   { id: "agents.jumpUnread", title: "Jump to the agent that needs you", group: "Agents", defaults: { mac: "Meta+Shift+U", linux: "Ctrl+Shift+U" } },
   { id: "agents.toggleSort", title: "Toggle agent ordering (workspace ⇄ priority)", group: "Agents" },
   // Kept adjacent to the rest of the Agents group: the palette prints a group
