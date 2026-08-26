@@ -956,6 +956,30 @@ describe("pending tab placeholder on create", () => {
     }
   });
 
+  /**
+   * A refused create — the host judging the configured start directory is one
+   * way to get one — leaves nothing behind: no placeholder in the strip, and no
+   * workspace selected. The host's own message is what the user sees, and
+   * `performAction` is what surfaces it.
+   */
+  it("leaves no placeholder and no selection behind when the host refuses the create", async () => {
+    const harness = mountNavigation({
+      performAction: vi.fn<ShellNavigationOptions["performAction"]>(async () => {
+        throw new Error("workspace start directory /nope does not exist or is not a directory");
+      }),
+    });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createSession("work", { directory: "/nope" }));
+    await flush();
+    await flush();
+
+    expect(harness.setPendingTab).toHaveBeenLastCalledWith(undefined);
+    expect(harness.setActiveSessionId).not.toHaveBeenCalled();
+    expect(harness.setActiveWindowId).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
   it("refuses to deliver a create's callback across a connection change", async () => {
     // The race the ticket names: the ack arrives after the app has moved to a
     // different host, and the pane id it names belongs to a connection that is
