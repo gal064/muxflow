@@ -9,6 +9,12 @@ interface TitleBarProps {
   panelOpen: boolean;
   /** Agents waiting on a human; 0 renders no badge at all. */
   unread: number;
+  /**
+   * Whether the bell has somewhere to go. Not the same as `unread > 0`: a
+   * waiting agent whose pane is gone still counts on the badge but cannot be
+   * selected, and a bell that silently does nothing reads as broken.
+   */
+  canJump: boolean;
   canMutate: boolean;
   onToggleSidebar(): void;
   onTogglePanel(): void;
@@ -30,6 +36,18 @@ interface TitleBarProps {
  * which is the only reason the window can still be moved.
  */
 export function TitleBar(props: TitleBarProps) {
+  const plural = props.unread === 1 ? "" : "s";
+  // Three states, and the tooltip says the same thing the label does: there is
+  // somewhere to go, there is nothing waiting, or something is waiting that the
+  // bell cannot reach.
+  const bellHint = props.canJump
+    ? "Go to the next agent waiting (blocked first, then unread completed)"
+    : props.unread > 0
+      ? `${props.unread} agent${plural} waiting, none reachable right now`
+      : "No agents waiting";
+  const bellLabel = props.canJump
+    ? `${props.unread} agent${plural} waiting; go to the next one`
+    : bellHint;
   return <header className={`titlebar ${props.platform === "mac" ? "titlebar-overlay" : ""}`} data-tauri-drag-region>
     <button
       aria-label="Toggle sidebar"
@@ -43,11 +61,11 @@ export function TitleBar(props: TitleBarProps) {
     </div>
     <div className="titlebar-spacer" data-tauri-drag-region />
     <button
-      aria-label={props.unread > 0
-        ? `${props.unread} agent${props.unread === 1 ? "" : "s"} waiting; jump to the loudest`
-        : "No agents waiting"}
+      aria-label={bellLabel}
       className="bar-button bar-button-badged"
+      disabled={!props.canJump}
       onClick={props.onBell}
+      title={bellHint}
       type="button"
     >
       <Icon name="bell" />

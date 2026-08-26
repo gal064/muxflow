@@ -517,6 +517,9 @@ export function App() {
     );
   }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, sidebarRows, snapshot.panes, snapshot.windows]);
   const unread = useMemo(() => unreadCount(agentRows), [agentRows]);
+  // The badge counts every waiting agent; the bell can only reach routable
+  // ones, so it is disabled on exactly the rows `agents.jumpUnread` would find.
+  const canJump = useMemo(() => Boolean(jumpTarget(agentRows)), [agentRows]);
 
   // Only in its own workspace's strip: a create-session placeholder has no
   // session until its ack names one, and drawing it anywhere before that would
@@ -948,6 +951,7 @@ export function App() {
     style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
   >
     <TitleBar
+      canJump={canJump}
       canMutate={hostState.canMutate}
       onBell={() => void runCommand("agents.jumpUnread")}
       onNewWorkspace={() => void runCommand("session.new")}

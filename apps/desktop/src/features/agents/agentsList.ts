@@ -170,9 +170,13 @@ function byWorkspace(left: AgentListRow, right: AgentListRow): number {
 }
 
 /**
- * The row ⌘⇧U goes to: the top of the status order, restricted to rows that
- * actually want attention and can actually be reached. Jumping to an idle agent
- * because it happened to sort first would make the shortcut useless.
+ * The row ⌘⇧U and the titlebar bell go to: the top of the status order,
+ * restricted to rows that actually want attention and can actually be reached.
+ * Jumping to an idle agent because it happened to sort first would make the
+ * shortcut useless.
+ *
+ * Order: blocked first, then unread completed; ties break on most recently
+ * updated.
  */
 export function jumpTarget(rows: readonly AgentListRow[]): AgentListRow | undefined {
   return [...rows].sort(byStatus).find((row) => row.routable && needsAttention(row.state));
