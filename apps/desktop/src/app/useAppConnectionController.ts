@@ -5,7 +5,11 @@ import type { TauriFileWorkspaceClient } from "../features/files/api";
 import type { TauriGitWorkspaceClient } from "../features/git/api";
 import { helperConnectionKey } from "../features/shell/helperUpgrade";
 import { hostProfileId } from "../features/shell/types";
-import { useDesktopResumeRecovery } from "../features/shell/useDesktopResumeRecovery";
+import {
+  probeResumedLink,
+  useDesktopResumeRecovery,
+  type ResumeProbeOutcome,
+} from "../features/shell/useDesktopResumeRecovery";
 import { TerminalEventHub } from "../features/terminal/TerminalEventHub";
 import { createEchoLagProbe } from "../features/terminal/echoLagProbe";
 import { createInputLatencyReporter } from "../features/terminal/inputLatencyStats";
@@ -13,6 +17,7 @@ import {
   fetchInputLatencyStats,
   fetchLinkStats,
   requestTerminalSeed,
+  selectTerminalSession,
   startTerminal,
   stopTerminal,
   terminalBridgeKey,
@@ -75,6 +80,12 @@ export function useAppConnectionController({
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const [activeSessionId, setActiveSessionId] = useState<string>();
+  // Read by the bridge effect and the resume handler, neither of which may be
+  // keyed on the selection: the bridge must not restart on a workspace switch.
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+  const hostPhaseRef = useRef(hostState.phase);
+  hostPhaseRef.current = hostState.phase;
   const [activeWindowId, setActiveWindowId] = useState<string>();
   const [clientId, setClientId] = useState<string>();
   /**
@@ -193,13 +204,46 @@ export function useAppConnectionController({
     (paneId) => echoLagProbe.noteOutput(paneId),
   ), [echoLagProbe, setStatus]);
 
-  useDesktopResumeRecovery(() => {
+  /**
+   * A resume rebuilds the connection only once the link it has fails to answer.
+   *
+   * The native wake notification fires for every full wake, including the ones
+   * a Power Nap dark wake already reconnected for and the short sleeps that
+   * never dropped the link. Rebuilding on each of those replaced a healthy
+   * connection — snapshot, reseed, the host attaching its first session — with
+   * the toast and the workspace jump the user reported. So a connected link is
+   * probed with one correlated request first (`RESUME_PROBE_TIMEOUT_MS`), and
+   * only a link that does not answer is rebuilt. A link that is not connected
+   * has nothing to probe and rebuilds as it always did.
+   */
+  useDesktopResumeRecovery((trigger) => {
     if (!profilesHydrated) return;
-    recordPerfCounter("connection.reconnect.desktopResume");
-    recordIncident("reconnect.desktopResume");
-    setConnectionDetail("System resumed; reconnecting for an authoritative state refresh.");
-    setStatus("System resumed; reconnecting…");
-    setConnectionEpoch((value) => value + 1);
+    const rebuild = (probe: ResumeProbeOutcome | "skipped") => {
+      recordPerfCounter("connection.reconnect.desktopResume");
+      recordIncident("reconnect.desktopResume", { trigger, probe });
+      setConnectionDetail("System resumed; reconnecting for an authoritative state refresh.");
+      setStatus("System resumed; reconnecting…");
+      setConnectionEpoch((value) => value + 1);
+    };
+    const probeClientId = clientIdRef.current;
+    const probeSessionId = activeSessionIdRef.current;
+    if (hostPhaseRef.current !== "connected" || !probeClientId || !probeSessionId) {
+      rebuild("skipped");
+      return;
+    }
+    const probedEpoch = terminalEpochRef.current;
+    void probeResumedLink(() => selectTerminalSession(probeClientId, probeSessionId)).then((outcome) => {
+      // The bridge that was probed is the one the outcome speaks for. A link
+      // the native supervisor replaced meanwhile carries a new epoch and is
+      // already the authoritative rebuild this would have asked for.
+      if (clientIdRef.current !== probeClientId || terminalEpochRef.current !== probedEpoch) return;
+      if (outcome === "alive") {
+        recordPerfCounter("connection.resume.linkAlive");
+        recordIncident("resume.linkAlive", { trigger });
+        return;
+      }
+      rebuild(outcome);
+    });
   });
 
   useEffect(() => {
@@ -342,7 +386,7 @@ export function useAppConnectionController({
     let topologyDirtyAt: number | undefined;
     let topologyDirtyName: string | undefined;
     let topologyDirtyCount = 0;
-    const scope = terminalBridgeScope();
+    const scope = terminalBridgeScope(activeSessionIdRef.current);
     void startTerminal(scope.sessionId, scope.paneIds, connection, (event) => {
       if (disposed) return;
       hub.publish(event, () => {

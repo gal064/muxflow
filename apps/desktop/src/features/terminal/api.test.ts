@@ -494,6 +494,7 @@ describe("binary terminal IPC", () => {
     expect(terminalBridgeKey(connection, 2)).toBe(initialKey);
     expect(terminalBridgeKey(connection, 3)).not.toBe(initialKey);
     expect(terminalBridgeScope()).toEqual({ sessionId: "", paneIds: [] });
+    expect(terminalBridgeScope("$27")).toEqual({ sessionId: "$27", paneIds: [] });
   });
 
   it("retries one cumulative bridge acknowledgement with the lifecycle measurement ID", async () => {
