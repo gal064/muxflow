@@ -14,6 +14,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import net.schmizz.keepalive.KeepAliveProvider
+import net.schmizz.keepalive.KeepAliveRunner
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.KeyType
@@ -34,6 +35,7 @@ internal object CloseReason {
 
 private const val CONNECT_TIMEOUT_MS = 10_000
 private const val KEEP_ALIVE_INTERVAL_SECONDS = 15
+private const val KEEP_ALIVE_MAX_COUNT = 3
 private const val STDOUT_CHUNK_BYTES = 64 * 1024
 private const val HOST_KEY_DECISION_TIMEOUT_SECONDS = 60L
 private const val EXIT_STATUS_TIMEOUT_SECONDS = 5L
@@ -65,9 +67,10 @@ internal class SshTransport(
   private val hostKeyDecision = ArrayBlockingQueue<Boolean>(1)
 
   @Volatile private var client: SSHClient? = null
-  @Volatile private var setupFailure: String? = null
   @Volatile private var pendingFingerprint: String? = null
-  @Volatile private var acceptedFingerprint: String? = null
+
+  /** The fingerprint this transport actually authenticated against, once it has one. */
+  @Volatile private var verifiedFingerprint: String? = null
   @Volatile private var verifierReason: String? = null
 
   /**
@@ -88,7 +91,7 @@ internal class SshTransport(
         try {
           channel.startOn(ensureConnected(connectionId, trustedFingerprint))
         } catch (t: Throwable) {
-          channel.failBeforeStart(setupFailure ?: CloseReason.CONNECT_FAILED)
+          channel.failBeforeStart((t as? TransportSetupException)?.reason ?: CloseReason.CONNECT_FAILED)
         }
       }
     } catch (e: RejectedExecutionException) {
@@ -133,13 +136,20 @@ internal class SshTransport(
 
   // Runs on the control thread, so only one connection attempt is ever in flight.
   private fun ensureConnected(connectionId: String, trustedFingerprint: String?): SSHClient {
-    setupFailure?.let { throw IOException("SSH transport $key already failed: $it") }
     client?.let { existing ->
       if (existing.isConnected && existing.isAuthenticated) {
-        // Later channels inherit the host key decision the first one made: their
-        // trustedFingerprint argument describes the same, already-verified key.
+        // The verifier does not run again for a channel that joins a live transport, so the pin
+        // this caller brought is checked here instead. §14 makes a mismatch a hard failure, and
+        // silently inheriting someone else's trust decision would be exactly that mismatch.
+        val verified = verifiedFingerprint
+        if (trustedFingerprint != null && verified != null && trustedFingerprint != verified) {
+          throw TransportSetupException(CloseReason.HOST_KEY_MISMATCH, null)
+        }
         return existing
       }
+      // A dead client still owns a socket, a reader thread and a keepalive thread.
+      closeQuietly { existing.close() }
+      client = null
     }
     SshSecurity.ensureBouncyCastle()
     verifierReason = null
@@ -154,7 +164,9 @@ internal class SshTransport(
       // only when the interval is already non-zero. The desktop uses ServerAliveInterval=15 with
       // ServerAliveCountMax=3 (design doc §3), which is what makes a dropped link surface as
       // `networkLost` instead of a read that blocks forever.
-      fresh.connection.keepAlive.keepAliveInterval = KEEP_ALIVE_INTERVAL_SECONDS
+      val keepAlive = fresh.connection.keepAlive
+      keepAlive.keepAliveInterval = KEEP_ALIVE_INTERVAL_SECONDS
+      (keepAlive as? KeepAliveRunner)?.maxAliveCount = KEEP_ALIVE_MAX_COUNT
       fresh.connect(host, port)
       fresh.authPublickey(user, fresh.loadKeys(keyPair))
     } catch (t: Throwable) {
@@ -165,9 +177,10 @@ internal class SshTransport(
           } else {
             CloseReason.CONNECT_FAILED
           }
-      setupFailure = reason
       closeQuietly { fresh.close() }
-      throw IOException("SSH transport $key failed: $reason", t)
+      // Deliberately not remembered on the transport: a later channel gets its own attempt rather
+      // than inheriting the reason an earlier, unrelated attempt failed with.
+      throw TransportSetupException(reason, t)
     }
     client = fresh
     return fresh
@@ -177,17 +190,21 @@ internal class SshTransport(
     object : HostKeyVerifier {
       override fun verify(hostname: String, port: Int, key: PublicKey): Boolean {
         val fingerprint = SshKeyStore.sha256Fingerprint(key)
-        val trusted = trustedFingerprint ?: acceptedFingerprint
+        val trusted = trustedFingerprint ?: verifiedFingerprint
         if (trusted != null) {
           if (trusted == fingerprint) {
+            verifiedFingerprint = fingerprint
             return true
           }
           verifierReason = CloseReason.HOST_KEY_MISMATCH
           return false
         }
         // Only the very first key exchange can reach here. sshj calls the verifier again on every
-        // rekey, and the branch above answers those from `acceptedFingerprint` rather than
+        // rekey, and the branch above answers those from `verifiedFingerprint` rather than
         // prompting a second time and stalling the reader thread for 60 s.
+        // Nothing may be left over from an earlier decision: a stale answer here would approve a
+        // key the user never saw.
+        hostKeyDecision.clear()
         pendingFingerprint = fingerprint
         emitEvent(
           mapOf(
@@ -204,7 +221,8 @@ internal class SshTransport(
             Thread.currentThread().interrupt()
             null
           } finally {
-            // A duplicate answer must not sit in the queue and silently approve a later key.
+            // Stop accepting answers for this prompt before draining, so a duplicate `trustHostKey`
+            // cannot slip a stale approval into the queue behind us.
             pendingFingerprint = null
             hostKeyDecision.clear()
           }
@@ -212,7 +230,7 @@ internal class SshTransport(
           verifierReason = CloseReason.HOST_KEY_NOT_TRUSTED
           return false
         }
-        acceptedFingerprint = fingerprint
+        verifiedFingerprint = fingerprint
         return true
       }
 
@@ -221,6 +239,10 @@ internal class SshTransport(
       override fun findExistingAlgorithms(hostname: String, port: Int): List<String> = emptyList()
     }
 }
+
+/** Carries the close reason a failed transport setup should report to its waiting channel. */
+private class TransportSetupException(val reason: String, cause: Throwable?) :
+  IOException("SSH transport setup failed: $reason", cause)
 
 /**
  * One remote command on one exec channel of an [SshTransport], with its own IO thread.
@@ -239,6 +261,7 @@ internal class SshChannel(
   private val onCloseRequested: () -> Unit,
 ) {
   private val terminated = AtomicBoolean(false)
+  private val closing = AtomicBoolean(false)
   private val writer: ExecutorService =
     Executors.newSingleThreadExecutor { runnable ->
       Thread(runnable, "muxflow-ssh-write-$connectionId").apply { isDaemon = true }
@@ -286,12 +309,26 @@ internal class SshChannel(
     closeRequested = true
     onCloseRequested()
     cancelQueuedWrites()
-    closeQuietly { stdin?.close() }
-    closeQuietly { channel?.close() }
+    if (!closing.compareAndSet(false, true)) {
+      return
+    }
+    // Both of these block on the network: sshj flushes stdin (which waits for remote window space)
+    // and then waits up to the connection's 30 s timeout for the channel close to be confirmed.
+    // The callers are the JavaScript async queue and the notification's Disconnect action on the
+    // main thread, so neither may wait for them.
+    Thread(
+        {
+          closeQuietly { stdin?.close() }
+          closeQuietly { channel?.close() }
+        },
+        "muxflow-ssh-close-$connectionId",
+      )
+      .apply { isDaemon = true }
+      .start()
   }
 
   private fun run(client: SSHClient) {
-    var reason: String
+    var reason = CloseReason.CONNECT_FAILED
     var connected = false
     var opened: Session.Command? = null
     try {
@@ -312,11 +349,20 @@ internal class SshChannel(
       reason = CloseReason.EXITED
     } catch (t: Throwable) {
       reason = if (connected) CloseReason.NETWORK_LOST else CloseReason.CONNECT_FAILED
+    } finally {
+      // In a finally so that no failure on the way down can leave JavaScript without a `closed`
+      // event, holding the connectionId — and its transport — open forever.
+      if (closeRequested) {
+        reason = CloseReason.CLOSED_BY_CLIENT
+      }
+      val exitCode =
+        try {
+          shutdown(opened)
+        } catch (t: Throwable) {
+          null
+        }
+      finish(reason, exitCode)
     }
-    if (closeRequested) {
-      reason = CloseReason.CLOSED_BY_CLIENT
-    }
-    finish(reason, shutdown(opened))
   }
 
   private fun requireStillWanted() {
@@ -383,8 +429,10 @@ internal class SshChannel(
     }
     closeQuietly { opened.close() }
     cancelQueuedWrites()
-    // §12 builds the error strip from the first stderr line, so give that line a bounded chance to
-    // reach JavaScript before `closed` does.
+    // §12 builds the error strip from the first stderr line, so that line has to reach JavaScript
+    // before `closed` does. Closing the stream ends the pump's blocking read rather than leaving it
+    // free to emit a `stderr` event after the connection is already gone.
+    closeQuietly { opened.errorStream.close() }
     try {
       stderrPump?.join(STDERR_DRAIN_TIMEOUT_MS)
     } catch (e: InterruptedException) {

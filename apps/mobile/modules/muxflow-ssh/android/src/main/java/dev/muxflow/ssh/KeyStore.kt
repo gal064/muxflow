@@ -119,7 +119,9 @@ internal object SshKeyStore {
   }
 
   fun delete(context: Context) {
-    prefs(context).edit().remove(PRIVATE_KEY_PREF).commit()
+    if (!prefs(context).edit().remove(PRIVATE_KEY_PREF).commit()) {
+      throw SshKeyStoreException("Could not remove the SSH key from this device.")
+    }
   }
 
   /** The stored key pair as JCA keys, ready for `SSHClient.loadKeys`. */
