@@ -67,11 +67,13 @@ export async function connectHost(host: SavedHost): Promise<void> {
   await disconnectHost();
   const dial = factory;
   controlHost = host;
+  // §12 cold-start auto-connect targets the last host used.
+  hostsStore.getState().setLastHostId(host.id);
   const connection = new HostConnection({
     dial: () => dial(host, "control"),
     appVersion: APP_VERSION,
     // The stored record wins over the caller's copy so the epoch stays monotonic.
-    nextConnectionEpoch: () => hostsStore.getState().bumpConnectionEpoch(host),
+    nextConnectionEpoch: () => hostsStore.getState().takeConnectionEpoch(host.id),
     store: sessionStore,
     host: { id: host.id, label: host.label, host: host.host, port: host.port, user: host.user },
     terminals: terminalRegistry,
