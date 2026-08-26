@@ -1,7 +1,9 @@
 import { Tabs } from "expo-router";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { blockedAgentCount, needsAttention } from "../../src/store/selectors";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+
+import { needsAttention } from "../../src/store/selectors";
 import { ConnectionStrip } from "../../src/ui/components/ConnectionStrip";
 import { useSession } from "../../src/ui/hooks";
 import { colors, metrics, typeScale } from "../../src/ui/tokens";
@@ -10,12 +12,10 @@ import { colors, metrics, typeScale } from "../../src/ui/tokens";
 export default function HomeLayout() {
   const label = useSession((s) => s.connection.host?.label ?? "Muxflow");
   const badge = useSession((s) => Object.values(s.agents).filter((a) => a.present && needsAttention(a) && a.lifecycle === "blocked").length);
-  // Kept for parity with the desktop's badge rule; the tab badge is the stricter count above.
-  void blockedAgentCount;
   return (
     <Tabs
       screenOptions={{
-        headerStyle: { backgroundColor: colors.chromeBg, height: metrics.appBarHeight + STATUS_BAR_ALLOWANCE },
+        headerStyle: { backgroundColor: colors.chromeBg },
         headerTintColor: colors.chromeInkStrong,
         headerTitle: label,
         headerTitleStyle: {
@@ -60,12 +60,11 @@ export default function HomeLayout() {
   );
 }
 
-const STATUS_BAR_ALLOWANCE = 0;
-
-/** App bar (56 dp) with the host label and the connection dot, then the global strip. */
+/** App bar (56 dp below the status bar) with the host label and the connection dot, then the global strip. */
 function TabHeader({ title }: { title: string; [key: string]: unknown }) {
+  const insets = useSafeAreaInsets();
   return (
-    <View style={styles.headerWrap}>
+    <View style={[styles.headerWrap, { paddingTop: insets.top }]}>
       <View style={styles.header}>
         <Text style={styles.headerTitle} numberOfLines={1}>{title}</Text>
         <ConnectionDot />

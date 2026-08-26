@@ -289,3 +289,31 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await expect(pending).resolves.toBeUndefined();
   });
 });
+
+describe("TerminalController stop during attach", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("hides the pane once the in-flight attach completes", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
+    await answerNext(t); // select
+    await answerNext(t); // resize
+    await settle();
+    const [attach] = t.drain();
+    if (attach?.payload.case !== "request") throw new Error("expected attach");
+    expect(attach.payload.value.operation).toBe(Operation.ATTACH_TERMINAL);
+    const stopped = h.controller.stop();
+    expect(h.store.getState().focusedPaneId).toBeUndefined();
+    await settle();
+    expect(t.drain()).toHaveLength(0); // nothing until the attach answers
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: attach.requestId }));
+    await settle();
+    const [hide] = t.drain();
+    if (hide?.payload.case !== "request") throw new Error("expected a hide after the attach settled");
+    expect(hide.payload.value).toMatchObject({ operation: Operation.SET_TERMINAL_VISIBILITY, visible: false, scope: "%1", terminalEpoch: 1n });
+    await stopped;
+  });
+});
