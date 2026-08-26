@@ -725,7 +725,10 @@ mod tests {
             value.host_setup.get("ssh-remote-linux"),
             Some(&HostSetupDecision::Declined)
         );
-        assert_eq!(value.shell.default_markdown_view, Some(AppTabViewMode::Preview));
+        assert_eq!(
+            value.shell.default_markdown_view,
+            Some(AppTabViewMode::Preview)
+        );
         // Per host, and never merged: the local directory and the remote one
         // are two different machines' filesystems.
         assert_eq!(
