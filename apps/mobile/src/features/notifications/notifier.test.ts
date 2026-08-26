@@ -51,7 +51,10 @@ function fakeHost() {
 /** A store stand-in: the state is set outright and `emit()` is the subscription. */
 function harness(options: { foreground?: boolean } = {}) {
   const platform = fakeHost();
-  let state: SessionState = { ...initialSessionState(), connection: { state: "connected", attempt: 0 } };
+  let state: SessionState = { ...initialSessionState(), connection: { state: "connected", attempt: 0 }, serverIdentity: "tmux:/s:1" };
+  // A virtual clock: the post-settle guard is asserted, never waited on.
+  let clock = 1_000;
+  const slept: number[] = [];
   const storeListeners = new Set<() => void>();
   const transitionListeners = new Set<(transition: AgentTransition) => void>();
   const notifier: AgentNotifier = createAgentNotifier({
@@ -66,6 +69,11 @@ function harness(options: { foreground?: boolean } = {}) {
       return () => transitionListeners.delete(listener);
     },
     appInForeground: () => options.foreground ?? false,
+    now: () => clock,
+    sleep: async (ms) => {
+      slept.push(ms);
+      clock += ms;
+    },
   });
   notifier.start();
 
@@ -85,7 +93,10 @@ function harness(options: { foreground?: boolean } = {}) {
   const settle = async (): Promise<void> => {
     await notifier.settled();
   };
-  return { ...platform, notifier, setState, put, transition, settle, state: () => state };
+  const advance = (ms: number): void => {
+    clock += ms;
+  };
+  return { ...platform, notifier, setState, put, transition, settle, slept, advance, state: () => state };
 }
 
 describe("agent notifier (§13)", () => {
@@ -101,7 +112,7 @@ describe("agent notifier (§13)", () => {
       tag: "a1",
       title: "muxflow · Claude",
       body: "Needs your input",
-      data: { agentId: "a1", paneId: "%1", sessionId: "$1", attentionGeneration: "2" },
+      data: { agentId: "a1", paneId: "%1", sessionId: "$1", attentionGeneration: "2", serverIdentity: "tmux:/s:1" },
     }]);
   });
 
@@ -116,10 +127,46 @@ describe("agent notifier (§13)", () => {
     expect(h.presented[0]?.body).toBe("Finished");
   });
 
-  it("does not post below the notification watermark (step 4)", async () => {
-    h.setState({ notificationWatermark: 5n });
-    await h.transition(agent({ attentionGeneration: 1n }), blocked({ attentionGeneration: 5n }));
-    expect(h.presented).toHaveLength(0);
+  describe("step 4, what was already waiting when we arrived", () => {
+    // The floor is per agent and comes from a snapshot, because the host's
+    // `notification_watermark` is a global store generation and its
+    // `attention_generation` is a per-agent counter — see `reconcileBaseline`.
+    const snapshot = (agents: Agent[], watermark: bigint) => ({
+      agents: Object.fromEntries(agents.map((a) => [a.id, a])),
+      notificationWatermark: watermark,
+    });
+
+    it("stays quiet for attention that was already there on the first snapshot", async () => {
+      const already = blocked({ attentionGeneration: 2n });
+      h.setState(snapshot([already], 47n));
+      await h.transition(undefined, already);
+      expect(h.presented).toHaveLength(0);
+    });
+
+    it("posts when that agent's attention advances afterwards", async () => {
+      h.setState(snapshot([blocked({ attentionGeneration: 2n })], 47n));
+      await h.transition(undefined, blocked({ attentionGeneration: 2n }));
+      await h.transition(blocked({ attentionGeneration: 2n }), blocked({ attentionGeneration: 3n }));
+      expect(h.presented).toHaveLength(1);
+    });
+
+    it("is not raised by a later snapshot, so a disconnect does not swallow attention", async () => {
+      h.setState(snapshot([agent({ attentionGeneration: 2n })], 47n));
+      await h.transition(undefined, agent({ attentionGeneration: 2n }));
+      // Offline; the agent blocked meanwhile. The reconnect snapshot carries a
+      // much larger global watermark and a per-agent generation of 3.
+      const now = blocked({ attentionGeneration: 3n });
+      h.setState(snapshot([now], 91n));
+      await h.transition(undefined, now);
+      expect(h.presented).toHaveLength(1);
+      expect(h.presented[0]?.body).toBe("Needs your input");
+    });
+
+    it("gives an agent first seen in an event no floor at all", async () => {
+      h.setState(snapshot([], 47n));
+      await h.transition(undefined, blocked({ attentionGeneration: 1n }));
+      expect(h.presented).toHaveLength(1);
+    });
   });
 
   it("posts once per (agent, generation), even when the same state is replayed (step 5)", async () => {
@@ -177,6 +224,25 @@ describe("agent notifier (§13)", () => {
       await h.settle();
       expect(h.cancelled).toEqual(["a1"]);
       expect(h.tray.size).toBe(0);
+    });
+
+    it("lets a post reach the status bar before cancelling it", async () => {
+      // `present()` resolves before `notify` runs natively; a cancel that
+      // overtook it would leave the notification up with no way to re-post.
+      await h.transition(agent(), blocked());
+      h.put(blocked({ seenGeneration: 2n }));
+      await h.settle();
+      expect(h.slept).toEqual([750]);
+      expect(h.cancelled).toEqual(["a1"]);
+    });
+
+    it("does not delay a cancel for a notification that has been up a while", async () => {
+      await h.transition(agent(), blocked());
+      h.advance(5_000);
+      h.put(blocked({ seenGeneration: 2n }));
+      await h.settle();
+      expect(h.slept).toEqual([]);
+      expect(h.cancelled).toEqual(["a1"]);
     });
 
     it("cancels when a blocked agent goes back to work without being seen", async () => {

@@ -1,7 +1,7 @@
 // Pull-to-refresh (design.md §9): AGENT_SNAPSHOT, re-applied to the store.
 
 import { agentSnapshot } from "../../protocol/requests";
-import { getConnection, toast } from "../../session/connectionManager";
+import { emitAgentTransition, getConnection, toast } from "../../session/connectionManager";
 import { sessionStore } from "../../store/sessionStore";
 
 export async function refreshAgents(): Promise<void> {
@@ -10,7 +10,11 @@ export async function refreshAgents(): Promise<void> {
   try {
     const response = await connection.request(agentSnapshot(connection.serverIdentity));
     const snapshot = response.agent?.snapshot;
-    if (snapshot) sessionStore.getState().applyAgentSnapshot(snapshot);
+    if (!snapshot) return;
+    // A reconciling snapshot feeds §13's decision rule like any AGENT_STATE.
+    for (const transition of sessionStore.getState().applyAgentSnapshot(snapshot)) {
+      emitAgentTransition(transition);
+    }
   } catch (error) {
     toast(error instanceof Error ? error.message : String(error));
   }

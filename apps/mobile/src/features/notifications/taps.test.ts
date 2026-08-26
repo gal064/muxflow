@@ -3,18 +3,18 @@ import { describe, expect, it } from "vitest";
 import { decodePayload, encodePayload, type TapTarget } from "./payload";
 import { createTapMarkSeen, terminalRoute } from "./taps";
 
-const target: TapTarget = { agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: 7n };
+const target: TapTarget = { agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: 7n, serverIdentity: "tmux:/s:1" };
 
 describe("notification payloads", () => {
   it("round-trips §13 step 7's data through the bridge's JSON", () => {
-    const encoded = encodePayload({ agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: 7n });
-    expect(encoded).toEqual({ agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: "7" });
+    const encoded = encodePayload({ agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: 7n }, "tmux:/s:1");
+    expect(encoded).toEqual({ agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: "7", serverIdentity: "tmux:/s:1" });
     expect(decodePayload(encoded)).toEqual(target);
   });
 
   it("survives a generation past Number.MAX_SAFE_INTEGER", () => {
     const generation = 9007199254740993n;
-    expect(decodePayload(encodePayload({ ...target, attentionGeneration: generation })))
+    expect(decodePayload(encodePayload({ ...target, attentionGeneration: generation }, "tmux:/s:1")))
       .toMatchObject({ attentionGeneration: generation });
   });
 
@@ -29,7 +29,7 @@ describe("notification payloads", () => {
 
   it("accepts a re-serialised numeric generation and a missing session", () => {
     expect(decodePayload({ agentId: "a1", paneId: "%12", attentionGeneration: 7 }))
-      .toEqual({ ...target, sessionId: "" });
+      .toEqual({ ...target, sessionId: "", serverIdentity: "" });
   });
 });
 
@@ -75,6 +75,24 @@ describe("mark-seen from a tap", () => {
     markSeen.flush();
     expect(sent).toEqual([target]);
     expect(markSeen.pending()).toBe(0);
+  });
+
+  it("holds a tap aimed at a host that is not the connected one", () => {
+    // Pane and session ids are tmux ids and collide across hosts, so a held
+    // acknowledgement must not be flushed at whichever host answers next.
+    const sent: TapTarget[] = [];
+    let identity = "tmux:/other:9";
+    const markSeen = createTapMarkSeen((t) => {
+      if (t.serverIdentity !== identity) return false;
+      sent.push(t);
+      return true;
+    });
+    markSeen.request(target);
+    markSeen.flush();
+    expect(sent).toEqual([]);
+    identity = "tmux:/s:1";
+    markSeen.flush();
+    expect(sent).toEqual([target]);
   });
 
   it("keeps only the newest generation per agent while holding", () => {

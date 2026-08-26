@@ -22,7 +22,7 @@ const { AGENTS_CHANNEL_ID, createExpoNotificationHost, installForegroundPresenta
 const { colors } = await import("../../ui/tokens");
 
 const response = (data: unknown) => ({ notification: { request: { content: { data } } } });
-const payload = { agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: "7" };
+const payload = { agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: "7", serverIdentity: "tmux:/s:1" };
 
 describe("the Android notification host (§13)", () => {
   beforeEach(() => {
@@ -57,7 +57,6 @@ describe("the Android notification host (§13)", () => {
         title: "muxflow · Claude",
         body: "Needs your input",
         data: payload,
-        sound: "default",
         color: colors.accent,
         priority: notifications.AndroidNotificationPriority.HIGH,
       },
@@ -95,7 +94,7 @@ describe("the Android notification host (§13)", () => {
       notifications.getLastNotificationResponse.mockReturnValue(response(payload));
       const seen: unknown[] = [];
       createExpoNotificationHost().onTap((target) => seen.push(target));
-      expect(seen).toEqual([{ agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: 7n }]);
+      expect(seen).toEqual([{ agentId: "a1", paneId: "%12", sessionId: "$3", attentionGeneration: 7n, serverIdentity: "tmux:/s:1" }]);
       // Otherwise Android replays it from the Activity's launch intent every
       // time the task is restored from Recents.
       expect(notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(1);

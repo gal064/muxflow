@@ -38,6 +38,15 @@ export function startNotifications(): void {
 
   const markSeen = createTapMarkSeen(connectionMarkSeenSink);
   host.onTap((target) => {
+    const identity = sessionStore.getState().serverIdentity;
+    // `%12` exists on every tmux server. If this app is already looking at a
+    // different one, routing the tap would open an unrelated pane; hold the
+    // acknowledgement instead and let it flush if that host comes back.
+    if (identity && target.serverIdentity && identity !== target.serverIdentity) {
+      log(`notifications: tap ${target.agentId} ignored (other host)`);
+      markSeen.request(target);
+      return;
+    }
     log(`notifications: tap ${target.agentId} pane=${target.paneId}`);
     openTerminal(target);
     markSeen.request(target);
@@ -50,8 +59,12 @@ export function startNotifications(): void {
       notificationsUiStore.getState().setPermission(outcome);
     },
   });
+  let wasConnected = false;
   sessionStore.subscribe((state) => {
-    if (state.connection.state !== "connected") return;
+    const connected = state.connection.state === "connected";
+    if (connected === wasConnected) return;
+    wasConnected = connected;
+    if (!connected) return;
     // A tap that cold-started the app had no connection to acknowledge on.
     markSeen.flush();
     void permission.onConnected().catch(reportFailure("permission"));
@@ -63,18 +76,15 @@ export function startNotifications(): void {
 
 /**
  * A tap can arrive before the navigator exists — it is what launched the
- * process. expo-router throws until the root layout has mounted, so the push is
- * retried on a short leash rather than lost.
+ * process. `router.navigate` puts the link on expo-router's `routingQueue`,
+ * which `useImperativeApiEmitter` drains once the root layout has mounted, so
+ * the cold-start push needs no retry of its own.
  */
-function openTerminal(target: TapTarget, attempt = 0): void {
+function openTerminal(target: TapTarget): void {
   try {
     router.navigate(terminalRoute(target));
   } catch (error: unknown) {
-    if (attempt >= 30) {
-      log(`notifications: tap.navigate.failed ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
-    setTimeout(() => openTerminal(target, attempt + 1), 100);
+    log(`notifications: tap.navigate.failed ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

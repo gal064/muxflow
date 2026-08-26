@@ -20,8 +20,22 @@ export interface AgentNotifierDeps {
   onAgentTransition: (listener: (transition: AgentTransition) => void) => () => void;
   /** §13 step 6. */
   appInForeground: () => boolean;
+  /** Injected for the post/cancel settle guard; the default is the real clock. */
+  now?: (() => number) | undefined;
+  sleep?: ((ms: number) => Promise<void>) | undefined;
   log?: ((line: string) => void) | undefined;
 }
+
+/**
+ * How long a post is given to actually reach the status bar before a cancel for
+ * the same tag is allowed to run. `present()` resolves when the request reaches
+ * the native scheduler, not when `NotificationManager.notify` fires — there is
+ * still a JS round trip (foreground) and an IO coroutine to go — while a
+ * dismiss goes straight through. Cancelling inside that window would leave the
+ * notification up for good, since step 5 blocks any re-post of the generation.
+ * The queue is serial, so waiting here cannot let a *newer* post be clobbered.
+ */
+const POST_SETTLE_MS = 750;
 
 export interface AgentNotifier {
   start(): void;
@@ -39,6 +53,7 @@ interface Outstanding {
   attentionGeneration: bigint;
   /** Whether the agent still wanted attention when this was posted (see `stale`). */
   unseenWhenPosted: boolean;
+  postedAtMs: number;
 }
 
 export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
@@ -49,6 +64,14 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
    * would let through.
    */
   const lastNotified = new Map<string, bigint>();
+  /**
+   * §13 step 4's floor, per agent. See `reconcileBaseline`: the store's
+   * `notificationWatermark` cannot be compared with an `attentionGeneration`.
+   */
+  const baseline = new Map<string, bigint>();
+  // 0n is the store's pre-snapshot value, and a host whose generation is still
+  // 0 has no agents to take a floor from.
+  let reconciledWatermark = 0n;
   const outstanding = new Map<string, Outstanding>();
   const unsubscribes: (() => void)[] = [];
   // Posts and cancels are serialised so a cancel can never overtake the post it
@@ -57,6 +80,8 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
   let running = false;
 
   const log = (line: string): void => deps.log?.(`notifications: ${line}`);
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
   const enqueue = (work: () => Promise<void>): void => {
     queue = queue.then(work).catch((error: unknown) => {
@@ -64,10 +89,45 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
     });
   };
 
+  /**
+   * §13 step 4 says "if `next.attentionGeneration <= notificationWatermark` →
+   * no notification (already notified before this connection)". Verified
+   * against the host, the two numbers are not comparable:
+   * `AgentSnapshot.notification_watermark` is the agent store's *global*
+   * generation (`apps/host/src/service/agents/snapshot.rs`), bumped by every
+   * agent change, while `attention_generation` is a *per-agent* counter
+   * incremented once per attention transition
+   * (`.../ingest.rs`, `attention.saturating_add(1)`). The global number
+   * outgrows every per-agent one within a few events, so the literal rule
+   * silences the feature outright — observed on a live host during M4 QA.
+   *
+   * What step 4 is *for* survives the correction: the floor is what this agent
+   * had already reached the first time a snapshot showed it to us, which is
+   * exactly "already notified before this connection". It is captured from
+   * snapshots only (an `AGENT_STATE` event leaves `notificationWatermark`
+   * alone) and never raised again, so attention that advanced while the phone
+   * was disconnected still notifies on the way back.
+   */
+  function reconcileBaseline(state: SessionState): void {
+    if (state.notificationWatermark === reconciledWatermark) return;
+    reconciledWatermark = state.notificationWatermark;
+    for (const [agentId, agent] of Object.entries(state.agents)) {
+      if (!baseline.has(agentId)) baseline.set(agentId, agent.attentionGeneration);
+    }
+  }
+
+  function onStoreChange(): void {
+    // Before the sweep: a snapshot lands in the store first and its
+    // transitions are delivered afterwards, so the floor is in place by then.
+    reconcileBaseline(deps.getState());
+    sweep();
+  }
+
   function onTransition(transition: AgentTransition): void {
     const state = deps.getState();
+    reconcileBaseline(state);
     const decision = decideAgentNotification(transition.prev, transition.next, {
-      notificationWatermark: state.notificationWatermark,
+      notificationWatermark: baseline.get(transition.next.id) ?? 0n,
       alreadyNotified: (agentId, generation) => (lastNotified.get(agentId) ?? -1n) >= generation,
       focusedPaneId: state.focusedPaneId,
       appInForeground: deps.appInForeground(),
@@ -85,6 +145,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       event: decision.event,
       attentionGeneration: next.attentionGeneration,
       unseenWhenPosted: needsAttention(next),
+      postedAtMs: now(),
     });
     log(`post ${next.id} ${decision.event} gen=${next.attentionGeneration}`);
     enqueue(async () => {
@@ -93,7 +154,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
           tag: decision.tag,
           title: decision.title,
           body: decision.body,
-          data: encodePayload(decision.data),
+          data: encodePayload(decision.data, state.serverIdentity),
         });
       } catch (error) {
         // Nothing was shown, so nothing is outstanding and this generation was
@@ -127,7 +188,12 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       if (!stale(entry, agents[entry.agentId])) continue;
       outstanding.delete(tag);
       log(`cancel ${tag}`);
-      enqueue(() => deps.host.cancel(tag));
+      const settleAfter = entry.postedAtMs + POST_SETTLE_MS;
+      enqueue(async () => {
+        const wait = settleAfter - now();
+        if (wait > 0) await sleep(wait);
+        await deps.host.cancel(tag);
+      });
     }
   }
 
@@ -135,7 +201,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
     start() {
       if (running) return;
       running = true;
-      unsubscribes.push(deps.onAgentTransition(onTransition), deps.subscribe(sweep));
+      unsubscribes.push(deps.onAgentTransition(onTransition), deps.subscribe(onStoreChange));
     },
     stop() {
       running = false;
