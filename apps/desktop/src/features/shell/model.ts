@@ -236,6 +236,41 @@ export function tabsToCloseNonAgent(tabs: readonly CombinedTab[]): CombinedTab[]
   return tabs.filter((tab) => tab.kind === "app" || (tab.kind === "terminal" && tab.agentPresence === "absent"));
 }
 
+export interface BulkCloseTargets {
+  others: CombinedTab[];
+  right: CombinedTab[];
+  nonAgent: CombinedTab[];
+  /** A set holding a tmux window needs the write permission a single close does. */
+  takesTerminals(targets: readonly CombinedTab[]): boolean;
+  /** Nothing to close, or nothing this connection is allowed to close. */
+  disabled(targets: readonly CombinedTab[]): boolean;
+}
+
+/**
+ * Every bulk close a strip anchor offers, and the one rule that greys them out.
+ *
+ * The strip now exposes the same two closes twice — as toolbar buttons over the
+ * active tab and as menu items over whichever tab was right-clicked. Two call
+ * sites computing "what would this close" separately is how a button and a menu
+ * come to disagree about the set, so both ask this and neither owns the answer.
+ */
+export function bulkCloseTargets(
+  tabs: readonly CombinedTab[],
+  anchorKey: string | undefined,
+  canMutate: boolean,
+): BulkCloseTargets {
+  const takesTerminals = (targets: readonly CombinedTab[]) => targets.some((tab) => tab.kind === "terminal");
+  return {
+    // No anchor is not a fallback anchor: with nothing selected there is no
+    // "others" and no "to the right", and both sets come back empty.
+    others: anchorKey === undefined ? [] : tabsToCloseOthers(tabs, anchorKey),
+    right: anchorKey === undefined ? [] : tabsToCloseRight(tabs, anchorKey),
+    nonAgent: tabsToCloseNonAgent(tabs),
+    takesTerminals,
+    disabled: (targets) => targets.length === 0 || (takesTerminals(targets) && !canMutate),
+  };
+}
+
 /**
  * Revalidates the safety predicate at the mutation boundary. A confirmation or
  * editor flush can outlive the snapshot that built the menu, so a terminal is
@@ -273,6 +308,22 @@ export function bulkCloseOutcomeStatus(closed: number, failed: number, skipped =
     skipped > 0 ? `${skipped} still had an agent and ${skipped === 1 ? "was" : "were"} left open` : undefined,
   ].filter((clause): clause is string => Boolean(clause));
   return `Closed ${closed} of ${attempted} ${attempted === 1 ? "tab" : "tabs"}; ${survivors.join("; ")}.`;
+}
+
+/**
+ * What a bulk close says when it closed everything it was given.
+ *
+ * The confirmation dialog used to be the acknowledgement — you said "Close 4
+ * tabs?" and the strip emptying was the answer. With the dialog gone, a bulk
+ * close over clipped tabs can remove tabs nobody could see, so the receipt
+ * moves after the fact: one counted sentence, auto-dismissing, rather than a
+ * question asked before anything happened.
+ *
+ * `undefined` when nothing was actually closed — an empty receipt is worse
+ * than none.
+ */
+export function bulkCloseCompleteStatus(closed: number): string | undefined {
+  return closed > 0 ? `Closed ${closed} ${closed === 1 ? "tab" : "tabs"}.` : undefined;
 }
 
 export function workspaceUiRecord(

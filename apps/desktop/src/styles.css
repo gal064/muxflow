@@ -1106,6 +1106,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    color and a menu item with `outline: none` would have no focus affordance at
    all — on the surface that now carries every row action in the app. */
 .context-menu-item:focus-visible { background: var(--accent); color: var(--accent-ink); outline-offset: -2px; }
+/* A picking menu's rows: the check column is reserved on every row, so the
+   labels sit on one left edge whichever row is checked. */
+.menu-item-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.menu-item-check { display: inline-flex; flex: none; width: 11px; justify-content: center; }
 .context-menu-item.destructive { color: var(--danger-ink); }
 .context-menu-item.destructive:hover:not(:disabled), .context-menu-item.destructive:focus-visible { background: var(--danger); color: var(--accent-ink); }
 
