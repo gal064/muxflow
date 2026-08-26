@@ -144,6 +144,12 @@ enum Operation {
   // authoritative cwd of the pane that displayed it. The response carries a
   // parent-directory capability and canonical regular-file path for the editor.
   OPERATION_RESOLVE_TERMINAL_FILE = 46;
+  // Publishes the current branch to its already configured upstream. Kept
+  // distinct from GIT_COMMIT because it is the only Git operation whose
+  // authority is a remote: it can be refused by that remote, it can need
+  // credentials this host deliberately cannot supply interactively, and its
+  // outcome is therefore never inferable from the local repository alone.
+  OPERATION_GIT_PUSH = 47;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -781,6 +787,9 @@ message GitCommandResult {
   uint64 pre_status_generation = 17;
   uint64 post_status_generation = 18;
   bool status_omitted = 19;
+  // What a push published to, exactly as `@{upstream}` names it (`origin/main`).
+  // Empty for every command that is not a push.
+  string push_target = 20;
 }
 
 message GitRequest {

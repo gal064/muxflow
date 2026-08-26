@@ -134,6 +134,7 @@ fn operation_from_name(value: &str) -> Result<v1::Operation, String> {
         "prepareDiscard" => Ok(v1::Operation::PrepareGitDiscard),
         "mutate" => Ok(v1::Operation::GitMutation),
         "commit" => Ok(v1::Operation::GitCommit),
+        "push" => Ok(v1::Operation::GitPush),
         _ => Err(format!("unsupported Git operation {value}")),
     }
 }
@@ -141,7 +142,10 @@ fn operation_from_name(value: &str) -> Result<v1::Operation, String> {
 fn operation_requires_epoch(operation: v1::Operation) -> bool {
     matches!(
         operation,
-        v1::Operation::PrepareGitDiscard | v1::Operation::GitMutation | v1::Operation::GitCommit
+        v1::Operation::PrepareGitDiscard
+            | v1::Operation::GitMutation
+            | v1::Operation::GitCommit
+            | v1::Operation::GitPush
     )
 }
 
@@ -245,7 +249,8 @@ fn command_json(value: &v1::GitCommandResult) -> Value {
         "postStateAuthoritative": value.post_state_authoritative,
         "preStatusGeneration": value.pre_status_generation.to_string(),
         "postStatusGeneration": value.post_status_generation.to_string(),
-        "statusOmitted": value.status_omitted })
+        "statusOmitted": value.status_omitted,
+        "pushTarget": value.push_target })
 }
 
 fn command_outcome_name(value: i32) -> &'static str {
@@ -318,6 +323,7 @@ mod tests {
                 pre_status_generation: u64::MAX - 1,
                 post_status_generation: u64::MAX,
                 status_omitted: true,
+                push_target: "origin/main".into(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -337,5 +343,16 @@ mod tests {
             u64::MAX.to_string()
         );
         assert_eq!(value["command"]["statusOmitted"], true);
+        assert_eq!(value["command"]["pushTarget"], "origin/main");
+    }
+
+    /// A push is a mutation bound to the connection generation, and the wire
+    /// name the renderer sends has to reach the operation that does it.
+    #[test]
+    fn push_is_an_epoch_bound_git_operation() {
+        let operation = operation_from_name("push").unwrap();
+        assert_eq!(operation, v1::Operation::GitPush);
+        assert!(operation_requires_epoch(operation));
+        assert!(operation_from_name("pushh").is_err());
     }
 }

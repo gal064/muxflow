@@ -317,6 +317,7 @@ fn phase5_git_contract_round_trips_raw_paths_and_stale_guards() {
         pre_status_generation: (1_u64 << 53) + 11,
         post_status_generation: (1_u64 << 53) + 12,
         status_omitted: true,
+        push_target: "origin/main".into(),
         ..Default::default()
     };
     assert_eq!(
@@ -486,8 +487,11 @@ fn open_file_stream_operation_and_payload_are_append_only() {
     assert_eq!(v1::Operation::OpenFileStream as i32, 44);
     assert_eq!(v1::Operation::GitDiffContent as i32, 45);
     assert_eq!(v1::Operation::ResolveTerminalFile as i32, 46);
+    // Push reuses the Git lane's request and result messages, so it costs one
+    // operation number and nothing else on the wire.
+    assert_eq!(v1::Operation::GitPush as i32, 47);
     assert_eq!(v1::Operation::TestDelay as i32, 100);
-    assert!(v1::Operation::try_from(47).is_err());
+    assert!(v1::Operation::try_from(48).is_err());
 }
 
 #[test]
