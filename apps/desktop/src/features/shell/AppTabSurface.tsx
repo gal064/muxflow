@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
-import { CLICK_SLOP_PX, useSanitizedMarkdown } from "../files/markdownPreview";
+import { CLICK_SLOP_PX, selectionHolds, useSanitizedMarkdown } from "../files/markdownPreview";
 import { renderSafeSvg } from "../files/markdown";
 import { useOpenFileTab } from "../files/useOpenFileTab";
 import { IMAGE_PREVIEW_LIMIT_BYTES, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
@@ -188,6 +188,13 @@ export function MarkdownPreview({ source, onStatus }: { source: string; onStatus
   // Where the press landed, so a release far from it reads as a drag.
   const pressedAt = useRef<{ x: number; y: number }>(undefined);
   const html = useSanitizedMarkdown(source, { held: selecting, container: article });
+  // React 19 compares `dangerouslySetInnerHTML` by reference and assigns
+  // `innerHTML` whenever the object differs, without looking at the string. A
+  // fresh literal per render therefore rebuilds the whole article on any
+  // re-render at all — including the one this component does when the gesture
+  // ends, at exactly the moment the drag's selection is standing in it. Holding
+  // the sanitize back only helps if the wrapper is stable too.
+  const inner = useMemo(() => ({ __html: html }), [html]);
   const [externalUrl, setExternalUrl] = useState<string>();
 
   // On the document, not the article: a drag that leaves the preview still ends
@@ -228,11 +235,10 @@ export function MarkdownPreview({ source, onStatus }: { source: string; onStatus
     // made. `detail` is 0 for a keyboard activation, which has no coordinates
     // to compare and must not be measured against a stale press.
     if (event.detail > 0 && pressed && Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > CLICK_SLOP_PX) return;
-    const selection = document.getSelection?.();
-    if (selection && !selection.isCollapsed) return;
+    if (selectionHolds(article.current)) return;
     if (/^https?:/i.test(href)) setExternalUrl(href);
     else onStatus(`Markdown link: ${href}`);
-  }} dangerouslySetInnerHTML={{ __html: html }} />
+  }} dangerouslySetInnerHTML={inner} />
   {externalUrl && <ConfirmationDialog
     confirmLabel="Open link"
     destructive={false}

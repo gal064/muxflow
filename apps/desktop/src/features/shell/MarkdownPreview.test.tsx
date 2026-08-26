@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 // jsdom, because the preview reads the document's selection and listens for the
 // end of a pointer gesture on the document itself.
+import { act as domAct } from "react";
+import { createRoot } from "react-dom/client";
 import { act, create } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarkdownPreview } from "./AppTabSurface";
@@ -233,5 +235,92 @@ describe("useSanitizedMarkdown", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     expect(JSON.stringify(renderer.toJSON())).toContain("goodbye");
     await act(async () => { renderer.unmount(); });
+  });
+});
+
+/**
+ * The same behaviour against a real DOM, because the assertions above cannot
+ * see it. `react-test-renderer` produces no nodes, so it reports the `__html`
+ * prop and not what React did with it — and React 19 compares
+ * `dangerouslySetInnerHTML` by reference, so a component that holds its
+ * sanitize back can still rebuild the whole article on an unrelated re-render.
+ * Only node identity distinguishes the two.
+ */
+describe("MarkdownPreview against the DOM", () => {
+  let host: HTMLElement;
+  let root: ReturnType<typeof createRoot>;
+
+  beforeEach(() => {
+    document.getSelection = realGetSelection;
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+  });
+
+  afterEach(async () => {
+    await domAct(async () => { root.unmount(); });
+    host.remove();
+  });
+
+  const render = async (source: string) => {
+    await domAct(async () => { root.render(<MarkdownPreview source={source} onStatus={vi.fn()} />); });
+  };
+  const paragraph = () => host.querySelector("p")!;
+  const send = (target: EventTarget, type: string, init: MouseEventInit = {}) => domAct(async () => {
+    target.dispatchEvent(new MouseEvent(type, { bubbles: true, ...init }));
+  });
+
+  it("leaves the rendered nodes in place when a pointer gesture ends", async () => {
+    await render("hello");
+    const text = paragraph().firstChild;
+
+    await send(host.querySelector("article")!, "pointerdown", { button: 0, clientX: 10, clientY: 10 });
+    await send(document, "pointerup");
+    // The component re-renders here to clear the gesture. Rebuilding the
+    // article at that instant is precisely what drops the drag's selection.
+    expect(paragraph().firstChild, "the gesture's own end rebuilt the text it selected").toBe(text);
+  });
+
+  it("keeps a live selection intact across an autosave refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      await render("hello");
+      const selection = window.getSelection()!;
+      const range = document.createRange();
+      range.selectNodeContents(paragraph());
+      selection.removeAllRanges();
+      selection.addRange(range);
+      expect(selection.toString()).toBe("hello");
+
+      await render("hello there");
+      await domAct(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(host.textContent?.trim(), "a pending refresh landed on a live selection").toBe("hello");
+      expect(selection.toString(), "copy would have returned the wrong text").toBe("hello");
+
+      // And once the selection is gone the deferred update arrives.
+      selection.removeAllRanges();
+      await domAct(async () => { document.dispatchEvent(new Event("selectionchange")); });
+      expect(host.textContent?.trim()).toBe("hello there");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds a select-all, whose endpoints sit above the article", async () => {
+    vi.useFakeTimers();
+    try {
+      await render("hello");
+      const selection = window.getSelection()!;
+      const range = document.createRange();
+      range.selectNodeContents(document.body);
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      await render("hello there");
+      await domAct(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(host.textContent?.trim(), "select-all was not recognised as a selection to protect").toBe("hello");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

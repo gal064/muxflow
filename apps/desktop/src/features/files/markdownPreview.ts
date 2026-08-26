@@ -64,19 +64,27 @@ interface PreviewOptions {
 }
 
 /**
- * True while a selection the user can see spans text inside `container`.
+ * True while a selection the user can see covers text inside `container`.
  *
  * Publishing replaces the whole subtree, which drops or moves any selection
- * living in it. A collapsed caret has nothing to lose and a selection anchored
- * somewhere else in the app is not ours to protect, so only this case defers.
+ * living in it. A collapsed caret has nothing to lose and a selection somewhere
+ * else in the app is not ours to protect, so only this case defers.
+ *
+ * Both tests are needed. An endpoint inside the article is the ordinary drag,
+ * including one begun in the editor pane and dragged in. But `contains` only
+ * looks downwards, so a select-all — both endpoints on the body, an ancestor —
+ * reads as outside; a range that merely spans the article covers every word in
+ * it and is the selection with the most to lose.
  */
-function selectionHolds(container: HTMLElement | null | undefined): boolean {
+export function selectionHolds(container: HTMLElement | null | undefined): boolean {
   if (!container) return false;
   const selection = document.getSelection?.();
   if (!selection || selection.isCollapsed) return false;
-  // Either end: a selection dragged from the editor into the article, or a
-  // select-all anchored at the body, still has visible text inside it to lose.
-  return [selection.anchorNode, selection.focusNode].some((node) => Boolean(node && container.contains(node)));
+  if ([selection.anchorNode, selection.focusNode].some((node) => Boolean(node && container.contains(node)))) return true;
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    if (selection.getRangeAt(index).intersectsNode?.(container)) return true;
+  }
+  return false;
 }
 
 /**

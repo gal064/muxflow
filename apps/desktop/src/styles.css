@@ -1066,7 +1066,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .markdown-preview code { padding: 2px 4px; border-radius: 3px; background: var(--chrome-raised); }
 .markdown-preview pre { padding: 12px; overflow: auto; border: 1px solid var(--chrome-hairline); border-radius: 6px; background: var(--chrome-raised); }
 .markdown-preview pre code { padding: 0; background: transparent; }
-.markdown-preview img { max-width: 100%; }
+.markdown-preview img { max-width: 100%; cursor: default; }
 .markdown-preview blockquote { margin-left: 0; padding-left: 14px; border-left: 3px solid var(--chrome-border); color: var(--chrome-dim); }
 .binary-surface {
   position: absolute; inset: 0; display: grid; align-content: center; justify-items: center;
