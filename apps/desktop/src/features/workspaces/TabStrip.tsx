@@ -171,6 +171,10 @@ export function TabStrip(props: TabStripProps) {
     .map((tab, index) => [tab.key, index + 1]));
   const activeTab = selectableTabs(props.tabs).find((tab) => tab.key === props.activeKey);
   const takesTerminals = menuBulk.takesTerminals;
+  // Measured against the strip as it is now, like the bulk-close sets above: a
+  // menu outlives the list it was opened over, and a stale `menu.tab` would let
+  // the item say "Pin" for a tab that is already pinned.
+  const menuTabPinned = props.tabs.some((tab) => tab.key === menu?.tab.key && tab.pinned);
   const menuClosesFocusedPane = Boolean(menu?.focusedPaneId
     && menu.tab.key === props.activeKey
     && props.activeTerminalPaneCount > 1);
@@ -364,7 +368,7 @@ export function TabStrip(props: TabStripProps) {
           : []),
         {
           id: "pin",
-          label: menu.tab.pinned ? "Unpin tab" : "Pin tab",
+          label: menuTabPinned ? "Unpin tab" : "Pin tab",
           run: () => props.onTogglePinned(menu.tab),
         },
         { id: "left", label: "Move left", disabled: !menu.tab.canMoveLeft || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "left", menu.scope) },
