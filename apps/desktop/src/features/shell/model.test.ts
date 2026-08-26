@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import {
   appTabsForWorkspace,
+  archiveWorkspace,
+  archivedSessionIds,
+  archivedWorkspacesFor,
   bulkCloseOutcomeStatus,
   closeAppTab,
   closeTransientGitDiff,
@@ -30,6 +33,7 @@ import {
   tabsToCloseNonAgent,
   tabsToCloseRight,
   tabsEligibleAtBulkCloseCommit,
+  unarchiveWorkspace,
   type CombinedTab,
 } from "./model";
 import { defaultAppState, type PersistedAppState } from "./types";
@@ -557,5 +561,67 @@ describe("application shell model", () => {
   it("keeps navigation local while writes are frozen instead of queuing a tmux mutation", () => {
     expect(shellNavigationMode(true)).toBe("authoritative");
     expect(shellNavigationMode(false)).toBe("cached");
+  });
+});
+
+describe("archived workspaces", () => {
+  const archived = archiveWorkspace(defaultAppState, "local", "server-a", sessions[1], 10);
+
+  it("hides the workspace on exactly this host and server, and unarchive restores it", () => {
+    expect(archivedSessionIds(archived, "local", "server-a")).toEqual(new Set(["$1"]));
+    expect(archivedWorkspacesFor(archived, "local", "server-a", sessions).map((session) => session.id)).toEqual(["$1"]);
+    expect(archived.archivedWorkspaces).toEqual([
+      { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionName: "one", archivedAt: 10 },
+    ]);
+    // Idempotent, and never without a server identity to key on.
+    expect(archiveWorkspace(archived, "local", "server-a", sessions[1], 11)).toBe(archived);
+    expect(archiveWorkspace(defaultAppState, "local", undefined, sessions[1], 11)).toBe(defaultAppState);
+    const restored = unarchiveWorkspace(archived, "local", "server-a", "$1");
+    expect(restored.archivedWorkspaces).toEqual([]);
+    expect(archivedSessionIds(restored, "local", "server-a").size).toBe(0);
+    expect(unarchiveWorkspace(restored, "local", "server-a", "$1")).toBe(restored);
+  });
+
+  it("never lets a record from another server or host hide a workspace", () => {
+    expect(archivedSessionIds(archived, "local", "server-b").size).toBe(0);
+    expect(archivedSessionIds(archived, "remote", "server-a").size).toBe(0);
+    expect(archivedSessionIds(archived, "local", undefined).size).toBe(0);
+    expect(archivedWorkspacesFor(archived, "local", "server-b", sessions)).toEqual([]);
+    // Another server's records are untouched by this server's reconcile…
+    expect(reconcileWorkspaceIdentity(archived, "local", "server-b", [])).toBe(archived);
+    // …and gone when that server's state is discarded.
+    expect(discardServerAppState(archived, "local", "server-a").archivedWorkspaces).toEqual([]);
+  });
+
+  it("follows a rename, survives a reconnect, and forgets a session killed from another client", () => {
+    const renamed = reconcileWorkspaceIdentity(archived, "local", "server-a", [{ ...sessions[1], name: "uno" }, sessions[0]]);
+    expect(renamed.archivedWorkspaces[0]).toMatchObject({ sessionId: "$1", sessionName: "uno" });
+    expect(archivedSessionIds(renamed, "local", "server-a")).toEqual(new Set(["$1"]));
+    // Same server, same sessions: nothing to change, same object.
+    expect(reconcileWorkspaceIdentity(archived, "local", "server-a", sessions)).toBe(archived);
+    const killed = reconcileWorkspaceIdentity(archived, "local", "server-a", [sessions[0]]);
+    expect(killed.archivedWorkspaces).toEqual([]);
+    // A record with no live session is not offered for unarchiving either.
+    expect(archivedWorkspacesFor(archived, "local", "server-a", [sessions[0]])).toEqual([]);
+  });
+
+  it("caps the archive at 200, dropping the oldest", () => {
+    let state = defaultAppState;
+    for (let index = 0; index < 200; index += 1) {
+      state = archiveWorkspace(state, "local", "server-a", { ...sessions[1], id: `$${index + 100}` }, index + 1);
+    }
+    expect(state.archivedWorkspaces).toHaveLength(200);
+    const overflow = archiveWorkspace(state, "local", "server-a", { ...sessions[1], id: "$999" }, 500);
+    expect(overflow.archivedWorkspaces).toHaveLength(200);
+    expect(archivedSessionIds(overflow, "local", "server-a").has("$100")).toBe(false);
+    expect(archivedSessionIds(overflow, "local", "server-a").has("$999")).toBe(true);
+  });
+
+  it("moves the selection off an archived workspace and onto the first visible one", () => {
+    const hidden = new Set(["$1"]);
+    expect(resolveSelectedSession(sessions, "$1", "one", hidden)?.id).toBe("$2");
+    expect(resolveSelectedSession(sessions, undefined, "one", hidden)?.id).toBe("$2");
+    expect(resolveSelectedSession(sessions, "$2", "two", hidden)?.id).toBe("$2");
+    expect(resolveSelectedSession(sessions, "$1", "one", new Set(["$1", "$2"]))).toBeUndefined();
   });
 });

@@ -3,7 +3,7 @@ import contract from "./persistedAppState.contract.json";
 import {
   clampedPanelWidth, clampedTerminalFontSize, defaultAppState, defaultShellState, normalizePersistedAppState,
   panelWidthForWindow, PANEL_MIN_WIDTH,
-  type AppOwnedTab, type PersistedAppState, type WorkspaceUiRecord,
+  type AppOwnedTab, type ArchivedWorkspaceRecord, type PersistedAppState, type WorkspaceUiRecord,
 } from "./types";
 
 /**
@@ -45,8 +45,12 @@ describe("persisted app state contract", () => {
     const workspace: Required<WorkspaceUiRecord> = {
       hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", selectedAppTabId: "",
     };
+    const archived: Required<ArchivedWorkspaceRecord> = {
+      hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", archivedAt: 0,
+    };
     expect(Object.keys(contract.appTabs[0]).sort()).toEqual(Object.keys(tab).sort());
     expect(Object.keys(contract.workspaceUi[0]).sort()).toEqual(Object.keys(workspace).sort());
+    expect(Object.keys(contract.archivedWorkspaces[0]).sort()).toEqual(Object.keys(archived).sort());
   });
 
   it("is a value this side would actually produce", () => {
@@ -62,6 +66,26 @@ describe("persisted app state contract", () => {
     expect(typed.shell.panelWidth).toBe(320);
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
+    expect(typed.archivedWorkspaces[0].sessionId).toBe("$2");
+  });
+
+  it("keeps only well-formed archived records, one per workspace, newest within the cap", () => {
+    const record = (sessionId: string, archivedAt = 1) => ({ hostProfileId: "local", serverIdentity: "server-a", sessionId, sessionName: "w", archivedAt });
+    const loaded = normalizePersistedAppState({
+      ...defaultAppState,
+      archivedWorkspaces: [
+        record("$1"), record("$1", 5), { ...record("$2"), serverIdentity: "" }, { ...record("$3"), archivedAt: "yesterday" },
+        { ...record("$4"), sessionName: undefined }, null, record("$5", 2),
+      ],
+    });
+    expect(loaded.archivedWorkspaces).toEqual([record("$1"), record("$5", 2)]);
+    const many = Array.from({ length: 205 }, (_, index) => record(`$${index}`, index));
+    const capped = normalizePersistedAppState({ ...defaultAppState, archivedWorkspaces: many }).archivedWorkspaces;
+    expect(capped).toHaveLength(200);
+    expect(capped.map((item) => item.archivedAt)).not.toContain(0);
+    expect(capped.map((item) => item.archivedAt)).toContain(204);
+    // A file from before the field existed loads with nothing archived.
+    expect(normalizePersistedAppState({ ...defaultAppState, archivedWorkspaces: undefined }).archivedWorkspaces).toEqual([]);
   });
 });
 
