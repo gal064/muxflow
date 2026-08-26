@@ -45,7 +45,7 @@ export type CommandId =
   | "focus.workspaces" | "focus.tabs" | "focus.back" | "focus.forward"
   | "tab.previous" | "tab.next"
   | "agents.jumpUnread" | "agents.toggleSort"
-  | "session.new" | "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close"
+  | "session.new" | "session.rename" | "session.moveLeft" | "session.moveRight" | "session.archive" | "session.close"
   | WorkspaceSelectCommandId
   | "window.new" | "window.rename" | "window.moveLeft" | "window.moveRight" | "window.close"
   | TabSelectCommandId
@@ -153,6 +153,8 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "session.rename", title: "Rename workspace", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.moveLeft", title: "Move workspace up", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.moveRight", title: "Move workspace down", group: "Workspace", mutates: true, requires: "session" },
+  // Not `mutates`: archiving is an app-side view decision and sends tmux nothing.
+  { id: "session.archive", title: "Archive workspace", group: "Workspace", requires: "session" },
   { id: "session.close", title: "Close workspace…", group: "Workspace", mutates: true, requires: "session", destructive: true },
   // With the rest of the Terminal tab group, not up beside the View commands:
   // the palette's headings assume one contiguous run per group, and these two

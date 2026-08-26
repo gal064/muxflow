@@ -55,6 +55,8 @@ interface ShellCommandOptions {
   /** Live subscription to what the row surfaces currently offer. */
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
+  /** Hides a workspace and its agents without touching tmux. */
+  archiveSession(session: Session): void;
   createSession(name: string): void;
   createWindow(sessionId: string): void;
   serverIdentity?: string;
@@ -321,6 +323,10 @@ export function useShellCommands(options: ShellCommandOptions): {
         const current = ordered.findIndex((session) => session.id === targetSession.id);
         const index = current + (commandId === "session.moveLeft" ? -1 : 1);
         if (current >= 0 && index >= 0 && index < ordered.length) await options.performAction({ kind: "reorderSession", sessionId: targetSession.id, index });
+        return;
+      }
+      case "session.archive": {
+        if (targetSession) options.archiveSession(targetSession);
         return;
       }
       case "window.new": {

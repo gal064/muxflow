@@ -94,6 +94,8 @@ const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
   onSelectWorkspace: noop,
   onSortMode: noop,
   onWorkspaceCommand: noop,
+  archivedWorkspaces: [],
+  onUnarchiveWorkspace: noop,
   phase: "connected",
   rows,
   maxWidth: 426,
@@ -434,7 +436,7 @@ describe("application shell accessibility contracts", () => {
       hostLabel="remote-linux" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
       onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop}
-      onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop}
+      onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
     />;
     await act(async () => { renderer = create(element(agents)); });
     // No agent focused: nothing to act on.
@@ -825,7 +827,7 @@ describe("application shell accessibility contracts", () => {
       hostLabel="remote-linux" maxWidth={426} phase="connected" rows={rows} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
       onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
-      onWorkspaceCommand={onWorkspaceCommand}
+      onWorkspaceCommand={onWorkspaceCommand} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope)); });
@@ -833,6 +835,48 @@ describe("application shell accessibility contracts", () => {
     await act(async () => { renderer.update(element(replacementScope)); });
     await act(async () => renderer.root.findByProps({ "data-menu-item": "rename" }).props.onClick());
     expect(onWorkspaceCommand).toHaveBeenCalledWith(session, "session.rename", commandScope);
+    await act(async () => renderer.unmount());
+  });
+
+  it("offers Archive workspace on a row's menu, without asking and without a tmux gate", async () => {
+    const onWorkspaceCommand = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<WorkspaceSidebar {...sidebarProps({ canMutate: false, onWorkspaceCommand })} />); });
+    await act(async () => renderer.root.findByProps({ "data-workspace-index": 0 }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    const archive = renderer.root.findByProps({ "data-menu-item": "archive" });
+    expect(archive.props.disabled).toBeFalsy();
+    await act(async () => archive.props.onClick());
+    expect(onWorkspaceCommand).toHaveBeenCalledWith(session, "session.archive", commandScope);
+    await act(async () => renderer.unmount());
+  });
+
+  it("lists archived workspaces under a collapsed disclosure, with an unarchive bound to the opening scope", async () => {
+    const parked: Session = { id: "$7", name: "parked", windowCount: 1, attachedClients: 0, order: 5 };
+    // Nothing archived: no disclosure at all.
+    expect(sidebar()).not.toContain("Archived (");
+    const html = sidebar({ archivedWorkspaces: [parked] });
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain("Archived (1)");
+    expect(html).not.toContain("Unarchive parked");
+
+    const onUnarchiveWorkspace = vi.fn();
+    const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
+    const element = (scope: typeof commandScope) => <WorkspaceSidebar {...sidebarProps({ archivedWorkspaces: [parked], commandScope: scope, onUnarchiveWorkspace })} />;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(element(commandScope)); });
+    await act(async () => renderer.root.findByProps({ "aria-controls": "sidebar-archived-list" }).props.onClick());
+    const row = renderer.root.findByProps({ "aria-label": "Unarchive parked" });
+    // Not a workspace row: no number, no selection, no agents.
+    expect(renderer.root.findAllByProps({ "data-workspace-index": 1 })).toHaveLength(0);
+    await act(async () => row.props.onClick());
+    expect(onUnarchiveWorkspace).toHaveBeenCalledWith(parked, commandScope);
+
+    // The row's own menu, opened before the connection was replaced, is gone.
+    await act(async () => renderer.root.findByProps({ id: "sidebar-archived-list" }).findAllByProps({ role: "listitem" })[0]
+      .props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    expect(renderer.root.findAllByProps({ "data-menu-item": "unarchive" })).toHaveLength(1);
+    await act(async () => { renderer.update(element(replacementScope)); });
+    expect(renderer.root.findAllByProps({ "data-menu-item": "unarchive" })).toHaveLength(0);
     await act(async () => renderer.unmount());
   });
 
@@ -851,7 +895,7 @@ describe("application shell accessibility contracts", () => {
       phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
       onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
-      onWorkspaceCommand={noop}
+      onWorkspaceCommand={noop} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope, "Old agent")); });

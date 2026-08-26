@@ -81,5 +81,14 @@
   "hostSetup": {
     "local": "accepted",
     "ssh-remote-linux": "declined"
-  }
+  },
+  "archivedWorkspaces": [
+    {
+      "hostProfileId": "local",
+      "serverIdentity": "server-a",
+      "sessionId": "$2",
+      "sessionName": "parked",
+      "archivedAt": 1700000000000
+    }
+  ]
 }

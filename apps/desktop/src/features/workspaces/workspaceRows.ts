@@ -61,6 +61,12 @@ export interface WorkspaceRowInputs {
   activeBranch?: string;
   /** Home directory, so paths render the way a shell prompt would. */
   home?: string;
+  /**
+   * Sessions that get no row at all — the archived ones. Excluded here rather
+   * than by each consumer, because the row list is also what ⌘1–9, the ⌘P
+   * switcher and the agents list's workspace order are built from.
+   */
+  excludeSessionIds?: ReadonlySet<string>;
 }
 
 export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
@@ -70,7 +76,7 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
     if (!needsAttention(displayState(agent))) continue;
     unreadBySession.set(agent.sessionId, (unreadBySession.get(agent.sessionId) ?? 0) + 1);
   }
-  return orderedSessions(inputs.snapshot.sessions).map((session) => {
+  return orderedSessions(inputs.snapshot.sessions).filter((session) => !inputs.excludeSessionIds?.has(session.id)).map((session) => {
     const rollup = inputs.attentionByWorkspace.get(session.id);
     const attention = rollup?.state ?? "none";
     const here = loudest.get(session.id);

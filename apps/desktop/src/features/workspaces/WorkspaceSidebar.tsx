@@ -17,10 +17,13 @@ import { sameHostConnection, type HostScopeToken } from "../shell/hostScope";
 import { activityWord, type WorkspaceRowModel } from "./workspaceRows";
 import { useTransientDrag } from "./transientDrag";
 
-export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close">;
+export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.archive" | "session.close">;
 
 interface WorkspaceSidebarProps {
   rows: readonly WorkspaceRowModel[];
+  /** Archived workspaces still alive on this server; drawn under the list, collapsed. */
+  archivedWorkspaces: readonly Session[];
+  onUnarchiveWorkspace(session: Session, scope: HostScopeToken): void;
   agents: readonly AgentListRow[];
   adapters: readonly AgentAdapterDescriptor[];
   agentSort: AgentSortMode;
@@ -74,6 +77,10 @@ interface WorkspaceSidebarProps {
  */
 export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const [menu, setMenu] = useState<{ session: Session; anchor: ContextMenuAnchor; index: number; scope: HostScopeToken }>();
+  const [archivedMenu, setArchivedMenu] = useState<{ session: Session; anchor: ContextMenuAnchor; scope: HostScopeToken }>();
+  // Collapsed by default and not persisted: the archive is a place things go
+  // to be out of the way, so it opens only when asked and closes with the app.
+  const [archivedOpen, setArchivedOpen] = useState(false);
   // Launching, resuming, renaming and hook review used to be four permanently
   // visible affordances in the agents panel. They are right-click menus now:
   // the section header for "start something", a row for "do something to this".
@@ -301,6 +308,40 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             {!props.compactWorkspaces && row.unread > 0
               && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
           </div>)}
+        {/* Under the list, not among it: archived rows are not selectable,
+            carry no number and show no agents, so they must not read as one
+            more workspace. Hidden altogether when there is nothing archived. */}
+        {props.archivedWorkspaces.length > 0 && <div className="archived-workspaces">
+          <button
+            aria-controls="sidebar-archived-list"
+            aria-expanded={archivedOpen}
+            className="archived-toggle"
+            onClick={() => setArchivedOpen((open) => !open)}
+            type="button"
+          >
+            <span aria-hidden="true" className="archived-chevron">{archivedOpen ? "▾" : "▸"}</span>
+            Archived ({props.archivedWorkspaces.length})
+          </button>
+          {archivedOpen && <div aria-label="Archived workspaces" className="archived-list" id="sidebar-archived-list" role="list">
+            {props.archivedWorkspaces.map((session) => <div
+              className="archived-row"
+              key={session.id}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setArchivedMenu({ session, anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
+              }}
+              role="listitem"
+            >
+              <span className="archived-name" title={session.name}>{session.name}</span>
+              <button
+                aria-label={`Unarchive ${session.name}`}
+                className="bar-button"
+                onClick={() => props.onUnarchiveWorkspace(session, props.commandScope)}
+                type="button"
+              >Unarchive</button>
+            </div>)}
+          </div>}
+        </div>}
       </div>
     </div>
 
@@ -423,11 +464,22 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         { id: "rename", label: "Rename workspace…", disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.rename", menu.scope) },
         { id: "up", label: "Move up", disabled: !props.canMutate || menu.index === 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft", menu.scope) },
         { id: "down", label: "Move down", disabled: !props.canMutate || menu.index === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight", menu.scope) },
+        // Not gated on `canMutate`: nothing is sent to tmux.
+        { id: "archive", label: "Archive workspace", run: () => props.onWorkspaceCommand(menu.session, "session.archive", menu.scope) },
         "separator",
         { id: "close", label: "Close workspace…", destructive: true, disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.close", menu.scope) },
       ]}
       label={`Actions for ${menu.session.name}`}
       onClose={() => setMenu(undefined)}
+    />}
+
+    {archivedMenu && sameHostConnection(archivedMenu.scope, props.commandScope) && <ContextMenu
+      anchor={archivedMenu.anchor}
+      items={[
+        { id: "unarchive", label: "Unarchive workspace", run: () => props.onUnarchiveWorkspace(archivedMenu.session, archivedMenu.scope) },
+      ]}
+      label={`Actions for archived ${archivedMenu.session.name}`}
+      onClose={() => setArchivedMenu(undefined)}
     />}
 
     {/* The sidebar's own width. The token table calls for 240px minimum,
