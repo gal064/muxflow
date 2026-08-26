@@ -65,7 +65,7 @@ interface ShellCommandOptions {
   setPaletteOpen: Dispatch<SetStateAction<boolean>>;
   setSettingsOpen: Dispatch<SetStateAction<boolean>>;
   setShortcutEditorOpen: Dispatch<SetStateAction<boolean>>;
-  setStatus: Dispatch<SetStateAction<string>>;
+  setStatus: (status: string) => void;
   setTextPrompt: Dispatch<SetStateAction<PendingTextPrompt | undefined>>;
   setWorkspaceSwitcherOpen: Dispatch<SetStateAction<boolean>>;
   snapshot: TmuxSnapshot;

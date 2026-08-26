@@ -6,7 +6,8 @@ import { noticeDismissDelay, noticeForStatus, type StatusNotice } from "../featu
 const COMPACT_VIEWPORT_QUERY = "(max-width: 880px)";
 
 /** Owns viewport-derived rails and the shell's status-to-notice lifecycle. */
-export function useAppShellChrome(status: string) {
+/** `sequence` changes on every `setStatus`, so a repeated message re-notifies. */
+export function useAppShellChrome(status: string, sequence = 0) {
   const [compactViewport, setCompactViewport] = useState(
     () => window.matchMedia?.(COMPACT_VIEWPORT_QUERY).matches ?? false,
   );
@@ -32,7 +33,7 @@ export function useAppShellChrome(status: string) {
       if (!next) return current;
       return current && current.message.trim() === next.message ? { ...current, noticeId: next.id } : undefined;
     });
-  }, [status]);
+  }, [sequence, status]);
 
   // Keyed on the notice rather than on the status that produced it: a notice
   // that outlives a routine status has to keep its own clock, or holding it

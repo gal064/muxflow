@@ -33,7 +33,7 @@ type ControllerArguments = {
   agentClient: TauriAgentClient;
   fileClient: TauriFileWorkspaceClient;
   gitClient: TauriGitWorkspaceClient;
-  setStatus: Dispatch<SetStateAction<string>>;
+  setStatus: (status: string) => void;
   terminalApplicationClipboardEnabled?: boolean;
   /**
    * Sessions a snapshot must not select — the workspaces archived on that
