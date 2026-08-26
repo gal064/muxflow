@@ -157,7 +157,12 @@ export class TerminalController {
     const store = this.options.store.getState();
     if (store.focusedPaneId === this.paneId) store.setFocusedPane(undefined);
     const connection = this.liveConnection();
+    // An attach still in flight hides itself when it completes (see attach()).
     if (!connection || !this.attached) return;
+    await this.hide(connection);
+  }
+
+  private async hide(connection: HostConnection): Promise<void> {
     this.attached = false;
     try {
       await connection.request(setTerminalVisibility(this.paneId, false, {
@@ -189,7 +194,15 @@ export class TerminalController {
   private output(bytes: Uint8Array, generation: bigint): void {
     if (this.stopped) return;
     if (generation > this.lastGeneration) this.lastGeneration = generation;
+    // Credit for these bytes is acknowledged by HostConnection as soon as they
+    // are handed to the page (§7.7 "handed to xterm"); the page's `written`
+    // echo is diagnostic only.
     this.options.page.send({ t: "out", b64: toBase64(bytes) });
+    // Output without a seed (host-abnormal) still means the pane is alive.
+    if (this.phase === "noOutput" || this.phase === "attaching") {
+      this.clearSeedTimers();
+      this.setPhase("seeded");
+    }
   }
 
   private exit(detail: string): void {
@@ -230,8 +243,12 @@ export class TerminalController {
       await connection.request(resizeTerminal(grid.cols, grid.rows));
       this.sentGrid = grid;
       await connection.request(attachTerminal(this.sessionId, this.paneId));
-      if (this.stopped) return;
       this.attached = true;
+      if (this.stopped) {
+        // Backed out mid-attach: the attach still revealed the pane, so hide it (§7.6 step 4).
+        await this.hide(connection);
+        return;
+      }
       this.log(`attached ${grid.cols}x${grid.rows}`);
       if (this.phase !== "seeded") this.startSeedTimers();
     } catch (error) {

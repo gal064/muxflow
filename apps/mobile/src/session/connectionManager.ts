@@ -66,10 +66,10 @@ export async function connectHost(host: SavedHost): Promise<void> {
   await disconnectHost();
   const dial = factory;
   controlHost = host;
-  hostsStore.getState().upsertHost(host);
   const connection = new HostConnection({
     dial: () => dial(host, "control"),
     appVersion: APP_VERSION,
+    // The stored record wins over the caller's copy so the epoch stays monotonic.
     nextConnectionEpoch: () => hostsStore.getState().bumpConnectionEpoch(host),
     store: sessionStore,
     host: { id: host.id, label: host.label, host: host.host, port: host.port, user: host.user },
@@ -87,9 +87,10 @@ export async function connectHost(host: SavedHost): Promise<void> {
     log,
   });
   control = connection;
-  const settled = waitForState(sessionStore, (state) => state === "connected" ? "ok" : state === "failed" || state === "incompatible" ? "bad" : undefined);
+  const settled = waitForState(sessionStore, (state) => state === "connected" ? "ok" : state === "failed" || state === "incompatible" ? "bad" : state === "idle" ? "cancelled" : undefined);
   connection.connect();
   const outcome = await settled;
+  if (outcome === "cancelled") throw new Error("disconnected");
   if (outcome === "bad") throw new Error(sessionStore.getState().connection.message ?? "connection failed");
 }
 
@@ -105,7 +106,9 @@ export function openBulkConnection(): Promise<HostConnection> {
     return Promise.reject(new Error("not connected"));
   }
   const epoch = connection.connectionEpoch;
-  if (bulk && bulk.epoch === epoch && bulk.connection.state !== "failed" && bulk.connection.state !== "idle" && bulk.connection.state !== "incompatible") {
+  // Anything but a live lane on the current epoch is re-dialled: the bulk
+  // lane's own reconnect keeps the (now stale) epoch and cannot rebind.
+  if (bulk && bulk.epoch === epoch && (bulk.connection.state === "connected" || bulk.connection.state === "handshaking" || bulk.connection.state === "sshConnecting")) {
     return bulk.ready;
   }
   dropBulk();
@@ -119,9 +122,9 @@ export function openBulkConnection(): Promise<HostConnection> {
     bulk: { expectedServerIdentity: connection.serverIdentity, connectionEpoch: epoch },
     log: (line) => log(`bulk ${line}`),
   });
-  const ready = waitForState(store, (state) => state === "connected" ? "ok" : state === "failed" || state === "incompatible" || state === "idle" ? "bad" : undefined)
+  const ready = waitForState(store, (state) => state === "connected" ? "ok" : state === "failed" || state === "incompatible" || state === "idle" || state === "reconnecting" ? "bad" : undefined)
     .then((outcome) => {
-      if (outcome === "bad") {
+      if (outcome !== "ok") {
         const message = store.getState().connection.message ?? "bulk connection failed";
         if (bulk?.connection === lane) bulk = null;
         throw new Error(message);
@@ -150,7 +153,9 @@ function dropBulk(): void {
   lane.connection.disconnect();
 }
 
-function waitForState(store: SessionStore, classify: (state: ConnectionState) => "ok" | "bad" | undefined): Promise<"ok" | "bad"> {
+type Outcome = "ok" | "bad" | "cancelled";
+
+function waitForState(store: SessionStore, classify: (state: ConnectionState) => Outcome | undefined): Promise<Outcome> {
   return new Promise((resolve) => {
     const check = (state: ConnectionState): boolean => {
       const outcome = classify(state);

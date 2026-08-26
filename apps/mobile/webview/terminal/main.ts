@@ -41,8 +41,11 @@ function root(): HTMLElement {
 /** Re-measures the viewport, resizes xterm to whole cells, and reports the grid. */
 function measure(force = false): void {
   if (!term || !fit) return;
-  const proposed = fit.proposeDimensions();
   const el = root();
+  // Before layout the element is 0×0; a grid derived from that would resize
+  // every window of the selected session to 2×1. Wait for the resize event.
+  if (el.clientWidth < 1 || el.clientHeight < 1) return;
+  const proposed = fit.proposeDimensions();
   const grid = proposed && proposed.cols > 0 && proposed.rows > 0
     ? { cols: Math.max(2, proposed.cols), rows: Math.max(1, proposed.rows) }
     : computeGrid({ width: el.clientWidth, height: el.clientHeight }, NOMINAL_CELL);

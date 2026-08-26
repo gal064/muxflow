@@ -1,6 +1,7 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { agentForPane, agentPillState } from "../agents/agentViews";
@@ -94,7 +95,11 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const inputEnabled = connected && !gone && snapshot.phase !== "exited";
 
   return (
-    <View style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+    // Expo SDK 57 is edge-to-edge on Android, where adjustResize no longer
+    // shrinks the window; keyboard-controller pads the screen by the real
+    // keyboard height so the chips and input bar stay visible and the WebView
+    // shrinks (which re-measures → RESIZE_TERMINAL, §7.6 step 6).
+    <KeyboardAvoidingView behavior="padding" style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       <ConnectionStrip />
       <View style={styles.header}>
         <Pressable accessibilityLabel="Back" hitSlop={12} onPress={() => router.back()} style={styles.back}>
@@ -169,7 +174,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
           <Text style={styles.sendLabel}>Send</Text>
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 

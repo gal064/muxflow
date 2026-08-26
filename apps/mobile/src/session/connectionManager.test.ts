@@ -27,30 +27,33 @@ describe("connectionManager", () => {
     const pending = connectHost(host);
     await settle();
     const control = dials[0]!.transport;
-    control.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 1n }) }, { requestId: 1n }));
+    // The epoch is per host and monotonic across connects (§8.3), so read it back.
+    const epoch = getConnection()!.connectionEpoch;
+    control.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: epoch }) }, { requestId: 1n }));
     control.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
     await pending;
-    return control;
+    return { control, epoch };
   }
 
   it("dials the control lane, drives the store, and resolves on connected", async () => {
-    await connectControl();
+    const { epoch } = await connectControl();
     expect(dials.map((d) => d.lane)).toEqual(["control"]);
     expect(sessionStore.getState().connection).toMatchObject({ state: "connected", host: { label: "Dev box" } });
-    expect(getConnection()?.connectionEpoch).toBe(1n);
+    expect(getConnection()?.connectionEpoch).toBe(epoch);
+    expect(epoch).toBeGreaterThanOrEqual(1n);
   });
 
   it("opens the bulk lane bound to the control epoch, without Subscribe, and memoises it", async () => {
-    await connectControl();
+    const { epoch } = await connectControl();
     const pending = openBulkConnection();
     await settle();
     const bulk = dials[1]!;
     expect(bulk.lane).toBe("bulk");
     const [hello, ...rest] = bulk.transport.drain();
     if (hello?.payload.case !== "clientHello") throw new Error("expected ClientHello");
-    expect(hello.payload.value).toMatchObject({ bulkConnection: true, expectedServerIdentity: "server-a", connectionEpoch: 1n });
+    expect(hello.payload.value).toMatchObject({ bulkConnection: true, expectedServerIdentity: "server-a", connectionEpoch: epoch });
     expect(rest).toHaveLength(0);
-    bulk.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 1n, terminalOutputWindowBytes: 0n }) }, { requestId: 1n }));
+    bulk.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: epoch, terminalOutputWindowBytes: 0n }) }, { requestId: 1n }));
     const lane = await pending;
     expect(lane.state).toBe("connected");
     expect(await openBulkConnection()).toBe(lane);
@@ -60,15 +63,17 @@ describe("connectionManager", () => {
   });
 
   it("re-dials the bulk lane after the control connection reconnects", async () => {
-    const control = await connectControl();
+    const { control, epoch } = await connectControl();
     const first = openBulkConnection();
     await settle();
-    dials[1]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 1n }) }, { requestId: 1n }));
+    dials[1]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: epoch }) }, { requestId: 1n }));
     await first;
     control.closeFromRemote({ reason: "networkLost" });
     await vi.advanceTimersByTimeAsync(1_000);
     const control2 = dials[2]!.transport;
-    control2.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 2n }) }, { requestId: 1n }));
+    const epoch2 = getConnection()!.connectionEpoch;
+    expect(epoch2).toBe(epoch + 1n);
+    control2.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: epoch2 }) }, { requestId: 1n }));
     control2.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
     expect(dials[1]!.transport.closed).toBe(true);
     const second = openBulkConnection();
@@ -76,8 +81,8 @@ describe("connectionManager", () => {
     expect(dials).toHaveLength(4);
     const [hello] = dials[3]!.transport.drain();
     if (hello?.payload.case !== "clientHello") throw new Error("expected ClientHello");
-    expect(hello.payload.value.connectionEpoch).toBe(2n);
-    dials[3]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 2n }) }, { requestId: 1n }));
+    expect(hello.payload.value.connectionEpoch).toBe(epoch2);
+    dials[3]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: epoch2 }) }, { requestId: 1n }));
     await second;
   });
 

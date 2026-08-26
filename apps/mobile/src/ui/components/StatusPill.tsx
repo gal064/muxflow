@@ -1,7 +1,7 @@
 import { StyleSheet, Text, View } from "react-native";
 
 import type { AgentDisplayState } from "../../store/selectors";
-import { colors, radii, typeScale } from "../tokens";
+import { colors, radii, terminalTheme, typeScale } from "../tokens";
 
 export type PillState = AgentDisplayState | "gone";
 
@@ -17,7 +17,7 @@ export function StatusPill({ state }: { state: PillState }) {
 
 const PILLS: Record<PillState, { background: string; ink: string; label: string }> = {
   blocked: { background: colors.danger, ink: colors.accentInk, label: "Needs you" },
-  done: { background: "#b6bd68", ink: colors.accentInk, label: "Done" },
+  done: { background: terminalTheme.green, ink: colors.accentInk, label: "Done" },
   working: { background: colors.accentWash, ink: colors.accent, label: "Working" },
   idle: { background: colors.chromeSelected, ink: colors.chromeDim, label: "Idle" },
   unknown: { background: colors.chromeSelected, ink: colors.chromeDim, label: "Unknown" },
