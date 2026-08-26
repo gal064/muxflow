@@ -139,6 +139,7 @@ function parseHost(raw: unknown): SavedHost | null {
 }
 
 export function createHostsStore(storage: HostsStorage): HostsStore {
+  const transientEpochs = new Map<string, number>();
   // Every write goes through one chain: two mutations in the same tick must not
   // race each other into the store and leave the older value persisted.
   let writes: Promise<unknown> = Promise.resolve();
@@ -234,10 +235,16 @@ export function createHostsStore(storage: HostsStorage): HostsStore {
 
       takeConnectionEpoch(id) {
         const current = get().hosts.find((host) => host.id === id);
-        // An unsaved host still has to hand the handshake a usable epoch (§7.3
-        // refuses 0), so fall back to 1 rather than throwing mid-connect.
-        const next = (current?.connectionEpoch ?? 0) + 1;
-        mutate(id, (host) => ({ ...host, connectionEpoch: next }));
+        if (current) {
+          const next = current.connectionEpoch + 1;
+          mutate(id, (host) => ({ ...host, connectionEpoch: next }));
+          return next;
+        }
+        // An unsaved host (the dev bridge, a test double) still needs an epoch
+        // that is monotonic across reconnects: the host compares it with the
+        // previous one (§7.3), and 0 is refused. Track it here, unpersisted.
+        const next = (transientEpochs.get(id) ?? 0) + 1;
+        transientEpochs.set(id, next);
         return next;
       },
 
