@@ -46,6 +46,9 @@ describe("terminal input translation", () => {
       .toBe("\u001f");
     // A layout whose `/` reports no `key` still identifies by physical key.
     expect(translateTerminalKey(slash({ key: "Unidentified" }), context())).toBe("\u001f");
+    // …but `code` is US-positional, so the physical fallback must not claim a
+    // QWERTZ Ctrl+-, which sits where a US `/` does and reports its own key.
+    expect(translateTerminalKey(slash({ key: "-", keyCode: 189 }), context())).toBeUndefined();
 
     // Everything with another modifier stays xterm's. Control-Shift-/ is
     // Control-? and Control-_ already produces 0x1f on its own.
