@@ -1,5 +1,6 @@
 import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { renderedPanes } from "../terminal/layout";
+import { usableWorkspaceDefault } from "./types";
 import type { AppOwnedTab, AppTabViewMode, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import type { AgentAdapterId, AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
@@ -631,9 +632,14 @@ export function setWorkspaceDefaults(
   patch: Partial<WorkspaceDefaults>,
 ): PersistedAppState {
   const merged = { ...workspaceDefaultsFor(state, hostProfileId), ...patch };
+  // Bounded here as well as on load: the storage side refuses the *whole* save
+  // for one over-long field, so an unbounded paste into Settings would freeze
+  // every other thing this file persists.
+  const directory = usableWorkspaceDefault(merged.directory);
+  const startupCommand = usableWorkspaceDefault(merged.startupCommand);
   const next: WorkspaceDefaults = {
-    ...(merged.directory?.trim() ? { directory: merged.directory.trim() } : {}),
-    ...(merged.startupCommand?.trim() ? { startupCommand: merged.startupCommand.trim() } : {}),
+    ...(directory ? { directory } : {}),
+    ...(startupCommand ? { startupCommand } : {}),
   };
   const workspaceDefaults = { ...state.workspaceDefaults };
   if (next.directory || next.startupCommand) workspaceDefaults[hostProfileId] = next;
