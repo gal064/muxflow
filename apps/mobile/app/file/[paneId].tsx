@@ -1,6 +1,14 @@
-import { PlaceholderScreen } from "../../src/ui/components/PlaceholderScreen";
+import { useLocalSearchParams } from "expo-router";
 
-/** File viewer — design.md §9.7 (`?path=`). */
+import { FileViewer } from "../../src/features/files/ui/FileViewer";
+
+/** File viewer — design.md §9.7 (`?path=&name=`). */
 export default function FileViewerScreen() {
-  return <PlaceholderScreen title="File" route="/file/[paneId]?path=" />;
+  const { paneId, path, name } = useLocalSearchParams<{ paneId: string; path: string; name?: string }>();
+  return <FileViewer paneId={paneId} path={path} name={name ?? lastSegment(path)} />;
+}
+
+function lastSegment(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash === -1 ? path : path.slice(slash + 1);
 }
