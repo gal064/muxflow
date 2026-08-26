@@ -2,6 +2,8 @@ import type { ConnectionSpec } from "../../app/types";
 import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
 
 export type AppTabKind = "file" | "markdown" | "gitDiff";
+/** How a Markdown tab is drawn; also the shape of the persisted default. */
+export type AppTabViewMode = "source" | "preview" | "split";
 /** The two halves of the right panel; they share one 300px surface. */
 export type PanelSurface = "files" | "git";
 
@@ -19,6 +21,8 @@ export const AGENTS_SECTION_MIN_RATIO = 0.15;
 export const AGENTS_SECTION_MAX_RATIO = 0.75;
 export const TERMINAL_FONT_SIZE_MIN = 10;
 export const TERMINAL_FONT_SIZE_MAX = 20;
+/** The same ceiling `hostSetup` uses: one entry per host profile, not per whim. */
+export const MAX_WORKSPACE_DEFAULT_HOSTS = 1_024;
 
 export interface AppOwnedTab {
   id: string;
@@ -41,7 +45,7 @@ export interface AppOwnedTab {
    * boundary, and an absent optional is what every other optional here does.
    */
   preview?: boolean;
-  viewMode?: "source" | "preview" | "split";
+  viewMode?: AppTabViewMode;
   /** Git diff tabs retain opaque host path and repository identity. */
   gitRepositoryId?: string;
   gitPath?: string;
@@ -91,6 +95,14 @@ export interface ShellState {
   terminalApplicationClipboard: boolean;
   /** Terminal text size in integer CSS pixels. */
   terminalFontSize: number;
+  /**
+   * The mode a *newly opened* Markdown tab starts in.
+   *
+   * Read once, when the tab is created. A tab that is already open keeps
+   * whatever mode it is in, and switching one tab's mode never rewrites this:
+   * the setting is the starting point, not a mirror of the last tab touched.
+   */
+  defaultMarkdownView: AppTabViewMode;
   /** Physical geometry plus the capture scale, used to preserve logical size across monitors. */
   windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
 }
@@ -106,6 +118,25 @@ export interface ShellState {
  */
 export type HostSetupDecision = "accepted" | "declined";
 
+/**
+ * What a *new* workspace on one host starts with.
+ *
+ * Per host profile, because a path is a statement about one machine's
+ * filesystem and a startup command is a statement about one machine's shell.
+ * A laptop's `~/dev` says nothing about a build box, and applying either
+ * across hosts is how a create fails on a directory that only exists
+ * somewhere else.
+ *
+ * Both fields are absent rather than empty when unset, and absent means "keep
+ * doing what this app did before the setting existed".
+ */
+export interface WorkspaceDefaults {
+  /** Where the first pane starts. Absent: wherever tmux would have started it. */
+  directory?: string;
+  /** Shell text sent to the first pane once, right after the create. Absent: nothing is sent. */
+  startupCommand?: string;
+}
+
 export interface PersistedAppState {
   schemaVersion: 1;
   appTabs: AppOwnedTab[];
@@ -113,6 +144,7 @@ export interface PersistedAppState {
   shell: ShellState;
   commands: { shortcutOverrides: Record<string, string | null> };
   hostSetup: Record<string, HostSetupDecision>;
+  workspaceDefaults: Record<string, WorkspaceDefaults>;
 }
 
 export const defaultShellState: ShellState = {
@@ -129,6 +161,7 @@ export const defaultShellState: ShellState = {
   copyOnSelect: false,
   terminalApplicationClipboard: false,
   terminalFontSize: 13,
+  defaultMarkdownView: "split",
 };
 
 export const defaultAppState: PersistedAppState = {
@@ -138,6 +171,7 @@ export const defaultAppState: PersistedAppState = {
   shell: defaultShellState,
   commands: { shortcutOverrides: {} },
   hostSetup: {},
+  workspaceDefaults: {},
 };
 
 export function hostProfileId(connection: ConnectionSpec): string {
@@ -175,12 +209,48 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       copyOnSelect: Boolean(shell?.copyOnSelect),
       terminalApplicationClipboard: Boolean(shell?.terminalApplicationClipboard),
       terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
+      defaultMarkdownView: normalizedViewMode(shell?.defaultMarkdownView),
       ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
         ? { windowGeometry: shell.windowGeometry } : {}),
     },
     commands: { shortcutOverrides: normalizeShortcutRecord(candidate.commands?.shortcutOverrides) },
     hostSetup: normalizeHostSetup(candidate.hostSetup),
+    workspaceDefaults: normalizeWorkspaceDefaults(candidate.workspaceDefaults),
   };
+}
+
+/** An unrecognised mode is the default, not a tab that renders nothing. */
+function normalizedViewMode(value: unknown): AppTabViewMode {
+  return value === "source" || value === "preview" || value === "split" ? value : defaultShellState.defaultMarkdownView;
+}
+
+/**
+ * The per-host workspace defaults, with everything unusable dropped.
+ *
+ * An empty or whitespace-only string is not a value here: it is what the field
+ * looks like when the user cleared it, and storing it would make "unset" and
+ * "set to nothing" two different states the create path would have to tell
+ * apart. The entry cap matches `hostSetup` for the same reason — a map keyed
+ * by host profile has no business being unbounded.
+ */
+function normalizeWorkspaceDefaults(value: unknown): Record<string, WorkspaceDefaults> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries: [string, WorkspaceDefaults][] = [];
+  for (const [host, defaults] of Object.entries(value)) {
+    if (!host || entries.length >= MAX_WORKSPACE_DEFAULT_HOSTS) break;
+    if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) continue;
+    const record = defaults as Partial<WorkspaceDefaults>;
+    const entry: WorkspaceDefaults = {
+      ...(usableDefault(record.directory) ? { directory: record.directory.trim() } : {}),
+      ...(usableDefault(record.startupCommand) ? { startupCommand: record.startupCommand.trim() } : {}),
+    };
+    if (entry.directory || entry.startupCommand) entries.push([host, entry]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function usableDefault(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
 }
 
 /**
