@@ -427,6 +427,11 @@ describe("TauriFileWorkspaceClient", () => {
 
   it.each(["queued", "running"] as const)("preserves a canonical %s download cancellation without synthetic failure", async (initialState) => {
     invokeMock.mockImplementation(async (_command, args) => {
+      expect(args).toMatchObject({
+        diagnosticAttemptId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+        ),
+      });
       const channel = (args as { onEvent: { onmessage?: (value: unknown) => void } }).onEvent;
       queueMicrotask(() => {
         channel.onmessage?.({
