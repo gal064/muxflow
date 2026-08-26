@@ -205,16 +205,19 @@ function byWorkspace(left: AgentListRow, right: AgentListRow): number {
 }
 
 /**
- * The row ⌘⇧U and the titlebar bell go to: the top of the status order,
- * restricted to rows that actually want attention and can actually be reached.
- * Jumping to an idle agent because it happened to sort first would make the
- * shortcut useless.
+ * The row ⌘⇧U and the titlebar bell go to: the loudest row that actually wants
+ * attention and can actually be reached. Jumping to an idle agent because it
+ * happened to sort first would make the shortcut useless.
  *
  * Order: blocked first, then unread completed; ties break on most recently
- * updated.
+ * updated. Deliberately `compareAgents` rather than the list's own `byStatus`,
+ * which now leads with the pinned block: a pin says "keep this where I can see
+ * it", and letting it outrank a blocked agent somewhere else would turn the
+ * one control that means "who needs me most" into a second bookmark.
  */
 export function jumpTarget(rows: readonly AgentListRow[]): AgentListRow | undefined {
-  return [...rows].sort(byStatus).find((row) => row.routable && needsAttention(row.state));
+  return [...rows].sort((left, right) => compareAgents(left.agent, right.agent))
+    .find((row) => row.routable && needsAttention(row.state));
 }
 
 /** How many rows are waiting on a human — the number on the titlebar's bell. */
