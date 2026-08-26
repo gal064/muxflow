@@ -13,7 +13,6 @@ const C = {
   dim: "#8f96a1",
   accent: "#7aa6da",
   accentInk: "#282c34",
-  danger: "#cc6566",
 };
 
 /** Manual check that the native module talks to a real sshd. Not linked from the product UI. */
@@ -64,15 +63,9 @@ export default function SshDebugScreen() {
   };
 
   const echoHi = () =>
-    run("connect", async () => {
-      await ssh.connect(
-        `debug-${Date.now()}`,
-        { host, port: Number(port) || 22, user },
-        "echo hi",
-        trusted.current,
-      );
-      return undefined;
-    });
+    run("connect", () =>
+      ssh.connect(`debug-${Date.now()}`, { host, port: Number(port) || 22, user }, "echo hi", trusted.current),
+    );
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -92,6 +85,7 @@ export default function SshDebugScreen() {
         onPress={() => run("getPublicKey", async () => (await ssh.getPublicKey()) ?? "(none)")}
       />
       <Button label="Run `echo hi`" onPress={echoHi} />
+      <Button label="Clear output" onPress={() => setLines([])} />
       {pending !== null ? (
         <Button
           label={`Trust ${pending.fingerprint}`}
@@ -104,14 +98,10 @@ export default function SshDebugScreen() {
           }
         />
       ) : null}
-      <Button label="Clear output" onPress={() => setLines([])} />
-
       <View style={styles.output}>
         {lines.length === 0 ? <Text style={styles.dim}>No output yet.</Text> : null}
         {lines.map((line, index) => (
-          <Text key={`${index}-${line}`} style={styles.mono}>
-            {line}
-          </Text>
+          <Text key={`${index}-${line}`} style={styles.mono}>{line}</Text>
         ))}
       </View>
     </ScrollView>
@@ -136,7 +126,6 @@ function Field(props: { label: string; value: string; onChange: (next: string) =
         onChangeText={props.onChange}
         autoCapitalize="none"
         autoCorrect={false}
-        placeholderTextColor={C.dim}
       />
     </View>
   );
@@ -145,9 +134,7 @@ function Field(props: { label: string; value: string; onChange: (next: string) =
 function Button(props: { label: string; onPress: () => void }) {
   return (
     <Pressable style={styles.button} onPress={props.onPress}>
-      <Text style={styles.buttonLabel} numberOfLines={1}>
-        {props.label}
-      </Text>
+      <Text style={styles.buttonLabel} numberOfLines={1}>{props.label}</Text>
     </Pressable>
   );
 }
@@ -167,13 +154,7 @@ const styles = StyleSheet.create({
     fontFamily: "monospace",
     padding: 10,
   },
-  button: {
-    alignItems: "center",
-    backgroundColor: C.accent,
-    borderRadius: 8,
-    marginTop: 8,
-    padding: 12,
-  },
+  button: { alignItems: "center", backgroundColor: C.accent, borderRadius: 8, marginTop: 8, padding: 12 },
   buttonLabel: { color: C.accentInk, fontSize: 15 },
   output: {
     backgroundColor: C.raised,
