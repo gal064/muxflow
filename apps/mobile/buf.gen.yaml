@@ -1,0 +1,10 @@
+version: v2
+inputs:
+  - directory: ../../crates/protocol/proto
+clean: true
+plugins:
+  - local: protoc-gen-es
+    out: src/protocol/gen
+    opt:
+      - target=ts
+      - import_extension=js

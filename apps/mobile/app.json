@@ -1,0 +1,57 @@
+{
+  "expo": {
+    "name": "Muxflow",
+    "slug": "muxflow-mobile",
+    "version": "0.1.0",
+    "scheme": "muxflow",
+    "orientation": "default",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#282c34",
+    "newArchEnabled": true,
+    "android": {
+      "package": "dev.muxflow.mobile",
+      "versionCode": 1,
+      "backgroundColor": "#282c34",
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26
+          }
+        }
+      ],
+      "expo-router",
+      "expo-dev-client",
+      "expo-secure-store",
+      "expo-notifications",
+      [
+        "expo-font",
+        {
+          "android": {
+            "fonts": [
+              {
+                "fontFamily": "JetBrains Mono",
+                "fontDefinitions": [
+                  {
+                    "path": "./assets/fonts/JetBrainsMono-Regular.ttf",
+                    "weight": 400
+                  },
+                  {
+                    "path": "./assets/fonts/JetBrainsMono-Bold.ttf",
+                    "weight": 700
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}
