@@ -226,8 +226,30 @@ pub(super) fn root_token(root: &str) -> anyhow::Result<String> {
     Ok(RootCapability::capture(root)?.token().to_owned())
 }
 
+/// The parent root and opaque read-only token for one terminal-linked file.
+///
+/// Unlike `root_token`, this capability cannot enumerate its root or resolve a
+/// sibling. It exists so a deliberate click can open a file outside the pane's
+/// workspace without widening the workspace capability to that file's parent.
+pub(super) fn single_file_root(path: &Path) -> anyhow::Result<(String, String)> {
+    let capability = RootCapability::capture_single_file(path)?;
+    Ok((
+        capability
+            .logical_root()
+            .to_str()
+            .context("single-file root is not valid UTF-8")?
+            .to_owned(),
+        capability.token().to_owned(),
+    ))
+}
+
 pub(super) fn validate_root_token(root: &str, token: &str) -> anyhow::Result<()> {
     RootCapability::validate(root, token)?;
+    Ok(())
+}
+
+pub(super) fn validate_read_token(root: &str, token: &str) -> anyhow::Result<()> {
+    RootCapability::validate_read(root, token)?;
     Ok(())
 }
 

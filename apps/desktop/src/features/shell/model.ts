@@ -458,17 +458,22 @@ export function openFileTab(
   resource: string,
   kind: "file" | "markdown",
   root: { path: string; token: string; revision: string },
-  options: { preview: boolean } = { preview: false },
+  options: { preview: boolean; refreshRoot?: boolean } = { preview: false },
 ): PersistedAppState {
   const inWorkspace = (tab: AppOwnedTab) => tab.hostProfileId === currentHostProfileId
     && tab.serverIdentity === currentServerIdentity
     && tab.sessionId === session.id;
   const existing = state.appTabs.find((tab) => inWorkspace(tab) && tab.resource === resource);
   if (existing) {
-    const pinned = !options.preview && existing.preview
-      ? state.appTabs.map((tab) => tab.id === existing.id ? withoutPreview(tab) : tab)
-      : state.appTabs;
-    return selectAppTab({ ...state, appTabs: pinned }, currentHostProfileId, currentServerIdentity, session, existing.id);
+    let reopened = existing;
+    if (!options.preview && reopened.preview) reopened = withoutPreview(reopened);
+    if (options.refreshRoot) {
+      reopened = { ...reopened, rootPath: root.path, rootToken: root.token };
+    }
+    const appTabs = reopened === existing
+      ? state.appTabs
+      : state.appTabs.map((tab) => tab.id === existing.id ? reopened : tab);
+    return selectAppTab({ ...state, appTabs }, currentHostProfileId, currentServerIdentity, session, existing.id);
   }
 
   const details = {

@@ -78,6 +78,93 @@ fn one_open_classifies_and_carries_exactly_the_content_policy_allows() {
 }
 
 #[test]
+fn terminal_single_file_capability_opens_one_outside_file_and_nothing_else() {
+    let (directory, service) = fixture();
+    let allowed = directory.join("claude-scratchpad.md");
+    let sibling = directory.join("other-secret.md");
+    fs::write(&allowed, "prompt").unwrap();
+    fs::write(&sibling, "secret").unwrap();
+    let (root, token) = single_file_root(&allowed).unwrap();
+    let exposed_digests = token
+        .strip_prefix("file-v1:")
+        .unwrap()
+        .split(':')
+        .collect::<Vec<_>>();
+
+    let opened = service
+        .open_file_stream_authorized(&root, &token, allowed.to_str().unwrap(), &NEVER_CANCELLED)
+        .unwrap();
+    let body: Vec<u8> = opened
+        .chunks()
+        .flat_map(|(_, chunk)| chunk.to_vec())
+        .collect();
+    assert_eq!(body, b"prompt");
+
+    assert!(
+        service
+            .open_file_stream_authorized(
+                &root,
+                &token,
+                sibling.to_str().unwrap(),
+                &NEVER_CANCELLED,
+            )
+            .is_err()
+    );
+    for (index, exposed_digest) in exposed_digests.iter().enumerate() {
+        assert!(
+            service
+                .open_file_stream_authorized(
+                    &root,
+                    exposed_digest,
+                    allowed.to_str().unwrap(),
+                    &NEVER_CANCELLED,
+                )
+                .is_err()
+        );
+        assert!(
+            service
+                .list_directory_page_authorized(
+                    &root,
+                    exposed_digest,
+                    &root,
+                    &format!("extracted-token-{index}"),
+                    "",
+                    0,
+                    &NEVER_CANCELLED,
+                )
+                .is_err()
+        );
+        assert!(
+            service
+                .begin_file_write_authorized(
+                    &root,
+                    exposed_digest,
+                    allowed.to_str().unwrap(),
+                    &format!("extracted-write-{index}"),
+                    "operation",
+                    3,
+                    0,
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        service
+            .begin_file_write_authorized(
+                &root,
+                &token,
+                allowed.to_str().unwrap(),
+                "write",
+                "operation",
+                3,
+                0,
+            )
+            .is_err()
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn an_oversized_text_file_is_classified_without_being_read() {
     let (root, service) = fixture();
     let path = root.join("huge.txt");

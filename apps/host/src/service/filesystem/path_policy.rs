@@ -18,7 +18,16 @@ pub(super) struct RootCapability {
     directory: File,
     logical_root: PathBuf,
     token: String,
+    single_file: Option<SingleFileCapability>,
 }
+
+struct SingleFileCapability {
+    root_token: String,
+    path_digest: String,
+    file_digest: String,
+}
+
+pub(super) const SINGLE_FILE_TOKEN_PREFIX: &str = "file-v1:";
 
 impl RootCapability {
     pub(super) fn capture(root: &str) -> anyhow::Result<Self> {
@@ -30,7 +39,43 @@ impl RootCapability {
             directory,
             logical_root,
             token,
+            single_file: None,
         })
+    }
+
+    /// Mints a read-only capability for one existing regular file.
+    ///
+    /// The public root remains the file's parent because the file streaming
+    /// protocol is root-relative, but the token binds that root to the exact
+    /// canonical leaf and its inode. A caller holding it cannot turn one
+    /// terminal click into a directory listing or a read of a sibling file.
+    pub(super) fn capture_single_file(path: &Path) -> anyhow::Result<Self> {
+        let canonical = fs::canonicalize(path).context("terminal file is unavailable")?;
+        let metadata = fs::metadata(&canonical)?;
+        if !metadata.is_file() {
+            bail!("terminal path is not a regular file");
+        }
+        let parent = canonical
+            .parent()
+            .context("terminal file has no parent directory")?;
+        let mut capability = Self::capture(
+            parent
+                .to_str()
+                .context("terminal file parent is not valid UTF-8")?,
+        )?;
+        let root_token = capability.token.clone();
+        let path_digest = single_file_path_digest(&root_token, &canonical);
+        let file_digest = single_file_digest(&root_token, &canonical, &metadata);
+        // Never serialize `root_token`: it is the ordinary parent-directory
+        // capability, so revealing it inside the narrow token would let a
+        // client peel it out and use it for listing, sibling reads and writes.
+        capability.token = format!("{SINGLE_FILE_TOKEN_PREFIX}{path_digest}:{file_digest}");
+        capability.single_file = Some(SingleFileCapability {
+            root_token,
+            path_digest,
+            file_digest,
+        });
+        Ok(capability)
     }
 
     pub(super) fn validate(root: &str, expected: &str) -> anyhow::Result<Self> {
@@ -38,6 +83,30 @@ impl RootCapability {
         if expected.is_empty() || capability.token != expected {
             bail!("root snapshot token does not match the requested root");
         }
+        Ok(capability)
+    }
+
+    /// Accepts ordinary root capabilities plus the narrow capability used by
+    /// terminal-link reads. Mutating and enumerating operations continue to
+    /// call `validate`, where a single-file token is intentionally invalid.
+    pub(super) fn validate_read(root: &str, expected: &str) -> anyhow::Result<Self> {
+        let Some(encoded) = expected.strip_prefix(SINGLE_FILE_TOKEN_PREFIX) else {
+            return Self::validate(root, expected);
+        };
+        let (path_digest, file_digest) = encoded
+            .split_once(':')
+            .context("single-file token is malformed")?;
+        if path_digest.len() != 64 || file_digest.len() != 64 {
+            bail!("single-file token is malformed");
+        }
+        let mut capability = Self::capture(root)?;
+        let root_token = capability.token.clone();
+        capability.token = expected.to_owned();
+        capability.single_file = Some(SingleFileCapability {
+            root_token,
+            path_digest: path_digest.to_owned(),
+            file_digest: file_digest.to_owned(),
+        });
         Ok(capability)
     }
 
@@ -100,13 +169,47 @@ impl RootCapability {
         Ok((logical_target, stable_target))
     }
 
+    pub(super) fn is_single_file(&self) -> bool {
+        self.single_file.is_some()
+    }
+
+    /// Re-checks a narrow capability against the descriptor actually opened.
+    /// Pathname validation alone is insufficient because another process can
+    /// replace the leaf between `stat` and `openat`.
+    pub(super) fn authorize_opened_file(
+        &self,
+        logical: &Path,
+        metadata: &Metadata,
+    ) -> anyhow::Result<()> {
+        let Some(single_file) = &self.single_file else {
+            return Ok(());
+        };
+        let digest = single_file_digest(&single_file.root_token, logical, metadata);
+        if !metadata.is_file() || digest != single_file.file_digest {
+            bail!("single-file capability does not authorize the opened file");
+        }
+        Ok(())
+    }
+
     fn resolve(&self, path: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
         let logical = super::request_path(&self.logical_root, path)?;
         let relative = logical
             .strip_prefix(&self.logical_root)
             .context("requested path is outside the active root")?
             .to_owned();
-        Ok((logical, self.stable_root().join(relative)))
+        let stable = self.stable_root().join(relative);
+        if let Some(single_file) = &self.single_file {
+            let path_digest = single_file_path_digest(&single_file.root_token, &logical);
+            if path_digest != single_file.path_digest {
+                bail!("single-file capability does not authorize the requested path");
+            }
+            let metadata = fs::metadata(&stable).context("single-file target is unavailable")?;
+            let digest = single_file_digest(&single_file.root_token, &logical, &metadata);
+            if !metadata.is_file() || digest != single_file.file_digest {
+                bail!("single-file capability does not authorize the requested path");
+            }
+        }
+        Ok((logical, stable))
     }
 }
 
@@ -118,6 +221,26 @@ pub(super) fn root_identity_token(root: &Path, metadata: &Metadata) -> String {
     hasher.update(root.as_os_str().as_encoded_bytes());
     hasher.update(&metadata.dev().to_le_bytes());
     hasher.update(&metadata.ino().to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn single_file_digest(root_token: &str, path: &Path, metadata: &Metadata) -> String {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(root_token.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(path.as_os_str().as_encoded_bytes());
+    hasher.update(&metadata.dev().to_le_bytes());
+    hasher.update(&metadata.ino().to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn single_file_path_digest(root_token: &str, path: &Path) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(root_token.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(path.as_os_str().as_encoded_bytes());
     hasher.finalize().to_hex().to_string()
 }
 
@@ -690,5 +813,84 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(displaced).unwrap();
+    }
+
+    #[test]
+    fn single_file_capability_reads_only_the_exact_existing_leaf() {
+        let temp = tempfile::tempdir().unwrap();
+        let allowed = temp.path().join("allowed.md");
+        let sibling = temp.path().join("sibling.md");
+        fs::write(&allowed, "allowed").unwrap();
+        fs::write(&sibling, "sibling").unwrap();
+
+        let minted = RootCapability::capture_single_file(&allowed).unwrap();
+        let root = minted.logical_root().to_str().unwrap().to_owned();
+        let token = minted.token().to_owned();
+        assert!(token.starts_with(SINGLE_FILE_TOKEN_PREFIX));
+        let exposed_digests = token
+            .strip_prefix(SINGLE_FILE_TOKEN_PREFIX)
+            .unwrap()
+            .split(':')
+            .collect::<Vec<_>>();
+        assert_eq!(exposed_digests.len(), 2);
+
+        // Mutating/enumerating operations use ordinary validation and cannot
+        // reinterpret the narrow token as a directory capability.
+        assert!(RootCapability::validate(&root, &token).is_err());
+        for exposed in exposed_digests {
+            assert!(RootCapability::validate(&root, exposed).is_err());
+        }
+
+        let reader = RootCapability::validate_read(&root, &token).unwrap();
+        assert!(reader.resolve_existing(allowed.to_str().unwrap()).is_ok());
+        let existing_sibling = reader
+            .resolve_existing(sibling.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        let missing_sibling = reader
+            .resolve_existing(temp.path().join("missing.md").to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(existing_sibling, missing_sibling);
+        assert!(reader.resolve_existing(&root).is_err());
+    }
+
+    #[test]
+    fn single_file_capability_does_not_follow_a_replaced_leaf() {
+        let temp = tempfile::tempdir().unwrap();
+        let allowed = temp.path().join("allowed.md");
+        fs::write(&allowed, "first").unwrap();
+        let minted = RootCapability::capture_single_file(&allowed).unwrap();
+        let root = minted.logical_root().to_str().unwrap().to_owned();
+        let token = minted.token().to_owned();
+
+        fs::remove_file(&allowed).unwrap();
+        fs::write(&allowed, "replacement").unwrap();
+
+        let reader = RootCapability::validate_read(&root, &token).unwrap();
+        assert!(reader.resolve_existing(allowed.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn single_file_capability_checks_the_descriptor_opened_after_a_leaf_swap() {
+        let temp = tempfile::tempdir().unwrap();
+        let allowed = temp.path().join("allowed.md");
+        let replacement = temp.path().join("replacement.md");
+        fs::write(&allowed, "allowed").unwrap();
+        fs::write(&replacement, "replacement").unwrap();
+        let minted = RootCapability::capture_single_file(&allowed).unwrap();
+        let root = minted.logical_root().to_str().unwrap().to_owned();
+        let token = minted.token().to_owned();
+        let reader = RootCapability::validate_read(&root, &token).unwrap();
+
+        // Authorization succeeds, then the leaf changes before openat.
+        reader.resolve_existing(allowed.to_str().unwrap()).unwrap();
+        fs::rename(&replacement, &allowed).unwrap();
+        let opened = reader.anchor(&allowed).unwrap().open_file().unwrap();
+        assert!(
+            reader
+                .authorize_opened_file(&allowed, &opened.metadata().unwrap())
+                .is_err()
+        );
     }
 }

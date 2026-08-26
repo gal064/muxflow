@@ -95,6 +95,43 @@ describe("useAppFileActions", () => {
     expect(picker.choose).not.toHaveBeenCalled();
   });
 
+  it("downloads a host-issued terminal file outside the active workspace", async () => {
+    picker.choose.mockResolvedValueOnce({ destination: "/tmp/prompt-copy.md", panelConfirmed: false });
+    const outsideRoot: ActiveRoot = {
+      ...root,
+      path: "/tmp/claude/session/scratchpad",
+      cwd: "/tmp/claude/session/scratchpad",
+      token: `file-v1:${"a".repeat(64)}:${"b".repeat(64)}`,
+    };
+    const transfer: TransferStatus = {
+      id: "outside-transfer",
+      scopeKey: "scope",
+      path: "/tmp/claude/session/scratchpad/prompt.md",
+      destination: "/tmp/prompt-copy.md",
+      kind: "file",
+      state: "queued",
+      completedBytes: "0",
+      filesCompleted: "0",
+    };
+    const client = {
+      startDownload: vi.fn().mockResolvedValue(transfer),
+      cancelTransfer: vi.fn(),
+    } as unknown as FileWorkspaceClient;
+    let renderer!: ReactTestRenderer;
+    await act(async () => { renderer = create(<Harness client={client} scope={scope("a")} root={root} />); });
+
+    await act(async () => {
+      await actions.startDownloadFlow({ path: transfer.path, kind: "file" }, outsideRoot, "fileSurface");
+    });
+
+    expect(client.startDownload).toHaveBeenCalledWith(
+      expect.objectContaining({ clientId: "a" }),
+      outsideRoot,
+      expect.objectContaining({ path: transfer.path, destination: "/tmp/prompt-copy.md" }),
+    );
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("does not start a download after the save panel outlives its host scope", async () => {
     let resolvePicker!: (value: { destination: string; panelConfirmed: boolean }) => void;
     picker.choose.mockReturnValueOnce(new Promise((resolve) => { resolvePicker = resolve; }));

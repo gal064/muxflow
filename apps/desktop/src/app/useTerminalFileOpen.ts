@@ -78,7 +78,7 @@ export function useTerminalFileOpen(options: TerminalFileOpenOptions) {
             resolved.path,
             kind,
             resolved.root,
-            { preview: false },
+            { preview: false, refreshRoot: true },
           ));
         },
       );
