@@ -50,6 +50,8 @@ import {
 import {
   combineWorkspaceTabs,
   closeAppTab,
+  closeTransientGitDiff,
+  findGitDiffTab,
   mountedAppTabIds,
   mountedTerminalPanes,
   openFileTab,
@@ -567,6 +569,19 @@ export function App() {
     [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
+  // A single-clicked Git diff is transient: it lives until the user selects
+  // any other tab. Closed here, on the selection change itself, rather than
+  // through `closeWorkspaceAppTab` — that path reveals a terminal, and the
+  // user has already navigated. Re-checked against live state: a diff pinned
+  // after it was selected is not the one that was selected then.
+  const previousSelectedAppTab = useRef(selectedAppTab);
+  useEffect(() => {
+    const previous = previousSelectedAppTab.current;
+    previousSelectedAppTab.current = selectedAppTab;
+    if (!previous || previous.kind !== "gitDiff" || previous.id === selectedAppTab?.id) return;
+    setAppState((current) => closeTransientGitDiff(current, currentHostProfileId, previous.id));
+    // Keyed on the strip's selection, which is the only thing this rule is about.
+  }, [activeCombinedTabKey]);
   const grid = useMemo(() => windowGrid(panes), [panes]);
   const mountedPanes = useMemo(
     () => mountedTerminalPanes(snapshot.panes, activeWindowId, Boolean(activeWindow?.zoomed)),
@@ -1159,19 +1174,36 @@ export function App() {
         ignoredPaths={ignoredPaths}
         maxWidth={Math.max(PANEL_MIN_WIDTH, Math.floor(windowWidth / 2))}
         onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
-        onGitDiff={(entry, target) => {
+        onGitDiff={(entry, target, options) => {
           if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
           const session = activeSession;
           const serverIdentity = hostState.serverIdentity;
           const root = workspaceFiles.root;
           const gitStatus = workspaceGit.status;
+          const hostProfileId = currentHostProfileId;
+          // The commit can run twice — once now, and again when a remote flight
+          // it interrupted settles. The second run must only re-select the tab
+          // the first one opened, never open it again: a transient diff the
+          // user has already navigated away from is closed, and stays closed.
+          let openedId: string | undefined;
           shellNavigation.selectLocalAppTab(
             session.id,
             activeWindowId,
             `git:${gitStatus.repository.id}:${target}:${entry.path}`,
-            () => setAppState((current) => openGitDiffTab(
-              current, currentHostProfileId, serverIdentity, session, entry, target, gitStatus, root,
-            )),
+            () => setAppState((current) => {
+              if (openedId) {
+                return current.appTabs.some((tab) => tab.id === openedId)
+                  ? selectAppTab(current, hostProfileId, serverIdentity, session, openedId)
+                  : current;
+              }
+              const next = openGitDiffTab(
+                current, hostProfileId, serverIdentity, session, entry, target, gitStatus, root, options,
+              );
+              openedId = findGitDiffTab(
+                next, hostProfileId, serverIdentity, session.id, gitStatus.repository.id, entry.path, target,
+              )?.id;
+              return next;
+            }),
           );
         }}
         onMessage={setStatus}

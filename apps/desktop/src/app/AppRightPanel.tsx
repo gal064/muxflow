@@ -16,7 +16,7 @@ interface AppRightPanelProps {
   fileScope?: FileWorkspaceScope;
   ignoredPaths?: ReadonlySet<string>;
   onDownload: (intent: DownloadIntent) => Promise<void>;
-  onGitDiff: (entry: GitStatusEntry, target: GitDiffTarget) => void;
+  onGitDiff: (entry: GitStatusEntry, target: GitDiffTarget, options: { preview: boolean }) => void;
   onMessage: (message: string) => void;
   onMutate: (mutation: FileMutation) => Promise<void>;
   onOpenFile: (entry: FileEntry, options: { preview: boolean }) => void;
