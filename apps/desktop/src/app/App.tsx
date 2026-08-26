@@ -34,7 +34,6 @@ import { GitRepositoryStore } from "../features/git/repositoryStore";
 import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
 import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
-import { emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
 import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
 import {
   helperConnectionKey, helperOwnsHostSetupLane, helperUpgradeReducer, initialHelperUpgradeState,
@@ -70,6 +69,7 @@ import {
   type PendingShellTab,
 } from "../features/shell/model";
 import { useContextMenusOpen } from "../ui/ContextMenu";
+import { useFocusHistoryNavigation } from "./useFocusHistoryNavigation";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
@@ -251,14 +251,6 @@ export function App() {
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
-  const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
-  const focusHistoryRef = useRef(focusHistory);
-  focusHistoryRef.current = focusHistory;
-  // Set while navigation itself is moving the app, so the effect that records
-  // where the app ended up does not record the intermediate state as a *new*
-  // destination — which truncated the forward branch on every back-step across
-  // workspaces.
-  const historyStep = useRef(false);
   const controllers = useRef(new Map<string, TerminalPaneController>());
   const lastSlowSendAt = useRef(new Map<string, number>());
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
@@ -607,21 +599,6 @@ export function App() {
   }, [activeSession, currentHostProfileId, hostState.generation, hostState.serverIdentity,
     selectedAppTab, shellNavigation.observeAuthoritativeWindow, windows]);
 
-  // Focus history follows where the app actually ended up, whatever moved it —
-  // a click, a shortcut, an agent notification, or tmux itself. Except when
-  // ⌘[ / ⌘] moved it: that is a walk through the history, not a new
-  // destination, and recording it would truncate the branch being walked.
-  useEffect(() => {
-    if (!activeSessionId) return;
-    if (historyStep.current) { historyStep.current = false; return; }
-    setFocusHistory((current) => visitFocus(current, { sessionId: activeSessionId, windowId: activeWindowId }));
-  }, [activeSessionId, activeWindowId]);
-  useEffect(() => {
-    setFocusHistory((current) => pruneFocusHistory(current, (point) =>
-      snapshot.sessions.some((session) => session.id === point.sessionId)
-      && (!point.windowId || snapshot.windows.some((item) => item.id === point.windowId))));
-  }, [snapshot.sessions, snapshot.windows]);
-
   const focusDirection = useCallback((direction: PaneDirection) => {
     if (!activePane) return;
     const target = adjacentPane(panes, activePane, direction);
@@ -636,6 +613,23 @@ export function App() {
     notificationActivation.clearNotificationFocusGuard();
     shellNavigation.selectWindow(windowId);
   }, [notificationActivation, shellNavigation]);
+  const revealTerminalUnderAppTab = useCallback((sessionId: string, windowId: string | undefined) => {
+    notificationActivation.clearNotificationFocusGuard();
+    shellNavigation.revealLocalTerminal(sessionId, windowId, () => setNavigationAppTab(sessionId, undefined));
+  }, [notificationActivation, setNavigationAppTab, shellNavigation]);
+  const focusNavigation = useFocusHistoryNavigation({
+    activeSessionId,
+    activeWindowId,
+    appTabs: appState.appTabs,
+    revealTerminal: revealTerminalUnderAppTab,
+    selectAppTab: shellNavigation.selectAppTab,
+    selectSession,
+    selectWindow,
+    selectedAppTabId: selectedAppTab?.id,
+    sessions: snapshot.sessions,
+    setStatus,
+    windows: snapshot.windows,
+  });
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is
@@ -673,6 +667,20 @@ export function App() {
    */
   const closeWorkspaceAppTab = (tab: AppOwnedTab, scope: HostScopeToken) => {
     const commit = () => setAppState((current) => closeAppTab(current, currentHostProfileId, tab.id));
+    // Closing the document on screen goes back to what was showing before
+    // it — the terminal it was opened from, usually — rather than to whatever
+    // terminal the workspace happens to have active. With no history to go
+    // back to, a neighbouring document in the same workspace is next, and
+    // only then the workspace's terminal.
+    if (selectedAppTabRef.current?.id === tab.id && sameHostConnection(scope, hostScopeRef.current)) {
+      if (focusNavigation.navigateBackFromClosing(tab.id)) return commit();
+      const neighbours = workspaceAppTabs.filter((item) => item.id !== tab.id);
+      const neighbour = neighbours.filter((item) => item.order < tab.order).at(-1) ?? neighbours[0];
+      if (neighbour) {
+        shellNavigation.selectAppTab(tab.sessionId, activeWindowId, neighbour.id);
+        return commit();
+      }
+    }
     commitScopedAppTabClose({
       activeWindowId,
       commit,
@@ -739,23 +747,7 @@ export function App() {
     serverIdentity: hostState.serverIdentity, setAppState, setConfirmation,
     setPaletteOpen, setSettingsOpen, setShortcutEditorOpen, setStatus, setTextPrompt,
     setWorkspaceSwitcherOpen, snapshot,
-    // Navigation happens here, not inside a state updater. React invokes
-    // updaters twice under StrictMode, and an updater that dispatched tmux
-    // actions therefore sent each one twice, with one captured generation
-    // between them — the same double-dispatch the tab strip documents avoiding.
-    stepFocusHistory: (direction) => {
-      const stepped = stepFocus(focusHistoryRef.current, direction);
-      if (!stepped.point) {
-        setStatus(direction === "back" ? "Nothing earlier to go back to." : "Nothing later to go forward to.");
-        return;
-      }
-      const { sessionId, windowId } = stepped.point;
-      historyStep.current = true;
-      setFocusHistory(stepped.history);
-      if (sessionId !== activeSessionId) selectSession(sessionId);
-      else if (windowId && windowId !== activeWindowId) selectWindow(windowId);
-      else historyStep.current = false;
-    },
+    stepFocusHistory: focusNavigation.step,
     windows,
   });
   // A context menu is an overlay like any other: with it open, ⌘W must not
@@ -963,8 +955,12 @@ export function App() {
     style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
   >
     <TitleBar
+      canGoBack={focusNavigation.canGoBack}
+      canGoForward={focusNavigation.canGoForward}
       canMutate={hostState.canMutate}
+      onBack={() => void runCommand("focus.back")}
       onBell={() => void runCommand("agents.jumpUnread")}
+      onForward={() => void runCommand("focus.forward")}
       onNewWorkspace={() => void runCommand("session.new")}
       onTogglePanel={() => void runCommand("view.togglePanel")}
       onToggleSidebar={() => void runCommand("view.toggleSidebar")}

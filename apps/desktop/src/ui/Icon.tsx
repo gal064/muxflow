@@ -27,6 +27,8 @@ export type IconName =
   | "refresh"
   | "splitRight"
   | "close"
+  | "arrowLeft"
+  | "arrowRight"
   | "chevronRight"
   | "chevronDown"
   | "file"
@@ -78,6 +80,8 @@ const paths: Record<IconName, ReactElement> = {
     <path d="M8 2.5v11" />
   </>,
   close: <path d="m4.25 4.25 7.5 7.5M11.75 4.25l-7.5 7.5" />,
+  arrowLeft: <path d="M12.25 8h-8.5M7.5 4.25 3.75 8l3.75 3.75" />,
+  arrowRight: <path d="M3.75 8h8.5M8.5 4.25 12.25 8 8.5 11.75" />,
   chevronRight: <path d="M6.25 3.75 10.5 8l-4.25 4.25" />,
   chevronDown: <path d="M3.75 6.25 8 10.5l4.25-4.25" />,
   file: <>

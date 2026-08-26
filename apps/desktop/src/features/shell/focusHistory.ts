@@ -1,16 +1,19 @@
 /**
- * Where the user has been, so ⌘[ and ⌘] can take them back.
+ * Where the user has been, so Back and Forward — the titlebar arrows and
+ * ⌘[ / ⌘] — can take them back.
  *
- * The redesigned titlebar carries four controls and no more, so the mock's
- * back/forward arrows do not survive as resting chrome — but the capability
- * they stood for does, as two commands. This is the model behind them: a
- * bounded, linear history of (workspace, tab) pairs with a cursor, the browser
- * model rather than a stack, because "back then forward" has to land where it
- * started.
+ * This is the model behind them: a bounded, linear history of tabs with a
+ * cursor, the browser model rather than a stack, because "back then forward"
+ * has to land where it started. A point names a terminal (workspace and
+ * window) or a document tab (workspace, the window it was opened over, and
+ * the tab), so the history walks through files, Markdown and Git diffs the
+ * same way it walks through terminals.
  */
 export interface FocusPoint {
   sessionId: string;
   windowId?: string;
+  /** Set for a document tab; absent for a terminal. */
+  appTabId?: string;
 }
 
 export interface FocusHistory {
@@ -25,7 +28,8 @@ export const FOCUS_HISTORY_LIMIT = 50;
 export const emptyFocusHistory: FocusHistory = { entries: [], cursor: -1 };
 
 export function samePoint(left: FocusPoint | undefined, right: FocusPoint | undefined): boolean {
-  return left?.sessionId === right?.sessionId && left?.windowId === right?.windowId;
+  return left?.sessionId === right?.sessionId && left?.windowId === right?.windowId
+    && left?.appTabId === right?.appTabId;
 }
 
 /**
@@ -55,6 +59,52 @@ export function stepFocus(history: FocusHistory, direction: "back" | "forward"):
   const next = history.cursor + (direction === "back" ? -1 : 1);
   if (next < 0 || next >= history.entries.length) return { history };
   return { history: { ...history, cursor: next }, point: history.entries[next] };
+}
+
+/**
+ * The nearest entry in `direction` that still exists — the walk skips points
+ * whose tab or workspace has gone, rather than stopping on them, so a closed
+ * tab between here and the destination is stepped over, not navigated to.
+ */
+export function stepFocusToValid(
+  history: FocusHistory,
+  direction: "back" | "forward",
+  exists: (point: FocusPoint) => boolean,
+): { history: FocusHistory; point?: FocusPoint } {
+  let current = history;
+  for (;;) {
+    const stepped = stepFocus(current, direction);
+    if (!stepped.point) return { history };
+    current = stepped.history;
+    if (exists(stepped.point)) return { history: current, point: stepped.point };
+  }
+}
+
+/** Whether `stepFocusToValid` would find somewhere to go. */
+export function hasValidStep(
+  history: FocusHistory,
+  direction: "back" | "forward",
+  exists: (point: FocusPoint) => boolean,
+): boolean {
+  return stepFocusToValid(history, direction, exists).point !== undefined;
+}
+
+/**
+ * The entry a closing tab should hand focus to: the nearest one before the
+ * cursor that exists and is not `exclude` — the tab being closed is still in
+ * the state when this is asked, and must not be its own destination.
+ */
+export function nearestValidBack(
+  history: FocusHistory,
+  exists: (point: FocusPoint) => boolean,
+  exclude?: Pick<FocusPoint, "appTabId">,
+): { index: number; point: FocusPoint } | undefined {
+  for (let index = history.cursor - 1; index >= 0; index -= 1) {
+    const point = history.entries[index];
+    if (exclude?.appTabId !== undefined && point.appTabId === exclude.appTabId) continue;
+    if (exists(point)) return { index, point };
+  }
+  return undefined;
 }
 
 /**

@@ -884,28 +884,40 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('aria-label="Resize the panel"');
   });
 
-  it("puts four controls and an unread count on the titlebar, and no more", () => {
+  it("puts six controls and an unread count on the titlebar, and no more", () => {
     const html = renderToStaticMarkup(<TitleBar
-      canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canGoBack canGoForward={false} canMutate onBack={noop} onBell={noop} onForward={noop}
+      onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="mac" sidebarOpen unread={3} workspaceName="muxflow"
     />);
-    expect([...html.matchAll(/<button/gu)]).toHaveLength(4);
+    expect([...html.matchAll(/<button/gu)]).toHaveLength(6);
     expect(html).toContain("3 agents waiting; jump to the loudest");
     expect(html).toContain("muxflow");
     // The branch label is gone: it arrived a beat after the first paint and
     // changed the bar's content height when it did.
     expect(html).not.toContain("titlebar-branch");
+    // Back and Forward are real controls, disabled exactly when the history
+    // has nothing that still exists in that direction, and named with the
+    // platform's own shortcut.
+    expect(html).toMatch(/<button aria-label="Back"[^>]*title="Back \(⌘\[\)"/u);
+    expect(html).not.toMatch(/<button aria-label="Back"[^>]*disabled/u);
+    expect(html).toMatch(/<button aria-label="Forward"[^>]*disabled/u);
     const quiet = renderToStaticMarkup(<TitleBar
-      canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canGoBack={false} canGoForward canMutate onBack={noop} onBell={noop} onForward={noop}
+      onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen={false} unread={0}
     />);
     expect(quiet).toContain("No agents waiting");
     expect(quiet).toContain("No workspace");
+    expect(quiet).toMatch(/<button aria-label="Back"[^>]*disabled/u);
+    expect(quiet).toMatch(/<button aria-label="Forward"[^>]*title="Forward \(Ctrl\+\]\)"/u);
+    expect(quiet).not.toMatch(/<button aria-label="Forward"[^>]*disabled/u);
   });
 
   it("reserves traffic-light room on macOS only, because only macOS overlays them", () => {
     const bar = (platform: "mac" | "linux") => renderToStaticMarkup(<TitleBar
-      canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canGoBack={false} canGoForward={false} canMutate onBack={noop} onBell={noop} onForward={noop}
+      onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform={platform} sidebarOpen unread={0}
     />);
     // `titleBarStyle: "Overlay"` is a macOS-only Tauri option; a Linux window
