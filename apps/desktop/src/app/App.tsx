@@ -45,7 +45,8 @@ import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
-  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
+  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
+  type AppOwnedTab, type HostSetupDecision, type ShellState, type WorkspaceDefaults,
 } from "../features/shell/types";
 import {
   combineWorkspaceTabs,
@@ -59,10 +60,12 @@ import {
   selectableTabs,
   selectAppTab,
   setMarkdownViewMode,
+  setWorkspaceDefaults,
   shouldSurfaceAuthoritativeTerminal,
   tabsToCloseOthers,
   tabsToCloseNonAgent,
   tabsToCloseRight,
+  workspaceDefaultsFor,
   type CombinedTab,
   type AgentPresenceSnapshot,
   type PendingShellTab,
@@ -80,6 +83,7 @@ import { useClientResize } from "./useClientResize";
 import { useVisibleTerminalSession } from "./useVisibleTerminalSession";
 import { commitScopedAppTabClose, reportAnnouncedPaneResult, useShellNavigation } from "./useShellNavigation";
 import { useTmuxActionPerformer } from "./useTmuxActionPerformer";
+import { useWorkspaceCreate } from "./useWorkspaceCreate";
 import { windowCellSize } from "../features/terminal/clientSize";
 import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
 import { AppDialogLayer } from "./AppDialogLayer";
@@ -189,6 +193,14 @@ export function App() {
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
   const platform = useMemo(() => currentPlatform(), []);
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus, platform);
+  // Read by things that run later than the render that scheduled them — the
+  // workspace-create prompt is submitted long after the command that opened it,
+  // and the defaults it applies must be the ones in force at that moment.
+  const appStateRef = useRef(appState);
+  appStateRef.current = appState;
+  // Stable identity: the hooks that read it hold it in a dependency list, and a
+  // fresh closure per render would rebuild them on every keystroke.
+  const readDefaultMarkdownView = useCallback(() => appStateRef.current.shell.defaultMarkdownView, []);
   // One shared observation per repository, for the sidebar and every diff tab.
   const gitRepositories = useMemo(() => new GitRepositoryStore(gitClient), [gitClient]);
   // The connection controller reports helper-relevant lifecycle points; what
@@ -680,6 +692,7 @@ export function App() {
   });
   const openTerminalFilePath = useTerminalFileOpen({
     clientIdRef,
+    defaultMarkdownView: readDefaultMarkdownView,
     fileClient,
     fileScope,
     hostScopeRef,
@@ -687,6 +700,15 @@ export function App() {
     setAppState,
     setStatus,
     snapshotRef,
+  });
+  const createWorkspace = useWorkspaceCreate({
+    appStateRef,
+    clientIdRef,
+    createSession: shellNavigation.createSession,
+    currentHostProfileId,
+    hostScopeRef,
+    sendInput,
+    setStatus,
   });
   const { commandContext, runCommand } = useShellCommands({
     activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
@@ -701,7 +723,7 @@ export function App() {
       selectAgentRow(target);
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
-    createSession: shellNavigation.createSession,
+    createSession: createWorkspace,
     createWindow: (sessionId) => {
       notificationActivation.clearNotificationFocusGuard();
       shellNavigation.createWindow(sessionId);
@@ -899,7 +921,8 @@ export function App() {
     const root = workspaceFiles.root;
     shellNavigation.selectLocalAppTab(session.id, activeWindowId, `file:${root.token}:${entry.path}`, () => {
       setAppState((current) => openFileTab(
-        current, currentHostProfileId, serverIdentity, session, entry.path, kind, root, options,
+        current, currentHostProfileId, serverIdentity, session, entry.path, kind, root,
+        { ...options, viewMode: current.shell.defaultMarkdownView },
       ));
     });
   };
@@ -928,6 +951,10 @@ export function App() {
       scope,
     });
   };
+
+  /** What to call the host in Settings; the profile’s own label wherever there is one. */
+  const currentHostLabel = profiles.find((profile) => profile.id === currentHostProfileId)?.label
+    ?? (currentHostProfileId === "local" ? "Local" : currentHostProfileId);
 
   const updateShell = (update: Partial<ShellState>) =>
     setAppState((current) => ({ ...current, shell: { ...current.shell, ...update } }));
@@ -1237,6 +1264,7 @@ export function App() {
       onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
       onShell={updateShell}
       onSounds={(preferences) => { setAgentSounds(preferences); saveAgentSoundPreferences(preferences); }}
+      onWorkspaceDefaults={(patch) => setAppState((current) => setWorkspaceDefaults(current, currentHostProfileId, patch))}
       // The selection survives typing. It used to be cleared on every
       // keystroke, which made "correct this host's address" indistinguishable
       // from "add a host": Connect derived a fresh id from the new values and
@@ -1251,6 +1279,13 @@ export function App() {
       sounds={agentSounds}
       sshConfigPath={sshConfigPath}
       sshTarget={sshTarget}
+      // The host the app is actually on, not the one the connection form is
+      // editing: these defaults are applied by the next workspace created here,
+      // and a form the user is filling in for a machine they have not connected
+      // to yet is not that host.
+      workspaceDefaults={workspaceDefaultsFor(appState, currentHostProfileId)}
+      workspaceDefaultsHostId={currentHostProfileId}
+      workspaceDefaultsHostLabel={currentHostLabel}
     />}
     {pendingBulkClose && <ConfirmationDialog
       confirmLabel="Close"

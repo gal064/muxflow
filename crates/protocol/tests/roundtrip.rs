@@ -94,6 +94,23 @@ fn sparse_window_reorder_round_trips_explicit_relative_target() {
     assert_eq!(v1::TmuxAction::decode(bytes.as_slice()).unwrap(), action);
 }
 
+/// The workspace start directory rides on the create that opens the session,
+/// so the session is never created before the path has been judged. That only
+/// holds if the field survives the wire.
+#[test]
+fn session_create_round_trips_its_start_directory() {
+    let action = v1::TmuxAction {
+        kind: v1::TmuxActionKind::CreateSession.into(),
+        name: "work".into(),
+        directory: "/work/projects".into(),
+        ..Default::default()
+    };
+    let bytes = action.encode_to_vec();
+    let decoded = v1::TmuxAction::decode(bytes.as_slice()).unwrap();
+    assert_eq!(decoded.directory, "/work/projects");
+    assert_eq!(decoded, action);
+}
+
 #[test]
 fn terminal_visibility_checkpoint_round_trips_without_reusing_fields() {
     let request = v1::Request {

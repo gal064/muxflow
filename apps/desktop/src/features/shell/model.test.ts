@@ -28,12 +28,36 @@ import {
   tabsToCloseNonAgent,
   tabsToCloseRight,
   tabsEligibleAtBulkCloseCommit,
+  setWorkspaceDefaults,
+  workspaceDefaultsFor,
   type CombinedTab,
 } from "./model";
 import { defaultAppState, type PersistedAppState } from "./types";
 import type { GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import { deriveAgentRollups } from "../agents/selectors";
 import { agent } from "../agents/testFixtures";
+
+describe("per-host workspace defaults", () => {
+  it("edits one host without touching another, and drops an entry with nothing left in it", () => {
+    const local = setWorkspaceDefaults(defaultAppState, "local", { directory: "/work" });
+    const both = setWorkspaceDefaults(local, "ssh-remote", { startupCommand: "tail -f log" });
+    expect(workspaceDefaultsFor(both, "local")).toEqual({ directory: "/work" });
+    expect(workspaceDefaultsFor(both, "ssh-remote")).toEqual({ startupCommand: "tail -f log" });
+    // A host nobody configured gets nothing, which is what "existing users keep
+    // the current behaviour" is made of.
+    expect(workspaceDefaultsFor(both, "ssh-other")).toEqual({});
+
+    const patched = setWorkspaceDefaults(both, "local", { startupCommand: "  npm run dev  " });
+    expect(workspaceDefaultsFor(patched, "local")).toEqual({ directory: "/work", startupCommand: "npm run dev" });
+
+    const cleared = setWorkspaceDefaults(
+      setWorkspaceDefaults(patched, "local", { directory: undefined }),
+      "local",
+      { startupCommand: "   " },
+    );
+    expect(cleared.workspaceDefaults).toEqual({ "ssh-remote": { startupCommand: "tail -f log" } });
+  });
+});
 
 const sessions: Session[] = [
   { id: "$2", name: "two", windowCount: 1, attachedClients: 0, order: 2 },
@@ -317,6 +341,28 @@ describe("application shell model", () => {
     expect(deduplicated.appTabs).toHaveLength(1);
     const preview = setMarkdownViewMode(deduplicated, "local", deduplicated.appTabs[0].id, "preview");
     expect(preview.appTabs[0].viewMode).toBe("preview");
+  });
+
+  /**
+   * The configured mode is a *starting* mode. It is read when a tab is made and
+   * never again, which is what keeps the two directions apart: changing the
+   * setting leaves open tabs alone, and changing an open tab's mode leaves the
+   * setting alone.
+   */
+  it("starts a new Markdown tab in the configured mode and leaves an open one where it is", () => {
+    const open = (state: PersistedAppState, resource: string, viewMode?: "source" | "preview" | "split") =>
+      openFileTab(state, "local", "server-a", sessions[1], resource, "markdown",
+        { path: "/repo", token: "root", revision: "1" }, { preview: false, ...(viewMode ? { viewMode } : {}) });
+
+    expect(open(defaultAppState, "/repo/a.md", "preview").appTabs[0].viewMode).toBe("preview");
+    expect(open(defaultAppState, "/repo/a.md", "source").appTabs[0].viewMode).toBe("source");
+    // Omitted is the behaviour every build before the setting had.
+    expect(open(defaultAppState, "/repo/a.md").appTabs[0].viewMode).toBe("split");
+
+    const opened = open(defaultAppState, "/repo/a.md", "source");
+    const switched = setMarkdownViewMode(opened, "local", opened.appTabs[0].id, "split");
+    // Reopening the same file with a different default does not restart it.
+    expect(open(switched, "/repo/a.md", "preview").appTabs[0].viewMode).toBe("split");
   });
 
   it("keeps at most one preview tab per workspace and reuses its slot in place", () => {

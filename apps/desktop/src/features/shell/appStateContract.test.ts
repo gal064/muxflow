@@ -3,7 +3,7 @@ import contract from "./persistedAppState.contract.json";
 import {
   clampedPanelWidth, clampedTerminalFontSize, defaultAppState, defaultShellState, normalizePersistedAppState,
   panelWidthForWindow, PANEL_MIN_WIDTH,
-  type AppOwnedTab, type PersistedAppState, type WorkspaceUiRecord,
+  type AppOwnedTab, type PersistedAppState, type WorkspaceDefaults, type WorkspaceUiRecord,
 } from "./types";
 
 /**
@@ -45,8 +45,13 @@ describe("persisted app state contract", () => {
     const workspace: Required<WorkspaceUiRecord> = {
       hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", selectedAppTabId: "",
     };
+    // The per-host workspace defaults cross the same boundary, and both of its
+    // fields are optional — exactly the shape that stops being saved without
+    // anything failing.
+    const defaults: Required<WorkspaceDefaults> = { directory: "", startupCommand: "" };
     expect(Object.keys(contract.appTabs[0]).sort()).toEqual(Object.keys(tab).sort());
     expect(Object.keys(contract.workspaceUi[0]).sort()).toEqual(Object.keys(workspace).sort());
+    expect(Object.keys(contract.workspaceDefaults.local).sort()).toEqual(Object.keys(defaults).sort());
   });
 
   it("is a value this side would actually produce", () => {
@@ -62,6 +67,48 @@ describe("persisted app state contract", () => {
     expect(typed.shell.panelWidth).toBe(320);
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
+    expect(typed.shell.defaultMarkdownView).toBe("preview");
+    expect(typed.workspaceDefaults.local).toEqual({ directory: "/work/projects", startupCommand: "git status" });
+  });
+});
+
+describe("per-host workspace defaults", () => {
+  const saved = (workspaceDefaults: unknown) => normalizePersistedAppState({
+    schemaVersion: 1, appTabs: [], workspaceUi: [], shell: {}, workspaceDefaults,
+  }).workspaceDefaults;
+
+  it("keeps one host's directory and command apart from another's", () => {
+    expect(saved({
+      local: { directory: "/work" },
+      "ssh-remote-linux": { startupCommand: "tmux list-sessions" },
+    })).toEqual({ local: { directory: "/work" }, "ssh-remote-linux": { startupCommand: "tmux list-sessions" } });
+  });
+
+  it("drops values that are not usable rather than storing an empty setting", () => {
+    // "Cleared" and "never set" have to be the same state: the create path asks
+    // one question — is there a directory? — and a stored "" would answer yes.
+    expect(saved({ local: { directory: "   ", startupCommand: "" } })).toEqual({});
+    expect(saved({ local: { directory: 7, startupCommand: null } })).toEqual({});
+    expect(saved({ local: "everything" })).toEqual({});
+    expect(saved({ local: { directory: "  /work  " } })).toEqual({ local: { directory: "/work" } });
+    expect(saved(undefined)).toEqual({});
+    expect(saved(["local"])).toEqual({});
+  });
+
+  it("caps the map the way the host setup decisions are capped", () => {
+    const many = Object.fromEntries(Array.from({ length: 1_100 }, (_, index) => [`host-${index}`, { directory: "/work" }]));
+    expect(Object.keys(saved(many))).toHaveLength(1_024);
+  });
+
+  it("restores the default markdown view and leaves legacy saves on split", () => {
+    const shell = (value: unknown) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { defaultMarkdownView: value },
+    }).shell.defaultMarkdownView;
+    expect(shell("source")).toBe("source");
+    expect(shell("preview")).toBe("preview");
+    expect(shell("split")).toBe("split");
+    expect(shell("reader")).toBe("split");
+    expect(shell(undefined)).toBe("split");
   });
 });
 
