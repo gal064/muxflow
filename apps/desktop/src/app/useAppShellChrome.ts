@@ -24,9 +24,14 @@ export function useAppShellChrome(status: string) {
     // own follow-up statuses, usually within the same frame: a bulk close's
     // receipt and, worse, a refusal that was never meant to auto-dismiss.
     if (next) setNotice(next);
-    setCompletedDownload((current) => current && next && current.message.trim() === next.message
-      ? { ...current, noticeId: next.id }
-      : undefined);
+    // The download's Reveal/Open actions hang off the notice by id, so the two
+    // have to be retired by the same rule. Cleared on chatter while the notice
+    // it belongs to stayed up, a completed download became a toast naming a
+    // file with nothing to do with it.
+    setCompletedDownload((current) => {
+      if (!next) return current;
+      return current && current.message.trim() === next.message ? { ...current, noticeId: next.id } : undefined;
+    });
   }, [status]);
 
   // Keyed on the notice rather than on the status that produced it: a notice

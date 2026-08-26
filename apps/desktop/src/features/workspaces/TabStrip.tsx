@@ -6,7 +6,7 @@ import { AgentIcon } from "../agents/AgentIdentity";
 import { fileIcon } from "../files/fileIcons";
 import { bulkCloseTargets, selectableTabs, type CombinedTab, type SelectableTab } from "../shell/model";
 import type { HostScopeToken } from "../shell/hostScope";
-import type { Platform } from "../../commands/registry";
+import { commandRegistry, shortcutFor, type Platform, type ShortcutOverrides } from "../../commands/registry";
 import { shortcutGlyphs, shortcutSpoken } from "../../commands/shortcutGlyphs";
 
 /** A tab that exists on the host, and so has something to act on. */
@@ -21,6 +21,8 @@ interface TabStripProps {
   commandScope: HostScopeToken;
   /** Renders the all-tabs list's positional shortcuts in this platform's notation. */
   platform: Platform;
+  /** The live keymap, so a rebound or cleared ⌃N is not advertised as it ships. */
+  shortcuts: ShortcutOverrides;
   /** Draws a shape as well as a color in each activity dot. */
   stateGlyphs: boolean;
   onSelect(tab: CombinedTab): void;
@@ -40,6 +42,19 @@ interface TabStripProps {
   /** Double-clicking a preview tab makes it permanent, as VS Code's does. */
   onPin(tab: Extract<CombinedTab, { kind: "app" }>): void;
   onNewTerminal(): void;
+}
+
+/**
+ * The binding that actually selects the nth tab right now.
+ *
+ * `tab.select1…9` are hidden from the palette but are ordinary rebindable
+ * commands, and the collision repair can store an explicit `null` for one. The
+ * default string is therefore not the answer — a menu that promised ⌃3 for a
+ * key someone had reassigned would be worse than a menu that promised nothing.
+ */
+function tabSelectShortcut(index: number, platform: Platform, overrides: ShortcutOverrides): string | undefined {
+  const command = commandRegistry.find((item) => item.id === `tab.select${index}`);
+  return command && shortcutFor(command, platform, overrides);
 }
 
 /** What the all-tabs list calls each kind, when two tabs share a title. */
@@ -299,7 +314,9 @@ export function TabStrip(props: TabStripProps) {
       anchor={allTabsAnchor}
       items={props.tabs.map((tab) => {
         const shortcutIndex = shortcutIndexByKey.get(tab.key);
-        const shortcut = shortcutIndex === undefined ? undefined : `Ctrl+${shortcutIndex}`;
+        const shortcut = shortcutIndex === undefined
+          ? undefined
+          : tabSelectShortcut(shortcutIndex, props.platform, props.shortcuts);
         return {
           id: tab.key,
           label: allTabsLabel(tab),
