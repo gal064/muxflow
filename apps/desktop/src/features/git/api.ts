@@ -37,6 +37,7 @@ interface WireCommand {
   exitCode: number; stdout: number[]; stderr: number[]; applied?: boolean; refreshFailed?: boolean; refreshError?: string; outcome?: string;
   stdoutTruncated?: boolean; stderrTruncated?: boolean; error?: string; preHeadOid?: string; postHeadOid?: string;
   preIndexGeneration?: string; postIndexGeneration?: string; postStateAuthoritative?: boolean; preStatusGeneration?: string; postStatusGeneration?: string; statusOmitted?: boolean;
+  pushTarget?: string;
   status?: WireStatus;
 }
 interface WireResponse { operationId: string; status?: WireStatus; diff?: WireDiff; confirmation?: { token: string; expiresUnixMillis: string }; command?: WireCommand }
@@ -181,6 +182,18 @@ export class TauriGitWorkspaceClient implements GitWorkspaceClient {
     return measurePerfOutcome("workflow.git.mutationAck", () => this.#request(scope, root, {
       operation: "commit", operationId: crypto.randomUUID(), repositoryId, expectedStatusGeneration, commitMessage: message,
     }, validateCommand, "git.commit.request"));
+  }
+
+  /// Publishes the current branch to the upstream the host resolves.
+  ///
+  /// Sent exactly once for the same reason a commit is: once Git has spoken to
+  /// a remote, a retry could publish twice, and the uncertainty belongs in the
+  /// returned outcome rather than in a second request.
+  async push(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, expectedStatusGeneration: string): Promise<GitCommandResult> {
+    recordPerfCounter("git.pushRequests");
+    return measurePerfOutcome("workflow.git.mutationAck", () => this.#request(scope, root, {
+      operation: "push", operationId: crypto.randomUUID(), repositoryId, expectedStatusGeneration,
+    }, validateCommand, "git.push.request"));
   }
 
   subscribe(listener: (event: GitWorkspaceEvent) => void): () => void {
@@ -358,6 +371,7 @@ function mapCommand(value: WireCommand): GitCommandResult {
     preHeadOid: value.preHeadOid ?? "", postHeadOid: value.postHeadOid ?? "", preIndexGeneration: value.preIndexGeneration ?? "", postIndexGeneration: value.postIndexGeneration ?? "",
     postStateAuthoritative: Boolean(value.postStateAuthoritative), preStatusGeneration: optionalDecimal(value.preStatusGeneration, "Git pre-status generation"),
     postStatusGeneration: optionalDecimal(value.postStatusGeneration, "Git post-status generation"), statusOmitted: Boolean(value.statusOmitted),
+    ...(value.pushTarget ? { pushTarget: value.pushTarget } : {}),
     ...(value.status ? { status: mapStatus(value.status) } : {}),
   };
 }

@@ -118,6 +118,18 @@ pub(super) async fn handle(
             Ok(command) => git_response(&operation_id, |v| v.command = Some(command)),
             Err(error) => git_error(&error),
         },
+        v1::Operation::GitPush => match context
+            .git
+            .push(
+                git_request,
+                context.connection_epoch,
+                Arc::clone(&cancellation),
+            )
+            .await
+        {
+            Ok(command) => git_response(&operation_id, |v| v.command = Some(command)),
+            Err(error) => git_error(&error),
+        },
         _ => unreachable!(),
     };
     send_response(context.control_tx, request_id, response).await;
@@ -140,8 +152,58 @@ fn git_error(error: &anyhow::Error) -> v1::Response {
         "git_timeout"
     } else if message.contains("not a git repository") {
         "not_git_repository"
+    // A push is the one Git command whose refusal is not the host's to
+    // paraphrase: it either could not prove who was asking, or the remote said
+    // no. Both are named so the desktop can say what to do instead of showing
+    // a generic rejection.
+    } else if message.contains("authentication")
+        || message.contains("could not read Username")
+        || message.contains("Permission denied")
+        || message.contains("publickey")
+    {
+        "git_auth_failed"
+    } else if message.contains("rejected") {
+        "git_push_rejected"
     } else {
         "git_rejected"
     };
     response_error(code, &message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_error;
+
+    /// A push fails in two ways nothing else here does, and the desktop's
+    /// advice differs completely between them: one needs credentials this host
+    /// deliberately cannot ask for, the other needs a pull.
+    #[test]
+    fn push_failures_are_classified_apart_from_a_generic_git_rejection() {
+        let auth = git_error(&anyhow::anyhow!(
+            "Git push failed: fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+        ));
+        assert_eq!(auth.error_code, "git_auth_failed");
+        let key = git_error(&anyhow::anyhow!(
+            "git@github.com: Permission denied (publickey)."
+        ));
+        assert_eq!(key.error_code, "git_auth_failed");
+        let refused = git_error(&anyhow::anyhow!(
+            "! [rejected] master -> master (non-fast-forward)"
+        ));
+        assert_eq!(refused.error_code, "git_push_rejected");
+        // The precondition families still win: they are the reason a client
+        // must resynchronize rather than re-word its message.
+        assert_eq!(
+            git_error(&anyhow::anyhow!("stale Git status generation")).error_code,
+            "stale_git_state"
+        );
+        assert_eq!(
+            git_error(&anyhow::anyhow!("Git push timed out")).error_code,
+            "git_timeout"
+        );
+        assert_eq!(
+            git_error(&anyhow::anyhow!("no upstream branch is configured")).error_code,
+            "git_rejected"
+        );
+    }
 }

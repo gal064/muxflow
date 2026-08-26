@@ -218,7 +218,8 @@ impl OperationPolicy {
             | v1::Operation::UnwatchGit
             | v1::Operation::PrepareGitDiscard
             | v1::Operation::GitMutation
-            | v1::Operation::GitCommit => (
+            | v1::Operation::GitCommit
+            | v1::Operation::GitPush => (
                 Access::Mutation,
                 Lane::Control,
                 Scheduling::Detached,
@@ -371,6 +372,7 @@ mod tests {
             (PrepareGitDiscard, M, C, Dd, GH),
             (GitMutation, M, C, Dd, GH),
             (GitCommit, M, C, Dd, GH),
+            (GitPush, M, C, Dd, GH),
             (AgentSnapshot, R, C, I, AH),
             (AgentAction, M, C, I, AH),
             (AgentMarkSeen, M, C, I, AH),

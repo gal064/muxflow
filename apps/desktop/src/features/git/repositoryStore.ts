@@ -37,6 +37,8 @@ export interface GitRepositoryHandle {
   /** Mints the one-time host token a discard requires. */
   prepareDiscard(repositoryId: string, request: GitMutationRequest): Promise<string>;
   commit(repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult>;
+  /** Publishes the current branch to its configured upstream. */
+  push(repositoryId: string, expectedStatusGeneration: string): Promise<GitCommandResult>;
 }
 
 /**
@@ -198,6 +200,7 @@ class RepositoryEntry {
       mutate: (repositoryId, request) => this.mutate(repositoryId, request),
       prepareDiscard: (repositoryId, request) => this.prepareDiscard(repositoryId, request),
       commit: (repositoryId, generation, message) => this.commit(repositoryId, generation, message),
+      push: (repositoryId, generation) => this.push(repositoryId, generation),
     };
     // A remembered snapshot paints immediately while the watch is re-acquired,
     // so reopening a panel is never a blank surface.
@@ -320,6 +323,12 @@ class RepositoryEntry {
 
   async commit(repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult> {
     const result = await this.#client.commit(this.#scope, this.#root, repositoryId, expectedStatusGeneration, message);
+    if (result.status) this.accept(result.status);
+    return result;
+  }
+
+  async push(repositoryId: string, expectedStatusGeneration: string): Promise<GitCommandResult> {
+    const result = await this.#client.push(this.#scope, this.#root, repositoryId, expectedStatusGeneration);
     if (result.status) this.accept(result.status);
     return result;
   }

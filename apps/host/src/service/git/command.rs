@@ -128,5 +128,7 @@ pub(super) fn truthful_command_result(
         pre_status_generation: pre.status_generation,
         post_status_generation: post.as_ref().map_or(0, |state| state.status_generation),
         status_omitted: false,
+        // Only a push has one, and only the push executor knows it.
+        push_target: String::new(),
     }
 }

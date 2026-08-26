@@ -45,6 +45,20 @@ const CODE_SUMMARY: readonly (readonly [RegExp, string])[] = [
 ];
 
 /**
+ * Codes whose meaning is more specific than anything their reason text can say,
+ * so they are read before `REASON_SUMMARY` rather than after it.
+ *
+ * `Permission denied (publickey)` is a Git authentication failure, not the
+ * filesystem-permission answer that phrase otherwise maps to, and answering it
+ * with "the host account is not allowed to write there" sends a person looking
+ * at the wrong machine.
+ */
+const CODE_OVERRIDE_SUMMARY: readonly (readonly [RegExp, string])[] = [
+  [/^git_auth_failed$/, "Push needs authentication that Muxflow cannot provide interactively; run git push in a terminal once, then retry."],
+  [/^git_push_rejected$/, "The remote rejected the push (non-fast-forward?). Pull or rebase first."],
+];
+
+/**
  * What the reason text means in practice. Checked before the code, because
  * "you cannot put a slash in the name" helps and "the host refused that file
  * change" does not. Every entry here was written against a real message the
@@ -88,7 +102,7 @@ export function summarizeSurfaceError(raw: string): SurfaceErrorText {
   // multi-line.
   const structured = code !== undefined && (/_(rejected|unavailable|failed)$/.test(code) || matched(CODE_SUMMARY, code) !== undefined);
   const summary = structured
-    ? matched(REASON_SUMMARY, reason) ?? matched(CODE_SUMMARY, code!) ?? firstSentence(reason)
+    ? matched(CODE_OVERRIDE_SUMMARY, code!) ?? matched(REASON_SUMMARY, reason) ?? matched(CODE_SUMMARY, code!) ?? firstSentence(reason)
     : firstSentence(stripped);
   return summary === text ? { summary } : { summary, detail: text };
 }

@@ -846,9 +846,12 @@ async fn deleted_files_stage_with_and_without_their_parent_directory() {
         v1::GitCommandOutcome::Applied as i32
     );
     let after = missing_parent.status.unwrap();
-    assert!(after.entries.iter().any(
-        |entry| entry.path == b"removed/nested/file" && entry.index_status == "D"
-    ));
+    assert!(
+        after
+            .entries
+            .iter()
+            .any(|entry| entry.path == b"removed/nested/file" && entry.index_status == "D")
+    );
 
     // The same mutation for a deleted file whose parent is still present.
     request.expected_status_generation = after.generation;

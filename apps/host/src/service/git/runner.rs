@@ -27,6 +27,10 @@ use super::{MAX_GIT_OUTPUT, validate_git_path};
 const GIT_DEADLINE: Duration = Duration::from_secs(30);
 pub(super) const GIT_MUTATION_DEADLINE: Duration = Duration::from_secs(2 * 60);
 pub(super) const GIT_COMMIT_DEADLINE: Duration = Duration::from_secs(5 * 60);
+/// A push talks to a remote over whatever link the host has, and pre-push hooks
+/// run inside it. Same budget as a commit: long enough for a real transfer,
+/// bounded so a hung connection cannot own the repository lock forever.
+pub(super) const GIT_PUSH_DEADLINE: Duration = Duration::from_secs(5 * 60);
 const TERMINATION_GRACE: Duration = Duration::from_millis(250);
 
 thread_local! {

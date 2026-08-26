@@ -213,6 +213,7 @@ function gitClient(shape: { binary?: boolean; tooLarge?: boolean }): GitWorkspac
     prepareDiscard: vi.fn(),
     mutate: vi.fn(),
     commit: vi.fn(),
+    push: vi.fn(),
     subscribe: vi.fn(() => () => undefined),
   };
 }
