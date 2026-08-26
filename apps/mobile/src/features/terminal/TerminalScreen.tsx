@@ -105,19 +105,21 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
     <Animated.View style={[styles.root, { paddingTop: insets.top }, keyboardPadding]}>
       <ConnectionStrip />
       <View style={styles.header}>
-        <Pressable accessibilityLabel="Back" hitSlop={12} onPress={() => router.back()} style={styles.back}>
+        <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={() => router.back()} style={styles.iconButton}>
           <Text style={styles.backGlyph}>←</Text>
         </Pressable>
         <Text numberOfLines={1} style={styles.title}>{title}</Text>
         {agent ? <StatusPill state={agentPillState(agent)} /> : null}
-        <Pressable
-          accessibilityLabel="Files"
-          hitSlop={8}
-          onPress={() => router.push({ pathname: "/files/[paneId]", params: { paneId } })}
-          style={styles.filesButton}
-        >
-          <Text style={styles.filesGlyph}>▤</Text>
-        </Pressable>
+        {gone ? null : (
+          <Pressable
+            accessibilityLabel="Files"
+            accessibilityRole="button"
+            onPress={() => router.push({ pathname: "/files/[paneId]", params: { paneId } })}
+            style={styles.iconButton}
+          >
+            <Text style={styles.filesGlyph}>▤</Text>
+          </Pressable>
+        )}
       </View>
 
       <View style={styles.terminalArea}>
@@ -145,38 +147,42 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
         )}
       </View>
 
-      <ScrollView contentContainerStyle={styles.chips} horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} style={styles.chipRow}>
-        {KEY_CHIPS.map((chip) => (
-          <Pressable
-            accessibilityRole="button"
-            disabled={!inputEnabled}
-            key={chip.label}
-            onPress={() => send(chip.bytes)}
-            style={({ pressed }) => [styles.chip, pressed && styles.chipPressed, !inputEnabled && styles.disabled]}
-          >
-            <Text style={styles.chipLabel}>{chip.label}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
+      {gone ? null : (
+        <>
+        <ScrollView contentContainerStyle={styles.chips} horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} style={styles.chipRow}>
+          {KEY_CHIPS.map((chip) => (
+            <Pressable
+              accessibilityRole="button"
+              disabled={!inputEnabled}
+              key={chip.label}
+              onPress={() => send(chip.bytes)}
+              style={({ pressed }) => [styles.chip, pressed && styles.chipPressed, !inputEnabled && styles.disabled]}
+            >
+              <Text style={[styles.chipLabel, chip.label.length === 1 && styles.chipGlyph]}>{chip.label}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
 
-      <View style={styles.inputBar}>
-        <TextInput
-          autoCapitalize="none"
-          autoCorrect={false}
-          editable={inputEnabled}
-          onChangeText={setText}
-          onSubmitEditing={sendText}
-          placeholder="Type, then Send"
-          placeholderTextColor={colors.chromeFaint}
-          returnKeyType="send"
-          style={[styles.input, !inputEnabled && styles.disabled]}
-          submitBehavior="submit"
-          value={text}
-        />
-        <Pressable accessibilityRole="button" disabled={!inputEnabled} onPress={sendText} style={[styles.sendButton, !inputEnabled && styles.disabled]}>
-          <Text style={styles.sendLabel}>Send</Text>
-        </Pressable>
-      </View>
+        <View style={styles.inputBar}>
+          <TextInput
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={inputEnabled}
+            onChangeText={setText}
+            onSubmitEditing={sendText}
+            placeholder="Type, then Send"
+            placeholderTextColor={colors.chromeFaint}
+            returnKeyType="send"
+            style={[styles.input, !inputEnabled && styles.disabled]}
+            submitBehavior="submit"
+            value={text}
+          />
+          <Pressable accessibilityRole="button" disabled={!inputEnabled} onPress={sendText} style={[styles.sendButton, !inputEnabled && styles.disabled]}>
+            <Text style={styles.sendLabel}>Send</Text>
+          </Pressable>
+        </View>
+        </>
+      )}
     </Animated.View>
   );
 }
@@ -187,15 +193,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: colors.chromeRaised,
     flexDirection: "row",
-    gap: 12,
+    gap: 4,
     height: metrics.terminalHeaderHeight,
-    paddingHorizontal: 8,
+    paddingHorizontal: 4,
   },
-  back: { padding: 8 },
-  backGlyph: { color: colors.chromeInkStrong, fontSize: 20 },
+  /** 48 dp touch targets, matching the app bar's Material back arrow. */
+  iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
+  backGlyph: { color: colors.chromeInkStrong, fontSize: 26, fontWeight: "600", lineHeight: 30 },
   title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
-  filesButton: { padding: 8 },
-  filesGlyph: { color: colors.accent, fontSize: 18 },
+  filesGlyph: { color: colors.accent, fontSize: 24, lineHeight: 28 },
   terminalArea: { backgroundColor: colors.chromeBg, flex: 1 },
   banner: {
     backgroundColor: colors.chromeSelected,
@@ -232,6 +238,8 @@ const styles = StyleSheet.create({
   },
   chipPressed: { backgroundColor: colors.chromeBorder },
   chipLabel: { color: colors.chromeInkStrong, fontSize: typeScale.rowSecondary, textAlign: "center" },
+  /** Single-glyph chips (arrows, y, n) read lighter than words at 13 sp; bump them to match. */
+  chipGlyph: { fontSize: 16, fontWeight: "600" },
   disabled: { opacity: 0.4 },
   inputBar: {
     alignItems: "center",
