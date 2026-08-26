@@ -10,6 +10,7 @@ import { colors, metrics, typeScale } from "../../src/ui/tokens";
 
 /** Home — design.md §9.3. Two tabs; Agents is the initial tab. */
 export default function HomeLayout() {
+  const insets = useSafeAreaInsets();
   const label = useSession((s) => s.connection.host?.label ?? "Muxflow");
   const badge = useSession((s) => Object.values(s.agents).filter((a) => a.present && needsAttention(a) && a.lifecycle === "blocked").length);
   return (
@@ -30,7 +31,9 @@ export default function HomeLayout() {
           backgroundColor: colors.chromeRaised,
           borderTopColor: colors.chromeHairline,
           borderTopWidth: metrics.hairlineWidth,
-          height: metrics.tabBarHeight,
+          // 56 dp of bar above the gesture-navigation inset (edge-to-edge window).
+          height: metrics.tabBarHeight + insets.bottom,
+          paddingBottom: insets.bottom,
         },
         tabBarActiveTintColor: colors.accent,
         tabBarInactiveTintColor: colors.chromeDim,
