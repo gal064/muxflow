@@ -1,5 +1,14 @@
 use super::*;
 
+fn visibility_permit(
+    sender: &mpsc::Sender<SequencerControl>,
+) -> mpsc::OwnedPermit<SequencerControl> {
+    sender
+        .clone()
+        .try_reserve_owned()
+        .expect("visibility event queue should have capacity")
+}
+
 fn long_lived_attachment_command() -> std::process::Command {
     let mut command = std::process::Command::new("sh");
     command.args(["-c", "exec sleep 30", "terminal-attachment-startup-fixture"]);
@@ -375,12 +384,11 @@ fn stopping_one_attachment_unparks_its_credit_waiter_before_the_join() {
         .unwrap();
 }
 
-/// The fence's whole purpose, pinned at the one point a reveal can still be
-/// held up: the ordered event queue. The recovery event must reach the queue
-/// before output that has already observed the new visibility, however long
-/// the queue makes the reveal wait for a slot.
-#[test]
-fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
+/// A saturated ordered queue must delay the visibility transition without
+/// holding the terminal mutex or emission fence. Once capacity is reserved,
+/// the recovery event must still precede output that observes visibility.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
     let output_credit = Arc::new(OutputCredit::negotiated(true));
     let mut clients =
         TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
@@ -403,9 +411,8 @@ fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
             )
             .unwrap();
     }
-    // One slot, already taken: the reveal reaches its ordered send holding the
-    // fence and stays there until the queue drains, which is the interleaving
-    // this test needs and the only one the fence still has to survive.
+    // One slot, already taken: the reveal must wait for a reservation before it
+    // is allowed to take the terminal mutex and make the pane visible.
     let (events, mut receiver) = mpsc::channel(1);
     events
         .try_send(SequencerControl::OrderedEvent(v1::HostEvent {
@@ -432,21 +439,46 @@ fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
     let reveal_clients = Arc::clone(&shared);
     let reveal_events = events.clone();
     let reveal_overflowed = Arc::clone(&overflowed);
-    let reveal = std::thread::spawn(move || {
-        reveal_clients.lock().unwrap().set_visibility(
-            "%1",
-            VisibilityChange {
-                visible: true,
-                serialized_snapshot: Vec::new(),
-                checkpoint: VisibilityCheckpoint {
-                    epoch: 1,
-                    generation: 1,
+    let reveal = tokio::spawn(async move {
+        let permit = reveal_events.clone().reserve_owned().await.unwrap();
+        tokio::task::spawn_blocking(move || {
+            reveal_clients.lock().unwrap().set_visibility(
+                "%1",
+                VisibilityChange {
+                    visible: true,
+                    serialized_snapshot: Vec::new(),
+                    checkpoint: VisibilityCheckpoint {
+                        epoch: 1,
+                        generation: 1,
+                    },
                 },
-            },
-            &reveal_events,
-            &reveal_overflowed,
-        )
+                permit,
+                &reveal_events,
+                &reveal_overflowed,
+            )
+        })
+        .await
+        .unwrap()
     });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        resources.lock().unwrap().get("%1").unwrap().state,
+        StoredResourceState::HiddenBuffered,
+        "visibility changed before its recovery event had reserved capacity"
+    );
+    assert!(
+        shared.try_lock().is_ok(),
+        "waiting for sequencer capacity held the terminal mutex"
+    );
+
+    let SequencerControl::OrderedEvent(filler) = receiver.recv().await.unwrap() else {
+        panic!("queue did not start with the filler event");
+    };
+    assert_eq!(
+        v1::EventKind::try_from(filler.kind).unwrap(),
+        v1::EventKind::TopologyDirty
+    );
 
     let deadline = std::time::Instant::now() + Duration::from_secs(1);
     loop {
@@ -460,9 +492,9 @@ fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "reveal never reached its ordered send"
+            "reveal never committed after reserving sequencer capacity"
         );
-        std::thread::yield_now();
+        tokio::task::yield_now().await;
     }
 
     let output_events = events.clone();
@@ -484,23 +516,13 @@ fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
         }
         .record("%1".into(), vec![b'O']);
     });
-    // Freeing the slot releases the reveal's send, and only then can the output
-    // thread take the fence at all.
-    let SequencerControl::OrderedEvent(filler) = receiver.blocking_recv().unwrap() else {
-        panic!("queue did not start with the filler event");
-    };
-    assert_eq!(
-        v1::EventKind::try_from(filler.kind).unwrap(),
-        v1::EventKind::TopologyDirty
-    );
-
-    let SequencerControl::OrderedEvent(recovery) = receiver.blocking_recv().unwrap() else {
+    let SequencerControl::OrderedEvent(recovery) = receiver.recv().await.unwrap() else {
         panic!("reveal did not emit ordered recovery");
     };
-    let SequencerControl::OrderedEvent(output_event) = receiver.blocking_recv().unwrap() else {
+    let SequencerControl::OrderedEvent(output_event) = receiver.recv().await.unwrap() else {
         panic!("visible output was not ordered after recovery");
     };
-    reveal.join().unwrap().unwrap();
+    reveal.await.unwrap().unwrap();
     output.join().unwrap();
     assert_eq!(
         v1::EventKind::try_from(recovery.kind).unwrap(),
@@ -633,6 +655,7 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
                     generation: 1,
                 },
             },
+            visibility_permit(&visibility_events),
             &visibility_events,
             &AtomicBool::new(false),
         );
@@ -696,6 +719,15 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
             drop(receiver);
         }
 
+        let permit = events.clone().try_reserve_owned();
+        if !close_credit {
+            assert!(permit.is_err());
+            let resources = clients.resources.lock().unwrap();
+            let resource = resources.get("%1").unwrap();
+            assert_eq!(resource.state, StoredResourceState::HiddenBuffered);
+            assert_eq!(resource.serialized_snapshot, vec![b'S']);
+            continue;
+        }
         assert!(
             clients
                 .set_visibility(
@@ -708,6 +740,7 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
                             generation: 1,
                         },
                     },
+                    permit.unwrap(),
                     &events,
                     &AtomicBool::new(false),
                 )
@@ -1356,6 +1389,7 @@ fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later()
                     generation: 1,
                 },
             },
+            visibility_permit(&events),
             &events,
             &AtomicBool::new(false),
         )
