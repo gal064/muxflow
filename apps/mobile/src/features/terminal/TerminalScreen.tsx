@@ -1,0 +1,249 @@
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+
+import { agentForPane, agentPillState } from "../agents/agentViews";
+import { stripAgentStatusGlyphs } from "../agents/agentLabels";
+import { getConnection, toast } from "../../session/connectionManager";
+import { log } from "../../session/log";
+import { sessionStore } from "../../store/sessionStore";
+import { ConnectionStrip } from "../../ui/components/ConnectionStrip";
+import { StatusPill } from "../../ui/components/StatusPill";
+import { useSession } from "../../ui/hooks";
+import { colors, metrics, radii, typeScale } from "../../ui/tokens";
+import type { FromPageMessage } from "./bridgeMessages";
+import { CR, KEY_CHIPS } from "./chips";
+import { utf8Encode } from "./bytes";
+import { TerminalController, type TerminalSnapshot } from "./TerminalController";
+import { terminalRegistry } from "./terminalRegistry";
+import { TerminalWebView, type TerminalWebViewHandle } from "./TerminalWebView";
+
+export interface TerminalScreenProps {
+  paneId: string;
+  sessionId: string;
+}
+
+/** Terminal — design.md §9.5. Header, xterm WebView, key chips, input bar. */
+export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const state = useSession((s) => s);
+  const webview = useRef<TerminalWebViewHandle>(null);
+  const controller = useRef<TerminalController | null>(null);
+  const [snapshot, setSnapshot] = useState<TerminalSnapshot>({ phase: "preparing", grid: undefined, lastError: undefined });
+  const [pageLoaded, setPageLoaded] = useState(false);
+  const [text, setText] = useState("");
+  const seenInTopology = useRef(false);
+
+  const pane = state.panes[paneId];
+  if (pane) seenInTopology.current = true;
+  const connected = state.connection.state === "connected";
+  const gone = connected && seenInTopology.current && !pane;
+  const agent = agentForPane(state, paneId);
+  const session = state.sessions[sessionId];
+  const window = pane ? state.windows[pane.windowId] : undefined;
+  const title = agent?.displayName
+    || `${stripAgentStatusGlyphs(session?.name ?? sessionId)} · ${stripAgentStatusGlyphs(window?.name ?? "")}`.replace(/ · $/, "");
+
+  // One controller per focus: hide on blur (Files, back), re-attach on focus (§7.6 steps 1, 4).
+  useFocusEffect(useCallback(() => {
+    if (!pageLoaded) return;
+    const instance = new TerminalController({
+      paneId,
+      sessionId,
+      store: sessionStore,
+      registry: terminalRegistry,
+      getConnection,
+      page: { send: (message) => webview.current?.send(message) },
+      onChange: setSnapshot,
+      log,
+    });
+    controller.current = instance;
+    instance.start();
+    setSnapshot(instance.snapshot);
+    return () => {
+      controller.current = null;
+      void instance.stop();
+    };
+  }, [pageLoaded, paneId, sessionId]));
+
+  const onPageMessage = useCallback((message: FromPageMessage) => {
+    controller.current?.onPageMessage(message);
+  }, []);
+
+  const send = useCallback((bytes: Uint8Array) => {
+    const instance = controller.current;
+    if (!instance) return;
+    instance.sendInput(bytes).catch((error: unknown) => toast(error instanceof Error ? error.message : String(error)));
+  }, []);
+
+  const sendText = useCallback(() => {
+    const body = utf8Encode(text);
+    const bytes = new Uint8Array(body.length + 1);
+    bytes.set(body);
+    bytes[body.length] = CR[0]!;
+    send(bytes);
+    setText("");
+  }, [send, text]);
+
+  useEffect(() => {
+    if (snapshot.lastError) toast(snapshot.lastError);
+  }, [snapshot.lastError]);
+
+  const inputEnabled = connected && !gone && snapshot.phase !== "exited";
+
+  return (
+    <View style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+      <ConnectionStrip />
+      <View style={styles.header}>
+        <Pressable accessibilityLabel="Back" hitSlop={12} onPress={() => router.back()} style={styles.back}>
+          <Text style={styles.backGlyph}>←</Text>
+        </Pressable>
+        <Text numberOfLines={1} style={styles.title}>{title}</Text>
+        {agent ? <StatusPill state={agentPillState(agent)} /> : null}
+        <Pressable
+          accessibilityLabel="Files"
+          hitSlop={8}
+          onPress={() => router.push({ pathname: "/files/[paneId]", params: { paneId } })}
+          style={styles.filesButton}
+        >
+          <Text style={styles.filesGlyph}>▤</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.terminalArea}>
+        {gone ? (
+          <View style={styles.overlay}>
+            <Text style={styles.overlayText}>This terminal no longer exists.</Text>
+            <Pressable onPress={() => router.back()} style={styles.button}>
+              <Text style={styles.buttonText}>Back</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <>
+            <TerminalWebView onLoadEnd={() => setPageLoaded(true)} onMessage={onPageMessage} ref={webview} />
+            {snapshot.phase === "exited" ? (
+              <View style={styles.banner}>
+                <Text style={styles.bannerText}>This pane has closed.</Text>
+              </View>
+            ) : null}
+            {snapshot.phase === "noOutput" ? (
+              <View pointerEvents="none" style={styles.overlay}>
+                <Text style={styles.overlayText}>No output yet. The pane may be idle.</Text>
+              </View>
+            ) : null}
+          </>
+        )}
+      </View>
+
+      <ScrollView contentContainerStyle={styles.chips} horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} style={styles.chipRow}>
+        {KEY_CHIPS.map((chip) => (
+          <Pressable
+            accessibilityRole="button"
+            disabled={!inputEnabled}
+            key={chip.label}
+            onPress={() => send(chip.bytes)}
+            style={({ pressed }) => [styles.chip, pressed && styles.chipPressed, !inputEnabled && styles.disabled]}
+          >
+            <Text style={styles.chipLabel}>{chip.label}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+
+      <View style={styles.inputBar}>
+        <TextInput
+          autoCapitalize="none"
+          autoCorrect={false}
+          blurOnSubmit={false}
+          editable={inputEnabled}
+          onChangeText={setText}
+          onSubmitEditing={sendText}
+          placeholder="Type, then Send"
+          placeholderTextColor={colors.chromeFaint}
+          returnKeyType="send"
+          style={[styles.input, !inputEnabled && styles.disabled]}
+          value={text}
+        />
+        <Pressable accessibilityRole="button" disabled={!inputEnabled} onPress={sendText} style={[styles.sendButton, !inputEnabled && styles.disabled]}>
+          <Text style={styles.sendLabel}>Send</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { backgroundColor: colors.chromeBg, flex: 1 },
+  header: {
+    alignItems: "center",
+    backgroundColor: colors.chromeRaised,
+    flexDirection: "row",
+    gap: 12,
+    height: metrics.terminalHeaderHeight,
+    paddingHorizontal: 8,
+  },
+  back: { padding: 8 },
+  backGlyph: { color: colors.chromeInkStrong, fontSize: 20 },
+  title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
+  filesButton: { padding: 8 },
+  filesGlyph: { color: colors.accent, fontSize: 18 },
+  terminalArea: { backgroundColor: colors.chromeBg, flex: 1 },
+  banner: {
+    backgroundColor: colors.chromeSelected,
+    left: 0,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    position: "absolute",
+    right: 0,
+    top: 0,
+  },
+  bannerText: { color: colors.chromeInk, fontSize: typeScale.body },
+  overlay: {
+    alignItems: "center",
+    bottom: 0,
+    gap: 16,
+    justifyContent: "center",
+    left: 0,
+    position: "absolute",
+    right: 0,
+    top: 0,
+  },
+  overlayText: { color: colors.chromeDim, fontSize: typeScale.body, textAlign: "center" },
+  button: { backgroundColor: colors.accent, borderRadius: radii.card, paddingHorizontal: 20, paddingVertical: 10 },
+  buttonText: { color: colors.accentInk, fontSize: typeScale.body, fontWeight: "600" },
+  chipRow: { backgroundColor: colors.chromeRaised, flexGrow: 0, height: metrics.keyChipRowHeight },
+  chips: { alignItems: "center", gap: 8, paddingHorizontal: 12 },
+  chip: {
+    backgroundColor: colors.chromeSelected,
+    borderRadius: radii.pill,
+    justifyContent: "center",
+    minWidth: 44,
+    paddingHorizontal: 12,
+    height: 28,
+  },
+  chipPressed: { backgroundColor: colors.chromeBorder },
+  chipLabel: { color: colors.chromeInkStrong, fontSize: typeScale.rowSecondary, textAlign: "center" },
+  disabled: { opacity: 0.4 },
+  inputBar: {
+    alignItems: "center",
+    backgroundColor: colors.chromeBg,
+    borderTopColor: colors.chromeHairline,
+    borderTopWidth: metrics.hairlineWidth,
+    flexDirection: "row",
+    gap: 8,
+    height: metrics.inputBarHeight,
+    paddingHorizontal: 12,
+  },
+  input: {
+    backgroundColor: colors.chromeRaised,
+    borderRadius: radii.card,
+    color: colors.chromeInkStrong,
+    flex: 1,
+    fontSize: typeScale.body,
+    height: 40,
+    paddingHorizontal: 12,
+  },
+  sendButton: { backgroundColor: colors.accent, borderRadius: radii.card, height: 40, justifyContent: "center", paddingHorizontal: 16 },
+  sendLabel: { color: colors.accentInk, fontSize: typeScale.body, fontWeight: "600" },
+});

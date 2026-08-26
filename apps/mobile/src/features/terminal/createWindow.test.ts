@@ -1,0 +1,67 @@
+import { create } from "@bufbuild/protobuf";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HostConnection } from "../../protocol/HostConnection";
+import { EventKind, HostEventSchema, Operation, ResponseSchema, TmuxActionResultSchema } from "../../protocol/gen/envelope_pb";
+import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../../protocol/testing/fakeTransport";
+import { createSessionStore } from "../../store/sessionStore";
+import { createTerminalWindow } from "./createWindow";
+
+const settle = () => vi.advanceTimersByTimeAsync(0);
+
+async function connected() {
+  const store = createSessionStore();
+  const transport = new FakeTransport();
+  const connection = new HostConnection({ dial: async () => transport, appVersion: "t", nextConnectionEpoch: () => 1, store });
+  connection.connect();
+  await settle();
+  transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n }));
+  transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot({ generation: 7n }) }) }, { requestId: 2n }));
+  transport.drain();
+  return { store, transport, connection };
+}
+
+describe("New terminal (§9.4, §7.5)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("sends TMUX_ACTION CREATE_WINDOW with the generation read at call time", async () => {
+    const { store, transport, connection } = await connected();
+    const pending = createTerminalWindow(connection, store, "$1");
+    const [frame] = transport.drain();
+    if (frame?.payload.case !== "request") throw new Error("expected a request");
+    expect(frame.payload.value.operation).toBe(Operation.TMUX_ACTION);
+    expect(frame.payload.value.tmuxAction).toMatchObject({ sessionId: "$1", expectedServerIdentity: "server-a", expectedGeneration: 7n });
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@9", paneId: "%9" }) }) }, { requestId: frame.requestId }));
+    await expect(pending).resolves.toEqual({ windowId: "@9", paneId: "%9" });
+  });
+
+  it("retries once on stale_topology with the generation from the snapshot that followed", async () => {
+    const { store, transport, connection } = await connected();
+    const pending = createTerminalWindow(connection, store, "$1");
+    const [first] = transport.drain();
+    // The refusal arrives after a fresh TOPOLOGY_SNAPSHOT.
+    transport.feed(hostEnvelope({ case: "event", value: create(HostEventSchema, { kind: EventKind.TOPOLOGY_SNAPSHOT, snapshot: topologySnapshot({ generation: 8n }) }) }, { sequence: 1n }));
+    transport.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "stale_topology", displayMessage: "topology changed" }) }, { requestId: first!.requestId }));
+    await settle();
+    const [second] = transport.drain();
+    if (second?.payload.case !== "request") throw new Error("expected a retry");
+    expect(second.payload.value.tmuxAction?.expectedGeneration).toBe(8n);
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@2", paneId: "%2" }) }) }, { requestId: second.requestId }));
+    await expect(pending).resolves.toEqual({ windowId: "@2", paneId: "%2" });
+  });
+
+  it("gives up after a second stale_topology and surfaces other errors untouched", async () => {
+    const { store, transport, connection } = await connected();
+    const pending = createTerminalWindow(connection, store, "$1");
+    const stale = (requestId: bigint) => transport.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "stale_topology", displayMessage: "again" }) }, { requestId }));
+    stale(transport.drain()[0]!.requestId);
+    await settle();
+    stale(transport.drain()[0]!.requestId);
+    await expect(pending).rejects.toMatchObject({ code: "stale_topology" });
+
+    const other = createTerminalWindow(connection, store, "$1");
+    transport.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "session_missing", displayMessage: "no such session" }) }, { requestId: transport.drain()[0]!.requestId }));
+    await expect(other).rejects.toMatchObject({ code: "session_missing", message: "no such session" });
+    expect(transport.drain()).toHaveLength(0);
+  });
+});

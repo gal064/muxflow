@@ -1,7 +1,10 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 
+import { wireApp } from "../src/session/appWiring";
 import { colors, typeScale } from "../src/ui/tokens";
+
+wireApp();
 
 /**
  * Root navigator. Global chrome per design.md §9: the status bar and every
