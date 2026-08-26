@@ -57,6 +57,13 @@ describe("status notices", () => {
     const partial = noticeForStatus("Closed 1 of 2 tabs; 1 could not be closed.", 3)!;
     expect(partial.severity).toBe("problem");
     expect(noticeDismissDelay(partial)).toBeUndefined();
+    // A terminal held back by the commit-time agent recheck is a survivor too,
+    // and its sentence contains none of the other refusal words. Left as info
+    // it timed out after six seconds, which is the same silence the counted
+    // outcome exists to break.
+    const heldBack = noticeForStatus("Closed 1 of 2 tabs; 1 still had an agent and was left open.", 4)!;
+    expect(heldBack.severity).toBe("problem");
+    expect(noticeDismissDelay(heldBack)).toBeUndefined();
   });
 
   it("carries an id so the same message twice re-shows the notice", () => {

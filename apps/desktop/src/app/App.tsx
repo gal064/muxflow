@@ -647,6 +647,7 @@ export function App() {
       tabSessionId: tab.sessionId,
     });
   };
+  const bulkCloseInFlight = useRef(false);
   const closeTabSet = useBulkTabClose({
     agentPresenceRef,
     closeAppTab: closeWorkspaceAppTab,
@@ -872,8 +873,14 @@ export function App() {
    * holding agents, and reports afterwards.
    */
   const bulkCloseTabs = (tabs: CombinedTab[], scope: HostScopeToken, protectAgents = false) => {
-    if (tabs.length === 0) return;
-    void closeTabSet(tabs, scope, protectAgents);
+    // One set at a time. The dialog used to serialize these by existing; with a
+    // toolbar button in its place a second click lands while the first close is
+    // still walking the set, and the second run reads the same pre-close
+    // snapshot — dispatching closes for windows that are already gone and
+    // ending in a sticky "N could not be closed" for an operation that worked.
+    if (tabs.length === 0 || bulkCloseInFlight.current) return;
+    bulkCloseInFlight.current = true;
+    void closeTabSet(tabs, scope, protectAgents).finally(() => { bulkCloseInFlight.current = false; });
   };
 
   const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {

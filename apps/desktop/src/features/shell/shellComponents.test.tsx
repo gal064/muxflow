@@ -776,7 +776,7 @@ describe("application shell accessibility contracts", () => {
     await act(async () => renderer.root.findByProps({ role: "tab" }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
     await act(async () => renderer.update(element("terminal:@2")));
     const close = renderer.root.findByProps({ "data-menu-item": "close" });
-    expect(close.findByType("span").children.join("")).toBe("Close tab…");
+    expect(close.findByType("span").children.join("")).toBe("Close tab");
     await act(async () => close.props.onClick());
     expect(onClose).toHaveBeenCalledWith(tab, commandScope);
     expect(onCloseCurrent).not.toHaveBeenCalled();
