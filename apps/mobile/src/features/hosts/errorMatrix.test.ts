@@ -110,6 +110,23 @@ describe("the §12 error matrix", () => {
     ).toMatchObject({ presentation: "fullScreen", action: { kind: "sshKey" } });
   });
 
+  it("keeps the state machine's message when the failure closed the transport itself", () => {
+    // `HostConnection.fail()` records why, then closes the transport, which
+    // reports `localClose`; the close says nothing the message does not.
+    expect(
+      describeConnectionFailure({
+        state: "failed",
+        message: "host did not return ServerHello",
+        close: { reason: "localClose", message: "Disconnected." },
+        host,
+      }),
+    ).toEqual({
+      presentation: "strip",
+      retryable: false,
+      message: "host did not return ServerHello",
+    });
+  });
+
   it("falls back to the state machine's message when nothing closed", () => {
     expect(describeConnectionFailure({ state: "failed", message: "host did not return ServerHello" })).toEqual({
       presentation: "strip",

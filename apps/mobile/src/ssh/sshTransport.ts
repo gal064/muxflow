@@ -38,6 +38,11 @@ export interface SshTransportOptions {
    * inherited a pin wants.
    */
   onHostKey?: (prompt: HostKeyPrompt) => Promise<boolean>;
+  /**
+   * The channel died while `onHostKey` was still deciding: whatever is asking
+   * the user must stop asking, because the answer has nowhere to go.
+   */
+  onHostKeyCancelled?: () => void;
   /** Every close, including the one that fails the dial, with §12 copy attached. */
   onClose?: (close: TransportClose) => void;
   /** Used only for the §12 copy; carries no port when absent. */
@@ -76,11 +81,16 @@ export function openSshTransport(options: SshTransportOptions): Promise<Transpor
   let settled = false;
   let closedByUs = false;
   let refusedHostKey = false;
+  let hostKeyPending = false;
   let unsubscribe = (): void => {};
 
   return new Promise<Transport>((resolve, reject) => {
     const finish = (raw: { reason: SshCloseReason; exitCode: number | null }): void => {
       unsubscribe();
+      if (hostKeyPending) {
+        hostKeyPending = false;
+        options.onHostKeyCancelled?.();
+      }
       // The native module reports a host key the user refused as
       // `closedByClient`, because refusing it means closing the channel; the
       // JS side is the one that knows why, so it names the reason (§12).
@@ -115,6 +125,7 @@ export function openSshTransport(options: SshTransportOptions): Promise<Transpor
       switch (event.type) {
         case "hostKey": {
           log(`hostKey ${event.algorithm} ${event.fingerprintSha256}`);
+          hostKeyPending = true;
           const decide = options.onHostKey?.({
             connectionId,
             target,
@@ -123,6 +134,7 @@ export function openSshTransport(options: SshTransportOptions): Promise<Transpor
           }) ?? Promise.resolve(false);
           void decide.then(
             (trusted) => {
+              hostKeyPending = false;
               if (settled && !connected) return; // the channel is already gone
               if (!trusted) {
                 refusedHostKey = true;
@@ -136,6 +148,7 @@ export function openSshTransport(options: SshTransportOptions): Promise<Transpor
               });
             },
             (error: unknown) => {
+              hostKeyPending = false;
               log(`hostKey.decision.failed ${describe(error)}`);
               refusedHostKey = true;
               void ssh.close(connectionId).catch(() => undefined);
@@ -200,6 +213,9 @@ export function openSshTransport(options: SshTransportOptions): Promise<Transpor
       if (settled) return;
       settled = true;
       unsubscribe();
+      // The native side may already own a thread and a client for this id;
+      // `close` is idempotent, so releasing it here costs nothing.
+      void ssh.close(connectionId).catch(() => undefined);
       const close: TransportClose = {
         reason: "connectFailed",
         message: describeTransportClose({ reason: "connectFailed" }, options.hostAddress).message,

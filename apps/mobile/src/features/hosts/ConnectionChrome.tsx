@@ -1,5 +1,5 @@
-import { router } from "expo-router";
-import { useEffect } from "react";
+import { router, useFocusEffect } from "expo-router";
+import { useCallback, useEffect, useState } from "react";
 
 import { ConnectionErrorScreen } from "./ConnectionErrorScreen";
 import { ConnectionSheet } from "./ConnectionSheet";
@@ -39,6 +39,17 @@ export function ConnectionChrome({ returnOnFailure = false }: ConnectionChromePr
   useEffect(() => {
     if (fatal && returnOnFailure) router.dismissTo("/");
   }, [fatal, returnOnFailure]);
+
+  // Screens below the top of the stack stay mounted; only the focused one may
+  // render the chrome, or its modals would stack one per mounted screen.
+  const [focused, setFocused] = useState(false);
+  useFocusEffect(
+    useCallback(() => {
+      setFocused(true);
+      return () => setFocused(false);
+    }, []),
+  );
+  if (!focused) return null;
 
   return (
     <>

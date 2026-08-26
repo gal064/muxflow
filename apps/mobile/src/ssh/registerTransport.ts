@@ -10,6 +10,7 @@ import { hostKeyStore } from "../features/hosts/hostKeyStore";
 import { log } from "../features/hosts/logBuffer";
 import { setTransportFactory, type TransportLane } from "../session/connectionManager";
 import { hostLabel, hostsStore, type SavedHost } from "../store/hostsStore";
+import { sessionStore } from "../store/sessionStore";
 import { openSshTransport } from "./sshTransport";
 
 let attempts = 0;
@@ -32,16 +33,22 @@ export function sshTransportFactory(host: SavedHost, lane: TransportLane) {
         log(`hostKey.refused lane=${lane}`);
         return false;
       }
+      // §7.2 names this state; the dial is parked until the dialog answers.
+      sessionStore.getState().setConnection({ state: "awaitingHostKeyTrust" });
       const trusted = await hostKeyStore.getState().request({
         prompt,
         hostId: saved.id,
         hostLabel: hostLabel(saved),
       });
+      if (sessionStore.getState().connection.state === "awaitingHostKeyTrust") {
+        sessionStore.getState().setConnection({ state: "sshConnecting" });
+      }
       if (trusted) {
         hostsStore.getState().setTrustedHostKeyFingerprint(saved.id, prompt.fingerprintSha256);
       }
       return trusted;
     },
+    onHostKeyCancelled: () => hostKeyStore.getState().cancel(),
     onClose: (close) => diagnosticsStore.getState().setLastClose(close),
     log,
   });

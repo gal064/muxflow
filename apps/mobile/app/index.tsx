@@ -5,7 +5,7 @@ import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { ConnectionChrome } from "../src/features/hosts/ConnectionChrome";
 import { ConnectionDot } from "../src/features/hosts/ConnectionDot";
 import { useHosts } from "../src/features/hosts/hooks";
-import { connectHost } from "../src/session/connectionManager";
+import { connectHost, getConnectedHost } from "../src/session/connectionManager";
 import { hostAddress, hostsStore, type SavedHost } from "../src/store/hostsStore";
 import { sessionStore } from "../src/store/sessionStore";
 import { Button, Hairline } from "../src/ui/components/Button";
@@ -26,7 +26,9 @@ export default function HostsScreen() {
   useAutoConnect(hydrated);
 
   const connect = (host: SavedHost) => {
-    connectHost(host);
+    // A cold start already connected to `lastHostId` (§12); tapping its row
+    // must not tear that connection down and dial it again.
+    if (!isLive(host.id)) connectHost(host);
     // §9.1: navigate as soon as the state is `sshConnecting`, which `connect()`
     // sets synchronously.
     router.push("/home");
@@ -158,6 +160,13 @@ function SheetAction({ label, onPress, danger = false }: { label: string; onPres
       <Text style={[styles.sheetActionLabel, danger ? styles.sheetActionDanger : null]}>{label}</Text>
     </Pressable>
   );
+}
+
+/** True while this host owns a connection that is up or on its way up. */
+function isLive(hostId: string): boolean {
+  if (getConnectedHost()?.id !== hostId) return false;
+  const { state } = sessionStore.getState().connection;
+  return state !== "idle" && state !== "failed" && state !== "incompatible";
 }
 
 /**

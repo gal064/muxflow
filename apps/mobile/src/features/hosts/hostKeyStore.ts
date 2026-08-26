@@ -22,6 +22,12 @@ export interface HostKeyActions {
   request(pending: PendingHostKey): Promise<boolean>;
   /** §9.10's two buttons. */
   answer(trusted: boolean): void;
+  /**
+   * Takes the dialog down when the channel it belongs to is gone (the native
+   * verifier's 60 s timeout, a disconnect, a connect that failed first).
+   * Without it the resolver stays parked and every later prompt is refused.
+   */
+  cancel(): void;
 }
 
 export type HostKeyStore = StoreApi<HostKeyState & HostKeyActions>;
@@ -48,6 +54,14 @@ export function createHostKeyStore(): HostKeyStore {
       answer = undefined;
       set({ pending: null });
       resolve?.(trusted);
+    },
+    cancel() {
+      if (!answer) return;
+      console.log("[muxflow] hostKey.prompt.cancelled");
+      const resolve = answer;
+      answer = undefined;
+      set({ pending: null });
+      resolve(false);
     },
   }));
 }

@@ -1,5 +1,5 @@
 import { router, Stack, useLocalSearchParams } from "expo-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { HostFormField } from "../../src/features/hosts/HostFormField";
@@ -28,6 +28,16 @@ export default function HostEditScreen() {
   // Errors stay hidden until a field has been visited, so a blank form does not
   // open covered in red.
   const [touched, setTouched] = useState<Record<string, boolean>>({});
+  // The persisted hosts may still be loading on the first render (a deep link
+  // straight into this route); seed the fields once the host shows up, and
+  // never again, so it cannot overwrite what is being typed.
+  const seeded = useRef(existing?.id ?? null);
+  useEffect(() => {
+    if (!existing || seeded.current === existing.id) return;
+    seeded.current = existing.id;
+    setValues(hostFormValues(existing));
+    setTouched({});
+  }, [existing]);
   const validation = useMemo(() => validateHostForm(values), [values]);
 
   const set = (field: keyof HostFormValues) => (next: string) => {
