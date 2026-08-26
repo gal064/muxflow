@@ -59,6 +59,24 @@ export interface WorkspaceUiRecord {
   selectedAppTabId?: string;
 }
 
+/**
+ * A workspace the user has put away without closing it.
+ *
+ * Keyed the way `WorkspaceUiRecord` is — host, tmux server, session id — so a
+ * record can only ever hide the exact session it was written for. The tmux
+ * session itself is untouched: archiving is a view decision, not a tmux one.
+ */
+export interface ArchivedWorkspaceRecord {
+  hostProfileId: string;
+  serverIdentity: string;
+  sessionId: string;
+  sessionName: string;
+  archivedAt: number;
+}
+
+/** The most archived records kept; the oldest go first past this. */
+export const MAX_ARCHIVED_WORKSPACES = 200;
+
 export interface ShellState {
   /** Which half of the right panel is showing when it is open. */
   panelSurface: PanelSurface;
@@ -113,6 +131,7 @@ export interface PersistedAppState {
   shell: ShellState;
   commands: { shortcutOverrides: Record<string, string | null> };
   hostSetup: Record<string, HostSetupDecision>;
+  archivedWorkspaces: ArchivedWorkspaceRecord[];
 }
 
 export const defaultShellState: ShellState = {
@@ -138,6 +157,7 @@ export const defaultAppState: PersistedAppState = {
   shell: defaultShellState,
   commands: { shortcutOverrides: {} },
   hostSetup: {},
+  archivedWorkspaces: [],
 };
 
 export function hostProfileId(connection: ConnectionSpec): string {
@@ -180,7 +200,41 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
     },
     commands: { shortcutOverrides: normalizeShortcutRecord(candidate.commands?.shortcutOverrides) },
     hostSetup: normalizeHostSetup(candidate.hostSetup),
+    archivedWorkspaces: normalizeArchivedWorkspaces(candidate.archivedWorkspaces),
   };
+}
+
+/**
+ * Only well-formed records, one per (host, server, session), and at most
+ * {@link MAX_ARCHIVED_WORKSPACES} of them, the oldest going first. A malformed
+ * record is dropped rather than repaired: one with no session id could hide
+ * nothing, and one with no server identity could hide the wrong thing.
+ */
+export function normalizeArchivedWorkspaces(value: unknown): ArchivedWorkspaceRecord[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const records: ArchivedWorkspaceRecord[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.hostProfileId !== "string" || !record.hostProfileId
+      || typeof record.serverIdentity !== "string" || !record.serverIdentity
+      || typeof record.sessionId !== "string" || !record.sessionId
+      || typeof record.sessionName !== "string"
+      || typeof record.archivedAt !== "number" || !Number.isFinite(record.archivedAt)) continue;
+    const key = `${record.hostProfileId}\0${record.serverIdentity}\0${record.sessionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    records.push({
+      hostProfileId: record.hostProfileId,
+      serverIdentity: record.serverIdentity,
+      sessionId: record.sessionId,
+      sessionName: record.sessionName,
+      archivedAt: record.archivedAt,
+    });
+  }
+  if (records.length <= MAX_ARCHIVED_WORKSPACES) return records;
+  return [...records].sort((left, right) => right.archivedAt - left.archivedAt).slice(0, MAX_ARCHIVED_WORKSPACES);
 }
 
 /**

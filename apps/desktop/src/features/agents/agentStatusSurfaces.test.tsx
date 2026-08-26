@@ -28,7 +28,7 @@ const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}
   adapters={[]} agents={[]} agentSort="status" agentsRatio={0.4} canMutate commandScope={commandScope} compactWorkspaces={false} hostLabel="remote-linux"
   latencyMs={41} maxWidth={426} onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop}
   onRenameAgent={noop} onResumeAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
-  onSelectWorkspace={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop}
+  onSelectWorkspace={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
   phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
   {...overrides}
 />);
