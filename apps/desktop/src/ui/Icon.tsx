@@ -43,6 +43,9 @@ export type IconName =
   | "markdown"
   | "diff"
   | "zoom"
+  // Pinned tabs and workspaces. A push pin seen head-on, so it reads as a pin
+  // rather than a bookmark at the 11px the tab strip draws it at.
+  | "pin"
   | "search"
   | "branch"
   // The Explorer's file-type set. VS Code's Seti look is mostly *color*, so
@@ -123,6 +126,11 @@ const paths: Record<IconName, ReactElement> = {
   </>,
   zoom: <>
     <path d="M2.75 6V2.75H6M10 2.75h3.25V6M13.25 10v3.25H10M6 13.25H2.75V10" />
+  </>,
+  pin: <>
+    <path d="M5.75 2.25h4.5" />
+    <path d="M6.9 2.25v3.6L5.25 7.7v1.05h5.5V7.7L9.1 5.85V2.25" />
+    <path d="M8 8.75v5" />
   </>,
   // 11.1.3 names both of these. `search` marks the palette's input the way the
   // mock's `⌕` does; `branch` marks the titlebar's branch name, which was a
