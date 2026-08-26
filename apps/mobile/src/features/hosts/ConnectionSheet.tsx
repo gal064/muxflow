@@ -49,7 +49,7 @@ export function ConnectionSheet() {
   const reconnect = () => {
     if (!savedHost) return;
     close();
-    connectHost(savedHost);
+    void connectHost(savedHost).catch(() => undefined);
   };
 
   const disconnect = () => {

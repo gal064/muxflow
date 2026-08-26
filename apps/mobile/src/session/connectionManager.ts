@@ -67,8 +67,6 @@ export async function connectHost(host: SavedHost): Promise<void> {
   await disconnectHost();
   const dial = factory;
   controlHost = host;
-  // §12 cold-start auto-connect targets the last host used.
-  hostsStore.getState().setLastHostId(host.id);
   const connection = new HostConnection({
     dial: () => dial(host, "control"),
     appVersion: APP_VERSION,
