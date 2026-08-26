@@ -22,33 +22,21 @@ const MAX_LISTED_TRANSFERS = 100;
  */
 export function useConnectionTransfers(scope: FileWorkspaceScope | undefined) {
   const connectionKey = scope ? keyForTransferConnection(scope) : "";
-  const [held, setHeld] = useState<{
-    connectionKey: string;
-    transfers: readonly TransferStatus[];
-    clearedTransferIds: ReadonlySet<string>;
-  }>(
-    { connectionKey: "", transfers: [], clearedTransferIds: new Set() },
+  const [held, setHeld] = useState<{ connectionKey: string; transfers: readonly TransferStatus[] }>(
+    { connectionKey: "", transfers: [] },
   );
 
   useEffect(() => {
     setHeld((current) => current.connectionKey === connectionKey
       ? current
-      : {
-        connectionKey,
-        transfers: replaced(current.connectionKey, current.transfers),
-        clearedTransferIds: new Set(),
-      });
+      : { connectionKey, transfers: replaced(current.connectionKey, current.transfers) });
   }, [connectionKey]);
 
   const record = useCallback((transfer: TransferStatus) => {
     if (transfer.scopeKey !== connectionKey) return;
-    setHeld((current) => {
-      if (current.connectionKey !== connectionKey) {
-        return { connectionKey, transfers: [transfer], clearedTransferIds: new Set() };
-      }
-      if (current.clearedTransferIds.has(transfer.id)) return current;
-      return { ...current, transfers: upsertTransfer(current.transfers, transfer) };
-    });
+    setHeld((current) => current.connectionKey === connectionKey
+      ? { ...current, transfers: upsertTransfer(current.transfers, transfer) }
+      : { connectionKey, transfers: [transfer] });
   }, [connectionKey]);
 
   const clearFinishedTransfers = useCallback(() => {
@@ -56,17 +44,10 @@ export function useConnectionTransfers(scope: FileWorkspaceScope | undefined) {
       const transfers = current.connectionKey === connectionKey
         ? current.transfers
         : replaced(current.connectionKey, current.transfers);
-      const remaining = transfers.filter((transfer) => !isTerminalTransferState(transfer.state));
-      if (current.connectionKey === connectionKey && remaining.length === current.transfers.length) return current;
-      const clearedTransferIds = current.connectionKey === connectionKey
-        ? new Set(current.clearedTransferIds)
-        : new Set<string>();
-      for (const transfer of transfers) {
-        if (transfer.scopeKey === connectionKey && isTerminalTransferState(transfer.state)) {
-          clearedTransferIds.add(transfer.id);
-        }
-      }
-      return { connectionKey, transfers: remaining, clearedTransferIds };
+      return {
+        connectionKey,
+        transfers: transfers.filter((transfer) => !isTerminalTransferState(transfer.state)),
+      };
     });
   }, [connectionKey]);
 
