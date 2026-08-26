@@ -43,6 +43,12 @@ export function GitDiffEditor(props: GitDiffEditorProps) {
       readOnly: true,
       renderSideBySide: true,
       scrollBeyondLastLine: false,
+      // A minified bundle or a long prose line used to run off the right edge
+      // of a 320px-wide panel with no way to read it. `diffWordWrap: "inherit"`
+      // is what makes the original side wrap the same way as the modified one,
+      // which is what keeps the two sides aligned.
+      wordWrap: "on",
+      diffWordWrap: "inherit",
     }}
     original={props.original}
     originalModelPath={props.originalModelPath}
