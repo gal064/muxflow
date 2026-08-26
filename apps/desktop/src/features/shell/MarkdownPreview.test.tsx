@@ -1,0 +1,193 @@
+// @vitest-environment jsdom
+// jsdom, because the preview reads the document's selection and listens for the
+// end of a pointer gesture on the document itself.
+import { act, create } from "react-test-renderer";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MarkdownPreview } from "./AppTabSurface";
+import { useSanitizedMarkdown } from "../files/markdownPreview";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+/** Stands in for a text node the selection is anchored at inside the article. */
+const insideArticle = {};
+/**
+ * The element behind every host ref in this tree.
+ *
+ * `contains` is the one the preview asks about; the rest keep the confirmation
+ * dialog's focus trap from tripping over a bare object.
+ */
+const articleNode = {
+  contains: (node: unknown) => node === insideArticle,
+  closest: () => null,
+  querySelector: () => null,
+  focus: () => undefined,
+  isConnected: false,
+  tabIndex: 0,
+};
+
+let selection: { isCollapsed: boolean; anchorNode: unknown } | null = null;
+const realGetSelection = document.getSelection;
+
+beforeEach(() => {
+  selection = null;
+  document.getSelection = (() => selection) as typeof document.getSelection;
+});
+
+afterEach(() => {
+  document.getSelection = realGetSelection;
+  vi.useRealTimers();
+});
+
+function select(anchorNode: unknown) { selection = { isCollapsed: false, anchorNode }; }
+
+function preview(source: string, onStatus = vi.fn()) {
+  let renderer!: ReturnType<typeof create>;
+  act(() => {
+    renderer = create(<MarkdownPreview source={source} onStatus={onStatus} />, { createNodeMock: () => articleNode });
+  });
+  const article = () => renderer.root.findByProps({ className: "markdown-preview" });
+  return {
+    renderer,
+    onStatus,
+    article,
+    html: () => article().props.dangerouslySetInnerHTML.__html as string,
+    retype: async (next: string) => {
+      await act(async () => { renderer.update(<MarkdownPreview source={next} onStatus={onStatus} />); });
+    },
+    /** Long enough for the debounce and the idle fallback behind it. */
+    settle: async () => { await act(async () => { await vi.advanceTimersByTimeAsync(500); }); },
+    fire: async (type: string) => { await act(async () => { document.dispatchEvent(new Event(type)); }); },
+  };
+}
+
+function press(surface: ReturnType<typeof preview>, x = 10, y = 10) {
+  act(() => { surface.article().props.onPointerDown({ button: 0, clientX: x, clientY: y }); });
+}
+
+function click(surface: ReturnType<typeof preview>, href: string | null, x = 10, y = 10) {
+  const preventDefault = vi.fn();
+  const anchor = href === null ? null : { getAttribute: (name: string) => (name === "href" ? href : null) };
+  act(() => {
+    surface.article().props.onClick({
+      clientX: x, clientY: y, preventDefault,
+      target: { closest: (selector: string) => (selector === "a" ? anchor : null) },
+    });
+  });
+  return preventDefault;
+}
+
+const opened = (surface: ReturnType<typeof preview>) => JSON.stringify(surface.renderer.toJSON()).includes("Open external link?");
+
+describe("MarkdownPreview selection", () => {
+  it("does not replace the rendered text while a pointer gesture is in progress", async () => {
+    vi.useFakeTimers();
+    const surface = preview("before");
+    press(surface);
+    await surface.retype("after");
+    await surface.settle();
+    expect(surface.html(), "an autosave-driven refresh landed in the middle of a drag").toContain("before");
+
+    await surface.fire("pointerup");
+    expect(surface.html(), "the update was dropped rather than deferred").toContain("after");
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
+  it("also releases the held update when the gesture is cancelled", async () => {
+    vi.useFakeTimers();
+    const surface = preview("before");
+    press(surface);
+    await surface.retype("after");
+    await surface.settle();
+    await surface.fire("pointercancel");
+    expect(surface.html()).toContain("after");
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
+  it("holds a refresh while text inside the preview is selected, and publishes once it is gone", async () => {
+    vi.useFakeTimers();
+    const surface = preview("before");
+    select(insideArticle);
+    await surface.retype("after");
+    await surface.settle();
+    expect(surface.html(), "a pending refresh moved a live selection").toContain("before");
+
+    // Selection collapsed by a click elsewhere: nothing is at risk any more.
+    selection = null;
+    await surface.fire("selectionchange");
+    expect(surface.html()).toContain("after");
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
+  it("ignores a selection that is not in the preview", async () => {
+    vi.useFakeTimers();
+    const surface = preview("before");
+    select({});
+    await surface.retype("after");
+    await surface.settle();
+    expect(surface.html(), "a selection in another surface froze this one").toContain("after");
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
+  it("opens a link on a plain click and leaves a drag alone", () => {
+    const surface = preview("[site](https://example.com)");
+    press(surface, 10, 10);
+    expect(click(surface, "https://example.com", 11, 10), "a plain click stopped acting as a link").toHaveBeenCalled();
+    expect(opened(surface)).toBe(true);
+    act(() => { surface.renderer.unmount(); });
+  });
+
+  it("does not follow a link when the release ends a drag", () => {
+    const surface = preview("[site](https://example.com)");
+    press(surface, 10, 10);
+    const preventDefault = click(surface, "https://example.com", 60, 10);
+    expect(preventDefault, "a drag ending on a link was swallowed as a click").not.toHaveBeenCalled();
+    expect(opened(surface)).toBe(false);
+    act(() => { surface.renderer.unmount(); });
+  });
+
+  it("does not follow a link while a selection is standing", () => {
+    const surface = preview("[site](https://example.com)");
+    select(insideArticle);
+    const preventDefault = click(surface, "https://example.com");
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(opened(surface)).toBe(false);
+    act(() => { surface.renderer.unmount(); });
+  });
+
+  it("still reports a non-external link as a status message", () => {
+    const surface = preview("[doc](./other.md)");
+    press(surface);
+    expect(click(surface, "./other.md")).toHaveBeenCalled();
+    expect(surface.onStatus).toHaveBeenCalledWith("Markdown link: ./other.md");
+    expect(opened(surface)).toBe(false);
+    act(() => { surface.renderer.unmount(); });
+  });
+});
+
+describe("useSanitizedMarkdown", () => {
+  let renders = 0;
+  function Harness({ source }: { source: string }) {
+    renders += 1;
+    return <span>{useSanitizedMarkdown(source)}</span>;
+  }
+
+  it("does not re-publish when the source changed but the rendered HTML did not", async () => {
+    vi.useFakeTimers();
+    renders = 0;
+    let renderer!: ReturnType<typeof create>;
+    act(() => { renderer = create(<Harness source="hello" />); });
+    expect(renders).toBe(1);
+
+    // A trailing newline is a different buffer and the same document.
+    await act(async () => { renderer.update(<Harness source={"hello\n"} />); });
+    expect(renders).toBe(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(renders, "identical HTML was published back into the DOM").toBe(2);
+
+    // A real edit still lands, so the skip is not just a stuck preview.
+    await act(async () => { renderer.update(<Harness source="goodbye" />); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(JSON.stringify(renderer.toJSON())).toContain("goodbye");
+    await act(async () => { renderer.unmount(); });
+  });
+});
