@@ -141,6 +141,16 @@ export function GitSidebar(props: Props) {
     latest.current.onMessage(gitResultMessage(result, result.outcome === "applied" ? "Commit created." : "Commit failed."));
     return result;
   }, []);
+  // Push is reachable whenever the repository is, not only when something is
+  // staged: the whole point of the button is the commit that already happened.
+  const push = useCallback(async () => {
+    const { git } = latest.current;
+    const status = git.status;
+    if (!status || !git.handle || latest.current.unavailable) throw new Error("Git is not available right now.");
+    const result = await git.handle.push(status.repository.id, status.generation);
+    latest.current.onMessage(gitResultMessage(result, result.outcome === "applied" ? `Pushed to ${result.pushTarget || "the upstream"}.` : "Push failed."));
+    return result;
+  }, []);
 
   // Git has no tree cursor to borrow, so the row the palette means is the last
   // one focused or right-clicked. It is stored by path rather than by object:
@@ -217,9 +227,16 @@ export function GitSidebar(props: Props) {
       <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onDrag={dragEntry} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
       {props.git.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
     </div>
-    {/* The commit form is not permanent chrome any more: it exists exactly when
-        there is something staged to commit. */}
-    {stagedCount > 0 && <GitCommitForm commit={commit} disabled={unavailable} stagedCount={stagedCount} />}
+    {/* Present whenever this repository is, because Push has to be reachable
+        after the commit that emptied the staged group. Commit itself is what
+        goes disabled when there is nothing staged. */}
+    {!unavailable && <GitCommitForm
+      canPush={!unavailable && !props.git.status.repository.initial}
+      commit={commit}
+      disabled={unavailable}
+      onPush={push}
+      stagedCount={stagedCount}
+    />}
     {menu && <ContextMenu
       anchor={menu.anchor}
       items={[

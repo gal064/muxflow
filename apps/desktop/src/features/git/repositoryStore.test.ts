@@ -282,6 +282,7 @@ function stubClient() {
     prepareDiscard: vi.fn(),
     mutate: vi.fn(),
     commit: vi.fn(),
+    push: vi.fn(),
     subscribe: vi.fn((next) => { listener = next; return () => { listener = undefined; }; }),
   };
   return {

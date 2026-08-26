@@ -959,6 +959,21 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 1px solid var(--chrome-border); border-radius: 4px;
   background: var(--chrome-bg); color: var(--chrome-ink); font-size: 11px;
 }
+/* Commit, its one extra action, and Push on one row. The split button is a
+   single control visually — one border, one hairline between the halves — so
+   the caret reads as belonging to Commit rather than as a third button. */
+.git-commit-actions { display: flex; gap: 6px; align-items: stretch; }
+.git-commit-actions .split-button { display: flex; flex: 1 1 auto; min-width: 0; }
+.git-commit-actions .split-button > button:first-child {
+  flex: 1 1 auto; min-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0;
+}
+.git-commit-actions .split-button-more {
+  flex: 0 0 auto; padding-inline: 7px;
+  border-top-left-radius: 0; border-bottom-left-radius: 0;
+  box-shadow: inset 1px 0 0 rgb(0 0 0 / .22);
+}
+.git-commit-actions > button:disabled { opacity: .5; }
+
 .git-output {
   max-height: 96px; margin: 0; overflow: auto; padding: 6px; border-radius: 3px;
   background: var(--chrome-bg); color: var(--term-2); font-size: var(--type-meta); white-space: pre-wrap;

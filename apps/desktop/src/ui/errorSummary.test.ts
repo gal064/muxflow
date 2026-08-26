@@ -78,6 +78,17 @@ describe("summarizeSurfaceError", () => {
     expect(result.detail).toBe(wall.trim());
   });
 
+  it("answers a push refusal with what to do, not with the filesystem reading of its words", () => {
+    // "Permission denied" is also an errno phrase, and the reason table would
+    // otherwise send a person looking at the wrong machine's permissions.
+    const auth = summarizeSurfaceError("git_auth_failed: git@github.com: Permission denied (publickey).");
+    expect(auth.summary).toContain("run git push in a terminal once");
+    expect(auth.detail).toContain("publickey");
+    const rejected = summarizeSurfaceError("git_push_rejected: ! [rejected] master -> master (non-fast-forward)");
+    expect(rejected.summary).toBe("The remote rejected the push (non-fast-forward?). Pull or rebase first.");
+    expect(rejected.detail).toContain("non-fast-forward");
+  });
+
   it("keeps a multi-line diagnostic's first line as the summary and the whole thing as detail", () => {
     const result = summarizeSurfaceError("commit failed\npre-commit hook output\nline 2");
     expect(result.summary).toBe("commit failed");

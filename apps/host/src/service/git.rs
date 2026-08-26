@@ -58,8 +58,8 @@ mod runner;
 #[cfg(test)]
 use runner::command_result;
 use runner::{
-    GIT_COMMIT_DEADLINE, GitMetadataCapability, GitOutput, ensure_success, git_index_generation,
-    git_output_with_deadline, git_path_cancellable,
+    GIT_COMMIT_DEADLINE, GIT_PUSH_DEADLINE, GitMetadataCapability, GitOutput, ensure_success,
+    git_index_generation, git_output_cancellable, git_output_with_deadline, git_path_cancellable,
 };
 mod status;
 use status::{
@@ -541,6 +541,67 @@ impl GitService {
             .await)
     }
 
+    /// Publishes the current branch to the upstream it already has.
+    ///
+    /// A push is the only Git command in this service whose authority is a
+    /// remote, so nothing about its outcome may be inferred from the local
+    /// repository: an exit code of zero with no accepted ref in the porcelain
+    /// report is an unknown outcome, not a success. The upstream is resolved
+    /// first and never created — `git push -u` is a decision about where a
+    /// branch belongs, and this button does not get to make it.
+    pub(in crate::service) async fn push(
+        &self,
+        request: v1::GitRequest,
+        connection_epoch: u64,
+        cancellation: Arc<AtomicBool>,
+    ) -> anyhow::Result<v1::GitCommandResult> {
+        require_repository_id(&request)?;
+        ensure_connection_epoch(&request, connection_epoch)?;
+        let (coordinator, capabilities) = self
+            .repository(&request, Some(Arc::clone(&cancellation)))
+            .await?;
+        let _guard = repository_lock(&capabilities.identity.repository_id)
+            .lock_owned()
+            .await;
+        let _mutation = coordinator.begin_mutation();
+        if cancellation.load(Ordering::Acquire) {
+            bail!("cancelled before push");
+        }
+        let current = coordinator
+            .status(
+                &capabilities,
+                Freshness::Exclusive,
+                Some(Arc::clone(&cancellation)),
+            )
+            .await?;
+        validate_status_generation(&request, &current)?;
+        let execution_capabilities = Arc::clone(&capabilities);
+        let executed = tokio::task::spawn_blocking(move || {
+            let _metadata_guard = execution_capabilities.metadata.install();
+            let root = execution_capabilities.stable_root();
+            let target = resolve_push_target(&root, &cancellation)?;
+            let pre_state = command_state(&root, &current);
+            let outcome = git_output_with_deadline(
+                &root,
+                &[OsStr::new("push"), OsStr::new("--porcelain")],
+                None,
+                Some(&cancellation),
+                GIT_PUSH_DEADLINE,
+            );
+            anyhow::Ok((outcome, pre_state, target))
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Git push task failed: {error}"))?;
+        let (execution, pre_state, target) = executed?;
+        let verdict = execution.as_ref().ok().map(classify_push);
+        let mut result = self
+            .reconcile_command(&coordinator, &capabilities, execution, pre_state, false)
+            .await;
+        result.push_target = target;
+        apply_push_verdict(&mut result, verdict);
+        Ok(result)
+    }
+
     /// The one authoritative refresh a completed Git command produces.
     ///
     /// Invalidating before refreshing means the watcher's own wake-up for these
@@ -805,6 +866,93 @@ fn validate_current_target(
         bail!("directory mutation targets are ambiguous and are not supported");
     }
     Ok(entry.clone())
+}
+
+/// What the remote said, as `git push --porcelain` reports it.
+///
+/// The porcelain report is a table: one `<flag>\t<from>:<to>\t<summary>` line
+/// per ref, where `!` is the flag for a ref the remote refused. It is the only
+/// per-ref evidence a push produces, so it is what "the remote accepted it" is
+/// read from rather than the exit code alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PushVerdict {
+    Accepted,
+    Rejected,
+    Unknown,
+}
+
+fn classify_push(output: &GitOutput) -> PushVerdict {
+    if output.interrupted.is_some() || output.stdout_truncated {
+        return PushVerdict::Unknown;
+    }
+    let report = String::from_utf8_lossy(&output.output.stdout);
+    let mut accepted = false;
+    let mut rejected = false;
+    for line in report.lines() {
+        let Some((flag, _)) = line.split_once('\t') else {
+            continue;
+        };
+        if flag == "!" {
+            rejected = true;
+        } else {
+            accepted = true;
+        }
+    }
+    match (accepted, rejected) {
+        (_, true) => PushVerdict::Rejected,
+        (true, false) => PushVerdict::Accepted,
+        (false, false) => PushVerdict::Unknown,
+    }
+}
+
+/// Reconciles the local truth with what the remote reported.
+///
+/// `truthful_command_result` can only see the local repository, and a push
+/// changes nothing there. Success therefore has to be proved by the porcelain
+/// report; anything less than an accepted ref on a clean exit is uncertain, and
+/// is reported as uncertain rather than as a push that worked.
+fn apply_push_verdict(result: &mut v1::GitCommandResult, verdict: Option<PushVerdict>) {
+    let outcome = match verdict {
+        Some(PushVerdict::Accepted) if result.exit_code == 0 => v1::GitCommandOutcome::Applied,
+        Some(PushVerdict::Rejected) => v1::GitCommandOutcome::NotApplied,
+        _ => v1::GitCommandOutcome::PartialOrUnknown,
+    };
+    result.outcome = outcome.into();
+    result.applied = outcome == v1::GitCommandOutcome::Applied;
+    if outcome == v1::GitCommandOutcome::PartialOrUnknown && result.error.is_empty() {
+        result.error = "Git did not report whether the remote accepted this push".into();
+    }
+}
+
+/// The upstream this branch already has, or a refusal naming what is missing.
+///
+/// Deliberately never creates one: `git push -u` decides where a branch lives,
+/// and a button that silently made that decision would publish a branch to a
+/// remote nobody chose.
+fn resolve_push_target(root: &str, cancellation: &AtomicBool) -> anyhow::Result<String> {
+    let output = git_output_cancellable(
+        root,
+        &[
+            OsStr::new("rev-parse"),
+            OsStr::new("--abbrev-ref"),
+            OsStr::new("--symbolic-full-name"),
+            OsStr::new("@{upstream}"),
+        ],
+        None,
+        Some(cancellation),
+    )?;
+    if let Some(interrupted) = &output.interrupted {
+        bail!("{interrupted}");
+    }
+    let target = String::from_utf8_lossy(&output.output.stdout)
+        .trim()
+        .to_owned();
+    if !output.status.success() || target.is_empty() {
+        bail!(
+            "no upstream branch is configured for the current branch; run `git push -u` in a terminal once"
+        );
+    }
+    Ok(target)
 }
 
 /// Rejects a status no client decision may be based on.
