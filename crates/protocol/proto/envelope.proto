@@ -341,6 +341,9 @@ message TmuxAction {
   bool confirmed = 12;
   string target_window_id = 13;
   WindowRelativePosition relative_position = 14;
+  // Where a created session's first pane starts. Empty leaves tmux's own
+  // choice alone. NEXT FREE FIELD = 16.
+  string directory = 15;
 }
 
 enum WindowRelativePosition {

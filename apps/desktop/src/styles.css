@@ -1288,13 +1288,19 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .settings-host-actions .settings-hint { margin: 0; }
 /* The panel's two ways of naming a group of controls, kept identical on
    purpose: a fieldset's legend, and a heading over a block that is not one. */
-.settings-modes legend, .settings-body .settings-heading {
+.settings-modes legend, .settings-fieldset legend, .settings-body .settings-heading {
   padding: 0 0 4px; color: var(--chrome-faint); font-size: var(--type-label);
   letter-spacing: var(--tracking-label); text-transform: uppercase;
 }
 .settings-body .settings-heading { margin: 4px 0 0; font-weight: inherit; }
 .settings-modes { display: flex; gap: 16px; padding: 0; border: 0; }
 .settings-modes label { display: flex !important; align-items: center; gap: 5px; }
+/* The other kind of group: full-width fields stacked, not a row of radios.
+   `.settings-modes` lays its children out in a line and forces its labels
+   inline, which is right for two radio buttons and wrong for a labelled text
+   field with a hint under it. */
+.settings-fieldset { display: grid; align-content: start; gap: 12px; padding: 0; border: 0; }
+.settings-fieldset .settings-hint { margin-left: 0; }
 .settings-helper { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .settings-helper p { flex-basis: 100%; margin: 0; color: var(--chrome-dim); font-size: 11px; }
 .helper-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; flex-basis: 100%; margin: 0; font-size: var(--type-meta); }

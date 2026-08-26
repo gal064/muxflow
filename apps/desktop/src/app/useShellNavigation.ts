@@ -60,6 +60,22 @@ export interface ShellNavigationOptions {
   optimisticWindow?: MutableRefObject<OptimisticWindowSwitch | undefined>;
 }
 
+/** What a workspace create carries beyond its name. See `createSession`. */
+export interface CreateSessionOptions {
+  /** Where the first pane starts. The host resolves and validates it. */
+  directory?: string;
+  /**
+   * Called once, with the ack's authoritative identity, after the ack has been
+   * validated and before the shell commits the switch. The scope is the one
+   * the request was issued in, so the caller can refuse to act on a workspace
+   * that belongs to a connection the app has since left.
+   */
+  onCreated?(
+    created: { sessionId: string; windowId?: string; paneId: string; topologyGeneration: number },
+    scope: HostScopeToken,
+  ): void;
+}
+
 export class ShellNavigationSupersededError extends Error {
   constructor() {
     super("navigation was superseded by a newer destination");
@@ -619,7 +635,7 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     return { ok: false, error: accepted.error ?? new Error(`${source} focus request was not accepted.`) };
   }, [beginTerminalIntent, coordinator, requestLocation, scopeCurrent]);
 
-  const createSession = useCallback((name: string) => {
+  const createSession = useCallback((name: string, options?: CreateSessionOptions) => {
     beginTerminalIntent();
     const scope = scopeRef.current;
     const key = `create-session:${++creationVersion.current}`;
@@ -633,7 +649,9 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       destination: { kind: "operation", key },
       request: async () => {
         try {
-          created = await optionsRef.current.performAction({ kind: "createSession", name });
+          created = await optionsRef.current.performAction({
+            kind: "createSession", name, ...(options?.directory ? { directory: options.directory } : {}),
+          });
         } catch (error) {
           withdrawPendingTab(key);
           return { kind: "unknown", reason: scopeCurrent(scope) ? "request" : "scope", error };
@@ -650,6 +668,22 @@ export function useShellNavigation(options: ShellNavigationOptions) {
           key, sessionId: created.sessionId, windowId: created.windowId, title: name || "New session",
         });
         optionsRef.current.acknowledgeHostSessionSelection?.(created.sessionId);
+        // The one moment a workspace's startup command can be delivered: the
+        // ack has just named the pane, the dispatcher has already attached a
+        // control client to it, and the scope has been re-checked since the
+        // request left. Nothing about this is retried or remembered — a
+        // reconnect, a restart, a replay or a reselect goes nowhere near here,
+        // which is what "exactly once, in the workspace that was created"
+        // means. A create that answers with no pane gets nothing sent.
+        const paneId = created.paneId;
+        if (paneId) {
+          options?.onCreated?.({
+            sessionId: created.sessionId,
+            windowId: created.windowId,
+            paneId,
+            topologyGeneration: created.topologyGeneration,
+          }, scope);
+        }
         return {
           kind: "reached",
           destination: { kind: "session", sessionId: created.sessionId },

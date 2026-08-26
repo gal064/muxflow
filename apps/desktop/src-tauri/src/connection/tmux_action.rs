@@ -102,6 +102,10 @@ pub struct TmuxActionWire {
     target_window_id: String,
     #[serde(default)]
     relative_position: WindowRelativePositionWire,
+    /// The created session's start directory, resolved on the host. Empty
+    /// means "wherever tmux would have started it".
+    #[serde(default)]
+    directory: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +147,7 @@ pub async fn tmux_action(
             confirmed: action.confirmed,
             target_window_id: action.target_window_id,
             relative_position: v1::WindowRelativePosition::from(action.relative_position).into(),
+            directory: action.directory,
         }),
         ..Default::default()
     };
@@ -177,7 +182,8 @@ mod tests {
             "relative_position": "before",
             "expected_server_identity": "socket:42",
             "expected_generation": 9,
-            "confirmed": true
+            "confirmed": true,
+            "directory": "/work/projects"
         }))
         .unwrap();
         assert!(matches!(action.kind, TmuxActionKindWire::ReorderWindow));
@@ -188,5 +194,6 @@ mod tests {
         ));
         assert_eq!(action.expected_generation, 9);
         assert!(action.confirmed);
+        assert_eq!(action.directory, "/work/projects");
     }
 }

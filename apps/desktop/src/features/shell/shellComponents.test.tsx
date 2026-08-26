@@ -1320,6 +1320,10 @@ describe("saved host picker", () => {
     onShell={noop}
     onSounds={noop}
     onSshConfigPath={noop}
+    onWorkspaceDefaults={noop}
+    workspaceDefaults={{}}
+    workspaceDefaultsHostId="local"
+    workspaceDefaultsHostLabel="Local"
     onTestNotification={async () => undefined}
     onSshTarget={noop}
     profiles={profiles as unknown as HostProfile[]}
@@ -1342,6 +1346,54 @@ describe("saved host picker", () => {
     expect(toggle.props.type).toBe("checkbox");
     await act(async () => { toggle.props.onChange({ target: { checked: false } }); });
     expect(onShell).toHaveBeenCalledWith({ compactWorkspaces: false });
+    await act(async () => renderer.unmount());
+  });
+
+  it("picks the mode new Markdown tabs start in without touching the ones already open", async () => {
+    const onShell = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(settings({ onShell, shell: defaultShellState })); });
+    const workspaceTab = renderer.root.findAllByType("button").find((node) => node.props.children === "Workspace")!;
+    await act(async () => { workspaceTab.props.onClick(); });
+
+    const select = renderer.root.findByProps({ "aria-label": "Default Markdown view" });
+    expect(select.props.value).toBe("split");
+    await act(async () => { select.props.onChange({ target: { value: "preview" } }); });
+    expect(onShell).toHaveBeenCalledWith({ defaultMarkdownView: "preview" });
+    await act(async () => renderer.unmount());
+  });
+
+  it("commits the per-host workspace defaults trimmed, and clears them when emptied", async () => {
+    const onWorkspaceDefaults = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(settings({
+        onWorkspaceDefaults,
+        shell: defaultShellState,
+        workspaceDefaults: { directory: "/work", startupCommand: "npm run dev" },
+        workspaceDefaultsHostLabel: "qa-host",
+      }));
+    });
+    const workspaceTab = renderer.root.findAllByType("button").find((node) => node.props.children === "Workspace")!;
+    await act(async () => { workspaceTab.props.onClick(); });
+    // Both fields say which machine they describe, because neither means
+    // anything without one.
+    expect(renderer.root.findAllByType("legend")[0].props.children).toEqual(["New workspaces on ", "qa-host"]);
+
+    const directory = () => renderer.root.findByProps({ "aria-label": "Workspace start directory" });
+    expect(directory().props.value).toBe("/work");
+    await act(async () => { directory().props.onChange({ target: { value: "  ~/dev  " } }); });
+    // Nothing is committed while it is being typed: a path saved per keystroke
+    // is a path a workspace created mid-edit would actually be started in.
+    expect(onWorkspaceDefaults).not.toHaveBeenCalled();
+    await act(async () => { directory().props.onBlur(); });
+    expect(onWorkspaceDefaults).toHaveBeenCalledWith({ directory: "~/dev" });
+
+    const command = () => renderer.root.findByProps({ "aria-label": "Workspace startup command" });
+    await act(async () => { command().props.onChange({ target: { value: "   " } }); });
+    await act(async () => { command().props.onKeyDown({ key: "Enter", preventDefault: () => undefined }); });
+    // Emptied means off, not "run a blank line".
+    expect(onWorkspaceDefaults).toHaveBeenLastCalledWith({ startupCommand: undefined });
     await act(async () => renderer.unmount());
   });
 

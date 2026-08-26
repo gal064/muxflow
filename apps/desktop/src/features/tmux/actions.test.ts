@@ -36,6 +36,16 @@ describe("tmux action boundary", () => {
     });
   });
 
+  it("carries a configured workspace directory, and an empty one when there is none", () => {
+    const precondition = { serverIdentity: "tmux:one", generation: 42 };
+    // The host is what resolves and validates it; this side only has to send
+    // it verbatim, and to send "" rather than dropping the field when unset —
+    // the wire shape is fixed and the host reads absence as "no preference".
+    expect(toWireTmuxAction({ kind: "createSession", name: "work", directory: "~/dev" }, precondition))
+      .toMatchObject({ kind: "createSession", name: "work", directory: "~/dev" });
+    expect(toWireTmuxAction({ kind: "createSession", name: "work" }, precondition).directory).toBe("");
+  });
+
   it("classifies every topology kill as destructive", () => {
     expect(["closeSession", "closeWindow", "closePane"].every((kind) =>
       isDestructiveTmuxAction({ kind: kind as "closePane" }),

@@ -1,6 +1,7 @@
 import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { renderedPanes } from "../terminal/layout";
-import { MAX_ARCHIVED_WORKSPACES, type AppOwnedTab, type ArchivedWorkspaceRecord, type PersistedAppState, type WorkspaceUiRecord } from "./types";
+import { MAX_ARCHIVED_WORKSPACES, usableWorkspaceDefault } from "./types";
+import type { AppOwnedTab, AppTabViewMode, ArchivedWorkspaceRecord, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import type { AgentAdapterId, AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
 import { stripAgentStatusGlyphs } from "../agents/agentLabels";
@@ -584,7 +585,7 @@ export function openFileTab(
   resource: string,
   kind: "file" | "markdown",
   root: { path: string; token: string; revision: string },
-  options: { preview: boolean } = { preview: false },
+  options: { preview: boolean; viewMode?: AppTabViewMode } = { preview: false },
 ): PersistedAppState {
   const inWorkspace = (tab: AppOwnedTab) => tab.hostProfileId === currentHostProfileId
     && tab.serverIdentity === currentServerIdentity
@@ -603,7 +604,11 @@ export function openFileTab(
     title: fileTabTitle(resource),
     rootPath: root.path,
     rootToken: root.token,
-    ...(kind === "markdown" ? { viewMode: "split" as const } : {}),
+    // The configured default, read here and only here: an existing tab is
+    // returned above with the mode the user put it in, so changing the setting
+    // never reaches a tab that is already open, and changing a tab's mode never
+    // reaches the setting.
+    ...(kind === "markdown" ? { viewMode: options.viewMode ?? "split" } : {}),
   };
   // The slot is reused, not the record: everything that described the previous
   // file — its markdown view mode, its root snapshot — is replaced, and only
@@ -759,11 +764,49 @@ export function openGitDiffTab(
   return selectAppTab({ ...state, appTabs }, currentHostProfileId, currentServerIdentity, session, tab.id);
 }
 
+/**
+ * What new workspaces on one host start with. Never another host's values: an
+ * absent entry is "whatever this app did before the setting existed", which is
+ * exactly what a host the user has not configured should get.
+ */
+export function workspaceDefaultsFor(state: PersistedAppState, hostProfileId: string): WorkspaceDefaults {
+  return state.workspaceDefaults[hostProfileId] ?? {};
+}
+
+/**
+ * Edits one host's entry, keeping the other hosts' untouched.
+ *
+ * A field set to an empty or whitespace-only string is a field being *cleared*,
+ * so it is removed rather than stored — and a host left with nothing to say
+ * drops out of the map entirely, so an entry only exists while it means
+ * something.
+ */
+export function setWorkspaceDefaults(
+  state: PersistedAppState,
+  hostProfileId: string,
+  patch: Partial<WorkspaceDefaults>,
+): PersistedAppState {
+  const merged = { ...workspaceDefaultsFor(state, hostProfileId), ...patch };
+  // Bounded here as well as on load: the storage side refuses the *whole* save
+  // for one over-long field, so an unbounded paste into Settings would freeze
+  // every other thing this file persists.
+  const directory = usableWorkspaceDefault(merged.directory);
+  const startupCommand = usableWorkspaceDefault(merged.startupCommand);
+  const next: WorkspaceDefaults = {
+    ...(directory ? { directory } : {}),
+    ...(startupCommand ? { startupCommand } : {}),
+  };
+  const workspaceDefaults = { ...state.workspaceDefaults };
+  if (next.directory || next.startupCommand) workspaceDefaults[hostProfileId] = next;
+  else delete workspaceDefaults[hostProfileId];
+  return { ...state, workspaceDefaults };
+}
+
 export function setMarkdownViewMode(
   state: PersistedAppState,
   currentHostProfileId: string,
   tabId: string,
-  viewMode: "source" | "preview" | "split",
+  viewMode: AppTabViewMode,
 ): PersistedAppState {
   return {
     ...state,

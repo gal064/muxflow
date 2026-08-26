@@ -16,6 +16,15 @@ use super::snapshot::tmux_command;
 /// Codex announce what they are working on — the window takes that title.
 /// Nothing cosmetic is included. The status bar, key bindings and colours
 /// remain entirely the user's business.
+///
+/// One interaction is worth stating, because it is deliberate. A workspace's
+/// first window is created with the workspace's name (`configure_new_session`),
+/// and an explicit window name turns tmux's *automatic* renaming off for that
+/// window — which is the point: the first tab keeps the name the user gave the
+/// workspace instead of becoming `zsh`. This hook is not automatic renaming, so
+/// it still applies: when an agent takes that pane over and announces a title,
+/// the window is renamed to it, exactly as it is in every other window. A
+/// rename by the user, from either side, is likewise final until the next one.
 const PANE_TITLE_HOOK: &str = "pane-title-changed";
 const AUTOMATIC_RENAME_FORMAT: &str = "automatic-rename-format";
 

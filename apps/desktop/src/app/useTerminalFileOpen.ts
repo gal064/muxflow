@@ -2,12 +2,18 @@ import { useCallback, type Dispatch, type MutableRefObject, type SetStateAction 
 import type { FileWorkspaceScope, TerminalFileResolver } from "../features/files/types";
 import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 import { openFileTab } from "../features/shell/model";
-import type { PersistedAppState } from "../features/shell/types";
+import type { AppTabViewMode, PersistedAppState } from "../features/shell/types";
 import { currentTerminalFilePane } from "./terminalFileOpenRoute";
 import type { TmuxSnapshot } from "./types";
 
 interface TerminalFileOpenOptions {
   clientIdRef: MutableRefObject<string | undefined>;
+  /**
+   * The configured starting mode for a new Markdown tab, read when the tab is
+   * created rather than when this hook is built: the resolve is a host round
+   * trip, and the setting may be changed while it is in flight.
+   */
+  defaultMarkdownView(): AppTabViewMode;
   fileClient: TerminalFileResolver;
   fileScope?: FileWorkspaceScope;
   hostScopeRef: MutableRefObject<HostScopeToken>;
@@ -25,7 +31,8 @@ interface TerminalFileOpenOptions {
 /** Resolves an application-emitted terminal path without crossing host or pane generations. */
 export function useTerminalFileOpen(options: TerminalFileOpenOptions) {
   const {
-    clientIdRef, fileClient, fileScope, hostScopeRef, selectLocalAppTab, setAppState, setStatus, snapshotRef,
+    clientIdRef, defaultMarkdownView, fileClient, fileScope, hostScopeRef, selectLocalAppTab,
+    setAppState, setStatus, snapshotRef,
   } = options;
   return useCallback(async (paneId: string, candidate: string): Promise<void> => {
     const pane = snapshotRef.current.panes.find((item) => item.id === paneId);
@@ -78,7 +85,7 @@ export function useTerminalFileOpen(options: TerminalFileOpenOptions) {
             resolved.path,
             kind,
             resolved.root,
-            { preview: false },
+            { preview: false, viewMode: defaultMarkdownView() },
           ));
         },
       );
@@ -88,5 +95,6 @@ export function useTerminalFileOpen(options: TerminalFileOpenOptions) {
         setStatus(`Could not open ${candidate}: ${String(error)}`);
       }
     }
-  }, [clientIdRef, fileClient, fileScope, hostScopeRef, selectLocalAppTab, setAppState, setStatus, snapshotRef]);
+  }, [clientIdRef, defaultMarkdownView, fileClient, fileScope, hostScopeRef, selectLocalAppTab,
+    setAppState, setStatus, snapshotRef]);
 }

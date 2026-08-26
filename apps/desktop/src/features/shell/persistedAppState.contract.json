@@ -64,6 +64,7 @@
     "copyOnSelect": true,
     "terminalApplicationClipboard": true,
     "terminalFontSize": 17,
+    "defaultMarkdownView": "preview",
     "windowGeometry": {
       "x": 20,
       "y": 30,
@@ -90,5 +91,15 @@
       "sessionName": "parked",
       "archivedAt": 1700000000000
     }
-  ]
+  ],
+  "workspaceDefaults": {
+    "local": {
+      "directory": "/work/projects",
+      "startupCommand": "git status"
+    },
+    "ssh-remote-linux": {
+      "directory": "/srv/checkout",
+      "startupCommand": "tail -f /var/log/build.log"
+    }
+  }
 }
