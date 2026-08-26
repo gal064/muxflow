@@ -167,4 +167,16 @@ describe("workspace sidebar rows", () => {
     expect(inferHome(["/home/operator/a", "/home/operator/b", "/home/deploy/c"])).toBe("/home/operator");
     expect(inferHome(["/home/zed/a", "/home/operator/b"])).toBe("/home/operator");
   });
+
+  it("gives an excluded (archived) workspace no row at all", () => {
+    const visible = workspaceRows({
+      snapshot, activeSessionId: "$1", agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
+      excludeSessionIds: new Set(["$1"]),
+    });
+    expect(visible.map((row) => row.session.id)).toEqual(["$2"]);
+    expect(workspaceRows({
+      snapshot, activeSessionId: "$1", agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
+      excludeSessionIds: new Set(),
+    })).toHaveLength(2);
+  });
 });

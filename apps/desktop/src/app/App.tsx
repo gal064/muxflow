@@ -44,9 +44,12 @@ import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
-  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
+  defaultAppState, PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
 } from "../features/shell/types";
 import {
+  archiveWorkspace,
+  archivedSessionIds,
+  archivedWorkspacesFor,
   combineWorkspaceTabs,
   closeAppTab,
   closeTransientGitDiff,
@@ -59,6 +62,7 @@ import {
   retirePendingTab,
   selectableTabs,
   selectAppTab,
+  unarchiveWorkspace,
   setMarkdownViewMode,
   shouldSurfaceAuthoritativeTerminal,
   tabsToCloseOthers,
@@ -74,7 +78,7 @@ import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
-import type { ConnectionSpec, HostProfile, Pane } from "./types";
+import type { ConnectionSpec, HostProfile, Pane, Session } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
 import { useAppRecoveryController } from "./useAppRecoveryController";
@@ -177,6 +181,11 @@ export function App() {
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
   const platform = useMemo(() => currentPlatform(), []);
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus, platform);
+  // Read through a ref by the connection controller, which needs the archived
+  // set for the snapshot it is applying — before this render's `archived`
+  // (below, once the host identity is known) could exist.
+  const appStateRef = useRef(appState);
+  appStateRef.current = appState;
   // One shared observation per repository, for the sidebar and every diff tab.
   const gitRepositories = useMemo(() => new GitRepositoryStore(gitClient), [gitClient]);
   // The connection controller reports helper-relevant lifecycle points; what
@@ -191,6 +200,7 @@ export function App() {
     fileClient,
     gitClient,
     terminalApplicationClipboardEnabled: appState.shell.terminalApplicationClipboard,
+    excludedSessionIds: (profileId, identity) => archivedSessionIds(appStateRef.current, profileId, identity),
     onHandshakeFailure: (failed) => onHandshakeFailure.current(failed),
     onConnectionStateChanged: (changed, state) => onConnectionStateChanged.current(changed, state),
     setStatus,
@@ -415,6 +425,24 @@ export function App() {
     }));
   }, [setAppState]);
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
+  // Archived workspaces on this host and server. One set, applied at the
+  // source of each list it must be absent from: the agent runtime, the
+  // sidebar rows, and the focus history.
+  // Keyed on the records alone: every other persisted write (a tab switch, a
+  // sidebar drag) must not hand the agent runtime and the sidebar a new set.
+  const archivedRecords = appState.archivedWorkspaces;
+  const archived = useMemo(
+    () => archivedSessionIds({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity),
+    [archivedRecords, currentHostProfileId, hostState.serverIdentity],
+  );
+  const visibleSessions = useMemo(
+    () => archived.size === 0 ? snapshot.sessions : snapshot.sessions.filter((session) => !archived.has(session.id)),
+    [archived, snapshot.sessions],
+  );
+  const archivedWorkspaces = useMemo(
+    () => archivedWorkspacesFor({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity, snapshot.sessions),
+    [archivedRecords, currentHostProfileId, hostState.serverIdentity, snapshot.sessions],
+  );
   const {
     hostSetup: agentHostSetup,
     notificationActivation,
@@ -441,6 +469,7 @@ export function App() {
     currentHostProfileId,
     decision: appState.hostSetup[currentHostProfileId],
     decisionsArePersistable: appStateRecovery === undefined,
+    excludedSessionIds: archived,
     hostCanMutate: hostState.canMutate,
     // Helper compatibility owns the host-level consent lane while it is
     // unresolved. Runtime observation stays live; only the separate one-time
@@ -471,7 +500,8 @@ export function App() {
     attentionByWorkspace: agentRuntime.rollups.byWorkspace,
     activeBranch: workspaceGit.status?.repository.headName,
     home,
-  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, snapshot, workspaceGit.status]);
+    excludeSessionIds: archived,
+  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, archived, home, snapshot, workspaceGit.status]);
   const agentRows = useMemo(() => {
     const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
     const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
@@ -607,10 +637,32 @@ export function App() {
     selectSession,
     selectWindow,
     selectedAppTabId: selectedAppTab?.id,
-    sessions: snapshot.sessions,
+    // Archived workspaces are not destinations: treat them as gone.
+    sessions: visibleSessions,
     setStatus,
     windows: snapshot.windows,
   });
+  // The archive itself sends tmux nothing: the session and everything in it
+  // keeps running. The only tmux traffic is the ordinary switch to the next
+  // workspace when the archived one was on screen. If
+  // the workspace being archived is the one on screen, the selection moves to
+  // its neighbour — the row after it, else the row before — so the shell is
+  // not left showing a workspace the sidebar no longer lists.
+  const archiveSession = useCallback((session: Session) => {
+    setAppState((current) => archiveWorkspace(current, currentHostProfileId, hostState.serverIdentity, session, Date.now()));
+    if (session.id !== activeSessionId) return;
+    const index = sidebarRows.findIndex((row) => row.session.id === session.id);
+    const next = index < 0 ? undefined : sidebarRows[index + 1] ?? sidebarRows[index - 1];
+    // No neighbour: nothing is selected, now rather than at the next snapshot,
+    // so the strip and terminals do not keep showing a workspace the sidebar
+    // no longer lists.
+    if (next) selectSession(next.session.id);
+    else setActiveSessionId(undefined);
+  }, [activeSessionId, currentHostProfileId, hostState.serverIdentity, selectSession, setActiveSessionId, setAppState, sidebarRows]);
+  const unarchiveSession = useCallback((session: Session, scope: HostScopeToken) => {
+    if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    setAppState((current) => unarchiveWorkspace(current, scope.hostProfileId, scope.serverIdentity, session.id));
+  }, [hostScopeRef, setAppState]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is
@@ -707,6 +759,7 @@ export function App() {
       selectAgentRow(target);
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
+    archiveSession,
     createSession: shellNavigation.createSession,
     createWindow: (sessionId) => {
       notificationActivation.clearNotificationFocusGuard();
@@ -987,6 +1040,8 @@ export function App() {
       {sidebarOpen && <WorkspaceSidebar
         adapters={agentRuntime.adapters}
         agents={agentRows}
+        archivedWorkspaces={archivedWorkspaces}
+        onUnarchiveWorkspace={unarchiveSession}
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}
         compactWorkspaces={appState.shell.compactWorkspaces}
