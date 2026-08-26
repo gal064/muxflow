@@ -16,7 +16,7 @@ describe("openExternalUrl", () => {
     (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
     await openExternalUrl("https://example.com/");
-    expect(invoke).toHaveBeenCalledWith("open_external_url", { url: "https://example.com/" });
+    expect(invoke).toHaveBeenCalledWith("open_external_link", { url: "https://example.com/", confirmed: true });
     expect(open).not.toHaveBeenCalled();
     open.mockRestore();
   });

@@ -1,4 +1,11 @@
-use std::process::{Command, Stdio};
+//! Open an `http(s)` URL in the user's default browser.
+//!
+//! One boundary for every surface that can show a link — Markdown preview,
+//! terminal text, OSC 8 hyperlinks: the string is validated here before any
+//! platform call, so a `file:`, `javascript:` or credential-bearing URL that a
+//! document or a process could print is refused. `confirmed` is the caller's
+//! statement that the user made a deliberate gesture (a dialog, or the
+//! modifier-click a terminal link requires).
 
 const MAX_URL_BYTES: usize = 8192;
 
@@ -8,8 +15,29 @@ pub fn open_external_link(url: String, confirmed: bool) -> Result<(), String> {
     if !confirmed {
         return Err("external_link_confirmation_required".into());
     }
+    open_in_browser(&url)
+}
+
+#[cfg(target_os = "macos")]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+
+    let Some(target) = NSURL::URLWithString(&NSString::from_str(url)) else {
+        return Err("macOS could not parse the link".into());
+    };
+    if NSWorkspace::sharedWorkspace().openURL(&target) {
+        return Ok(());
+    }
+    Err("macOS refused to open the link".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
     Command::new("xdg-open")
-        .arg(&url)
+        .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
