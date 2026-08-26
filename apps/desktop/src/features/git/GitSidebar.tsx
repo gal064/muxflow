@@ -23,7 +23,12 @@ interface Props {
   scope?: FileWorkspaceScope;
   root?: ActiveRoot;
   disabled: boolean;
-  onOpenDiff(entry: GitStatusEntry, target: GitDiffTarget): void;
+  /**
+   * `preview` is a single click's transient diff, closed by the next
+   * navigation; a double-click, the context menu and the palette open it
+   * pinned.
+   */
+  onOpenDiff(entry: GitStatusEntry, target: GitDiffTarget, options: { preview: boolean }): void;
   onMessage(message: string): void;
 }
 
@@ -97,8 +102,8 @@ export function GitSidebar(props: Props) {
   // during render, so a render React discards cannot leave these handlers
   // acting on props that were never committed.
   const latest = useCommittedRef({ ...props, unavailable });
-  const openDiff = useCallback((entry: GitStatusEntry, target: GitDiffTarget) => {
-    latest.current.onOpenDiff(entry, target);
+  const openDiff = useCallback((entry: GitStatusEntry, target: GitDiffTarget, options: { preview: boolean }) => {
+    latest.current.onOpenDiff(entry, target, options);
   }, []);
   const focusRow = useCallback((entry: GitStatusEntry, target: GitDiffTarget) => setFocusedRow(
     // The palette only needs to know which row is selected. Re-selecting the
@@ -164,7 +169,7 @@ export function GitSidebar(props: Props) {
   const committedRowCommand = (commandId: CommandId) => {
     if (!focusedEntry || !focusedRow) return;
     switch (commandId) {
-      case "git.openDiff": props.onOpenDiff(focusedEntry, focusedRow.target); return;
+      case "git.openDiff": props.onOpenDiff(focusedEntry, focusedRow.target, { preview: false }); return;
       case "git.stage": void mutateFile(focusedEntry, "unstaged", "stageFile"); return;
       case "git.unstage": void mutateFile(focusedEntry, "staged", "unstageFile"); return;
       case "git.discard":
@@ -223,7 +228,7 @@ export function GitSidebar(props: Props) {
     {menu && <ContextMenu
       anchor={menu.anchor}
       items={[
-        { id: "open", label: "Open diff", run: () => props.onOpenDiff(menu.entry, menu.target) },
+        { id: "open", label: "Open diff", run: () => props.onOpenDiff(menu.entry, menu.target, { preview: false }) },
         ...(!unavailable && !menu.entry.conflicted && props.scope && props.root && props.git.status ? [
           menu.target === "staged"
             ? { id: "unstage", label: "Unstage", disabled: menu.entry.submodule, run: () => void mutateFile(menu.entry, "staged", "unstageFile") }
@@ -264,7 +269,7 @@ const GitGroup = memo(function GitGroup(props: {
   title: string; entries: GitStatusEntry[]; target: GitDiffTarget; pending?: ReadonlyMap<string, string>;
   /** Whether this repository can be written to at all; a row decides the rest. */
   mutable?: boolean;
-  onOpen(entry: GitStatusEntry, target: GitDiffTarget): void;
+  onOpen(entry: GitStatusEntry, target: GitDiffTarget, options: { preview: boolean }): void;
   onFocusEntry(entry: GitStatusEntry, target: GitDiffTarget): void;
   onMenu?(entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor): void;
   onStage?(entry: GitStatusEntry): void;
@@ -298,7 +303,8 @@ const GitGroup = memo(function GitGroup(props: {
             draggable={Boolean(props.onDrag && entry.absolutePath)}
             onDragStart={(event) => entry.absolutePath && props.onDrag?.(entry, event.dataTransfer)}
             onDragEnd={(event) => finishInternalPathDrag(event.dataTransfer.dropEffect !== "none")}
-            onClick={() => props.onOpen(entry, props.target)}
+            onClick={() => props.onOpen(entry, props.target, { preview: true })}
+            onDoubleClick={() => props.onOpen(entry, props.target, { preview: false })}
             // What "the selected change" means for the palette and for a bound
             // shortcut: whichever row the keyboard or the pointer last landed on.
             // Both are needed — macOS WebKit does not focus a button on click.

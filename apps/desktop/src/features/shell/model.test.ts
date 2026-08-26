@@ -4,11 +4,13 @@ import {
   appTabsForWorkspace,
   bulkCloseOutcomeStatus,
   closeAppTab,
+  closeTransientGitDiff,
   combineWorkspaceTabs,
   discardServerAppState,
   mountedAppTabIds,
   mountedTerminalPanes,
   openFileTab,
+  findGitDiffTab,
   openGitDiffTab,
   orderedSessions,
   pinAppTab,
@@ -307,6 +309,79 @@ describe("application shell model", () => {
       expect.objectContaining({ gitTarget: "staged", gitPath: "YSBmaWxl", rootPath: "/repo", rootToken: "root-token" }),
       expect.objectContaining({ gitTarget: "unstaged", gitPath: "YSBmaWxl", rootPath: "/repo", rootToken: "root-token" }),
     ]));
+  });
+
+  it("opens a single-clicked Git diff as transient, promotes it on a pinned open, and never demotes it", () => {
+    const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
+    const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
+    const root = { path: "/repo", token: "root-token" };
+    const open = (state: PersistedAppState, preview: boolean) =>
+      openGitDiffTab(state, "local", "server-a", sessions[1], entry, "unstaged", status, root, { preview });
+    const find = (state: PersistedAppState) => findGitDiffTab(state, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged");
+
+    const transient = open(defaultAppState, true);
+    expect(transient.appTabs).toHaveLength(1);
+    expect(find(transient)).toMatchObject({ kind: "gitDiff", preview: true });
+    expect(transient.workspaceUi[0].selectedAppTabId).toBe(find(transient)!.id);
+
+    // A second single click keeps the same transient tab.
+    const again = open(transient, true);
+    expect(again.appTabs).toHaveLength(1);
+    expect(find(again)).toMatchObject({ id: find(transient)!.id, preview: true });
+
+    // A pinned open promotes it in place; a later single click does not demote it.
+    const pinned = open(again, false);
+    expect(pinned.appTabs).toHaveLength(1);
+    expect(find(pinned)!.id).toBe(find(transient)!.id);
+    expect(find(pinned)!.preview).toBeUndefined();
+    expect(find(open(pinned, true))!.preview).toBeUndefined();
+
+    // The strip's double-click pins a transient diff the same way.
+    expect(find(pinAppTab(transient, "local", find(transient)!.id))!.preview).toBeUndefined();
+
+    // Without the option the tab is pinned, as every caller before this option was.
+    expect(find(openGitDiffTab(defaultAppState, "local", "server-a", sessions[1], entry, "unstaged", status, root))!.preview).toBeUndefined();
+  });
+
+  it("closes a transient diff on navigation away, and leaves a pinned one where it is", () => {
+    const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
+    const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
+    const transient = openGitDiffTab(tabs, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
+    const transientId = findGitDiffTab(transient, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged")!.id;
+    const left = closeTransientGitDiff(transient, "local", transientId);
+    expect(left.appTabs.map((tab) => tab.id)).toEqual(tabs.appTabs.map((tab) => tab.id));
+    expect(left.workspaceUi[0].selectedAppTabId).toBeUndefined();
+
+    const pinned = pinAppTab(transient, "local", transientId);
+    expect(closeTransientGitDiff(pinned, "local", transientId)).toBe(pinned);
+    // A file tab and an id that is already gone are not this rule's business.
+    expect(closeTransientGitDiff(tabs, "local", "a")).toBe(tabs);
+    expect(closeTransientGitDiff(left, "local", transientId)).toBe(left);
+  });
+
+  it("does not resurrect a closed transient diff when its open commit runs a second time", () => {
+    const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
+    const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
+    // The shape of the commit the shell hands the navigation coordinator: the
+    // first run opens, every later run only re-selects what the first opened.
+    let openedId: string | undefined;
+    const commit = (current: PersistedAppState): PersistedAppState => {
+      if (openedId) {
+        return current.appTabs.some((tab) => tab.id === openedId)
+          ? selectAppTab(current, "local", "server-a", sessions[1], openedId)
+          : current;
+      }
+      const next = openGitDiffTab(current, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
+      openedId = findGitDiffTab(next, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged")?.id;
+      return next;
+    };
+    const opened = commit(defaultAppState);
+    expect(opened.appTabs).toHaveLength(1);
+    const closed = closeAppTab(opened, "local", openedId!);
+    expect(closed.appTabs).toHaveLength(0);
+    const replayed = commit(closed);
+    expect(replayed).toBe(closed);
+    expect(replayed.workspaceUi[0].selectedAppTabId).toBeUndefined();
   });
 
   it("opens one root-scoped file tab and preserves it across root changes", () => {

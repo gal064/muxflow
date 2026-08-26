@@ -39,6 +39,25 @@ async function rowMenuItem(renderer: ReturnType<typeof create>, displayPath: str
 }
 
 describe("GitSidebar", () => {
+  it("opens a transient diff on a single click and a pinned one from a double-click, the menu and the palette", async () => {
+    const props = baseProps();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    const row = gitRow(renderer, "changed.txt");
+    await act(async () => { row.props.onClick(); });
+    expect(props.onOpenDiff).toHaveBeenLastCalledWith(expect.objectContaining({ displayPath: "changed.txt" }), "unstaged", { preview: true });
+    await act(async () => { row.props.onDoubleClick(); });
+    expect(props.onOpenDiff).toHaveBeenLastCalledWith(expect.objectContaining({ displayPath: "changed.txt" }), "unstaged", { preview: false });
+    const open = await rowMenuItem(renderer, "staged.txt", "open");
+    await act(async () => { open.props.onClick(); });
+    expect(props.onOpenDiff).toHaveBeenLastCalledWith(expect.objectContaining({ displayPath: "staged.txt" }), "staged", { preview: false });
+    await act(async () => { gitRow(renderer, "changed.txt").props.onPointerDown(); });
+    await act(async () => { rowCommandRegistry.run("git.openDiff"); });
+    expect(props.onOpenDiff).toHaveBeenLastCalledWith(expect.objectContaining({ displayPath: "changed.txt" }), "unstaged", { preview: false });
+    expect(props.onOpenDiff).toHaveBeenCalledTimes(4);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("writes a private canonical same-host payload for Git rows", async () => {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...baseProps()} />); });
