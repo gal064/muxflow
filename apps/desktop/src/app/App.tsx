@@ -48,6 +48,12 @@ import {
   type AppOwnedTab, type HostSetupDecision, type ShellState, type WorkspaceDefaults,
 } from "../features/shell/types";
 import {
+  pinnedTabTimes,
+  pinnedWorkspaceTimes,
+  togglePinnedTab,
+  togglePinnedWorkspace,
+} from "../features/shell/pins";
+import {
   archiveWorkspace,
   archivedSessionIds,
   archivedWorkspacesFor,
@@ -293,6 +299,7 @@ export function App() {
     currentScope: currentHostScope,
     serverIdentity: hostState.serverIdentity,
     sessions: snapshot.sessions,
+    windows: snapshot.windows,
     setAppState,
   });
 
@@ -457,6 +464,15 @@ export function App() {
     () => archivedWorkspacesFor({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity, snapshot.sessions),
     [archivedRecords, currentHostProfileId, hostState.serverIdentity, snapshot.sessions],
   );
+  // Pinned workspaces and tabs on this host and server, keyed on the records
+  // alone for the same reason the archive is: every other persisted write must
+  // not hand the sidebar and the strip a new map to re-sort against.
+  const pinnedWorkspaceRecords = appState.pinnedWorkspaces;
+  const pinnedTabRecords = appState.pinnedTabs;
+  const pinnedWorkspaceAt = useMemo(
+    () => pinnedWorkspaceTimes({ ...defaultAppState, pinnedWorkspaces: pinnedWorkspaceRecords }, currentHostProfileId, hostState.serverIdentity),
+    [currentHostProfileId, hostState.serverIdentity, pinnedWorkspaceRecords],
+  );
   const {
     hostSetup: agentHostSetup,
     notificationActivation,
@@ -515,11 +531,21 @@ export function App() {
     activeBranch: workspaceGit.status?.repository.headName,
     home,
     excludeSessionIds: archived,
-  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, archived, home, snapshot, workspaceGit.status]);
+    pinnedAt: pinnedWorkspaceAt,
+  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, archived, home, pinnedWorkspaceAt, snapshot, workspaceGit.status]);
   const agentRows = useMemo(() => {
     const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
     const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
     const paneIds = new Set(snapshot.panes.map((pane) => pane.id));
+    // Every pinned tab on this server, not just the workspace on screen: the
+    // agents list spans workspaces, so it needs the pin times of tabs whose
+    // strip is not currently drawn.
+    const tabPinnedAt = new Map<string, number>();
+    for (const record of pinnedTabRecords) {
+      if (record.hostProfileId !== currentHostProfileId || !hostState.serverIdentity
+        || record.serverIdentity !== hostState.serverIdentity) continue;
+      tabPinnedAt.set(`${record.sessionId}\0${record.tabId}`, record.pinnedAt);
+    }
     return buildAgentRows(
       agentRuntime.agents,
       (record) => ({
@@ -527,11 +553,13 @@ export function App() {
         workspaceName: record.sessionName || "unknown workspace",
         hostLabel,
         tabIndex: windowIndexById.get(record.windowId),
+        workspacePinnedAt: pinnedWorkspaceAt.get(record.sessionId),
+        tabPinnedAt: tabPinnedAt.get(`${record.sessionId}\0${record.windowId}`),
       }),
       (record) => Boolean(record.paneId) && paneIds.has(record.paneId),
       appState.shell.agentSort,
     );
-  }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, sidebarRows, snapshot.panes, snapshot.windows]);
+  }, [agentRuntime.agents, appState.shell.agentSort, currentHostProfileId, hostLabel, hostState.serverIdentity, pinnedTabRecords, pinnedWorkspaceAt, sidebarRows, snapshot.panes, snapshot.windows]);
   const unread = useMemo(() => unreadCount(agentRows), [agentRows]);
   // The badge counts every waiting agent; the bell can only reach routable
   // ones, so it is disabled on exactly the rows `agents.jumpUnread` would find.
@@ -572,6 +600,13 @@ export function App() {
   };
   const agentPresenceRef = useRef(agentPresence);
   agentPresenceRef.current = agentPresence;
+  const pinnedTabAt = useMemo(
+    () => pinnedTabTimes(
+      { ...defaultAppState, pinnedTabs: pinnedTabRecords },
+      currentHostProfileId, hostState.serverIdentity, activeSessionId,
+    ),
+    [activeSessionId, currentHostProfileId, hostState.serverIdentity, pinnedTabRecords],
+  );
   const combinedTabs = useMemo(
     // The same authority the commit-time recheck reads, `hasUnmappedAgents`
     // included: the strip and the recheck must not disagree about which
@@ -582,8 +617,9 @@ export function App() {
         current: currentAgentTopology,
         hasUnmappedAgents,
       },
+      pinnedTabAt,
     ),
-    [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, windows, workspaceAppTabs],
+    [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, pinnedTabAt, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
   // A single-clicked Git diff is transient: it lives until the user selects
@@ -677,6 +713,17 @@ export function App() {
     if (!sameHostConnection(scope, hostScopeRef.current)) return;
     setAppState((current) => unarchiveWorkspace(current, scope.hostProfileId, scope.serverIdentity, session.id));
   }, [hostScopeRef, setAppState]);
+  // Both pins are scoped writes and nothing else: no tmux traffic, no
+  // selection change. The scope check is the same one every row action makes —
+  // a menu can outlive the connection it was opened over.
+  const toggleWorkspacePin = useCallback((session: Session, scope: HostScopeToken) => {
+    if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    setAppState((current) => togglePinnedWorkspace(current, scope.hostProfileId, scope.serverIdentity, session, Date.now()));
+  }, [hostScopeRef, setAppState]);
+  const toggleTabPin = useCallback((tab: CombinedTab, scope: HostScopeToken) => {
+    if (tab.kind === "pending" || !sameHostConnection(scope, hostScopeRef.current)) return;
+    setAppState((current) => togglePinnedTab(current, scope.hostProfileId, scope.serverIdentity, activeSessionId, tab.id, Date.now()));
+  }, [activeSessionId, hostScopeRef, setAppState]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is
@@ -1104,6 +1151,7 @@ export function App() {
         onReviewHooks={agentWorkflow.reviewHooks}
         onSelectAgent={selectAgentRow}
         onSelectWorkspace={selectSession}
+        onTogglePinnedWorkspace={toggleWorkspacePin}
         onSortMode={(mode) => updateShell({ agentSort: mode })}
         onWorkspaceCommand={(session, commandId, scope) => void runCommand(commandId, { kind: "session", id: session.id, scope })}
         phase={hostState.phase}
@@ -1143,6 +1191,7 @@ export function App() {
           onMove={moveCombinedTab}
           onNewTerminal={() => void runCommand("window.new")}
           onPin={(tab) => pinOpenTab(tab.id)}
+          onTogglePinned={(tab) => toggleTabPin(tab, currentHostScope)}
           onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
           onSelect={selectCombinedTab}
           platform={platform}

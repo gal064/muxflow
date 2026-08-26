@@ -180,3 +180,34 @@ describe("workspace sidebar rows", () => {
     })).toHaveLength(2);
   });
 });
+
+describe("pinned workspaces lead the sidebar list", () => {
+  const pinnedRows = (pinnedAt: ReadonlyMap<string, number>) => workspaceRows({
+    snapshot,
+    activeSessionId: "$1",
+    agents,
+    attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
+    pinnedAt,
+  });
+
+  it("moves a pinned workspace to the top and marks the row", () => {
+    // `$2` sorts second by tmux order; pinning it puts it first.
+    const list = pinnedRows(new Map([["$2", 10]]));
+    expect(list.map((row) => row.session.id)).toEqual(["$2", "$1"]);
+    expect(list.map((row) => row.pinned)).toEqual([true, false]);
+  });
+
+  it("keeps the first workspace pinned first, and the rest in tmux order", () => {
+    const list = pinnedRows(new Map([["$1", 20], ["$2", 10]]));
+    expect(list.map((row) => row.session.id)).toEqual(["$2", "$1"]);
+    // This list is also ⌘1–9 and the ⌘P switcher, so the numbers follow it.
+    expect(list.map((row) => row.session.name)).toEqual(["project-e2e", "muxflow"]);
+  });
+
+  it("changes nothing when no workspace on this server is pinned", () => {
+    const list = pinnedRows(new Map([["$99", 10]]));
+    expect(list.map((row) => row.session.id)).toEqual(["$1", "$2"]);
+    expect(list.every((row) => !row.pinned)).toBe(true);
+    expect(rows().map((row) => row.pinned)).toEqual([false, false]);
+  });
+});

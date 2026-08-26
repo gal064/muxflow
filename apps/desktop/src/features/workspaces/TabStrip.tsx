@@ -41,6 +41,14 @@ interface TabStripProps {
   onRenameTerminal(tab: Extract<CombinedTab, { kind: "terminal" }>, scope: HostScopeToken): void;
   /** Double-clicking a preview tab makes it permanent, as VS Code's does. */
   onPin(tab: Extract<CombinedTab, { kind: "app" }>): void;
+  /**
+   * Shift-click, and the menu item beside it: pins the tab to the front of the
+   * strip, or unpins one already there.
+   *
+   * Deliberately not `onPin`, which this strip has meant "promote a preview tab
+   * to a permanent one" since Phase 11 and still does.
+   */
+  onTogglePinned(tab: SelectableTab): void;
   onNewTerminal(): void;
 }
 
@@ -216,7 +224,11 @@ export function TabStrip(props: TabStripProps) {
               // tabs still route through the confirmation contract.
               if (event.button === 1) { event.preventDefault(); props.onClose(tab, props.commandScope); }
             }}
-            onClick={() => props.onSelect(tab)}
+            // Shift-click pins rather than selects. Nothing else in the strip
+            // claims the modifier, and pinning without selecting is the point:
+            // pinning a background tab must not pull the terminal out from
+            // under whatever is on screen.
+            onClick={(event) => event.shiftKey ? props.onTogglePinned(tab) : props.onSelect(tab)}
             onContextMenu={(event) => {
               // Opening a menu is not a selection: selecting first would make a
               // right-click on a terminal tab issue a real tmux select-window.
@@ -241,6 +253,10 @@ export function TabStrip(props: TabStripProps) {
             type="button"
           >
             {shortcutIndex !== undefined && <span aria-hidden="true" className="tab-index">{shortcutIndex}</span>}
+            {/* Leading, beside the number: the close button sits at the tab's
+                trailing edge and keeps its own box, so the mark cannot move
+                the target a pointer is already heading for. */}
+            {tab.pinned && <span aria-label="Pinned" className="tab-pin"><Icon name="pin" size={11} /></span>}
             {tab.kind === "app" && <TabGlyph tab={tab} />}
             {/* The document tab's glyph slot, spent on the adapter mark: a
                 terminal tab's "type" is whichever agent is living in it. Purely
@@ -346,6 +362,11 @@ export function TabStrip(props: TabStripProps) {
         ...(menu.tab.kind === "terminal"
           ? [{ id: "rename", label: "Rename tab…", disabled: !props.canMutate, run: () => props.onRenameTerminal(menu.tab as Extract<CombinedTab, { kind: "terminal" }>, menu.scope) }]
           : []),
+        {
+          id: "pin",
+          label: menu.tab.pinned ? "Unpin tab" : "Pin tab",
+          run: () => props.onTogglePinned(menu.tab),
+        },
         { id: "left", label: "Move left", disabled: !menu.tab.canMoveLeft || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "left", menu.scope) },
         { id: "right", label: "Move right", disabled: !menu.tab.canMoveRight || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "right", menu.scope) },
         "separator",
