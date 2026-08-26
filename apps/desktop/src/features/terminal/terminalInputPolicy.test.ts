@@ -64,13 +64,13 @@ describe("terminal input translation", () => {
     expect(translateTerminalKey(slash({ isComposing: true }), context())).toBeUndefined();
   });
 
-  it("turns Shift-Enter into Control-J only for Codex", () => {
+  it("sends Shift-Enter as CSI u for every app, the way Ghostty does", () => {
     const shiftedEnter = key({ key: "Enter", shiftKey: true });
-    expect(translateTerminalKey(shiftedEnter, context({ currentCommand: "codex" }))).toBe("\n");
-    expect(translateTerminalKey(shiftedEnter, context({ currentCommand: "node" }))).toBeUndefined();
-    expect(translateTerminalKey(shiftedEnter, context({ currentCommand: "zsh" }))).toBeUndefined();
-    expect(translateTerminalKey(shiftedEnter, context({ alternateScreen: true, currentCommand: "vim" })))
-      .toBeUndefined();
+    for (const currentCommand of ["codex", "claude", "node", "zsh"]) {
+      expect(translateTerminalKey(shiftedEnter, context({ currentCommand }))).toBe("\u001b[13;2u");
+    }
+    expect(translateTerminalKey(key({ key: "Enter" }), context({ currentCommand: "claude" }))).toBeUndefined();
+    expect(translateTerminalKey(key({ key: "Enter", shiftKey: true, ctrlKey: true }), context())).toBeUndefined();
     expect(translateTerminalKey(key(), context({ currentCommand: "codex" }))).toBeUndefined();
   });
 
