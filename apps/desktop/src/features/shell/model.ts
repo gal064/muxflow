@@ -482,7 +482,11 @@ export function openFileTab(
   // The slot is reused, not the record: everything that described the previous
   // file — its markdown view mode, its root snapshot — is replaced, and only
   // the tab's identity and position survive.
-  const reusable = options.preview ? state.appTabs.find((tab) => inWorkspace(tab) && tab.preview) : undefined;
+  // A transient Git diff is not this slot: it closes on the next navigation
+  // rather than being rewritten into a file, and its identity is a diff's.
+  const reusable = options.preview
+    ? state.appTabs.find((tab) => inWorkspace(tab) && tab.preview && tab.kind !== "gitDiff")
+    : undefined;
   if (reusable) {
     const appTabs = state.appTabs.map((tab) => tab.id === reusable.id
       ? { id: tab.id, hostProfileId: tab.hostProfileId, serverIdentity: tab.serverIdentity, sessionId: tab.sessionId, sessionName: tab.sessionName, order: tab.order, preview: true, ...details }
