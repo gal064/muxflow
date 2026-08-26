@@ -30,9 +30,6 @@ export interface HostAddress {
   port: number;
 }
 
-/** §12 "Request timeout". */
-export const REQUEST_TIMEOUT_TOAST = "The host didn't answer in time.";
-
 /** §12 "Helper missing" (exit code 127). */
 export const HELPER_MISSING_EXIT_CODE = 127;
 
@@ -134,7 +131,11 @@ export function describeConnectionFailure(input: ConnectionFailureInput): Connec
       message: input.message ?? "This host's Muxflow helper is not compatible with this app.",
     };
   }
-  if (input.close) return describeTransportClose(input.close, input.host);
+  // A `localClose` in a failed state is the state machine closing the transport
+  // after it decided the failure itself (`HostConnection.fail`), so it says
+  // nothing about why; the message it recorded does.
+  const close = input.close?.reason === "localClose" ? undefined : input.close;
+  if (close) return describeTransportClose(close, input.host);
   return {
     presentation: "strip",
     retryable: false,

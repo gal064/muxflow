@@ -271,8 +271,14 @@ export const secureStoreStorage: HostsStorage = {
   },
 };
 
-/** The app-wide store. */
+/**
+ * The app-wide store. It reads the persisted value as soon as it is imported,
+ * so a route entered without the Hosts screen — a notification tap, a deep
+ * link — sees the same hosts. `hydrate()` is idempotent; screens await it to
+ * know the read finished.
+ */
 export const hostsStore: HostsStore = createHostsStore(secureStoreStorage);
+void hostsStore.getState().hydrate();
 
 export function findHost(state: HostsState, id: string | null | undefined): SavedHost | undefined {
   return id ? state.hosts.find((host) => host.id === id) : undefined;
