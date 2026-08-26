@@ -1,0 +1,22 @@
+# Dependencies (a local symlink during development is still not ours to track)
+node_modules
+
+# Expo
+.expo/
+dist/
+expo-env.d.ts
+
+# Native projects are produced on demand by `expo prebuild`
+/android
+/ios
+.kotlin/
+
+# Metro
+.metro-health-check*
+
+# Signing material
+*.jks
+*.p8
+*.p12
+*.key
+*.keystore
