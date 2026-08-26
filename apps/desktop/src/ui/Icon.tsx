@@ -27,6 +27,14 @@ export type IconName =
   | "refresh"
   | "splitRight"
   | "close"
+  // The tab strip's bulk closes, which are buttons now rather than menu items
+  // only. Both have to say *which* tabs go without a label: `closeOthers` keeps
+  // one tab and crosses out its neighbours, `closeNonAgent` crosses out a tab
+  // and keeps the dot that marks an agent.
+  | "closeOthers"
+  | "closeNonAgent"
+  | "check"
+  | "more"
   | "chevronRight"
   | "chevronDown"
   | "file"
@@ -78,6 +86,22 @@ const paths: Record<IconName, ReactElement> = {
     <path d="M8 2.5v11" />
   </>,
   close: <path d="m4.25 4.25 7.5 7.5M11.75 4.25l-7.5 7.5" />,
+  closeOthers: <>
+    <rect height="8" rx="1.5" width="5" x="5.5" y="4" />
+    <path d="m1.5 6.8 2.4 2.4M3.9 6.8 1.5 9.2" />
+    <path d="m12.1 6.8 2.4 2.4M14.5 6.8 12.1 9.2" />
+  </>,
+  closeNonAgent: <>
+    <rect height="9" rx="2" width="13" x="1.5" y="3.5" />
+    <path d="m4 6.4 2.6 2.6M6.6 6.4 4 9" />
+    <circle cx="11.4" cy="7.7" r="1.5" />
+  </>,
+  check: <path d="m3.5 8.4 3 3 6-6.8" />,
+  more: <>
+    <circle cx="3.6" cy="8" r=".9" />
+    <circle cx="8" cy="8" r=".9" />
+    <circle cx="12.4" cy="8" r=".9" />
+  </>,
   chevronRight: <path d="M6.25 3.75 10.5 8l-4.25 4.25" />,
   chevronDown: <path d="M3.75 6.25 8 10.5l4.25-4.25" />,
   file: <>

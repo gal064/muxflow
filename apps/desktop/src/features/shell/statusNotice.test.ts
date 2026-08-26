@@ -43,6 +43,22 @@ describe("status notices", () => {
     ]) expect(noticeForStatus(message, 1)?.severity, message).toBe("problem");
   });
 
+  it("times out a bulk close's receipt but not its partial failure", () => {
+    // The tab-strip closes no longer ask first, so this sentence is the whole
+    // acknowledgement of a set that vanished. It has to appear — a clipped tab
+    // can be closed unseen — and it has to go away on its own.
+    const receipt = noticeForStatus("Closed 3 tabs.", 1)!;
+    expect(receipt.severity).toBe("info");
+    expect(noticeDismissDelay(receipt)).toBe(NOTICE_DISMISS_MS);
+    expect(noticeForStatus("Closed 1 tab.", 2)?.severity).toBe("info");
+    // Deliberately not suppressed by a `Closed ` routine prefix: the partial
+    // outcome opens with the same two words, and a prefix rule would silence
+    // the one message of the pair a person has to act on.
+    const partial = noticeForStatus("Closed 1 of 2 tabs; 1 could not be closed.", 3)!;
+    expect(partial.severity).toBe("problem");
+    expect(noticeDismissDelay(partial)).toBeUndefined();
+  });
+
   it("carries an id so the same message twice re-shows the notice", () => {
     expect(noticeForStatus("same", 1)?.id).toBe(1);
     expect(noticeForStatus("same", 2)?.id).toBe(2);
