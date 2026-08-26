@@ -176,9 +176,6 @@ export function createMuxflowSsh(native: NativeMuxflowSshModule): MuxflowSsh {
     if (event === null) {
       return;
     }
-    if (event.type === "closed") {
-      writeTails.delete(event.connectionId);
-    }
     for (const listener of [...listeners]) {
       listener(event);
     }
@@ -188,10 +185,15 @@ export function createMuxflowSsh(native: NativeMuxflowSshModule): MuxflowSsh {
     const previous = writeTails.get(connectionId) ?? Promise.resolve();
     // `then(task, task)` so one failed write does not wedge the queue for the next one.
     const next = previous.then(task, task);
-    writeTails.set(
-      connectionId,
-      next.catch(() => undefined),
-    );
+    const settled = next.catch(() => undefined);
+    writeTails.set(connectionId, settled);
+    // The tail is dropped only once it has settled — never on close — so a write issued after a
+    // close still queues behind the one that may still be in flight on the same connection.
+    void settled.then(() => {
+      if (writeTails.get(connectionId) === settled) {
+        writeTails.delete(connectionId);
+      }
+    });
     return next;
   };
 
@@ -209,10 +211,7 @@ export function createMuxflowSsh(native: NativeMuxflowSshModule): MuxflowSsh {
           await native.write(connectionId, chunk);
         }
       }),
-    close: async (connectionId) => {
-      writeTails.delete(connectionId);
-      await native.close(connectionId);
-    },
+    close: (connectionId) => native.close(connectionId),
     startForegroundService: (title, body) => native.startForegroundService(title, body),
     stopForegroundService: () => native.stopForegroundService(),
     addListener: (listener) => {

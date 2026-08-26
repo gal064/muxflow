@@ -325,6 +325,28 @@ describe("two channels on one host", () => {
     expect(h.writes.map(([id]) => id)).toEqual(["bridge", "bulk", "bridge"]);
   });
 
+  it("keeps a write issued after a close behind the one still in flight", async () => {
+    const h = harness({ deferWrites: true });
+    const ssh = createMuxflowSsh(h.native);
+
+    const inFlight = ssh.write("bridge", "AAAA");
+    await flush();
+    void ssh.close("bridge");
+    const afterClose = ssh.write("bridge", "BBBB");
+    await flush();
+    expect(h.writes).toEqual([["bridge", "AAAA"]]);
+
+    h.resolveWrite();
+    await inFlight;
+    await flush();
+    h.resolveWrite();
+    await afterClose;
+    expect(h.writes).toEqual([
+      ["bridge", "AAAA"],
+      ["bridge", "BBBB"],
+    ]);
+  });
+
   it("closing one connection leaves the other's queue alone", async () => {
     const h = harness();
     const ssh = createMuxflowSsh(h.native);

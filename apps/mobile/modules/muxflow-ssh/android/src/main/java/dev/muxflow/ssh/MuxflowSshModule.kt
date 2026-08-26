@@ -64,6 +64,7 @@ class MuxflowSshModule : Module() {
     OnCreate {
       SshSecurity.ensureBouncyCastle()
       ConnectionService.onDisconnectRequested = { disconnectFromNotification() }
+      ConnectionService.onStopped = { serviceRunning = false }
     }
 
     AsyncFunction("generateKeyPair") {
@@ -87,12 +88,22 @@ class MuxflowSshModule : Module() {
           throw ConnectionAlreadyOpenException(connectionId)
         }
         val key = "${target.user}@${target.host}:${target.port}"
+        val existing = transports[key]
         val transport =
-          transports.getOrPut(key) {
-            SshTransport(key, target.host, target.port, target.user, keyPair, ::dispatch)
+          existing ?: SshTransport(key, target.host, target.port, target.user, keyPair, ::dispatch)
+        transports[key] = transport
+        try {
+          channels[connectionId] =
+            transport.open(connectionId, command, trustedHostKeyFingerprint, ::onChannelTerminated)
+        } catch (t: Throwable) {
+          // A transport this call created has no channel to release it later, so it would sit in
+          // the registry with its control thread alive and never be reachable again.
+          if (existing == null) {
+            transports.remove(key)
+            transport.close()
           }
-        channels[connectionId] =
-          transport.open(connectionId, command, trustedHostKeyFingerprint, ::onChannelTerminated)
+          throw t
+        }
       }
     }
 
@@ -126,6 +137,8 @@ class MuxflowSshModule : Module() {
       Unit
     }
 
+    // Unlike the automatic start in [startServiceIfNeeded], a failure here is reported: JavaScript
+    // asked for the service explicitly and needs to know it did not appear.
     AsyncFunction("startForegroundService") { title: String, body: String ->
       serviceTitle = title
       serviceBody = body
@@ -137,6 +150,7 @@ class MuxflowSshModule : Module() {
 
     OnDestroy {
       ConnectionService.onDisconnectRequested = null
+      ConnectionService.onStopped = null
       closeAllChannels()
       stopService()
     }
@@ -144,12 +158,14 @@ class MuxflowSshModule : Module() {
 
   // -----------------------------------------------------------------------------------------
 
+  /**
+   * Never throws: this runs on an IO thread that is in the middle of a connection, and letting an
+   * exception out — a lost react context, say — would be misread as the connection failing.
+   */
   private fun dispatch(payload: Map<String, Any?>) {
     if (payload["type"] == "connected") {
-      startServiceIfNeeded()
+      runCatching { startServiceIfNeeded() }
     }
-    // The module can be torn down while an IO thread is still draining; a dropped event then is
-    // preferable to crashing that thread.
     runCatching { sendEvent(EVENT_NAME, payload) }
   }
 

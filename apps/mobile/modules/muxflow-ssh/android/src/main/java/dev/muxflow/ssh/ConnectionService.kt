@@ -40,6 +40,9 @@ class ConnectionService : Service() {
     /** Set by [MuxflowSshModule] while it is alive; invoked by the notification's Disconnect action. */
     @Volatile var onDisconnectRequested: (() -> Unit)? = null
 
+    /** Invoked whenever the service goes away, including when the system stops it on its own. */
+    @Volatile var onStopped: (() -> Unit)? = null
+
     fun start(context: Context, title: String, body: String) {
       val intent =
         Intent(context, ConnectionService::class.java).apply {
@@ -75,6 +78,7 @@ class ConnectionService : Service() {
   }
 
   override fun onDestroy() {
+    onStopped?.invoke()
     releaseWakeLock()
     ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     super.onDestroy()
