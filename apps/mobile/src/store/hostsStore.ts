@@ -249,6 +249,9 @@ export function createHostsStore(storage: HostsStorage): HostsStore {
       },
 
       markConnected(id, atMs = Date.now()) {
+        // Only a saved host can be the §12 cold-start target; a dev bridge or a
+        // transient host must not displace it.
+        if (!get().hosts.some((host) => host.id === id)) return;
         mutate(id, (host) => ({ ...host, lastConnectedAtMs: atMs }));
         set({ lastHostId: id });
         persist();

@@ -1,5 +1,4 @@
-// Wires the SSH module into the connection manager at app start (imported for
-// its side effect from `app/_layout.tsx`).
+// The SSH transport factory; installed by `src/session/appWiring.ts`.
 //
 // One `connectionId` per lane per attempt: the native module refuses an id that
 // is still open, and a reconnect may overlap the close of the channel it
@@ -8,7 +7,7 @@
 import { diagnosticsStore } from "../features/hosts/connectionDiagnostics";
 import { hostKeyStore } from "../features/hosts/hostKeyStore";
 import { log } from "../features/hosts/logBuffer";
-import { setTransportFactory, type Lane as TransportLane } from "../session/connectionManager";
+import type { Lane as TransportLane } from "../session/connectionManager";
 import { hostLabel, hostsStore, type SavedHost } from "../store/hostsStore";
 import { sessionStore } from "../store/sessionStore";
 import { openSshTransport } from "./sshTransport";
@@ -54,4 +53,3 @@ export function sshTransportFactory(host: SavedHost, lane: TransportLane) {
   });
 }
 
-setTransportFactory(sshTransportFactory);
