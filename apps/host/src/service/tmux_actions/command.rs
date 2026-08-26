@@ -38,18 +38,36 @@ pub(super) fn configure_new_session(
         "#{session_id} #{window_id} #{pane_id}",
     ]);
     if !action.directory.is_empty() {
-        // As an argument, never as a tmux format: a directory the user typed is
-        // data, and the only thing between it and tmux is this validation.
         command.arg("-c");
-        command.arg(resolved_start_directory(&action.directory)?);
+        command.arg(escaped_format_literal(&resolved_start_directory(
+            &action.directory,
+        )?));
     }
     if !action.name.is_empty() {
         validate_name(&action.name)?;
-        command.args(["-s", &action.name]);
-        command.args(["-n", &action.name]);
+        // The same escape, and it has to be the same string in both places:
+        // the session and its first window are one name, and a workspace whose
+        // two halves disagree is worse than either.
+        let name = escaped_format_literal(&action.name);
+        command.args(["-s", &name]);
+        command.args(["-n", &name]);
     }
     command.arg(APP_SHELL);
     Ok(())
+}
+
+/// Text tmux must take literally, in the one place tmux would not.
+///
+/// `new-session` runs `-c`, `-s` and `-n` through its *format* parser, so an
+/// argument is protected from the shell by being an argument and protected from
+/// tmux by nothing. That is not academic in either direction: a directory
+/// legitimately named `#Session-notes` would start the pane somewhere else than
+/// the path this file just stood behind, and `#(…)` is tmux's run-a-command
+/// substitution — on an SSH profile, a command that runs on the remote machine.
+/// `##` is tmux's own escape for a literal `#`, so doubling every one of them
+/// makes the value mean itself.
+fn escaped_format_literal(value: &str) -> String {
+    value.replace('#', "##")
 }
 
 /// The configured start directory, or the reason the workspace is not created.
@@ -59,7 +77,7 @@ pub(super) fn configure_new_session(
 /// that is the home directory the session would have started in anyway; a
 /// relative path has no meaning at the point tmux runs, so it is refused rather
 /// than resolved against whatever this process's cwd happens to be.
-fn resolved_start_directory(directory: &str) -> anyhow::Result<std::ffi::OsString> {
+fn resolved_start_directory(directory: &str) -> anyhow::Result<String> {
     if directory.contains('\0') || directory.chars().any(char::is_control) {
         bail!("workspace start directory must not contain control characters");
     }
@@ -79,7 +97,28 @@ fn resolved_start_directory(directory: &str) -> anyhow::Result<std::ffi::OsStrin
     if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
         bail!("workspace start directory {expanded} does not exist or is not a directory");
     }
-    Ok(expanded.into())
+    // Existing is not the same as enterable, and the difference is the failure
+    // this check exists to prevent: `metadata` needs only search permission on
+    // the *parent*, so a directory this process cannot enter reports itself as
+    // a directory, `new-session` succeeds anyway, and tmux quietly starts the
+    // pane in $HOME instead — a workspace created somewhere the user did not
+    // ask for, with nothing said about it.
+    if !searchable(path) {
+        bail!("workspace start directory {expanded} cannot be entered");
+    }
+    Ok(expanded)
+}
+
+/// Whether this process could `chdir` into the path — the exact thing tmux is
+/// about to try. `access(2)` asks the kernel the question directly; reading the
+/// directory would answer a stricter one and refuse a legitimate `--x` path.
+fn searchable(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c_path` is a valid NUL-terminated string for the call's duration.
+    unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
 }
 
 pub(super) fn configure_new_window(
@@ -266,6 +305,56 @@ mod tests {
                 APP_SHELL,
             ]
         );
+    }
+
+    /// tmux runs `-c`, `-s` and `-n` through its format parser, so an argument
+    /// is safe from the shell and not from tmux. `#Session-notes` is a legal
+    /// directory name that would otherwise start the pane at `` — and `#(…)` is
+    /// tmux's run-a-command substitution, which on an SSH profile runs there.
+    #[test]
+    fn new_session_hands_tmux_a_literal_directory_and_name() {
+        let directory = std::env::temp_dir().join("muxflow-#test");
+        std::fs::create_dir_all(&directory).unwrap();
+        let action = v1::TmuxAction {
+            directory: directory.to_string_lossy().into_owned(),
+            name: "build #(id)".into(),
+            ..Default::default()
+        };
+        let args = session_args(&action).unwrap();
+        let after = |flag: &str| {
+            args[args.iter().position(|argument| argument == flag).unwrap() + 1].clone()
+        };
+        assert_eq!(
+            after("-c"),
+            format!("{}", directory.to_string_lossy()).replace('#', "##")
+        );
+        assert_eq!(after("-n"), "build ##(id)");
+        // One name, not two: the session and its first window must not disagree.
+        assert_eq!(after("-s"), after("-n"));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// Existing is not enterable. `metadata` needs only search permission on the
+    /// parent, so without this the create succeeds and tmux silently starts the
+    /// pane in $HOME — a workspace somewhere the user never asked for.
+    #[test]
+    fn new_session_refuses_a_directory_it_could_not_enter() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!("muxflow-sealed-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refusal = session_args(&v1::TmuxAction {
+            directory: directory.to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .map(|_| String::new())
+        .unwrap_or_else(|error| error.to_string());
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        // Root ignores the permission bits, so there is nothing to assert there.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(refusal.contains("cannot be entered"), "{refusal}");
+        }
     }
 
     #[test]

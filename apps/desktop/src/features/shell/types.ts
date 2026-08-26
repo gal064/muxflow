@@ -237,8 +237,11 @@ function normalizeWorkspaceDefaults(value: unknown): Record<string, WorkspaceDef
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const entries: [string, WorkspaceDefaults][] = [];
   for (const [host, defaults] of Object.entries(value)) {
-    if (!host || entries.length >= MAX_WORKSPACE_DEFAULT_HOSTS) break;
-    if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) continue;
+    if (entries.length >= MAX_WORKSPACE_DEFAULT_HOSTS) break;
+    // An unusable entry is skipped, never a reason to stop reading: `""` is a
+    // legal JSON key, and abandoning the loop on one would silently drop every
+    // host after it.
+    if (!host || !defaults || typeof defaults !== "object" || Array.isArray(defaults)) continue;
     const record = defaults as Partial<WorkspaceDefaults>;
     const entry: WorkspaceDefaults = {
       ...(usableDefault(record.directory) ? { directory: record.directory.trim() } : {}),
