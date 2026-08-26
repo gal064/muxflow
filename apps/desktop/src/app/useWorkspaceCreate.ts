@@ -32,8 +32,11 @@ interface WorkspaceCreateOptions {
  *
  * Failures are kept apart. A create that the host refuses — a start directory
  * that is not there — fails as a create, through the action's own error
- * surfacing, and no workspace exists. A command that cannot be delivered to a
- * workspace that *was* created says exactly that instead.
+ * surfacing, and no workspace exists. A send that is refused on the way out of
+ * the app is reported as what it is instead: the workspace exists, and only the
+ * command did not go. Input is fire-and-forget past that point, as every
+ * keystroke in this app is, so a host-side refusal surfaces the way one always
+ * does — as a pane resnapshot, not as a rejection here.
  */
 export function useWorkspaceCreate(options: WorkspaceCreateOptions) {
   const {

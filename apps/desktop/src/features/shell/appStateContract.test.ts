@@ -93,6 +93,10 @@ describe("per-host workspace defaults", () => {
     expect(saved({ local: { directory: "  /work  " } })).toEqual({ local: { directory: "/work" } });
     expect(saved(undefined)).toEqual({});
     expect(saved(["local"])).toEqual({});
+    // An unusable entry is skipped, not a reason to stop reading the rest: `""`
+    // is a legal JSON key, and every host after it would otherwise be dropped.
+    expect(saved({ "": { directory: "/x" }, local: { directory: "/work" } }))
+      .toEqual({ local: { directory: "/work" } });
   });
 
   it("caps the map the way the host setup decisions are capped", () => {
