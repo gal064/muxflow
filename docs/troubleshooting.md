@@ -17,6 +17,21 @@ Common report states:
 - Nonzero connection or accept error counts — reconnect and check network/SSH/tmux availability. The report intentionally records only safe error classes, so local application logs may be needed for deeper investigation.
 
 The report never includes terminal output, prompts, file contents, SSH configuration, credentials, hosts, users, or paths. See [Diagnostics, privacy, and security](diagnostics-privacy-security.md) before sharing it.
+# Terminal keys
+
+## Ctrl+/ and Ctrl+_
+
+Both deliver the same byte, `0x1f` (ASCII US), and a TUI cannot tell them
+apart. That is a property of the terminal encoding, not of Muxflow: on a US
+layout `_` is Shift+`-`, and control-masking either key produces `0x1f`. So a
+program that binds Ctrl+/ (undo in Emacs, comment-toggle in several editors)
+and a program that binds Ctrl+_ are binding the same input.
+
+Muxflow sends `0x1f` for Ctrl+/ explicitly, because xterm.js has no mapping for
+that key and would otherwise send nothing at all. Ctrl+_ is left to xterm.js,
+which already encodes it correctly. Ctrl+Shift+/ (Ctrl+?) is a different key and
+is unaffected.
+
 # macOS package and permissions
 
 The internal macOS build is unsigned. If a quarantined artifact is blocked,
