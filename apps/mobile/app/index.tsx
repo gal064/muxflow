@@ -48,7 +48,7 @@ export default function HostsScreen() {
           renderItem={({ item }) => (
             <HostRow host={item} onPress={() => connect(item)} onLongPress={() => setActionsFor(item)} />
           )}
-          ListFooterComponent={<Footer />}
+          ListFooterComponent={<KeyLink />}
         />
       )}
 
@@ -141,38 +141,8 @@ function EmptyState() {
         would from a terminal.
       </Text>
       <Button label="Add host" onPress={() => router.push("/hosts/new")} style={styles.emptyButton} />
-      <Footer />
-    </View>
-  );
-}
-
-function Footer() {
-  return (
-    <>
       <KeyLink />
-      {__DEV__ ? <DevBridgeLink /> : null}
-    </>
-  );
-}
-
-/**
- * Development builds only: connects to `scripts/dev-tcp-bridge-terminal.mjs`
- * on the host machine (a real muxflow-host over plain TCP) so the app can be
- * exercised without an SSH host. Not compiled into release builds.
- */
-function DevBridgeLink() {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { DEV_HOST } = require("../src/session/devTransport") as typeof import("../src/session/devTransport");
-  return (
-    <Pressable
-      onPress={() => {
-        void connectHost(DEV_HOST).catch(() => undefined);
-        router.push("/home");
-      }}
-      style={{ alignSelf: "center", marginTop: 8 }}
-    >
-      <Text style={styles.keyLinkLabel}>Dev: connect to 10.0.2.2:7777</Text>
-    </Pressable>
+    </View>
   );
 }
 
