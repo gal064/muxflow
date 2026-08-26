@@ -17,8 +17,12 @@ export function translateTerminalKey(event: TerminalKeyEvent, context: TerminalK
   if (keyboardEventIsComposing(event)) return undefined;
   // xterm.js 6 has no Ctrl+/ mapping; legacy terminals alias Ctrl+/ and Ctrl+_
   // to 0x1f (US). Ctrl+_ is left to xterm, which already emits 0x1f.
-  if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
-    && (event.key === "/" || event.code === "Slash")) {
+  //
+  // `code` is only a fallback for a key that reports no character at all:
+  // `code` is US-positional, and on a QWERTZ layout `Slash` is the `-`/`_`
+  // key, so matching it outright would send 0x1f for an unrelated Ctrl+-.
+  const slashKey = event.key === "/" || (event.key.length !== 1 && event.code === "Slash");
+  if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && slashKey) {
     return "\u001f";
   }
   const command = context.currentCommand.split("/").at(-1)?.toLowerCase() ?? "";
