@@ -30,8 +30,10 @@ export const GitCommitForm = memo(function GitCommitForm(props: Props) {
   const [message, setMessage] = useState("");
   const [output, setOutput] = useState<{ result: GitCommandResult; verb: "Commit" | "Push" }>();
   const [error, setError] = useState<string>();
-  /** The step-by-step line: what just happened, and what is happening now. */
+  /** What has already settled — "Committed." survives a push that then failed. */
   const [note, setNote] = useState<string>();
+  /** What is happening right now. Always cleared when the work ends. */
+  const [progress, setProgress] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [menu, setMenu] = useState<ContextMenuAnchor>();
   const composing = useRef(false);
@@ -52,10 +54,10 @@ export const GitCommitForm = memo(function GitCommitForm(props: Props) {
   // A push is never reported as having worked on the strength of the request
   // returning. The host says whether the remote accepted it, and "unknown" is
   // a third answer that has to survive all the way to this line.
-  const runPush = async (): Promise<void> => {
+  const runPush = async (already: string): Promise<void> => {
     const result = await props.onPush();
     setOutput({ result, verb: "Push" });
-    if (result.outcome === "applied") setNote(`Pushed to ${result.pushTarget || "the upstream"}.`);
+    if (result.outcome === "applied") setNote(`${already}Pushed to ${result.pushTarget || "the upstream"}.`);
     else if (result.outcome === "partialOrUnknown") setError("Push outcome is unknown; check the remote before retrying.");
     else setError("The remote did not accept the push.");
   };
@@ -65,10 +67,13 @@ export const GitCommitForm = memo(function GitCommitForm(props: Props) {
     setError(undefined);
     setOutput(undefined);
     setNote(undefined);
+    setProgress(undefined);
     setBusy(true);
     void work()
       .catch((cause) => setError(String(cause)))
-      .finally(() => setBusy(false));
+      // Whatever happened, nothing is in flight any more — a progress line left
+      // reading "Pushing…" beside an error is the app lying about its own state.
+      .finally(() => { setBusy(false); setProgress(undefined); });
   };
 
   const submit = () => run(async () => { await runCommit(); });
@@ -77,12 +82,13 @@ export const GitCommitForm = memo(function GitCommitForm(props: Props) {
     // Only a commit that actually happened is worth publishing. An uncertain
     // one is a reason to look at HEAD, not to talk to a remote.
     if (committed?.outcome !== "applied") return;
-    setNote("Committed. Pushing…");
-    await runPush();
+    setNote("Committed.");
+    setProgress("Pushing…");
+    await runPush("Committed. ");
   });
   const push = () => run(async () => {
-    setNote("Pushing…");
-    await runPush();
+    setProgress("Pushing…");
+    await runPush("");
   });
 
   const nothingStaged = props.stagedCount === 0;
@@ -122,7 +128,7 @@ export const GitCommitForm = memo(function GitCommitForm(props: Props) {
         type="button"
       >Push</button>
     </div>
-    {note && <p className="surface-note" role="status">{note}</p>}
+    {(note || progress) && <p className="surface-note" role="status">{[note, progress].filter(Boolean).join(" ")}</p>}
     {error && <SurfaceError detail={error} />}
     {output && <pre aria-label={`Git ${output.verb.toLowerCase()} output`} className={output.result.outcome === "applied" && !output.result.refreshFailed ? "git-output" : "git-output error"}>{commandDetails(output.result, output.verb)}</pre>}
     {menu && <ContextMenu

@@ -593,6 +593,22 @@ impl GitService {
         .await
         .map_err(|error| anyhow::anyhow!("Git push task failed: {error}"))?;
         let (execution, pre_state, target) = executed?;
+        // A push Git ran and the remote refused is a failed operation, not a
+        // result to render: what the desktop needs is the classified code that
+        // says whether to authenticate or to pull first, and that only travels
+        // on a rejection. Only an outcome nobody can name — a timeout, a
+        // cancellation, a clean exit that reported no ref — comes back as a
+        // result carrying its own uncertainty.
+        if let Ok(output) = &execution
+            && output.interrupted.is_none()
+            && !output.status.success()
+        {
+            let diagnostic = push_diagnostic(output);
+            // The push wrote nothing locally, but a pre-push hook may have, and
+            // the next status must not answer from a cache taken before it.
+            coordinator.invalidate();
+            bail!("Git push failed: {diagnostic}");
+        }
         let verdict = execution.as_ref().ok().map(classify_push);
         let mut result = self
             .reconcile_command(&coordinator, &capabilities, execution, pre_state, false)
@@ -879,6 +895,31 @@ enum PushVerdict {
     Accepted,
     Rejected,
     Unknown,
+}
+
+/// What Git said about a push that failed, preferring stderr and falling back
+/// to the porcelain report when Git put its refusal only there.
+fn push_diagnostic(output: &GitOutput) -> String {
+    let stderr = String::from_utf8_lossy(&output.output.stderr)
+        .trim()
+        .to_owned();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.output.stdout)
+        .trim()
+        .to_owned();
+    if stdout.is_empty() {
+        format!(
+            "Git exited with code {}",
+            output
+                .status
+                .code()
+                .map_or_else(|| "signal".into(), |value| value.to_string())
+        )
+    } else {
+        stdout
+    }
 }
 
 fn classify_push(output: &GitOutput) -> PushVerdict {

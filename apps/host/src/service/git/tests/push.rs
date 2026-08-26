@@ -114,7 +114,7 @@ async fn push_without_an_upstream_refuses_instead_of_creating_one() {
 }
 
 #[tokio::test]
-async fn a_remote_that_refuses_the_push_is_reported_as_not_applied() {
+async fn a_remote_that_refuses_the_push_is_reported_as_a_named_rejection() {
     let owner = Fixture::new("push-remote-rejected");
     let remote = bare_remote(&owner, "origin.git");
     let fixture = published("push-rejected", &remote);
@@ -141,20 +141,14 @@ async fn a_remote_that_refuses_the_push_is_reported_as_not_applied() {
 
     let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
     let request = request_for(&service, &fixture, 107).await;
+    // A refused push is an error, not a result: only an error carries the code
+    // the desktop turns into "pull or rebase first".
     let refused = service
         .push(request, 107, Arc::new(AtomicBool::new(false)))
         .await
-        .unwrap();
-    assert_eq!(refused.outcome, v1::GitCommandOutcome::NotApplied as i32);
-    assert!(!refused.applied);
-    assert_ne!(refused.exit_code, 0);
-    let reported = format!(
-        "{}{}{}",
-        String::from_utf8_lossy(&refused.stdout),
-        String::from_utf8_lossy(&refused.stderr),
-        refused.error
-    );
-    assert!(reported.contains("rejected"), "{reported}");
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("rejected"), "{refused}");
     assert_eq!(
         git_at(&remote, &["rev-parse", "master"]).stdout,
         remote_head
