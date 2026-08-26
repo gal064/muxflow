@@ -244,7 +244,11 @@ export function TabStrip(props: TabStripProps) {
                 focusedPaneId: tab.kind === "terminal" && tab.key === props.activeKey ? props.activePaneId : undefined,
               });
             }}
-            onDoubleClick={() => {
+            onDoubleClick={(event) => {
+              // Shift is the pin gesture and nothing else: without this, a
+              // shift-double-click pinned and unpinned on the two clicks and
+              // then opened the rename prompt behind them.
+              if (event.shiftKey) return;
               if (tab.kind === "app") props.onPin(tab);
               else if (props.canMutate) props.onRenameTerminal(tab, props.commandScope);
             }}
