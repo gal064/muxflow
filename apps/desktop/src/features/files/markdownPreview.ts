@@ -74,8 +74,9 @@ function selectionHolds(container: HTMLElement | null | undefined): boolean {
   if (!container) return false;
   const selection = document.getSelection?.();
   if (!selection || selection.isCollapsed) return false;
-  const anchor = selection.anchorNode;
-  return Boolean(anchor && container.contains(anchor));
+  // Either end: a selection dragged from the editor into the article, or a
+  // select-all anchored at the body, still has visible text inside it to lose.
+  return [selection.anchorNode, selection.focusNode].some((node) => Boolean(node && container.contains(node)));
 }
 
 /**
@@ -116,7 +117,10 @@ export function useSanitizedMarkdown(source: string, options?: PreviewOptions): 
   }, []);
 
   useEffect(() => {
-    if (rendered.current === source) return;
+    // Back to what is already on screen — an undo, or an agent restoring a file
+    // it had rewritten. Anything parked describes a document that no longer
+    // exists, and publishing it later would leave the preview stuck showing it.
+    if (rendered.current === source) { setParked(undefined); return; }
     return scheduleSanitizedPreview(() => {
       const next = { source, html: renderSafeMarkdown(source) };
       // `held` is read through the render that armed this schedule, which is

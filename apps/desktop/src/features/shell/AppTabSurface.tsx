@@ -192,15 +192,18 @@ export function MarkdownPreview({ source, onStatus }: { source: string; onStatus
 
   // On the document, not the article: a drag that leaves the preview still ends
   // somewhere, and a gesture whose end is never seen would hold the preview
-  // frozen for the rest of the session.
+  // frozen for the rest of the session. `blur` is the backstop for an
+  // interruption that takes the window without delivering a pointer event.
   useEffect(() => {
     if (!selecting) return;
     const end = () => setSelecting(false);
     document.addEventListener("pointerup", end);
     document.addEventListener("pointercancel", end);
+    window.addEventListener("blur", end);
     return () => {
       document.removeEventListener("pointerup", end);
       document.removeEventListener("pointercancel", end);
+      window.removeEventListener("blur", end);
     };
   }, [selecting]);
 
@@ -211,17 +214,22 @@ export function MarkdownPreview({ source, onStatus }: { source: string; onStatus
   }} onClick={(event) => {
     const pressed = pressedAt.current;
     pressedAt.current = undefined;
-    // A release that travelled is a selection gesture, even when it ends on a
-    // link, and a selection still standing at click time is one the user just
-    // made. Returning without `preventDefault` leaves the browser's own
-    // selection behaviour alone.
-    if (pressed && Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > CLICK_SLOP_PX) return;
-    const selection = document.getSelection?.();
-    if (selection && !selection.isCollapsed) return;
     const anchor = (event.target as HTMLElement).closest("a");
     const href = anchor?.getAttribute("href");
     if (!href) return;
+    // Unconditional, and before the gesture tests below. A click's default
+    // action is activation, not selection — the selection was settled back at
+    // pointerup — so suppressing it costs the drag nothing, while letting a
+    // relative href through navigates the whole webview off the app and takes
+    // every tab, terminal and unsaved buffer with it.
     event.preventDefault();
+    // A release that travelled is a selection gesture, even when it ends on a
+    // link, and a selection still standing at click time is one the user just
+    // made. `detail` is 0 for a keyboard activation, which has no coordinates
+    // to compare and must not be measured against a stale press.
+    if (event.detail > 0 && pressed && Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > CLICK_SLOP_PX) return;
+    const selection = document.getSelection?.();
+    if (selection && !selection.isCollapsed) return;
     if (/^https?:/i.test(href)) setExternalUrl(href);
     else onStatus(`Markdown link: ${href}`);
   }} dangerouslySetInnerHTML={{ __html: html }} />

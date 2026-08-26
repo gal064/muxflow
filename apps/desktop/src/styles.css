@@ -1054,9 +1054,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   min-width: 0; min-height: 0; margin: 0; padding: 24px clamp(18px, 5vw, 56px); overflow: auto;
   border-left: 1px solid var(--chrome-hairline);
   color: var(--chrome-ink); background: var(--chrome-bg); font-size: var(--type-menu); line-height: 1.62;
-  /* Rendered Markdown is document text: it selects, and it says so under the
-     pointer. The app chrome around it is not selectable, so without this the
-     preview inherits a control's cursor over a page of prose. */
+  /* Rendered Markdown is document text: it selects, it says so under the
+     pointer, and it keeps saying so if the chrome around it ever stops being
+     selectable. */
   user-select: text; cursor: text;
 }
 .markdown-preview :first-child { margin-top: 0; }

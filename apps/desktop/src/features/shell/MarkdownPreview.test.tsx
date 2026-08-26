@@ -25,7 +25,7 @@ const articleNode = {
   tabIndex: 0,
 };
 
-let selection: { isCollapsed: boolean; anchorNode: unknown } | null = null;
+let selection: { isCollapsed: boolean; anchorNode: unknown; focusNode?: unknown } | null = null;
 const realGetSelection = document.getSelection;
 
 beforeEach(() => {
@@ -38,7 +38,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function select(anchorNode: unknown) { selection = { isCollapsed: false, anchorNode }; }
+function select(anchorNode: unknown) { selection = { isCollapsed: false, anchorNode, focusNode: anchorNode }; }
 
 function preview(source: string, onStatus = vi.fn()) {
   let renderer!: ReturnType<typeof create>;
@@ -64,12 +64,13 @@ function press(surface: ReturnType<typeof preview>, x = 10, y = 10) {
   act(() => { surface.article().props.onPointerDown({ button: 0, clientX: x, clientY: y }); });
 }
 
-function click(surface: ReturnType<typeof preview>, href: string | null, x = 10, y = 10) {
+/** `detail` 0 is a keyboard activation, which carries no pointer coordinates. */
+function click(surface: ReturnType<typeof preview>, href: string | null, x = 10, y = 10, detail = 1) {
   const preventDefault = vi.fn();
   const anchor = href === null ? null : { getAttribute: (name: string) => (name === "href" ? href : null) };
   act(() => {
     surface.article().props.onClick({
-      clientX: x, clientY: y, preventDefault,
+      clientX: x, clientY: y, detail, preventDefault,
       target: { closest: (selector: string) => (selector === "a" ? anchor : null) },
     });
   });
@@ -118,6 +119,37 @@ describe("MarkdownPreview selection", () => {
     await act(async () => { surface.renderer.unmount(); });
   });
 
+  it("drops a held update when the source goes back to what is on screen", async () => {
+    vi.useFakeTimers();
+    const surface = preview("before");
+    select(insideArticle);
+    await surface.retype("after");
+    await surface.settle();
+    expect(surface.html()).toContain("before");
+
+    // An undo, or an agent restoring a file it had rewritten. What is parked
+    // now describes a document that no longer exists.
+    await surface.retype("before");
+    await surface.settle();
+    selection = null;
+    await surface.fire("selectionchange");
+    expect(surface.html(), "a superseded park was published over the live buffer").not.toContain("after");
+    expect(surface.html()).toContain("before");
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
+  it("holds a refresh for a selection that only reaches into the preview", async () => {
+    vi.useFakeTimers();
+    const surface = preview("before");
+    // Dragged from the editor pane in split mode: anchored outside, ending in.
+    selection = { isCollapsed: false, anchorNode: {} };
+    (selection as { focusNode?: unknown }).focusNode = insideArticle;
+    await surface.retype("after");
+    await surface.settle();
+    expect(surface.html()).toContain("before");
+    await act(async () => { surface.renderer.unmount(); });
+  });
+
   it("ignores a selection that is not in the preview", async () => {
     vi.useFakeTimers();
     const surface = preview("before");
@@ -140,8 +172,10 @@ describe("MarkdownPreview selection", () => {
     const surface = preview("[site](https://example.com)");
     press(surface, 10, 10);
     const preventDefault = click(surface, "https://example.com", 60, 10);
-    expect(preventDefault, "a drag ending on a link was swallowed as a click").not.toHaveBeenCalled();
-    expect(opened(surface)).toBe(false);
+    expect(opened(surface), "a drag ending on a link was swallowed as a click").toBe(false);
+    // Suppressed all the same: a click's default action is activation, and a
+    // relative href left to the browser navigates the webview off the app.
+    expect(preventDefault, "the browser was left free to follow the link").toHaveBeenCalled();
     act(() => { surface.renderer.unmount(); });
   });
 
@@ -149,8 +183,18 @@ describe("MarkdownPreview selection", () => {
     const surface = preview("[site](https://example.com)");
     select(insideArticle);
     const preventDefault = click(surface, "https://example.com");
-    expect(preventDefault).not.toHaveBeenCalled();
     expect(opened(surface)).toBe(false);
+    expect(preventDefault, "the browser was left free to follow the link").toHaveBeenCalled();
+    act(() => { surface.renderer.unmount(); });
+  });
+
+  it("activates a link from the keyboard after a drag that never produced a click", () => {
+    const surface = preview("[site](https://example.com)");
+    // Pressed in the preview, released outside it: no click reaches the
+    // article, so the recorded press outlives its gesture.
+    press(surface, 300, 300);
+    expect(click(surface, "https://example.com", 0, 0, 0)).toHaveBeenCalled();
+    expect(opened(surface), "a stale press swallowed a keyboard activation").toBe(true);
     act(() => { surface.renderer.unmount(); });
   });
 
