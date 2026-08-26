@@ -212,6 +212,27 @@ export function restoreDecision(
   return { kind: "apply" };
 }
 
+/**
+ * The URL a click on a terminal link should open, or `undefined` when it should
+ * open nothing: the click needs the same modifier that opens a file path — a
+ * plain click stays inert so it selects text like any other cell — and only
+ * `http(s)` links leave the app.
+ */
+export function activatedTerminalUrl(
+  event: Pick<MouseEvent, "ctrlKey" | "metaKey">,
+  platform: Platform,
+  value: string,
+): string | undefined {
+  if (!isTerminalFileLinkActivation(event, platform)) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
 export class XtermRenderer implements TerminalRenderer {
   readonly #terminal: Terminal;
   readonly #fit = new FitAddon();
@@ -275,7 +296,7 @@ export class XtermRenderer implements TerminalRenderer {
         getWinSizePixels: true,
       },
       linkHandler: {
-        activate: (_event, url) => this.#activateLink(url),
+        activate: (event, url) => this.#activateLink(event, url),
       },
       theme: terminalTheme(),
     });
@@ -772,14 +793,9 @@ export class XtermRenderer implements TerminalRenderer {
     this.#terminal.refresh(0, this.#terminal.rows - 1);
   }
 
-  #activateLink(value: string): void {
-    try {
-      const url = new URL(value);
-      if (url.protocol !== "http:" && url.protocol !== "https:") return;
-      this.#options.onOpenLink?.(url.href);
-    } catch {
-      // Invalid and non-HTTP OSC links remain inert.
-    }
+  #activateLink(event: Pick<MouseEvent, "ctrlKey" | "metaKey">, value: string): void {
+    const url = activatedTerminalUrl(event, this.#options.platform ?? "linux", value);
+    if (url) this.#options.onOpenLink?.(url);
   }
 
   #linksForLine(bufferLineNumber: number): ILink[] | undefined {
@@ -797,7 +813,7 @@ export class XtermRenderer implements TerminalRenderer {
           start: { x: start, y: bufferLineNumber },
           end: { x: start + text.length, y: bufferLineNumber },
         },
-        activate: () => this.#activateLink(text),
+        activate: (event) => this.#activateLink(event, text),
       });
     }
     if (this.#options.onOpenFilePath) {

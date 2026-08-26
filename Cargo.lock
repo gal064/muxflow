@@ -2320,6 +2320,7 @@ dependencies = [
  "tmux-agent-protocol",
  "tmux-control",
  "tokio",
+ "url",
  "uuid",
  "zbus",
 ]
