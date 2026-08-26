@@ -663,7 +663,7 @@ export class HostConnection {
     const n = this.reconnectAttempt;
     const delayMs = Math.min(2 ** n, this.maxBackoffMs / 1000) * 1000;
     this.reconnectAttempt = n + 1;
-    this.options.store.getState().setConnection({ state: "reconnecting", attempt: n + 1, message });
+    this.options.store.getState().setConnection({ state: "reconnecting", attempt: n + 1, message, retryAtMs: Date.now() + delayMs });
     this.log(`reconnect.scheduled attempt=${n + 1} delayMs=${delayMs} reason=${message}`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
