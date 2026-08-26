@@ -79,11 +79,16 @@ export function useAppFileActions(options: AppFileActionsOptions) {
   scopeRef.current = options.scope;
   rootRef.current = options.root;
 
-  const selectionIsCurrent = (scope: FileWorkspaceScope, root: ActiveRoot) => {
+  const selectionIsCurrent = (scope: FileWorkspaceScope, root: ActiveRoot, origin: DownloadOrigin) => {
     const currentScope = scopeRef.current;
     return Boolean(currentScope
       && keyForScope(currentScope) === keyForScope(scope)
-      && sameRoot(rootRef.current, root));
+      // Explorer commands act on the live tree and must remain bound to its
+      // current root. A file tab carries its own host-issued root capability;
+      // requiring that capability to equal the Explorer root makes a still-
+      // valid tab undownloadable after `cd` changes the live tree. The host
+      // validates the captured path/token pair before it opens the source.
+      && (origin !== "explorer" || sameRoot(rootRef.current, root)));
   };
 
   const mutateFile = async (mutation: FileMutation) => {
@@ -120,7 +125,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
     root: ActiveRoot,
     origin: DownloadOrigin,
   ) => {
-    if (!selectionIsCurrent(scope, root)) {
+    if (!selectionIsCurrent(scope, root, origin)) {
       recordIncident("download.workspaceRejected", {
         attemptId: request.diagnosticAttemptId, origin, stage: "preStart",
         ...downloadSelectionEvidence(scope, root, scopeRef.current, rootRef.current),
@@ -130,7 +135,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
     }
     try {
       const transfer = await options.client.startDownload(scope, root, request);
-      if (!selectionIsCurrent(scope, root)) {
+      if (!selectionIsCurrent(scope, root, origin)) {
         await options.client.cancelTransfer(scope, transfer.id).catch(() => undefined);
         recordIncident("download.workspaceRejected", {
           attemptId: request.diagnosticAttemptId, origin, stage: "postAdmission",
@@ -145,7 +150,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
       options.setStatus(banner);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!selectionIsCurrent(scope, root)) {
+      if (!selectionIsCurrent(scope, root, origin)) {
         recordIncident("download.workspaceRejected", {
           attemptId: request.diagnosticAttemptId, origin, stage: "admissionErrorAfterSelectionChanged",
           ...downloadSelectionEvidence(scope, root, scopeRef.current, rootRef.current),
@@ -183,7 +188,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
       attemptId, origin, intentKind: intent.kind,
       ...downloadSelectionEvidence(scope, root, scopeRef.current, rootRef.current),
     });
-    if (!scope || !selectionIsCurrent(scope, root)) {
+    if (!scope || !selectionIsCurrent(scope, root, origin)) {
       recordIncident("download.workspaceRejected", {
         attemptId, origin, stage: "prePicker",
         ...downloadSelectionEvidence(scope, root, scopeRef.current, rootRef.current),
@@ -202,7 +207,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
     recordIncident("download.destinationChosen", {
       attemptId, origin, intentKind: intent.kind, panelConfirmed: chosen.panelConfirmed,
     });
-    if (!selectionIsCurrent(scope, root)) {
+    if (!selectionIsCurrent(scope, root, origin)) {
       recordIncident("download.workspaceRejected", {
         attemptId, origin, stage: "postPicker",
         ...downloadSelectionEvidence(scope, root, scopeRef.current, rootRef.current),

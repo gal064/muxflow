@@ -53,8 +53,13 @@ describe("useAppFileActions", () => {
     picker.choose.mockReset();
   });
 
-  it("records the exact predicate when a valid file tab differs from the live Explorer root", async () => {
-    const client = { startDownload: vi.fn(), cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
+  it("downloads a valid file tab whose captured root differs from the live Explorer root", async () => {
+    picker.choose.mockResolvedValueOnce({ destination: "/tmp/report", panelConfirmed: false });
+    const startDownload = vi.fn().mockResolvedValue({
+      id: "transfer-1", scopeKey: "scope", path: "/work/report", destination: "/tmp/report",
+      kind: "file", state: "queued", completedBytes: "0", filesCompleted: "0",
+    });
+    const client = { startDownload, cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
     const currentRoot = { ...root, token: "root-b", path: "/other", cwd: "/other" };
     await act(async () => { create(<Harness client={client} scope={scope("a")} root={currentRoot} />); });
 
@@ -62,24 +67,47 @@ describe("useAppFileActions", () => {
       await actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "fileSurface");
     });
 
-    expect(picker.choose).not.toHaveBeenCalled();
-    expect(journal.record).toHaveBeenCalledWith("download.workspaceRejected", expect.objectContaining({
-      origin: "fileSurface", stage: "prePicker", currentScopePresent: true, currentRootPresent: true,
+    expect(startDownload).toHaveBeenCalledWith(expect.anything(), root, expect.objectContaining({ path: "/work/report" }));
+    expect(journal.record).toHaveBeenCalledWith("download.requested", expect.objectContaining({
+      origin: "fileSurface", currentScopePresent: true, currentRootPresent: true,
       scopeKeyMatch: true, rootMatch: false, rootTokenMatch: false, rootPathMatch: false, rootPaneMatch: true,
     }));
+    expect(journal.record).not.toHaveBeenCalledWith("download.workspaceRejected", expect.anything());
   });
 
-  it("distinguishes a restored tab rendered before the live root is reacquired", async () => {
-    const client = { startDownload: vi.fn(), cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
+  it("downloads a restored file tab before the live Explorer root is reacquired", async () => {
+    picker.choose.mockResolvedValueOnce({ destination: "/tmp/report", panelConfirmed: false });
+    const startDownload = vi.fn().mockResolvedValue({
+      id: "transfer-1", scopeKey: "scope", path: "/work/report", destination: "/tmp/report",
+      kind: "file", state: "queued", completedBytes: "0", filesCompleted: "0",
+    });
+    const client = { startDownload, cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
     await act(async () => { create(<Harness client={client} scope={scope("a")} root={undefined} />); });
 
     await act(async () => {
       await actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "fileSurface");
     });
 
-    expect(journal.record).toHaveBeenCalledWith("download.workspaceRejected", expect.objectContaining({
-      stage: "prePicker", currentScopePresent: true, currentRootPresent: false,
+    expect(startDownload).toHaveBeenCalled();
+    expect(journal.record).toHaveBeenCalledWith("download.requested", expect.objectContaining({
+      currentScopePresent: true, currentRootPresent: false,
       scopeKeyMatch: true, rootMatch: false, rootTokenMatch: false, rootPathMatch: false, rootPaneMatch: false,
+    }));
+    expect(journal.record).not.toHaveBeenCalledWith("download.workspaceRejected", expect.anything());
+  });
+
+  it("keeps Explorer downloads bound to the live Explorer root", async () => {
+    const client = { startDownload: vi.fn(), cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
+    const currentRoot = { ...root, token: "root-b", path: "/other", cwd: "/other" };
+    await act(async () => { create(<Harness client={client} scope={scope("a")} root={currentRoot} />); });
+
+    await act(async () => {
+      await actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "explorer");
+    });
+
+    expect(picker.choose).not.toHaveBeenCalled();
+    expect(journal.record).toHaveBeenCalledWith("download.workspaceRejected", expect.objectContaining({
+      origin: "explorer", stage: "prePicker", scopeKeyMatch: true, rootMatch: false,
     }));
   });
 
