@@ -365,7 +365,6 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
       destination: request.destination,
       folder: request.kind === "folder",
       collision: request.collision === "overwrite" ? "overwriteConfirmed" : request.collision,
-      diagnosticAttemptId: request.diagnosticAttemptId ?? crypto.randomUUID(),
     };
     const boundary = { ...downloadCommand, onEvent };
     const transferId = await measurePerfRequest("file.downloadAdmission", "file", boundary, async (requestBoundary) => {

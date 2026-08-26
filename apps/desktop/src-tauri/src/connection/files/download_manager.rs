@@ -18,10 +18,7 @@ use uuid::Uuid;
 
 use super::bulk_pool::BulkLease;
 use super::bulk_protocol::{BulkProtocolClient, Exchange, RequestFailure};
-use super::local_destination::{
-    DestinationReservations, PreparedDestination, ReservedDestination,
-    destination_parent_diagnostic,
-};
+use super::local_destination::{DestinationReservations, PreparedDestination, ReservedDestination};
 use super::scheduler::{
     BulkBinding, CancelState, DeadlineGuard, QueuedPublication, cancel_transfer,
     enqueue_transfer_with_queued,
@@ -146,18 +143,13 @@ pub fn start_download(
     destination: String,
     folder: bool,
     collision: DownloadCollisionPolicy,
-    diagnostic_attempt_id: String,
     on_event: Channel<Value>,
     profiles: State<'_, ProfileStore>,
     clients: State<'_, TerminalClients>,
     transfers: State<'_, DownloadManager>,
-    incidents: State<'_, crate::incidents::IncidentJournal>,
 ) -> Result<String, String> {
     if root.is_empty() || root_token.is_empty() || source.is_empty() || destination.is_empty() {
         return Err("root snapshot, source, and destination are required".into());
-    }
-    if !valid_diagnostic_attempt_id(&diagnostic_attempt_id) {
-        return Err("invalid download diagnostic attempt ID".into());
     }
     let connection = profiles.connection_for(&profile_id)?;
     let binding = BulkBinding::capture(
@@ -168,40 +160,11 @@ pub fn start_download(
     let transfer_id = Uuid::new_v4().to_string();
     let cancellation = Arc::new(CancelState::new());
     let destination = archive_destination(PathBuf::from(destination), folder);
-    let reserved = ReservedDestination::reserve_observed(
+    let destination = Arc::new(ReservedDestination::reserve(
         &destination,
         collision,
         Arc::clone(&transfers.reserved),
-    );
-    let parent_open = match &reserved {
-        Ok(destination) => destination.parent_open_diagnostic(),
-        Err(failure) => failure.parent_open_diagnostic(),
-    };
-    let destination_diagnostic = destination_parent_diagnostic(
-        &destination,
-        reserved.as_ref().err().map(|failure| failure.as_str()),
-        parent_open,
-        reserved
-            .as_ref()
-            .ok()
-            .map(|destination| destination.parent_directory()),
-    );
-    let mut diagnostic = destination_diagnostic
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    diagnostic.insert("attemptId".into(), Value::String(diagnostic_attempt_id));
-    diagnostic.insert("folder".into(), Value::Bool(folder));
-    diagnostic.insert("admitted".into(), Value::Bool(reserved.is_ok()));
-    let _ = incidents.record_native(
-        if reserved.is_ok() {
-            "download.destinationAdmitted"
-        } else {
-            "download.destinationRejected"
-        },
-        Value::Object(diagnostic),
-    );
-    let destination = Arc::new(reserved.map_err(|failure| failure.into_message())?);
+    )?);
     let job = Arc::new(DownloadJob {
         transfer_id: transfer_id.clone(),
         connection,
@@ -217,12 +180,6 @@ pub fn start_download(
     });
     enqueue(job)?;
     Ok(transfer_id)
-}
-
-fn valid_diagnostic_attempt_id(value: &str) -> bool {
-    Uuid::parse_str(value).is_ok_and(|parsed| {
-        parsed.get_version() == Some(uuid::Version::Random) && parsed.to_string() == value
-    })
 }
 
 /// The name the save panel opens with, chosen so the panel's own "…already
@@ -677,22 +634,6 @@ mod tests {
             serde_json::to_string(&DownloadCollisionPolicy::OverwriteConfirmed).unwrap(),
             "\"overwriteConfirmed\""
         );
-    }
-
-    #[test]
-    fn diagnostic_attempt_ids_accept_only_canonical_v4_uuids() {
-        assert!(valid_diagnostic_attempt_id(
-            "8c627ead-fa11-4c04-9109-23cabefa16c1"
-        ));
-        assert!(!valid_diagnostic_attempt_id(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        ));
-        assert!(!valid_diagnostic_attempt_id(
-            "8C627EAD-FA11-4C04-9109-23CABEFA16C1"
-        ));
-        assert!(!valid_diagnostic_attempt_id(
-            "8c627eadfa114c04910923cabefa16c1"
-        ));
     }
 
     #[test]
