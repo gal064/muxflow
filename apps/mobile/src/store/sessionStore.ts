@@ -33,7 +33,7 @@ export interface ConnectionSlice {
   state: ConnectionState;
   host?: SavedHostRef | undefined;
   message?: string | undefined;
-  /** Reconnect attempt counter `n` from §7.2; 0 while healthy. */
+  /** Which reconnect attempt is in progress (1-based) while `reconnecting`/`sshConnecting`; 0 once connected. */
   attempt: number;
 }
 

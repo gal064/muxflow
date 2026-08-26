@@ -334,11 +334,21 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
     transport = h.transports[2]!;
     transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n }));
     transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
-    expect(h.store.getState().connection.state).toBe("connected");
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(h.store.getState().connection.attempt).toBe(0);
+    expect(h.store.getState().connection).toMatchObject({ state: "connected", attempt: 0 });
+    // Before 60 s of stability the backoff exponent is kept: the next delay is 4 s.
     transport.closeFromRemote({ reason: "exited", exitCode: 1, message: "bridge: daemon went away" });
-    expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1, message: "bridge: daemon went away" });
+    expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 3, message: "bridge: daemon went away" });
+    await vi.advanceTimersByTimeAsync(3999);
+    expect(h.dials).toBe(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.dials).toBe(4);
+    transport = h.transports[3]!;
+    transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n }));
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
+    await vi.advanceTimersByTimeAsync(60_000);
+    transport.closeFromRemote({ reason: "networkLost" });
+    // After 60 s connected the exponent is back to 0: 1 s again.
+    expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1 });
   });
 
   it("does not retry after auth failure or exit code 127", async () => {
@@ -369,6 +379,32 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
     expect(h.store.getState().connection.state).toBe("idle");
     await vi.advanceTimersByTimeAsync(60_000);
     expect(h.dials).toBe(1);
+  });
+
+  it("reconnects when the handshake gets no answer within 20 s", async () => {
+    const h = harness();
+    h.connection.connect();
+    await settle();
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(h.store.getState().connection.state).toBe("handshaking");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1, message: "handshake timed out" });
+    expect(h.transports[0]!.closed).toBe(true);
+  });
+
+  it("acknowledges the charge of events dropped at the snapshot barrier", async () => {
+    const h = harness();
+    h.connection.connect();
+    await settle();
+    const transport = h.transports[0]!;
+    transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n }));
+    transport.feed(event(EventKind.PANE_RESOURCE, 1n, { terminalDeliveryBytes: 0n, terminalDeliveryRecords: 1n }));
+    transport.drain();
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot(), acceptedSequence: 1n }) }, { requestId: 2n }));
+    await vi.advanceTimersByTimeAsync(50);
+    const [ack] = transport.drain();
+    if (ack?.payload.case !== "terminalOutputAck") throw new Error("expected an ack for the dropped event");
+    expect(ack.payload.value).toMatchObject({ cumulativeBytes: 0n, cumulativeRecords: 1n });
   });
 
   it("a non-retryable connection-level error frame toasts and reconnects", async () => {

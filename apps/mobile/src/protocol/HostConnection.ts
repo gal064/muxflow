@@ -29,6 +29,8 @@ export const FILE_STREAM_TIMEOUT_MS = 60_000;
 /** A connection `connected` this long resets the reconnect attempt counter (§7.2). */
 export const STABLE_AFTER_MS = 60_000;
 export const MAX_BACKOFF_MS = 30_000;
+/** Bound on ServerHello + Subscribe response; the host bounds its own side at 5 s (service.rs). */
+export const HANDSHAKE_TIMEOUT_MS = 20_000;
 
 /** §7.2: closes after which the app does not retry. */
 const FATAL_CLOSE_REASONS: ReadonlySet<TransportCloseReason> = new Set(["authFailed", "hostKeyMismatch", "hostKeyNotTrusted"]);
@@ -59,7 +61,13 @@ export class ConnectionClosedError extends Error {
 export interface TerminalSink {
   seed(paneId: string, bytes: Uint8Array, generation: bigint): void;
   output(paneId: string, bytes: Uint8Array, generation: bigint): void;
-  exit(paneId: string, detail: string): void;
+  /**
+   * The host emits TERMINAL_EXIT scoped by **session id** ("$N"), not pane id:
+   * its only emitter is `reconcile_terminal_clients_locked` in
+   * apps/host/src/service.rs, when a session's control client failed. Every
+   * pane of that session is affected.
+   */
+  exit(sessionId: string, detail: string): void;
 }
 
 export interface RequestOptions {
@@ -109,6 +117,7 @@ export interface HostConnectionOptions {
   fileStreamTimeoutMs?: number;
   stableAfterMs?: number;
   maxBackoffMs?: number;
+  handshakeTimeoutMs?: number;
 }
 
 interface PendingRequest {
@@ -116,6 +125,8 @@ interface PendingRequest {
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   onFileStream?: ((frame: FileStreamFrame) => void) | undefined;
+  /** `file.operationId` of the request, when it carries one. */
+  operationId?: string | undefined;
 }
 
 type Phase = "hello" | "subscribe" | "live";
@@ -133,6 +144,7 @@ interface Attempt {
   pending: Map<bigint, PendingRequest>;
   credit?: OutputCreditLedger;
   connectionEpoch: bigint;
+  handshakeTimer?: ReturnType<typeof setTimeout> | undefined;
   /** Set once we decided the outcome of this attempt, so its close is not re-diagnosed. */
   outcome?: { state: "failed" | "incompatible"; message: string } | { state: "reconnect"; message: string };
 }
@@ -148,12 +160,14 @@ export class HostConnection {
   private readonly fileStreamTimeoutMs: number;
   private readonly stableAfterMs: number;
   private readonly maxBackoffMs: number;
+  private readonly handshakeTimeoutMs: number;
 
   constructor(private readonly options: HostConnectionOptions) {
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.fileStreamTimeoutMs = options.fileStreamTimeoutMs ?? FILE_STREAM_TIMEOUT_MS;
     this.stableAfterMs = options.stableAfterMs ?? STABLE_AFTER_MS;
     this.maxBackoffMs = options.maxBackoffMs ?? MAX_BACKOFF_MS;
+    this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
   }
 
   get state(): ConnectionState {
@@ -208,7 +222,13 @@ export class HostConnection {
         attempt.pending.delete(requestId);
         reject(new RequestTimeoutError(requestId));
       }, timeoutMs);
-      attempt.pending.set(requestId, { resolve, reject, timer, onFileStream: options.onFileStream });
+      attempt.pending.set(requestId, {
+        resolve,
+        reject,
+        timer,
+        onFileStream: options.onFileStream,
+        operationId: request.file?.operationId || undefined,
+      });
       try {
         this.send(attempt, envelope(requestId, { case: "request", value: request }));
       } catch (error) {
@@ -249,7 +269,6 @@ export class HostConnection {
       pending: new Map(),
       connectionEpoch: this.options.bulk?.connectionEpoch ?? BigInt(this.options.nextConnectionEpoch()),
     };
-    if (attempt.connectionEpoch < 1n) throw new Error("connectionEpoch must be >= 1");
     this.attempt = attempt;
     transport.onData((chunk) => {
       if (this.attempt === attempt) this.onData(attempt, chunk);
@@ -258,6 +277,29 @@ export class HostConnection {
       if (this.attempt === attempt) this.onClosed(attempt, close);
     });
     this.options.store.getState().setConnection({ state: "handshaking" });
+    attempt.handshakeTimer = setTimeout(() => {
+      attempt.handshakeTimer = undefined;
+      if (this.attempt === attempt && attempt.phase !== "live") {
+        this.log(`handshake.timeout phase=${attempt.phase}`);
+        this.reconnectNow(attempt, "handshake timed out");
+      }
+    }, this.handshakeTimeoutMs);
+    try {
+      this.sendHandshake(attempt);
+    } catch (error) {
+      // The transport died between dial and the first write; its own closed
+      // event may or may not follow, so diagnose it here.
+      this.log(`handshake.write.failed ${error instanceof Error ? error.message : String(error)}`);
+      if (this.attempt === attempt) {
+        this.teardown(attempt, new ConnectionClosedError("transport write failed"));
+        transport.close();
+        if (!attempt.outcome) this.afterClose({ reason: "exited", message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  }
+
+  private sendHandshake(attempt: Attempt): void {
+    if (attempt.connectionEpoch < 1n) throw new Error("connectionEpoch must be >= 1");
     // §7.3: both handshake frames go out without waiting between them.
     const bulk = this.options.bulk;
     const hello = create(ClientHelloSchema, {
@@ -329,8 +371,7 @@ export class HostConnection {
         this.fail(attempt, "failed", "bulk connection was bound to a different control connection");
         return;
       }
-      attempt.phase = "live";
-      this.options.store.getState().setConnection({ state: "connected", message: undefined });
+      this.goLive(attempt);
       this.options.onConnected?.();
       return;
     }
@@ -372,15 +413,13 @@ export class HostConnection {
     store.getState().setServerIdentity(hello.serverIdentity);
     this.applySnapshotWithAgents(snapshot);
     attempt.lastSequence = response.acceptedSequence;
-    attempt.phase = "live";
-    store.getState().setConnection({ state: "connected", message: undefined });
+    this.goLive(attempt);
     this.clearStableTimer();
+    // The backoff exponent resets only after 60 s of stability (§7.2); the
+    // store's `attempt` is a display value and is 0 whenever connected.
     this.stableTimer = setTimeout(() => {
       this.stableTimer = undefined;
-      if (this.attempt === attempt) {
-        this.reconnectAttempt = 0;
-        store.getState().setConnection({ attempt: 0 });
-      }
+      if (this.attempt === attempt) this.reconnectAttempt = 0;
     }, this.stableAfterMs);
     // A snapshot barrier already incorporates every ordered event at or below
     // its accepted sequence; replaying one would read as a gap. Mirrors
@@ -389,10 +428,27 @@ export class HostConnection {
     attempt.buffered = [];
     for (const frame of buffered) {
       if (this.attempt !== attempt) return;
-      if (frame.payload.case === "event" && frame.sequence <= response.acceptedSequence) continue;
+      if (frame.payload.case === "event" && frame.sequence <= response.acceptedSequence) {
+        // Dropped, but the host already reserved its credit: acknowledge it
+        // like the desktop's `forfeit_delivery_charge` does.
+        const dropped = frame.payload.value;
+        if (dropped.terminalDeliveryRecords > 0n || dropped.terminalDeliveryBytes > 0n) {
+          attempt.credit?.charge(dropped.terminalDeliveryBytes, dropped.terminalDeliveryRecords);
+        }
+        continue;
+      }
       this.onLiveFrame(attempt, frame);
     }
     if (this.attempt === attempt) this.options.onConnected?.();
+  }
+
+  private goLive(attempt: Attempt): void {
+    attempt.phase = "live";
+    if (attempt.handshakeTimer !== undefined) {
+      clearTimeout(attempt.handshakeTimer);
+      attempt.handshakeTimer = undefined;
+    }
+    this.options.store.getState().setConnection({ state: "connected", message: undefined, attempt: 0 });
   }
 
   private onLiveFrame(attempt: Attempt, frame: Envelope): void {
@@ -415,6 +471,11 @@ export class HostConnection {
         const pending = attempt.pending.get(frame.requestId);
         if (!pending?.onFileStream) {
           this.log(`fileStream.unmatched requestId=${frame.requestId}`);
+          return;
+        }
+        // §11.1: associate by request id and double-check the operation id.
+        if (pending.operationId !== undefined && payload.value.operationId !== pending.operationId) {
+          this.log(`fileStream.operation.mismatch requestId=${frame.requestId} got=${payload.value.operationId}`);
           return;
         }
         pending.onFileStream(payload.value);
@@ -566,6 +627,10 @@ export class HostConnection {
   /** Detaches an attempt, rejecting everything in flight. Idempotent. */
   private teardown(attempt: Attempt, error: Error): void {
     if (this.attempt === attempt) this.attempt = undefined;
+    if (attempt.handshakeTimer !== undefined) {
+      clearTimeout(attempt.handshakeTimer);
+      attempt.handshakeTimer = undefined;
+    }
     attempt.credit?.close();
     for (const [, pending] of attempt.pending) {
       clearTimeout(pending.timer);
