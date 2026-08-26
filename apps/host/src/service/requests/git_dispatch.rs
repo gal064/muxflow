@@ -161,6 +161,11 @@ fn git_error(operation: v1::Operation, error: &anyhow::Error) -> v1::Response {
         "git_timeout"
     } else if message.contains("not a git repository") {
         "not_git_repository"
+    // Every branch that has never been published is in this state, so it is the
+    // push refusal a person is most likely to meet; it earns its own code so the
+    // panel can lead with the one command that resolves it.
+    } else if pushing && lowered.contains("no upstream") {
+        "git_no_upstream"
     // A push is the one Git command whose refusal is not the host's to
     // paraphrase: it either could not prove who was asking, or the remote said
     // no. Both are named so the desktop can say what to do instead of showing
@@ -266,6 +271,15 @@ mod tests {
         assert_eq!(
             git_error(
                 v1::Operation::GitPush,
+                &anyhow::anyhow!("no upstream branch is configured")
+            )
+            .error_code,
+            "git_no_upstream"
+        );
+        // And it stays push-specific, like the other two.
+        assert_eq!(
+            git_error(
+                v1::Operation::GitCommit,
                 &anyhow::anyhow!("no upstream branch is configured")
             )
             .error_code,

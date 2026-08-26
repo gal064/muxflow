@@ -103,7 +103,10 @@ export const GitCommitForm = memo(function GitCommitForm(props: Props) {
       onKeyDown={(event) => {
         if (!keyboardEventIsComposing(event.nativeEvent) && event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
           event.preventDefault();
-          submit();
+          // The same condition the Commit button carries. This form is
+          // permanent chrome now, so the shortcut is reachable with an empty
+          // index, and a guard weaker than its own control is no guard.
+          if (!props.disabled && !busy && !nothingStaged) submit();
         }
       }}
       placeholder="Commit message…"

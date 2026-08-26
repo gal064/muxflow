@@ -177,7 +177,7 @@ async fn push_revalidates_the_status_generation_it_was_asked_for() {
 #[test]
 fn push_verdict_is_read_from_the_porcelain_ref_report() {
     let accepted = classify_push(&porcelain(
-        b"To /tmp/origin\n\trefs/heads/master:refs/heads/master\t0123..4567\nDone\n",
+        b"To /tmp/origin\n \trefs/heads/master:refs/heads/master\t0123..4567\nDone\n",
     ));
     assert_eq!(accepted, PushVerdict::Accepted);
     let rejected = classify_push(&porcelain(b"To /tmp/origin\n!\trefs/heads/master:refs/heads/master\t[rejected] (non-fast-forward)\nDone\n"));
@@ -210,4 +210,50 @@ fn porcelain(stdout: &[u8]) -> GitOutput {
         stderr: Vec::new(),
     }
     .into()
+}
+
+/// A fork workflow publishes to `pushRemote`, not to the upstream it tracks.
+///
+/// Reporting the upstream there would name a remote the commits never reached,
+/// which is the one claim this button is not allowed to get wrong.
+#[tokio::test]
+async fn a_branch_that_publishes_elsewhere_names_where_it_actually_went() {
+    let owner = Fixture::new("push-remote-triangular");
+    let upstream = bare_remote(&owner, "origin.git");
+    let fork = bare_remote(&owner, "fork.git");
+    let fixture = published("push-triangular", &upstream);
+    fixture.git(&["remote", "add", "fork", fork.to_str().unwrap()]);
+    fixture.git(&["config", "branch.master.pushRemote", "fork"]);
+    fixture.write("file", b"two\n");
+    fixture.git(&["add", "file"]);
+    fixture.git(&["commit", "-qm", "second"]);
+
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let request = request_for(&service, &fixture, 113).await;
+    let pushed = service
+        .push(request, 113, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(pushed.outcome, v1::GitCommandOutcome::Applied as i32);
+    // Git refuses to resolve `@{push}` under `push.default=simple` here, so the
+    // reported destination comes from the report rather than the tracking
+    // configuration. It names the fork, and never the remote it tracks.
+    assert!(
+        pushed.push_target.contains("fork.git"),
+        "{}",
+        pushed.push_target
+    );
+    assert!(
+        !pushed.push_target.starts_with("origin/"),
+        "{}",
+        pushed.push_target
+    );
+    assert_eq!(
+        git_at(&fork, &["rev-parse", "master"]).stdout,
+        fixture.git(&["rev-parse", "HEAD"]).stdout
+    );
+    assert_eq!(
+        git_at(&upstream, &["rev-parse", "master"]).stdout,
+        fixture.git(&["rev-parse", "HEAD~1"]).stdout
+    );
 }

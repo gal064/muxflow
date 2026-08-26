@@ -579,7 +579,7 @@ impl GitService {
         let executed = tokio::task::spawn_blocking(move || {
             let _metadata_guard = execution_capabilities.metadata.install();
             let root = execution_capabilities.stable_root();
-            let target = resolve_push_target(&root, &cancellation)?;
+            let configured = resolve_push_target(&root, &cancellation)?;
             let pre_state = command_state(&root, &current);
             let outcome = git_output_with_deadline(
                 &root,
@@ -588,6 +588,8 @@ impl GitService {
                 Some(&cancellation),
                 GIT_PUSH_DEADLINE,
             );
+            let target =
+                confirm_push_destination(&root, &configured, outcome.as_ref().ok(), &cancellation);
             anyhow::Ok((outcome, pre_state, target))
         })
         .await
@@ -603,7 +605,12 @@ impl GitService {
             && output.interrupted.is_none()
             && !output.status.success()
         {
-            let diagnostic = push_diagnostic(output);
+            let mut diagnostic = push_diagnostic(output);
+            // The `remote:` half of this is written by the remote server, so it
+            // is the one Git diagnostic whose length is not under local
+            // control. Error responses carry no `command` for
+            // `bound_command_response` to trim, so it is bounded here.
+            bound_text(&mut diagnostic, MAX_GIT_DIAGNOSTIC);
             // The push wrote nothing locally, but a pre-push hook may have, and
             // the next status must not answer from a cache taken before it.
             coordinator.invalidate();
@@ -965,19 +972,103 @@ fn apply_push_verdict(result: &mut v1::GitCommandResult, verdict: Option<PushVer
     }
 }
 
-/// The upstream this branch already has, or a refusal naming what is missing.
+/// Where this branch already publishes to, or a refusal naming what is missing.
+///
+/// `@{push}` first, because that — not `@{upstream}` — is where a bare `git
+/// push` sends this branch once `remote.pushDefault` or `branch.<n>.pushRemote`
+/// is set. Naming the upstream in that configuration would report a destination
+/// the commits never reached, and "Pushed to origin/main" has to be true.
+/// `@{push}` does not resolve under every `push.default`, so the upstream stays
+/// the fallback and, either way, the pre-flight check.
 ///
 /// Deliberately never creates one: `git push -u` decides where a branch lives,
 /// and a button that silently made that decision would publish a branch to a
 /// remote nobody chose.
 fn resolve_push_target(root: &str, cancellation: &AtomicBool) -> anyhow::Result<String> {
+    for revision in ["@{push}", "@{upstream}"] {
+        if let Some(target) = symbolic_destination(root, revision, cancellation)? {
+            return Ok(target);
+        }
+    }
+    bail!(
+        "no upstream branch is configured for the current branch; run `git push -u` in a terminal once"
+    )
+}
+
+/// The destination to report, confirmed against what Git actually did.
+///
+/// The configured target is where this branch *tracks* or is set up to publish;
+/// the porcelain report's `To` line is where the commits went. They differ under
+/// `remote.pushDefault` and `branch.<n>.pushRemote`, and printing a familiar
+/// name for a remote the commits never reached is the one thing "Pushed to X"
+/// must not do. So the readable form is kept only when the URL Git used is that
+/// remote's own; otherwise the URL itself is reported.
+fn confirm_push_destination(
+    root: &str,
+    configured: &str,
+    output: Option<&GitOutput>,
+    cancellation: &AtomicBool,
+) -> String {
+    let Some(destination) = output.and_then(reported_destination) else {
+        return configured.to_owned();
+    };
+    let Some((remote, _)) = configured.split_once('/') else {
+        return destination;
+    };
+    let known = ["pushurl", "url"]
+        .into_iter()
+        .find_map(|key| git_config_value(root, &format!("remote.{remote}.{key}"), cancellation));
+    if known.as_deref() == Some(destination.as_str()) {
+        configured.to_owned()
+    } else {
+        destination
+    }
+}
+
+/// The `To <destination>` line Git opens its porcelain report with.
+fn reported_destination(output: &GitOutput) -> Option<String> {
+    String::from_utf8_lossy(&output.output.stdout)
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("To ")
+                .map(|value| value.trim().to_owned())
+        })
+        .filter(|value| !value.is_empty())
+}
+
+/// One configuration value, or `None` when this repository does not set it.
+fn git_config_value(root: &str, key: &str, cancellation: &AtomicBool) -> Option<String> {
+    let output = git_output_cancellable(
+        root,
+        &[OsStr::new("config"), OsStr::new("--get"), OsStr::new(key)],
+        None,
+        Some(cancellation),
+    )
+    .ok()?;
+    if !output.status.success() || output.interrupted.is_some() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.output.stdout)
+        .trim()
+        .to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+/// One symbolic ref, or `None` when this repository does not have that one.
+/// A ref that does not exist is not an error here; the caller decides what a
+/// missing destination means.
+fn symbolic_destination(
+    root: &str,
+    revision: &str,
+    cancellation: &AtomicBool,
+) -> anyhow::Result<Option<String>> {
     let output = git_output_cancellable(
         root,
         &[
             OsStr::new("rev-parse"),
             OsStr::new("--abbrev-ref"),
             OsStr::new("--symbolic-full-name"),
-            OsStr::new("@{upstream}"),
+            OsStr::new(revision),
         ],
         None,
         Some(cancellation),
@@ -985,15 +1076,17 @@ fn resolve_push_target(root: &str, cancellation: &AtomicBool) -> anyhow::Result<
     if let Some(interrupted) = &output.interrupted {
         bail!("{interrupted}");
     }
+    if !output.status.success() {
+        return Ok(None);
+    }
     let target = String::from_utf8_lossy(&output.output.stdout)
         .trim()
         .to_owned();
-    if !output.status.success() || target.is_empty() {
-        bail!(
-            "no upstream branch is configured for the current branch; run `git push -u` in a terminal once"
-        );
-    }
-    Ok(target)
+    Ok(if target.is_empty() {
+        None
+    } else {
+        Some(target)
+    })
 }
 
 /// Rejects a status no client decision may be based on.
