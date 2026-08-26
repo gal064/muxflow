@@ -2,6 +2,8 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 
 import { colors, typeScale } from "../src/ui/tokens";
+// Registers the SSH transport factory with the connection manager (§6, §11.1).
+import "../src/ssh/registerTransport";
 
 /**
  * Root navigator. Global chrome per design.md §9: the status bar and every
