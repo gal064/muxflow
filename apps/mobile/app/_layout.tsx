@@ -1,6 +1,7 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 
+import { ConnectionModals } from "../src/features/hosts/ConnectionModals";
 import { colors, typeScale } from "../src/ui/tokens";
 // Registers the SSH transport factory with the connection manager (§6, §11.1).
 import "../src/ssh/registerTransport";
@@ -37,6 +38,8 @@ export default function RootLayout() {
         <Stack.Screen name="file/[paneId]" options={{ title: "File" }} />
         <Stack.Screen name="key" options={{ title: "Your SSH key" }} />
       </Stack>
+      {/* §9.8 and §9.10 are raised over whatever screen is on top (§9 global chrome). */}
+      <ConnectionModals />
     </>
   );
 }

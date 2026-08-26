@@ -7,6 +7,7 @@ import { ConnectionStrip } from "./ConnectionStrip";
 import { describeConnectionFailure } from "./errorMatrix";
 import { HostKeyDialog } from "./HostKeyDialog";
 import { useDiagnostics, useSession } from "./hooks";
+import { useOwnsGlobalModals } from "./primaryChrome";
 
 export interface ConnectionChromeProps {
   /**
@@ -18,10 +19,11 @@ export interface ConnectionChromeProps {
 }
 
 /**
- * Everything design.md §9 calls global chrome, in one mount: the connection
- * strip, the full-screen rows of §12, the §9.10 trust dialog and the §9.8
- * sheet. Mount it as the first child of a screen's root view — the error row
- * covers that view.
+ * The per-screen half of what design.md §9 calls global chrome: the connection
+ * strip and the full-screen rows of §12. Mount it as the first child of a
+ * screen's root view — the error row covers that view. The §9.10 dialog and
+ * the §9.8 sheet are app-wide and live in the root layout instead
+ * (`ConnectionModals`); this renders them only where no root mount exists.
  */
 export function ConnectionChrome({ returnOnFailure = false }: ConnectionChromeProps) {
   const connection = useSession((state) => state.connection);
@@ -40,8 +42,10 @@ export function ConnectionChrome({ returnOnFailure = false }: ConnectionChromePr
     if (fatal && returnOnFailure) router.dismissTo("/");
   }, [fatal, returnOnFailure]);
 
-  // Screens below the top of the stack stay mounted; only the focused one may
-  // render the chrome, or its modals would stack one per mounted screen.
+  // Screens below the top of the stack stay mounted, so only the focused one
+  // draws the strip and the full-screen row. The modals belong to the root
+  // layout (`ConnectionModals`); this renders them only when nothing else
+  // does.
   const [focused, setFocused] = useState(false);
   useFocusEffect(
     useCallback(() => {
@@ -49,16 +53,16 @@ export function ConnectionChrome({ returnOnFailure = false }: ConnectionChromePr
       return () => setFocused(false);
     }, []),
   );
-  if (!focused) return null;
+  const owns = useOwnsGlobalModals("screen");
 
   return (
     <>
-      <ConnectionStrip />
-      {failure?.presentation === "fullScreen" ? (
+      {focused ? <ConnectionStrip /> : null}
+      {focused && failure?.presentation === "fullScreen" ? (
         <ConnectionErrorScreen failure={failure} hostId={connection.host?.id} />
       ) : null}
-      <HostKeyDialog />
-      <ConnectionSheet />
+      {owns ? <HostKeyDialog /> : null}
+      {owns ? <ConnectionSheet /> : null}
     </>
   );
 }

@@ -213,6 +213,13 @@ export function openSshTransport(options: SshTransportOptions): Promise<Transpor
       if (settled) return;
       settled = true;
       unsubscribe();
+      // Same reason as in `finish`: the dial is over, so a dialog still asking
+      // about this channel has nowhere to send its answer. Leaving it parked
+      // would keep `hostKeyStore` busy and silently refuse every later prompt.
+      if (hostKeyPending) {
+        hostKeyPending = false;
+        options.onHostKeyCancelled?.();
+      }
       // The native side may already own a thread and a client for this id;
       // `close` is idempotent, so releasing it here costs nothing.
       void ssh.close(connectionId).catch(() => undefined);

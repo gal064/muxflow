@@ -104,6 +104,33 @@ describe("hostsStore", () => {
     expect(partial.lastHostId).toBeNull();
   });
 
+  it("drops the pinned host key when the row is pointed at another machine", async () => {
+    const store = createHostsStore(fakeSecureStore().storage);
+    await store.getState().hydrate();
+    const saved = store.getState().addHost(draft);
+    store.getState().setTrustedHostKeyFingerprint(saved.id, "SHA256:abc");
+
+    // A host key belongs to host:port, so renaming or re-labelling keeps it.
+    store.getState().updateHost(saved.id, { ...draft, user: "ade", label: "Work" });
+    expect(store.getState().hosts[0]).toMatchObject({
+      user: "ade",
+      label: "Work",
+      trustedHostKeyFingerprint: "SHA256:abc",
+    });
+
+    store.getState().updateHost(saved.id, { ...draft, host: "other-box", label: "Work" });
+    expect(store.getState().hosts[0]?.trustedHostKeyFingerprint).toBeNull();
+  });
+
+  it("drops the pinned host key when only the port moves", async () => {
+    const store = createHostsStore(fakeSecureStore().storage);
+    await store.getState().hydrate();
+    const saved = store.getState().addHost(draft);
+    store.getState().setTrustedHostKeyFingerprint(saved.id, "SHA256:abc");
+    store.getState().updateHost(saved.id, { ...draft, port: 2222 });
+    expect(store.getState().hosts[0]?.trustedHostKeyFingerprint).toBeNull();
+  });
+
   it("labels and addresses hosts the way §9.1 and §9.8 show them", () => {
     expect(hostLabel({ label: "  ", host: "devbox" })).toBe("devbox");
     expect(hostLabel({ label: "Work", host: "devbox" })).toBe("Work");
