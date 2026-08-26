@@ -916,6 +916,16 @@ export function terminalBridgeKey(connection: ConnectionSpec, epoch: number): st
   return `${JSON.stringify(connection)}:${epoch}`;
 }
 
-export function terminalBridgeScope(): { sessionId: ""; paneIds: [] } {
-  return { sessionId: "", paneIds: [] };
+/**
+ * What a new bridge asks the host to attach first.
+ *
+ * The session is the one the shell is showing, so a rebuild — a resume, a
+ * changed server — lands the host on that workspace directly. Left empty, the
+ * host attaches its first session instead and the shell has to move it back
+ * afterwards: a round trip the user watches as the wrong workspace. The panes
+ * stay empty; the host mounts the attached session's active window, and the
+ * shell's own visibility requests refine that once the tabs are up.
+ */
+export function terminalBridgeScope(sessionId?: string): { sessionId: string; paneIds: [] } {
+  return { sessionId: sessionId ?? "", paneIds: [] };
 }
