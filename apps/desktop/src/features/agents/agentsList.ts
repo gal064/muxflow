@@ -1,4 +1,5 @@
 import { compareAgents, displayState } from "./selectors";
+import { pinRank } from "../shell/pins";
 import type { AgentDisplayState, AgentRecord } from "./types";
 
 /**
@@ -47,6 +48,16 @@ export interface AgentLocation {
   /** User-facing host identity, needed when workspace names collide. */
   hostLabel?: string;
   tabIndex?: number;
+  /**
+   * When this agent's workspace and tab were pinned, if either was.
+   *
+   * `workspaceOrder` already puts a pinned workspace's rows first in the
+   * workspace ordering, because it comes from the sidebar list that is itself
+   * pinned-first. These two are what the *priority* ordering needs, where there
+   * is no workspace ranking to inherit.
+   */
+  workspacePinnedAt?: number;
+  tabPinnedAt?: number;
 }
 
 export interface AgentListRow {
@@ -55,6 +66,8 @@ export interface AgentListRow {
   location: AgentLocation;
   /** A row is only clickable when it resolves to an exact live pane. */
   routable: boolean;
+  /** In the leading block: its workspace is pinned, or its tab is. */
+  pinned: boolean;
 }
 
 export interface AgentWorkspaceGroup {
@@ -100,8 +113,11 @@ export const AGENT_STATUS_GROUPS = [
 export interface AgentStatusGroup {
   key: string;
   label: string;
-  /** The state the heading's dot draws — the group's own, not any one row's. */
-  state: AgentDisplayState;
+  /**
+   * The state the heading's dot draws — the group's own, not any one row's.
+   * Absent on the pinned block, which is not a state and draws a pin instead.
+   */
+  state?: AgentDisplayState;
   rows: AgentListRow[];
 }
 
@@ -116,14 +132,21 @@ export interface AgentStatusGroup {
  * bucket, so the loudest row in a group is still its first.
  */
 export function groupAgentRowsByStatus(rows: readonly AgentListRow[]): AgentStatusGroup[] {
-  return AGENT_STATUS_GROUPS
+  // The pinned block is lifted out above the headings rather than sorted to the
+  // top of whichever bucket each of its rows lands in. Left in the buckets, a
+  // pinned agent that happened to be idle would sit under an Idle heading below
+  // three other headings — first in its group, and nowhere near first in the
+  // list, which is the one thing a pin promises.
+  const pinned = rows.filter((row) => row.pinned);
+  const buckets = AGENT_STATUS_GROUPS
     .map((group) => ({
       key: group.key,
       label: group.label,
       state: group.states[0] as AgentDisplayState,
-      rows: rows.filter((row) => (group.states as readonly AgentDisplayState[]).includes(row.state)),
+      rows: rows.filter((row) => !row.pinned && (group.states as readonly AgentDisplayState[]).includes(row.state)),
     }))
     .filter((group) => group.rows.length > 0);
+  return pinned.length > 0 ? [{ key: "pinned", label: "Pinned", rows: pinned }, ...buckets] : buckets;
 }
 
 /**
@@ -141,19 +164,28 @@ export function buildAgentRows(
   routable: (agent: AgentRecord) => boolean,
   mode: AgentSortMode,
 ): AgentListRow[] {
-  const rows = agents.map((agent) => ({
-    agent,
-    state: displayState(agent),
-    location: locate(agent),
-    routable: routable(agent),
-  }));
+  const rows = agents.map((agent) => {
+    const location = locate(agent);
+    return {
+      agent,
+      state: displayState(agent),
+      location,
+      routable: routable(agent),
+      pinned: location.workspacePinnedAt !== undefined || location.tabPinnedAt !== undefined,
+    };
+  });
   return rows.sort(mode === "status" ? byStatus : byWorkspace);
 }
 
 function byStatus(left: AgentListRow, right: AgentListRow): number {
-  // compareAgents is already blocked > done-unread > working > unknown > idle,
-  // then most-recently-updated. Reusing it keeps one definition of "loudest".
-  return compareAgents(left.agent, right.agent);
+  // The pinned block first, in workspace pin order and then tab pin order, and
+  // compareAgents — blocked > done-unread > working > unknown > idle, then
+  // most-recently-updated — inside each block. Reusing it keeps one definition
+  // of "loudest"; the pin keys only decide which block a row is in.
+  return Number(right.pinned) - Number(left.pinned)
+    || pinRank(left.location.workspacePinnedAt) - pinRank(right.location.workspacePinnedAt)
+    || pinRank(left.location.tabPinnedAt) - pinRank(right.location.tabPinnedAt)
+    || compareAgents(left.agent, right.agent);
 }
 
 function byWorkspace(left: AgentListRow, right: AgentListRow): number {
@@ -164,22 +196,28 @@ function byWorkspace(left: AgentListRow, right: AgentListRow): number {
     || left.agent.hostProfileId.localeCompare(right.agent.hostProfileId)
     || left.agent.serverIdentity.localeCompare(right.agent.serverIdentity)
     || left.agent.sessionId.localeCompare(right.agent.sessionId)
+    // Inside one workspace, a pinned tab's agents lead — the strip's own order,
+    // which is what this mode exists to follow.
+    || pinRank(left.location.tabPinnedAt) - pinRank(right.location.tabPinnedAt)
     || (left.location.tabIndex ?? Number.MAX_SAFE_INTEGER) - (right.location.tabIndex ?? Number.MAX_SAFE_INTEGER)
     || left.agent.displayName.localeCompare(right.agent.displayName)
     || left.agent.id.localeCompare(right.agent.id);
 }
 
 /**
- * The row ⌘⇧U and the titlebar bell go to: the top of the status order,
- * restricted to rows that actually want attention and can actually be reached.
- * Jumping to an idle agent because it happened to sort first would make the
- * shortcut useless.
+ * The row ⌘⇧U and the titlebar bell go to: the loudest row that actually wants
+ * attention and can actually be reached. Jumping to an idle agent because it
+ * happened to sort first would make the shortcut useless.
  *
  * Order: blocked first, then unread completed; ties break on most recently
- * updated.
+ * updated. Deliberately `compareAgents` rather than the list's own `byStatus`,
+ * which now leads with the pinned block: a pin says "keep this where I can see
+ * it", and letting it outrank a blocked agent somewhere else would turn the
+ * one control that means "who needs me most" into a second bookmark.
  */
 export function jumpTarget(rows: readonly AgentListRow[]): AgentListRow | undefined {
-  return [...rows].sort(byStatus).find((row) => row.routable && needsAttention(row.state));
+  return [...rows].sort((left, right) => compareAgents(left.agent, right.agent))
+    .find((row) => row.routable && needsAttention(row.state));
 }
 
 /** How many rows are waiting on a human — the number on the titlebar's bell. */
