@@ -793,9 +793,13 @@ fn validate_current_target(
     if entry.ignored {
         bail!("ignored paths cannot be mutated through the Git control lane");
     }
-    if WorktreeRoot::capture(root)?
-        .entry(&request.path)?
-        .is_directory()?
+    // Git legitimately names a deleted file after its entire parent directory
+    // has disappeared, and staging that deletion is exactly the mutation being
+    // asked for. An absent parent is therefore an absent worktree entry, not an
+    // unsafe path — and only an entry that still exists can be a directory. The
+    // walk itself stays no-follow, so a symlinked parent is still refused here.
+    if let Some(target) = WorktreeRoot::capture(root)?.entry_if_parent_exists(&request.path)?
+        && target.is_directory()?
         && !entry.submodule
     {
         bail!("directory mutation targets are ambiguous and are not supported");
