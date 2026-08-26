@@ -653,8 +653,12 @@ export function App() {
     if (session.id !== activeSessionId) return;
     const index = sidebarRows.findIndex((row) => row.session.id === session.id);
     const next = index < 0 ? undefined : sidebarRows[index + 1] ?? sidebarRows[index - 1];
+    // No neighbour: nothing is selected, now rather than at the next snapshot,
+    // so the strip and terminals do not keep showing a workspace the sidebar
+    // no longer lists.
     if (next) selectSession(next.session.id);
-  }, [activeSessionId, currentHostProfileId, hostState.serverIdentity, selectSession, setAppState, sidebarRows]);
+    else setActiveSessionId(undefined);
+  }, [activeSessionId, currentHostProfileId, hostState.serverIdentity, selectSession, setActiveSessionId, setAppState, sidebarRows]);
   const unarchiveSession = useCallback((session: Session, scope: HostScopeToken) => {
     if (!sameHostConnection(scope, hostScopeRef.current)) return;
     setAppState((current) => unarchiveWorkspace(current, scope.hostProfileId, scope.serverIdentity, session.id));
