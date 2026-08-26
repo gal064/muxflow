@@ -8,9 +8,9 @@ import { router } from "expo-router";
 import { AppState } from "react-native";
 
 import { createExpoNotificationHost, installForegroundPresentation } from "./expoHost";
-import type { NotificationHost } from "./host";
 import { createAgentNotifier } from "./notifier";
 import type { TapTarget } from "./payload";
+import { createPermissionFlow } from "./permissionFlow";
 import { notificationsUiStore } from "./permissionStore";
 import { connectionMarkSeenSink, createTapMarkSeen, terminalRoute } from "./taps";
 import { onAgentTransition } from "../../session/connectionManager";
@@ -43,23 +43,22 @@ export function startNotifications(): void {
     markSeen.request(target);
   });
 
-  let asked = false;
+  const permission = createPermissionFlow({
+    host,
+    setPermission: (outcome) => {
+      log(`notifications: permission ${outcome}`);
+      notificationsUiStore.getState().setPermission(outcome);
+    },
+  });
   sessionStore.subscribe((state) => {
     if (state.connection.state !== "connected") return;
-    // A tap that cold-started the app has no connection to acknowledge on yet.
+    // A tap that cold-started the app had no connection to acknowledge on.
     markSeen.flush();
-    // §13: ask the first time a host reaches `connected`, and only then.
-    if (asked) return;
-    asked = true;
-    void requestPermission(host).catch(reportFailure("permission"));
+    void permission.onConnected().catch(reportFailure("permission"));
   });
-}
-
-async function requestPermission(host: NotificationHost): Promise<void> {
-  const current = await host.getPermission();
-  const outcome = current === "undetermined" ? await host.requestPermission() : current;
-  log(`notifications: permission ${outcome}`);
-  notificationsUiStore.getState().setPermission(outcome);
+  AppState.addEventListener("change", (next) => {
+    if (next === "active") void permission.onAppActive().catch(reportFailure("permission"));
+  });
 }
 
 /**

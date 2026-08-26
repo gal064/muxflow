@@ -8,7 +8,7 @@
 
 import * as Notifications from "expo-notifications";
 
-import type { AgentNotification, NotificationHost, NotificationPermission } from "./host";
+import type { AgentNotification, NotificationHost } from "./host";
 import { decodePayload, type TapTarget } from "./payload";
 import { colors } from "../../ui/tokens";
 
@@ -34,11 +34,20 @@ export function createExpoNotificationHost(): NotificationHost {
     },
 
     async getPermission() {
-      return classify(await Notifications.getPermissionsAsync());
+      const status = await Notifications.getPermissionsAsync();
+      if (status.granted) return "granted";
+      // Nothing has been asked yet, or Android is still willing to ask.
+      return status.canAskAgain ? "undetermined" : "denied";
     },
 
     async requestPermission() {
-      return classify(await Notifications.requestPermissionsAsync());
+      // The answer to a prompt that was actually shown is yes or no. Android
+      // keeps `canAskAgain` true after the *first* denial (it means "you may
+      // show a rationale and ask once more"), and reading that as "still
+      // undetermined" would hide §13's banner from everyone who taps Don't
+      // allow once.
+      const status = await Notifications.requestPermissionsAsync();
+      return status.granted ? "granted" : "denied";
     },
 
     async present(notification: AgentNotification) {
@@ -71,7 +80,15 @@ export function createExpoNotificationHost(): NotificationHost {
         if (target) listener(target);
       };
       // A tap that cold-started the app is waiting here, not on the listener.
-      deliver(Notifications.getLastNotificationResponse());
+      // It is cleared once handled: the response is read off the Activity's
+      // launch intent, which Android hands back verbatim when it restores the
+      // task from Recents — without this the app would re-route and re-
+      // acknowledge a generation the user dealt with hours ago.
+      const launch = Notifications.getLastNotificationResponse();
+      if (launch) {
+        deliver(launch);
+        Notifications.clearLastNotificationResponse();
+      }
       const subscription = Notifications.addNotificationResponseReceivedListener(deliver);
       return () => subscription.remove();
     },
@@ -95,9 +112,4 @@ export function installForegroundPresentation(): void {
       shouldSetBadge: false,
     }),
   });
-}
-
-function classify(status: Notifications.NotificationPermissionsStatus): NotificationPermission {
-  if (status.granted) return "granted";
-  return status.canAskAgain ? "undetermined" : "denied";
 }
