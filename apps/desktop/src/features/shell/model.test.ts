@@ -336,6 +336,12 @@ describe("application shell model", () => {
     expect(find(pinned)!.preview).toBeUndefined();
     expect(find(open(pinned, true))!.preview).toBeUndefined();
 
+    // A file preview does not take over the transient diff's slot: the diff
+    // is closed by navigation, not rewritten into a file.
+    const withFile = openFileTab(transient, "local", "server-a", sessions[1], "/repo/a.ts", "file", { path: "/repo", token: "root", revision: "1" }, { preview: true });
+    expect(withFile.appTabs).toHaveLength(2);
+    expect(find(withFile)).toMatchObject({ kind: "gitDiff", preview: true });
+
     // The strip's double-click pins a transient diff the same way.
     expect(find(pinAppTab(transient, "local", find(transient)!.id))!.preview).toBeUndefined();
 
