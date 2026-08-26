@@ -173,10 +173,20 @@ pub fn start_download(
     let transfer_id = Uuid::new_v4().to_string();
     let cancellation = Arc::new(CancelState::new());
     let destination = archive_destination(PathBuf::from(destination), folder);
-    let reserved =
-        ReservedDestination::reserve(&destination, collision, Arc::clone(&transfers.reserved));
-    let destination_diagnostic =
-        destination_parent_diagnostic(&destination, reserved.as_ref().err().map(String::as_str));
+    let reserved = ReservedDestination::reserve_observed(
+        &destination,
+        collision,
+        Arc::clone(&transfers.reserved),
+    );
+    let parent_open = match &reserved {
+        Ok(destination) => destination.parent_open_diagnostic(),
+        Err(failure) => failure.parent_open_diagnostic(),
+    };
+    let destination_diagnostic = destination_parent_diagnostic(
+        &destination,
+        reserved.as_ref().err().map(|failure| failure.as_str()),
+        parent_open,
+    );
     let mut diagnostic = destination_diagnostic
         .as_object()
         .cloned()
@@ -192,7 +202,7 @@ pub fn start_download(
         },
         Value::Object(diagnostic),
     );
-    let destination = Arc::new(reserved?);
+    let destination = Arc::new(reserved.map_err(|failure| failure.into_message())?);
     let job = Arc::new(DownloadJob {
         transfer_id: transfer_id.clone(),
         connection,

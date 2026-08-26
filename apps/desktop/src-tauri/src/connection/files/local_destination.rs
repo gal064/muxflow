@@ -5,7 +5,7 @@ use std::{
     os::unix::{
         ffi::OsStrExt,
         fs::MetadataExt,
-        io::{AsRawFd, FromRawFd},
+        io::{AsRawFd, FromRawFd, RawFd},
     },
     path::{Path, PathBuf},
     sync::Arc,
@@ -27,7 +27,11 @@ pub(super) use super::destination_lease::DestinationReservations;
 /// A privacy-safe snapshot of the process/path boundary used by download
 /// admission. It deliberately records classifications and permission facts,
 /// never the selected path, HOME, cwd, capability token, or file name.
-pub(super) fn destination_parent_diagnostic(path: &Path, admission_error: Option<&str>) -> Value {
+pub(super) fn destination_parent_diagnostic(
+    path: &Path,
+    admission_error: Option<&str>,
+    parent_open: ParentOpenDiagnostic,
+) -> Value {
     let parent = path.parent().unwrap_or(path);
     let parent_name = c_string(parent.as_os_str(), "diagnostic destination parent").ok();
     let metadata = std::fs::symlink_metadata(parent);
@@ -100,9 +104,21 @@ pub(super) fn destination_parent_diagnostic(path: &Path, admission_error: Option
     let lsm_confinement_label_present = std::fs::read_to_string("/proc/self/attr/current")
         .ok()
         .map(|value| value.trim() != "unconfined");
+    let namespace_matches_init = |namespace: &str| {
+        let current = std::fs::read_link(format!("/proc/self/ns/{namespace}")).ok()?;
+        let init = std::fs::read_link(format!("/proc/1/ns/{namespace}")).ok()?;
+        Some(current == init)
+    };
+    let cap_eff = status_value("CapEff:");
+    let effective_capabilities_present =
+        (cap_eff != "unknown").then(|| cap_eff.bytes().any(|byte| byte != b'0'));
 
     json!({
         "admissionErrorClass": admission_error.map(classify_admission_error),
+        "parentOpenAttempts": parent_open.attempts,
+        "parentOpenFirstErrno": parent_open.first_errno,
+        "parentOpenFinalErrno": parent_open.final_errno,
+        "parentOpenRecovered": parent_open.first_errno.is_some() && parent_open.final_errno.is_none(),
         "parentClass": classify_destination_parent(parent),
         "parentAbsolute": parent.is_absolute(),
         "parentExists": parent_exists,
@@ -121,6 +137,9 @@ pub(super) fn destination_parent_diagnostic(path: &Path, admission_error: Option
         "noNewPrivs": status_value("NoNewPrivs:"),
         "seccompMode": status_value("Seccomp:"),
         "lsmConfinementLabelPresent": lsm_confinement_label_present,
+        "mountNamespaceMatchesInit": namespace_matches_init("mnt"),
+        "userNamespaceMatchesInit": namespace_matches_init("user"),
+        "effectiveCapabilitiesPresent": effective_capabilities_present,
         "codexEnvironment": std::env::vars_os().any(|(key, _)| key.to_string_lossy().starts_with("CODEX_")),
         "flatpakEnvironment": std::env::var_os("FLATPAK_ID").is_some(),
         "snapEnvironment": std::env::var_os("SNAP").is_some(),
@@ -187,7 +206,86 @@ pub(super) struct ReservedDestination {
     final_display: PathBuf,
     overwrite_identity: Option<FileIdentity>,
     collision: DownloadCollisionPolicy,
+    parent_open: ParentOpenDiagnostic,
     _lease: DestinationLease,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ParentOpenDiagnostic {
+    attempts: u8,
+    first_errno: Option<i32>,
+    final_errno: Option<i32>,
+}
+
+#[derive(Debug)]
+pub(super) struct DestinationAdmissionFailure {
+    message: String,
+    parent_open: ParentOpenDiagnostic,
+}
+
+impl DestinationAdmissionFailure {
+    fn message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            parent_open: ParentOpenDiagnostic::default(),
+        }
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.message
+    }
+
+    pub(super) fn into_message(self) -> String {
+        self.message
+    }
+
+    pub(super) fn parent_open_diagnostic(&self) -> ParentOpenDiagnostic {
+        self.parent_open
+    }
+}
+
+impl From<String> for DestinationAdmissionFailure {
+    fn from(message: String) -> Self {
+        Self::message(message)
+    }
+}
+
+impl From<&str> for DestinationAdmissionFailure {
+    fn from(message: &str) -> Self {
+        Self::message(message)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECT_PARENT_OPEN_EPERM: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn inject_parent_open_eperm(attempts: u8) {
+    INJECT_PARENT_OPEN_EPERM.with(|injected| injected.set(attempts));
+}
+
+fn open_parent_fd(name: &CString) -> Result<RawFd, io::Error> {
+    #[cfg(test)]
+    if INJECT_PARENT_OPEN_EPERM.with(|injected| {
+        let remaining = injected.get();
+        injected.set(remaining.saturating_sub(1));
+        remaining > 0
+    }) {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
+    let fd = unsafe {
+        libc::open(
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(fd)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,33 +334,74 @@ impl Drop for LocalJournalHandle {
 }
 
 impl ReservedDestination {
+    #[cfg(test)]
     pub(super) fn reserve(
         path: &Path,
         collision: DownloadCollisionPolicy,
         reservations: Arc<DestinationReservations>,
     ) -> Result<Self, String> {
+        Self::reserve_observed(path, collision, reservations).map_err(|failure| failure.message)
+    }
+
+    pub(super) fn reserve_observed(
+        path: &Path,
+        collision: DownloadCollisionPolicy,
+        reservations: Arc<DestinationReservations>,
+    ) -> Result<Self, DestinationAdmissionFailure> {
         if !path.is_absolute() {
-            return Err("download destination path must be absolute".into());
+            return Err(DestinationAdmissionFailure::message(
+                "download destination path must be absolute",
+            ));
         }
         let directory_path = path
             .parent()
             .ok_or("download destination has no parent")?
             .to_owned();
         let directory_name = c_string(directory_path.as_os_str(), "destination parent")?;
-        // SAFETY: directory_name is live for this call and the returned fd is
-        // immediately owned by File.
-        let fd = unsafe {
-            libc::open(
-                directory_name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
+        let first = open_parent_fd(&directory_name);
+        let first_errno = first.as_ref().err().and_then(io::Error::raw_os_error);
+        // EPERM can be returned transiently by a filesystem/security mediator.
+        // Retry the identical safe open once: no flag, path, or policy is
+        // relaxed, and the directory identity is still established only from
+        // the descriptor the kernel approved.
+        let (fd, attempts, final_errno) = match first {
+            Ok(fd) => (fd, 1, None),
+            Err(first_error) if first_error.raw_os_error() == Some(libc::EPERM) => {
+                std::thread::yield_now();
+                match open_parent_fd(&directory_name) {
+                    Ok(fd) => (fd, 2, None),
+                    Err(final_error) => {
+                        let parent_open = ParentOpenDiagnostic {
+                            attempts: 2,
+                            first_errno,
+                            final_errno: final_error.raw_os_error(),
+                        };
+                        return Err(DestinationAdmissionFailure {
+                            message: format!(
+                                "destination parent is unavailable or unsafe: {final_error}"
+                            ),
+                            parent_open,
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                let parent_open = ParentOpenDiagnostic {
+                    attempts: 1,
+                    first_errno,
+                    final_errno: first_errno,
+                };
+                return Err(DestinationAdmissionFailure {
+                    message: format!("destination parent is unavailable or unsafe: {error}"),
+                    parent_open,
+                });
+            }
         };
-        if fd < 0 {
-            return Err(format!(
-                "destination parent is unavailable or unsafe: {}",
-                io::Error::last_os_error()
-            ));
-        }
+        let parent_open = ParentOpenDiagnostic {
+            attempts,
+            first_errno,
+            final_errno,
+        };
         // SAFETY: fd was freshly returned by open and is uniquely owned.
         let directory = unsafe { File::from_raw_fd(fd) };
         let metadata = directory.metadata().map_err(|error| error.to_string())?;
@@ -300,8 +439,13 @@ impl ReservedDestination {
             final_display,
             overwrite_identity: reserved.overwrite_identity,
             collision,
+            parent_open,
             _lease: reserved.lease,
         })
+    }
+
+    pub(super) fn parent_open_diagnostic(&self) -> ParentOpenDiagnostic {
+        self.parent_open
     }
 
     #[cfg(test)]
