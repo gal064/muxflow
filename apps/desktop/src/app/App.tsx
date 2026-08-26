@@ -45,7 +45,7 @@ import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
-  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
+  defaultAppState, PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
 } from "../features/shell/types";
 import {
   archiveWorkspace,
@@ -456,13 +456,16 @@ export function App() {
   // Archived workspaces on this host and server. One set, applied at the
   // source of each list it must be absent from: the agent runtime, the
   // sidebar rows, and the focus history.
+  // Keyed on the records alone: every other persisted write (a tab switch, a
+  // sidebar drag) must not hand the agent runtime and the sidebar a new set.
+  const archivedRecords = appState.archivedWorkspaces;
   const archived = useMemo(
-    () => archivedSessionIds(appState, currentHostProfileId, hostState.serverIdentity),
-    [appState, currentHostProfileId, hostState.serverIdentity],
+    () => archivedSessionIds({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity),
+    [archivedRecords, currentHostProfileId, hostState.serverIdentity],
   );
   const archivedWorkspaces = useMemo(
-    () => archivedWorkspacesFor(appState, currentHostProfileId, hostState.serverIdentity, snapshot.sessions),
-    [appState, currentHostProfileId, hostState.serverIdentity, snapshot.sessions],
+    () => archivedWorkspacesFor({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity, snapshot.sessions),
+    [archivedRecords, currentHostProfileId, hostState.serverIdentity, snapshot.sessions],
   );
   const {
     hostSetup: agentHostSetup,
@@ -644,7 +647,9 @@ export function App() {
     notificationActivation.clearNotificationFocusGuard();
     shellNavigation.selectWindow(windowId);
   }, [notificationActivation, shellNavigation]);
-  // Never a tmux action: the session and everything in it keeps running. If
+  // The archive itself sends tmux nothing: the session and everything in it
+  // keeps running. The only tmux traffic is the ordinary switch to the next
+  // workspace when the archived one was on screen. If
   // the workspace being archived is the one on screen, the selection moves to
   // its neighbour — the row after it, else the row before — so the shell is
   // not left showing a workspace the sidebar no longer lists.
