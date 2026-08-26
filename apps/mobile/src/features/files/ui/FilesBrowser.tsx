@@ -5,11 +5,13 @@
 import { useCallback } from "react";
 import { Stack, useRouter } from "expo-router";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { useStore } from "zustand";
 
 import { FileKind } from "../../../protocol/gen/envelope_pb";
 import { colors, metrics, typeScale } from "../../../ui/tokens";
 import { relativeToRoot, rootTitle } from "../activeRoot";
 import { formatSize, type DirectoryEntry } from "../entries";
+import { filesStore } from "../filesStore";
 import { FILES_COPY } from "../presentation";
 import { useDirectory } from "../useDirectory";
 import { FileGlyph, FolderGlyph, MarkdownGlyph, SymlinkGlyph } from "./glyphs";
@@ -26,10 +28,12 @@ export interface FilesBrowserProps {
 export function FilesBrowser({ paneId, path, name }: FilesBrowserProps) {
   const router = useRouter();
   const { view, reload } = useDirectory(paneId, path);
-  const root = view.status === "ready" ? view.root : undefined;
+  // From the store rather than from `view`, so the title survives the loading
+  // and error states of a re-visit (§9.6 step 1).
+  const rootPath = useStore(filesStore, (state) => state.roots[paneId]?.root ?? "");
 
-  const title = path === undefined ? (root ? rootTitle(root.root) : "Files") : (name ?? rootTitle(path));
-  const subtitle = path === undefined ? (root?.root ?? "") : root ? relativeToRoot(root.root, path) : path;
+  const title = path === undefined ? (rootPath ? rootTitle(rootPath) : "Files") : (name ?? rootTitle(path));
+  const subtitle = path === undefined ? rootPath : rootPath ? relativeToRoot(rootPath, path) : path;
 
   const open = useCallback(
     (entry: DirectoryEntry) => {

@@ -5,9 +5,12 @@ import { Stack } from "expo-router";
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
+import { useStore } from "zustand";
+
 import { colors, fonts, radii, terminalTheme, typeScale } from "../../../ui/tokens";
 import { MARKDOWN_HTML } from "../../../webview/markdownBundle";
 import { relativeToRoot } from "../activeRoot";
+import { filesStore } from "../filesStore";
 import type { FilePresentation, ViewerMode } from "../presentation";
 import { useFileBody } from "../useFileBody";
 import { CentredMessage, CentredSpinner, ErrorState, StreamingBar, TitleBlock } from "./parts";
@@ -23,7 +26,11 @@ export function FileViewer({ paneId, path, name }: FileViewerProps) {
   const { view, reload } = useFileBody(paneId, path, name);
   const [mode, setMode] = useState<ViewerMode>("rendered");
   const markdown = view.status === "ready" && view.presentation.kind === "markdown";
-  const subtitle = view.status === "ready" ? relativeToRoot(view.root.root, path) : path;
+  // The root is known before the body is: the screen that pushed this one
+  // resolved it. Reading it from the store keeps §9.7's "path relative to root"
+  // true while the file is still streaming and after it failed to open.
+  const rootPath = useStore(filesStore, (state) => state.roots[paneId]?.root ?? "");
+  const subtitle = rootPath ? relativeToRoot(rootPath, path) : path;
 
   return (
     <View style={styles.root}>
