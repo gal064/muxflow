@@ -70,7 +70,7 @@ fn acknowledge_terminal_delivery_blocking(
         return Ok(());
     };
     *client.pending_delivery_ack.lock().unwrap() = Some((connection_epoch, host));
-    flush_delivery_ack_serialized(&client).inspect_err(|_| client.reconnect_transport())
+    flush_delivery_ack_serialized(client).inspect_err(|_| client.reconnect_transport())
 }
 
 /// Acknowledges host terminal credit for payload this connection dropped.
