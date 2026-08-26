@@ -43,8 +43,10 @@ interface Outstanding {
 
 export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
   /**
-   * Step 5. Generations are monotonic per agent, so the last generation posted
-   * for an agent is enough to answer "was this exact pair already notified".
+   * Step 5. Generations are monotonic per agent, so the highest generation
+   * posted for an agent answers "was this pair already notified" in O(1) — and
+   * suppresses a replayed *older* generation too, which set membership alone
+   * would let through.
    */
   const lastNotified = new Map<string, bigint>();
   const outstanding = new Map<string, Outstanding>();
@@ -66,7 +68,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
     const state = deps.getState();
     const decision = decideAgentNotification(transition.prev, transition.next, {
       notificationWatermark: state.notificationWatermark,
-      alreadyNotified: (agentId, generation) => lastNotified.get(agentId) === generation,
+      alreadyNotified: (agentId, generation) => (lastNotified.get(agentId) ?? -1n) >= generation,
       focusedPaneId: state.focusedPaneId,
       appInForeground: deps.appInForeground(),
       workspaceName: agentWorkspaceName(state, transition.next),
@@ -76,6 +78,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       return;
     }
     const next = transition.next;
+    const previouslyNotified = lastNotified.get(next.id);
     lastNotified.set(next.id, next.attentionGeneration);
     outstanding.set(decision.tag, {
       agentId: next.id,
@@ -84,18 +87,42 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       unseenWhenPosted: needsAttention(next),
     });
     log(`post ${next.id} ${decision.event} gen=${next.attentionGeneration}`);
-    enqueue(() => deps.host.present({
-      tag: decision.tag,
-      title: decision.title,
-      body: decision.body,
-      data: encodePayload(decision.data),
-    }));
+    enqueue(async () => {
+      try {
+        await deps.host.present({
+          tag: decision.tag,
+          title: decision.title,
+          body: decision.body,
+          data: encodePayload(decision.data),
+        });
+      } catch (error) {
+        // Nothing was shown, so nothing is outstanding and this generation was
+        // not notified: undo the bookkeeping rather than swallow the event for
+        // the rest of the process.
+        if (outstanding.get(decision.tag)?.attentionGeneration === next.attentionGeneration) {
+          outstanding.delete(decision.tag);
+        }
+        if (lastNotified.get(next.id) === next.attentionGeneration) {
+          if (previouslyNotified === undefined) lastNotified.delete(next.id);
+          else lastNotified.set(next.id, previouslyNotified);
+        }
+        throw error;
+      }
+    });
   }
 
   /** §13: cancel by tag once the notification no longer stands for anything. */
   function sweep(): void {
     if (outstanding.size === 0) return;
-    const agents = deps.getState().agents;
+    const state = deps.getState();
+    // Only a live host can say that an agent is gone. `HostConnection` clears
+    // the whole agent map on every Subscribe — including a routine reconnect —
+    // before the snapshot refills it, and a disconnect empties it too; reading
+    // either as "retired" would take an unread "Needs your input" off the lock
+    // screen, which §12 explicitly does not want and step 4 would then stop
+    // from ever being re-posted.
+    if (state.connection.state !== "connected") return;
+    const agents = state.agents;
     for (const [tag, entry] of [...outstanding]) {
       if (!stale(entry, agents[entry.agentId])) continue;
       outstanding.delete(tag);

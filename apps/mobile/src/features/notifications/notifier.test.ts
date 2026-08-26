@@ -51,7 +51,7 @@ function fakeHost() {
 /** A store stand-in: the state is set outright and `emit()` is the subscription. */
 function harness(options: { foreground?: boolean } = {}) {
   const platform = fakeHost();
-  let state: SessionState = initialSessionState();
+  let state: SessionState = { ...initialSessionState(), connection: { state: "connected", attempt: 0 } };
   const storeListeners = new Set<() => void>();
   const transitionListeners = new Set<(transition: AgentTransition) => void>();
   const notifier: AgentNotifier = createAgentNotifier({
@@ -186,7 +186,7 @@ describe("agent notifier (§13)", () => {
       expect(h.cancelled).toEqual(["a1"]);
     });
 
-    it("cancels when the agent is retired or goes away", async () => {
+    it("cancels when a connected host retires the agent", async () => {
       await h.transition(agent(), blocked());
       h.setState({ agents: {} });
       await h.settle();
@@ -197,6 +197,39 @@ describe("agent notifier (§13)", () => {
       gone.put(blocked({ present: false }));
       await gone.settle();
       expect(gone.cancelled).toEqual(["a1"]);
+    });
+
+    it("survives a reconnect: an unread notification is neither cancelled nor lost", async () => {
+      await h.transition(agent(), blocked());
+      expect(h.presented).toHaveLength(1);
+
+      // §7.2 reconnect, exactly as HostConnection drives it: the map is cleared
+      // while the connection is down, then the snapshot refills it.
+      h.setState({ connection: { state: "reconnecting", attempt: 1 } });
+      h.setState({ agents: {} });
+      await h.settle();
+      expect(h.cancelled).toEqual([]);
+      expect(h.tray.has("a1")).toBe(true);
+
+      h.setState({ agents: { a1: blocked() }, connection: { state: "connected", attempt: 0 } });
+      await h.transition(undefined, blocked());
+      await h.settle();
+      // Step 5 keeps it from being posted twice, and the sweep leaves it alone.
+      expect(h.presented).toHaveLength(1);
+      expect(h.cancelled).toEqual([]);
+      expect(h.tray.has("a1")).toBe(true);
+
+      // The agent is still cancellable once the reconnected host says so.
+      h.put(blocked({ seenGeneration: 2n }));
+      await h.settle();
+      expect(h.cancelled).toEqual(["a1"]);
+    });
+
+    it("leaves the notification alone while the host is disconnected", async () => {
+      await h.transition(agent(), blocked());
+      h.setState({ connection: { state: "idle", attempt: 0 }, agents: {} });
+      await h.settle();
+      expect(h.cancelled).toEqual([]);
     });
 
     it("keeps a `Finished` notification while the agent sits idle, and drops it when seen", async () => {
@@ -229,6 +262,29 @@ describe("agent notifier (§13)", () => {
       await h.settle();
       expect(h.cancelled).toEqual([]);
     });
+  });
+
+  it("re-arms after a post fails, rather than swallowing the generation", async () => {
+    const failing = harness();
+    let fail = true;
+    const present = failing.host.present.bind(failing.host);
+    failing.host.present = async (notification) => {
+      if (fail) throw new Error("no permission");
+      await present(notification);
+    };
+    await failing.transition(agent(), blocked());
+    expect(failing.presented).toHaveLength(0);
+    expect(failing.notifier.outstandingTags()).toEqual([]);
+
+    fail = false;
+    await failing.transition(agent(), blocked());
+    expect(failing.presented).toHaveLength(1);
+  });
+
+  it("suppresses a replayed older generation (step 5)", async () => {
+    await h.transition(agent(), blocked({ attentionGeneration: 5n }));
+    await h.transition(agent(), blocked({ attentionGeneration: 3n }));
+    expect(h.presented).toHaveLength(1);
   });
 
   it("stops listening after stop()", async () => {
