@@ -99,4 +99,10 @@ describe("summarizeSurfaceError", () => {
     expect(result.summary).toBe("commit failed");
     expect(result.detail).toBe("commit failed\npre-commit hook output\nline 2");
   });
+
+  it("points a refused workspace start directory at Settings, not at a refresh", () => {
+    const text = summarizeSurfaceError("tmux_action_rejected: workspace start directory /nope does not exist or is not a directory");
+    expect(text.summary).toContain("Settings");
+    expect(text.summary).not.toContain("Refresh");
+  });
 });
