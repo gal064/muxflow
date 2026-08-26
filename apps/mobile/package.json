@@ -1,0 +1,22 @@
+{
+  "name": "@muxflow/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "expo": "57.0.16",
+    "expo-router": "57.0.16",
+    "react": "19.2.3",
+    "react-native": "0.86.2"
+  },
+  "devDependencies": {
+    "@types/node": "26.3.0",
+    "@types/react": "19.2.18",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}
