@@ -32,6 +32,7 @@ class ConnectionService : Service() {
     private const val NOTIFICATION_ID = 4711
 
     private const val ACTION_START = "dev.muxflow.ssh.action.START"
+    private const val ACTION_STOP = "dev.muxflow.ssh.action.STOP"
     const val ACTION_DISCONNECT = "dev.muxflow.ssh.action.DISCONNECT"
     private const val EXTRA_TITLE = "title"
     private const val EXTRA_BODY = "body"
@@ -53,8 +54,26 @@ class ConnectionService : Service() {
       ContextCompat.startForegroundService(context, intent)
     }
 
+    /**
+     * Stops the service through itself rather than with `stopService`.
+     *
+     * Android kills the whole process with `ForegroundServiceDidNotStartInTimeException` when a
+     * service that was started with `startForegroundService()` is stopped from outside before it
+     * has called `startForeground()`. That window is not theoretical here: a helper that is not
+     * installed exits 127 within milliseconds of the channel reporting `connected`, so the start
+     * and the stop land in the same tick (design doc §12, "Helper missing"). Delivering the stop as
+     * an intent guarantees `onStartCommand` runs, and the service then enters the foreground and
+     * leaves again in one turn — which honours the contract in every ordering.
+     */
     fun stop(context: Context) {
-      context.stopService(Intent(context, ConnectionService::class.java))
+      val intent = Intent(context, ConnectionService::class.java).setAction(ACTION_STOP)
+      try {
+        ContextCompat.startForegroundService(context, intent)
+      } catch (t: Throwable) {
+        // Android 12+ can refuse a foreground start from the background. Nothing was started in
+        // that case either, so the plain stop is both safe and the only way left to be sure.
+        context.stopService(Intent(context, ConnectionService::class.java))
+      }
     }
   }
 
@@ -68,8 +87,15 @@ class ConnectionService : Service() {
       stopSelf()
       return START_NOT_STICKY
     }
-    val title =
-      intent?.getStringExtra(EXTRA_TITLE) ?: applicationInfo.loadLabel(packageManager).toString()
+    if (intent?.action == ACTION_STOP) {
+      // Enter the foreground before leaving it: see [stop]. `onDestroy` takes the notification
+      // down again in the same main-thread turn, so nothing is drawn.
+      createChannel()
+      startInForeground(buildNotification(serviceLabel(), ""))
+      stopSelf()
+      return START_NOT_STICKY
+    }
+    val title = intent?.getStringExtra(EXTRA_TITLE) ?: serviceLabel()
     val body = intent?.getStringExtra(EXTRA_BODY).orEmpty()
     createChannel()
     startInForeground(buildNotification(title, body))
@@ -83,6 +109,8 @@ class ConnectionService : Service() {
     ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     super.onDestroy()
   }
+
+  private fun serviceLabel(): String = applicationInfo.loadLabel(packageManager).toString()
 
   private fun startInForeground(notification: Notification) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
