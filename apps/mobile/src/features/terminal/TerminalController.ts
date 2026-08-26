@@ -224,7 +224,11 @@ export class TerminalController {
   private onConnected(): void {
     if (this.stopped) return;
     this.attached = false;
+    this.attachFailures = 0;
     this.sentGrid = undefined;
+    // The generation counter lives in the daemon; a restarted daemon starts it
+    // over, and the first seed of a fresh attach is never stale.
+    this.lastGeneration = 0n;
     if (this.phase === "exited") this.setPhase("preparing");
     void this.attach();
   }
@@ -232,10 +236,16 @@ export class TerminalController {
   // ---- attach ----------------------------------------------------------------
 
   private async attach(): Promise<void> {
-    if (this.stopped || !this.grid) return;
+    if (this.stopped || !this.grid || this.attached) return;
     if (this.attaching) {
       this.reattachWanted = true;
       return;
+    }
+    // A pending retry would otherwise re-run select → resize → attach on top
+    // of this one, and every extra ATTACH resets the page with a new seed.
+    if (this.attachRetryTimer !== undefined) {
+      clearTimeout(this.attachRetryTimer);
+      this.attachRetryTimer = undefined;
     }
     const connection = this.liveConnection();
     if (!connection) return;
@@ -257,8 +267,11 @@ export class TerminalController {
       this.attached = true;
       this.attachFailures = 0;
       if (this.stopped) {
-        // Backed out mid-attach: the attach still revealed the pane, so hide it (§7.6 step 4).
-        await this.hide(connection);
+        // Backed out mid-attach: the attach still revealed the pane, so hide it
+        // (§7.6 step 4) — unless a successor controller already owns the pane,
+        // whose own select → resize → attach this late hide would undo.
+        if (this.options.registry.get(this.paneId) === undefined) await this.hide(connection);
+        else this.attached = false;
         return;
       }
       this.log(`attached ${grid.cols}x${grid.rows}`);
@@ -271,7 +284,7 @@ export class TerminalController {
       if (!this.stopped && this.attachFailures < ATTACH_RETRY_LIMIT) {
         this.attachRetryTimer = setTimeout(() => {
           this.attachRetryTimer = undefined;
-          void this.attach();
+          if (!this.attached) void this.attach();
         }, ATTACH_RETRY_MS);
       }
     } finally {
@@ -279,6 +292,7 @@ export class TerminalController {
     }
     if (this.reattachWanted) {
       this.reattachWanted = false;
+      this.attached = false;
       void this.attach();
     } else if (this.attached && !sameGrid(this.sentGrid, this.grid)) {
       this.scheduleResize();

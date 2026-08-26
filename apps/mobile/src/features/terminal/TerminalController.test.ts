@@ -351,3 +351,64 @@ describe("TerminalController attach failure", () => {
     expect(t.drain()).toHaveLength(0);
   });
 });
+
+describe("TerminalController successor and reconnect", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("skips the late hide when a successor controller already owns the pane", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
+    await answerNext(t); // select
+    await answerNext(t); // resize
+    await settle();
+    const [attach] = t.drain();
+    if (attach?.payload.case !== "request") throw new Error("expected attach");
+    const stopped = h.controller.stop();
+    const successor = new TerminalController({
+      paneId: "%1",
+      sessionId: "$1",
+      store: h.store,
+      registry: h.registry,
+      getConnection: () => h.connection,
+      page: { send: () => {} },
+      onChange: () => {},
+    });
+    successor.start();
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: attach.requestId }));
+    await settle();
+    await stopped;
+    const ops = t.drain().map((f) => f.payload.case === "request" ? f.payload.value.operation : undefined);
+    expect(ops).not.toContain(Operation.SET_TERMINAL_VISIBILITY);
+    await successor.stop();
+  });
+
+  it("resets the generation cutoff on reconnect so a restarted daemon's seed is not stale", async () => {
+    const h = harness();
+    let t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
+    await answerNext(t); // select
+    await answerNext(t); // resize
+    await answerNext(t); // attach
+    t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 50n));
+    await settle();
+    expect(h.controller.snapshot.phase).toBe("seeded");
+    expect(h.controller.generation).toBe(50n);
+    t.closeFromRemote({ reason: "networkLost" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    t = h.transport();
+    t.drain();
+    t.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 2n, terminalOutputWindowBytes: 1000n }) }, { requestId: 1n }));
+    t.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
+    await answerNext(t); // select
+    await answerNext(t); // resize
+    await answerNext(t); // attach
+    h.page.length = 0;
+    t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 2n));
+    await settle();
+    expect(h.page.map((m) => m.t)).toContain("seed");
+  });
+});

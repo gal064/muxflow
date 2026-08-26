@@ -5,6 +5,7 @@ import { FlatList, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { agentPillState, agentTitle, noAdapterWired } from "../../src/features/agents/agentViews";
 import { markSeenIfNeeded } from "../../src/features/agents/markSeen";
 import { refreshAgents } from "../../src/features/agents/refresh";
+import { toast } from "../../src/session/connectionManager";
 import { agentWindowName, agentWorkspaceName, displayState, needsAttention, sortedAgents } from "../../src/store/selectors";
 import type { Agent } from "../../src/store/sessionStore";
 import { EmptyState } from "../../src/ui/components/EmptyState";
@@ -28,6 +29,11 @@ export default function AgentsScreen() {
     }
   }, []);
   const open = useCallback((agent: Agent) => {
+    // A retained (gone) agent may have no pane; "/terminal/" would be an unmatched route.
+    if (!agent.route.paneId) {
+      toast("This agent has no terminal.");
+      return;
+    }
     markSeenIfNeeded(agent);
     router.push({ pathname: "/terminal/[paneId]", params: { paneId: agent.route.paneId, sessionId: agent.route.sessionId } });
   }, [router]);
