@@ -127,6 +127,8 @@ export function openBulkConnection(): Promise<HostConnection> {
       if (outcome !== "ok") {
         const message = store.getState().connection.message ?? "bulk connection failed";
         if (bulk?.connection === lane) bulk = null;
+        // The lane would otherwise keep re-dialling on a stale epoch.
+        lane.disconnect();
         throw new Error(message);
       }
       return lane;

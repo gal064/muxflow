@@ -59,6 +59,9 @@ export interface TerminalControllerOptions {
 
 export const SEED_TIMEOUT_MS = 5_000;
 export const RESIZE_DEBOUNCE_MS = 150;
+/** A failed select/resize/attach is retried after this, up to ATTACH_RETRY_LIMIT times. */
+export const ATTACH_RETRY_MS = 2_000;
+export const ATTACH_RETRY_LIMIT = 3;
 
 export class TerminalController {
   readonly paneId: string;
@@ -77,6 +80,8 @@ export class TerminalController {
   private seedRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private seedHintTimer: ReturnType<typeof setTimeout> | undefined;
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
+  private attachRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  private attachFailures = 0;
   private readonly seedTimeoutMs: number;
   private readonly resizeDebounceMs: number;
 
@@ -151,6 +156,10 @@ export class TerminalController {
     if (this.resizeTimer !== undefined) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = undefined;
+    }
+    if (this.attachRetryTimer !== undefined) {
+      clearTimeout(this.attachRetryTimer);
+      this.attachRetryTimer = undefined;
     }
     this.unregister?.();
     this.unregister = undefined;
@@ -240,10 +249,13 @@ export class TerminalController {
       // control client and refuses a resize before one exists (§7.6 step 1).
       this.options.store.getState().setFocusedPane(this.paneId);
       await connection.request(selectTerminalSession(this.sessionId));
+      if (this.stopped) return; // left before the reveal: nothing to hide
       await connection.request(resizeTerminal(grid.cols, grid.rows));
       this.sentGrid = grid;
+      if (this.stopped) return;
       await connection.request(attachTerminal(this.sessionId, this.paneId));
       this.attached = true;
+      this.attachFailures = 0;
       if (this.stopped) {
         // Backed out mid-attach: the attach still revealed the pane, so hide it (§7.6 step 4).
         await this.hide(connection);
@@ -253,8 +265,15 @@ export class TerminalController {
       if (this.phase !== "seeded") this.startSeedTimers();
     } catch (error) {
       this.lastError = describe(error);
-      this.log(`attach.failed ${this.lastError}`);
+      this.attachFailures += 1;
+      this.log(`attach.failed (${this.attachFailures}) ${this.lastError}`);
       this.emit();
+      if (!this.stopped && this.attachFailures < ATTACH_RETRY_LIMIT) {
+        this.attachRetryTimer = setTimeout(() => {
+          this.attachRetryTimer = undefined;
+          void this.attach();
+        }, ATTACH_RETRY_MS);
+      }
     } finally {
       this.attaching = false;
     }

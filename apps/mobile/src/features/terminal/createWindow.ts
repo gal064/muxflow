@@ -7,19 +7,51 @@ import type { SessionStore } from "../../store/sessionStore";
 
 export interface CreatedWindow { windowId: string; paneId: string }
 
+/** How long a stale_topology retry waits for the newer TOPOLOGY_SNAPSHOT to land (the desktop waits the same). */
+export const STALE_TOPOLOGY_WAIT_MS = 250;
+
+function waitForNewerGeneration(store: SessionStore, seen: bigint, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (store.getState().topologyGeneration > seen) return resolve();
+    const timer = setTimeout(() => {
+      unsubscribe();
+      resolve();
+    }, timeoutMs);
+    const unsubscribe = store.subscribe((state) => {
+      if (state.topologyGeneration > seen) {
+        clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      }
+    });
+  });
+}
+
 /**
  * `expectedGeneration` is read from the store at call time. The host
  * reconciles topology in the background, so a `stale_topology` refusal is
- * ordinary; it arrives after a fresh TOPOLOGY_SNAPSHOT, so one retry with the
- * new generation is enough. A second refusal propagates.
+ * ordinary; the fresh TOPOLOGY_SNAPSHOT travels on the ordered event channel
+ * and can land just after the refusal, so the retry waits briefly for a newer
+ * generation, then sends once more. A second refusal propagates.
  */
-export async function createTerminalWindow(connection: HostConnection, store: SessionStore, sessionId: string): Promise<CreatedWindow> {
-  const attempt = () => connection.request(createWindow(sessionId, connection.serverIdentity, store.getState().topologyGeneration));
+export async function createTerminalWindow(
+  connection: HostConnection,
+  store: SessionStore,
+  sessionId: string,
+  staleWaitMs = STALE_TOPOLOGY_WAIT_MS,
+): Promise<CreatedWindow> {
+  const attempt = () => {
+    const generation = store.getState().topologyGeneration;
+    return connection.request(createWindow(sessionId, connection.serverIdentity, generation)).catch((error: unknown) => {
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { generation });
+    });
+  };
   let response;
   try {
     response = await attempt();
   } catch (error) {
     if (!(error instanceof HostError) || error.code !== "stale_topology") throw error;
+    await waitForNewerGeneration(store, (error as { generation?: bigint }).generation ?? 0n, staleWaitMs);
     response = await attempt();
   }
   const result = response.tmuxActionResult;
