@@ -230,10 +230,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
           {/* Named after the host, because both fields are about one machine:
               a path that exists on a laptop is not a path on a build box, and
               silently applying either across hosts is how a create fails on a
-              directory that was never there. */}
-          {/* Keyed by host: a path half-typed for one machine must not be
-              left sitting in the field when the fields start describing
-              another. */}
+              directory that was never there. Keyed by it for the same reason —
+              a path half-typed for one machine must not be left sitting in the
+              field once the fields describe another. */}
           <fieldset className="settings-fieldset" key={props.workspaceDefaultsHostId}>
             <legend>New workspaces on {props.workspaceDefaultsHostLabel}</legend>
             <label>Start in directory
