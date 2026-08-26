@@ -34,7 +34,6 @@ import { GitRepositoryStore } from "../features/git/repositoryStore";
 import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
 import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
-import { emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
 import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
 import {
   helperConnectionKey, helperOwnsHostSetupLane, helperUpgradeReducer, initialHelperUpgradeState,
@@ -50,6 +49,8 @@ import {
 import {
   combineWorkspaceTabs,
   closeAppTab,
+  closeTransientGitDiff,
+  findGitDiffTab,
   mountedAppTabIds,
   mountedTerminalPanes,
   openFileTab,
@@ -68,6 +69,7 @@ import {
   type PendingShellTab,
 } from "../features/shell/model";
 import { useContextMenusOpen } from "../ui/ContextMenu";
+import { useFocusHistoryNavigation } from "./useFocusHistoryNavigation";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
@@ -227,14 +229,6 @@ export function App() {
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
-  const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
-  const focusHistoryRef = useRef(focusHistory);
-  focusHistoryRef.current = focusHistory;
-  // Set while navigation itself is moving the app, so the effect that records
-  // where the app ended up does not record the intermediate state as a *new*
-  // destination — which truncated the forward branch on every back-step across
-  // workspaces.
-  const historyStep = useRef(false);
   const controllers = useRef(new Map<string, TerminalPaneController>());
   const lastSlowSendAt = useRef(new Map<string, number>());
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
@@ -548,6 +542,19 @@ export function App() {
     [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
+  // A single-clicked Git diff is transient: it lives until the user selects
+  // any other tab. Closed here, on the selection change itself, rather than
+  // through `closeWorkspaceAppTab` — that path reveals a terminal, and the
+  // user has already navigated. Re-checked against live state: a diff pinned
+  // after it was selected is not the one that was selected then.
+  const previousSelectedAppTab = useRef(selectedAppTab);
+  useEffect(() => {
+    const previous = previousSelectedAppTab.current;
+    previousSelectedAppTab.current = selectedAppTab;
+    if (!previous || previous.kind !== "gitDiff" || previous.id === selectedAppTab?.id) return;
+    setAppState((current) => closeTransientGitDiff(current, currentHostProfileId, previous.id));
+    // Keyed on the strip's selection, which is the only thing this rule is about.
+  }, [activeCombinedTabKey]);
   const grid = useMemo(() => windowGrid(panes), [panes]);
   const mountedPanes = useMemo(
     () => mountedTerminalPanes(snapshot.panes, activeWindowId, Boolean(activeWindow?.zoomed)),
@@ -573,21 +580,6 @@ export function App() {
   }, [activeSession, currentHostProfileId, hostState.generation, hostState.serverIdentity,
     selectedAppTab, shellNavigation.observeAuthoritativeWindow, windows]);
 
-  // Focus history follows where the app actually ended up, whatever moved it —
-  // a click, a shortcut, an agent notification, or tmux itself. Except when
-  // ⌘[ / ⌘] moved it: that is a walk through the history, not a new
-  // destination, and recording it would truncate the branch being walked.
-  useEffect(() => {
-    if (!activeSessionId) return;
-    if (historyStep.current) { historyStep.current = false; return; }
-    setFocusHistory((current) => visitFocus(current, { sessionId: activeSessionId, windowId: activeWindowId }));
-  }, [activeSessionId, activeWindowId]);
-  useEffect(() => {
-    setFocusHistory((current) => pruneFocusHistory(current, (point) =>
-      snapshot.sessions.some((session) => session.id === point.sessionId)
-      && (!point.windowId || snapshot.windows.some((item) => item.id === point.windowId))));
-  }, [snapshot.sessions, snapshot.windows]);
-
   const focusDirection = useCallback((direction: PaneDirection) => {
     if (!activePane) return;
     const target = adjacentPane(panes, activePane, direction);
@@ -602,6 +594,23 @@ export function App() {
     notificationActivation.clearNotificationFocusGuard();
     shellNavigation.selectWindow(windowId);
   }, [notificationActivation, shellNavigation]);
+  const revealTerminalUnderAppTab = useCallback((sessionId: string, windowId: string | undefined) => {
+    notificationActivation.clearNotificationFocusGuard();
+    shellNavigation.revealLocalTerminal(sessionId, windowId, () => setNavigationAppTab(sessionId, undefined));
+  }, [notificationActivation, setNavigationAppTab, shellNavigation]);
+  const focusNavigation = useFocusHistoryNavigation({
+    activeSessionId,
+    activeWindowId,
+    appTabs: appState.appTabs,
+    revealTerminal: revealTerminalUnderAppTab,
+    selectAppTab: shellNavigation.selectAppTab,
+    selectSession,
+    selectWindow,
+    selectedAppTabId: selectedAppTab?.id,
+    sessions: snapshot.sessions,
+    setStatus,
+    windows: snapshot.windows,
+  });
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is
@@ -637,8 +646,23 @@ export function App() {
    * flushes every open editor first, which for a set of tabs would replay the
    * same flush once per tab.
    */
-  const closeWorkspaceAppTab = (tab: AppOwnedTab, scope: HostScopeToken) => {
+  const closeWorkspaceAppTab = (tab: AppOwnedTab, scope: HostScopeToken, mode: "single" | "bulk" = "single") => {
     const commit = () => setAppState((current) => closeAppTab(current, currentHostProfileId, tab.id));
+    // Closing the document on screen goes back to what was showing before
+    // it — the terminal it was opened from, usually — rather than to whatever
+    // terminal the workspace happens to have active. With no history to go
+    // back to, a neighbouring document in the same workspace is next, and
+    // only then the workspace's terminal. A bulk close skips both: its
+    // neighbours are about to go too, and the terminal is where it ends up.
+    if (mode === "single" && selectedAppTabRef.current?.id === tab.id && sameHostConnection(scope, hostScopeRef.current)) {
+      if (focusNavigation.navigateBackFromClosing(tab.id)) return commit();
+      const neighbours = workspaceAppTabs.filter((item) => item.id !== tab.id);
+      const neighbour = neighbours.filter((item) => item.order < tab.order).at(-1) ?? neighbours[0];
+      if (neighbour) {
+        shellNavigation.selectAppTab(tab.sessionId, activeWindowId, neighbour.id);
+        return commit();
+      }
+    }
     commitScopedAppTabClose({
       activeWindowId,
       commit,
@@ -653,7 +677,7 @@ export function App() {
   const bulkCloseInFlight = useRef(false);
   const closeTabSet = useBulkTabClose({
     agentPresenceRef,
-    closeAppTab: closeWorkspaceAppTab,
+    closeAppTab: (tab, scope) => closeWorkspaceAppTab(tab, scope, "bulk"),
     hostScopeRef,
     performAction,
     setStatus,
@@ -706,23 +730,7 @@ export function App() {
     serverIdentity: hostState.serverIdentity, setAppState, setConfirmation,
     setPaletteOpen, setSettingsOpen, setShortcutEditorOpen, setStatus, setTextPrompt,
     setWorkspaceSwitcherOpen, snapshot,
-    // Navigation happens here, not inside a state updater. React invokes
-    // updaters twice under StrictMode, and an updater that dispatched tmux
-    // actions therefore sent each one twice, with one captured generation
-    // between them — the same double-dispatch the tab strip documents avoiding.
-    stepFocusHistory: (direction) => {
-      const stepped = stepFocus(focusHistoryRef.current, direction);
-      if (!stepped.point) {
-        setStatus(direction === "back" ? "Nothing earlier to go back to." : "Nothing later to go forward to.");
-        return;
-      }
-      const { sessionId, windowId } = stepped.point;
-      historyStep.current = true;
-      setFocusHistory(stepped.history);
-      if (sessionId !== activeSessionId) selectSession(sessionId);
-      else if (windowId && windowId !== activeWindowId) selectWindow(windowId);
-      else historyStep.current = false;
-    },
+    stepFocusHistory: focusNavigation.step,
     windows,
   });
   // A context menu is an overlay like any other: with it open, ⌘W must not
@@ -945,8 +953,12 @@ export function App() {
   >
     <TitleBar
       canJump={canJump}
+      canGoBack={focusNavigation.canGoBack}
+      canGoForward={focusNavigation.canGoForward}
       canMutate={hostState.canMutate}
+      onBack={() => void runCommand("focus.back")}
       onBell={() => void runCommand("agents.jumpUnread")}
+      onForward={() => void runCommand("focus.forward")}
       onNewWorkspace={() => void runCommand("session.new")}
       onTogglePanel={() => void runCommand("view.togglePanel")}
       onToggleSidebar={() => void runCommand("view.toggleSidebar")}
@@ -1156,19 +1168,39 @@ export function App() {
         ignoredPaths={ignoredPaths}
         maxWidth={Math.max(PANEL_MIN_WIDTH, Math.floor(windowWidth / 2))}
         onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
-        onGitDiff={(entry, target) => {
+        onGitDiff={(entry, target, options) => {
           if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
           const session = activeSession;
           const serverIdentity = hostState.serverIdentity;
           const root = workspaceFiles.root;
           const gitStatus = workspaceGit.status;
+          const hostProfileId = currentHostProfileId;
+          // The commit can run twice — once now, and again when a remote flight
+          // it interrupted settles. The second run must only re-select the tab
+          // the first one opened, never open it again: a transient diff the
+          // user has already navigated away from is closed, and stays closed.
+          // Decided in the commit, not in the updater: StrictMode runs the
+          // updater twice and keeps the second result.
+          let committed = false;
           shellNavigation.selectLocalAppTab(
             session.id,
             activeWindowId,
             `git:${gitStatus.repository.id}:${target}:${entry.path}`,
-            () => setAppState((current) => openGitDiffTab(
-              current, currentHostProfileId, serverIdentity, session, entry, target, gitStatus, root,
-            )),
+            () => {
+              const replay = committed;
+              committed = true;
+              setAppState((current) => {
+                if (!replay) {
+                  return openGitDiffTab(
+                    current, hostProfileId, serverIdentity, session, entry, target, gitStatus, root, options,
+                  );
+                }
+                const opened = findGitDiffTab(
+                  current, hostProfileId, serverIdentity, session.id, gitStatus.repository.id, entry.path, target,
+                );
+                return opened ? selectAppTab(current, hostProfileId, serverIdentity, session, opened.id) : current;
+              });
+            },
           );
         }}
         onMessage={setStatus}

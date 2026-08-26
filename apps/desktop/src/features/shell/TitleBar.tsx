@@ -16,6 +16,11 @@ interface TitleBarProps {
    */
   canJump: boolean;
   canMutate: boolean;
+  /** Whether Back / Forward have somewhere that still exists to go. */
+  canGoBack: boolean;
+  canGoForward: boolean;
+  onBack(): void;
+  onForward(): void;
   onToggleSidebar(): void;
   onTogglePanel(): void;
   onNewWorkspace(): void;
@@ -26,10 +31,9 @@ interface TitleBarProps {
  * The only full-width bar: 38px on macOS, where it has to clear the native
  * traffic lights drawn over it, and 28px like every other bar elsewhere.
  *
- * It carries four controls. The mock also draws back/forward arrows; those did
- * not survive, because the phase's own acceptance gate caps resting chrome and
- * "delete chrome instead of rearranging it" outranks a decorative pair of
- * arrows. Focus history is still there — as commands, on ⌘[ and ⌘].
+ * It carries six controls. Back and Forward walk the focus history — through
+ * terminals and document tabs alike — and are disabled when nothing that
+ * still exists lies in that direction; ⌘[ and ⌘] run the same commands.
  *
  * On macOS the OS titlebar is an overlay, so this bar draws underneath the
  * traffic lights and reserves room for them; the empty space is a drag region,
@@ -56,6 +60,22 @@ export function TitleBar(props: TitleBarProps) {
       onClick={props.onToggleSidebar}
       type="button"
     ><Icon name="sidebarLeft" /></button>
+    <button
+      aria-label="Back"
+      className="bar-button"
+      disabled={!props.canGoBack}
+      onClick={props.onBack}
+      title={props.platform === "mac" ? "Back (⌘[)" : "Back (Ctrl+[)"}
+      type="button"
+    ><Icon name="arrowLeft" /></button>
+    <button
+      aria-label="Forward"
+      className="bar-button"
+      disabled={!props.canGoForward}
+      onClick={props.onForward}
+      title={props.platform === "mac" ? "Forward (⌘])" : "Forward (Ctrl+])"}
+      type="button"
+    ><Icon name="arrowRight" /></button>
     <div className="titlebar-title" data-tauri-drag-region>
       <span className="titlebar-workspace">{props.workspaceName ?? "No workspace"}</span>
     </div>
