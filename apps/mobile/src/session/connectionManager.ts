@@ -6,6 +6,11 @@
 // written, built and run against the two getters it actually uses —
 // `getConnection()` and `openBulkConnection()` — whose signatures are fixed.
 // Everything below those two is the smallest thing that works.
+//
+// One line the replacement has to keep: the control connection's `onFileEvent`
+// must reach `filesStore.applyFileEvent`. §7.4 routes ACTIVE_ROOT,
+// DIRECTORY_SNAPSHOT and FILE_CHANGED there, and §9.6/§11.2 make a mounted
+// Files screen re-list on them.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { HostConnection } from "../protocol/HostConnection";

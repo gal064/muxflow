@@ -30,13 +30,18 @@ describe("assembling a body (§9.7 step 1, §11.1)", () => {
     expect(decoder.decode((body as { bytes: Uint8Array }).bytes)).toBe(text);
   });
 
-  it("places a frame that arrives out of order at its own offset", () => {
+  it("refuses a frame that skips ahead, which would leave a zero-filled hole", () => {
     const assembler = new FileStreamAssembler(OPERATION);
     const bytes = encoder.encode("abcdef");
     assembler.push(textHeader(6));
-    assembler.push(bodyFrame(OPERATION, 3, bytes.slice(3), true));
-    assembler.push(bodyFrame(OPERATION, 0, bytes.slice(0, 3)));
-    expect(decoder.decode((assembler.finish() as { bytes: Uint8Array }).bytes)).toBe("abcdef");
+    expect(() => assembler.push(bodyFrame(OPERATION, 3, bytes.slice(3), true))).toThrow(FileStreamError);
+  });
+
+  it("refuses a frame that repeats bytes already written", () => {
+    const assembler = new FileStreamAssembler(OPERATION);
+    assembler.push(textHeader(6));
+    assembler.push(bodyFrame(OPERATION, 0, encoder.encode("abc")));
+    expect(() => assembler.push(bodyFrame(OPERATION, 0, encoder.encode("abc")))).toThrow(FileStreamError);
   });
 
   it("ignores frames belonging to another operation", () => {
@@ -61,10 +66,10 @@ describe("assembling a body (§9.7 step 1, §11.1)", () => {
     expect(() => assembler.finish()).toThrow(/eof/u);
   });
 
-  it("refuses a frame that would fall outside the declared length", () => {
+  it("refuses a frame that would run past the declared length", () => {
     const assembler = new FileStreamAssembler(OPERATION);
     assembler.push(textHeader(3));
-    expect(() => assembler.push(bodyFrame(OPERATION, 2, encoder.encode("abc"), true))).toThrow(FileStreamError);
+    expect(() => assembler.push(bodyFrame(OPERATION, 0, encoder.encode("abcd"), true))).toThrow(FileStreamError);
   });
 
   it("refuses a body frame that arrives before the header", () => {
@@ -140,10 +145,25 @@ describe("classifications the host answers with (§9.7 step 1)", () => {
     expect(new FileStreamAssembler(OPERATION).finish()).toEqual({ kind: "unavailable" });
   });
 
-  it("refuses a body under a classification that declared none", () => {
+  it("refuses a body under a header that declared none", () => {
     const assembler = new FileStreamAssembler(OPERATION);
     assembler.push(headerFrame(OPERATION, { contentKind: FileContentKind.BINARY, totalBytes: 0n, contentStreaming: false }));
     expect(() => assembler.push(bodyFrame(OPERATION, 0, encoder.encode("x"), true))).toThrow(FileStreamError);
+  });
+
+  it("drains the body of an image the host does stream, and still answers `image`", () => {
+    // `content_streaming`, not the classification, decides whether frames
+    // follow: an image under the host's 25 MiB preview limit streams its bytes
+    // (open_stream.rs), and §9.7 shows a placeholder for it either way.
+    const assembler = new FileStreamAssembler(OPERATION);
+    assembler.push(headerFrame(OPERATION, {
+      contentKind: FileContentKind.IMAGE,
+      totalBytes: 2048n,
+      contentStreaming: true,
+    }));
+    assembler.push(bodyFrame(OPERATION, 0, new Uint8Array(1024)));
+    assembler.push(bodyFrame(OPERATION, 1024, new Uint8Array(1024), true));
+    expect(assembler.finish()).toEqual({ kind: "image" });
   });
 });
 

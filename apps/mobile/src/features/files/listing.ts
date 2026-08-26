@@ -64,6 +64,7 @@ export async function fetchDirectory(
     if (directory.complete || !directory.nextPageToken) break;
     if (pages >= MAX_LISTING_PAGES) {
       truncated = true;
+      console.log(`[muxflow] listing.truncated path=${target.path} pages=${pages} entries=${collected.length}`);
       break;
     }
     pageToken = directory.nextPageToken;

@@ -52,7 +52,7 @@ export function FilesBrowser({ paneId, path, name }: FilesBrowserProps) {
     <View style={styles.root}>
       <Stack.Screen options={{ headerTitle: () => <TitleBlock title={title} subtitle={subtitle} /> }} />
       {view.status === "loading" ? <CentredSpinner /> : null}
-      {view.status === "error" ? <ErrorState message={FILES_COPY.error(view.message)} onRetry={reload} /> : null}
+      {view.status === "error" ? <ErrorState message={view.message} onRetry={reload} /> : null}
       {view.status === "ready" ? (
         view.listing.entries.length === 0 ? (
           <CentredMessage message={FILES_COPY.empty} />

@@ -2,8 +2,9 @@
 //
 // A "visit" is a focus: §9.6 says the listing is fetched once per visit, and a
 // DIRECTORY_SNAPSHOT or FILE_CHANGED for the displayed directory re-lists
-// silently. Both are wired here so the two screens (`index` and `dir`) share
-// one implementation.
+// silently, as does an ACTIVE_ROOT that moves the pane's root (§11.2). All of
+// them are wired here so the two screens (`index` and `dir`) share one
+// implementation.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useFocusEffect } from "expo-router";
@@ -14,6 +15,7 @@ import { resolveRoot, rooted, type ResolvedRoot } from "./activeRoot";
 import { displayMessageFor } from "./errors";
 import { filesStore } from "./filesStore";
 import { fetchDirectory, type DirectoryListing } from "./listing";
+import { FILES_COPY } from "./presentation";
 
 export type DirectoryView =
   /** Resolving the root, or waiting for the connection: §9.6 shows a centred spinner. */
@@ -33,9 +35,19 @@ export interface DirectoryResult {
 export function useDirectory(paneId: string, path?: string | undefined): DirectoryResult {
   const [view, setView] = useState<DirectoryView>({ status: "loading" });
   const connectionState = useStore(sessionStore, (state) => state.connection.state);
-  const revision = useStore(filesStore, (state) => (path === undefined ? 0 : (state.directoryRevisions[path] ?? 0)));
+  // The root screen only learns its directory once the root resolves, so the
+  // revision is watched on whatever path was actually listed.
+  const [listedPath, setListedPath] = useState(path);
+  const revision = useStore(filesStore, (state) => (listedPath === undefined ? 0 : (state.directoryRevisions[listedPath] ?? 0)));
+  const rootToken = useStore(filesStore, (state) => state.roots[paneId]?.rootToken ?? "");
   const attempt = useRef(0);
   const focused = useRef(false);
+  /**
+   * What the host had told us about this directory when it was last listed.
+   * Seeded from the mount-time values so the first focus is the only load, and
+   * refreshed by `load` so a listing this hook itself caused never re-triggers.
+   */
+  const applied = useRef(`${rootToken}:${revision}`);
 
   const load = useCallback(async () => {
     const token = ++attempt.current;
@@ -54,10 +66,12 @@ export function useDirectory(paneId: string, path?: string | undefined): Directo
       filesStore.getState().setRoot(root);
       const listing = await fetchDirectory(request, rooted(root, path ?? root.root), identity);
       if (token !== attempt.current) return;
+      setListedPath(listing.path);
+      applied.current = signature(paneId, listing.path);
       setView({ status: "ready", root, listing });
     } catch (error) {
       if (token !== attempt.current) return;
-      setView({ status: "error", message: displayMessageFor(error) });
+      setView({ status: "error", message: FILES_COPY.error(displayMessageFor(error)) });
     }
   }, [connectionState, paneId, path]);
 
@@ -73,10 +87,15 @@ export function useDirectory(paneId: string, path?: string | undefined): Directo
     }, [load]),
   );
 
-  // A host-driven change to this directory re-lists without a spinner.
+  // A host-driven change — this directory's contents, or the pane's root —
+  // re-lists without a spinner. Anything this hook did itself is already in
+  // `applied`, so only the host's own news gets here.
   useEffect(() => {
-    if (revision > 0 && focused.current) void load();
-  }, [revision, load]);
+    const current = `${rootToken}:${revision}`;
+    if (applied.current === current) return;
+    applied.current = current;
+    if (focused.current) void load();
+  }, [revision, rootToken, load]);
 
   const reload = useCallback(() => {
     setView({ status: "loading" });
@@ -84,4 +103,9 @@ export function useDirectory(paneId: string, path?: string | undefined): Directo
   }, [load]);
 
   return { view, reload };
+}
+
+function signature(paneId: string, listedPath: string): string {
+  const state = filesStore.getState();
+  return `${state.roots[paneId]?.rootToken ?? ""}:${state.directoryRevisions[listedPath] ?? 0}`;
 }
