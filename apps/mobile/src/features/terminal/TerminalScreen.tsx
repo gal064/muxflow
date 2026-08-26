@@ -9,7 +9,7 @@ import { stripAgentStatusGlyphs } from "../agents/agentLabels";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
-import { ConnectionStrip } from "../../ui/components/ConnectionStrip";
+import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";

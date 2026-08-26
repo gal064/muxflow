@@ -28,9 +28,9 @@ export default function HostsScreen() {
   const connect = (host: SavedHost) => {
     // A cold start already connected to `lastHostId` (§12); tapping its row
     // must not tear that connection down and dial it again.
-    if (!isLive(host.id)) connectHost(host);
-    // §9.1: navigate as soon as the state is `sshConnecting`, which `connect()`
-    // sets synchronously.
+    if (!isLive(host.id)) void connectHost(host).catch(() => undefined);
+    // §9.1: navigate right away; the strip on /home shows `sshConnecting` as
+    // soon as the dial starts (the rejection is rendered by the chrome, §12).
     router.push("/home");
   };
 
@@ -211,7 +211,7 @@ function useAutoConnect(hydrated: boolean): void {
     const { hosts, lastHostId } = hostsStore.getState();
     const host = hosts.find((candidate) => candidate.id === lastHostId);
     if (!host || sessionStore.getState().connection.state !== "idle") return;
-    connectHost(host);
+    void connectHost(host).catch(() => undefined);
   }, [hydrated]);
 }
 

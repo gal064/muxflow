@@ -1,10 +1,11 @@
 import { Tabs } from "expo-router";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { needsAttention } from "../../src/store/selectors";
-import { ConnectionStrip } from "../../src/ui/components/ConnectionStrip";
+import { ConnectionDot } from "../../src/features/hosts/ConnectionDot";
+import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
 import { useSession } from "../../src/ui/hooks";
 import { colors, metrics, typeScale } from "../../src/ui/tokens";
 
@@ -77,17 +78,6 @@ function TabHeader({ title }: { title: string; [key: string]: unknown }) {
   );
 }
 
-/** 10 dp: `--ok` connected, `--warn` reconnecting/connecting, `--danger` failed. Opens the Connection sheet (§9.8, M6). */
-function ConnectionDot() {
-  const state = useSession((s) => s.connection.state);
-  const color = state === "connected" ? colors.ok : state === "failed" || state === "incompatible" ? colors.danger : colors.warn;
-  return (
-    <Pressable accessibilityLabel={`Connection: ${state}`} hitSlop={12} style={styles.dotHit}>
-      <View style={[styles.dot, { backgroundColor: color }]} />
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create({
   icon: { fontSize: 18 },
   headerWrap: { backgroundColor: colors.chromeBg },
@@ -103,6 +93,4 @@ const styles = StyleSheet.create({
     fontSize: typeScale.appBarTitle,
     fontWeight: "600",
   },
-  dotHit: { padding: 8 },
-  dot: { borderRadius: 5, height: 10, width: 10 },
 });

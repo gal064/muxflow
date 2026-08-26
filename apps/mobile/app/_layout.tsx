@@ -4,8 +4,6 @@ import { StatusBar } from "expo-status-bar";
 import { ConnectionModals } from "../src/features/hosts/ConnectionModals";
 import { wireApp } from "../src/session/appWiring";
 import { colors, typeScale } from "../src/ui/tokens";
-// Registers the SSH transport factory with the connection manager (§6, §11.1).
-import "../src/ssh/registerTransport";
 
 wireApp();
 
