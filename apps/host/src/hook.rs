@@ -348,6 +348,7 @@ fn build_event(
     let event_name = string_field(&value, &["hook_event_name", "hookEventName", "event"]);
     let codex_permission =
         adapter == v1::AgentAdapterKind::Codex && event_name == "PermissionRequest";
+    let codex_pre_tool = adapter == v1::AgentAdapterKind::Codex && event_name == "PreToolUse";
     let notification_type = string_field(&value, &["notification_type", "notificationType"]);
     let mut normalized = serde_json::Map::new();
     normalized.insert("hook_event_name".into(), event_name.into());
@@ -356,6 +357,12 @@ fn build_event(
     }
     if !notification_type.is_empty() {
         normalized.insert("notification_type".into(), notification_type.into());
+    }
+    if codex_pre_tool {
+        let tool_name = string_field(&value, &["tool_name", "toolName"]);
+        if !tool_name.is_empty() {
+            normalized.insert("tool_name".into(), tool_name.into());
+        }
     }
     if codex_permission {
         let turn_id = string_field(&value, &["turn_id", "turnId"]);
@@ -748,6 +755,28 @@ mod tests {
         assert!(!payload.contains("private"));
         assert!(!payload.contains("secret"));
         assert!(!payload.contains("prompt"));
+    }
+
+    #[test]
+    fn codex_question_normalizes_only_the_tool_name_discriminator() {
+        let event = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"PreToolUse","session_id":"session-1","tool_name":"request_user_input","tool_input":{"questions":[{"question":"private question","options":[{"label":"private choice"}]}]},"prompt":"private prompt","api_token":"secret"}"#.to_vec(),
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-1",
+                "tool_name": "request_user_input",
+            })
+        );
     }
 
     #[test]

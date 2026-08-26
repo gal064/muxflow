@@ -20,6 +20,16 @@ fn permission_for_turn(id: &str, turn_id: &str, reviewer: Option<&str>) -> v1::A
     permission
 }
 
+fn codex_tool_event(id: &str, event_name: &str, tool_name: &str) -> v1::AgentHookEvent {
+    let mut tool = event(id, 0, event_name);
+    tool.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": event_name,
+        "tool_name": tool_name,
+    }))
+    .unwrap();
+    tool
+}
+
 #[test]
 fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
     let path = std::env::current_dir()
@@ -225,6 +235,78 @@ fn auto_review_approval_stays_working_and_only_stop_requests_attention() {
         completed.agent.unwrap().lifecycle,
         v1::AgentLifecycleState::Idle as i32
     );
+}
+
+#[test]
+fn codex_question_blocks_once_and_resumes_after_its_tool_returns() {
+    let runtime = runtime("codex-question");
+    let topology = topology("codex");
+    let prompt = runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!prompt.notify);
+    assert_eq!(
+        prompt.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+
+    let blocked = runtime
+        .ingest_hook_with_context(
+            &codex_tool_event("question", "PreToolUse", "request_user_input"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(blocked.notify);
+    assert_eq!(blocked.reason, "blocked");
+    let blocked_agent = blocked.agent.unwrap();
+    assert_eq!(
+        blocked_agent.lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+    assert_eq!(blocked_agent.attention_kind, "blocked");
+
+    let repeated = runtime
+        .ingest_hook_with_context(
+            &codex_tool_event("question-repeat", "PreToolUse", "request_user_input"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!repeated.notify);
+    assert_eq!(
+        repeated.agent.unwrap().attention_generation,
+        blocked_agent.attention_generation
+    );
+
+    let resumed = runtime
+        .ingest_hook_with_context(
+            &codex_tool_event("answer", "PostToolUse", "request_user_input"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!resumed.notify);
+    assert_eq!(
+        resumed.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+
+    let completed = runtime
+        .ingest_hook_with_context(&event("stop", 0, "Stop"), "server-a", Some(&topology))
+        .unwrap();
+    assert!(completed.notify);
+    assert_eq!(completed.reason, "completed");
+    let completed_agent = completed.agent.unwrap();
+    assert_eq!(
+        completed_agent.lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+    assert_eq!(completed_agent.attention_kind, "completed");
 }
 
 #[test]
