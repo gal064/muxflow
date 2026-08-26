@@ -4,11 +4,10 @@ import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor
 import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
 import { AgentIcon } from "../agents/AgentIdentity";
 import { fileIcon } from "../files/fileIcons";
-import {
-  selectableTabs, tabsToCloseNonAgent, tabsToCloseOthers, tabsToCloseRight,
-  type CombinedTab, type SelectableTab,
-} from "../shell/model";
+import { bulkCloseTargets, selectableTabs, type CombinedTab, type SelectableTab } from "../shell/model";
 import type { HostScopeToken } from "../shell/hostScope";
+import type { Platform } from "../../commands/registry";
+import { shortcutGlyphs, shortcutSpoken } from "../../commands/shortcutGlyphs";
 
 /** A tab that exists on the host, and so has something to act on. */
 type AppTab = Extract<CombinedTab, { kind: "app" }>;
@@ -19,8 +18,9 @@ interface TabStripProps {
   activePaneId?: string;
   activeTerminalPaneCount: number;
   canMutate: boolean;
-  canSplit: boolean;
   commandScope: HostScopeToken;
+  /** Renders the all-tabs list's positional shortcuts in this platform's notation. */
+  platform: Platform;
   /** Draws a shape as well as a color in each activity dot. */
   stateGlyphs: boolean;
   onSelect(tab: CombinedTab): void;
@@ -40,7 +40,13 @@ interface TabStripProps {
   /** Double-clicking a preview tab makes it permanent, as VS Code's does. */
   onPin(tab: Extract<CombinedTab, { kind: "app" }>): void;
   onNewTerminal(): void;
-  onSplit(): void;
+}
+
+/** What the all-tabs list calls each kind, when two tabs share a title. */
+function tabKindLabel(tab: CombinedTab): string {
+  if (tab.kind === "terminal") return "terminal";
+  if (tab.kind === "pending") return "pending";
+  return tab.appKind === "gitDiff" ? "diff" : tab.appKind;
 }
 
 /**
@@ -81,7 +87,20 @@ export function TabStrip(props: TabStripProps) {
     scope: HostScopeToken;
     focusedPaneId?: string;
   }>();
+  // The strip does not scroll vertically and does not wrap, so a long enough
+  // strip hides tabs off its right edge with no affordance at all. This is that
+  // affordance: every tab, in display order, whether or not it is clipped.
+  const [allTabsAnchor, setAllTabsAnchor] = useState<ContextMenuAnchor>();
+  // An open menu closes on any pointer-down outside it, and that includes the
+  // control that opened it — so by the time the click arrives the menu is gone
+  // and the button would silently reopen it, leaving a control that claims
+  // `aria-expanded` and can never collapse. The close's own instant is what
+  // makes it a toggle.
+  const allTabsClosedAt = useRef(0);
   const tabs = useRef<HTMLDivElement>(null);
+  const revealTab = (key: string) => tabs.current
+    ?.querySelector<HTMLElement>(`#${CSS.escape(workspaceTabDomId(key))}`)
+    ?.scrollIntoView({ block: "nearest", inline: "nearest" });
   // The strip scrolls rather than pushing its neighbours, which means the tab
   // that just became active can be outside it. Measured with the right panel
   // open and four long tmux window names: opening a git diff created its
@@ -91,8 +110,7 @@ export function TabStrip(props: TabStripProps) {
   // nothing when the tab is already visible.
   useEffect(() => {
     if (!props.activeKey) return;
-    tabs.current?.querySelector<HTMLElement>(`#${CSS.escape(workspaceTabDomId(props.activeKey))}`)
-      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    revealTab(props.activeKey);
   }, [props.activeKey, props.tabs]);
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: SelectableTab, index: number) => {
@@ -122,18 +140,26 @@ export function TabStrip(props: TabStripProps) {
 
   // Measured against the strip as it is now, not as it was when the menu
   // opened: `props.tabs` is the display order, and the menu can outlive it.
-  const bulkOthers = menu ? tabsToCloseOthers(props.tabs, menu.tab.key) : [];
-  const bulkRight = menu ? tabsToCloseRight(props.tabs, menu.tab.key) : [];
-  const bulkNonAgent = menu ? tabsToCloseNonAgent(props.tabs) : [];
+  // The toolbar's anchor is the selected tab; the menu's is whichever tab was
+  // right-clicked. Same function, so the two can never name different sets.
+  const menuBulk = bulkCloseTargets(props.tabs, menu?.tab.key, props.canMutate);
+  const toolBulk = bulkCloseTargets(props.tabs, props.activeKey, props.canMutate);
   const shortcutIndexByKey = new Map<CombinedTab["key"], number>(selectableTabs(props.tabs).slice(0, 9)
     .map((tab, index) => [tab.key, index + 1]));
-  const takesTerminals = (targets: readonly CombinedTab[]) => targets.some((tab) => tab.kind === "terminal");
-  // Nothing to close is a disabled item, and a set containing a tmux window
-  // needs the same write permission a single terminal close does.
-  const bulkDisabled = (targets: readonly CombinedTab[]) => targets.length === 0 || (takesTerminals(targets) && !props.canMutate);
+  const activeTab = selectableTabs(props.tabs).find((tab) => tab.key === props.activeKey);
+  const takesTerminals = menuBulk.takesTerminals;
   const menuClosesFocusedPane = Boolean(menu?.focusedPaneId
     && menu.tab.key === props.activeKey
     && props.activeTerminalPaneCount > 1);
+  // A title is ambiguous only when another tab in the list wears it, so the
+  // kind is appended where it tells two rows apart and nowhere else.
+  const titleCounts = new Map<string, number>();
+  for (const tab of props.tabs) titleCounts.set(tab.title, (titleCounts.get(tab.title) ?? 0) + 1);
+  const allTabsLabel = (tab: CombinedTab) => {
+    const kind = (titleCounts.get(tab.title) ?? 0) > 1 ? ` (${tabKindLabel(tab)})` : "";
+    const state = tab.kind === "terminal" && tab.attention !== "none" ? ` — agent ${tab.attention}` : "";
+    return `${tab.title}${kind}${state}`;
+  };
 
   return <div className="tabstrip">
     <div aria-label="Terminal tabs and documents" className="tabstrip-tabs" ref={tabs} role="tablist">
@@ -232,9 +258,71 @@ export function TabStrip(props: TabStripProps) {
       })}
     </div>
     <div className="tabstrip-tools">
-      <button aria-label="Split pane right" className="bar-button" disabled={!props.canSplit} onClick={props.onSplit} type="button"><Icon name="splitRight" /></button>
-      <button aria-label="New terminal tab" className="bar-button" disabled={!props.canMutate} onClick={props.onNewTerminal} type="button"><Icon name="plus" /></button>
+      {/* The bulk closes, one click from the strip rather than a right-click
+          away. Both take the selected tab as their anchor and the same targets
+          the menu's items would. */}
+      <button
+        aria-label="Close other tabs"
+        className="bar-button"
+        disabled={!activeTab || toolBulk.disabled(toolBulk.others)}
+        onClick={() => { if (activeTab) props.onCloseOthers(activeTab, props.commandScope); }}
+        title="Close other tabs"
+        type="button"
+      ><Icon name="closeOthers" /></button>
+      <button
+        aria-label="Close all non-agent tabs"
+        className="bar-button"
+        disabled={toolBulk.disabled(toolBulk.nonAgent)}
+        onClick={() => props.onCloseNonAgent(props.commandScope)}
+        title="Close all non-agent tabs"
+        type="button"
+      ><Icon name="closeNonAgent" /></button>
+      <button aria-label="New terminal tab" className="bar-button" disabled={!props.canMutate} onClick={props.onNewTerminal} title="New terminal tab" type="button"><Icon name="plus" /></button>
+      <button
+        aria-expanded={Boolean(allTabsAnchor)}
+        aria-haspopup="menu"
+        aria-label="All tabs"
+        className="bar-button"
+        onClick={(event) => {
+          if (Date.now() - allTabsClosedAt.current < 250) return;
+          // Focused before the menu mounts, because the menu remembers whatever
+          // had focus and gives it back on Escape — and a webview that does not
+          // focus a button on click would otherwise hand it back to nothing.
+          event.currentTarget.focus();
+          setAllTabsAnchor(anchorForElement(event.currentTarget));
+        }}
+        title="All tabs"
+        type="button"
+      ><Icon name="more" /></button>
     </div>
+    {allTabsAnchor && <ContextMenu
+      anchor={allTabsAnchor}
+      items={props.tabs.map((tab) => {
+        const shortcutIndex = shortcutIndexByKey.get(tab.key);
+        const shortcut = shortcutIndex === undefined ? undefined : `Ctrl+${shortcutIndex}`;
+        return {
+          id: tab.key,
+          label: allTabsLabel(tab),
+          // A placeholder has nothing on the host to select; it is listed so the
+          // list matches the strip, and disabled for the same reason the strip
+          // disables it.
+          disabled: tab.kind === "pending",
+          checked: tab.key === props.activeKey,
+          shortcut: shortcutGlyphs(shortcut, props.platform),
+          shortcutLabel: shortcutSpoken(shortcut, props.platform),
+          run: () => {
+            if (tab.kind === "pending") return;
+            props.onSelect(tab);
+            // The active-tab effect covers a selection that moves the key.
+            // Choosing the tab that is already selected does not move it, and
+            // that is exactly the clipped tab someone opened this list to find.
+            revealTab(tab.key);
+          },
+        };
+      })}
+      label="All tabs"
+      onClose={() => { allTabsClosedAt.current = Date.now(); setAllTabsAnchor(undefined); }}
+    />}
     {menu && <ContextMenu
       anchor={menu.anchor}
       items={[
@@ -256,22 +344,22 @@ export function TabStrip(props: TabStripProps) {
         {
           id: "closeOthers",
           label: "Close Others",
-          destructive: takesTerminals(bulkOthers),
-          disabled: bulkDisabled(bulkOthers),
+          destructive: takesTerminals(menuBulk.others),
+          disabled: menuBulk.disabled(menuBulk.others),
           run: () => props.onCloseOthers(menu.tab, menu.scope),
         },
         {
           id: "closeRight",
           label: "Close Tabs to the Right",
-          destructive: takesTerminals(bulkRight),
-          disabled: bulkDisabled(bulkRight),
+          destructive: takesTerminals(menuBulk.right),
+          disabled: menuBulk.disabled(menuBulk.right),
           run: () => props.onCloseRight(menu.tab, menu.scope),
         },
         {
           id: "closeNonAgent",
           label: "Close All Non-Agent Tabs",
-          destructive: takesTerminals(bulkNonAgent),
-          disabled: bulkDisabled(bulkNonAgent),
+          destructive: takesTerminals(menuBulk.nonAgent),
+          disabled: menuBulk.disabled(menuBulk.nonAgent),
           run: () => props.onCloseNonAgent(menu.scope),
         },
         // A diff has no file behind it to save, so the item is absent rather

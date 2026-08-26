@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Icon } from "./Icon";
 
 export interface ContextMenuItem {
   id: string;
@@ -9,6 +10,14 @@ export interface ContextMenuItem {
   /** Already rendered in platform notation by the caller. */
   shortcut?: string;
   shortcutLabel?: string;
+  /**
+   * Makes the item one option of a set rather than a command: defined turns the
+   * row into a `menuitemradio` carrying `aria-checked` and a check column, so a
+   * menu that *picks* something can say which one is picked. Left undefined —
+   * every menu but the strip's all-tabs list — the row is a plain `menuitem`
+   * and nothing about its markup changes.
+   */
+  checked?: boolean;
   run(): void;
 }
 
@@ -158,6 +167,7 @@ export function ContextMenu(props: ContextMenuProps) {
     {props.items.map((item, index) => item === "separator"
       ? <hr aria-hidden="true" key={`separator-${index}`} />
       : <button
+        aria-checked={item.checked}
         className={item.destructive ? "context-menu-item destructive" : "context-menu-item"}
         // Stable identity for tests and for anything that needs to point at a
         // specific item; the label is user-facing text and will change.
@@ -165,10 +175,18 @@ export function ContextMenu(props: ContextMenuProps) {
         disabled={item.disabled}
         key={item.id}
         onClick={() => { item.run(); props.onClose(); }}
-        role="menuitem"
+        role={item.checked === undefined ? "menuitem" : "menuitemradio"}
         type="button"
       >
-        <span>{item.label}</span>
+        {item.checked === undefined
+          ? <span>{item.label}</span>
+          // The check column is reserved on every row of such a menu, not only
+          // the checked one, so choosing a different row does not reflow the
+          // labels under the pointer.
+          : <span className="menu-item-label">
+            <span aria-hidden="true" className="menu-item-check">{item.checked ? <Icon name="check" size={11} /> : null}</span>
+            {item.label}
+          </span>}
         {item.shortcut && <kbd aria-label={item.shortcutLabel}>{item.shortcut}</kbd>}
       </button>)}
     {props.children}
