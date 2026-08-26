@@ -234,7 +234,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           {/* Keyed by host: a path half-typed for one machine must not be
               left sitting in the field when the fields start describing
               another. */}
-          <fieldset className="settings-modes" key={props.workspaceDefaultsHostId}>
+          <fieldset className="settings-fieldset" key={props.workspaceDefaultsHostId}>
             <legend>New workspaces on {props.workspaceDefaultsHostLabel}</legend>
             <label>Start in directory
               <WorkspaceDefaultField
