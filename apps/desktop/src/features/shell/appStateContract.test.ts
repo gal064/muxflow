@@ -3,7 +3,7 @@ import contract from "./persistedAppState.contract.json";
 import {
   clampedPanelWidth, clampedTerminalFontSize, defaultAppState, defaultShellState, normalizePersistedAppState,
   panelWidthForWindow, PANEL_MIN_WIDTH,
-  type AppOwnedTab, type ArchivedWorkspaceRecord, type PersistedAppState, type WorkspaceUiRecord,
+  type AppOwnedTab, type ArchivedWorkspaceRecord, type PersistedAppState, type WorkspaceDefaults, type WorkspaceUiRecord,
 } from "./types";
 
 /**
@@ -48,9 +48,14 @@ describe("persisted app state contract", () => {
     const archived: Required<ArchivedWorkspaceRecord> = {
       hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", archivedAt: 0,
     };
+    // The per-host workspace defaults cross the same boundary, and both of its
+    // fields are optional — exactly the shape that stops being saved without
+    // anything failing.
+    const defaults: Required<WorkspaceDefaults> = { directory: "", startupCommand: "" };
     expect(Object.keys(contract.appTabs[0]).sort()).toEqual(Object.keys(tab).sort());
     expect(Object.keys(contract.workspaceUi[0]).sort()).toEqual(Object.keys(workspace).sort());
     expect(Object.keys(contract.archivedWorkspaces[0]).sort()).toEqual(Object.keys(archived).sort());
+    expect(Object.keys(contract.workspaceDefaults.local).sort()).toEqual(Object.keys(defaults).sort());
   });
 
   it("is a value this side would actually produce", () => {
@@ -67,6 +72,8 @@ describe("persisted app state contract", () => {
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
     expect(typed.archivedWorkspaces[0].sessionId).toBe("$2");
+    expect(typed.shell.defaultMarkdownView).toBe("preview");
+    expect(typed.workspaceDefaults.local).toEqual({ directory: "/work/projects", startupCommand: "git status" });
   });
 
   it("keeps only well-formed archived records, one per workspace, newest within the cap", () => {
@@ -86,6 +93,60 @@ describe("persisted app state contract", () => {
     expect(capped.map((item) => item.archivedAt)).toContain(204);
     // A file from before the field existed loads with nothing archived.
     expect(normalizePersistedAppState({ ...defaultAppState, archivedWorkspaces: undefined }).archivedWorkspaces).toEqual([]);
+  });
+});
+
+describe("per-host workspace defaults", () => {
+  const saved = (workspaceDefaults: unknown) => normalizePersistedAppState({
+    schemaVersion: 1, appTabs: [], workspaceUi: [], shell: {}, workspaceDefaults,
+  }).workspaceDefaults;
+
+  it("keeps one host's directory and command apart from another's", () => {
+    expect(saved({
+      local: { directory: "/work" },
+      "ssh-remote-linux": { startupCommand: "tmux list-sessions" },
+    })).toEqual({ local: { directory: "/work" }, "ssh-remote-linux": { startupCommand: "tmux list-sessions" } });
+  });
+
+  it("drops values that are not usable rather than storing an empty setting", () => {
+    // "Cleared" and "never set" have to be the same state: the create path asks
+    // one question — is there a directory? — and a stored "" would answer yes.
+    expect(saved({ local: { directory: "   ", startupCommand: "" } })).toEqual({});
+    expect(saved({ local: { directory: 7, startupCommand: null } })).toEqual({});
+    expect(saved({ local: "everything" })).toEqual({});
+    expect(saved({ local: { directory: "  /work  " } })).toEqual({ local: { directory: "/work" } });
+    expect(saved(undefined)).toEqual({});
+    expect(saved(["local"])).toEqual({});
+    // An unusable entry is skipped, not a reason to stop reading the rest: `""`
+    // is a legal JSON key, and every host after it would otherwise be dropped.
+    expect(saved({ "": { directory: "/x" }, local: { directory: "/work" } }))
+      .toEqual({ local: { directory: "/work" } });
+  });
+
+  it("bounds each value so one long paste cannot freeze every other save", () => {
+    // The storage side validates every text field and refuses the *whole*
+    // state, so an unbounded command here would stop open tabs, workspace
+    // selection and window geometry from persisting at all.
+    const long = "x".repeat(20_000);
+    expect(saved({ local: { directory: long, startupCommand: long } })).toEqual({
+      local: { directory: "x".repeat(2_048), startupCommand: "x".repeat(2_048) },
+    });
+  });
+
+  it("caps the map the way the host setup decisions are capped", () => {
+    const many = Object.fromEntries(Array.from({ length: 1_100 }, (_, index) => [`host-${index}`, { directory: "/work" }]));
+    expect(Object.keys(saved(many))).toHaveLength(1_024);
+  });
+
+  it("restores the default markdown view and leaves legacy saves on split", () => {
+    const shell = (value: unknown) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { defaultMarkdownView: value },
+    }).shell.defaultMarkdownView;
+    expect(shell("source")).toBe("source");
+    expect(shell("preview")).toBe("preview");
+    expect(shell("split")).toBe("split");
+    expect(shell("reader")).toBe("split");
+    expect(shell(undefined)).toBe("split");
   });
 });
 

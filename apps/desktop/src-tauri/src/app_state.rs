@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -147,8 +147,26 @@ pub struct ShellPreferences {
     pub terminal_application_clipboard: bool,
     #[serde(default)]
     pub terminal_font_size: Option<u8>,
+    /// The mode a newly opened Markdown tab starts in. `None` is a save written
+    /// before the setting existed, which is the same thing as "split".
+    #[serde(default)]
+    pub default_markdown_view: Option<AppTabViewMode>,
     #[serde(default)]
     pub window_geometry: Option<WindowGeometry>,
+}
+
+/// What a new workspace on one host profile starts with.
+///
+/// Both halves are per host and both are optional, because a filesystem path
+/// and a shell command are statements about one machine. Absent means the
+/// behaviour this app had before the setting existed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -226,6 +244,8 @@ pub struct PersistedAppState {
     /// before this field existed must keep loading.
     #[serde(default)]
     pub archived_workspaces: Vec<ArchivedWorkspaceRecord>,
+    #[serde(default)]
+    pub workspace_defaults: BTreeMap<String, WorkspaceDefaults>,
 }
 
 impl Default for PersistedAppState {
@@ -238,6 +258,7 @@ impl Default for PersistedAppState {
             commands: CommandPreferences::default(),
             host_setup: HashMap::new(),
             archived_workspaces: Vec::new(),
+            workspace_defaults: BTreeMap::new(),
         }
     }
 }
@@ -335,6 +356,18 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
     }
     for host_profile_id in value.host_setup.keys() {
         validate_text("host setup profile ID", host_profile_id, false)?;
+    }
+    if value.workspace_defaults.len() > 1_024 {
+        return Err("too many recorded workspace defaults".into());
+    }
+    for (host_profile_id, defaults) in &value.workspace_defaults {
+        validate_text("workspace defaults profile ID", host_profile_id, false)?;
+        if let Some(directory) = defaults.directory.as_deref() {
+            validate_text("workspace start directory", directory, false)?;
+        }
+        if let Some(startup_command) = defaults.startup_command.as_deref() {
+            validate_text("workspace startup command", startup_command, false)?;
+        }
     }
     let mut ids = HashSet::new();
     for tab in &value.app_tabs {
@@ -583,6 +616,7 @@ mod tests {
                 copy_on_select: false,
                 terminal_application_clipboard: false,
                 terminal_font_size: Some(13),
+                default_markdown_view: Some(AppTabViewMode::Preview),
                 window_geometry: Some(WindowGeometry {
                     x: 20,
                     y: 30,
@@ -603,6 +637,13 @@ mod tests {
                 session_name: "parked".into(),
                 archived_at: 1_700_000_000_000.0,
             }],
+            workspace_defaults: BTreeMap::from([(
+                "local".into(),
+                WorkspaceDefaults {
+                    directory: Some("/work/projects".into()),
+                    startup_command: Some("git status".into()),
+                },
+            )]),
         }
     }
 
@@ -765,6 +806,26 @@ mod tests {
             value.host_setup.get("ssh-remote-linux"),
             Some(&HostSetupDecision::Declined)
         );
+        assert_eq!(
+            value.shell.default_markdown_view,
+            Some(AppTabViewMode::Preview)
+        );
+        // Per host, and never merged: the local directory and the remote one
+        // are two different machines' filesystems.
+        assert_eq!(
+            value.workspace_defaults.get("local"),
+            Some(&WorkspaceDefaults {
+                directory: Some("/work/projects".into()),
+                startup_command: Some("git status".into()),
+            })
+        );
+        assert_eq!(
+            value
+                .workspace_defaults
+                .get("ssh-remote-linux")
+                .and_then(|defaults| defaults.directory.as_deref()),
+            Some("/srv/checkout")
+        );
         validate(&value).expect("the frontend's own payload must validate");
 
         // Nothing may be stored that the frontend does not send, and nothing the
@@ -798,6 +859,11 @@ mod tests {
             keys(&stored["commands"]),
             keys(&expected["commands"]),
             "commands"
+        );
+        assert_eq!(
+            keys(&stored["workspaceDefaults"]["local"]),
+            keys(&expected["workspaceDefaults"]["local"]),
+            "workspaceDefaults"
         );
         // And the envelope itself, so a whole section cannot go missing.
         assert_eq!(

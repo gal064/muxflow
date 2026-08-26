@@ -23,6 +23,14 @@ export interface TmuxAction {
   resizeCells?: number;
   zoomed?: boolean;
   confirmed?: boolean;
+  /**
+   * Where a created session's first pane starts (`createSession` only).
+   *
+   * Resolved and validated on the host that owns the filesystem, not here: the
+   * path may name a directory only the remote machine has, and a create that
+   * half-succeeds is worse than one that is refused.
+   */
+  directory?: string;
 }
 
 export interface AuthoritativePrecondition {
@@ -52,6 +60,7 @@ interface WireTmuxAction {
   expected_server_identity: string;
   expected_generation: number;
   confirmed: boolean;
+  directory: string;
 }
 
 export function toWireTmuxAction(
@@ -80,6 +89,7 @@ export function toWireTmuxAction(
     expected_server_identity: precondition.serverIdentity,
     expected_generation: precondition.generation,
     confirmed: action.confirmed ?? false,
+    directory: action.directory ?? "",
   };
 }
 
