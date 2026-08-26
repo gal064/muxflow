@@ -1,0 +1,177 @@
+/*
+ * Markdown page styles (design doc §10.3). Colours are the §10.1 tokens,
+ * spelled literally because this file is not TypeScript and the WebView has no
+ * access to `src/ui/tokens.ts`.
+ *
+ * Code is set in JetBrains Mono where the platform has it and falls back to the
+ * system monospace otherwise: the WebView loads no files (`allowFileAccess` is
+ * off, §10.2) and embedding the 270 KB face as a data URI here would quadruple
+ * the bundle for a fallback nobody can tell apart at 13 px.
+ */
+
+:root {
+  --chrome-bg: #282c34;
+  --chrome-raised: #2c313a;
+  --chrome-border: #3e4451;
+  --chrome-ink: #c4c8c6;
+  --chrome-ink-strong: #ffffff;
+  --chrome-dim: #8f96a1;
+  --accent: #7aa6da;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--chrome-bg);
+}
+
+body {
+  color: var(--chrome-ink);
+  font-family: Roboto, system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
+  overflow-wrap: break-word;
+  padding: 16px 16px 48px;
+  -webkit-text-size-adjust: 100%;
+}
+
+#content > :first-child {
+  margin-top: 0;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: var(--chrome-ink-strong);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1.6em 0 0.6em;
+}
+
+h1 {
+  font-size: 1.65em;
+}
+
+h2 {
+  border-bottom: 1px solid var(--chrome-border);
+  font-size: 1.35em;
+  padding-bottom: 0.25em;
+}
+
+h3 {
+  font-size: 1.15em;
+}
+
+h4,
+h5,
+h6 {
+  font-size: 1em;
+}
+
+p,
+ul,
+ol,
+blockquote,
+pre,
+table {
+  margin: 0 0 1em;
+}
+
+ul,
+ol {
+  padding-left: 1.4em;
+}
+
+li {
+  margin: 0.25em 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:active {
+  text-decoration: underline;
+}
+
+strong {
+  color: var(--chrome-ink-strong);
+}
+
+hr {
+  background: var(--chrome-border);
+  border: 0;
+  height: 1px;
+  margin: 1.6em 0;
+}
+
+blockquote {
+  border-left: 3px solid var(--chrome-border);
+  color: var(--chrome-dim);
+  margin-left: 0;
+  padding: 0 0 0 12px;
+}
+
+code,
+kbd,
+samp {
+  background: var(--chrome-raised);
+  border-radius: 4px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 13px;
+  padding: 0.1em 0.35em;
+}
+
+pre {
+  background: var(--chrome-raised);
+  border: 1px solid var(--chrome-border);
+  border-radius: 8px;
+  overflow-x: auto;
+  padding: 12px;
+}
+
+pre code {
+  background: none;
+  border-radius: 0;
+  display: block;
+  padding: 0;
+  white-space: pre;
+}
+
+/*
+ * A wide table scrolls inside itself rather than widening the page; the phone
+ * has no horizontal viewport to spare.
+ */
+table {
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  width: max-content;
+}
+
+th,
+td {
+  border: 1px solid var(--chrome-border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+th {
+  background: var(--chrome-raised);
+  color: var(--chrome-ink-strong);
+  font-weight: 600;
+}
+
+img {
+  max-width: 100%;
+}
