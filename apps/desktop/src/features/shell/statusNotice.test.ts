@@ -43,6 +43,29 @@ describe("status notices", () => {
     ]) expect(noticeForStatus(message, 1)?.severity, message).toBe("problem");
   });
 
+  it("times out a bulk close's receipt but not its partial failure", () => {
+    // The tab-strip closes no longer ask first, so this sentence is the whole
+    // acknowledgement of a set that vanished. It has to appear — a clipped tab
+    // can be closed unseen — and it has to go away on its own.
+    const receipt = noticeForStatus("Closed 3 tabs.", 1)!;
+    expect(receipt.severity).toBe("info");
+    expect(noticeDismissDelay(receipt)).toBe(NOTICE_DISMISS_MS);
+    expect(noticeForStatus("Closed 1 tab.", 2)?.severity).toBe("info");
+    // Deliberately not suppressed by a `Closed ` routine prefix: the partial
+    // outcome opens with the same two words, and a prefix rule would silence
+    // the one message of the pair a person has to act on.
+    const partial = noticeForStatus("Closed 1 of 2 tabs; 1 could not be closed.", 3)!;
+    expect(partial.severity).toBe("problem");
+    expect(noticeDismissDelay(partial)).toBeUndefined();
+    // A terminal held back by the commit-time agent recheck is a survivor too,
+    // and its sentence contains none of the other refusal words. Left as info
+    // it timed out after six seconds, which is the same silence the counted
+    // outcome exists to break.
+    const heldBack = noticeForStatus("Closed 1 of 2 tabs; 1 still had an agent and was left open.", 4)!;
+    expect(heldBack.severity).toBe("problem");
+    expect(noticeDismissDelay(heldBack)).toBeUndefined();
+  });
+
   it("carries an id so the same message twice re-shows the notice", () => {
     expect(noticeForStatus("same", 1)?.id).toBe(1);
     expect(noticeForStatus("same", 2)?.id).toBe(2);

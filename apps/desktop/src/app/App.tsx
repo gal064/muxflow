@@ -158,20 +158,6 @@ function AppTabFrame({ tab }: { tab: AppOwnedTab }) {
     </section>;
 }
 
-/**
- * What a bulk close is actually about to destroy.
- *
- * Only the terminal windows are named: closing a document tab throws nothing
- * away, and a dialog that counted those too would ask for consent to something
- * that needs none.
- */
-function bulkCloseDetail(tabs: readonly CombinedTab[]): string {
-  const terminals = tabs.filter((tab) => tab.kind === "terminal").length;
-  return terminals === 1
-    ? "1 terminal window will be closed and its running processes terminated."
-    : `${terminals} terminal windows will be closed and their running processes terminated.`;
-}
-
 export function App() {
   const [status, setStatus] = useState("Discovering local tmux…");
   const {
@@ -237,14 +223,6 @@ export function App() {
     : undefined;
   const [shortcutEditorOpen, setShortcutEditorOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
-  // A bulk close waiting on its one summary dialog. Closing tabs the user is
-  // *not* looking at is not the single close's "the surface's disappearance is
-  // the confirmation" case, so it asks — once, for the whole set.
-  const [pendingBulkClose, setPendingBulkClose] = useState<{
-    tabs: CombinedTab[];
-    scope: HostScopeToken;
-    protectAgents: boolean;
-  }>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
@@ -672,6 +650,7 @@ export function App() {
       tabSessionId: tab.sessionId,
     });
   };
+  const bulkCloseInFlight = useRef(false);
   const closeTabSet = useBulkTabClose({
     agentPresenceRef,
     closeAppTab: closeWorkspaceAppTab,
@@ -750,7 +729,7 @@ export function App() {
   // close the tab behind it.
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
-    || Boolean(confirmation) || Boolean(pendingBulkClose) || Boolean(textPrompt)
+    || Boolean(confirmation) || Boolean(textPrompt)
     || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecovery.modalOpen
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
@@ -886,11 +865,25 @@ export function App() {
     void runCommand("window.close", { kind: tab.kind === "app" ? "appTab" : "terminalTab", id: tab.id, scope });
   };
 
-  /** Terminal windows in the set mean one dialog for the set; app tabs alone close on the spot. */
+  /**
+   * Runs a settled bulk close immediately.
+   *
+   * There is no preflight dialog. A close asked for from a tab strip is a
+   * direct manipulation of the thing the person is pointing at, and a modal
+   * between the click and the result made the four-tab case a two-step. What
+   * replaces it is a receipt: the hook flushes dirty editors before it destroys
+   * anything, refuses the whole set if a save fails, still protects terminals
+   * holding agents, and reports afterwards.
+   */
   const bulkCloseTabs = (tabs: CombinedTab[], scope: HostScopeToken, protectAgents = false) => {
-    if (tabs.length === 0) return;
-    if (tabs.some((tab) => tab.kind === "terminal")) setPendingBulkClose({ tabs, scope, protectAgents });
-    else void closeTabSet(tabs, scope, protectAgents);
+    // One set at a time. The dialog used to serialize these by existing; with a
+    // toolbar button in its place a second click lands while the first close is
+    // still walking the set, and the second run reads the same pre-close
+    // snapshot — dispatching closes for windows that are already gone and
+    // ending in a sticky "N could not be closed" for an operation that worked.
+    if (tabs.length === 0 || bulkCloseInFlight.current) return;
+    bulkCloseInFlight.current = true;
+    void closeTabSet(tabs, scope, protectAgents).finally(() => { bulkCloseInFlight.current = false; });
   };
 
   const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {
@@ -1028,7 +1021,6 @@ export function App() {
           activePaneId={activePane?.id}
           activeTerminalPaneCount={panes.length}
           canMutate={hostState.canMutate && Boolean(activeSession)}
-          canSplit={hostState.canMutate && Boolean(activePane) && !selectedAppTab}
           commandScope={currentHostScope}
           onClose={closeCombinedTab}
           onCloseCurrent={(paneId, scope) => void runCommand("window.close", { kind: "focusedSurface", paneId, scope })}
@@ -1057,8 +1049,9 @@ export function App() {
           onPin={(tab) => pinOpenTab(tab.id)}
           onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
           onSelect={selectCombinedTab}
-      stateGlyphs={appState.shell.agentStateGlyphs}
-          onSplit={() => void runCommand("pane.splitRight")}
+          platform={platform}
+          shortcuts={shortcuts}
+          stateGlyphs={appState.shell.agentStateGlyphs}
           tabs={combinedTabs}
         />
         <div
@@ -1255,18 +1248,6 @@ export function App() {
       sounds={agentSounds}
       sshConfigPath={sshConfigPath}
       sshTarget={sshTarget}
-    />}
-    {pendingBulkClose && <ConfirmationDialog
-      confirmLabel="Close"
-      destructive
-      detail={bulkCloseDetail(pendingBulkClose.tabs)}
-      onCancel={() => setPendingBulkClose(undefined)}
-      onConfirm={() => {
-        const pending = pendingBulkClose;
-        setPendingBulkClose(undefined);
-        void closeTabSet(pending.tabs, pending.scope, pending.protectAgents);
-      }}
-      title={`Close ${pendingBulkClose.tabs.length} ${pendingBulkClose.tabs.length === 1 ? "tab" : "tabs"}?`}
     />}
     {workspaceSwitcherOpen && <WorkspaceSwitcher
       onClose={() => setWorkspaceSwitcherOpen(false)}

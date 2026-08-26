@@ -154,10 +154,10 @@ describe("one derivation, three surfaces", () => {
     const surfaces = [
       sidebar({ agents: rows, stateGlyphs: true }),
       renderToStaticMarkup(<TabStrip
-        activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate canSplit commandScope={commandScope} onClose={noop} onCloseCurrent={noop} onCloseOthers={noop}
+        activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate commandScope={commandScope} onClose={noop} onCloseCurrent={noop} onCloseOthers={noop}
         onCloseNonAgent={noop}
         onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
-        onPin={noop} onRenameTerminal={noop} onSelect={noop} onSplit={noop} stateGlyphs
+        onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} stateGlyphs
         tabs={combineWorkspaceTabs(
           [{ id: "@1", sessionId: "$1", index: 0, name: "claude", active: true, layout: "", zoomed: false }] as never,
           [],
@@ -200,10 +200,10 @@ describe("idle shows nothing, on every surface that draws state", () => {
   const idleRollups = deriveAgentRollups([agent({ id: "quiet", lifecycle: "idle" })]);
 
   const tabStrip = (stateGlyphs: boolean) => renderToStaticMarkup(<TabStrip
-    activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate canSplit commandScope={commandScope}
+    activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate commandScope={commandScope}
     onClose={noop} onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop}
     onDownloadTab={noop} onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop}
-    onSelect={noop} onSplit={noop} stateGlyphs={stateGlyphs}
+    onSelect={noop} platform="mac" shortcuts={{}} stateGlyphs={stateGlyphs}
     tabs={combineWorkspaceTabs([idleWindow] as never, [], idleRollups.byWindow)}
   />);
 

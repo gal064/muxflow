@@ -17,19 +17,36 @@ export function useAppShellChrome(status: string) {
 
   useEffect(() => {
     const next = noticeForStatus(status, (noticeSequence.current += 1));
-    setNotice(next);
-    setCompletedDownload((current) => current && next && current.message.trim() === next.message
-      ? { ...current, noticeId: next.id }
-      : undefined);
-    if (!next) return;
-    const delay = noticeDismissDelay(next);
+    // Routine chatter is the shell narrating itself — "Live" after every
+    // snapshot, "Topology changed; reconciling…" after every mutation — and it
+    // is not an instruction to take down what is already on screen. Treating it
+    // as one meant any message a mutation produced was erased by the mutation's
+    // own follow-up statuses, usually within the same frame: a bulk close's
+    // receipt and, worse, a refusal that was never meant to auto-dismiss.
+    if (next) setNotice(next);
+    // The download's Reveal/Open actions hang off the notice by id, so the two
+    // have to be retired by the same rule. Cleared on chatter while the notice
+    // it belongs to stayed up, a completed download became a toast naming a
+    // file with nothing to do with it.
+    setCompletedDownload((current) => {
+      if (!next) return current;
+      return current && current.message.trim() === next.message ? { ...current, noticeId: next.id } : undefined;
+    });
+  }, [status]);
+
+  // Keyed on the notice rather than on the status that produced it: a notice
+  // that outlives a routine status has to keep its own clock, or holding it
+  // through the chatter above would hold it forever.
+  useEffect(() => {
+    if (!notice) return;
+    const delay = noticeDismissDelay(notice);
     if (delay === undefined) return;
     const timer = window.setTimeout(
-      () => setNotice((current) => current?.id === next.id ? undefined : current),
+      () => setNotice((current) => current?.id === notice.id ? undefined : current),
       delay,
     );
     return () => window.clearTimeout(timer);
-  }, [status]);
+  }, [notice]);
 
   useEffect(() => {
     if (!window.matchMedia) return;
