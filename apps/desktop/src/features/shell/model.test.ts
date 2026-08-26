@@ -363,25 +363,32 @@ describe("application shell model", () => {
     const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
     const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
     // The shape of the commit the shell hands the navigation coordinator: the
-    // first run opens, every later run only re-selects what the first opened.
-    let openedId: string | undefined;
-    const commit = (current: PersistedAppState): PersistedAppState => {
-      if (openedId) {
-        return current.appTabs.some((tab) => tab.id === openedId)
-          ? selectAppTab(current, "local", "server-a", sessions[1], openedId)
-          : current;
-      }
-      const next = openGitDiffTab(current, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
-      openedId = findGitDiffTab(next, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged")?.id;
-      return next;
+    // first commit opens, every later one only re-selects what is there. The
+    // decision is made per commit, and the updater itself stays pure — React
+    // runs it twice under StrictMode and keeps the second result.
+    let committed = false;
+    const find = (state: PersistedAppState) => findGitDiffTab(state, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged");
+    const commit = (): ((current: PersistedAppState) => PersistedAppState) => {
+      const replay = committed;
+      committed = true;
+      return (current) => {
+        if (!replay) return openGitDiffTab(current, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
+        const opened = find(current);
+        return opened ? selectAppTab(current, "local", "server-a", sessions[1], opened.id) : current;
+      };
     };
-    const opened = commit(defaultAppState);
+    const first = commit();
+    first(defaultAppState);
+    const opened = first(defaultAppState);
     expect(opened.appTabs).toHaveLength(1);
-    const closed = closeAppTab(opened, "local", openedId!);
+    const closed = closeAppTab(opened, "local", find(opened)!.id);
     expect(closed.appTabs).toHaveLength(0);
-    const replayed = commit(closed);
-    expect(replayed).toBe(closed);
-    expect(replayed.workspaceUi[0].selectedAppTabId).toBeUndefined();
+    const replay = commit();
+    expect(replay(closed)).toBe(closed);
+    // A replay while the tab is still open only re-selects it.
+    const reselected = replay(selectAppTab(opened, "local", "server-a", sessions[1], undefined));
+    expect(reselected.appTabs).toHaveLength(1);
+    expect(reselected.workspaceUi[0].selectedAppTabId).toBe(find(opened)!.id);
   });
 
   it("opens one root-scoped file tab and preserves it across root changes", () => {
