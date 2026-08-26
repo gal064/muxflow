@@ -54,8 +54,7 @@
             ]
           }
         }
-      ],
-      "./plugins/withBouncyCastleDedup.js"
+      ]
     ],
     "experiments": {
       "typedRoutes": false
