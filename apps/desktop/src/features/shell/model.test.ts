@@ -319,6 +319,72 @@ describe("application shell model", () => {
     expect(preview.appTabs[0].viewMode).toBe("preview");
   });
 
+  it("refreshes an existing terminal-opened tab capability without resetting its view", () => {
+    const opened = openFileTab(
+      defaultAppState,
+      "local",
+      "server-a",
+      sessions[1],
+      "/tmp/scratchpad/prompt.md",
+      "markdown",
+      { path: "/tmp/scratchpad", token: "file-v1:old", revision: "1" },
+    );
+    const preview = setMarkdownViewMode(opened, "local", opened.appTabs[0].id, "preview");
+    const refreshed = openFileTab(
+      preview,
+      "local",
+      "server-a",
+      sessions[1],
+      "/tmp/scratchpad/prompt.md",
+      "markdown",
+      { path: "/tmp/scratchpad", token: "file-v1:new", revision: "2" },
+      { preview: false, refreshRoot: true },
+    );
+
+    expect(refreshed.appTabs).toHaveLength(1);
+    expect(refreshed.appTabs[0]).toMatchObject({
+      rootPath: "/tmp/scratchpad",
+      rootToken: "file-v1:new",
+      viewMode: "preview",
+    });
+  });
+
+  it("reacquires a cleared terminal-file capability after server recovery", () => {
+    const opened = openFileTab(
+      defaultAppState,
+      "local",
+      "server-a",
+      sessions[1],
+      "/tmp/scratchpad/prompt.md",
+      "markdown",
+      { path: "/tmp/scratchpad", token: "file-v1:old", revision: "1" },
+    );
+    const liveSession = { ...sessions[1], id: "$99" };
+    const recovered = recoverAppTabsFromPreviousServer(
+      opened,
+      "local",
+      "server-a",
+      "server-b",
+      [liveSession],
+    );
+    expect(recovered.appTabs[0]).toMatchObject({ rootPath: undefined, rootToken: undefined });
+
+    const refreshed = openFileTab(
+      recovered,
+      "local",
+      "server-b",
+      liveSession,
+      "/tmp/scratchpad/prompt.md",
+      "markdown",
+      { path: "/tmp/scratchpad", token: "file-v1:new", revision: "1" },
+      { preview: false, refreshRoot: true },
+    );
+    expect(refreshed.appTabs[0]).toMatchObject({
+      sessionId: "$99",
+      rootPath: "/tmp/scratchpad",
+      rootToken: "file-v1:new",
+    });
+  });
   it("keeps at most one preview tab per workspace and reuses its slot in place", () => {
     const open = (state: PersistedAppState, resource: string, preview: boolean, kind: "file" | "markdown" = "file") =>
       openFileTab(state, "local", "server-a", sessions[1], resource, kind, { path: "/repo", token: "root", revision: "1" }, { preview });

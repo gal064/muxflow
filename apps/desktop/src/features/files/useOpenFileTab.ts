@@ -7,6 +7,7 @@ import { AutosaveController, type AutosaveView } from "./autosave";
 import { editorFlushRegistry } from "./editorFlushRegistry";
 import { parentPath } from "./listingModel";
 import {
+  isTerminalSingleFileRoot,
   TEXT_FILE_LIMIT_BYTES,
   type ActiveRoot,
   type BinaryFile,
@@ -460,7 +461,7 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
   };
 
   useEffect(() => {
-    if (!scope || !root) return;
+    if (!scope || !root || isTerminalSingleFileRoot(root)) return;
     let disposed = false;
     let release: (() => void) | undefined;
     // The bootstrap *is* a full directory listing, so a tab closed while it is
