@@ -242,6 +242,7 @@ pub fn run() {
             connection::files::download_manager::suggest_download_destination,
             connection::files::download_opener::open_download,
             connection::files::download_opener::reveal_download,
+            connection::files::external_url::open_external_url,
             connection::files::editor_manager::start_file_read,
             connection::files::editor_manager::start_file_write,
             connection::files::editor_manager::cancel_file_io,
