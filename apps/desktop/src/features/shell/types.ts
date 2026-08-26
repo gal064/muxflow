@@ -23,6 +23,17 @@ export const TERMINAL_FONT_SIZE_MIN = 10;
 export const TERMINAL_FONT_SIZE_MAX = 20;
 /** The same ceiling `hostSetup` uses: one entry per host profile, not per whim. */
 export const MAX_WORKSPACE_DEFAULT_HOSTS = 1_024;
+/**
+ * The longest a workspace default may be, in characters.
+ *
+ * Enforced on *this* side because the storage side's limit is a refusal of the
+ * whole save: `save_app_state` validates every text field against 16 KiB and
+ * returns an error for the entire state, so one over-long paste into a settings
+ * field would stop open tabs, workspace selection, shortcut overrides and window
+ * geometry from persisting at all. Well under that ceiling even at four bytes
+ * per character, and far past any real path or command.
+ */
+export const MAX_WORKSPACE_DEFAULT_LENGTH = 2_048;
 
 export interface AppOwnedTab {
   id: string;
@@ -243,9 +254,11 @@ function normalizeWorkspaceDefaults(value: unknown): Record<string, WorkspaceDef
     // host after it.
     if (!host || !defaults || typeof defaults !== "object" || Array.isArray(defaults)) continue;
     const record = defaults as Partial<WorkspaceDefaults>;
+    const directory = usableWorkspaceDefault(record.directory);
+    const startupCommand = usableWorkspaceDefault(record.startupCommand);
     const entry: WorkspaceDefaults = {
-      ...(usableDefault(record.directory) ? { directory: record.directory.trim() } : {}),
-      ...(usableDefault(record.startupCommand) ? { startupCommand: record.startupCommand.trim() } : {}),
+      ...(directory ? { directory } : {}),
+      ...(startupCommand ? { startupCommand } : {}),
     };
     if (entry.directory || entry.startupCommand) entries.push([host, entry]);
   }
@@ -254,6 +267,12 @@ function normalizeWorkspaceDefaults(value: unknown): Record<string, WorkspaceDef
 
 function usableDefault(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
+}
+
+/** One workspace default, trimmed and bounded, or `undefined` when there is none. */
+export function usableWorkspaceDefault(value: unknown): string | undefined {
+  if (!usableDefault(value)) return undefined;
+  return value.trim().slice(0, MAX_WORKSPACE_DEFAULT_LENGTH);
 }
 
 /**

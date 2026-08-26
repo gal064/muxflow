@@ -4,8 +4,8 @@ use tmux_agent_protocol::v1;
 use super::snapshot::{discover_consistent, reorder_session, server_identity, tmux_command};
 use super::terminal::validate_tmux_id;
 use command::{
-    configure_new_session, configure_new_window, configure_split, run, run_for_id, run_for_ids,
-    validate_name,
+    configure_new_session, configure_new_window, configure_split, escaped_format_literal, run,
+    run_for_id, run_for_ids, validate_name,
 };
 
 mod command;
@@ -72,7 +72,14 @@ pub(super) fn execute(
         }
         v1::TmuxActionKind::RenameSession => {
             validate_name(&action.name)?;
-            command.args(["rename-session", "-t", &action.session_id, &action.name]);
+            // Literal, for the reason `escaped_format_literal` documents: tmux
+            // expands a rename's name as a format too.
+            command.args([
+                "rename-session",
+                "-t",
+                &action.session_id,
+                &escaped_format_literal(&action.name),
+            ]);
             run(command)?;
             result.session_id = action.session_id;
         }
@@ -101,7 +108,12 @@ pub(super) fn execute(
         }
         v1::TmuxActionKind::RenameWindow => {
             validate_name(&action.name)?;
-            command.args(["rename-window", "-t", &action.window_id, &action.name]);
+            command.args([
+                "rename-window",
+                "-t",
+                &action.window_id,
+                &escaped_format_literal(&action.name),
+            ]);
             run(command)?;
             result.window_id = action.window_id;
         }

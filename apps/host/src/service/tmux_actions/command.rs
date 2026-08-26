@@ -58,15 +58,20 @@ pub(super) fn configure_new_session(
 
 /// Text tmux must take literally, in the one place tmux would not.
 ///
-/// `new-session` runs `-c`, `-s` and `-n` through its *format* parser, so an
-/// argument is protected from the shell by being an argument and protected from
-/// tmux by nothing. That is not academic in either direction: a directory
-/// legitimately named `#Session-notes` would start the pane somewhere else than
-/// the path this file just stood behind, and `#(…)` is tmux's run-a-command
-/// substitution — on an SSH profile, a command that runs on the remote machine.
-/// `##` is tmux's own escape for a literal `#`, so doubling every one of them
-/// makes the value mean itself.
-fn escaped_format_literal(value: &str) -> String {
+/// tmux runs the name and start-directory arguments of `new-session`,
+/// `new-window`, `rename-session` and `rename-window` through its *format*
+/// parser, so an argument is protected from the shell by being an argument and
+/// protected from tmux by nothing. That is not academic in either direction: a
+/// directory legitimately named `#Session-notes` would start the pane somewhere
+/// else than the path this file just stood behind, and `#(…)` is tmux's
+/// run-a-command substitution — on an SSH profile, a command that runs on the
+/// remote machine. `##` is tmux's own escape for a literal `#`, so doubling
+/// every one of them makes the value mean itself.
+///
+/// Applied at every one of those sites rather than only the new ones: a
+/// workspace name that is safe to create and unsafe to rename to is the worst
+/// of both, and the whole point is that a name means the characters in it.
+pub(super) fn escaped_format_literal(value: &str) -> String {
     value.replace('#', "##")
 }
 
@@ -138,7 +143,7 @@ pub(super) fn configure_new_window(
     ]);
     if !action.name.is_empty() {
         validate_name(&action.name)?;
-        command.args(["-n", &action.name]);
+        command.args(["-n", &escaped_format_literal(&action.name)]);
     }
     command.arg(APP_SHELL);
     Ok(())
@@ -355,6 +360,26 @@ mod tests {
         if unsafe { libc::geteuid() } != 0 {
             assert!(refusal.contains("cannot be entered"), "{refusal}");
         }
+    }
+
+    /// A workspace name that is safe to create with and unsafe to rename to
+    /// would be the worst of both. Every path that hands tmux a name escapes it.
+    #[test]
+    fn every_name_path_hands_tmux_a_literal() {
+        assert_eq!(escaped_format_literal("build #(id)"), "build ##(id)");
+        assert_eq!(escaped_format_literal("plain"), "plain");
+        let action = v1::TmuxAction {
+            session_id: "$1".into(),
+            name: "tab #(id)".into(),
+            ..Default::default()
+        };
+        let mut command = std::process::Command::new("tmux");
+        configure_new_window(&mut command, &action).unwrap();
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.contains(&"tab ##(id)".to_owned()), "{args:?}");
     }
 
     #[test]

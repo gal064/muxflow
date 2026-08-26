@@ -99,6 +99,16 @@ describe("per-host workspace defaults", () => {
       .toEqual({ local: { directory: "/work" } });
   });
 
+  it("bounds each value so one long paste cannot freeze every other save", () => {
+    // The storage side validates every text field and refuses the *whole*
+    // state, so an unbounded command here would stop open tabs, workspace
+    // selection and window geometry from persisting at all.
+    const long = "x".repeat(20_000);
+    expect(saved({ local: { directory: long, startupCommand: long } })).toEqual({
+      local: { directory: "x".repeat(2_048), startupCommand: "x".repeat(2_048) },
+    });
+  });
+
   it("caps the map the way the host setup decisions are capped", () => {
     const many = Object.fromEntries(Array.from({ length: 1_100 }, (_, index) => [`host-${index}`, { directory: "/work" }]));
     expect(Object.keys(saved(many))).toHaveLength(1_024);

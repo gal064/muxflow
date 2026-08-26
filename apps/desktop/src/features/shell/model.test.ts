@@ -57,6 +57,11 @@ describe("per-host workspace defaults", () => {
     );
     expect(cleared.workspaceDefaults).toEqual({ "ssh-remote": { startupCommand: "tail -f log" } });
   });
+
+  it("bounds what it writes, not only what it reads back", () => {
+    const written = setWorkspaceDefaults(defaultAppState, "local", { startupCommand: "y".repeat(9_000) });
+    expect(workspaceDefaultsFor(written, "local").startupCommand).toHaveLength(2_048);
+  });
 });
 
 const sessions: Session[] = [
