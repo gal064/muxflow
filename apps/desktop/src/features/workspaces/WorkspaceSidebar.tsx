@@ -95,6 +95,21 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const container = useRef<HTMLElement>(null);
   const [displayedAgentsRatio, startAgentsRatioDrag] = useTransientDrag(props.agentsRatio, props.onAgentsRatio);
   const [displayedWidth, startWidthDrag] = useTransientDrag(props.width, props.onWidth);
+  /**
+   * Where the right-clicked workspace sits in *tmux's* order, not on screen.
+   *
+   * `session.moveLeft` and `session.moveRight` are tmux reorders: they step the
+   * session's `order`, so their bounds are that order and not the display order
+   * the pinned block rearranged. Gating on the display index made a pinned row
+   * refuse to move up while it still had somewhere to go, and offered "move up"
+   * to the last row on screen, where it computed a negative index and silently
+   * did nothing.
+   */
+  const moveIndex = menu
+    ? [...props.rows]
+      .sort((left, right) => (left.session.order ?? 0) - (right.session.order ?? 0))
+      .findIndex((row) => row.session.id === menu.session.id)
+    : -1;
   const groupedAgents = props.agentSort === "workspace" ? groupAgentRows(props.agents) : [];
   const priorityAgents = props.agentSort === "workspace" ? [] : groupAgentRowsByStatus(props.agents);
   // The flat position in `props.agents`, kept across every grouping: the roving
@@ -487,8 +502,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           label: props.rows.find((row) => row.session.id === menu.session.id)?.pinned ? "Unpin workspace" : "Pin workspace",
           run: () => props.onTogglePinnedWorkspace(menu.session, menu.scope),
         },
-        { id: "up", label: "Move up", disabled: !props.canMutate || menu.index === 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft", menu.scope) },
-        { id: "down", label: "Move down", disabled: !props.canMutate || menu.index === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight", menu.scope) },
+        { id: "up", label: "Move up", disabled: !props.canMutate || moveIndex <= 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft", menu.scope) },
+        { id: "down", label: "Move down", disabled: !props.canMutate || moveIndex < 0 || moveIndex === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight", menu.scope) },
         // Not gated on `canMutate`: nothing is sent to tmux.
         { id: "archive", label: "Archive workspace", run: () => props.onWorkspaceCommand(menu.session, "session.archive", menu.scope) },
         "separator",

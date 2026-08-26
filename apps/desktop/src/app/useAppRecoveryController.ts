@@ -68,7 +68,10 @@ export function useAppRecoveryController(options: AppRecoveryControllerOptions) 
     if (options.serverIdentity) {
       lastIdentities.current.set(options.currentHostProfileId, options.serverIdentity);
     }
-  }, [options.currentHostProfileId, options.serverIdentity, options.sessions]);
+    // `windows` is a dependency because it is the only evidence a *terminal*
+    // tab's pin is stale: a killed window leaves its session in place, so
+    // nothing else here would re-run to sweep the record.
+  }, [options.currentHostProfileId, options.serverIdentity, options.sessions, options.windows]);
 
   useEffect(() => {
     dispatch({ type: "reconcileScope", scope: options.currentScope });
