@@ -396,6 +396,7 @@ describe("TauriFileWorkspaceClient", () => {
   it("uses the canonical verifying/unknown outcome schema and preserves cleanup failure", async () => {
     invokeMock.mockImplementation(async (command, args) => {
       expect(command).toBe("start_download");
+      expect(args).toMatchObject({ diagnosticAttemptId: "diagnostic-attempt-1" });
       const channel = (args as { onEvent: { onmessage?: (value: unknown) => void } }).onEvent;
       queueMicrotask(() => {
         channel.onmessage?.({
@@ -413,7 +414,10 @@ describe("TauriFileWorkspaceClient", () => {
     const client = new TauriFileWorkspaceClient();
     const events: unknown[] = [];
     await client.subscribe(scope, (next) => events.push(next));
-    await expect(client.startDownload(scope, root, { path: "/repo/a", destination: "/tmp/a", kind: "file", collision: "fail" })).resolves.toMatchObject({
+    await expect(client.startDownload(scope, root, {
+      path: "/repo/a", destination: "/tmp/a", kind: "file", collision: "fail",
+      diagnosticAttemptId: "diagnostic-attempt-1",
+    })).resolves.toMatchObject({
       id: "download-1", state: "failed", outcome: "unknown", failureKind: "outcomeUnknown",
       cleanupStatus: "failed", cleanupError: "could not remove partial",
     });

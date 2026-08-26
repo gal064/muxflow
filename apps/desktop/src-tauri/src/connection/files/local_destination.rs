@@ -12,6 +12,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tmux_agent_protocol::{PublicationOutcome, PublishFailure, PublishResult, Published};
 use uuid::Uuid;
 
@@ -22,6 +23,148 @@ use super::{
 };
 
 pub(super) use super::destination_lease::DestinationReservations;
+
+/// A privacy-safe snapshot of the process/path boundary used by download
+/// admission. It deliberately records classifications and permission facts,
+/// never the selected path, HOME, cwd, capability token, or file name.
+pub(super) fn destination_parent_diagnostic(path: &Path, admission_error: Option<&str>) -> Value {
+    let parent = path.parent().unwrap_or(path);
+    let parent_name = c_string(parent.as_os_str(), "diagnostic destination parent").ok();
+    let metadata = std::fs::symlink_metadata(parent);
+    let euid = unsafe { libc::geteuid() };
+    let (parent_exists, parent_kind, owner_matches, parent_mode, metadata_errno) = match metadata {
+        Ok(metadata) => {
+            let kind = if metadata.file_type().is_symlink() {
+                "symlink"
+            } else if metadata.is_dir() {
+                "directory"
+            } else if metadata.is_file() {
+                "file"
+            } else {
+                "other"
+            };
+            (
+                true,
+                kind,
+                Some(metadata.uid() == euid),
+                Some(metadata.mode() & 0o7777),
+                None,
+            )
+        }
+        Err(error) => (false, "unavailable", None, None, error.raw_os_error()),
+    };
+    let access = |mode| {
+        parent_name.as_ref().map(|name| {
+            let result = unsafe { libc::access(name.as_ptr(), mode) };
+            json!({
+                "allowed": result == 0,
+                "errno": (result != 0).then(|| io::Error::last_os_error().raw_os_error()).flatten(),
+            })
+        })
+    };
+    let (retry_open_succeeded, retry_open_errno) =
+        parent_name.as_ref().map_or((false, None), |name| {
+            let fd = unsafe {
+                libc::open(
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd >= 0 {
+                unsafe { libc::close(fd) };
+                (true, None)
+            } else {
+                (false, io::Error::last_os_error().raw_os_error())
+            }
+        });
+    let (statvfs_succeeded, mount_read_only, statvfs_errno) =
+        parent_name.as_ref().map_or((false, None, None), |name| {
+            let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            let result = unsafe { libc::statvfs(name.as_ptr(), stats.as_mut_ptr()) };
+            if result == 0 {
+                let stats = unsafe { stats.assume_init() };
+                (true, Some(stats.f_flag & libc::ST_RDONLY != 0), None)
+            } else {
+                (false, None, io::Error::last_os_error().raw_os_error())
+            }
+        });
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let status_value = |label: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(label))
+            .map(str::trim)
+            .unwrap_or("unknown")
+            .to_owned()
+    };
+    let lsm_confinement_label_present = std::fs::read_to_string("/proc/self/attr/current")
+        .ok()
+        .map(|value| value.trim() != "unconfined");
+
+    json!({
+        "admissionErrorClass": admission_error.map(classify_admission_error),
+        "parentClass": classify_destination_parent(parent),
+        "parentAbsolute": parent.is_absolute(),
+        "parentExists": parent_exists,
+        "parentKind": parent_kind,
+        "parentOwnerMatchesProcess": owner_matches,
+        "parentMode": parent_mode,
+        "parentMetadataErrno": metadata_errno,
+        "readAccess": access(libc::R_OK),
+        "writeAccess": access(libc::W_OK),
+        "searchAccess": access(libc::X_OK),
+        "retryOpenSucceeded": retry_open_succeeded,
+        "retryOpenErrno": retry_open_errno,
+        "statvfsSucceeded": statvfs_succeeded,
+        "mountReadOnly": mount_read_only,
+        "statvfsErrno": statvfs_errno,
+        "noNewPrivs": status_value("NoNewPrivs:"),
+        "seccompMode": status_value("Seccomp:"),
+        "lsmConfinementLabelPresent": lsm_confinement_label_present,
+        "codexEnvironment": std::env::vars_os().any(|(key, _)| key.to_string_lossy().starts_with("CODEX_")),
+        "flatpakEnvironment": std::env::var_os("FLATPAK_ID").is_some(),
+        "snapEnvironment": std::env::var_os("SNAP").is_some(),
+        "appImageEnvironment": std::env::var_os("APPIMAGE").is_some(),
+    })
+}
+
+fn classify_admission_error(error: &str) -> &'static str {
+    if error.starts_with("destination parent is unavailable or unsafe") {
+        "parentUnavailableOrUnsafe"
+    } else if error.starts_with("destination is not writable") {
+        "destinationNotWritable"
+    } else if error == "destination already exists" {
+        "destinationAlreadyExists"
+    } else if error.contains("already reserved by another transfer") {
+        "destinationAlreadyReserved"
+    } else if error.starts_with("download destination path must be absolute")
+        || error.starts_with("download destination has no parent")
+        || error.starts_with("download destination has no basename")
+        || error.starts_with("destination basename")
+    {
+        "invalidDestination"
+    } else {
+        "other"
+    }
+}
+
+fn classify_destination_parent(parent: &Path) -> &'static str {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if parent == home.join("Downloads") {
+            return "homeDownloads";
+        }
+        if parent.starts_with(&home) {
+            return "homeOther";
+        }
+    }
+    if parent.starts_with(std::env::temp_dir()) {
+        return "temporaryDirectory";
+    }
+    if parent.starts_with("/run/user") {
+        return "userRuntimeDirectory";
+    }
+    "otherAbsolute"
+}
 
 pub(super) struct PreparedDestination {
     _reservation: Arc<ReservedDestination>,

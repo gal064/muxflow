@@ -1046,7 +1046,7 @@ export function App() {
                 revision: "0",
               }
               : workspaceFiles.root;
-            if (root) void startDownloadFlow({ path: appTab.resource, kind: "file" }, root);
+            if (root) void startDownloadFlow({ path: appTab.resource, kind: "file" }, root, "tabMenu");
           }}
           onMove={moveCombinedTab}
           onNewTerminal={() => void runCommand("window.new")}
@@ -1142,7 +1142,7 @@ export function App() {
               activeRoot={workspaceFiles.root}
               canWrite={hostState.canMutate}
               client={fileClient}
-              onDownload={(path, kind, root) => void startDownloadFlow({ path, kind }, root)}
+              onDownload={(path, kind, root) => void startDownloadFlow({ path, kind }, root, "fileSurface")}
               onDirty={() => pinOpenTab(tab.id)}
               onStatus={setStatus}
               onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, tab.id, viewMode))}
@@ -1158,7 +1158,7 @@ export function App() {
         fileScope={fileScope}
         ignoredPaths={ignoredPaths}
         maxWidth={Math.max(PANEL_MIN_WIDTH, Math.floor(windowWidth / 2))}
-        onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
+        onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root, "explorer"); }}
         onGitDiff={(entry, target) => {
           if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
           const session = activeSession;

@@ -162,6 +162,8 @@ export interface DownloadRequest {
   kind: "file" | "folder";
   destination?: string;
   collision: CollisionPolicy;
+  /** Correlates privacy-safe renderer and native diagnostics for one user gesture. */
+  diagnosticAttemptId?: string;
 }
 
 export interface TransferStatus {
