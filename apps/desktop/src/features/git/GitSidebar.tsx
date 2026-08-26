@@ -227,16 +227,17 @@ export function GitSidebar(props: Props) {
       <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onDrag={dragEntry} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
       {props.git.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
     </div>
-    {/* Present whenever this repository is, because Push has to be reachable
-        after the commit that emptied the staged group. Commit itself is what
-        goes disabled when there is nothing staged. */}
-    {!unavailable && <GitCommitForm
+    {/* Permanent chrome again, for two reasons: Push has to be reachable after
+        the commit that emptied the staged group, and unmounting the form during
+        a transient resynchronization would throw away a half-typed commit
+        message. `disabled` is what a lost connection takes away, not the form. */}
+    <GitCommitForm
       canPush={!unavailable && !props.git.status.repository.initial}
       commit={commit}
       disabled={unavailable}
       onPush={push}
       stagedCount={stagedCount}
-    />}
+    />
     {menu && <ContextMenu
       anchor={menu.anchor}
       items={[

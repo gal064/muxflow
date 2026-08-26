@@ -392,7 +392,8 @@ describe("GitSidebar", () => {
     await act(async () => { item.props.onClick(); await settle(); });
     expect(props.git.handle!.commit).toHaveBeenCalledWith("repo", "1", "message");
     expect(props.git.handle!.push).toHaveBeenCalledWith("repo", "1");
-    expect(JSON.stringify(renderer.toJSON())).toContain("Pushed to origin/main.");
+    // Both halves are reported, not just the last one.
+    expect(JSON.stringify(renderer.toJSON())).toContain("Committed. Pushed to origin/main.");
     await act(async () => { renderer.unmount(); });
   });
 
@@ -406,7 +407,34 @@ describe("GitSidebar", () => {
     await act(async () => { renderer.root.findByProps({ "data-menu-item": "commitAndPush" }).props.onClick(); await settle(); });
     expect(props.git.handle!.commit).toHaveBeenCalledTimes(1);
     expect(props.git.handle!.push).not.toHaveBeenCalled();
-    expect(JSON.stringify(renderer.toJSON())).toContain("pre-commit rejected");
+    const failed = JSON.stringify(renderer.toJSON());
+    expect(failed).toContain("pre-commit rejected");
+    expect(failed).not.toContain("Pushing…");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("keeps a half-typed commit message through a transient resynchronization", async () => {
+    const props = baseProps();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "half typed" } }); });
+    // The banner the panel already shows for this state; the draft is not a
+    // casualty of it.
+    await act(async () => { renderer.update(<GitSidebar {...baseProps(gitState({ status: { ...status(), authoritative: false } }))} />); });
+    expect(renderer.root.findByType("textarea").props.value).toBe("half typed");
+    expect(renderer.root.findByProps({ "aria-label": "Push to upstream" }).props.disabled).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("does not leave a progress line claiming a push is still running after it failed", async () => {
+    const props = baseProps();
+    vi.mocked(props.git.handle!.push).mockRejectedValueOnce(new Error("git_push_rejected: ! [rejected] master -> master (non-fast-forward)"));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Push to upstream" }).props.onClick(); await settle(); });
+    const text = JSON.stringify(renderer.toJSON());
+    expect(text).not.toContain("Pushing…");
+    expect(text).toContain("The remote rejected the push (non-fast-forward?). Pull or rebase first.");
     await act(async () => { renderer.unmount(); });
   });
 

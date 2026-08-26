@@ -300,6 +300,7 @@ fn phase5_git_contract_round_trips_raw_paths_and_stale_guards() {
         pre_status_generation: (1_u64 << 53) + 11,
         post_status_generation: (1_u64 << 53) + 12,
         status_omitted: true,
+        push_target: "origin/main".into(),
         ..Default::default()
     };
     assert_eq!(

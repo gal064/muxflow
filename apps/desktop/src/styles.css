@@ -972,8 +972,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border-top-left-radius: 0; border-bottom-left-radius: 0;
   box-shadow: inset 1px 0 0 rgb(0 0 0 / .22);
 }
-.git-commit-actions > button:disabled { opacity: .5; }
-
 .git-output {
   max-height: 96px; margin: 0; overflow: auto; padding: 6px; border-radius: 3px;
   background: var(--chrome-bg); color: var(--term-2); font-size: var(--type-meta); white-space: pre-wrap;
