@@ -48,6 +48,18 @@ describe("agents section ordering", () => {
     expect(jumpTarget(buildAgentRows([idle, working], locate, () => true, "status"))).toBeUndefined();
   });
 
+  it("puts blocked ahead of done-unread whatever the timestamps say", () => {
+    // Blocked is the older of the two here, so only the status ranking — not
+    // the recency tiebreak — can put it first.
+    const stale = agent({ id: "blocked", lifecycle: "blocked", sessionId: "$1", updatedAt: 1 });
+    const fresh = agent({
+      id: "done", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 4,
+      seenGeneration: 2, sessionId: "$2", updatedAt: 99,
+    });
+    expect(jumpTarget(buildAgentRows([fresh, stale], locate, () => true, "status"))?.agent.id).toBe("blocked");
+    expect(jumpTarget(buildAgentRows([fresh, stale], locate, () => true, "workspace"))?.agent.id).toBe("blocked");
+  });
+
   it("counts only the rows waiting on a human as unread", () => {
     const rows = buildAgentRows([idle, working, done, blocked], locate, () => true, "status");
     expect(unreadCount(rows)).toBe(2);

@@ -886,26 +886,59 @@ describe("application shell accessibility contracts", () => {
 
   it("puts four controls and an unread count on the titlebar, and no more", () => {
     const html = renderToStaticMarkup(<TitleBar
-      canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canJump canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="mac" sidebarOpen unread={3} workspaceName="muxflow"
     />);
     expect([...html.matchAll(/<button/gu)]).toHaveLength(4);
-    expect(html).toContain("3 agents waiting; jump to the loudest");
+    expect(html).toContain("3 agents waiting; go to the next one");
+    expect(html).toContain("Go to the next agent waiting (blocked first, then unread completed)");
     expect(html).toContain("muxflow");
     // The branch label is gone: it arrived a beat after the first paint and
     // changed the bar's content height when it did.
     expect(html).not.toContain("titlebar-branch");
     const quiet = renderToStaticMarkup(<TitleBar
-      canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canJump={false} canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen={false} unread={0}
     />);
     expect(quiet).toContain("No agents waiting");
     expect(quiet).toContain("No workspace");
   });
 
+  it("disables the bell when it has nowhere to go, and says so", () => {
+    const bell = (html: string) => html.slice(html.indexOf("bar-button-badged") - 200).split("</button>")[0];
+    const enabled = bell(renderToStaticMarkup(<TitleBar
+      canJump canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={1}
+    />));
+    expect(enabled).not.toContain("disabled");
+    expect(enabled).toContain("1 agent waiting; go to the next one");
+    expect(enabled).toContain('title="Go to the next agent waiting (blocked first, then unread completed)"');
+
+    // Nothing waiting at all: no badge, and the control is inert rather than a
+    // click that quietly does nothing.
+    const idle = bell(renderToStaticMarkup(<TitleBar
+      canJump={false} canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={0}
+    />));
+    expect(idle).toContain("disabled");
+    expect(idle).toContain('aria-label="No agents waiting"');
+    expect(idle).toContain('title="No agents waiting"');
+    expect(idle).not.toContain("badge-corner");
+
+    // Waiting but unreachable — the badge stays honest, the label explains why
+    // the bell will not move.
+    const stranded = bell(renderToStaticMarkup(<TitleBar
+      canJump={false} canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={2}
+    />));
+    expect(stranded).toContain("disabled");
+    expect(stranded).toContain("2 agents waiting, none reachable right now");
+    expect(stranded).toContain("badge-corner");
+  });
+
   it("reserves traffic-light room on macOS only, because only macOS overlays them", () => {
     const bar = (platform: "mac" | "linux") => renderToStaticMarkup(<TitleBar
-      canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canJump={false} canMutate onBell={noop} onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform={platform} sidebarOpen unread={0}
     />);
     // `titleBarStyle: "Overlay"` is a macOS-only Tauri option; a Linux window
