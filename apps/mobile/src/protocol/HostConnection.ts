@@ -358,6 +358,13 @@ export class HostConnection {
       return;
     }
     const hello = frame.payload.value;
+    const bulk = this.options.bulk;
+    // Before the contract check: the host answers a mis-bound bulk lane with
+    // `read_only`, which would otherwise read as "update the helper".
+    if (bulk && (hello.serverIdentity !== bulk.expectedServerIdentity || hello.connectionEpoch !== bulk.connectionEpoch)) {
+      this.fail(attempt, "failed", "bulk connection was bound to a different control connection");
+      return;
+    }
     const refusal = validateHostContract(frame.protocolMajor, hello);
     if (refusal) {
       this.log(`handshake.incompatible ${refusal.kind}`);
@@ -365,12 +372,7 @@ export class HostConnection {
       return;
     }
     attempt.hello = hello;
-    const bulk = this.options.bulk;
     if (bulk) {
-      if (hello.serverIdentity !== bulk.expectedServerIdentity || hello.connectionEpoch !== bulk.connectionEpoch) {
-        this.fail(attempt, "failed", "bulk connection was bound to a different control connection");
-        return;
-      }
       this.goLive(attempt);
       this.options.onConnected?.();
       return;
@@ -405,7 +407,7 @@ export class HostConnection {
       return;
     }
     if (snapshot.serverIdentity !== hello.serverIdentity) {
-      this.fail(attempt, "failed", "tmux server changed during handshake; reconnecting for a coherent snapshot");
+      this.fail(attempt, "failed", "tmux server changed during handshake");
       return;
     }
     const store = this.options.store;
