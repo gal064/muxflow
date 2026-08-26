@@ -47,7 +47,7 @@ const pendingTab = { key: "pending:create", kind: "pending", title: "Creating" }
 
 type TabStripOverrides = Partial<Pick<
   ComponentProps<typeof TabStrip>,
-  "activeKey" | "canMutate" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "platform"
+  "activeKey" | "canMutate" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "platform" | "shortcuts"
 >>;
 
 /** One TabStrip with every handler stubbed, so a test names only what it means. */
@@ -55,7 +55,7 @@ function tabStripOver(tabs: readonly CombinedTab[], overrides: TabStripOverrides
   return <TabStrip
     activeTerminalPaneCount={1} canMutate commandScope={commandScope} onClose={noop} onCloseCurrent={noop}
     onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
-    onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac"
+    onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
     stateGlyphs={false} tabs={tabs} {...overrides}
   />;
 }
@@ -589,7 +589,7 @@ describe("application shell accessibility contracts", () => {
     const html = renderToStaticMarkup(<TabStrip
       activeKey="app:file" activeTerminalPaneCount={1} canMutate commandScope={commandScope} stateGlyphs={false} onClose={noop}
       onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
-      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac"
+      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
       tabs={[
         { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked", agentPresence: "present" },
         { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: true, canMoveLeft: false, canMoveRight: false },
@@ -642,7 +642,7 @@ describe("application shell accessibility contracts", () => {
       activeKey={manyTabs[0].key} activeTerminalPaneCount={0} canMutate
       commandScope={commandScope} stateGlyphs={false} onClose={noop} onCloseCurrent={noop}
       onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop}
-      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac"
+      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
       tabs={[...manyTabs, { key: "pending:create", kind: "pending", title: "Creating" }]}
     />);
     expect(tabHtml.match(/class="tab-index"/g)).toHaveLength(9);
@@ -655,7 +655,7 @@ describe("application shell accessibility contracts", () => {
       activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate commandScope={commandScope}
       stateGlyphs={false} onClose={noop} onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop}
       onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop} onPin={noop}
-      onRenameTerminal={noop} onSelect={noop} platform="mac"
+      onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
       tabs={states.map((attention, index) => ({
         key: `terminal:@${index + 1}` as const, kind: "terminal" as const, id: `@${index + 1}`,
         title: attention, index: index + 1, activeInTmux: index === 0, zoomed: false,
@@ -697,7 +697,7 @@ describe("application shell accessibility contracts", () => {
       activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate commandScope={commandScope}
       stateGlyphs={false} onClose={noop} onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop}
       onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop} onPin={noop}
-      onRenameTerminal={noop} onSelect={noop} platform="mac"
+      onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
       tabs={[
         terminal("@1", { attention: "working", agentAdapterId: "codex", agentPresence: "present" }),
         terminal("@2", {}),
@@ -727,7 +727,7 @@ describe("application shell accessibility contracts", () => {
     const element = (scope: typeof commandScope) => <TabStrip
       activeKey={tab.key} activeTerminalPaneCount={1} canMutate commandScope={scope} stateGlyphs={false} onClose={onClose}
       onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
-      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" tabs={[tab]}
+      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} tabs={[tab]}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope)); });
@@ -747,7 +747,7 @@ describe("application shell accessibility contracts", () => {
       activeKey={tab.key} activePaneId={paneId} activeTerminalPaneCount={2} canMutate commandScope={scope}
       stateGlyphs={false} onClose={onClose} onCloseCurrent={onCloseCurrent} onCloseNonAgent={noop}
       onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
-      onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" tabs={[tab]}
+      onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} tabs={[tab]}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope, "%1")); });
@@ -769,7 +769,7 @@ describe("application shell accessibility contracts", () => {
       activeKey={activeKey} activePaneId="%1" activeTerminalPaneCount={2} canMutate commandScope={commandScope}
       stateGlyphs={false} onClose={onClose} onCloseCurrent={onCloseCurrent} onCloseNonAgent={noop}
       onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
-      onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" tabs={[tab]}
+      onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} tabs={[tab]}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(tab.key)); });
@@ -795,7 +795,7 @@ describe("application shell accessibility contracts", () => {
       activeKey={tab.key} activePaneId="%covered" activeTerminalPaneCount={2} canMutate
       commandScope={commandScope} stateGlyphs={false} onClose={onClose} onCloseCurrent={onCloseCurrent}
       onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
-      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" tabs={[tab]}
+      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} tabs={[tab]}
     />); });
     await act(async () => renderer.root.findByProps({ role: "tab" }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
     await act(async () => renderer.root.findByProps({ "data-menu-item": "close" }).props.onClick());
@@ -818,7 +818,7 @@ describe("application shell accessibility contracts", () => {
     const element = (canMutate: boolean) => <TabStrip
       activeKey="app:file" activeTerminalPaneCount={1} canMutate={canMutate} commandScope={commandScope} stateGlyphs={false}
       onClose={noop} onCloseCurrent={noop} onCloseNonAgent={onCloseNonAgent} onCloseOthers={onCloseOthers} onCloseRight={onCloseRight} onDownloadTab={onDownloadTab}
-      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac"
+      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
       tabs={[...strip]}
     />;
     const openMenuOn = async (renderer: ReturnType<typeof create>, index: number) => {
@@ -967,6 +967,25 @@ describe("application shell accessibility contracts", () => {
 
     await act(async () => rows[1].props.onClick());
     expect(onSelect).toHaveBeenCalledWith(mixedStrip[1]);
+    await act(async () => renderer.unmount());
+  });
+
+  it("advertises the tab shortcut the keymap holds, not the one it ships with", async () => {
+    // `tab.select1…9` are hidden from the palette but are ordinary rebindable
+    // commands, and the collision repair can clear one outright. A row
+    // promising ⌃3 for a key that now does something else is worse than a row
+    // promising nothing.
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(tabStripOver([...mixedStrip], {
+        activeKey: "app:file",
+        shortcuts: { "tab.select2": "Meta+Alt+2", "tab.select3": null },
+      }));
+    });
+    await act(async () => openAllTabs(renderer));
+    const rows = renderer.root.findAllByProps({ role: "menuitemradio" });
+    const shortcutOf = (row: ReactTestInstance) => row.findAllByType("kbd").map((key) => key.children.join("")).join("");
+    expect(rows.map(shortcutOf)).toEqual(["⌃1", "⌥⌘2", "", "⌃4"]);
     await act(async () => renderer.unmount());
   });
 

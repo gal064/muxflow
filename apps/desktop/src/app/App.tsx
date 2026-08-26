@@ -1046,6 +1046,7 @@ export function App() {
           onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
           onSelect={selectCombinedTab}
           platform={platform}
+          shortcuts={shortcuts}
           stateGlyphs={appState.shell.agentStateGlyphs}
           tabs={combinedTabs}
         />
