@@ -3,7 +3,8 @@ import contract from "./persistedAppState.contract.json";
 import {
   clampedPanelWidth, clampedTerminalFontSize, defaultAppState, defaultShellState, normalizePersistedAppState,
   panelWidthForWindow, PANEL_MIN_WIDTH,
-  type AppOwnedTab, type ArchivedWorkspaceRecord, type PersistedAppState, type WorkspaceDefaults, type WorkspaceUiRecord,
+  type AppOwnedTab, type ArchivedWorkspaceRecord, type PersistedAppState, type PinnedTabRecord,
+  type PinnedWorkspaceRecord, type WorkspaceDefaults, type WorkspaceUiRecord,
 } from "./types";
 
 /**
@@ -48,6 +49,15 @@ describe("persisted app state contract", () => {
     const archived: Required<ArchivedWorkspaceRecord> = {
       hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", archivedAt: 0,
     };
+    // Pins cross the same boundary and are keyed the same way. The tab record
+    // is the one that differs — a tab id in place of a workspace name — and is
+    // exactly the shape a hand-written Rust mirror can drift on.
+    const pinnedWorkspace: Required<PinnedWorkspaceRecord> = {
+      hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", pinnedAt: 0,
+    };
+    const pinnedTab: Required<PinnedTabRecord> = {
+      hostProfileId: "", serverIdentity: "", sessionId: "", tabId: "", pinnedAt: 0,
+    };
     // The per-host workspace defaults cross the same boundary, and both of its
     // fields are optional — exactly the shape that stops being saved without
     // anything failing.
@@ -55,6 +65,8 @@ describe("persisted app state contract", () => {
     expect(Object.keys(contract.appTabs[0]).sort()).toEqual(Object.keys(tab).sort());
     expect(Object.keys(contract.workspaceUi[0]).sort()).toEqual(Object.keys(workspace).sort());
     expect(Object.keys(contract.archivedWorkspaces[0]).sort()).toEqual(Object.keys(archived).sort());
+    expect(Object.keys(contract.pinnedWorkspaces[0]).sort()).toEqual(Object.keys(pinnedWorkspace).sort());
+    expect(Object.keys(contract.pinnedTabs[0]).sort()).toEqual(Object.keys(pinnedTab).sort());
     expect(Object.keys(contract.workspaceDefaults.local).sort()).toEqual(Object.keys(defaults).sort());
   });
 
@@ -72,6 +84,8 @@ describe("persisted app state contract", () => {
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
     expect(typed.archivedWorkspaces[0].sessionId).toBe("$2");
+    expect(typed.pinnedWorkspaces[0].sessionId).toBe("$1");
+    expect(typed.pinnedTabs[0].tabId).toBe("@3");
     expect(typed.shell.defaultMarkdownView).toBe("preview");
     expect(typed.workspaceDefaults.local).toEqual({ directory: "/work/projects", startupCommand: "git status" });
   });

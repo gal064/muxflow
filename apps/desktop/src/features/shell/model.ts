@@ -1,14 +1,15 @@
 import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { renderedPanes } from "../terminal/layout";
 import { MAX_ARCHIVED_WORKSPACES, usableWorkspaceDefault } from "./types";
+import { pinnedFirst, unpinTab, unpinWorkspaceAndTabs } from "./pins";
 import type { AppOwnedTab, AppTabViewMode, ArchivedWorkspaceRecord, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import type { AgentAdapterId, AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
 import { stripAgentStatusGlyphs } from "../agents/agentLabels";
 
 export type CombinedTab =
-  | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"]; agentAdapterId?: AgentAdapterId; agentPresence: TerminalAgentPresence }
-  | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean }
+  | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"]; agentAdapterId?: AgentAdapterId; agentPresence: TerminalAgentPresence; pinned: boolean }
+  | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean; pinned: boolean }
   | { key: `pending:${string}`; kind: "pending"; title: string };
 export type SelectableTab = Exclude<CombinedTab, { kind: "pending" }>;
 export type TerminalAgentPresence = "present" | "absent" | "unknown";
@@ -152,6 +153,8 @@ export function combineWorkspaceTabs(
   // dropping it made the strip believe a window was empty while the
   // commit-time recheck, reading the full snapshot, called it unknown.
   authority: Omit<AgentPresenceSnapshot, "byWindow"> = {},
+  /** When each of this workspace's tabs was pinned; see `pinnedFirst`. */
+  pinnedAt: ReadonlyMap<string, number> = new Map(),
 ): CombinedTab[] {
   const agentPresence = {
     ...authority,
@@ -184,6 +187,7 @@ export function combineWorkspaceTabs(
         // already-read agents are just as protected by Close All Non-Agent Tabs
         // as working, blocked and unread-complete agents.
         agentPresence: presence,
+        pinned: pinnedAt.has(window.id),
       };
     });
   const ownedTabs: CombinedTab[] = [...appTabs]
@@ -199,14 +203,20 @@ export function combineWorkspaceTabs(
       preview: Boolean(tab.preview),
       canMoveLeft: index > 0,
       canMoveRight: index < ordered.length - 1,
+      pinned: pinnedAt.has(tab.id),
     }));
   const pendingTabs: CombinedTab[] = pending && pendingTabStillOpen(pending, windows)
     ? [{ key: `pending:${pending.key}`, kind: "pending", title: pending.title }]
     : [];
-  // Last, because it is the newest thing asked for and because a placeholder
-  // that pushed the existing tabs sideways would move the targets under a
-  // person's cursor while they waited.
-  return [...terminalTabs, ...ownedTabs, ...pendingTabs];
+  // Pinned tabs lead, in the order they were pinned; everything else keeps the
+  // window/document order above. `canMoveLeft` and `canMoveRight` are
+  // deliberately *not* recomputed against this: a move is a change to the tmux
+  // window index or the document order, which is what those flags describe.
+  //
+  // The placeholder stays last, because it is the newest thing asked for and
+  // because a placeholder that pushed the existing tabs sideways would move the
+  // targets under a person's cursor while they waited.
+  return [...pinnedFirst([...terminalTabs, ...ownedTabs], (tab) => tab.kind === "pending" ? undefined : pinnedAt.get(tab.id)), ...pendingTabs];
 }
 
 /**
@@ -427,7 +437,11 @@ export function archiveWorkspace(
     archivedWorkspaces.forEach((item, index) => { if (item.archivedAt < archivedWorkspaces[oldest].archivedAt) oldest = index; });
     archivedWorkspaces.splice(oldest, 1);
   }
-  return { ...state, archivedWorkspaces };
+  // Archiving takes the pin with it. A pinned row is a row the user asked to
+  // keep at the top of the sidebar, and a row that is no longer in the sidebar
+  // cannot be at the top of it; keeping the record would silently restore the
+  // pin on the next unarchive.
+  return unpinWorkspaceAndTabs({ ...state, archivedWorkspaces }, hostProfileId, serverIdentity, session.id);
 }
 
 export function unarchiveWorkspace(
@@ -506,6 +520,8 @@ export function discardServerAppState(state: PersistedAppState, hostProfileId: s
     appTabs: state.appTabs.filter((tab) => tab.hostProfileId !== hostProfileId || tab.serverIdentity !== serverIdentity),
     workspaceUi: state.workspaceUi.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
     archivedWorkspaces: state.archivedWorkspaces.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
+    pinnedWorkspaces: state.pinnedWorkspaces.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
+    pinnedTabs: state.pinnedTabs.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
   };
 }
 
@@ -827,11 +843,18 @@ export function closeTransientGitDiff(state: PersistedAppState, currentHostProfi
 }
 
 export function closeAppTab(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {
+  const closing = state.appTabs.find((tab) => tab.hostProfileId === currentHostProfileId && tab.id === tabId);
   const appTabs = state.appTabs.filter((tab) => tab.hostProfileId !== currentHostProfileId || tab.id !== tabId);
   const workspaceUi = state.workspaceUi.map((item) => item.hostProfileId === currentHostProfileId && item.selectedAppTabId === tabId
     ? { ...item, selectedAppTabId: undefined }
     : item);
-  return { ...state, appTabs, workspaceUi };
+  const closed: PersistedAppState = { ...state, appTabs, workspaceUi };
+  // The tab is gone, so its pin has nothing to order. Dropped here rather than
+  // left to the next reconcile, so a document tab reopened under a fresh id
+  // cannot inherit the position of the one that was closed.
+  return closing
+    ? unpinTab(closed, currentHostProfileId, closing.serverIdentity, closing.sessionId, tabId)
+    : closed;
 }
 
 export function reorderAppTab(

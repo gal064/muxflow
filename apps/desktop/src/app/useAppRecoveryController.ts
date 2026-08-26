@@ -5,9 +5,10 @@ import {
   recoverableAppTabCount,
   recoverAppTabsFromPreviousServer,
 } from "../features/shell/model";
+import { prunePins } from "../features/shell/pins";
 import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 import type { PersistedAppState } from "../features/shell/types";
-import type { Session } from "./types";
+import type { Session, Window as TmuxWindow } from "./types";
 import { appRecoveryDiscardState, appRecoveryReducer } from "./appRecovery";
 
 interface AppRecoveryControllerOptions {
@@ -16,6 +17,8 @@ interface AppRecoveryControllerOptions {
   currentScope: HostScopeToken;
   serverIdentity?: string;
   sessions: readonly Session[];
+  /** Every window this server has, which is what a tab pin is checked against. */
+  windows: readonly TmuxWindow[];
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
 }
 
@@ -47,11 +50,17 @@ export function useAppRecoveryController(options: AppRecoveryControllerOptions) 
         scope: { ...options.currentScope, serverIdentity: options.serverIdentity },
       });
     }
-    options.setAppState((current) => reconcileWorkspaceIdentity(
-      current,
+    options.setAppState((current) => prunePins(
+      reconcileWorkspaceIdentity(
+        current,
+        options.currentHostProfileId,
+        options.serverIdentity,
+        options.sessions,
+      ),
       options.currentHostProfileId,
       options.serverIdentity,
       options.sessions,
+      options.windows,
     ));
     // A reconnect intentionally clears the live host state before its new
     // ServerHello arrives. Undefined never erases the last authoritative

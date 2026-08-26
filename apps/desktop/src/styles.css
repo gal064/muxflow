@@ -337,6 +337,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    the adapter marks were reading at --chrome-faint and --chrome-dim against a
    light accent, which is the one combination the palette has no contrast for. */
 .workspace-button.active .workspace-shortcut-index,
+.workspace-button.active .workspace-pin,
 .workspace-button.active .agent-icon { color: var(--accent-ink); }
 .workspace-shortcut-index {
   width: 12px; flex: 0 0 auto;
@@ -620,6 +621,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
   font-variant-numeric: tabular-nums;
 }
+/* The pin marks, at the leading edge of a tab and of a workspace row. Both are
+   `inline-flex` so the 11px glyph sits on the control's optical centre rather
+   than the text baseline, and both are absent — not hidden — when the thing is
+   not pinned, so nothing reserves a slot the way the state indicators do. */
+.tab-pin, .workspace-pin, .agent-group-pin { display: inline-flex; flex: 0 0 auto; color: var(--chrome-dim); }
 /* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
    inline color, so there is no rule here per document kind. */
 .tab-glyph { display: inline-flex; }

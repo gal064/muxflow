@@ -46,6 +46,7 @@ function Harness({ serverIdentity, session, connectionEpoch, hostProfileId = "re
     currentScope: scope,
     serverIdentity,
     sessions: [session],
+    windows: [],
     setAppState,
   }).offer;
   return null;
