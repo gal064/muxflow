@@ -74,6 +74,9 @@ const REASON_SUMMARY: readonly (readonly [RegExp, string])[] = [
   [/permission denied|os error 13|read-only file system|os error 30/i, "The host account is not allowed to write there."],
   [/no space left|os error 28/i, "The host has run out of disk space."],
   [/file exists|already exists|os error 17/i, "Something is already at that path. Allow overwrite, or choose another name."],
+  // The workspace start directory is configuration, not a file the user just
+  // clicked: "refresh" would not help, Settings would.
+  [/workspace start directory/i, "The start directory configured for new workspaces is not a directory on this host. Change it under Settings → Workspace."],
   [/no such file or directory|os error 2|does not exist|is no longer available/i, "That path is no longer on the host. Refresh and try again."],
   [/not a directory|os error 20/i, "Part of that path is a file, not a folder."],
   [/directory not empty|os error 66/i, "That folder still has files in it; confirm the non-empty replacement to continue."],
