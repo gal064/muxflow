@@ -9,7 +9,7 @@ import { useStore } from "zustand";
 
 import { FileKind } from "../../../protocol/gen/envelope_pb";
 import { colors, metrics, typeScale } from "../../../ui/tokens";
-import { relativeToRoot, rootTitle } from "../activeRoot";
+import { relativeToRoot, rootTitle, subtitleFor } from "../activeRoot";
 import { formatSize, type DirectoryEntry } from "../entries";
 import { filesStore } from "../filesStore";
 import { FILES_COPY } from "../presentation";
@@ -33,7 +33,7 @@ export function FilesBrowser({ paneId, path, name }: FilesBrowserProps) {
   const rootPath = useStore(filesStore, (state) => state.roots[paneId]?.root ?? "");
 
   const title = path === undefined ? (rootPath ? rootTitle(rootPath) : "Files") : (name ?? rootTitle(path));
-  const subtitle = path === undefined ? rootPath : rootPath ? relativeToRoot(rootPath, path) : path;
+  const subtitle = subtitleFor(title, path === undefined ? rootPath : rootPath ? relativeToRoot(rootPath, path) : path);
 
   const open = useCallback(
     (entry: DirectoryEntry) => {
@@ -59,7 +59,7 @@ export function FilesBrowser({ paneId, path, name }: FilesBrowserProps) {
       {view.status === "error" ? <ErrorState message={view.message} onRetry={reload} /> : null}
       {view.status === "ready" ? (
         view.listing.entries.length === 0 ? (
-          <CentredMessage message={FILES_COPY.empty} />
+          <CentredMessage message={FILES_COPY.empty} tone="quiet" />
         ) : (
           <FlatList
             data={view.listing.entries}
@@ -117,8 +117,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     flexDirection: "row",
     height: metrics.fileRowHeight,
-    paddingLeft: 12,
-    paddingRight: 16,
+    // 16 dp on both edges, the same inset as the app bar's back arrow, so the
+    // content edge does not move as you navigate.
+    paddingHorizontal: 16,
   },
   rowPressed: {
     backgroundColor: colors.chromeHover,
@@ -138,7 +139,7 @@ const styles = StyleSheet.create({
     color: colors.chromeInkStrong,
   },
   nameInert: {
-    color: colors.chromeFaint,
+    color: colors.chromeDim,
   },
   size: {
     color: colors.chromeDim,

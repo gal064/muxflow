@@ -9,7 +9,7 @@ import { useStore } from "zustand";
 
 import { colors, fonts, radii, terminalTheme, typeScale } from "../../../ui/tokens";
 import { MARKDOWN_HTML } from "../../../webview/markdownBundle";
-import { relativeToRoot } from "../activeRoot";
+import { relativeToRoot, subtitleFor } from "../activeRoot";
 import { filesStore } from "../filesStore";
 import type { FilePresentation, ViewerMode } from "../presentation";
 import { useFileBody } from "../useFileBody";
@@ -30,7 +30,7 @@ export function FileViewer({ paneId, path, name }: FileViewerProps) {
   // resolved it. Reading it from the store keeps §9.7's "path relative to root"
   // true while the file is still streaming and after it failed to open.
   const rootPath = useStore(filesStore, (state) => state.roots[paneId]?.root ?? "");
-  const subtitle = rootPath ? relativeToRoot(rootPath, path) : path;
+  const subtitle = subtitleFor(name, rootPath ? relativeToRoot(rootPath, path) : path);
 
   return (
     <View style={styles.root}>
@@ -71,6 +71,9 @@ function ModeToggle({ mode, onChange }: { mode: ViewerMode; onChange: (mode: Vie
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ selected: mode === value }}
+          // The segments have to fit a 56 dp app bar, so the touchable area is
+          // grown past the painted pill rather than the pill past the bar.
+          hitSlop={{ bottom: 12, left: 8, right: 8, top: 12 }}
           key={value}
           onPress={() => onChange(value)}
           style={[styles.toggleOption, mode === value && styles.toggleOptionSelected]}
@@ -114,6 +117,9 @@ function MarkdownView({ source }: { source: string }) {
   const webView = useRef<WebView>(null);
   const ready = useRef(false);
 
+  // `render` is idempotent, so posting it from both `ready` and `onLoadEnd`
+  // costs nothing and stops one lost message from leaving a blank page with no
+  // way back short of leaving the screen.
   const send = useCallback(() => {
     webView.current?.postMessage(JSON.stringify({ t: "render", source }));
   }, [source]);
@@ -150,6 +156,7 @@ function MarkdownView({ source }: { source: string }) {
       allowUniversalAccessFromFileURLs={false}
       androidLayerType="hardware"
       javaScriptEnabled
+      onLoadEnd={send}
       onMessage={onMessage}
       onShouldStartLoadWithRequest={(request) => request.url === "about:blank" || request.url.startsWith("about:")}
       originWhitelist={["about:blank"]}
@@ -181,7 +188,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   plainRow: {
-    paddingHorizontal: 12,
+    paddingHorizontal: 16,
   },
   plainText: {
     color: colors.chromeInk,

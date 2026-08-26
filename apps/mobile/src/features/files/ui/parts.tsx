@@ -1,6 +1,6 @@
 // Small pieces the Files screens and the file viewer share.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Animated, Easing, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { colors, fonts, metrics, radii, typeScale } from "../../../ui/tokens";
@@ -30,11 +30,17 @@ export function CentredSpinner() {
   );
 }
 
-/** A centred line of dim copy: `Empty folder`, and the §9.7 placeholders. */
-export function CentredMessage({ message }: { message: string }) {
+/**
+ * A centred line of copy: `Empty folder`, and the §9.7 placeholders.
+ *
+ * `quiet` is for a state that is merely uneventful — an empty directory. A
+ * placeholder is the only thing on its screen and is the answer to "why can I
+ * not see my file", so it is set in the reading ink, not the de-emphasised one.
+ */
+export function CentredMessage({ message, tone = "primary" }: { message: string; tone?: "primary" | "quiet" }) {
   return (
     <View style={styles.centred}>
-      <Text style={styles.message}>{message}</Text>
+      <Text style={tone === "quiet" ? styles.messageQuiet : styles.message}>{message}</Text>
     </View>
   );
 }
@@ -55,31 +61,48 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry: () 
   );
 }
 
-/** §9.7 step 2: a thin indeterminate progress bar under the app bar while streaming. */
+/**
+ * §9.7 step 2: a thin indeterminate progress bar under the app bar while
+ * streaming.
+ *
+ * The travel is measured from the track and interpolated to dp. A percentage
+ * `outputRange` is not something the native driver can evaluate — it forwards
+ * the string unconverted, the Android node's numeric value stays `NaN`, and the
+ * bar silently never moves.
+ */
 export function StreamingBar() {
   const progress = useRef(new Animated.Value(0)).current;
+  const [width, setWidth] = useState(0);
   useEffect(() => {
+    if (width === 0) return;
+    progress.setValue(0);
     const animation = Animated.loop(
       Animated.timing(progress, { toValue: 1, duration: 1100, easing: Easing.linear, useNativeDriver: true }),
     );
     animation.start();
     return () => animation.stop();
-  }, [progress]);
+  }, [progress, width]);
+  const barWidth = width * PROGRESS_BAR_FRACTION;
   return (
-    <View style={styles.progressTrack}>
-      <Animated.View
-        style={[
-          styles.progressBar,
-          {
-            transform: [
-              { translateX: progress.interpolate({ inputRange: [0, 1], outputRange: ["-40%", "260%"] }) },
-            ],
-          },
-        ]}
-      />
+    <View style={styles.progressTrack} onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
+      {width > 0 ? (
+        <Animated.View
+          style={[
+            styles.progressBar,
+            {
+              width: barWidth,
+              transform: [
+                { translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [-barWidth, width] }) },
+              ],
+            },
+          ]}
+        />
+      ) : null}
     </View>
   );
 }
+
+const PROGRESS_BAR_FRACTION = 0.4;
 
 const styles = StyleSheet.create({
   titleBlock: {
@@ -104,6 +127,11 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   message: {
+    color: colors.chromeInk,
+    fontSize: typeScale.body,
+    textAlign: "center",
+  },
+  messageQuiet: {
     color: colors.chromeDim,
     fontSize: typeScale.body,
     textAlign: "center",
@@ -113,17 +141,22 @@ const styles = StyleSheet.create({
     fontSize: typeScale.body,
     textAlign: "center",
   },
+  // The only action on its screen: a filled accent button, and 48 dp tall so it
+  // meets the platform's minimum tap target. `accentWash` is the "this segment
+  // is selected" treatment and must not read as a button too.
   retry: {
-    backgroundColor: colors.accentWash,
+    alignItems: "center",
+    backgroundColor: colors.accent,
     borderRadius: radii.pill,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
+    justifyContent: "center",
+    minHeight: 48,
+    paddingHorizontal: 24,
   },
   retryPressed: {
-    backgroundColor: colors.chromeSelected,
+    opacity: 0.8,
   },
   retryLabel: {
-    color: colors.accent,
+    color: colors.accentInk,
     fontSize: typeScale.body,
     fontWeight: "600",
   },
@@ -136,6 +169,5 @@ const styles = StyleSheet.create({
   progressBar: {
     backgroundColor: colors.accent,
     height: metrics.hairlineWidth * 2,
-    width: "40%",
   },
 });
