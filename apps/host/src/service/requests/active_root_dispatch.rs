@@ -168,7 +168,14 @@ async fn resolve_terminal_file(
             &expected_cwd,
             &resolve_cancellation,
         )?;
-        let path = canonical_terminal_file(&root, &expected_cwd, &candidate)?;
+        let home = if candidate.starts_with("~/") {
+            Some(PathBuf::from(
+                std::env::var_os("HOME").context("HOME is unavailable")?,
+            ))
+        } else {
+            None
+        };
+        let path = canonical_terminal_file(&root, &expected_cwd, &candidate, home.as_deref())?;
         Ok((root, git_worktree, path))
     })
     .await
@@ -217,12 +224,31 @@ fn pane_matches_terminal_file_route(
 /// where it lands and not by how it is spelled. `root` is canonicalized here
 /// too: comparing a canonical path against a root that still contains a symlink
 /// would reject files that are genuinely inside it.
-fn canonical_terminal_file(root: &str, cwd: &str, candidate: &str) -> anyhow::Result<String> {
-    let requested = Path::new(candidate);
-    let joined: PathBuf = if requested.is_absolute() {
-        requested.to_owned()
+fn canonical_terminal_file(
+    root: &str,
+    cwd: &str,
+    candidate: &str,
+    home: Option<&Path>,
+) -> anyhow::Result<String> {
+    let requested = if let Some(suffix) = candidate.strip_prefix("~/") {
+        if suffix.is_empty() || suffix.starts_with('/') {
+            bail!("terminal file path has a malformed current-user home prefix");
+        }
+        let home = home.context("HOME is unavailable")?;
+        if !home.is_absolute() {
+            bail!("HOME must be absolute");
+        }
+        home.join(suffix)
     } else {
-        Path::new(cwd).join(requested)
+        if candidate.starts_with('~') {
+            bail!("terminal file paths support only the current-user ~/ prefix");
+        }
+        PathBuf::from(candidate)
+    };
+    let joined: PathBuf = if requested.is_absolute() {
+        requested
+    } else {
+        Path::new(cwd).join(&requested)
     };
     let canonical = std::fs::canonicalize(&joined)
         .with_context(|| format!("{} does not exist", joined.display()))?;
@@ -331,7 +357,7 @@ async fn discover(
 #[cfg(test)]
 mod terminal_file_tests {
     use super::{canonical_terminal_file, pane_matches_terminal_file_route};
-    use std::fs;
+    use std::{fs, path::Path};
     use tmux_agent_protocol::v1;
     use tmux_control::Pane;
 
@@ -391,15 +417,20 @@ mod terminal_file_tests {
         let root = fs::canonicalize(&root).unwrap();
         let cwd = fs::canonicalize(&cwd).unwrap();
 
-        let relative =
-            canonical_terminal_file(root.to_str().unwrap(), cwd.to_str().unwrap(), "./local.txt")
-                .unwrap();
+        let relative = canonical_terminal_file(
+            root.to_str().unwrap(),
+            cwd.to_str().unwrap(),
+            "./local.txt",
+            None,
+        )
+        .unwrap();
         assert_eq!(relative, cwd.join("local.txt").to_str().unwrap());
 
         let absolute = canonical_terminal_file(
             root.to_str().unwrap(),
             cwd.to_str().unwrap(),
             root.join("top.txt").to_str().unwrap(),
+            None,
         )
         .unwrap();
         assert_eq!(absolute, root.join("top.txt").to_str().unwrap());
@@ -434,9 +465,13 @@ mod terminal_file_tests {
             outside.join("passwd").to_str().unwrap().to_owned(),
             sibling.join("notes.txt").to_str().unwrap().to_owned(),
         ] {
-            let error =
-                canonical_terminal_file(root.to_str().unwrap(), root.to_str().unwrap(), &candidate)
-                    .expect_err("a path outside the pane root was resolved");
+            let error = canonical_terminal_file(
+                root.to_str().unwrap(),
+                root.to_str().unwrap(),
+                &candidate,
+                None,
+            )
+            .expect_err("a path outside the pane root was resolved");
             assert!(
                 error.to_string().contains("outside the pane's root"),
                 "{candidate} was refused for the wrong reason: {error}"
@@ -448,12 +483,81 @@ mod terminal_file_tests {
     fn rejects_missing_paths_and_directories() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().to_str().unwrap();
-        assert!(canonical_terminal_file(cwd, cwd, "./missing.txt").is_err());
+        assert!(canonical_terminal_file(cwd, cwd, "./missing.txt", None).is_err());
         assert!(
-            canonical_terminal_file(cwd, cwd, ".")
+            canonical_terminal_file(cwd, cwd, ".", None)
                 .unwrap_err()
                 .to_string()
                 .contains("not a file")
         );
+    }
+
+    #[test]
+    fn resolves_current_user_home_paths_with_the_host_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = home.join("work");
+        let report = home.join("dev/report.pdf");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(report.parent().unwrap()).unwrap();
+        fs::write(&report, "report").unwrap();
+        let home = fs::canonicalize(home).unwrap();
+        let cwd = fs::canonicalize(cwd).unwrap();
+        let report = fs::canonicalize(report).unwrap();
+
+        let resolved = canonical_terminal_file(
+            home.to_str().unwrap(),
+            cwd.to_str().unwrap(),
+            "~/dev/report.pdf",
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(resolved, report.to_str().unwrap());
+    }
+
+    #[test]
+    fn home_paths_require_one_absolute_current_user_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_str().unwrap();
+        for (candidate, home, expected) in [
+            ("~/file", None, "HOME is unavailable"),
+            (
+                "~/file",
+                Some(Path::new("relative/home")),
+                "HOME must be absolute",
+            ),
+            ("~alice/file", None, "only the current-user ~/ prefix"),
+            (
+                "~//file",
+                Some(temp.path()),
+                "malformed current-user home prefix",
+            ),
+        ] {
+            let error = canonical_terminal_file(root, root, candidate, home).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "{candidate} was refused for the wrong reason: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn home_path_traversal_remains_confined_to_the_pane_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = home.join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(home.join("outside.txt"), "outside").unwrap();
+        let home = fs::canonicalize(home).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+
+        let error = canonical_terminal_file(
+            root.to_str().unwrap(),
+            root.to_str().unwrap(),
+            "~/outside.txt",
+            Some(&home),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("outside the pane's root"));
     }
 }
