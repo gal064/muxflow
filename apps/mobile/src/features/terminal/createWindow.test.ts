@@ -35,13 +35,16 @@ describe("New terminal (§9.4, §7.5)", () => {
     await expect(pending).resolves.toEqual({ windowId: "@9", paneId: "%9" });
   });
 
-  it("retries once on stale_topology with the generation from the snapshot that followed", async () => {
+  it("retries once on stale_topology, waiting for the snapshot that follows the refusal", async () => {
     const { store, transport, connection } = await connected();
     const pending = createTerminalWindow(connection, store, "$1");
     const [first] = transport.drain();
-    // The refusal arrives after a fresh TOPOLOGY_SNAPSHOT.
-    transport.feed(hostEnvelope({ case: "event", value: create(HostEventSchema, { kind: EventKind.TOPOLOGY_SNAPSHOT, snapshot: topologySnapshot({ generation: 8n }) }) }, { sequence: 1n }));
+    // The refusal is answered directly; the fresh TOPOLOGY_SNAPSHOT travels on
+    // the ordered event channel and can land just after it.
     transport.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "stale_topology", displayMessage: "topology changed" }) }, { requestId: first!.requestId }));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(transport.drain()).toHaveLength(0);
+    transport.feed(hostEnvelope({ case: "event", value: create(HostEventSchema, { kind: EventKind.TOPOLOGY_SNAPSHOT, snapshot: topologySnapshot({ generation: 8n }) }) }, { sequence: 1n }));
     await settle();
     const [second] = transport.drain();
     if (second?.payload.case !== "request") throw new Error("expected a retry");
@@ -55,7 +58,10 @@ describe("New terminal (§9.4, §7.5)", () => {
     const pending = createTerminalWindow(connection, store, "$1");
     const stale = (requestId: bigint) => transport.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "stale_topology", displayMessage: "again" }) }, { requestId }));
     stale(transport.drain()[0]!.requestId);
-    await settle();
+    // No newer snapshot arrives: the retry goes out after the 250 ms wait.
+    await vi.advanceTimersByTimeAsync(249);
+    expect(transport.drain()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
     stale(transport.drain()[0]!.requestId);
     await expect(pending).rejects.toMatchObject({ code: "stale_topology" });
 

@@ -42,12 +42,12 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const [snapshot, setSnapshot] = useState<TerminalSnapshot>({ phase: "preparing", grid: undefined, lastError: undefined });
   const [pageLoaded, setPageLoaded] = useState(false);
   const [text, setText] = useState("");
-  const seenInTopology = useRef(false);
-
   const pane = state.panes[paneId];
-  if (pane) seenInTopology.current = true;
   const connected = state.connection.state === "connected";
-  const gone = connected && seenInTopology.current && !pane;
+  // §9.5: the pane left the topology (window closed elsewhere), or never was
+  // in it (a retained "gone" agent). New terminal waits for its pane before
+  // navigating here, so an absent pane on a loaded topology is conclusive.
+  const gone = connected && !pane && state.topologyGeneration > 0n;
   const agent = agentForPane(state, paneId);
   const session = state.sessions[sessionId];
   const window = pane ? state.windows[pane.windowId] : undefined;
@@ -56,7 +56,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
 
   // One controller per focus: hide on blur (Files, back), re-attach on focus (§7.6 steps 1, 4).
   useFocusEffect(useCallback(() => {
-    if (!pageLoaded) return;
+    if (!pageLoaded || gone) return;
     const instance = new TerminalController({
       paneId,
       sessionId,
@@ -74,7 +74,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
       controller.current = null;
       void instance.stop();
     };
-  }, [pageLoaded, paneId, sessionId]));
+  }, [gone, pageLoaded, paneId, sessionId]));
 
   const onPageMessage = useCallback((message: FromPageMessage) => {
     controller.current?.onPageMessage(message);
@@ -163,7 +163,6 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
         <TextInput
           autoCapitalize="none"
           autoCorrect={false}
-          blurOnSubmit={false}
           editable={inputEnabled}
           onChangeText={setText}
           onSubmitEditing={sendText}
@@ -171,6 +170,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
           placeholderTextColor={colors.chromeFaint}
           returnKeyType="send"
           style={[styles.input, !inputEnabled && styles.disabled]}
+          submitBehavior="submit"
           value={text}
         />
         <Pressable accessibilityRole="button" disabled={!inputEnabled} onPress={sendText} style={[styles.sendButton, !inputEnabled && styles.disabled]}>

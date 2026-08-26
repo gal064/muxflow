@@ -1,7 +1,7 @@
 import { create } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HostConnection } from "../../protocol/HostConnection";
-import { EventKind, HostEventSchema, Operation, PaneResourceSchema, PaneResourceState, TerminalBytesSchema, type Envelope, type Request } from "../../protocol/gen/envelope_pb";
+import { EventKind, HostEventSchema, Operation, PaneResourceSchema, PaneResourceState, ResponseSchema, TerminalBytesSchema, type Envelope, type Request } from "../../protocol/gen/envelope_pb";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../../protocol/testing/fakeTransport";
 import { createSessionStore } from "../../store/sessionStore";
 import type { ToPageMessage } from "./bridgeMessages";
@@ -315,5 +315,39 @@ describe("TerminalController stop during attach", () => {
     if (hide?.payload.case !== "request") throw new Error("expected a hide after the attach settled");
     expect(hide.payload.value).toMatchObject({ operation: Operation.SET_TERMINAL_VISIBILITY, visible: false, scope: "%1", terminalEpoch: 1n });
     await stopped;
+  });
+});
+
+describe("TerminalController attach failure", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("retries the attach after 2 s when a step is refused", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
+    await settle();
+    const [select] = t.drain();
+    t.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "terminal_resize_rejected", displayMessage: "no visible session control client" }) }, { requestId: select!.requestId }));
+    await settle();
+    expect(h.controller.snapshot.lastError).toContain("no visible session control client");
+    expect(t.drain()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const ops = [await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
+    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL]);
+  });
+
+  it("stops sending the remaining steps once stopped mid-select", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
+    await settle();
+    const [select] = t.drain();
+    void h.controller.stop();
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: select!.requestId }));
+    await settle();
+    expect(t.drain()).toHaveLength(0);
   });
 });
