@@ -3,6 +3,7 @@
 
 import { ToastAndroid } from "react-native";
 import { onToast, setTransportFactory } from "./connectionManager";
+import { startNotifications } from "../features/notifications";
 
 let wired = false;
 
@@ -10,6 +11,7 @@ export function wireApp(): void {
   if (wired) return;
   wired = true;
   onToast((message) => ToastAndroid.show(message, ToastAndroid.SHORT));
+  startNotifications();
   if (__DEV__) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { devTransportFactory } = require("./devTransport") as typeof import("./devTransport");
