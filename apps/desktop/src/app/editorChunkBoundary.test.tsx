@@ -291,6 +291,7 @@ function gitClient(): GitWorkspaceClient {
     prepareDiscard: vi.fn(async () => "one-time"),
     mutate: vi.fn(),
     commit: vi.fn(),
+    push: vi.fn(),
     subscribe: vi.fn(() => () => undefined),
   };
 }

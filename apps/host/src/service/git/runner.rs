@@ -27,6 +27,13 @@ use super::{MAX_GIT_OUTPUT, validate_git_path};
 const GIT_DEADLINE: Duration = Duration::from_secs(30);
 pub(super) const GIT_MUTATION_DEADLINE: Duration = Duration::from_secs(2 * 60);
 pub(super) const GIT_COMMIT_DEADLINE: Duration = Duration::from_secs(5 * 60);
+/// A push talks to a remote over whatever link the host has, and pre-push hooks
+/// run inside it. Deliberately under the desktop's own five-minute Git request
+/// timeout rather than equal to it: a push that hits this deadline still has to
+/// be terminated, refreshed and serialized, and if the renderer gave up first
+/// the honest "the outcome is unknown" answer this push exists to produce would
+/// never arrive. The 30s upstream lookup runs before this clock starts.
+pub(super) const GIT_PUSH_DEADLINE: Duration = Duration::from_secs(4 * 60);
 const TERMINATION_GRACE: Duration = Duration::from_millis(250);
 
 thread_local! {

@@ -116,6 +116,8 @@ export interface GitCommandResult {
   postStatusGeneration?: string;
   statusOmitted?: boolean;
   status?: GitStatusSnapshot;
+  /** What a push published to, as `@{upstream}` names it. Pushes only. */
+  pushTarget?: string;
 }
 
 export type GitWorkspaceEvent =
@@ -137,5 +139,6 @@ export interface GitWorkspaceClient {
   prepareDiscard(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, request: GitMutationRequest): Promise<string>;
   mutate(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, request: GitMutationRequest): Promise<GitCommandResult>;
   commit(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, expectedStatusGeneration: string, message: string): Promise<GitCommandResult>;
+  push(scope: FileWorkspaceScope, root: ActiveRoot, repositoryId: string, expectedStatusGeneration: string): Promise<GitCommandResult>;
   subscribe(listener: (event: GitWorkspaceEvent) => void): () => void;
 }

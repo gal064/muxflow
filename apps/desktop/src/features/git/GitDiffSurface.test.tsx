@@ -337,6 +337,7 @@ function mockClient(): GitWorkspaceClient {
     prepareDiscard: vi.fn(async () => "one-time"),
     mutate: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "", applied: true, refreshFailed: false, refreshError: "", outcome: "applied" as const, status })),
     commit: vi.fn(),
+    push: vi.fn(),
     subscribe: vi.fn(() => () => undefined),
   };
 }
