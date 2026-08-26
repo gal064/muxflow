@@ -160,13 +160,16 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 0; border-radius: var(--radius-control);
   background: transparent; color: var(--chrome-dim);
 }
-.bar-button:hover:not(:disabled) { background: var(--chrome-hover); color: var(--chrome-ink); }
+.bar-button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--chrome-hover); color: var(--chrome-ink); }
 .bar-button[aria-pressed="true"] { color: var(--chrome-ink-strong); }
 /* A frozen control has to look frozen. While the connection was read-only the
    titlebar's new-workspace `+` and the strip's split and `+` were disabled and
    drawn identically to the live ones, so the only feedback from pressing one
    was nothing happening. */
-.bar-button:disabled { color: var(--chrome-faint); cursor: default; }
+/* `aria-disabled` gets the same treatment: a control that keeps its tooltip
+   and its place in the tab order — the bell, whose whole job when it has
+   nowhere to go is to say so — still has to read as frozen. */
+.bar-button:disabled, .bar-button[aria-disabled="true"] { color: var(--chrome-faint); cursor: default; }
 
 .badge {
   display: inline-flex; align-items: center; justify-content: center;
@@ -1428,7 +1431,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   }
   .pane-frame.attention::after { border-color: Highlight; }
   .state-dot, .tab-dot, .link-dot, .badge { border: 1px solid ButtonText; }
-  .bar-button:disabled { color: GrayText; }
+  .bar-button:disabled, .bar-button[aria-disabled="true"] { color: GrayText; }
   /* Four state colors become one system color here, so the shape carries the
      encoding whether or not the user turned the glyph option on. The dots grow
      to fit a legible glyph — and the tab's spinner grows with them, because a

@@ -45,8 +45,9 @@ export function GitDiffEditor(props: GitDiffEditorProps) {
       scrollBeyondLastLine: false,
       // A minified bundle or a long prose line used to run off the right edge
       // of a 320px-wide panel with no way to read it. `diffWordWrap: "inherit"`
-      // is what makes the original side wrap the same way as the modified one,
-      // which is what keeps the two sides aligned.
+      // — Monaco's default, stated here because it is the setting that makes
+      // both sides follow `wordWrap` rather than only the modified one — keeps
+      // the two columns wrapping identically, and so aligned.
       wordWrap: "on",
       diffWordWrap: "inherit",
     }}
