@@ -665,14 +665,15 @@ export function App() {
    * flushes every open editor first, which for a set of tabs would replay the
    * same flush once per tab.
    */
-  const closeWorkspaceAppTab = (tab: AppOwnedTab, scope: HostScopeToken) => {
+  const closeWorkspaceAppTab = (tab: AppOwnedTab, scope: HostScopeToken, mode: "single" | "bulk" = "single") => {
     const commit = () => setAppState((current) => closeAppTab(current, currentHostProfileId, tab.id));
     // Closing the document on screen goes back to what was showing before
     // it — the terminal it was opened from, usually — rather than to whatever
     // terminal the workspace happens to have active. With no history to go
     // back to, a neighbouring document in the same workspace is next, and
-    // only then the workspace's terminal.
-    if (selectedAppTabRef.current?.id === tab.id && sameHostConnection(scope, hostScopeRef.current)) {
+    // only then the workspace's terminal. A bulk close skips both: its
+    // neighbours are about to go too, and the terminal is where it ends up.
+    if (mode === "single" && selectedAppTabRef.current?.id === tab.id && sameHostConnection(scope, hostScopeRef.current)) {
       if (focusNavigation.navigateBackFromClosing(tab.id)) return commit();
       const neighbours = workspaceAppTabs.filter((item) => item.id !== tab.id);
       const neighbour = neighbours.filter((item) => item.order < tab.order).at(-1) ?? neighbours[0];
@@ -694,7 +695,7 @@ export function App() {
   };
   const closeTabSet = useBulkTabClose({
     agentPresenceRef,
-    closeAppTab: closeWorkspaceAppTab,
+    closeAppTab: (tab, scope) => closeWorkspaceAppTab(tab, scope, "bulk"),
     hostScopeRef,
     performAction,
     setStatus,
@@ -1181,25 +1182,28 @@ export function App() {
           // it interrupted settles. The second run must only re-select the tab
           // the first one opened, never open it again: a transient diff the
           // user has already navigated away from is closed, and stays closed.
-          let openedId: string | undefined;
+          // Decided in the commit, not in the updater: StrictMode runs the
+          // updater twice and keeps the second result.
+          let committed = false;
           shellNavigation.selectLocalAppTab(
             session.id,
             activeWindowId,
             `git:${gitStatus.repository.id}:${target}:${entry.path}`,
-            () => setAppState((current) => {
-              if (openedId) {
-                return current.appTabs.some((tab) => tab.id === openedId)
-                  ? selectAppTab(current, hostProfileId, serverIdentity, session, openedId)
-                  : current;
-              }
-              const next = openGitDiffTab(
-                current, hostProfileId, serverIdentity, session, entry, target, gitStatus, root, options,
-              );
-              openedId = findGitDiffTab(
-                next, hostProfileId, serverIdentity, session.id, gitStatus.repository.id, entry.path, target,
-              )?.id;
-              return next;
-            }),
+            () => {
+              const replay = committed;
+              committed = true;
+              setAppState((current) => {
+                if (!replay) {
+                  return openGitDiffTab(
+                    current, hostProfileId, serverIdentity, session, entry, target, gitStatus, root, options,
+                  );
+                }
+                const opened = findGitDiffTab(
+                  current, hostProfileId, serverIdentity, session.id, gitStatus.repository.id, entry.path, target,
+                );
+                return opened ? selectAppTab(current, hostProfileId, serverIdentity, session, opened.id) : current;
+              });
+            },
           );
         }}
         onMessage={setStatus}
