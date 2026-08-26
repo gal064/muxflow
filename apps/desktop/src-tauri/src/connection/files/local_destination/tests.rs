@@ -35,6 +35,7 @@ fn destination_diagnostic_classifies_without_recording_the_path() {
     let root = std::env::temp_dir().join(format!("ade-dl-diagnostic-{}", Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
     let destination = root.join("private-report-name.pdf");
+    let directory = File::open(&root).unwrap();
     let diagnostic = destination_parent_diagnostic(
         &destination,
         None,
@@ -43,13 +44,13 @@ fn destination_diagnostic_classifies_without_recording_the_path() {
             first_errno: None,
             final_errno: None,
         },
+        Some(&directory),
     );
     let serialized = serde_json::to_string(&diagnostic).unwrap();
 
     assert_eq!(diagnostic["parentClass"], "temporaryDirectory");
     assert_eq!(diagnostic["parentExists"], true);
     assert_eq!(diagnostic["parentKind"], "directory");
-    assert_eq!(diagnostic["retryOpenSucceeded"], true);
     assert!(!serialized.contains(root.to_str().unwrap()));
     assert!(!serialized.contains("private-report-name.pdf"));
     fs::remove_dir_all(&root).unwrap();
@@ -67,11 +68,12 @@ fn destination_diagnostic_preserves_original_and_retry_denial_facts() {
             first_errno: Some(libc::EPERM),
             final_errno: Some(libc::EPERM),
         },
+        None,
     );
 
-    assert_eq!(diagnostic["parentExists"], false);
-    assert_eq!(diagnostic["retryOpenSucceeded"], false);
-    assert!(diagnostic["retryOpenErrno"].is_number());
+    assert!(diagnostic["parentExists"].is_null());
+    assert_eq!(diagnostic["parentKind"], "notProbed");
+    assert!(diagnostic["readAccess"].is_null());
     assert_eq!(diagnostic["parentOpenAttempts"], 2);
     assert_eq!(diagnostic["parentOpenFirstErrno"], libc::EPERM);
     assert_eq!(diagnostic["parentOpenFinalErrno"], libc::EPERM);
@@ -80,6 +82,22 @@ fn destination_diagnostic_preserves_original_and_retry_denial_facts() {
         diagnostic["admissionErrorClass"],
         "parentUnavailableOrUnsafe"
     );
+}
+
+#[test]
+fn rejected_relative_destination_is_not_probed_against_the_process_cwd() {
+    let diagnostic = destination_parent_diagnostic(
+        Path::new("renderer-controlled/report.pdf"),
+        Some("download destination path must be absolute"),
+        ParentOpenDiagnostic::default(),
+        None,
+    );
+
+    assert_eq!(diagnostic["parentAbsolute"], false);
+    assert_eq!(diagnostic["parentClass"], "relativeRejected");
+    assert_eq!(diagnostic["parentKind"], "notProbed");
+    assert!(diagnostic["readAccess"].is_null());
+    assert_eq!(diagnostic["statvfsSucceeded"], false);
 }
 
 #[test]
@@ -120,16 +138,12 @@ fn repeated_eperm_fails_after_one_retry_and_preserves_both_errno_values() {
     };
     let parent_open = failure.parent_open_diagnostic();
     let diagnostic =
-        destination_parent_diagnostic(&destination, Some(failure.as_str()), parent_open);
+        destination_parent_diagnostic(&destination, Some(failure.as_str()), parent_open, None);
 
     assert_eq!(parent_open.attempts, 2);
     assert_eq!(parent_open.first_errno, Some(libc::EPERM));
     assert_eq!(parent_open.final_errno, Some(libc::EPERM));
     assert_eq!(diagnostic["parentOpenRecovered"], false);
-    // The observational probe runs after the bounded operational retry. It
-    // can prove the denial was transient without converting this attempt into
-    // an unbounded retry loop.
-    assert_eq!(diagnostic["retryOpenSucceeded"], true);
     fs::remove_dir_all(root).unwrap();
 }
 

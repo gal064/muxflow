@@ -156,12 +156,7 @@ pub fn start_download(
     if root.is_empty() || root_token.is_empty() || source.is_empty() || destination.is_empty() {
         return Err("root snapshot, source, and destination are required".into());
     }
-    if diagnostic_attempt_id.is_empty()
-        || diagnostic_attempt_id.len() > 64
-        || !diagnostic_attempt_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
+    if !valid_diagnostic_attempt_id(&diagnostic_attempt_id) {
         return Err("invalid download diagnostic attempt ID".into());
     }
     let connection = profiles.connection_for(&profile_id)?;
@@ -186,6 +181,10 @@ pub fn start_download(
         &destination,
         reserved.as_ref().err().map(|failure| failure.as_str()),
         parent_open,
+        reserved
+            .as_ref()
+            .ok()
+            .map(|destination| destination.parent_directory()),
     );
     let mut diagnostic = destination_diagnostic
         .as_object()
@@ -218,6 +217,12 @@ pub fn start_download(
     });
     enqueue(job)?;
     Ok(transfer_id)
+}
+
+fn valid_diagnostic_attempt_id(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|parsed| {
+        parsed.get_version() == Some(uuid::Version::Random) && parsed.to_string() == value
+    })
 }
 
 /// The name the save panel opens with, chosen so the panel's own "…already
@@ -672,6 +677,22 @@ mod tests {
             serde_json::to_string(&DownloadCollisionPolicy::OverwriteConfirmed).unwrap(),
             "\"overwriteConfirmed\""
         );
+    }
+
+    #[test]
+    fn diagnostic_attempt_ids_accept_only_canonical_v4_uuids() {
+        assert!(valid_diagnostic_attempt_id(
+            "8c627ead-fa11-4c04-9109-23cabefa16c1"
+        ));
+        assert!(!valid_diagnostic_attempt_id(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!valid_diagnostic_attempt_id(
+            "8C627EAD-FA11-4C04-9109-23CABEFA16C1"
+        ));
+        assert!(!valid_diagnostic_attempt_id(
+            "8c627eadfa114c04910923cabefa16c1"
+        ));
     }
 
     #[test]

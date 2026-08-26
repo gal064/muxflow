@@ -31,16 +31,15 @@ pub(super) fn destination_parent_diagnostic(
     path: &Path,
     admission_error: Option<&str>,
     parent_open: ParentOpenDiagnostic,
+    directory: Option<&File>,
 ) -> Value {
     let parent = path.parent().unwrap_or(path);
-    let parent_name = c_string(parent.as_os_str(), "diagnostic destination parent").ok();
-    let metadata = std::fs::symlink_metadata(parent);
+    let parent_absolute = parent.is_absolute();
+    let metadata = directory.map(File::metadata);
     let euid = unsafe { libc::geteuid() };
     let (parent_exists, parent_kind, owner_matches, parent_mode, metadata_errno) = match metadata {
-        Ok(metadata) => {
-            let kind = if metadata.file_type().is_symlink() {
-                "symlink"
-            } else if metadata.is_dir() {
+        Some(Ok(metadata)) => {
+            let kind = if metadata.is_dir() {
                 "directory"
             } else if metadata.is_file() {
                 "file"
@@ -48,43 +47,29 @@ pub(super) fn destination_parent_diagnostic(
                 "other"
             };
             (
-                true,
+                Some(true),
                 kind,
                 Some(metadata.uid() == euid),
                 Some(metadata.mode() & 0o7777),
                 None,
             )
         }
-        Err(error) => (false, "unavailable", None, None, error.raw_os_error()),
+        Some(Err(error)) => (None, "unavailable", None, None, error.raw_os_error()),
+        None => (None, "notProbed", None, None, None),
     };
     let access = |mode| {
-        parent_name.as_ref().map(|name| {
-            let result = unsafe { libc::access(name.as_ptr(), mode) };
+        directory.map(|directory| {
+            let result = unsafe { libc::faccessat(directory.as_raw_fd(), c".".as_ptr(), mode, 0) };
             json!({
                 "allowed": result == 0,
                 "errno": (result != 0).then(|| io::Error::last_os_error().raw_os_error()).flatten(),
             })
         })
     };
-    let (retry_open_succeeded, retry_open_errno) =
-        parent_name.as_ref().map_or((false, None), |name| {
-            let fd = unsafe {
-                libc::open(
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            };
-            if fd >= 0 {
-                unsafe { libc::close(fd) };
-                (true, None)
-            } else {
-                (false, io::Error::last_os_error().raw_os_error())
-            }
-        });
     let (statvfs_succeeded, mount_read_only, statvfs_errno) =
-        parent_name.as_ref().map_or((false, None, None), |name| {
+        directory.map_or((false, None, None), |directory| {
             let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-            let result = unsafe { libc::statvfs(name.as_ptr(), stats.as_mut_ptr()) };
+            let result = unsafe { libc::fstatvfs(directory.as_raw_fd(), stats.as_mut_ptr()) };
             if result == 0 {
                 let stats = unsafe { stats.assume_init() };
                 (true, Some(stats.f_flag & libc::ST_RDONLY != 0), None)
@@ -120,7 +105,7 @@ pub(super) fn destination_parent_diagnostic(
         "parentOpenFinalErrno": parent_open.final_errno,
         "parentOpenRecovered": parent_open.first_errno.is_some() && parent_open.final_errno.is_none(),
         "parentClass": classify_destination_parent(parent),
-        "parentAbsolute": parent.is_absolute(),
+        "parentAbsolute": parent_absolute,
         "parentExists": parent_exists,
         "parentKind": parent_kind,
         "parentOwnerMatchesProcess": owner_matches,
@@ -129,8 +114,6 @@ pub(super) fn destination_parent_diagnostic(
         "readAccess": access(libc::R_OK),
         "writeAccess": access(libc::W_OK),
         "searchAccess": access(libc::X_OK),
-        "retryOpenSucceeded": retry_open_succeeded,
-        "retryOpenErrno": retry_open_errno,
         "statvfsSucceeded": statvfs_succeeded,
         "mountReadOnly": mount_read_only,
         "statvfsErrno": statvfs_errno,
@@ -168,6 +151,9 @@ fn classify_admission_error(error: &str) -> &'static str {
 }
 
 fn classify_destination_parent(parent: &Path) -> &'static str {
+    if !parent.is_absolute() {
+        return "relativeRejected";
+    }
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         if parent == home.join("Downloads") {
             return "homeDownloads";
@@ -446,6 +432,10 @@ impl ReservedDestination {
 
     pub(super) fn parent_open_diagnostic(&self) -> ParentOpenDiagnostic {
         self.parent_open
+    }
+
+    pub(super) fn parent_directory(&self) -> &File {
+        &self.directory
     }
 
     #[cfg(test)]
