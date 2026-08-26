@@ -178,8 +178,15 @@ export class HostConnection {
     return this.attempt?.hello;
   }
 
+  /**
+   * The tmux server identity every guarded request must echo (§7.5). The
+   * latest TOPOLOGY_SNAPSHOT wins over the ServerHello: a tmux server that
+   * starts after the handshake changes the identity from `tmux:none`, and
+   * the host refuses the stale one with `stale_topology`.
+   */
   get serverIdentity(): string {
-    return this.attempt?.hello?.serverIdentity ?? "";
+    const fromTopology = this.options.store.getState().serverIdentity;
+    return fromTopology || (this.attempt?.hello?.serverIdentity ?? "");
   }
 
   /** The epoch sent in this connection's ClientHello; also the visibility checkpoint epoch (§7.6). */
