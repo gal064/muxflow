@@ -395,10 +395,12 @@ impl TerminalClient {
             .unwrap()
             .clone()
             .ok_or_else(|| "host bridge is disconnected".to_owned())?;
-        writer.write(
-            envelope(request_id, 0, Payload::Request(request)),
-            Instant::now() + REQUEST_TIMEOUT,
-        )
+        writer
+            .write(
+                envelope(request_id, 0, Payload::Request(request)),
+                Instant::now() + REQUEST_TIMEOUT,
+            )
+            .inspect_err(|_| self.reconnect_transport())
     }
 
     fn request_git(
@@ -462,6 +464,13 @@ impl TerminalClient {
             if let Some(claim) = &operation {
                 self.operations.unbind(claim);
             }
+            // A control write that missed its deadline or poisoned its pipe is
+            // not a request-scoped failure. Keeping that bridge installed lets
+            // every later keystroke and mutation queue behind a transport that
+            // has already proved it cannot make bounded progress. The bridge
+            // supervisor owns reconnect policy; removing this one transport is
+            // the smallest recovery that reaches it.
+            self.reconnect_transport();
             return Err(error);
         }
         // A cancel raised between the bind above and the write that has just
@@ -488,8 +497,17 @@ impl TerminalClient {
             Err(_) => {
                 self.cancel_request(request_id);
                 self.pending.lock().unwrap().remove(&request_id);
+                // The host may still complete a mutation after our deadline,
+                // so it is not safe to replay the request. It is equally unsafe
+                // to keep using the same ordered lane: production showed one
+                // timed-out selection leaving later selections and terminal
+                // input several minutes behind it while fresh connections to
+                // the same daemon stayed healthy. Tear down only this bridge;
+                // the existing supervisor reconnects and reconciles from an
+                // authoritative snapshot without replaying the request.
+                self.reconnect_transport();
                 Err(
-                    "host request timed out; commit outcome is unknown and the request will not be replayed"
+                    "host request timed out; reconnecting because commit outcome is unknown and the request will not be replayed"
                         .into(),
                 )
             }
@@ -538,16 +556,18 @@ impl TerminalClient {
             .unwrap()
             .clone()
             .ok_or("host bridge is disconnected")?;
-        writer.write(
-            envelope(
-                self.next_request_id.fetch_add(1, Ordering::AcqRel),
-                0,
-                Payload::Cancel(v1::Cancel {
-                    target_request_id: request_id,
-                }),
-            ),
-            Instant::now() + REQUEST_TIMEOUT,
-        )
+        writer
+            .write(
+                envelope(
+                    self.next_request_id.fetch_add(1, Ordering::AcqRel),
+                    0,
+                    Payload::Cancel(v1::Cancel {
+                        target_request_id: request_id,
+                    }),
+                ),
+                Instant::now() + REQUEST_TIMEOUT,
+            )
+            .inspect_err(|_| self.reconnect_transport())
     }
 
     /// Best-effort `Cancel` for a request already on the wire.
