@@ -29,41 +29,51 @@ export function encodeFrame(envelope: Envelope): Uint8Array {
  * maximum-sized frame followed by part or all of later frames.
  */
 export class FrameAccumulator {
+  /** Backing store; `head..tail` is the pending region. Grown geometrically like `Vec`. */
   private bytes = new Uint8Array(0);
   private head = 0;
+  private tail = 0;
 
   push(chunk: Uint8Array): void {
     if (chunk.byteLength === 0) return;
-    const pending = this.bytes.byteLength - this.head;
+    const pending = this.tail - this.head;
     if (pending === 0) {
-      this.bytes = chunk.slice();
       this.head = 0;
-      return;
+      this.tail = 0;
     }
-    const joined = new Uint8Array(pending + chunk.byteLength);
-    joined.set(this.bytes.subarray(this.head), 0);
-    joined.set(chunk, pending);
-    this.bytes = joined;
-    this.head = 0;
+    if (this.tail + chunk.byteLength > this.bytes.byteLength) {
+      // Compact and, if still short, grow to at least double.
+      const needed = pending + chunk.byteLength;
+      const grown = new Uint8Array(Math.max(needed, this.bytes.byteLength * 2));
+      grown.set(this.bytes.subarray(this.head, this.tail), 0);
+      this.bytes = grown;
+      this.head = 0;
+      this.tail = pending;
+    }
+    this.bytes.set(chunk, this.tail);
+    this.tail += chunk.byteLength;
   }
 
   /** Bytes buffered and not yet decoded. */
   get buffered(): number {
-    return this.bytes.byteLength - this.head;
+    return this.tail - this.head;
   }
 
   nextFrame(): Envelope | undefined {
-    const pending = this.bytes.byteLength - this.head;
+    const pending = this.tail - this.head;
     if (pending < 4) return undefined;
     const length = new DataView(this.bytes.buffer, this.bytes.byteOffset + this.head, 4).getUint32(0, false);
     if (length > MAX_FRAME_BYTES) throw new FrameTooLargeError(length);
     if (pending < length + 4) return undefined;
     const start = this.head + 4;
+    // Decoded `bytes` fields view this region, so it is never overwritten: a
+    // later push that needs the space allocates a fresh backing store.
     const envelope = fromBinary(EnvelopeSchema, this.bytes.subarray(start, start + length));
     this.head = start + length;
-    if (this.head === this.bytes.byteLength) {
+    if (this.head === this.tail) {
       this.bytes = new Uint8Array(0);
       this.head = 0;
+      this.tail = 0;
     }
     return envelope;
   }
