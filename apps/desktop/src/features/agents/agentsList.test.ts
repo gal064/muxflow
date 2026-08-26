@@ -199,3 +199,21 @@ describe("pinned agents lead the list in both orderings", () => {
       .toEqual([false, false, false, false]);
   });
 });
+
+describe("the bell and ⌘⇧U ignore pins", () => {
+  it("still goes to the loudest waiting agent, not to a pinned quieter one", () => {
+    const pinnedDone = agent({
+      id: "pinned-done", displayName: "a", sessionId: "$pin", lifecycle: "idle",
+      attentionKind: "completed", attentionGeneration: 4, seenGeneration: 1, updatedAt: 1,
+    });
+    const blockedElsewhere = agent({ id: "blocked-away", displayName: "c", sessionId: "$plain", lifecycle: "blocked", updatedAt: 99 });
+    const place = (record: AgentRecord): AgentLocation => record.sessionId === "$pin"
+      ? { workspaceOrder: 0, workspaceName: "pinned-ws", workspacePinnedAt: 100 }
+      : { workspaceOrder: 1, workspaceName: "plain-ws" };
+    const rows = buildAgentRows([pinnedDone, blockedElsewhere], place, () => true, "status");
+    // The list leads with the pinned row…
+    expect(rows[0].agent.id).toBe("pinned-done");
+    // …and the bell still means "who needs me most".
+    expect(jumpTarget(rows)?.agent.id).toBe("blocked-away");
+  });
+});
