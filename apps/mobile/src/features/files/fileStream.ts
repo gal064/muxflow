@@ -44,10 +44,11 @@ export class FileStreamError extends Error {
 /**
  * Assembles one `OPEN_FILE_STREAM` answer.
  *
- * Body frames carry their own `offset`, so they are written into a buffer sized
- * from the header rather than concatenated in arrival order: §11.1 says the
- * frames may interleave with unrelated traffic and says nothing about their
- * order relative to each other.
+ * The body is written into a buffer sized from the header, at the offset each
+ * frame declares, and every frame must continue where the last one stopped:
+ * §11.1 says the frames may interleave with unrelated *traffic*, but the host
+ * cuts them from one buffer in order down one connection. Checking the offset
+ * is what turns "the right number of bytes arrived" into "every byte arrived".
  */
 export class FileStreamAssembler {
   private header: FileStreamHeader | undefined;

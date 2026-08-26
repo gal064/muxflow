@@ -19,9 +19,10 @@ import { FILES_COPY } from "./presentation";
 
 export type DirectoryView =
   /** Resolving the root, or waiting for the connection: §9.6 shows a centred spinner. */
-  | { status: "loading"; root?: ResolvedRoot | undefined }
+  | { status: "loading" }
   | { status: "ready"; root: ResolvedRoot; listing: DirectoryListing }
-  | { status: "error"; message: string; root?: ResolvedRoot | undefined };
+  /** §9.6 step 7. The root the screen last knew stays in the store, for the title. */
+  | { status: "error"; message: string };
 
 export interface DirectoryResult {
   view: DirectoryView;
