@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { renderSafeMarkdown } from "./markdown";
 
 /**
@@ -44,21 +44,109 @@ function whenIdle(work: () => void): () => void {
   return () => globalThis.cancelIdleCallback?.(handle);
 }
 
+/** How far the pointer may travel between press and release and still be a click. */
+export const CLICK_SLOP_PX = 4;
+
+interface Sanitized {
+  source: string;
+  html: string;
+}
+
+interface PreviewOptions {
+  /**
+   * A pointer selection gesture is in progress. Nothing may be published until
+   * it ends, because replacing the subtree mid-drag collapses the selection the
+   * drag is building.
+   */
+  held?: boolean;
+  /** The article the HTML is rendered into, used to locate a live selection. */
+  container?: RefObject<HTMLElement | null>;
+}
+
+/**
+ * True while a selection the user can see spans text inside `container`.
+ *
+ * Publishing replaces the whole subtree, which drops or moves any selection
+ * living in it. A collapsed caret has nothing to lose and a selection anchored
+ * somewhere else in the app is not ours to protect, so only this case defers.
+ */
+function selectionHolds(container: HTMLElement | null | undefined): boolean {
+  if (!container) return false;
+  const selection = document.getSelection?.();
+  if (!selection || selection.isCollapsed) return false;
+  const anchor = selection.anchorNode;
+  return Boolean(anchor && container.contains(anchor));
+}
+
 /**
  * The sanitized HTML for a Markdown source, published on a delay.
  *
  * The first render is deliberately not delayed: opening a document must paint
  * its preview, and there is nothing to debounce yet.
+ *
+ * A finished sanitize is parked rather than published while the user is
+ * selecting text in the preview: an autosave-driven re-render arriving in the
+ * middle of a drag would replace the nodes the selection points at, and the
+ * selection would collapse. The park is released — once — as soon as the
+ * gesture ends and the selection is gone or has moved out of the article, so a
+ * live selection defers the refresh instead of freezing the preview.
  */
-export function useSanitizedMarkdown(source: string): string {
+export function useSanitizedMarkdown(source: string, options?: PreviewOptions): string {
   const [published, setPublished] = useState(() => renderSafeMarkdown(source));
+  // The published string is read from inside scheduled work and from listeners,
+  // so it is mirrored here rather than closed over at whatever render armed them.
+  const publishedRef = useRef(published);
   const rendered = useRef(source);
+  const [parked, setParked] = useState<Sanitized>();
+  const held = options?.held ?? false;
+  const container = options?.container;
+
+  // Read from inside scheduled work, which outlives the render that armed it.
+  const heldRef = useRef(held);
+  useEffect(() => { heldRef.current = held; }, [held]);
+
+  const publish = useCallback((next: Sanitized) => {
+    rendered.current = next.source;
+    setParked(undefined);
+    // Identical HTML is not a new document. Skipping the state write keeps
+    // React from touching the subtree at all, selection or no selection.
+    if (publishedRef.current === next.html) return;
+    publishedRef.current = next.html;
+    setPublished(next.html);
+  }, []);
+
   useEffect(() => {
     if (rendered.current === source) return;
     return scheduleSanitizedPreview(() => {
-      rendered.current = source;
-      setPublished(renderSafeMarkdown(source));
+      const next = { source, html: renderSafeMarkdown(source) };
+      // `held` is read through the render that armed this schedule, which is
+      // the render the gesture started in or a later one; a gesture that began
+      // after the schedule is caught by the selection test below or, before any
+      // text is selected, by the pointer-up release publishing the park.
+      if (heldRef.current || selectionHolds(container?.current)) {
+        setParked(next);
+        return;
+      }
+      publish(next);
     });
-  }, [source]);
+  }, [container, publish, source]);
+
+  useEffect(() => {
+    if (!parked || held) return;
+    if (!selectionHolds(container?.current)) {
+      publish(parked);
+      return;
+    }
+    // Still selected. Wait for the selection to collapse or leave rather than
+    // dropping the update, and stop listening the moment it is published.
+    const recheck = () => {
+      if (selectionHolds(container?.current)) return;
+      document.removeEventListener("selectionchange", recheck);
+      publish(parked);
+    };
+    document.addEventListener("selectionchange", recheck);
+    return () => document.removeEventListener("selectionchange", recheck);
+  }, [container, held, parked, publish]);
+
   return published;
 }
