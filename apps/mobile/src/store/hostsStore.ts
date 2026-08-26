@@ -204,13 +204,20 @@ export function createHostsStore(storage: HostsStorage): HostsStore {
       },
 
       updateHost(id, draft) {
-        mutate(id, (host) => ({
-          ...host,
-          label: hostLabel(draft),
-          host: draft.host.trim(),
-          port: draft.port,
-          user: draft.user.trim(),
-        }));
+        mutate(id, (host) => {
+          const address = { host: draft.host.trim(), port: draft.port, user: draft.user.trim() };
+          // Re-pointing an entry at another machine means the pin belongs to a
+          // host this one is not: §9.10's mismatch screen is for a key that
+          // changed under the same address, not for a row the user edited. A
+          // host key belongs to host:port, so a new user name is not a move.
+          const moved = address.host !== host.host || address.port !== host.port;
+          return {
+            ...host,
+            ...address,
+            label: hostLabel(draft),
+            ...(moved ? { trustedHostKeyFingerprint: null } : {}),
+          };
+        });
       },
 
       removeHost(id) {

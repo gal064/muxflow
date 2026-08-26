@@ -29,8 +29,21 @@ export function connectingStripText(label: string): string {
   return `Connecting to ${label}…`;
 }
 
-export function reconnectingStripText(secondsLeft: number): string {
-  return secondsLeft > 0 ? `Connection lost. Reconnecting in ${secondsLeft}s…` : "Reconnecting…";
+/**
+ * §9 spells the reconnecting strip `"Connection lost. Reconnecting in {n}s…"`,
+ * and at 0 `"Reconnecting…"`. §12 asks the same 28 dp line to say
+ * `"Couldn't reach {host}:{port}."` while it retries an unreachable host, so
+ * the first sentence is the §12 close message when there is one and §9's
+ * `"Connection lost."` — a connection that was up and went away — when there
+ * is not. The countdown is the only place the two have to share; at 0 the line
+ * is §9's exactly.
+ */
+export const CONNECTION_LOST = "Connection lost.";
+
+export function reconnectingStripText(secondsLeft: number, reason: string = CONNECTION_LOST): string {
+  if (secondsLeft <= 0) return "Reconnecting…";
+  const why = reason.trim().length > 0 ? reason.trim() : CONNECTION_LOST;
+  return `${why} Reconnecting in ${secondsLeft}s…`;
 }
 
 /** §7.2's backoff, so the strip can count the same seconds down. */

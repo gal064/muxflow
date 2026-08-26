@@ -80,11 +80,6 @@ export function getConnection(): HostConnection | undefined {
   return control;
 }
 
-/** The host the current connection belongs to. */
-export function getConnectedHost(): SavedHost | undefined {
-  return connectedHost;
-}
-
 /**
  * The second `bridge --stdio` channel file bodies are served on (§11.1).
  * Dialled lazily and bound to the control lane's identity and epoch.

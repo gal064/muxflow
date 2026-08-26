@@ -222,6 +222,30 @@ describe("openSshTransport", () => {
     ]);
   });
 
+  it("takes the dialog down when the dial itself fails under it", async () => {
+    const fake = fakeSsh();
+    let cancelled = 0;
+    fake.ssh.connect = vi.fn(async () => {
+      throw new Error("no route to host");
+    });
+    const pending = openSshTransport({
+      connectionId: "c",
+      target,
+      trustedHostKeyFingerprint: null,
+      ssh: fake.ssh,
+      hostAddress,
+      // Never answers: the dialog is still on screen when the dial gives up.
+      onHostKey: () => new Promise<boolean>(() => undefined),
+      onHostKeyCancelled: () => {
+        cancelled += 1;
+      },
+    });
+    fake.emit({ type: "hostKey", connectionId: "c", algorithm: "ssh-ed25519", fingerprintSha256: "SHA256:new" });
+    await expect(pending).rejects.toBeInstanceOf(TransportDialError);
+    // Without this the store stays busy and refuses every later prompt.
+    expect(cancelled).toBe(1);
+  });
+
   it("never trusts a key when no dialog is wired", async () => {
     const fake = fakeSsh();
     void openSshTransport({

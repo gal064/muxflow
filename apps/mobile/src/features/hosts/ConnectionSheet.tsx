@@ -27,7 +27,8 @@ const sheetStore = createStore<SheetState>((set) => ({
 
 /**
  * Opens the §9.8 sheet from anywhere — the connection dot on Home, the strip's
- * "Details". The sheet itself is mounted once per screen that can show it.
+ * "Details", the full-screen rows of §12. The sheet itself is mounted once, by
+ * `ConnectionModals` in the root layout.
  */
 export function useConnectionSheet(): SheetState {
   const visible = useStore(sheetStore, (state) => state.visible);

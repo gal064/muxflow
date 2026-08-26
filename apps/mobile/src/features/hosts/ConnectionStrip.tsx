@@ -43,9 +43,11 @@ export function ConnectionStrip() {
 
   if (connection.state === "reconnecting") {
     return (
+      // Only a close carries §12 copy; the state machine also reconnects for
+      // reasons of its own ("sequence gap"), which §12 keeps out of the UI.
       <View style={[styles.strip, styles.warn]}>
         <Text style={[styles.text, styles.warnText]} numberOfLines={1}>
-          {reconnectingStripText(secondsLeft)}
+          {reconnectingStripText(secondsLeft, lastClose?.message)}
         </Text>
       </View>
     );

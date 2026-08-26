@@ -59,9 +59,13 @@ const styles = StyleSheet.create({
     bottom: 0, left: 0, position: "absolute", right: 0, top: 0,
     alignItems: "center",
     backgroundColor: colors.chromeBg,
+    // The chrome is mounted first so the strip sits under the app bar, which
+    // also puts this row behind its screen's content in paint order.
+    elevation: 8,
     gap: 16,
     justifyContent: "center",
     padding: 32,
+    zIndex: 10,
   },
   glyph: {
     color: colors.danger,

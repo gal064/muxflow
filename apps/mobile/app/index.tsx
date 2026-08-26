@@ -5,7 +5,7 @@ import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { ConnectionChrome } from "../src/features/hosts/ConnectionChrome";
 import { ConnectionDot } from "../src/features/hosts/ConnectionDot";
 import { useHosts } from "../src/features/hosts/hooks";
-import { connectHost, getConnectedHost } from "../src/session/connectionManager";
+import { connectHost } from "../src/session/connectionManager";
 import { hostAddress, hostsStore, type SavedHost } from "../src/store/hostsStore";
 import { sessionStore } from "../src/store/sessionStore";
 import { Button, Hairline } from "../src/ui/components/Button";
@@ -38,7 +38,7 @@ export default function HostsScreen() {
     <View style={styles.root}>
       <Stack.Screen options={{ headerRight: () => <ConnectionDot /> }} />
       <ConnectionChrome returnOnFailure />
-      {hosts.length === 0 ? (
+      {hydrated && hosts.length === 0 ? (
         <EmptyState />
       ) : (
         <FlatList
@@ -164,8 +164,8 @@ function SheetAction({ label, onPress, danger = false }: { label: string; onPres
 
 /** True while this host owns a connection that is up or on its way up. */
 function isLive(hostId: string): boolean {
-  if (getConnectedHost()?.id !== hostId) return false;
-  const { state } = sessionStore.getState().connection;
+  const { state, host } = sessionStore.getState().connection;
+  if (host?.id !== hostId) return false;
   return state !== "idle" && state !== "failed" && state !== "incompatible";
 }
 
