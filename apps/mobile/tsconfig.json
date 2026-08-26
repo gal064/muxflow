@@ -16,7 +16,8 @@
     "app/**/*.ts",
     "app/**/*.tsx",
     "src/**/*.ts",
-    "src/**/*.tsx"
+    "src/**/*.tsx",
+    "webview/**/*.ts"
   ],
   "exclude": [
     "node_modules",

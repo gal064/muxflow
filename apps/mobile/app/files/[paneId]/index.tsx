@@ -1,6 +1,9 @@
-import { PlaceholderScreen } from "../../../src/ui/components/PlaceholderScreen";
+import { useLocalSearchParams } from "expo-router";
 
-/** Files, active root — design.md §9.6. */
+import { FilesBrowser } from "../../../src/features/files/ui/FilesBrowser";
+
+/** Files, rooted at the pane's active root — design.md §9.6. */
 export default function FilesRootScreen() {
-  return <PlaceholderScreen title="Files" route="/files/[paneId]" />;
+  const { paneId } = useLocalSearchParams<{ paneId: string }>();
+  return <FilesBrowser paneId={paneId} />;
 }
