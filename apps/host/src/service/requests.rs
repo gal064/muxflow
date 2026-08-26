@@ -34,6 +34,7 @@ pub(super) mod operation_policy;
 mod tmux_action_dispatch;
 pub(super) use dispatcher::handle_request;
 
+#[derive(Clone)]
 pub(super) struct RequestContext {
     pub(super) control_tx: mpsc::Sender<SequencerControl>,
     pub(super) event_tx: mpsc::Sender<SequencerControl>,

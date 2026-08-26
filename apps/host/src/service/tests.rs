@@ -103,6 +103,75 @@ async fn bulk_handshake_rejects_stale_server_identity_and_echoes_epoch() {
     task.await.unwrap().unwrap();
 }
 
+/// A stalled ordered operation used to own the frame reader itself. That made
+/// the acknowledgement below unreadable until the operation returned: every
+/// request, pane and workspace behind it appeared frozen. The ordered worker
+/// may stall; the frame reader must still consume acknowledgements immediately.
+#[tokio::test]
+async fn stalled_ordered_operation_does_not_block_the_frame_reader() {
+    TEST_LAST_TERMINAL_ACK_EPOCH.store(0, Ordering::Release);
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let task = tokio::spawn(serve_with_shutdown(server, None));
+    write_frame(
+        &mut client,
+        &envelope(
+            1,
+            0,
+            Payload::ClientHello(v1::ClientHello {
+                desktop_version: "ordered-stall-test".into(),
+                requested_capabilities: HOST_CAPABILITIES,
+                expected_helper_version: HELPER_VERSION.into(),
+                connection_epoch: 77,
+                ..Default::default()
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    let _hello = read_frame(&mut client).await.unwrap().unwrap();
+    write_frame(
+        &mut client,
+        &envelope(
+            2,
+            0,
+            Payload::Request(v1::Request {
+                operation: v1::Operation::TestDelay.into(),
+                scope: "stall-ordered-lane".into(),
+                ..Default::default()
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    // No terminal record was ever reserved, so acknowledging one is invalid.
+    // Processing it proves the reader is alive independently of ordered work.
+    write_frame(
+        &mut client,
+        &envelope(
+            0,
+            0,
+            Payload::TerminalOutputAck(v1::TerminalOutputAck {
+                connection_epoch: 77,
+                cumulative_bytes: 1,
+                cumulative_records: 1,
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while TEST_LAST_TERMINAL_ACK_EPOCH.load(Ordering::Acquire) != 77 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("frame reader waited for the deliberately stalled ordered lane");
+
+    drop(client);
+    assert!(task.await.unwrap().is_err());
+}
+
 #[tokio::test]
 async fn buffered_cancel_or_eof_before_first_poll_cannot_stage_a_file() {
     async fn exercise(eof: bool) {
