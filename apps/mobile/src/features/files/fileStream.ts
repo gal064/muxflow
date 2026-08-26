@@ -53,7 +53,7 @@ export class FileStreamAssembler {
   private header: FileStreamHeader | undefined;
   private buffer: Uint8Array | undefined;
   private received = 0;
-  private capped = false;
+  private draining = false;
   private sawEof = false;
 
   constructor(private readonly operationId: string) {}
@@ -65,28 +65,35 @@ export class FileStreamAssembler {
       if (this.header) throw new FileStreamError("the host sent a second stream header");
       this.header = frame.header;
       const total = frame.header.totalBytes;
-      if (frame.header.contentKind === FileContentKind.TEXT && frame.header.contentStreaming) {
-        if (total > BigInt(MAX_CLIENT_FILE_BYTES)) {
-          // §11.1: do not read the body. Frames still arrive and are dropped so
-          // the request id settles on the response.
-          this.capped = true;
-        } else {
-          this.buffer = new Uint8Array(Number(total));
-        }
+      // `content_streaming` — not the classification — decides whether body
+      // frames follow (`open_stream.rs`). An image under the host's 25 MiB
+      // preview limit streams its bytes even though §9.7 only ever shows a
+      // placeholder for it, so those frames are drained rather than kept.
+      if (frame.header.contentStreaming) {
+        const readable = frame.header.contentKind === FileContentKind.TEXT && total <= BigInt(MAX_CLIENT_FILE_BYTES);
+        // §11.1: past the cap, do not read the body. Frames still arrive and
+        // are dropped so the request id settles on the response.
+        if (readable) this.buffer = new Uint8Array(Number(total));
+        else this.draining = true;
       }
       return;
     }
     if (!this.header) throw new FileStreamError("a body frame arrived before the stream header");
     if (frame.eof) this.sawEof = true;
-    if (this.capped || frame.data.length === 0) return;
+    if (this.draining || frame.data.length === 0) return;
     const buffer = this.buffer;
     if (!buffer) {
-      // A classification that declares no body must not carry one.
+      // A header that declared no body must not carry one.
       throw new FileStreamError("the host streamed a body for a file it declared unreadable");
     }
+    // The host cuts the frames from one buffer in order (`FileStreamBody::chunks`)
+    // and writes them down one connection, so the offsets are contiguous.
+    // Insisting on that is what makes the length check below a coverage check:
+    // a byte count alone would accept two overlapping frames and a zero-filled
+    // hole between them.
     const offset = Number(frame.offset);
-    if (!Number.isSafeInteger(offset) || offset < 0 || offset + frame.data.length > buffer.length) {
-      throw new FileStreamError("a body frame fell outside the declared length");
+    if (offset !== this.received || offset + frame.data.length > buffer.length) {
+      throw new FileStreamError(`a body frame arrived at ${frame.offset}, expected ${this.received}`);
     }
     buffer.set(frame.data, offset);
     this.received += frame.data.length;
@@ -105,7 +112,7 @@ export class FileStreamAssembler {
       case FileContentKind.IMAGE:
         return { kind: "image" };
       case FileContentKind.TEXT: {
-        if (this.capped) return { kind: "tooLarge", size: header.totalBytes };
+        if (this.draining) return { kind: "tooLarge", size: header.totalBytes };
         const buffer = this.buffer;
         if (!buffer) return { kind: "unavailable" };
         // §9.7 step 1: the assembled length must be the declared length.

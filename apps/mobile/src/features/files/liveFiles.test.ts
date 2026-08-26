@@ -93,6 +93,9 @@ describe.skipIf(!availability.available)(`live files (${availability.reason ?? "
     writeFileSync(path.join(harness.workDir, ".gitignore"), "target\n");
     writeFileSync(path.join(harness.workDir, "big.log"), "x".repeat(3 * 1024 * 1024));
     writeFileSync(path.join(harness.workDir, "logo.bin"), Buffer.from([0, 1, 2, 3, 0, 255]));
+    // An image the host is willing to preview: it streams a body even though
+    // §9.7 only ever shows a placeholder for it.
+    writeFileSync(path.join(harness.workDir, "icon.png"), Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"));
     const crowded = path.join(harness.workDir, "many");
     mkdirSync(crowded);
     for (let index = 0; index < CROWDED_ENTRIES; index += 1) {
@@ -177,6 +180,11 @@ describe.skipIf(!availability.available)(`live files (${availability.reason ?? "
     const binaryBody = await readFile(stream, rooted(root, binary.path), identity);
     say(`OPEN_FILE_STREAM ${binary.name} → ${JSON.stringify(filePresentation(binaryBody, binary.name))}`);
     expect(binaryBody.kind).toBe("binary");
+
+    const image = top.entries.find((entry) => entry.name === "icon.png")!;
+    const imageBody = await readFile(stream, rooted(root, image.path), identity);
+    say(`OPEN_FILE_STREAM ${image.name} → ${JSON.stringify(filePresentation(imageBody, image.name))}`);
+    expect(imageBody.kind).toBe("image");
 
     // §9.6 — a nested directory reached the way the screen reaches it.
     const docs = top.entries.find((entry) => entry.name === "docs")!;
