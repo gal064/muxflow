@@ -1,6 +1,5 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { KeyboardProvider } from "react-native-keyboard-controller";
 
 import { wireApp } from "../src/session/appWiring";
 import { colors, typeScale } from "../src/ui/tokens";
@@ -14,7 +13,7 @@ wireApp();
  */
 export default function RootLayout() {
   return (
-    <KeyboardProvider>
+    <>
       <StatusBar style="light" />
       <Stack
         screenOptions={{
@@ -39,6 +38,6 @@ export default function RootLayout() {
         <Stack.Screen name="file/[paneId]" options={{ title: "File" }} />
         <Stack.Screen name="key" options={{ title: "Your SSH key" }} />
       </Stack>
-    </KeyboardProvider>
+    </>
   );
 }

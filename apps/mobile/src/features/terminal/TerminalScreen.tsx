@@ -1,7 +1,7 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
+import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { agentForPane, agentPillState } from "../agents/agentViews";
@@ -29,6 +29,13 @@ export interface TerminalScreenProps {
 export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  // Expo SDK 57 is edge-to-edge on Android, where adjustResize no longer
+  // shrinks the window and RN's Keyboard events under-report the height.
+  // Reanimated reads the IME inset itself; padding by it keeps the chips and
+  // input bar visible and shrinks the WebView, which re-measures and sends
+  // RESIZE_TERMINAL (§7.6 step 6).
+  const keyboard = useAnimatedKeyboard({ isStatusBarTranslucentAndroid: true, isNavigationBarTranslucentAndroid: true });
+  const keyboardPadding = useAnimatedStyle(() => ({ paddingBottom: Math.max(insets.bottom, keyboard.height.value) }), [insets.bottom]);
   const state = useSession((s) => s);
   const webview = useRef<TerminalWebViewHandle>(null);
   const controller = useRef<TerminalController | null>(null);
@@ -95,11 +102,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const inputEnabled = connected && !gone && snapshot.phase !== "exited";
 
   return (
-    // Expo SDK 57 is edge-to-edge on Android, where adjustResize no longer
-    // shrinks the window; keyboard-controller pads the screen by the real
-    // keyboard height so the chips and input bar stay visible and the WebView
-    // shrinks (which re-measures → RESIZE_TERMINAL, §7.6 step 6).
-    <KeyboardAvoidingView behavior="padding" style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+    <Animated.View style={[styles.root, { paddingTop: insets.top }, keyboardPadding]}>
       <ConnectionStrip />
       <View style={styles.header}>
         <Pressable accessibilityLabel="Back" hitSlop={12} onPress={() => router.back()} style={styles.back}>
@@ -174,7 +177,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
           <Text style={styles.sendLabel}>Send</Text>
         </Pressable>
       </View>
-    </KeyboardAvoidingView>
+    </Animated.View>
   );
 }
 
