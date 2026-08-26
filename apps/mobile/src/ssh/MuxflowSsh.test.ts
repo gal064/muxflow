@@ -279,3 +279,60 @@ describe("pass-through", () => {
     expect(h.native.stopForegroundService).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("two channels on one host", () => {
+  it("routes events to listeners keyed by connectionId", () => {
+    const h = harness();
+    const { events } = collect(h);
+
+    // The bridge connection and the bulk connection share one transport natively, but each
+    // channel reports under its own id.
+    h.emit({ type: "connected", connectionId: "bridge" });
+    h.emit({ type: "connected", connectionId: "bulk" });
+    h.emit({ type: "data", connectionId: "bulk", base64: "Ym9keQ==" });
+    h.emit({ type: "closed", connectionId: "bulk", exitCode: 0, reason: "closedByClient" });
+    h.emit({ type: "data", connectionId: "bridge", base64: "ZnJhbWU=" });
+
+    expect(events).toEqual([
+      { type: "connected", connectionId: "bridge" },
+      { type: "connected", connectionId: "bulk" },
+      { type: "data", connectionId: "bulk", base64: "Ym9keQ==" },
+      { type: "closed", connectionId: "bulk", exitCode: 0, reason: "closedByClient" },
+      { type: "data", connectionId: "bridge", base64: "ZnJhbWU=" },
+    ]);
+  });
+
+  it("queues writes per connection, so a stalled channel cannot block its sibling", async () => {
+    const h = harness({ deferWrites: true });
+    const ssh = createMuxflowSsh(h.native);
+
+    const bridgeFirst = ssh.write("bridge", "AAAA");
+    ssh.write("bridge", "BBBB");
+    const bulk = ssh.write("bulk", "CCCC");
+    await flush();
+
+    // Both connections got their first write out; only the second write on "bridge" is waiting.
+    expect(h.writes).toEqual([
+      ["bridge", "AAAA"],
+      ["bulk", "CCCC"],
+    ]);
+
+    h.resolveWrite();
+    await bridgeFirst;
+    h.resolveWrite();
+    await bulk;
+    await flush();
+    expect(h.writes.map(([id]) => id)).toEqual(["bridge", "bulk", "bridge"]);
+  });
+
+  it("closing one connection leaves the other's queue alone", async () => {
+    const h = harness();
+    const ssh = createMuxflowSsh(h.native);
+
+    await ssh.close("bridge");
+    await ssh.write("bulk", "CCCC");
+
+    expect(h.native.close).toHaveBeenCalledWith("bridge");
+    expect(h.writes).toEqual([["bulk", "CCCC"]]);
+  });
+});

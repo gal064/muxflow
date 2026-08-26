@@ -13,10 +13,14 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * `muxflow-ssh`: a deliberately dumb SSH transport for the Muxflow phone app (design doc §6).
  *
- * It opens an exec channel to `muxflow-host bridge --stdio` and moves bytes; it knows nothing about
+ * It opens exec channels to `muxflow-host bridge --stdio` and moves bytes; it knows nothing about
  * the protocol those bytes carry. Every event reaches JavaScript through the single `onSshEvent`
  * event, discriminated by `type`, which is what `src/ssh/MuxflowSsh.ts` fans out into the typed
  * union in §6.1.
+ *
+ * Several `connectionId`s may address the same `user@host:port`; they share one authenticated
+ * [SshTransport] and get one exec channel each, so the client's second "bulk" bridge costs no extra
+ * login. Channels close independently; the transport goes away with the last of them.
  */
 class MuxflowSshModule : Module() {
   private companion object {
@@ -33,14 +37,17 @@ class MuxflowSshModule : Module() {
      */
     val NON_RETRYABLE_REASONS =
       setOf(
-        SshSession.CloseReason.CLOSED_BY_CLIENT,
-        SshSession.CloseReason.AUTH_FAILED,
-        SshSession.CloseReason.HOST_KEY_MISMATCH,
-        SshSession.CloseReason.HOST_KEY_NOT_TRUSTED,
+        CloseReason.CLOSED_BY_CLIENT,
+        CloseReason.AUTH_FAILED,
+        CloseReason.HOST_KEY_MISMATCH,
+        CloseReason.HOST_KEY_NOT_TRUSTED,
       )
   }
 
-  private val sessions = ConcurrentHashMap<String, SshSession>()
+  /** Guards [transports] and [channels] together so a new channel cannot race a transport teardown. */
+  private val registryLock = Any()
+  private val transports = HashMap<String, SshTransport>()
+  private val channels = ConcurrentHashMap<String, SshChannel>()
 
   @Volatile private var serviceTitle: String? = null
   @Volatile private var serviceBody: String = ""
@@ -74,63 +81,63 @@ class MuxflowSshModule : Module() {
       target: SshTarget,
       command: String,
       trustedHostKeyFingerprint: String? ->
-      if (sessions.containsKey(connectionId)) {
-        throw ConnectionAlreadyOpenException(connectionId)
-      }
       val keyPair = translatingKeyStoreErrors { SshKeyStore.keyPair(context) }
-      val session =
-        SshSession(
-          connectionId = connectionId,
-          host = target.host,
-          port = target.port,
-          user = target.user,
-          command = command,
-          trustedFingerprint = trustedHostKeyFingerprint,
-          keyPair = keyPair,
-          emitEvent = ::dispatch,
-          onTerminated = ::onSessionTerminated,
-        )
-      // A racing `connect` for the same id must not orphan a session on its own IO thread.
-      if (sessions.putIfAbsent(connectionId, session) != null) {
-        throw ConnectionAlreadyOpenException(connectionId)
+      synchronized(registryLock) {
+        if (channels.containsKey(connectionId)) {
+          throw ConnectionAlreadyOpenException(connectionId)
+        }
+        val key = "${target.user}@${target.host}:${target.port}"
+        val transport =
+          transports.getOrPut(key) {
+            SshTransport(key, target.host, target.port, target.user, keyPair, ::dispatch)
+          }
+        channels[connectionId] =
+          transport.open(connectionId, command, trustedHostKeyFingerprint, ::onChannelTerminated)
       }
-      session.start()
     }
 
     AsyncFunction("trustHostKey") { connectionId: String, fingerprintSha256: String ->
-      val session = sessions[connectionId] ?: throw UnknownConnectionException(connectionId)
-      if (!session.trustHostKey(fingerprintSha256)) {
+      val transport =
+        synchronized(registryLock) {
+          val channel = channels[connectionId] ?: throw UnknownConnectionException(connectionId)
+          transports[channel.transportKey]
+        } ?: throw UnknownConnectionException(connectionId)
+      if (!transport.trustHostKey(fingerprintSha256)) {
         throw NoPendingHostKeyException(connectionId)
       }
     }
 
     AsyncFunction("write") { connectionId: String, base64: String, promise: Promise ->
-      val session = sessions[connectionId]
-      if (session == null) {
+      val channel = channels[connectionId]
+      if (channel == null) {
         promise.reject(UnknownConnectionException(connectionId))
         return@AsyncFunction
       }
-      session.write(
+      channel.write(
         base64,
         onWritten = { promise.resolve(null) },
         onFailed = { failure -> promise.reject(SshWriteException(failure)) },
       )
     }
 
-    AsyncFunction("close") { connectionId: String -> sessions[connectionId]?.close() }
+    // Closing an id that is already gone is a no-op, so `close` stays idempotent from JavaScript.
+    AsyncFunction("close") { connectionId: String ->
+      channels[connectionId]?.close()
+      Unit
+    }
 
     AsyncFunction("startForegroundService") { title: String, body: String ->
       serviceTitle = title
       serviceBody = body
-      serviceRunning = true
       ConnectionService.start(context, title, body)
+      serviceRunning = true
     }
 
     AsyncFunction("stopForegroundService") { stopService() }
 
     OnDestroy {
       ConnectionService.onDisconnectRequested = null
-      closeAllSessions()
+      closeAllChannels()
       stopService()
     }
   }
@@ -146,22 +153,33 @@ class MuxflowSshModule : Module() {
     runCatching { sendEvent(EVENT_NAME, payload) }
   }
 
-  private fun onSessionTerminated(session: SshSession, reason: String, exitCode: Int?) {
-    sessions.remove(session.connectionId, session)
-    if (sessions.isEmpty() &&
-      (reason in NON_RETRYABLE_REASONS || exitCode == EXIT_COMMAND_NOT_FOUND)
-    ) {
+  private fun onChannelTerminated(channel: SshChannel, reason: String, exitCode: Int?) {
+    var doomed: SshTransport? = null
+    var idle = false
+    synchronized(registryLock) {
+      channels.remove(channel.connectionId, channel)
+      val transport = transports[channel.transportKey]
+      if (transport != null && transport.release(channel)) {
+        transports.remove(channel.transportKey)
+        doomed = transport
+      }
+      idle = channels.isEmpty()
+    }
+    // Outside the lock: closing an SSH client joins sshj's own threads, and a sibling channel may
+    // be inside onChannelTerminated at the same moment.
+    doomed?.close()
+    if (idle && (reason in NON_RETRYABLE_REASONS || exitCode == EXIT_COMMAND_NOT_FOUND)) {
       stopService()
     }
   }
 
   private fun disconnectFromNotification() {
-    closeAllSessions()
+    closeAllChannels()
     stopService()
   }
 
-  private fun closeAllSessions() {
-    sessions.values.toList().forEach { it.close() }
+  private fun closeAllChannels() {
+    channels.values.toList().forEach { it.close() }
   }
 
   private fun startServiceIfNeeded() {
@@ -170,10 +188,10 @@ class MuxflowSshModule : Module() {
     }
     val title =
       serviceTitle ?: context.applicationInfo.loadLabel(context.packageManager).toString()
-    serviceRunning = true
     // Android 12+ refuses some background foreground-service starts. The process is already alive
-    // in that case, so failing here costs nothing but the notification.
-    runCatching { ConnectionService.start(context, title, serviceBody) }
+    // in that case, so failing here costs nothing but the notification, and the flag stays false
+    // so the next connection tries again.
+    serviceRunning = runCatching { ConnectionService.start(context, title, serviceBody) }.isSuccess
   }
 
   private fun stopService() {

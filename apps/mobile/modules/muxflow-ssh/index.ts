@@ -1,4 +1,4 @@
-import { requireNativeModule } from "expo-modules-core";
+import { requireNativeModule } from "expo";
 
 import type { NativeMuxflowSshModule } from "../../src/ssh/MuxflowSsh";
 

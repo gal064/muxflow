@@ -12,7 +12,7 @@
       android:name="dev.muxflow.ssh.ConnectionService"
       android:exported="false"
       android:foregroundServiceType="specialUse"
-      android:stopWithTask="true">
+      android:stopWithTask="false">
       <property
         android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
         android:value="Persistent SSH session that delivers agent status notifications" />
