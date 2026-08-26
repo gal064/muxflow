@@ -26,7 +26,13 @@
       "expo-router",
       "expo-dev-client",
       "expo-secure-store",
-      "expo-notifications",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#7aa6da"
+        }
+      ],
       [
         "expo-font",
         {

@@ -5,6 +5,7 @@ import { FlatList, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { agentPillState, agentTitle, noAdapterWired } from "../../src/features/agents/agentViews";
 import { markSeenIfNeeded } from "../../src/features/agents/markSeen";
 import { refreshAgents } from "../../src/features/agents/refresh";
+import { NotificationsOffBanner } from "../../src/features/notifications/ui/NotificationsOffBanner";
 import { toast } from "../../src/session/connectionManager";
 import { agentWindowName, agentWorkspaceName, displayState, needsAttention, sortedAgents } from "../../src/store/selectors";
 import type { Agent } from "../../src/store/sessionStore";
@@ -56,6 +57,7 @@ export default function AgentsScreen() {
       data={agents}
       keyExtractor={(agent) => agent.id}
       ListEmptyComponent={state.connection.state === "connected" ? empty : null}
+      ListHeaderComponent={NotificationsOffBanner}
       refreshControl={<RefreshControl colors={[colors.accent]} progressBackgroundColor={colors.chromeRaised} onRefresh={onRefresh} refreshing={refreshing} />}
       renderItem={({ item }) => {
         const attention = needsAttention(item);

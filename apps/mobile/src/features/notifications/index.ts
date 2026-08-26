@@ -1,0 +1,84 @@
+// Starts §13. Called once, from `session/appWiring.ts::wireApp`.
+//
+// This is the only file in the feature that touches expo-notifications,
+// expo-router or react-native; everything it wires together is testable
+// without them.
+
+import { router } from "expo-router";
+import { AppState } from "react-native";
+
+import { createExpoNotificationHost, installForegroundPresentation } from "./expoHost";
+import type { NotificationHost } from "./host";
+import { createAgentNotifier } from "./notifier";
+import type { TapTarget } from "./payload";
+import { notificationsUiStore } from "./permissionStore";
+import { connectionMarkSeenSink, createTapMarkSeen, terminalRoute } from "./taps";
+import { onAgentTransition } from "../../session/connectionManager";
+import { log } from "../../session/log";
+import { sessionStore } from "../../store/sessionStore";
+
+let started = false;
+
+export function startNotifications(): void {
+  if (started) return;
+  started = true;
+  const host = createExpoNotificationHost();
+  installForegroundPresentation();
+  // §13: the channel exists from first launch, whether or not a host is added.
+  void host.ensureChannel().catch(reportFailure("channel"));
+
+  createAgentNotifier({
+    host,
+    getState: () => sessionStore.getState(),
+    subscribe: (listener) => sessionStore.subscribe(listener),
+    onAgentTransition,
+    appInForeground: () => AppState.currentState === "active",
+    log,
+  }).start();
+
+  const markSeen = createTapMarkSeen(connectionMarkSeenSink);
+  host.onTap((target) => {
+    log(`notifications: tap ${target.agentId} pane=${target.paneId}`);
+    openTerminal(target);
+    markSeen.request(target);
+  });
+
+  let asked = false;
+  sessionStore.subscribe((state) => {
+    if (state.connection.state !== "connected") return;
+    // A tap that cold-started the app has no connection to acknowledge on yet.
+    markSeen.flush();
+    // §13: ask the first time a host reaches `connected`, and only then.
+    if (asked) return;
+    asked = true;
+    void requestPermission(host).catch(reportFailure("permission"));
+  });
+}
+
+async function requestPermission(host: NotificationHost): Promise<void> {
+  const current = await host.getPermission();
+  const outcome = current === "undetermined" ? await host.requestPermission() : current;
+  log(`notifications: permission ${outcome}`);
+  notificationsUiStore.getState().setPermission(outcome);
+}
+
+/**
+ * A tap can arrive before the navigator exists — it is what launched the
+ * process. expo-router throws until the root layout has mounted, so the push is
+ * retried on a short leash rather than lost.
+ */
+function openTerminal(target: TapTarget, attempt = 0): void {
+  try {
+    router.navigate(terminalRoute(target));
+  } catch (error: unknown) {
+    if (attempt >= 30) {
+      log(`notifications: tap.navigate.failed ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    setTimeout(() => openTerminal(target, attempt + 1), 100);
+  }
+}
+
+function reportFailure(what: string): (error: unknown) => void {
+  return (error) => log(`notifications: ${what}.failed ${error instanceof Error ? error.message : String(error)}`);
+}
