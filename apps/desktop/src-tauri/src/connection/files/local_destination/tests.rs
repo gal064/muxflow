@@ -31,6 +31,41 @@ fn write_crafted_journal(
 }
 
 #[test]
+fn destination_diagnostic_classifies_without_recording_the_path() {
+    let root = std::env::temp_dir().join(format!("ade-dl-diagnostic-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let destination = root.join("private-report-name.pdf");
+    let diagnostic = destination_parent_diagnostic(&destination, None);
+    let serialized = serde_json::to_string(&diagnostic).unwrap();
+
+    assert_eq!(diagnostic["parentClass"], "temporaryDirectory");
+    assert_eq!(diagnostic["parentExists"], true);
+    assert_eq!(diagnostic["parentKind"], "directory");
+    assert_eq!(diagnostic["retryOpenSucceeded"], true);
+    assert!(!serialized.contains(root.to_str().unwrap()));
+    assert!(!serialized.contains("private-report-name.pdf"));
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn destination_diagnostic_preserves_original_and_retry_denial_facts() {
+    let root = std::env::temp_dir().join(format!("ade-dl-missing-parent-{}", Uuid::new_v4()));
+    let destination = root.join("report.pdf");
+    let diagnostic = destination_parent_diagnostic(
+        &destination,
+        Some("destination parent is unavailable or unsafe: Operation not permitted (os error 1)"),
+    );
+
+    assert_eq!(diagnostic["parentExists"], false);
+    assert_eq!(diagnostic["retryOpenSucceeded"], false);
+    assert!(diagnostic["retryOpenErrno"].is_number());
+    assert_eq!(
+        diagnostic["admissionErrorClass"],
+        "parentUnavailableOrUnsafe"
+    );
+}
+
+#[test]
 fn concurrent_rename_leases_choose_distinct_exact_final_leaves() {
     let root = std::env::temp_dir().join(format!("ade-dl-leases-{}", Uuid::new_v4()));
     fs::create_dir(&root).unwrap();

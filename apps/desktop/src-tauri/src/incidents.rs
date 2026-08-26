@@ -16,6 +16,9 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::{Map, Value};
 
 /// Rotate once the journal passes this size. One rotated file is kept, so the
 /// on-disk bound is twice this and history survives at least one rotation.
@@ -33,6 +36,34 @@ impl IncidentJournal {
             path: Mutex::new(directory.join("incidents.jsonl")),
         }
     }
+
+    /// Native-side incidents share the renderer journal without exposing a
+    /// second log location. Callers provide already-redacted structured data;
+    /// this adds only process/time correlation and never affects app behavior.
+    pub(crate) fn record_native(&self, kind: &str, detail: Value) -> Result<(), String> {
+        let mut record = Map::new();
+        if let Value::Object(detail) = detail {
+            record.extend(detail);
+        }
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        record.insert("tUnixMillis".into(), Value::String(at.to_string()));
+        record.insert("nativePid".into(), Value::from(std::process::id()));
+        record.insert("kind".into(), Value::String(kind.to_owned()));
+        let line = serde_json::to_string(&record).map_err(|error| error.to_string())?;
+        self.append(&line)
+    }
+
+    fn append(&self, line: &str) -> Result<(), String> {
+        if line.len() > MAX_LINE_BYTES {
+            return Err("incident record exceeds byte limit".into());
+        }
+        let line = line.replace(['\n', '\r'], " ");
+        let path = self.path.lock().map_err(|_| "journal lock poisoned")?;
+        append_line(&path, &line).map_err(|error| error.to_string())
+    }
 }
 
 /// Appends one journal line. Failures are reported but must stay harmless:
@@ -43,13 +74,7 @@ pub fn record_incident(
     journal: tauri::State<'_, IncidentJournal>,
     line: String,
 ) -> Result<(), String> {
-    if line.len() > MAX_LINE_BYTES {
-        return Err("incident record exceeds byte limit".into());
-    }
-    // A record with a line break would corrupt the one-line-per-record format.
-    let line = line.replace(['\n', '\r'], " ");
-    let path = journal.path.lock().map_err(|_| "journal lock poisoned")?;
-    append_line(&path, &line).map_err(|error| error.to_string())
+    journal.append(&line)
 }
 
 fn append_line(path: &PathBuf, line: &str) -> std::io::Result<()> {
@@ -85,6 +110,29 @@ mod tests {
         let fresh = fs::read_to_string(&path).unwrap();
         assert_eq!(fresh.lines().count(), 1);
         assert!(path.with_extension("jsonl.1").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn native_records_add_correlation_without_flattening_private_payloads() {
+        let dir =
+            std::env::temp_dir().join(format!("native-incidents-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let journal = IncidentJournal::new(dir.clone());
+        journal
+            .record_native(
+                "download.test",
+                serde_json::json!({
+                    "attemptId": "attempt-1", "parentClass": "homeDownloads", "kind": "spoofed",
+                }),
+            )
+            .unwrap();
+        let line = fs::read_to_string(dir.join("incidents.jsonl")).unwrap();
+        let value: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["kind"], "download.test");
+        assert_eq!(value["attemptId"], "attempt-1");
+        assert!(value["nativePid"].is_number());
+        assert!(value["tUnixMillis"].is_string());
         fs::remove_dir_all(&dir).unwrap();
     }
 }
