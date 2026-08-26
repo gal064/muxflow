@@ -15,6 +15,7 @@ import {
 
 const key = (overrides: Partial<KeyboardEvent> = {}) => ({
   altKey: false,
+  code: "Enter",
   ctrlKey: false,
   isComposing: false,
   key: "Enter",
@@ -34,6 +35,31 @@ describe("terminal input translation", () => {
   });
   const left = key({ key: "ArrowLeft", keyCode: 37, metaKey: true });
   const right = key({ key: "ArrowRight", keyCode: 39, metaKey: true });
+
+  it("sends Control-/ as 0x1f, which xterm.js 6 does not map at all", () => {
+    const slash = (overrides: Partial<KeyboardEvent> = {}) =>
+      key({ code: "Slash", ctrlKey: true, key: "/", keyCode: 191, ...overrides });
+    expect(translateTerminalKey(slash(), context())).toBe("\u001f");
+    expect(translateTerminalKey(slash(), context({ platform: "linux" }))).toBe("\u001f");
+    // Inside a TUI too: this is the one binding the shortcut exists for.
+    expect(translateTerminalKey(slash(), context({ alternateScreen: true, currentCommand: "nvim" })))
+      .toBe("\u001f");
+    // A layout whose `/` reports no `key` still identifies by physical key.
+    expect(translateTerminalKey(slash({ key: "Unidentified" }), context())).toBe("\u001f");
+
+    // Everything with another modifier stays xterm's. Control-Shift-/ is
+    // Control-? and Control-_ already produces 0x1f on its own.
+    expect(translateTerminalKey(slash({ shiftKey: true }), context())).toBeUndefined();
+    expect(translateTerminalKey(slash({ altKey: true }), context())).toBeUndefined();
+    expect(translateTerminalKey(slash({ metaKey: true }), context())).toBeUndefined();
+    expect(translateTerminalKey(key({ code: "Minus", ctrlKey: true, key: "_", keyCode: 189, shiftKey: true }), context()))
+      .toBeUndefined();
+    // Command-/ is an app shortcut, not terminal bytes.
+    expect(translateTerminalKey(key({ code: "Slash", key: "/", keyCode: 191, metaKey: true }), context()))
+      .toBeUndefined();
+    // A composing IME still wins over every translation.
+    expect(translateTerminalKey(slash({ isComposing: true }), context())).toBeUndefined();
+  });
 
   it("turns Shift-Enter into Control-J only for Codex", () => {
     const shiftedEnter = key({ key: "Enter", shiftKey: true });

@@ -2,7 +2,7 @@ import { keyboardEventIsComposing, type Platform } from "../../commands/registry
 import type { TerminalRenderer } from "./TerminalRenderer";
 
 type TerminalKeyEvent = Pick<KeyboardEvent,
-  "altKey" | "ctrlKey" | "isComposing" | "key" | "keyCode" | "metaKey" | "shiftKey"
+  "altKey" | "code" | "ctrlKey" | "isComposing" | "key" | "keyCode" | "metaKey" | "shiftKey"
 >;
 
 export interface TerminalKeyContext {
@@ -12,9 +12,15 @@ export interface TerminalKeyContext {
   platform: Platform;
 }
 
-/** Returns bytes for the two terminal shortcuts Muxflow owns, or nothing. */
+/** Returns bytes for the terminal shortcuts Muxflow owns, or nothing. */
 export function translateTerminalKey(event: TerminalKeyEvent, context: TerminalKeyContext): string | undefined {
   if (keyboardEventIsComposing(event)) return undefined;
+  // xterm.js 6 has no Ctrl+/ mapping; legacy terminals alias Ctrl+/ and Ctrl+_
+  // to 0x1f (US). Ctrl+_ is left to xterm, which already emits 0x1f.
+  if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+    && (event.key === "/" || event.code === "Slash")) {
+    return "\u001f";
+  }
   const command = context.currentCommand.split("/").at(-1)?.toLowerCase() ?? "";
   // tmux's current command is foreground evidence. Agent records are not:
   // process-tree discovery deliberately keeps suspended/background agents
