@@ -72,7 +72,7 @@ export interface StatusNotice {
 }
 
 /** Words that mean the app refused, failed, or could not do something. */
-const PROBLEM = /(\bcannot\b|\bcould not\b|\bunavailable\b|\bfailed\b|\bfailure\b|\berror\b|refus|\brejected\b|\bno longer\b|\bnot available\b|\bfrozen\b|\bstopped\b|\btimed out\b|\bunknown\b|\bexceeds\b|\brequire[sd]?\b|\bno agent is waiting\b)/iu;
+const PROBLEM = /(\bcannot\b|\bcould not\b|\bunavailable\b|\bfailed\b|\bfailure\b|\berror\b|refus|\brejected\b|\bno longer\b|\bnot available\b|\bfrozen\b|\bstopped\b|\btimed out\b|\bunknown\b|\bexceeds\b|\brequire[sd]?\b|\bno agent is waiting\b|\bleft open\b)/iu;
 
 export function noticeForStatus(message: string, id: number): StatusNotice | undefined {
   const trimmed = message.trim();

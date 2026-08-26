@@ -334,7 +334,10 @@ export function TabStrip(props: TabStripProps) {
         "separator",
         {
           id: "close",
-          label: menuClosesFocusedPane ? "Close Pane" : menu.tab.kind === "terminal" ? "Close tab…" : "Close tab",
+          // No ellipsis on either: nothing in this menu asks first any more, and
+          // a label that promises a dialog there is no longer one of is a
+          // smaller lie than a missing one but a lie all the same.
+          label: menuClosesFocusedPane ? "Close Pane" : "Close tab",
           destructive: menu.tab.kind === "terminal",
           disabled: menu.tab.kind === "terminal" && !props.canMutate,
           run: () => menuClosesFocusedPane && menu.focusedPaneId

@@ -112,7 +112,12 @@ export function ContextMenu(props: ContextMenuProps) {
     // handled by a listener on this container — so a menu whose items are all
     // disabled, which happens on a read-only connection, left focus outside it
     // and made ⌘K, ⌘P, ⌘B and ⌘, all dead with no keyboard way out.
-    const first = container.current?.querySelector<HTMLButtonElement>("button:not([disabled])");
+    // A menu that *picks* something opens on the option that is already
+    // picked, the way every platform's own picker does — so the strip's
+    // all-tabs list lands the keyboard on the current tab rather than on
+    // whatever happens to be first in the strip.
+    const checked = container.current?.querySelector<HTMLButtonElement>('button[aria-checked="true"]:not([disabled])');
+    const first = checked ?? container.current?.querySelector<HTMLButtonElement>("button:not([disabled])");
     (first ?? container.current)?.focus();
     const onPointerDown = (event: PointerEvent) => {
       if (!container.current?.contains(event.target as Node)) props.onClose();
