@@ -31,7 +31,9 @@ export function MarkdownGlyph() {
 export function FileGlyph() {
   return (
     <View style={styles.column}>
-      <View style={styles.file} />
+      <View style={styles.file}>
+        <View style={styles.fileFold} />
+      </View>
     </View>
   );
 }
@@ -67,12 +69,20 @@ const styles = StyleSheet.create({
     height: 12,
     width: 18,
   },
+  // A page with a folded corner. An empty rounded rectangle reads as an
+  // unchecked checkbox once a few of them stack up in a list.
   file: {
-    borderColor: colors.chromeFaint,
+    alignItems: "flex-end",
+    borderColor: colors.chromeDim,
     borderRadius: 2,
     borderWidth: 1.5,
     height: 16,
     width: 13,
+  },
+  fileFold: {
+    backgroundColor: colors.chromeDim,
+    height: 5,
+    width: 5,
   },
   markdown: {
     color: colors.chromeInkStrong,

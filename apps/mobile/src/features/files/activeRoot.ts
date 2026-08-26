@@ -64,6 +64,17 @@ export function rootTitle(root: string): string {
   return slash === -1 || slash === trimmed.length - 1 ? trimmed || "/" : trimmed.slice(slash + 1);
 }
 
+/**
+ * The app bar's second line, or `""` when there is nothing to add.
+ *
+ * §9.6 and §9.7 both want the path under the name, and for anything at the top
+ * of the root that path *is* the name — a subtitle that repeats the title reads
+ * as an unfinished screen and costs a line of the app bar for nothing.
+ */
+export function subtitleFor(title: string, path: string): string {
+  return path === title ? "" : path;
+}
+
 /** §9.7: the viewer's subtitle is the path relative to the root. */
 export function relativeToRoot(root: string, path: string): string {
   const base = root.replace(/\/+$/u, "");

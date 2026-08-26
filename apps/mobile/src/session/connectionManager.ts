@@ -111,8 +111,12 @@ export function openBulkConnection(): Promise<HostConnection> {
   return opening;
 }
 
-/** States in which the memoised lane is still worth handing out. */
-const LIVE_STATES = new Set(["sshConnecting", "handshaking", "connected", "reconnecting"]);
+/**
+ * States in which the memoised lane is still worth handing out. `reconnecting`
+ * is deliberately absent: its `opening` promise has already resolved, so it
+ * would hand back a lane whose next request fails.
+ */
+const LIVE_STATES = new Set(["sshConnecting", "handshaking", "connected"]);
 
 function dial(lane: "control" | "bulk"): Promise<Transport> {
   if (!transportFactory) return Promise.reject(new Error("no transport factory is configured"));

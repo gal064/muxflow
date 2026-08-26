@@ -65,6 +65,10 @@ export function useDirectory(paneId: string, path?: string | undefined): Directo
       const root = await resolveRoot(request, paneId, identity, known);
       if (token !== attempt.current) return;
       filesStore.getState().setRoot(root);
+      // Before the await: `setRoot` notifies subscribers, so the effect below
+      // sees the new token while the listing is still in flight and would
+      // otherwise start the whole visit again.
+      applied.current = signature(paneId, path ?? root.root);
       const listing = await fetchDirectory(request, rooted(root, path ?? root.root), identity);
       if (token !== attempt.current) return;
       setListedPath(listing.path);

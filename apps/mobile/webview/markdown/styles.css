@@ -131,20 +131,27 @@ samp {
   padding: 0.1em 0.35em;
 }
 
+/*
+ * The padding belongs to the code, not to the scroller: no engine honours
+ * `padding-right` on content that overflows its box, so a long line would be
+ * cut flush against the right border and read as a layout bug.
+ */
 pre {
   background: var(--chrome-raised);
   border: 1px solid var(--chrome-border);
   border-radius: 8px;
   overflow-x: auto;
-  padding: 12px;
+  padding: 0;
 }
 
 pre code {
   background: none;
   border-radius: 0;
   display: block;
-  padding: 0;
+  min-width: 100%;
+  padding: 12px;
   white-space: pre;
+  width: max-content;
 }
 
 /*
