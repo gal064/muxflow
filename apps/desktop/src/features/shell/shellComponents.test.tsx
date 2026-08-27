@@ -1661,8 +1661,12 @@ describe("pinning by Shift-click", () => {
       renderer = create(tabStripOver([mixedStrip[2]], { onSelect, onTogglePinned }));
     });
     const tab = renderer.root.findByProps({ role: "tab" });
+    // Shift does nothing at all here: it is the pin gesture, and a stray one
+    // must not become a navigation to a background document tab.
     await act(async () => tab.props.onClick({ shiftKey: true }));
     expect(onTogglePinned).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+    await act(async () => tab.props.onClick({ shiftKey: false }));
     expect(onSelect).toHaveBeenCalledWith(mixedStrip[2]);
     await act(async () => tab.props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
     expect(renderer.root.findAllByProps({ "data-menu-item": "pin" })).toHaveLength(0);

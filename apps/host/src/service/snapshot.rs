@@ -40,12 +40,13 @@ struct ServerPins {
     windows: Vec<PinnedWindow>,
 }
 
-/// A pinned workspace, in pin order: entries are appended as they are pinned
-/// and the leading block is the vector itself, so the first thing pinned stays
-/// first. `pinned_at` — milliseconds since the epoch — is what a reader would
-/// need to restore that order after any future rewrite of this file; nothing
-/// sorts on it today, and it is deliberately not on the wire, because the
-/// snapshot says only whether a thing is pinned.
+/// A pinned workspace, recorded in the order it was pinned.
+///
+/// Neither the vector's order nor `pinned_at` — milliseconds since the epoch —
+/// decides anything today: the overlay reads the entries as a set, the wire
+/// carries one boolean, and the app draws the pinned block in its own workspace
+/// and window order. The timestamp is the record of when, kept so this file can
+/// answer that question later without a second migration.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PinnedSession {

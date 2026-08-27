@@ -109,12 +109,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     : -1;
   const groupedAgents = props.agentSort === "workspace" ? groupAgentRows(props.agents) : [];
   /**
-   * The right-clicked workspace as the list has it now.
+   * The right-clicked workspace as the list has it now, or nothing when the
+   * list no longer holds it.
    *
    * The menu outlives the list it was opened over, and the pin is host state
    * another client of the same tmux server can change while it is open: the
-   * item both reads its label and sends its action from this row, so it can
-   * never ask for the state it is already showing.
+   * pin item both reads its label and sends its action from this row, so it
+   * can never ask for the state it is already showing — and it is not offered
+   * at all once there is no row to read.
    */
   const menuRow = menu ? props.rows.find((row) => row.session.id === menu.session.id) : undefined;
   const priorityAgents = props.agentSort === "workspace" ? [] : groupAgentRowsByStatus(props.agents);
@@ -557,12 +559,16 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         { id: "rename", label: "Rename workspace…", disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.rename", menu.scope) },
         // Not gated on `canMutate`: a pin is host state rather than a tmux
         // mutation, and the action pipeline reports it if the connection
-        // cannot carry it.
-        {
-          id: "pin",
-          label: menuRow?.pinned ? "Unpin workspace" : "Pin workspace",
-          run: () => props.onTogglePinnedWorkspace(menuRow?.session ?? menu.session, menu.scope),
-        },
+        // cannot carry it. Offered only while the list still holds the row,
+        // like the strip's own pin item: a row that has left cannot say which
+        // way its pin should go, and the capture would answer for it.
+        ...(menuRow
+          ? [{
+            id: "pin",
+            label: menuRow.pinned ? "Unpin workspace" : "Pin workspace",
+            run: () => props.onTogglePinnedWorkspace(menuRow.session, menu.scope),
+          }]
+          : []),
         { id: "up", label: "Move up", disabled: !props.canMutate || moveIndex <= 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft", menu.scope) },
         { id: "down", label: "Move down", disabled: !props.canMutate || moveIndex < 0 || moveIndex === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight", menu.scope) },
         "separator",

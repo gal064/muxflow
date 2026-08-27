@@ -267,10 +267,16 @@ export function TabStrip(props: TabStripProps) {
             // Shift-click pins rather than selects. Nothing else in the strip
             // claims the modifier, and pinning without selecting is the point:
             // pinning a background tab must not pull the terminal out from
-            // under whatever is on screen.
-            onClick={(event) => event.shiftKey && tab.kind === "terminal"
-              ? props.onTogglePinned(tab)
-              : props.onSelect(tab)}
+            // under whatever is on screen. A document tab has no tmux window
+            // to pin, so Shift does nothing there rather than turning into a
+            // navigation to a tab nobody asked to see.
+            onClick={(event) => {
+              if (event.shiftKey) {
+                if (tab.kind === "terminal") props.onTogglePinned(tab);
+                return;
+              }
+              props.onSelect(tab);
+            }}
             onContextMenu={(event) => {
               // Opening a menu is not a selection: selecting first would make a
               // right-click on a terminal tab issue a real tmux select-window.
