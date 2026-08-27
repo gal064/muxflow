@@ -4,6 +4,7 @@ import { needsAttention } from "../agents/agentsList";
 import { agentSessionLabel } from "../agents/agentLabels";
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentAttentionRollup, AgentDisplayState, AgentRecord } from "../agents/types";
 import { orderedSessions } from "../shell/model";
+import { pinnedFirst } from "../shell/pins";
 
 /**
  * A workspace row in the sidebar: name and what its loudest few agents are
@@ -25,6 +26,8 @@ export interface WorkspaceRowModel {
   attention: AgentAttentionRollup["state"];
   /** Number of that workspace's agents waiting on a human. */
   unread: number;
+  /** Shift-clicked to the top of the list; the row draws a pin. */
+  pinned: boolean;
   working: boolean;
   /** The loudest agents here, at most {@link WORKSPACE_ROW_AGENT_LIMIT}. */
   agents: WorkspaceRowAgent[];
@@ -61,6 +64,21 @@ export interface WorkspaceRowInputs {
   activeBranch?: string;
   /** Home directory, so paths render the way a shell prompt would. */
   home?: string;
+  /**
+   * Sessions that get no row at all — the archived ones. Excluded here rather
+   * than by each consumer, because the row list is also what ⌘1–9, the ⌘P
+   * switcher and the agents list's workspace order are built from.
+   */
+  excludeSessionIds?: ReadonlySet<string>;
+  /**
+   * When each pinned workspace on this server was pinned.
+   *
+   * Applied here rather than in the sidebar because this list *is* the
+   * workspace order: ⌘1–9, the ⌘P switcher and the agents list's workspace
+   * ranking all read it, and a pin the sidebar applied on its own would be a
+   * pin only the sidebar knew about.
+   */
+  pinnedAt?: ReadonlyMap<string, number>;
 }
 
 export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
@@ -70,7 +88,11 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
     if (!needsAttention(displayState(agent))) continue;
     unreadBySession.set(agent.sessionId, (unreadBySession.get(agent.sessionId) ?? 0) + 1);
   }
-  return orderedSessions(inputs.snapshot.sessions).map((session) => {
+  const ordered = pinnedFirst(
+    orderedSessions(inputs.snapshot.sessions).filter((session) => !inputs.excludeSessionIds?.has(session.id)),
+    (session) => inputs.pinnedAt?.get(session.id),
+  );
+  return ordered.map((session) => {
     const rollup = inputs.attentionByWorkspace.get(session.id);
     const attention = rollup?.state ?? "none";
     const here = loudest.get(session.id);
@@ -81,6 +103,7 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
       active,
       attention,
       unread: unreadBySession.get(session.id) ?? 0,
+      pinned: inputs.pinnedAt?.has(session.id) ?? false,
       working: (rollup?.working ?? 0) > 0,
       agents: shown.map((agent) => ({
         id: agent.id,

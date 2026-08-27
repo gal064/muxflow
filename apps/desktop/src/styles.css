@@ -160,13 +160,16 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 0; border-radius: var(--radius-control);
   background: transparent; color: var(--chrome-dim);
 }
-.bar-button:hover:not(:disabled) { background: var(--chrome-hover); color: var(--chrome-ink); }
+.bar-button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--chrome-hover); color: var(--chrome-ink); }
 .bar-button[aria-pressed="true"] { color: var(--chrome-ink-strong); }
 /* A frozen control has to look frozen. While the connection was read-only the
    titlebar's new-workspace `+` and the strip's split and `+` were disabled and
    drawn identically to the live ones, so the only feedback from pressing one
    was nothing happening. */
-.bar-button:disabled { color: var(--chrome-faint); cursor: default; }
+/* `aria-disabled` gets the same treatment: a control that keeps its tooltip
+   and its place in the tab order — the bell, whose whole job when it has
+   nowhere to go is to say so — still has to read as frozen. */
+.bar-button:disabled, .bar-button[aria-disabled="true"] { color: var(--chrome-faint); cursor: default; }
 
 .badge {
   display: inline-flex; align-items: center; justify-content: center;
@@ -254,6 +257,22 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   margin-left: -14px; border-radius: 2px; background: var(--chrome-border);
 }
 
+/* The archive lives under the workspace list as one collapsed line. Its rows
+   are plain text with a bar-button, deliberately not `.workspace-button`:
+   they are not selectable and must not look like one more workspace. */
+.archived-workspaces { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--chrome-hairline); }
+.archived-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 8px;
+  border: 0; border-radius: var(--radius-row); background: transparent;
+  color: var(--chrome-faint); text-align: left; font-size: var(--type-label); letter-spacing: .04em;
+}
+.archived-toggle:hover { background: var(--chrome-hover); color: var(--chrome-ink); }
+.archived-chevron { width: 10px; }
+.archived-row {
+  display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 8px 2px 24px;
+  color: var(--chrome-faint);
+}
+.archived-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-row, .agent-row { position: relative; }
 .workspace-button {
   display: flex; flex-direction: column; gap: 3px;
@@ -318,6 +337,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    the adapter marks were reading at --chrome-faint and --chrome-dim against a
    light accent, which is the one combination the palette has no contrast for. */
 .workspace-button.active .workspace-shortcut-index,
+.workspace-button.active .workspace-pin,
 .workspace-button.active .agent-icon { color: var(--accent-ink); }
 .workspace-shortcut-index {
   width: 12px; flex: 0 0 auto;
@@ -601,6 +621,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
   font-variant-numeric: tabular-nums;
 }
+/* The pin marks, at the leading edge of a tab and of a workspace row. Both are
+   `inline-flex` so the 11px glyph sits on the control's optical centre rather
+   than the text baseline, and both are absent — not hidden — when the thing is
+   not pinned, so nothing reserves a slot the way the state indicators do. */
+.tab-pin, .workspace-pin, .agent-group-pin { display: inline-flex; flex: 0 0 auto; color: var(--chrome-dim); }
 /* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
    inline color, so there is no rule here per document kind. */
 .tab-glyph { display: inline-flex; }
@@ -959,6 +984,19 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 1px solid var(--chrome-border); border-radius: 4px;
   background: var(--chrome-bg); color: var(--chrome-ink); font-size: 11px;
 }
+/* Commit, its one extra action, and Push on one row. The split button is a
+   single control visually — one border, one hairline between the halves — so
+   the caret reads as belonging to Commit rather than as a third button. */
+.git-commit-actions { display: flex; gap: 6px; align-items: stretch; }
+.git-commit-actions .split-button { display: flex; flex: 1 1 auto; min-width: 0; }
+.git-commit-actions .split-button > button:first-child {
+  flex: 1 1 auto; min-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0;
+}
+.git-commit-actions .split-button-more {
+  flex: 0 0 auto; padding-inline: 7px;
+  border-top-left-radius: 0; border-bottom-left-radius: 0;
+  box-shadow: inset 1px 0 0 rgb(0 0 0 / .22);
+}
 .git-output {
   max-height: 96px; margin: 0; overflow: auto; padding: 6px; border-radius: 3px;
   background: var(--chrome-bg); color: var(--term-2); font-size: var(--type-meta); white-space: pre-wrap;
@@ -1054,15 +1092,19 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   min-width: 0; min-height: 0; margin: 0; padding: 24px clamp(18px, 5vw, 56px); overflow: auto;
   border-left: 1px solid var(--chrome-hairline);
   color: var(--chrome-ink); background: var(--chrome-bg); font-size: var(--type-menu); line-height: 1.62;
+  /* Rendered Markdown is document text: it selects, it says so under the
+     pointer, and it keeps saying so if the chrome around it ever stops being
+     selectable. */
+  user-select: text; cursor: text;
 }
 .markdown-preview :first-child { margin-top: 0; }
 .markdown-preview h1, .markdown-preview h2, .markdown-preview h3 { color: var(--chrome-ink-strong); }
 .markdown-preview h1, .markdown-preview h2 { padding-bottom: .3em; border-bottom: 1px solid var(--chrome-hairline); }
-.markdown-preview a { color: var(--accent); }
+.markdown-preview a { color: var(--accent); cursor: pointer; }
 .markdown-preview code { padding: 2px 4px; border-radius: 3px; background: var(--chrome-raised); }
 .markdown-preview pre { padding: 12px; overflow: auto; border: 1px solid var(--chrome-hairline); border-radius: 6px; background: var(--chrome-raised); }
 .markdown-preview pre code { padding: 0; background: transparent; }
-.markdown-preview img { max-width: 100%; }
+.markdown-preview img { max-width: 100%; cursor: default; }
 .markdown-preview blockquote { margin-left: 0; padding-left: 14px; border-left: 3px solid var(--chrome-border); color: var(--chrome-dim); }
 .binary-surface {
   position: absolute; inset: 0; display: grid; align-content: center; justify-items: center;
@@ -1099,6 +1141,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    color and a menu item with `outline: none` would have no focus affordance at
    all — on the surface that now carries every row action in the app. */
 .context-menu-item:focus-visible { background: var(--accent); color: var(--accent-ink); outline-offset: -2px; }
+/* A picking menu's rows: the check column is reserved on every row, so the
+   labels sit on one left edge whichever row is checked. */
+.menu-item-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.menu-item-check { display: inline-flex; flex: none; width: 11px; justify-content: center; }
 .context-menu-item.destructive { color: var(--danger-ink); }
 .context-menu-item.destructive:hover:not(:disabled), .context-menu-item.destructive:focus-visible { background: var(--danger); color: var(--accent-ink); }
 
@@ -1261,13 +1307,19 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .settings-host-actions .settings-hint { margin: 0; }
 /* The panel's two ways of naming a group of controls, kept identical on
    purpose: a fieldset's legend, and a heading over a block that is not one. */
-.settings-modes legend, .settings-body .settings-heading {
+.settings-modes legend, .settings-fieldset legend, .settings-body .settings-heading {
   padding: 0 0 4px; color: var(--chrome-faint); font-size: var(--type-label);
   letter-spacing: var(--tracking-label); text-transform: uppercase;
 }
 .settings-body .settings-heading { margin: 4px 0 0; font-weight: inherit; }
 .settings-modes { display: flex; gap: 16px; padding: 0; border: 0; }
 .settings-modes label { display: flex !important; align-items: center; gap: 5px; }
+/* The other kind of group: full-width fields stacked, not a row of radios.
+   `.settings-modes` lays its children out in a line and forces its labels
+   inline, which is right for two radio buttons and wrong for a labelled text
+   field with a hint under it. */
+.settings-fieldset { display: grid; align-content: start; gap: 12px; padding: 0; border: 0; }
+.settings-fieldset .settings-hint { margin-left: 0; }
 .settings-helper { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .settings-helper p { flex-basis: 100%; margin: 0; color: var(--chrome-dim); font-size: 11px; }
 .helper-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; flex-basis: 100%; margin: 0; font-size: var(--type-meta); }
@@ -1428,7 +1480,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   }
   .pane-frame.attention::after { border-color: Highlight; }
   .state-dot, .tab-dot, .link-dot, .badge { border: 1px solid ButtonText; }
-  .bar-button:disabled { color: GrayText; }
+  .bar-button:disabled, .bar-button[aria-disabled="true"] { color: GrayText; }
   /* Four state colors become one system color here, so the shape carries the
      encoding whether or not the user turned the glyph option on. The dots grow
      to fit a legible glyph — and the tab's spinner grows with them, because a

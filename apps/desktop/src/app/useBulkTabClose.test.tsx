@@ -82,14 +82,18 @@ async function closeSet(options: {
 }
 
 describe("bulk tab close", () => {
-  it("survives the topology generation moving under an open confirmation", async () => {
+  it("survives the topology generation moving under a set captured earlier", async () => {
     // An agent animating its title bumps the generation several times a second,
-    // so a set captured before the dialog can never match it again. The durable
+    // so a set captured a moment before can never match it again. The durable
     // connection is what has to hold.
     const result = await closeSet({ liveScope: { ...scope, generation: 41 } });
     expect(result.performAction).toHaveBeenCalledTimes(2);
     expect(result.closeAppTab).toHaveBeenCalledTimes(1);
-    expect(result.setStatus).not.toHaveBeenCalled();
+    // Two terminals and one document, counted together and reported once. With
+    // no dialog in front of the close, this sentence is the whole
+    // acknowledgement — and it is emitted only after everything is gone.
+    expect(result.setStatus).toHaveBeenCalledTimes(1);
+    expect(result.setStatus).toHaveBeenCalledWith("Closed 3 tabs.");
   });
 
   it("stops at a tab that gained an agent, keeping its terminals and its editors", async () => {

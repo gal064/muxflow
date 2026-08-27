@@ -4,6 +4,7 @@ import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
+import { Icon } from "../../ui/Icon";
 import {
   groupAgentRows, groupAgentRowsByStatus, needsAttention, nextSortMode, sortModeLabel,
   type AgentListRow, type AgentSortMode,
@@ -17,10 +18,13 @@ import { sameHostConnection, type HostScopeToken } from "../shell/hostScope";
 import { activityWord, type WorkspaceRowModel } from "./workspaceRows";
 import { useTransientDrag } from "./transientDrag";
 
-export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close">;
+export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.archive" | "session.close">;
 
 interface WorkspaceSidebarProps {
   rows: readonly WorkspaceRowModel[];
+  /** Archived workspaces still alive on this server; drawn under the list, collapsed. */
+  archivedWorkspaces: readonly Session[];
+  onUnarchiveWorkspace(session: Session, scope: HostScopeToken): void;
   agents: readonly AgentListRow[];
   adapters: readonly AgentAdapterDescriptor[];
   agentSort: AgentSortMode;
@@ -37,6 +41,11 @@ interface WorkspaceSidebarProps {
   latencyMs?: number;
   phase: ConnectionPhase;
   onSelectWorkspace(sessionId: string): void;
+  /**
+   * Shift-click, and the menu item beside it: pins the workspace to the top of
+   * this list, or unpins one already there.
+   */
+  onTogglePinnedWorkspace(session: Session, scope: HostScopeToken): void;
   onWorkspaceCommand(session: Session, commandId: WorkspaceCommandId, scope: HostScopeToken): void;
   onSelectAgent(row: AgentListRow, scope: HostScopeToken): void;
   onSortMode(mode: AgentSortMode): void;
@@ -74,6 +83,10 @@ interface WorkspaceSidebarProps {
  */
 export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const [menu, setMenu] = useState<{ session: Session; anchor: ContextMenuAnchor; index: number; scope: HostScopeToken }>();
+  const [archivedMenu, setArchivedMenu] = useState<{ session: Session; anchor: ContextMenuAnchor; scope: HostScopeToken }>();
+  // Collapsed by default and not persisted: the archive is a place things go
+  // to be out of the way, so it opens only when asked and closes with the app.
+  const [archivedOpen, setArchivedOpen] = useState(false);
   // Launching, resuming, renaming and hook review used to be four permanently
   // visible affordances in the agents panel. They are right-click menus now:
   // the section header for "start something", a row for "do something to this".
@@ -82,6 +95,21 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const container = useRef<HTMLElement>(null);
   const [displayedAgentsRatio, startAgentsRatioDrag] = useTransientDrag(props.agentsRatio, props.onAgentsRatio);
   const [displayedWidth, startWidthDrag] = useTransientDrag(props.width, props.onWidth);
+  /**
+   * Where the right-clicked workspace sits in *tmux's* order, not on screen.
+   *
+   * `session.moveLeft` and `session.moveRight` are tmux reorders: they step the
+   * session's `order`, so their bounds are that order and not the display order
+   * the pinned block rearranged. Gating on the display index made a pinned row
+   * refuse to move up while it still had somewhere to go, and offered "move up"
+   * to the last row on screen, where it computed a negative index and silently
+   * did nothing.
+   */
+  const moveIndex = menu
+    ? [...props.rows]
+      .sort((left, right) => (left.session.order ?? 0) - (right.session.order ?? 0))
+      .findIndex((row) => row.session.id === menu.session.id)
+    : -1;
   const groupedAgents = props.agentSort === "workspace" ? groupAgentRows(props.agents) : [];
   const priorityAgents = props.agentSort === "workspace" ? [] : groupAgentRowsByStatus(props.agents);
   // The flat position in `props.agents`, kept across every grouping: the roving
@@ -230,7 +258,12 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               aria-label={rowLabel(row)}
               className={["workspace-button", row.active ? "active" : undefined, props.compactWorkspaces ? "compact" : undefined].filter(Boolean).join(" ")}
               data-workspace-index={index}
-              onClick={() => props.onSelectWorkspace(row.session.id)}
+              // Shift-click pins rather than selects, as it does in the tab
+              // strip. Pinning a workspace must not navigate to it: the row
+              // being moved to the top is often not the one you are working in.
+              onClick={(event) => event.shiftKey
+                ? props.onTogglePinnedWorkspace(row.session, props.commandScope)
+                : props.onSelectWorkspace(row.session.id)}
               onContextMenu={(event) => {
                 event.preventDefault();
                 setMenu({ session: row.session, anchor: { x: event.clientX, y: event.clientY }, index, scope: props.commandScope });
@@ -263,6 +296,9 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                 {props.compactWorkspaces
                   ? <WorkspaceStateIndicator glyphs={props.stateGlyphs} row={row} />
                   : row.working ? <span aria-hidden="true" className="spinner" /> : <HiddenStateSlot />}
+                {/* After the state slot and before the name, so a pin arriving
+                    never moves the indicator every other row keeps in place. */}
+                {row.pinned && <span aria-hidden="true" className="workspace-pin"><Icon name="pin" size={11} /></span>}
                 <span className="workspace-name">{row.session.name}</span>
               </span>
               {/* Compact rows trade the per-agent lines for a cluster of
@@ -302,6 +338,40 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
           </div>)}
       </div>
+      {/* Under the list, not among it: archived rows are not selectable,
+          carry no number and show no agents, so they must not read as one
+          more workspace. Hidden altogether when there is nothing archived. */}
+      {props.archivedWorkspaces.length > 0 && <div className="archived-workspaces">
+        <button
+          aria-controls="sidebar-archived-list"
+          aria-expanded={archivedOpen}
+          className="archived-toggle"
+          onClick={() => setArchivedOpen((open) => !open)}
+          type="button"
+        >
+          <span aria-hidden="true" className="archived-chevron">{archivedOpen ? "▾" : "▸"}</span>
+          Archived ({props.archivedWorkspaces.length})
+        </button>
+        {archivedOpen && <div aria-label="Archived workspaces" className="archived-list" id="sidebar-archived-list" role="list">
+          {props.archivedWorkspaces.map((session) => <div
+            className="archived-row"
+            key={session.id}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              setArchivedMenu({ session, anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
+            }}
+            role="listitem"
+          >
+            <span className="archived-name" title={session.name}>{session.name}</span>
+            <button
+              aria-label={`Unarchive ${session.name}`}
+              className="bar-button"
+              onClick={() => props.onUnarchiveWorkspace(session, props.commandScope)}
+              type="button"
+            >Unarchive</button>
+          </div>)}
+        </div>}
+      </div>}
     </div>
 
     <div
@@ -387,12 +457,17 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               const headingId = `agent-status-${group.key}`;
               return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
                 <h3 className="agent-workspace-heading" id={headingId}>
-                  <AgentStateIndicator
-                    className="state-dot agent-group-dot"
-                    glyphs={props.stateGlyphs}
-                    spinnerClassName="agent-group-dot"
-                    state={group.state}
-                  />
+                  {/* The pinned block is not a state, so it draws the same pin
+                      its rows' tabs and workspaces do rather than a dot that
+                      would claim something about what those agents are doing. */}
+                  {group.state
+                    ? <AgentStateIndicator
+                      className="state-dot agent-group-dot"
+                      glyphs={props.stateGlyphs}
+                      spinnerClassName="agent-group-dot"
+                      state={group.state}
+                    />
+                    : <span aria-hidden="true" className="agent-group-pin"><Icon name="pin" size={11} /></span>}
                   <span>{group.label}</span>
                   <span aria-hidden="true" className="agent-group-count">{group.rows.length}</span>
                 </h3>
@@ -421,13 +496,30 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       anchor={menu.anchor}
       items={[
         { id: "rename", label: "Rename workspace…", disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.rename", menu.scope) },
-        { id: "up", label: "Move up", disabled: !props.canMutate || menu.index === 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft", menu.scope) },
-        { id: "down", label: "Move down", disabled: !props.canMutate || menu.index === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight", menu.scope) },
+        // Not gated on `canMutate`: nothing is sent to tmux, as with archiving.
+        {
+          id: "pin",
+          label: props.rows.find((row) => row.session.id === menu.session.id)?.pinned ? "Unpin workspace" : "Pin workspace",
+          run: () => props.onTogglePinnedWorkspace(menu.session, menu.scope),
+        },
+        { id: "up", label: "Move up", disabled: !props.canMutate || moveIndex <= 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft", menu.scope) },
+        { id: "down", label: "Move down", disabled: !props.canMutate || moveIndex < 0 || moveIndex === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight", menu.scope) },
+        // Not gated on `canMutate`: nothing is sent to tmux.
+        { id: "archive", label: "Archive workspace", run: () => props.onWorkspaceCommand(menu.session, "session.archive", menu.scope) },
         "separator",
         { id: "close", label: "Close workspace…", destructive: true, disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.close", menu.scope) },
       ]}
       label={`Actions for ${menu.session.name}`}
       onClose={() => setMenu(undefined)}
+    />}
+
+    {archivedMenu && sameHostConnection(archivedMenu.scope, props.commandScope) && <ContextMenu
+      anchor={archivedMenu.anchor}
+      items={[
+        { id: "unarchive", label: "Unarchive workspace", run: () => props.onUnarchiveWorkspace(archivedMenu.session, archivedMenu.scope) },
+      ]}
+      label={`Actions for archived ${archivedMenu.session.name}`}
+      onClose={() => setArchivedMenu(undefined)}
     />}
 
     {/* The sidebar's own width. The token table calls for 240px minimum,
@@ -538,6 +630,7 @@ function rowLabel(row: WorkspaceRowModel): string {
   const total = row.agents.length + row.agentOverflow;
   return [
     row.session.name,
+    row.pinned ? "pinned" : undefined,
     row.agents[0] && agentLine(row.agents[0]),
     total > 1 ? `${total} agents` : undefined,
     row.unread > 0 ? `${row.unread} agent${row.unread === 1 ? "" : "s"} waiting` : undefined,

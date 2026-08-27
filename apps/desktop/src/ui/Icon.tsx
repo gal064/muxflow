@@ -27,12 +27,25 @@ export type IconName =
   | "refresh"
   | "splitRight"
   | "close"
+  // The tab strip's bulk closes, which are buttons now rather than menu items
+  // only. Both have to say *which* tabs go without a label: `closeOthers` keeps
+  // one tab and crosses out its neighbours, `closeNonAgent` crosses out a tab
+  // and keeps the dot that marks an agent.
+  | "closeOthers"
+  | "closeNonAgent"
+  | "check"
+  | "more"
+  | "arrowLeft"
+  | "arrowRight"
   | "chevronRight"
   | "chevronDown"
   | "file"
   | "markdown"
   | "diff"
   | "zoom"
+  // Pinned tabs and workspaces. A push pin seen head-on, so it reads as a pin
+  // rather than a bookmark at the 11px the tab strip draws it at.
+  | "pin"
   | "search"
   | "branch"
   // The Explorer's file-type set. VS Code's Seti look is mostly *color*, so
@@ -78,6 +91,24 @@ const paths: Record<IconName, ReactElement> = {
     <path d="M8 2.5v11" />
   </>,
   close: <path d="m4.25 4.25 7.5 7.5M11.75 4.25l-7.5 7.5" />,
+  closeOthers: <>
+    <rect height="8" rx="1.5" width="5" x="5.5" y="4" />
+    <path d="m1.5 6.8 2.4 2.4M3.9 6.8 1.5 9.2" />
+    <path d="m12.1 6.8 2.4 2.4M14.5 6.8 12.1 9.2" />
+  </>,
+  closeNonAgent: <>
+    <rect height="9" rx="2" width="13" x="1.5" y="3.5" />
+    <path d="m4 6.4 2.6 2.6M6.6 6.4 4 9" />
+    <circle cx="11.4" cy="7.7" r="1.5" />
+  </>,
+  check: <path d="m3.5 8.4 3 3 6-6.8" />,
+  more: <>
+    <circle cx="3.6" cy="8" r=".9" />
+    <circle cx="8" cy="8" r=".9" />
+    <circle cx="12.4" cy="8" r=".9" />
+  </>,
+  arrowLeft: <path d="M12.25 8h-8.5M7.5 4.25 3.75 8l3.75 3.75" />,
+  arrowRight: <path d="M3.75 8h8.5M8.5 4.25 12.25 8 8.5 11.75" />,
   chevronRight: <path d="M6.25 3.75 10.5 8l-4.25 4.25" />,
   chevronDown: <path d="M3.75 6.25 8 10.5l4.25-4.25" />,
   file: <>
@@ -95,6 +126,11 @@ const paths: Record<IconName, ReactElement> = {
   </>,
   zoom: <>
     <path d="M2.75 6V2.75H6M10 2.75h3.25V6M13.25 10v3.25H10M6 13.25H2.75V10" />
+  </>,
+  pin: <>
+    <path d="M5.75 2.25h4.5" />
+    <path d="M6.9 2.25v3.6L5.25 7.7v1.05h5.5V7.7L9.1 5.85V2.25" />
+    <path d="M8 8.75v5" />
   </>,
   // 11.1.3 names both of these. `search` marks the palette's input the way the
   // mock's `⌕` does; `branch` marks the titlebar's branch name, which was a

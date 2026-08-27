@@ -5,7 +5,10 @@ import type { HostProfile } from "../../app/types";
 import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
-import { clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, type ShellState } from "./types";
+import {
+  clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN,
+  type AppTabViewMode, type ShellState, type WorkspaceDefaults,
+} from "./types";
 
 interface SettingsDialogProps {
   connectionMode: "local" | "ssh";
@@ -32,6 +35,17 @@ interface SettingsDialogProps {
   onProbeHelper(): void;
   onRequestHelperInstall(): void;
   onShell(update: Partial<ShellState>): void;
+  /**
+   * What new workspaces on `workspaceDefaultsHostId` start with.
+   *
+   * Per host, and shown as such: the fields are labelled with the host they
+   * belong to, because a start directory is a path on one machine and a startup
+   * command is a shell on one machine. A patch field committed empty clears it.
+   */
+  workspaceDefaults: WorkspaceDefaults;
+  workspaceDefaultsHostId: string;
+  workspaceDefaultsHostLabel: string;
+  onWorkspaceDefaults(patch: Partial<WorkspaceDefaults>): void;
   onSounds(preferences: AgentSoundPreferences): void;
   /** What the OS says about this app's notification permission, read on demand. */
   onNotificationStatus(): Promise<NotificationPermissionStatus>;
@@ -201,6 +215,45 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Compact workspace list
           </label>
           <p className="settings-hint">Hides individual agent lines under each workspace while keeping its activity, unread count, and connection status visible.</p>
+          <label>Default Markdown view
+            <select
+              aria-label="Default Markdown view"
+              onChange={(event) => props.onShell({ defaultMarkdownView: event.target.value as AppTabViewMode })}
+              value={props.shell.defaultMarkdownView}
+            >
+              <option value="source">Source</option>
+              <option value="preview">Preview</option>
+              <option value="split">Split</option>
+            </select>
+          </label>
+          <p className="settings-hint">Applies to Markdown files opened from now on. Tabs already open keep the view they are in.</p>
+          {/* Named after the host, because both fields are about one machine:
+              a path that exists on a laptop is not a path on a build box, and
+              silently applying either across hosts is how a create fails on a
+              directory that was never there. Keyed by it for the same reason —
+              a path half-typed for one machine must not be left sitting in the
+              field once the fields describe another. */}
+          <fieldset className="settings-fieldset" key={props.workspaceDefaultsHostId}>
+            <legend>New workspaces on {props.workspaceDefaultsHostLabel}</legend>
+            <label>Start in directory
+              <WorkspaceDefaultField
+                ariaLabel="Workspace start directory"
+                onCommit={(directory) => props.onWorkspaceDefaults({ directory })}
+                placeholder="Home directory"
+                value={props.workspaceDefaults.directory ?? ""}
+              />
+            </label>
+            <p className="settings-hint">Checked on {props.workspaceDefaultsHostLabel} when the workspace is created; a path that is not there refuses the create instead of putting the workspace somewhere else.</p>
+            <label>Run command in first tab
+              <WorkspaceDefaultField
+                ariaLabel="Workspace startup command"
+                onCommit={(startupCommand) => props.onWorkspaceDefaults({ startupCommand })}
+                placeholder="None"
+                value={props.workspaceDefaults.startupCommand ?? ""}
+              />
+            </label>
+            <p className="settings-hint">Sent to the first terminal once, right after the workspace is created.</p>
+          </fieldset>
         </>}
 
         {tab === "terminal" && <>
@@ -294,6 +347,46 @@ function TerminalFontSizeField({ value, onCommit }: { value: number; onCommit(si
     step="1"
     type="number"
     value={draft ?? String(value)}
+  />;
+}
+
+/**
+ * One of the two per-host workspace defaults, committed when the user is done
+ * with it rather than on every keystroke.
+ *
+ * The same rule as the font size field, for the same reason: each of these is
+ * persisted, and a value saved per character means half-typed paths and
+ * half-typed commands are what a workspace created mid-edit would use. An empty
+ * field commits `undefined` — clearing a setting is a thing the user must be
+ * able to do, and it is not the same as setting it to "".
+ */
+function WorkspaceDefaultField(props: {
+  ariaLabel: string;
+  onCommit(value: string | undefined): void;
+  placeholder: string;
+  value: string;
+}) {
+  const [draft, setDraft] = useState<string>();
+  const commit = () => {
+    if (draft === undefined) return;
+    setDraft(undefined);
+    const trimmed = draft.trim();
+    if (trimmed === props.value) return;
+    props.onCommit(trimmed === "" ? undefined : trimmed);
+  };
+  return <input
+    aria-label={props.ariaLabel}
+    onBlur={commit}
+    onChange={(event) => setDraft(event.target.value)}
+    onKeyDown={(event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      commit();
+    }}
+    placeholder={props.placeholder}
+    spellCheck={false}
+    type="text"
+    value={draft ?? props.value}
   />;
 }
 

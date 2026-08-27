@@ -72,5 +72,6 @@ impl Drop for Fixture {
 
 mod capability_safety;
 mod mutation;
+mod push;
 mod status_diff;
 mod watch_reconnect;

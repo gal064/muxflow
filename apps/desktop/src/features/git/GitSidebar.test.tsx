@@ -39,6 +39,25 @@ async function rowMenuItem(renderer: ReturnType<typeof create>, displayPath: str
 }
 
 describe("GitSidebar", () => {
+  it("opens a transient diff on a single click and a pinned one from a double-click, the menu and the palette", async () => {
+    const props = baseProps();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    const row = gitRow(renderer, "changed.txt");
+    await act(async () => { row.props.onClick(); });
+    expect(props.onOpenDiff).toHaveBeenLastCalledWith(expect.objectContaining({ displayPath: "changed.txt" }), "unstaged", { preview: true });
+    await act(async () => { row.props.onDoubleClick(); });
+    expect(props.onOpenDiff).toHaveBeenLastCalledWith(expect.objectContaining({ displayPath: "changed.txt" }), "unstaged", { preview: false });
+    const open = await rowMenuItem(renderer, "staged.txt", "open");
+    await act(async () => { open.props.onClick(); });
+    expect(props.onOpenDiff).toHaveBeenLastCalledWith(expect.objectContaining({ displayPath: "staged.txt" }), "staged", { preview: false });
+    await act(async () => { gitRow(renderer, "changed.txt").props.onPointerDown(); });
+    await act(async () => { rowCommandRegistry.run("git.openDiff"); });
+    expect(props.onOpenDiff).toHaveBeenLastCalledWith(expect.objectContaining({ displayPath: "changed.txt" }), "unstaged", { preview: false });
+    expect(props.onOpenDiff).toHaveBeenCalledTimes(4);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("writes a private canonical same-host payload for Git rows", async () => {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...baseProps()} />); });
@@ -358,6 +377,98 @@ describe("GitSidebar", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it("keeps the commit form mounted with nothing staged, so Push survives the commit that emptied it", async () => {
+    const clean = { ...status(), entries: [] };
+    const props = baseProps(gitState({ status: clean }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    const commitButton = renderer.root.findAllByType("button").find((button) => Array.isArray(button.props.children) && button.props.children[0] === "Commit ");
+    expect(commitButton?.props.disabled).toBe(true);
+    const pushButton = renderer.root.findByProps({ "aria-label": "Push to upstream" });
+    expect(pushButton.props.disabled).toBe(false);
+    await act(async () => { pushButton.props.onClick(); await settle(); });
+    expect(props.git.handle!.push).toHaveBeenCalledWith("repo", "1");
+    expect(props.git.handle!.commit).not.toHaveBeenCalled();
+    expect(JSON.stringify(renderer.toJSON())).toContain("Pushed to origin/main.");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("offers no Push in a repository that has no commit to publish", async () => {
+    const initial = { ...status(), repository: { ...status().repository, initial: true } };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...baseProps(gitState({ status: initial }))} />); });
+    expect(renderer.root.findByProps({ "aria-label": "Push to upstream" }).props.disabled).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("commits and then pushes from the split button's menu", async () => {
+    const props = baseProps();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "message" } }); });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "More commit actions" }).props.onClick({ currentTarget: anchorTarget() }); });
+    const item = renderer.root.findByProps({ "data-menu-item": "commitAndPush" });
+    await act(async () => { item.props.onClick(); await settle(); });
+    expect(props.git.handle!.commit).toHaveBeenCalledWith("repo", "1", "message");
+    expect(props.git.handle!.push).toHaveBeenCalledWith("repo", "1");
+    // Both halves are reported, not just the last one.
+    expect(JSON.stringify(renderer.toJSON())).toContain("Committed. Pushed to origin/main.");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("does not talk to the remote when the commit it was chained to did not happen", async () => {
+    const props = baseProps();
+    vi.mocked(props.git.handle!.commit).mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "pre-commit rejected", applied: false, refreshFailed: false, refreshError: "", outcome: "notApplied" });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "message" } }); });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "More commit actions" }).props.onClick({ currentTarget: anchorTarget() }); });
+    await act(async () => { renderer.root.findByProps({ "data-menu-item": "commitAndPush" }).props.onClick(); await settle(); });
+    expect(props.git.handle!.commit).toHaveBeenCalledTimes(1);
+    expect(props.git.handle!.push).not.toHaveBeenCalled();
+    const failed = JSON.stringify(renderer.toJSON());
+    expect(failed).toContain("pre-commit rejected");
+    expect(failed).not.toContain("Pushing…");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("keeps a half-typed commit message through a transient resynchronization", async () => {
+    const props = baseProps();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "half typed" } }); });
+    // The banner the panel already shows for this state; the draft is not a
+    // casualty of it.
+    await act(async () => { renderer.update(<GitSidebar {...baseProps(gitState({ status: { ...status(), authoritative: false } }))} />); });
+    expect(renderer.root.findByType("textarea").props.value).toBe("half typed");
+    expect(renderer.root.findByProps({ "aria-label": "Push to upstream" }).props.disabled).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("does not leave a progress line claiming a push is still running after it failed", async () => {
+    const props = baseProps();
+    vi.mocked(props.git.handle!.push).mockRejectedValueOnce(new Error("git_push_rejected: ! [rejected] master -> master (non-fast-forward)"));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Push to upstream" }).props.onClick(); await settle(); });
+    const text = JSON.stringify(renderer.toJSON());
+    expect(text).not.toContain("Pushing…");
+    expect(text).toContain("The remote rejected the push (non-fast-forward?). Pull or rebase first.");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("never reports a push the host could not confirm as one that worked", async () => {
+    const props = baseProps();
+    vi.mocked(props.git.handle!.push).mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "", applied: false, refreshFailed: false, refreshError: "", outcome: "partialOrUnknown", pushTarget: "origin/main" });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Push to upstream" }).props.onClick(); await settle(); });
+    const text = JSON.stringify(renderer.toJSON());
+    expect(text).toContain("Push outcome is unknown; check the remote before retrying.");
+    expect(text).not.toContain("Pushed to origin/main.");
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("treats re-focusing the same row as no change at all", async () => {
     const wide = { ...status(), entries: Array.from({ length: 200 }, (_, index) => entry(`file-${index}.txt`)) };
     let renderer!: ReturnType<typeof create>;
@@ -373,6 +484,11 @@ describe("GitSidebar", () => {
   });
 
 });
+
+/** What `anchorForElement` needs from the button a menu was opened from. */
+function anchorTarget() {
+  return { getBoundingClientRect: () => ({ left: 10, bottom: 20 }) };
+}
 
 /** Every row's click handler, whose identity changes if its group re-renders. */
 function rowHandlers(renderer: ReturnType<typeof create>) {
@@ -399,6 +515,7 @@ function gitState(overrides: Partial<WorkspaceGitState & GitRepositoryHandle> = 
       mutate: vi.fn(async () => applied()),
       prepareDiscard: vi.fn(async () => "confirmed"),
       commit: vi.fn(async () => applied()),
+      push: vi.fn(async () => pushed()),
       ...handle,
     },
   };
@@ -406,6 +523,10 @@ function gitState(overrides: Partial<WorkspaceGitState & GitRepositoryHandle> = 
 
 function applied(): GitCommandResult {
   return { exitCode: 0, stdout: "", stderr: "", applied: true, refreshFailed: false, refreshError: "", outcome: "applied", status: status() };
+}
+
+function pushed(): GitCommandResult {
+  return { ...applied(), pushTarget: "origin/main" };
 }
 
 function baseProps(git: WorkspaceGitState = gitState()) {

@@ -102,7 +102,7 @@ async function run(
       canMutate: true, closeAppTab, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
       currentHostProfileId: "local", focusDirection: vi.fn(), generation: 8,
       hostScope, isHostScopeCurrent: () => true, jumpToUnreadAgent: vi.fn(),
-      requestHostProfileDelete: vi.fn(), rowCommands: [], createSession,
+      requestHostProfileDelete: vi.fn(), rowCommands: [], archiveSession: vi.fn(), createSession,
       createWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
       selectWorkspaceByIndex: vi.fn(), serverIdentity: "server-a", setAppState,
       setConfirmation, setPaletteOpen: vi.fn(), setSettingsOpen: vi.fn(),
@@ -213,6 +213,19 @@ describe("shell commands", () => {
     expect(performAction).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["file", { ...appTab, kind: "file" as const }],
+    ["markdown", { ...appTab, kind: "markdown" as const, viewMode: "split" as const }],
+    ["gitDiff", { ...appTab, kind: "gitDiff" as const, resource: "unstaged:notes.md", gitRepositoryId: "repo", gitPath: "bm90ZXMubWQ=", gitTarget: "unstaged" as const }],
+  ])("creates a terminal tab from a selected %s tab without closing the document", async (_kind, selectedAppTab) => {
+    const { createWindow, closeAppTab, setAppState } = await run("window.new", {
+      selectedAppTab, appState: { ...defaultAppState, appTabs: [selectedAppTab] },
+    });
+    expect(createWindow).toHaveBeenCalledExactlyOnceWith("$1");
+    expect(closeAppTab).not.toHaveBeenCalled();
+    expect(setAppState).not.toHaveBeenCalled();
+  });
+
   it("closes a terminal tab and a pane without a dialog, still telling the host it was confirmed", async () => {
     const closeWindow = await run("window.close", {}, target({ kind: "terminalTab", id: "@1" }));
     expect(closeWindow.setConfirmation).not.toHaveBeenCalled();
@@ -251,6 +264,19 @@ describe("shell commands", () => {
       snapshot: { ...snapshot, panes: [pane, secondPane] },
     }, stale);
     expect(performAction).not.toHaveBeenCalled();
+  });
+
+  it("archives a workspace without any tmux action or confirmation", async () => {
+    const archiveSession = vi.fn();
+    const { setConfirmation, performAction } = await run("session.archive", { archiveSession }, target({ kind: "session", id: "$1" }));
+    expect(archiveSession).toHaveBeenCalledWith(session);
+    expect(performAction).not.toHaveBeenCalled();
+    expect(setConfirmation).not.toHaveBeenCalled();
+    // A menu whose connection scope has been replaced archives nothing.
+    const stale = target({ kind: "session", id: "$1" });
+    const second = vi.fn();
+    await run("session.archive", { archiveSession: second, hostScope: { ...hostScope, connectionEpoch: 2, serverIdentity: "server-b" } }, stale);
+    expect(second).not.toHaveBeenCalled();
   });
 
   it("still confirms closing a whole workspace", async () => {
