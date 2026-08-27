@@ -634,8 +634,8 @@ export function openFileTab(
   // The slot is reused, not the record: everything that described the previous
   // file — its markdown view mode, its root snapshot — is replaced, and only
   // the tab's identity and position survive.
-  // A transient Git diff is not this slot: it closes on the next navigation
-  // rather than being rewritten into a file, and its identity is a diff's.
+  // A preview Git diff is not this slot: a diff's identity is a repository,
+  // a path and a target, and rewriting one into a file would lose all three.
   const reusable = options.preview
     ? state.appTabs.find((tab) => inWorkspace(tab) && tab.preview && tab.kind !== "gitDiff")
     : undefined;
@@ -735,10 +735,11 @@ export function findGitDiffTab(
 }
 
 /**
- * A single click opens the diff as a transient tab (`preview`), which the
- * shell closes on the next navigation; a double-click, the context menu and
- * the palette open it pinned. As with files, a tab is only ever promoted by a
- * pinned open, never demoted by a transient one.
+ * A single click opens the diff as a preview tab, which the strip draws as one
+ * and a double-click promotes; the context menu and the palette open it pinned
+ * outright. As with files, a tab is only ever promoted by a pinned open, never
+ * demoted by a preview one. Navigating away does not close it: the diff tab
+ * stays in the strip until it is closed, and only the surface follows.
  */
 export function openGitDiffTab(
   state: PersistedAppState,
@@ -835,16 +836,6 @@ export function setMarkdownViewMode(
       ? { ...tab, viewMode }
       : tab),
   };
-}
-
-/**
- * The transient-diff rule: a single-clicked Git diff the user has navigated
- * away from is closed. Anything else — a pinned diff, a file, a tab already
- * gone — is left exactly as it is, and returns the same state object.
- */
-export function closeTransientGitDiff(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {
-  const tab = state.appTabs.find((item) => item.hostProfileId === currentHostProfileId && item.id === tabId);
-  return tab?.kind === "gitDiff" && tab.preview ? closeAppTab(state, currentHostProfileId, tabId) : state;
 }
 
 export function closeAppTab(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {

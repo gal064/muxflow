@@ -24,9 +24,8 @@ interface Props {
   root?: ActiveRoot;
   disabled: boolean;
   /**
-   * `preview` is a single click's transient diff, closed by the next
-   * navigation; a double-click, the context menu and the palette open it
-   * pinned.
+   * `preview` is a single click's preview diff, which a double-click promotes;
+   * the context menu and the palette open it pinned outright.
    */
   onOpenDiff(entry: GitStatusEntry, target: GitDiffTarget, options: { preview: boolean }): void;
   onMessage(message: string): void;
