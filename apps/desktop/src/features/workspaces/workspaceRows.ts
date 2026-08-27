@@ -65,11 +65,16 @@ export interface WorkspaceRowInputs {
   /** Home directory, so paths render the way a shell prompt would. */
   home?: string;
   /**
-   * Sessions that get no row at all — the archived ones. Excluded here rather
-   * than by each consumer, because the row list is also what ⌘1–9, the ⌘P
-   * switcher and the agents list's workspace order are built from.
+   * The sidebar's one filter: only pinned workspaces get a row.
+   *
+   * Applied here rather than by each consumer, because the row list is also
+   * what ⌘1–9, the ⌘P switcher and the agents list's workspace order are built
+   * from — a filter the sidebar applied on its own would be a list only the
+   * sidebar agreed with. The workspace on screen is the one exception: it keeps
+   * its row until the user selects another, so the filter can never hide what
+   * the shell is currently showing.
    */
-  excludeSessionIds?: ReadonlySet<string>;
+  pinnedOnly?: boolean;
   /**
    * When each pinned workspace on this server was pinned.
    *
@@ -89,7 +94,9 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
     unreadBySession.set(agent.sessionId, (unreadBySession.get(agent.sessionId) ?? 0) + 1);
   }
   const ordered = pinnedFirst(
-    orderedSessions(inputs.snapshot.sessions).filter((session) => !inputs.excludeSessionIds?.has(session.id)),
+    orderedSessions(inputs.snapshot.sessions).filter((session) => !inputs.pinnedOnly
+      || inputs.pinnedAt?.has(session.id)
+      || session.id === inputs.activeSessionId),
     (session) => inputs.pinnedAt?.get(session.id),
   );
   return ordered.map((session) => {

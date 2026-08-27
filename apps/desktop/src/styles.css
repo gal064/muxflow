@@ -257,22 +257,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   margin-left: -14px; border-radius: 2px; background: var(--chrome-border);
 }
 
-/* The archive lives under the workspace list as one collapsed line. Its rows
-   are plain text with a bar-button, deliberately not `.workspace-button`:
-   they are not selectable and must not look like one more workspace. */
-.archived-workspaces { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--chrome-hairline); }
-.archived-toggle {
-  display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 8px;
-  border: 0; border-radius: var(--radius-row); background: transparent;
-  color: var(--chrome-faint); text-align: left; font-size: var(--type-label); letter-spacing: .04em;
-}
-.archived-toggle:hover { background: var(--chrome-hover); color: var(--chrome-ink); }
-.archived-chevron { width: 10px; }
-.archived-row {
-  display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 8px 2px 24px;
-  color: var(--chrome-faint);
-}
-.archived-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-row, .agent-row { position: relative; }
 .workspace-button {
   display: flex; flex-direction: column; gap: 3px;

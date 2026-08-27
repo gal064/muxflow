@@ -55,8 +55,6 @@ interface ShellCommandOptions {
   /** Live subscription to what the row surfaces currently offer. */
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
-  /** Hides a workspace and its agents without touching tmux. */
-  archiveSession(session: Session): void;
   createSession(name: string): void;
   createWindow(sessionId: string): void;
   serverIdentity?: string;
@@ -325,10 +323,12 @@ export function useShellCommands(options: ShellCommandOptions): {
         if (current >= 0 && index >= 0 && index < ordered.length) await options.performAction({ kind: "reorderSession", sessionId: targetSession.id, index });
         return;
       }
-      case "session.archive": {
-        if (targetSession) options.archiveSession(targetSession);
+      case "workspaces.showPinnedOnly": case "workspaces.showAll":
+        options.setAppState((current) => ({
+          ...current,
+          shell: { ...current.shell, pinnedOnly: commandId === "workspaces.showPinnedOnly" },
+        }));
         return;
-      }
       case "window.new": {
         if (!targetSession) return;
         options.createWindow(targetSession.id);
@@ -392,6 +392,7 @@ export function useShellCommands(options: ShellCommandOptions): {
       ? Boolean(movableAppTab(options.combinedTabs, options.selectedAppTab.id)?.canMoveRight)
       : Boolean(options.activeWindow && relativeWindowReorderAction(options.windows, options.activeWindow.id, "right")),
     hasHostProfile: Boolean(options.deletableHostProfile),
+    pinnedOnly: options.appState.shell.pinnedOnly,
     rowCommands: options.rowCommands,
     run: runCommand,
   }), [options, runCommand]);

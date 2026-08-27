@@ -168,15 +168,21 @@ describe("workspace sidebar rows", () => {
     expect(inferHome(["/home/zed/a", "/home/operator/b"])).toBe("/home/operator");
   });
 
-  it("gives an excluded (archived) workspace no row at all", () => {
-    const visible = workspaceRows({
-      snapshot, activeSessionId: "$1", agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
-      excludeSessionIds: new Set(["$1"]),
-    });
-    expect(visible.map((row) => row.session.id)).toEqual(["$2"]);
+  it("lists only pinned workspaces under the filter, and keeps the selected one either way", () => {
+    const filtered = (pinnedAt: ReadonlyMap<string, number>, activeSessionId?: string) => workspaceRows({
+      snapshot, activeSessionId, agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
+      pinnedOnly: true, pinnedAt,
+    }).map((row) => row.session.id);
+    // The selected workspace keeps its row even unpinned: the filter must never
+    // hide what the shell is currently showing.
+    expect(filtered(new Map([["$2", 1]]), "$1")).toEqual(["$2", "$1"]);
+    expect(filtered(new Map([["$2", 1]]), "$2")).toEqual(["$2"]);
+    // Nothing pinned and nothing selected is an empty list, not a full one.
+    expect(filtered(new Map())).toEqual([]);
+    // Off, the same inputs list everything.
     expect(workspaceRows({
       snapshot, activeSessionId: "$1", agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
-      excludeSessionIds: new Set(),
+      pinnedAt: new Map([["$2", 1]]),
     })).toHaveLength(2);
   });
 });
