@@ -40,8 +40,8 @@ const rows: WorkspaceRowModel[] = [{
 const mixedStrip = [
   { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: true, attention: "none", agentPresence: "absent", pinned: false },
   { key: "terminal:@2", kind: "terminal", id: "@2", title: "claude", index: 2, activeInTmux: false, zoomed: false, canMoveLeft: true, canMoveRight: true, attention: "blocked", agentPresence: "present", pinned: false },
-  { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: false, canMoveLeft: true, canMoveRight: true, pinned: false },
-  { key: "app:diff", kind: "app", id: "diff", title: "README.md", appKind: "gitDiff", resource: "staged:README.md", order: 1, preview: false, canMoveLeft: true, canMoveRight: false, pinned: false },
+  { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: false, canMoveLeft: true, canMoveRight: true },
+  { key: "app:diff", kind: "app", id: "diff", title: "README.md", appKind: "gitDiff", resource: "staged:README.md", order: 1, preview: false, canMoveLeft: true, canMoveRight: false },
 ] as const;
 const pendingTab = { key: "pending:create", kind: "pending", title: "Creating" } as const;
 
@@ -617,7 +617,7 @@ describe("application shell accessibility contracts", () => {
       onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}}
       tabs={[
         { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked", agentPresence: "present", pinned: false },
-        { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: true, canMoveLeft: false, canMoveRight: false, pinned: false },
+        { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: true, canMoveLeft: false, canMoveRight: false },
       ]}
     />);
     expect(html).toContain('role="tablist"');
@@ -662,7 +662,6 @@ describe("application shell accessibility contracts", () => {
       preview: false,
       canMoveLeft: index > 0,
       canMoveRight: index < 9,
-      pinned: false,
     }));
     const tabHtml = renderToStaticMarkup(<TabStrip
       activeKey={manyTabs[0].key} activeTerminalPaneCount={0} canMutate
@@ -815,7 +814,7 @@ describe("application shell accessibility contracts", () => {
     const onCloseCurrent = vi.fn();
     const tab = {
       key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown",
-      resource: "/r/README.md", order: 0, preview: false, canMoveLeft: false, canMoveRight: false, pinned: false,
+      resource: "/r/README.md", order: 0, preview: false, canMoveLeft: false, canMoveRight: false,
     } as const;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<TabStrip
@@ -839,8 +838,8 @@ describe("application shell accessibility contracts", () => {
     const strip = [
       { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: true, attention: "none", agentPresence: "absent", pinned: false },
       { key: "terminal:@2", kind: "terminal", id: "@2", title: "logs", index: 2, activeInTmux: false, zoomed: false, canMoveLeft: true, canMoveRight: false, attention: "none", agentPresence: "absent", pinned: false },
-      { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: false, canMoveLeft: false, canMoveRight: true, pinned: false },
-      { key: "app:diff", kind: "app", id: "diff", title: "a.ts (staged)", appKind: "gitDiff", resource: "staged:a.ts", order: 1, preview: false, canMoveLeft: true, canMoveRight: false, pinned: false },
+      { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: false, canMoveLeft: false, canMoveRight: true },
+      { key: "app:diff", kind: "app", id: "diff", title: "a.ts (staged)", appKind: "gitDiff", resource: "staged:a.ts", order: 1, preview: false, canMoveLeft: true, canMoveRight: false },
     ] as const;
     const element = (canMutate: boolean) => <TabStrip
       activeKey="app:file" activeTerminalPaneCount={1} canMutate={canMutate} commandScope={commandScope} stateGlyphs={false}
@@ -1067,7 +1066,7 @@ describe("application shell accessibility contracts", () => {
     const many = Array.from({ length: 11 }, (_, index) => ({
       key: `app:file-${index}` as const, kind: "app" as const, id: `file-${index}`,
       title: `file-${index}.ts`, appKind: "file" as const, resource: `/r/file-${index}.ts`,
-      order: index, preview: false, canMoveLeft: index > 0, canMoveRight: index < 10, pinned: false,
+      order: index, preview: false, canMoveLeft: index > 0, canMoveRight: index < 10,
     }));
     let renderer!: ReturnType<typeof create>;
     await act(async () => {
@@ -1652,6 +1651,24 @@ describe("pinning by Shift-click", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("does not offer the pin to a document tab, which the host has no window for", async () => {
+    const onSelect = vi.fn();
+    const onTogglePinned = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    // mixedStrip[2] is the markdown tab: a pin is keyed on a tmux window, and
+    // a document tab does not have one.
+    await act(async () => {
+      renderer = create(tabStripOver([mixedStrip[2]], { onSelect, onTogglePinned }));
+    });
+    const tab = renderer.root.findByProps({ role: "tab" });
+    await act(async () => tab.props.onClick({ shiftKey: true }));
+    expect(onTogglePinned).not.toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledWith(mixedStrip[2]);
+    await act(async () => tab.props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    expect(renderer.root.findAllByProps({ "data-menu-item": "pin" })).toHaveLength(0);
+    await act(async () => renderer.unmount());
+  });
+
   it("pins a workspace row on Shift-click and selects it on a plain one", async () => {
     const onSelectWorkspace = vi.fn();
     const onTogglePinnedWorkspace = vi.fn();
@@ -1729,20 +1746,20 @@ describe("pinning by Shift-click", () => {
   });
 
   it("wraps the agents list's workspace groups in the same two dividers", () => {
-    const rowsFor = (pinnedAt?: number) => buildAgentRows(
+    const rowsFor = (pinned = false) => buildAgentRows(
       [agent({ id: "pinned-agent", sessionId: "$1", displayName: "Codex one" }), agent({ id: "loose", sessionId: "$2", displayName: "Codex two" })],
       (record) => ({
         workspaceOrder: record.sessionId === "$1" ? 0 : 1,
         workspaceName: record.sessionId === "$1" ? "api" : "web",
         hostLabel: "remote-linux",
-        workspacePinnedAt: record.sessionId === "$1" ? pinnedAt : undefined,
+        workspacePinned: pinned && record.sessionId === "$1",
       }),
       () => true,
       "workspace",
     );
     // No pinned workspace: the groups stand on their own, as they always did.
     expect(sidebar({ agents: rowsFor() })).not.toContain("list-divider");
-    const html = sidebar({ agents: rowsFor(5) });
+    const html = sidebar({ agents: rowsFor(true) });
     expect(html).toContain('<h3 class="list-divider">Pinned</h3>');
     expect(html).toContain('<h3 class="list-divider">Others</h3>');
     expect(html.indexOf(">Pinned</h3>")).toBeLessThan(html.indexOf(">Others</h3>"));
@@ -1759,7 +1776,7 @@ describe("pinning by Shift-click", () => {
           workspaceOrder: 0,
           workspaceName: "work",
           hostLabel: "remote-linux",
-          tabPinnedAt: record.id === "on-a-pinned-tab" ? 5 : undefined,
+          tabPinned: record.id === "on-a-pinned-tab",
         }),
         () => true,
         agentSort,
@@ -1784,7 +1801,7 @@ describe("pinning by Shift-click", () => {
         workspaceOrder: 0,
         workspaceName: "work",
         hostLabel: "remote-linux",
-        workspacePinnedAt: pinnedIds.includes(record.id) ? 5 : undefined,
+        workspacePinned: pinnedIds.includes(record.id),
       }),
       () => true,
       "status",

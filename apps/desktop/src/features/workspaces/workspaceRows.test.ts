@@ -24,6 +24,12 @@ const snapshot: TmuxSnapshot = {
   ],
 };
 
+/** The same topology with the host reporting these workspaces as pinned. */
+const pinnedSnapshot = (pinned: readonly string[]): TmuxSnapshot => ({
+  ...snapshot,
+  sessions: snapshot.sessions.map((session) => ({ ...session, pinned: pinned.includes(session.id) })),
+});
+
 const agents = [
   agent({ id: "a", sessionId: "$1", windowId: "@1", paneId: "%1", displayName: "claude", lifecycle: "working", updatedAt: 20 }),
   agent({ id: "b", sessionId: "$1", windowId: "@2", paneId: "%2", displayName: "codex", lifecycle: "blocked", updatedAt: 10 }),
@@ -169,47 +175,47 @@ describe("workspace sidebar rows", () => {
   });
 
   it("narrows to the pinned workspaces, keeping whichever one is selected", () => {
-    const all = (pinnedAt: ReadonlyMap<string, number>, activeSessionId?: string) => workspaceRows({
-      snapshot, activeSessionId, agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace, pinnedAt,
+    const all = (pinned: readonly string[], activeSessionId?: string) => workspaceRows({
+      snapshot: pinnedSnapshot(pinned), activeSessionId, agents,
+      attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
     });
-    const filtered = (pinnedAt: ReadonlyMap<string, number>, activeSessionId?: string) =>
-      pinnedOnlyRows(all(pinnedAt, activeSessionId), activeSessionId).map((row) => row.session.id);
+    const filtered = (pinned: readonly string[], activeSessionId?: string) =>
+      pinnedOnlyRows(all(pinned, activeSessionId), activeSessionId).map((row) => row.session.id);
     // The selected workspace keeps its row even unpinned: the filter must never
     // hide what the shell is currently showing.
-    expect(filtered(new Map([["$2", 1]]), "$1")).toEqual(["$2", "$1"]);
-    expect(filtered(new Map([["$2", 1]]), "$2")).toEqual(["$2"]);
+    expect(filtered(["$2"], "$1")).toEqual(["$2", "$1"]);
+    expect(filtered(["$2"], "$2")).toEqual(["$2"]);
     // Nothing pinned and nothing selected is an empty list, not a full one.
-    expect(filtered(new Map())).toEqual([]);
+    expect(filtered([])).toEqual([]);
     // The list it narrows is untouched — ⌘P reads that one whole.
-    expect(all(new Map([["$2", 1]]), "$1")).toHaveLength(2);
+    expect(all(["$2"], "$1")).toHaveLength(2);
   });
 });
 
 describe("pinned workspaces lead the sidebar list", () => {
-  const pinnedRows = (pinnedAt: ReadonlyMap<string, number>) => workspaceRows({
-    snapshot,
+  const pinnedRows = (pinned: readonly string[]) => workspaceRows({
+    snapshot: pinnedSnapshot(pinned),
     activeSessionId: "$1",
     agents,
     attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
-    pinnedAt,
   });
 
   it("moves a pinned workspace to the top and marks the row", () => {
     // `$2` sorts second by tmux order; pinning it puts it first.
-    const list = pinnedRows(new Map([["$2", 10]]));
+    const list = pinnedRows(["$2"]);
     expect(list.map((row) => row.session.id)).toEqual(["$2", "$1"]);
     expect(list.map((row) => row.pinned)).toEqual([true, false]);
   });
 
-  it("keeps the first workspace pinned first, and the rest in tmux order", () => {
-    const list = pinnedRows(new Map([["$1", 20], ["$2", 10]]));
-    expect(list.map((row) => row.session.id)).toEqual(["$2", "$1"]);
+  it("keeps pinned workspaces in the workspace order among themselves", () => {
+    const list = pinnedRows(["$1", "$2"]);
+    expect(list.map((row) => row.session.id)).toEqual(["$1", "$2"]);
     // This list is also ⌘1–9 and the ⌘P switcher, so the numbers follow it.
-    expect(list.map((row) => row.session.name)).toEqual(["project-e2e", "muxflow"]);
+    expect(list.map((row) => row.session.name)).toEqual(["muxflow", "project-e2e"]);
   });
 
   it("changes nothing when no workspace on this server is pinned", () => {
-    const list = pinnedRows(new Map([["$99", 10]]));
+    const list = pinnedRows(["$99"]);
     expect(list.map((row) => row.session.id)).toEqual(["$1", "$2"]);
     expect(list.every((row) => !row.pinned)).toBe(true);
     expect(rows().map((row) => row.pinned)).toEqual([false, false]);

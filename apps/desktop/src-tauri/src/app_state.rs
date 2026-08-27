@@ -86,36 +86,6 @@ pub struct WorkspaceUiRecord {
     pub selected_app_tab_id: Option<String>,
 }
 
-/// A workspace the user pinned to the top of the sidebar. Keyed like
-/// `WorkspaceUiRecord` so it can only ever act on the exact session it was
-/// written for; `pinned_at` is the leading block's sort key.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PinnedWorkspaceRecord {
-    pub host_profile_id: String,
-    pub server_identity: String,
-    pub session_id: String,
-    pub session_name: String,
-    pub pinned_at: f64,
-}
-
-/// A tab the user pinned to the front of one workspace's strip. `tab_id` is a
-/// tmux window id (`@N`) or an app-owned document tab id; the two id spaces
-/// never collide, so one record covers both kinds of tab.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PinnedTabRecord {
-    pub host_profile_id: String,
-    pub server_identity: String,
-    pub session_id: String,
-    pub tab_id: String,
-    pub pinned_at: f64,
-}
-
-/// The pin ceilings, matching the frontend's.
-const MAX_PINNED_WORKSPACES: usize = 200;
-const MAX_PINNED_TABS: usize = 200;
-
 /// The shell preferences the frontend owns.
 ///
 /// Every field is `#[serde(default)]`, and that is a contract rather than a
@@ -257,12 +227,6 @@ pub struct PersistedAppState {
     pub commands: CommandPreferences,
     #[serde(default)]
     pub host_setup: HashMap<String, HostSetupDecision>,
-    /// Defaulted for the same reason the shell preferences are: a file written
-    /// before pinning existed must keep loading, with nothing pinned.
-    #[serde(default)]
-    pub pinned_workspaces: Vec<PinnedWorkspaceRecord>,
-    #[serde(default)]
-    pub pinned_tabs: Vec<PinnedTabRecord>,
     #[serde(default)]
     pub workspace_defaults: BTreeMap<String, WorkspaceDefaults>,
 }
@@ -276,8 +240,6 @@ impl Default for PersistedAppState {
             shell: ShellPreferences::default(),
             commands: CommandPreferences::default(),
             host_setup: HashMap::new(),
-            pinned_workspaces: Vec::new(),
-            pinned_tabs: Vec::new(),
             workspace_defaults: BTreeMap::new(),
         }
     }
@@ -489,49 +451,6 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
             }
         }
     }
-    if value.pinned_workspaces.len() > MAX_PINNED_WORKSPACES {
-        return Err("too many pinned workspaces".into());
-    }
-    let mut pinned_workspaces = HashSet::new();
-    for record in &value.pinned_workspaces {
-        validate_text("host profile ID", &record.host_profile_id, false)?;
-        validate_text("server identity", &record.server_identity, false)?;
-        validate_text("session name", &record.session_name, true)?;
-        validate_tmux_session_id(&record.session_id)?;
-        if !record.pinned_at.is_finite() {
-            return Err("invalid pinned timestamp".into());
-        }
-        if !pinned_workspaces.insert((
-            record.host_profile_id.as_str(),
-            record.server_identity.as_str(),
-            record.session_id.as_str(),
-        )) {
-            return Err("duplicate pinned workspace".into());
-        }
-    }
-    if value.pinned_tabs.len() > MAX_PINNED_TABS {
-        return Err("too many pinned tabs".into());
-    }
-    let mut pinned_tabs = HashSet::new();
-    for record in &value.pinned_tabs {
-        validate_text("host profile ID", &record.host_profile_id, false)?;
-        validate_text("server identity", &record.server_identity, false)?;
-        // Not a tmux id check: this is a tmux window id for a terminal tab and
-        // an app-owned tab id for a document, and only the frontend knows which.
-        validate_text("pinned tab ID", &record.tab_id, false)?;
-        validate_tmux_session_id(&record.session_id)?;
-        if !record.pinned_at.is_finite() {
-            return Err("invalid pinned timestamp".into());
-        }
-        if !pinned_tabs.insert((
-            record.host_profile_id.as_str(),
-            record.server_identity.as_str(),
-            record.session_id.as_str(),
-            record.tab_id.as_str(),
-        )) {
-            return Err("duplicate pinned tab".into());
-        }
-    }
     Ok(())
 }
 
@@ -674,20 +593,6 @@ mod tests {
                 shortcut_overrides: HashMap::from([("window.new".into(), Some("Ctrl+T".into()))]),
             },
             host_setup: HashMap::from([("local".into(), HostSetupDecision::Accepted)]),
-            pinned_workspaces: vec![PinnedWorkspaceRecord {
-                host_profile_id: "local".into(),
-                server_identity: "server-a".into(),
-                session_id: "$1".into(),
-                session_name: "project".into(),
-                pinned_at: 1_700_000_001_000.0,
-            }],
-            pinned_tabs: vec![PinnedTabRecord {
-                host_profile_id: "local".into(),
-                server_identity: "server-a".into(),
-                session_id: "$1".into(),
-                tab_id: "@3".into(),
-                pinned_at: 1_700_000_002_000.0,
-            }],
             workspace_defaults: BTreeMap::from([(
                 "local".into(),
                 WorkspaceDefaults {
@@ -749,65 +654,25 @@ mod tests {
         assert_eq!(restored.app_tabs[1], state.app_tabs[1]);
     }
 
+    /// The pins moved to the host, where they belong to the tmux server rather
+    /// than to this installation. A file written by the build that kept them
+    /// here must still load: the records are simply not read.
     #[test]
-    fn pins_are_bounded_and_keyed_per_workspace_and_tab() {
-        let mut value = sample_state();
-        value
-            .pinned_workspaces
-            .push(value.pinned_workspaces[0].clone());
-        assert!(validate(&value).unwrap_err().contains("duplicate pinned"));
-
-        let mut value = sample_state();
-        value.pinned_tabs.push(value.pinned_tabs[0].clone());
-        assert!(
-            validate(&value)
-                .unwrap_err()
-                .contains("duplicate pinned tab")
-        );
-
-        // Same workspace, another tab: two pins, not a duplicate.
-        let mut value = sample_state();
-        let mut second = value.pinned_tabs[0].clone();
-        second.tab_id = "doc-1".into();
-        value.pinned_tabs.push(second);
-        validate(&value).unwrap();
-
-        let mut value = sample_state();
-        value.pinned_tabs[0].tab_id = String::new();
-        assert!(validate(&value).unwrap_err().contains("pinned tab ID"));
-
-        let mut value = sample_state();
-        value.pinned_workspaces[0].session_id = "not-a-session".into();
-        assert!(validate(&value).unwrap_err().contains("session ID"));
-
-        let mut value = sample_state();
-        value.pinned_workspaces = (0..=MAX_PINNED_WORKSPACES)
-            .map(|index| PinnedWorkspaceRecord {
-                session_id: format!("${index}"),
-                ..value.pinned_workspaces[0].clone()
-            })
-            .collect();
-        assert!(validate(&value).unwrap_err().contains("too many pinned"));
-
-        let mut value = sample_state();
-        value.pinned_tabs = (0..=MAX_PINNED_TABS)
-            .map(|index| PinnedTabRecord {
-                tab_id: format!("@{index}"),
-                ..value.pinned_tabs[0].clone()
-            })
-            .collect();
-        assert!(
-            validate(&value)
-                .unwrap_err()
-                .contains("too many pinned tabs")
-        );
-
-        // A file written before pinning existed loads with nothing pinned.
+    fn pin_records_written_by_the_previous_build_are_ignored() {
         let legacy: PersistedAppState = serde_json::from_value(serde_json::json!({
-            "schemaVersion": 1, "appTabs": [], "workspaceUi": [], "shell": {}
+            "schemaVersion": 1, "appTabs": [], "workspaceUi": [], "shell": {},
+            "pinnedWorkspaces": [{
+                "hostProfileId": "local", "serverIdentity": "server-a",
+                "sessionId": "$1", "sessionName": "project", "pinnedAt": 1
+            }],
+            "pinnedTabs": [{
+                "hostProfileId": "local", "serverIdentity": "server-a",
+                "sessionId": "$1", "tabId": "@3", "pinnedAt": 2
+            }]
         }))
         .unwrap();
-        assert!(legacy.pinned_workspaces.is_empty() && legacy.pinned_tabs.is_empty());
+        assert_eq!(legacy, PersistedAppState::default());
+        validate(&legacy).unwrap();
     }
 
     #[test]
@@ -906,8 +771,6 @@ mod tests {
                 .and_then(|defaults| defaults.directory.as_deref()),
             Some("/srv/checkout")
         );
-        assert_eq!(value.pinned_workspaces[0].session_id, "$1");
-        assert_eq!(value.pinned_tabs[0].tab_id, "@3");
         validate(&value).expect("the frontend's own payload must validate");
 
         // Nothing may be stored that the frontend does not send, and nothing the
@@ -931,16 +794,6 @@ mod tests {
             keys(&stored["workspaceUi"][0]),
             keys(&expected["workspaceUi"][0]),
             "workspaceUi"
-        );
-        assert_eq!(
-            keys(&stored["pinnedWorkspaces"][0]),
-            keys(&expected["pinnedWorkspaces"][0]),
-            "pinnedWorkspaces"
-        );
-        assert_eq!(
-            keys(&stored["pinnedTabs"][0]),
-            keys(&expected["pinnedTabs"][0]),
-            "pinnedTabs"
         );
         assert_eq!(
             keys(&stored["commands"]),

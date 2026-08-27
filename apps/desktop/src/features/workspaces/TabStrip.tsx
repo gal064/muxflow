@@ -45,10 +45,13 @@ interface TabStripProps {
    * Shift-click, and the menu item beside it: pins the tab to the front of the
    * strip, or unpins one already there.
    *
+   * Terminal tabs only. A pin is host state now, keyed on the tmux window it
+   * names, and a document tab has no window on the host to name.
+   *
    * Deliberately not `onPin`, which this strip has meant "promote a preview tab
    * to a permanent one" since Phase 11 and still does.
    */
-  onTogglePinned(tab: SelectableTab): void;
+  onTogglePinned(tab: Extract<CombinedTab, { kind: "terminal" }>): void;
   onNewTerminal(): void;
 }
 
@@ -148,7 +151,7 @@ export function TabStrip(props: TabStripProps) {
   // array's identity: a re-render carrying the same tabs must not tear the
   // observer down and build it again.
   const stripSignature = props.tabs
-    .map((tab) => `${tab.key}|${tab.title}|${tab.kind !== "pending" && tab.pinned ? "1" : ""}`)
+    .map((tab) => `${tab.key}|${tab.title}|${tab.kind === "terminal" && tab.pinned ? "1" : ""}`)
     .join("\n");
   useLayoutEffect(() => {
     const node = tabs.current;
@@ -203,7 +206,7 @@ export function TabStrip(props: TabStripProps) {
   // Measured against the strip as it is now, like the bulk-close sets above: a
   // menu outlives the list it was opened over, and a stale `menu.tab` would let
   // the item say "Pin" for a tab that is already pinned.
-  const menuTabPinned = props.tabs.some((tab) => tab.key === menu?.tab.key && tab.pinned);
+  const menuTabPinned = props.tabs.some((tab) => tab.key === menu?.tab.key && tab.kind === "terminal" && tab.pinned);
   const menuClosesFocusedPane = Boolean(menu?.focusedPaneId
     && menu.tab.key === props.activeKey
     && props.activeTerminalPaneCount > 1);
@@ -261,7 +264,9 @@ export function TabStrip(props: TabStripProps) {
             // claims the modifier, and pinning without selecting is the point:
             // pinning a background tab must not pull the terminal out from
             // under whatever is on screen.
-            onClick={(event) => event.shiftKey ? props.onTogglePinned(tab) : props.onSelect(tab)}
+            onClick={(event) => event.shiftKey && tab.kind === "terminal"
+              ? props.onTogglePinned(tab)
+              : props.onSelect(tab)}
             onContextMenu={(event) => {
               // Opening a menu is not a selection: selecting first would make a
               // right-click on a terminal tab issue a real tmux select-window.
@@ -293,7 +298,8 @@ export function TabStrip(props: TabStripProps) {
             {/* Leading, beside the number: the close button sits at the tab's
                 trailing edge and keeps its own box, so the mark cannot move
                 the target a pointer is already heading for. */}
-            {tab.pinned && <span aria-label="Pinned" className="tab-pin"><Icon name="pin" size={11} /></span>}
+            {tab.kind === "terminal" && tab.pinned
+              && <span aria-label="Pinned" className="tab-pin"><Icon name="pin" size={11} /></span>}
             {tab.kind === "app" && <TabGlyph tab={tab} />}
             {/* The document tab's glyph slot, spent on the adapter mark: a
                 terminal tab's "type" is whichever agent is living in it. Purely
@@ -403,11 +409,13 @@ export function TabStrip(props: TabStripProps) {
         ...(menu.tab.kind === "terminal"
           ? [{ id: "rename", label: "Rename tab…", disabled: !props.canMutate, run: () => props.onRenameTerminal(menu.tab as Extract<CombinedTab, { kind: "terminal" }>, menu.scope) }]
           : []),
-        {
-          id: "pin",
-          label: menuTabPinned ? "Unpin tab" : "Pin tab",
-          run: () => props.onTogglePinned(menu.tab),
-        },
+        ...(menu.tab.kind === "terminal"
+          ? [{
+            id: "pin",
+            label: menuTabPinned ? "Unpin tab" : "Pin tab",
+            run: () => props.onTogglePinned(menu.tab as Extract<CombinedTab, { kind: "terminal" }>),
+          }]
+          : []),
         { id: "left", label: "Move left", disabled: !menu.tab.canMoveLeft || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "left", menu.scope) },
         { id: "right", label: "Move right", disabled: !menu.tab.canMoveRight || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "right", menu.scope) },
         "separator",

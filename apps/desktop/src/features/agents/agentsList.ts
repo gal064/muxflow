@@ -1,5 +1,4 @@
 import { compareAgents, displayState } from "./selectors";
-import { pinRank } from "../shell/pins";
 import type { AgentDisplayState, AgentRecord } from "./types";
 
 /**
@@ -49,15 +48,16 @@ export interface AgentLocation {
   hostLabel?: string;
   tabIndex?: number;
   /**
-   * When this agent's workspace and tab were pinned, if either was.
+   * Whether this agent's workspace and tab are pinned, as the host reports
+   * them.
    *
    * `workspaceOrder` already puts a pinned workspace's rows first in the
    * workspace ordering, because it comes from the sidebar list that is itself
    * pinned-first. These two are what the *priority* ordering needs, where there
    * is no workspace ranking to inherit.
    */
-  workspacePinnedAt?: number;
-  tabPinnedAt?: number;
+  workspacePinned?: boolean;
+  tabPinned?: boolean;
 }
 
 export interface AgentListRow {
@@ -99,7 +99,7 @@ export function groupAgentRows(rows: readonly AgentListRow[]): AgentWorkspaceGro
       key,
       workspaceName: row.location.workspaceName,
       hostLabel,
-      pinned: row.location.workspacePinnedAt !== undefined,
+      pinned: Boolean(row.location.workspacePinned),
       rows: [row],
     });
   }
@@ -190,20 +190,20 @@ export function buildAgentRows(
       state: displayState(agent),
       location,
       routable: routable(agent),
-      pinned: location.workspacePinnedAt !== undefined || location.tabPinnedAt !== undefined,
+      pinned: Boolean(location.workspacePinned || location.tabPinned),
     };
   });
   return rows.sort(mode === "status" ? byStatus : byWorkspace);
 }
 
 function byStatus(left: AgentListRow, right: AgentListRow): number {
-  // The pinned block first, in workspace pin order and then tab pin order, and
-  // compareAgents — blocked > done-unread > working > unknown > idle, then
+  // The pinned block first, pinned workspaces ahead of pinned tabs inside it,
+  // and compareAgents — blocked > done-unread > working > unknown > idle, then
   // most-recently-updated — inside each block. Reusing it keeps one definition
-  // of "loudest"; the pin keys only decide which block a row is in.
+  // of "loudest"; the pins only decide which block a row is in.
   return Number(right.pinned) - Number(left.pinned)
-    || pinRank(left.location.workspacePinnedAt) - pinRank(right.location.workspacePinnedAt)
-    || pinRank(left.location.tabPinnedAt) - pinRank(right.location.tabPinnedAt)
+    || Number(Boolean(right.location.workspacePinned)) - Number(Boolean(left.location.workspacePinned))
+    || Number(Boolean(right.location.tabPinned)) - Number(Boolean(left.location.tabPinned))
     || compareAgents(left.agent, right.agent);
 }
 
@@ -217,7 +217,7 @@ function byWorkspace(left: AgentListRow, right: AgentListRow): number {
     || left.agent.sessionId.localeCompare(right.agent.sessionId)
     // Inside one workspace, a pinned tab's agents lead — the strip's own order,
     // which is what this mode exists to follow.
-    || pinRank(left.location.tabPinnedAt) - pinRank(right.location.tabPinnedAt)
+    || Number(Boolean(right.location.tabPinned)) - Number(Boolean(left.location.tabPinned))
     || (left.location.tabIndex ?? Number.MAX_SAFE_INTEGER) - (right.location.tabIndex ?? Number.MAX_SAFE_INTEGER)
     || left.agent.displayName.localeCompare(right.agent.displayName)
     || left.agent.id.localeCompare(right.agent.id);

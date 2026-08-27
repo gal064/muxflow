@@ -3,8 +3,7 @@ import contract from "./persistedAppState.contract.json";
 import {
   clampedPanelWidth, clampedTerminalFontSize, defaultAppState, defaultShellState, normalizePersistedAppState,
   panelWidthForWindow, PANEL_MIN_WIDTH,
-  type AppOwnedTab, type PersistedAppState, type PinnedTabRecord,
-  type PinnedWorkspaceRecord, type WorkspaceDefaults, type WorkspaceUiRecord,
+  type AppOwnedTab, type PersistedAppState, type WorkspaceDefaults, type WorkspaceUiRecord,
 } from "./types";
 
 /**
@@ -46,23 +45,12 @@ describe("persisted app state contract", () => {
     const workspace: Required<WorkspaceUiRecord> = {
       hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", selectedAppTabId: "",
     };
-    // Pins cross the boundary and are keyed like `workspaceUi`. The tab record
-    // is the one that differs — a tab id in place of a workspace name — and is
-    // exactly the shape a hand-written Rust mirror can drift on.
-    const pinnedWorkspace: Required<PinnedWorkspaceRecord> = {
-      hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", pinnedAt: 0,
-    };
-    const pinnedTab: Required<PinnedTabRecord> = {
-      hostProfileId: "", serverIdentity: "", sessionId: "", tabId: "", pinnedAt: 0,
-    };
     // The per-host workspace defaults cross the same boundary, and both of its
     // fields are optional — exactly the shape that stops being saved without
     // anything failing.
     const defaults: Required<WorkspaceDefaults> = { directory: "", startupCommand: "" };
     expect(Object.keys(contract.appTabs[0]).sort()).toEqual(Object.keys(tab).sort());
     expect(Object.keys(contract.workspaceUi[0]).sort()).toEqual(Object.keys(workspace).sort());
-    expect(Object.keys(contract.pinnedWorkspaces[0]).sort()).toEqual(Object.keys(pinnedWorkspace).sort());
-    expect(Object.keys(contract.pinnedTabs[0]).sort()).toEqual(Object.keys(pinnedTab).sort());
     expect(Object.keys(contract.workspaceDefaults.local).sort()).toEqual(Object.keys(defaults).sort());
   });
 
@@ -79,8 +67,6 @@ describe("persisted app state contract", () => {
     expect(typed.shell.panelWidth).toBe(320);
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
-    expect(typed.pinnedWorkspaces[0].sessionId).toBe("$1");
-    expect(typed.pinnedTabs[0].tabId).toBe("@3");
     expect(typed.shell.defaultMarkdownView).toBe("preview");
     expect(typed.workspaceDefaults.local).toEqual({ directory: "/work/projects", startupCommand: "git status" });
   });
@@ -99,6 +85,20 @@ describe("persisted app state contract", () => {
     expect(shell("yes")).toBe(true);
     expect(defaultAppState.shell.pinnedOnly).toBe(false);
     expect((contract as unknown as PersistedAppState).shell.pinnedOnly).toBe(true);
+  });
+
+  it("ignores the pin records left behind by the build that kept pins in app state", () => {
+    // Pins are the host's now, read off every snapshot. The records that used
+    // to be here are not a migration — an unknown key is simply dropped — and
+    // the pins themselves are unaffected, because they were never in this file
+    // on the host that owns them.
+    const loaded = normalizePersistedAppState({
+      ...defaultAppState,
+      pinnedWorkspaces: [{ hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionName: "project", pinnedAt: 1 }],
+      pinnedTabs: [{ hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", tabId: "@3", pinnedAt: 2 }],
+    });
+    expect(Object.keys(loaded)).toEqual(Object.keys(defaultAppState));
+    expect(loaded).toEqual(defaultAppState);
   });
 
   it("ignores an archivedWorkspaces field left behind by an older build", () => {
