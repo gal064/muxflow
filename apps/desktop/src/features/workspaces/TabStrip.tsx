@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../../ui/Icon";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
@@ -135,6 +135,35 @@ export function TabStrip(props: TabStripProps) {
     if (!props.activeKey) return;
     revealTab(props.activeKey);
   }, [props.activeKey, props.tabs]);
+
+  // The `…` is an affordance for tabs that cannot be seen, so it is worth its
+  // place in the strip only while the strip is actually hiding one: with
+  // everything visible it opens a list of what is already on screen and steals
+  // width from the tabs themselves. `scrollWidth > clientWidth` is the whole
+  // measurement. It is taken again on any layout of the strip — the window
+  // resizing, the sidebar or right panel opening — and whenever the tab set
+  // itself changes, which is the other way clipping starts and stops.
+  const [clipped, setClipped] = useState(false);
+  // Widths depend on which tabs are there and what they are called, not on the
+  // array's identity: a re-render carrying the same tabs must not tear the
+  // observer down and build it again.
+  const stripSignature = props.tabs
+    .map((tab) => `${tab.key}|${tab.title}|${tab.kind !== "pending" && tab.pinned ? "1" : ""}`)
+    .join("\n");
+  useLayoutEffect(() => {
+    const node = tabs.current;
+    if (!node) return;
+    // A pixel of slack: fractional layout can leave `scrollWidth` a hair over
+    // `clientWidth` with nothing whatsoever hidden.
+    const measure = () => setClipped(node.scrollWidth - node.clientWidth > 1);
+    // Measured directly, and first — the observer's first callback is a frame
+    // away, and it may not exist at all.
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [stripSignature]);
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: SelectableTab, index: number) => {
     if (isContextMenuKey(event)) {
@@ -317,7 +346,11 @@ export function TabStrip(props: TabStripProps) {
         type="button"
       ><Icon name="closeNonAgent" /></button>
       <button aria-label="New terminal tab" className="bar-button" disabled={!props.canMutate} onClick={props.onNewTerminal} title="New terminal tab" type="button"><Icon name="plus" /></button>
-      <button
+      {/* Only while the strip clips — and while its own menu is open, so the
+          control cannot vanish out from under the menu it owns. The menu
+          itself renders off `allTabsAnchor` alone, so anything that opens it
+          without this button still works. */}
+      {(clipped || allTabsAnchor) && <button
         aria-expanded={Boolean(allTabsAnchor)}
         aria-haspopup="menu"
         aria-label="All tabs"
@@ -332,7 +365,7 @@ export function TabStrip(props: TabStripProps) {
         }}
         title="All tabs"
         type="button"
-      ><Icon name="more" /></button>
+      ><Icon name="more" /></button>}
     </div>
     {allTabsAnchor && <ContextMenu
       anchor={allTabsAnchor}

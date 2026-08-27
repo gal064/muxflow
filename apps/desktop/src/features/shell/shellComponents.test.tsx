@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import stylesCss from "../../styles.css?raw";
-import { act as domAct, type ComponentProps } from "react";
+import { act as domAct, type ComponentProps, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot } from "react-dom/client";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
@@ -58,6 +58,28 @@ function tabStripOver(tabs: readonly CombinedTab[], overrides: TabStripOverrides
     onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop}
     platform="mac" shortcuts={{}} stateGlyphs={false} tabs={tabs} {...overrides}
   />;
+}
+
+/**
+ * The widths the strip's tab list reports. `react-test-renderer` has no layout
+ * of its own, so this ref mock is the only place a test can say whether the
+ * strip is clipping a tab — which is what decides the `…` control.
+ */
+function stripNode(scrollWidth: number, clientWidth: number) {
+  return { scrollWidth, clientWidth, querySelector: () => null };
+}
+
+/** Renders a strip whose tab list measures itself as `node` says. */
+function createStrip(element: ReactElement, node: ReturnType<typeof stripNode>) {
+  return create(element, {
+    createNodeMock: (mocked: ReactElement<{ className?: string }>) =>
+      mocked.props.className === "tabstrip-tabs" ? node : null,
+  });
+}
+
+/** The `…` control, or nothing when the strip is not clipping a tab. */
+function allTabsControls(renderer: ReturnType<typeof create>) {
+  return renderer.root.findAllByProps({ "aria-label": "All tabs", type: "button" });
 }
 
 /** Clicks the strip's `…` control the way a pointer does, rect and all. */
@@ -941,7 +963,7 @@ describe("application shell accessibility contracts", () => {
     const onSelect = vi.fn();
     let renderer!: ReturnType<typeof create>;
     await act(async () => {
-      renderer = create(tabStripOver([...mixedStrip, pendingTab], { activeKey: "app:file", onSelect }));
+      renderer = createStrip(tabStripOver([...mixedStrip, pendingTab], { activeKey: "app:file", onSelect }), stripNode(520, 300));
     });
     await act(async () => openAllTabs(renderer));
     // Opening the list is not a selection: the point of it is to find a tab you
@@ -975,6 +997,53 @@ describe("application shell accessibility contracts", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("shows the all-tabs control only while the strip is clipping a tab", async () => {
+    // The `…` opens a list of every tab. With every tab already on screen that
+    // list says nothing the strip does not, so the control is not drawn — and
+    // the width it would have taken goes to the tabs.
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = createStrip(tabStripOver([...mixedStrip]), stripNode(300, 300)); });
+    expect(allTabsControls(renderer)).toHaveLength(0);
+    await act(async () => renderer.unmount());
+
+    await act(async () => { renderer = createStrip(tabStripOver([...mixedStrip]), stripNode(520, 300)); });
+    expect(allTabsControls(renderer)).toHaveLength(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it("re-measures the strip when it resizes and when the tab set changes", async () => {
+    const observers: Array<() => void> = [];
+    class StubResizeObserver {
+      constructor(callback: () => void) { observers.push(callback); }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", StubResizeObserver);
+    const node = stripNode(300, 300);
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = createStrip(tabStripOver([...mixedStrip]), node); });
+    expect(allTabsControls(renderer)).toHaveLength(0);
+
+    // The window narrows — or a panel opens — and a tab goes off the edge.
+    node.clientWidth = 200;
+    await act(async () => observers.at(-1)?.());
+    expect(allTabsControls(renderer)).toHaveLength(1);
+
+    // And widens again, with room for everything.
+    node.clientWidth = 400;
+    await act(async () => observers.at(-1)?.());
+    expect(allTabsControls(renderer)).toHaveLength(0);
+
+    // A tab set that grows past the edge is the other way clipping starts, and
+    // it moves no layout the observer would report.
+    node.scrollWidth = 900;
+    await act(async () => { renderer.update(tabStripOver([...mixedStrip, pendingTab])); });
+    expect(allTabsControls(renderer)).toHaveLength(1);
+    await act(async () => renderer.unmount());
+    vi.unstubAllGlobals();
+  });
+
   it("advertises the tab shortcut the keymap holds, not the one it ships with", async () => {
     // `tab.select1…9` are hidden from the palette but are ordinary rebindable
     // commands, and the collision repair can clear one outright. A row
@@ -982,10 +1051,10 @@ describe("application shell accessibility contracts", () => {
     // promising nothing.
     let renderer!: ReturnType<typeof create>;
     await act(async () => {
-      renderer = create(tabStripOver([...mixedStrip], {
+      renderer = createStrip(tabStripOver([...mixedStrip], {
         activeKey: "app:file",
         shortcuts: { "tab.select2": "Meta+Alt+2", "tab.select3": null },
-      }));
+      }), stripNode(520, 300));
     });
     await act(async () => openAllTabs(renderer));
     const rows = renderer.root.findAllByProps({ role: "menuitemradio" });
@@ -1002,7 +1071,7 @@ describe("application shell accessibility contracts", () => {
     }));
     let renderer!: ReturnType<typeof create>;
     await act(async () => {
-      renderer = create(tabStripOver(many, { activeKey: many[0].key, platform: "linux" }));
+      renderer = createStrip(tabStripOver(many, { activeKey: many[0].key, platform: "linux" }), stripNode(1400, 300));
     });
     await act(async () => openAllTabs(renderer));
     const rows = renderer.root.findAllByProps({ role: "menuitemradio" });
