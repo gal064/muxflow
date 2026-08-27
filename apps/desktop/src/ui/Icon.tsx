@@ -91,15 +91,29 @@ const paths: Record<IconName, ReactElement> = {
     <path d="M8 2.5v11" />
   </>,
   close: <path d="m4.25 4.25 7.5 7.5M11.75 4.25l-7.5 7.5" />,
+  // Lucide (ISC) `copy-x`, transcribed on the 24 grid and scaled to this set's
+  // 16 one; the stroke is widened to keep SF-Symbols weight after the scale.
   closeOthers: <>
-    <rect height="8" rx="1.5" width="5" x="5.5" y="4" />
-    <path d="m1.5 6.8 2.4 2.4M3.9 6.8 1.5 9.2" />
-    <path d="m12.1 6.8 2.4 2.4M14.5 6.8 12.1 9.2" />
+    <g strokeWidth={2.1} transform="scale(.6667)">
+      <line x1="12" x2="18" y1="12" y2="18" />
+      <line x1="12" x2="18" y1="18" y2="12" />
+      <rect height="14" rx="2" ry="2" width="14" x="8" y="8" />
+      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+    </g>
   </>,
+  // Lucide (ISC) `bot`, scaled and offset up-left to leave room for an ×
+  // badge knocked out of its bottom-right corner with the chrome background.
   closeNonAgent: <>
-    <rect height="9" rx="2" width="13" x="1.5" y="3.5" />
-    <path d="m4 6.4 2.6 2.6M6.6 6.4 4 9" />
-    <circle cx="11.4" cy="7.7" r="1.5" />
+    <g strokeWidth={2.3} transform="translate(-1 -1) scale(.6)">
+      <path d="M12 8V4H8" />
+      <rect height="12" rx="2" width="16" x="4" y="8" />
+      <path d="M2 14h2" />
+      <path d="M20 14h2" />
+      <path d="M15 13v2" />
+      <path d="M9 13v2" />
+    </g>
+    <circle cx="12.4" cy="12.4" fill="var(--chrome-bg)" r="3.6" stroke="none" />
+    <path d="m10.7 10.7 3.4 3.4M14.1 10.7l-3.4 3.4" strokeWidth={1.5} />
   </>,
   check: <path d="m3.5 8.4 3 3 6-6.8" />,
   more: <>
@@ -127,10 +141,11 @@ const paths: Record<IconName, ReactElement> = {
   zoom: <>
     <path d="M2.75 6V2.75H6M10 2.75h3.25V6M13.25 10v3.25H10M6 13.25H2.75V10" />
   </>,
+  // Bootstrap Icons (MIT) `pin`, whose filled silhouette is redrawn here as a
+  // 1.4 stroke so it matches the rest of the set.
   pin: <>
-    <path d="M5.75 2.25h4.5" />
-    <path d="M6.9 2.25v3.6L5.25 7.7v1.05h5.5V7.7L9.1 5.85V2.25" />
-    <path d="M8 8.75v5" />
+    <path d="M4.75 1.25h6.5c0 .95-.55 1.5-1.25 1.9V6.9c1.2.7 2.25 1.6 2.25 2.85h-8.5c0-1.25 1.05-2.15 2.25-2.85V3.15c-.7-.4-1.25-.95-1.25-1.9Z" />
+    <path d="M8 9.75v4.75" />
   </>,
   // 11.1.3 names both of these. `search` marks the palette's input the way the
   // mock's `⌕` does; `branch` marks the titlebar's branch name, which was a
