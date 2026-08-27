@@ -65,17 +65,6 @@ export interface WorkspaceRowInputs {
   /** Home directory, so paths render the way a shell prompt would. */
   home?: string;
   /**
-   * The sidebar's one filter: only pinned workspaces get a row.
-   *
-   * Applied here rather than by each consumer, because the row list is also
-   * what ⌘1–9, the ⌘P switcher and the agents list's workspace order are built
-   * from — a filter the sidebar applied on its own would be a list only the
-   * sidebar agreed with. The workspace on screen is the one exception: it keeps
-   * its row until the user selects another, so the filter can never hide what
-   * the shell is currently showing.
-   */
-  pinnedOnly?: boolean;
-  /**
    * When each pinned workspace on this server was pinned.
    *
    * Applied here rather than in the sidebar because this list *is* the
@@ -94,9 +83,7 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
     unreadBySession.set(agent.sessionId, (unreadBySession.get(agent.sessionId) ?? 0) + 1);
   }
   const ordered = pinnedFirst(
-    orderedSessions(inputs.snapshot.sessions).filter((session) => !inputs.pinnedOnly
-      || inputs.pinnedAt?.has(session.id)
-      || session.id === inputs.activeSessionId),
+    orderedSessions(inputs.snapshot.sessions),
     (session) => inputs.pinnedAt?.get(session.id),
   );
   return ordered.map((session) => {
@@ -150,6 +137,25 @@ function topAgentsBySession(
     if (here.top.length < WORKSPACE_ROW_AGENT_LIMIT) here.top.push(agent);
   }
   return loudest;
+}
+
+/**
+ * The sidebar's one filter, over a list that was already built whole.
+ *
+ * A filter and not a build input, because the two consumers disagree on
+ * purpose: the sidebar, ⌘1–9 and the agents list read the narrowed list, and
+ * ⌘P reads the whole one — a filter meant to quieten the sidebar must not be
+ * the reason a workspace cannot be reached.
+ *
+ * The workspace on screen is the one exception the narrowing makes: it keeps
+ * its row until the user selects another, so turning the filter on can never
+ * hide what the shell is currently showing.
+ */
+export function pinnedOnlyRows(
+  rows: readonly WorkspaceRowModel[],
+  activeSessionId: string | undefined,
+): WorkspaceRowModel[] {
+  return rows.filter((row) => row.pinned || row.session.id === activeSessionId);
 }
 
 /**

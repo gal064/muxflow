@@ -82,7 +82,7 @@ import { useFocusHistoryNavigation } from "./useFocusHistoryNavigation";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
-import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
+import { inferHome, pinnedOnlyRows, workspaceRows } from "../features/workspaces/workspaceRows";
 import type { ConnectionSpec, HostProfile, Pane, Session } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
@@ -498,7 +498,9 @@ export function App() {
   });
 
   const home = useMemo(() => inferHome(snapshot.panes.map((pane) => pane.currentPath)), [snapshot.panes]);
-  const sidebarRows = useMemo(() => workspaceRows({
+  // Every workspace on this server, pinned first. ⌘P reads this whole; the
+  // sidebar, ⌘1–9 and the agents list read the narrowed version below.
+  const switcherRows = useMemo(() => workspaceRows({
     snapshot,
     activeSessionId,
     agents: agentRuntime.agents,
@@ -506,9 +508,12 @@ export function App() {
     attentionByWorkspace: agentRuntime.rollups.byWorkspace,
     activeBranch: workspaceGit.status?.repository.headName,
     home,
-    pinnedOnly: appState.shell.pinnedOnly,
     pinnedAt: pinnedWorkspaceAt,
-  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, appState.shell.pinnedOnly, home, pinnedWorkspaceAt, snapshot, workspaceGit.status]);
+  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, pinnedWorkspaceAt, snapshot, workspaceGit.status]);
+  const sidebarRows = useMemo(
+    () => appState.shell.pinnedOnly ? pinnedOnlyRows(switcherRows, activeSessionId) : switcherRows,
+    [activeSessionId, appState.shell.pinnedOnly, switcherRows],
+  );
   const agentRows = useMemo(() => {
     const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
     const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
@@ -1388,7 +1393,11 @@ export function App() {
     {workspaceSwitcherOpen && <WorkspaceSwitcher
       onClose={() => setWorkspaceSwitcherOpen(false)}
       onSelect={selectSession}
-      rows={sidebarRows}
+      // Every workspace, filtered or not. The filter is a way to quieten the
+      // list, not a way to make a workspace unreachable; leaving the switcher
+      // narrowed would mean the only way back to an unpinned workspace is to
+      // turn the filter off first.
+      rows={switcherRows}
       stateGlyphs={appState.shell.agentStateGlyphs}
     />}
     <AppDialogLayer

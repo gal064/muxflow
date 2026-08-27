@@ -1629,12 +1629,31 @@ describe("pinning by Shift-click", () => {
     expect(allPinned).not.toContain(">Others</h3>");
   });
 
-  it("says what the workspace filter will show next, and offers the pinned empty state", () => {
+  it("says what the workspace filter will show next, and explains an empty-looking filtered list", () => {
     expect(sidebar()).toContain('class="sort-toggle" type="button">pinned</button>');
     expect(sidebar({ pinnedOnly: true })).toContain('class="sort-toggle" type="button">all</button>');
-    expect(sidebar({ pinnedOnly: true, rows: [] }))
-      .toContain("No pinned workspaces — Shift-click a workspace to pin it.");
+    const hint = "No pinned workspaces — Shift-click a workspace to pin it.";
+    expect(sidebar({ pinnedOnly: true, rows: [] })).toContain(hint);
+    // And with the selected workspace still keeping its row, which is how this
+    // state is normally met: one unexplained row is exactly what needs the hint.
+    const kept = sidebar({ pinnedOnly: true });
+    expect(kept).toContain(hint);
+    expect(kept).toContain(session.name);
+    // Something pinned: nothing to explain.
+    expect(sidebar({ pinnedOnly: true, rows: [{ ...rows[0], pinned: true }] })).not.toContain(hint);
+    // Off, an empty list is about the host and not about pins.
     expect(sidebar({ rows: [] })).toContain("No tmux sessions on this host yet.");
+    expect(sidebar({ rows: [] })).not.toContain(hint);
+    expect(sidebar({ pinnedOnly: true, rows: [] })).not.toContain("No tmux sessions on this host yet.");
+  });
+
+  it("does not claim the host has no agents when the filter is what emptied the list", () => {
+    // The titlebar's unread count deliberately still reads every agent, so a
+    // filtered-empty panel must not answer for the whole host.
+    expect(sidebar({ agents: [] })).toContain("No agents detected.");
+    const filtered = sidebar({ agents: [], pinnedOnly: true });
+    expect(filtered).toContain("No agents in pinned workspaces.");
+    expect(filtered).not.toContain("No agents detected.");
   });
 
   it("wraps the agents list's workspace groups in the same two dividers", () => {
@@ -1652,9 +1671,12 @@ describe("pinning by Shift-click", () => {
     // No pinned workspace: the groups stand on their own, as they always did.
     expect(sidebar({ agents: rowsFor() })).not.toContain("list-divider");
     const html = sidebar({ agents: rowsFor(5) });
-    expect(html).toContain('<h3 class="list-divider" id="agent-block-pinned">Pinned</h3>');
-    expect(html).toContain('<h3 class="list-divider" id="agent-block-others">Others</h3>');
-    expect(html.indexOf("agent-block-pinned")).toBeLessThan(html.indexOf("agent-block-others"));
+    expect(html).toContain('<h3 class="list-divider">Pinned</h3>');
+    expect(html).toContain('<h3 class="list-divider">Others</h3>');
+    expect(html.indexOf(">Pinned</h3>")).toBeLessThan(html.indexOf(">Others</h3>"));
+    // The blocks are ignored containers, not a second level of group: a group
+    // owning a group is outside what `role="list"` may own.
+    expect(html).toContain('<div class="list-block" role="presentation">');
   });
 
   it("puts the pin immediately after the name of an agent whose tab is pinned, in both orderings", () => {
@@ -1680,17 +1702,34 @@ describe("pinning by Shift-click", () => {
     }
   });
 
-  it("heads the agents list with a Pinned block in priority mode", () => {
-    const pinnedRow = buildAgentRows(
-      [agent({ displayName: "Codex one", lifecycle: "idle" })],
-      () => ({ workspaceOrder: 0, workspaceName: "work", hostLabel: "remote-linux", workspacePinnedAt: 5 }),
+  it("heads the agents list with a Pinned block in priority mode, unless it would hold everything", () => {
+    const priorityRows = (pinnedIds: readonly string[]) => buildAgentRows(
+      [
+        agent({ id: "pinned-one", displayName: "Codex one", lifecycle: "idle" }),
+        agent({ id: "loose", windowId: "@2", paneId: "%2", displayName: "Codex two", lifecycle: "blocked" }),
+      ],
+      (record) => ({
+        workspaceOrder: 0,
+        workspaceName: "work",
+        hostLabel: "remote-linux",
+        workspacePinnedAt: pinnedIds.includes(record.id) ? 5 : undefined,
+      }),
       () => true,
       "status",
     );
-    const html = sidebar({ agentSort: "status", agents: pinnedRow });
+    const html = sidebar({ agentSort: "status", agents: priorityRows(["pinned-one"]) });
     expect(html).toContain("<span>Pinned</span>");
-    // No state dot on the heading: "pinned" is not a state an agent is in.
+    // No state dot on that heading: "pinned" is not a state an agent is in.
     expect(html).toContain('<span aria-hidden="true" class="agent-group-pin">');
-    expect(html).not.toContain("agent-group-dot");
+    // The rest still bucket by status under their own headings.
+    expect(html).toContain("<span>Blocked</span>");
+
+    // Every row pinned — which is what the pinned-only filter leaves behind —
+    // and the block would say nothing while costing all four headings.
+    const everything = sidebar({ agentSort: "status", agents: priorityRows(["pinned-one", "loose"]) });
+    expect(everything).not.toContain("<span>Pinned</span>");
+    expect(everything).not.toContain("agent-group-pin");
+    expect(everything).toContain("<span>Blocked</span>");
+    expect(everything).toContain("<span>Idle</span>");
   });
 });

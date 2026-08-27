@@ -149,13 +149,20 @@ export function groupAgentRowsByStatus(rows: readonly AgentListRow[]): AgentStat
   // pinned agent that happened to be idle would sit under an Idle heading below
   // three other headings — first in its group, and nowhere near first in the
   // list, which is the one thing a pin promises.
-  const pinned = rows.filter((row) => row.pinned);
+  //
+  // Unless it would hold everything, in which case there is nothing to lift it
+  // above: a block containing every row says nothing the list did not already
+  // say, and it costs the four headings that are this ordering's whole point.
+  // That is exactly the shape the pinned-only filter produces, where every row
+  // that survives belongs to a pinned workspace.
+  const pinned = rows.some((row) => !row.pinned) ? rows.filter((row) => row.pinned) : [];
+  const bucketed = pinned.length > 0 ? rows.filter((row) => !row.pinned) : rows;
   const buckets = AGENT_STATUS_GROUPS
     .map((group) => ({
       key: group.key,
       label: group.label,
       state: group.states[0] as AgentDisplayState,
-      rows: rows.filter((row) => !row.pinned && (group.states as readonly AgentDisplayState[]).includes(row.state)),
+      rows: bucketed.filter((row) => (group.states as readonly AgentDisplayState[]).includes(row.state)),
     }))
     .filter((group) => group.rows.length > 0);
   return pinned.length > 0 ? [{ key: "pinned", label: "Pinned", rows: pinned }, ...buckets] : buckets;
