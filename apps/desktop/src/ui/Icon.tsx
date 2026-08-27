@@ -102,7 +102,9 @@ const paths: Record<IconName, ReactElement> = {
     </g>
   </>,
   // Lucide (ISC) `bot`, scaled and offset up-left to leave room for an ×
-  // badge knocked out of its bottom-right corner with the chrome background.
+  // badge knocked out of its bottom-right corner. The knockout follows the
+  // surface under the icon: `.bar-button:hover` sets `--icon-knockout` to its
+  // hover colour so the disc does not draw a ring on hover.
   closeNonAgent: <>
     <g strokeWidth={2.3} transform="translate(-1 -1) scale(.6)">
       <path d="M12 8V4H8" />
@@ -112,7 +114,7 @@ const paths: Record<IconName, ReactElement> = {
       <path d="M15 13v2" />
       <path d="M9 13v2" />
     </g>
-    <circle cx="12.4" cy="12.4" fill="var(--chrome-bg)" r="3.6" stroke="none" />
+    <circle cx="12.4" cy="12.4" fill="var(--icon-knockout, var(--chrome-bg))" r="3.6" stroke="none" />
     <path d="m10.7 10.7 3.4 3.4M14.1 10.7l-3.4 3.4" strokeWidth={1.5} />
   </>,
   check: <path d="m3.5 8.4 3 3 6-6.8" />,
