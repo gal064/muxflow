@@ -642,23 +642,21 @@ export function App() {
   // Both pins are host state now, so both take the action pipeline: the pin
   // outlives this app, and every client of the same tmux server sees it. The
   // scope check is the same one every row action makes — a menu can outlive the
-  // connection it was opened over — and neither pin selects anything, so both
-  // report themselves as silent navigation.
+  // connection it was opened over.
+  //
+  // Deliberately without an `execution`, like the workspace reorder these now
+  // resemble: navigation execution rethrows a refusal for its caller to handle,
+  // and a pin has no navigation to abandon — a host that says no is a status
+  // line and an incident, not an exception nobody is waiting for. The pin state
+  // is read from the same live row or tab the menu label was drawn from, so the
+  // action asks for the opposite of what the user was just shown.
   const toggleWorkspacePin = useCallback((session: Session, scope: HostScopeToken) => {
     if (!sameHostConnection(scope, hostScopeRef.current)) return;
-    void performAction(
-      { kind: "setPinned", sessionId: session.id, pinned: !session.pinned },
-      undefined,
-      { kind: "navigation", feedback: "silent", measurePanePaint: false },
-    );
+    void performAction({ kind: "setPinned", sessionId: session.id, pinned: !session.pinned });
   }, [hostScopeRef, performAction]);
   const toggleTabPin = useCallback((tab: Extract<CombinedTab, { kind: "terminal" }>, scope: HostScopeToken) => {
     if (!activeSessionId || !sameHostConnection(scope, hostScopeRef.current)) return;
-    void performAction(
-      { kind: "setPinned", sessionId: activeSessionId, windowId: tab.id, pinned: !tab.pinned },
-      undefined,
-      { kind: "navigation", feedback: "silent", measurePanePaint: false },
-    );
+    void performAction({ kind: "setPinned", sessionId: activeSessionId, windowId: tab.id, pinned: !tab.pinned });
   }, [activeSessionId, hostScopeRef, performAction]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {

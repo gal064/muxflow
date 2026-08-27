@@ -40,8 +40,12 @@ struct ServerPins {
     windows: Vec<PinnedWindow>,
 }
 
-/// `pinned_at` is milliseconds since the epoch. It is the pinned block's sort
-/// key: entries are held in pin order, so the first thing pinned stays first.
+/// A pinned workspace, in pin order: entries are appended as they are pinned
+/// and the leading block is the vector itself, so the first thing pinned stays
+/// first. `pinned_at` — milliseconds since the epoch — is what a reader would
+/// need to restore that order after any future rewrite of this file; nothing
+/// sorts on it today, and it is deliberately not on the wire, because the
+/// snapshot says only whether a thing is pinned.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PinnedSession {
@@ -270,6 +274,13 @@ fn write_pin(
                 pinned_at,
             });
         }
+    }
+    // An unpin that empties a server leaves nothing worth a key. The overlay
+    // collects the same emptiness after a prune; doing it here as well is what
+    // keeps a server that was pinned and then unpinned from sitting in the file
+    // forever, since unpinning is not a prune.
+    if pins.sessions.is_empty() && pins.windows.is_empty() {
+        state.servers.remove(server_identity);
     }
     save_sidecar(path, PINS_LABEL, &state)
 }
@@ -664,9 +675,9 @@ mod tests {
         write_pin(&path, "tmux:one", &snapshot, "$1", "@1", false).unwrap();
         apply_pins(&path, &mut snapshot, "tmux:one").unwrap();
         assert!(!snapshot.sessions[0].pinned && !snapshot.windows[0].pinned);
+        // Nothing pinned here any more, so the server keeps no entry at all.
         let state: PinState = load_sidecar(&path, PINS_LABEL).unwrap();
-        let pins = state.servers.get("tmux:one").unwrap();
-        assert!(pins.sessions.is_empty() && pins.windows.is_empty());
+        assert!(!state.servers.contains_key("tmux:one"));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
