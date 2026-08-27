@@ -1633,18 +1633,21 @@ describe("pinning by Shift-click", () => {
     expect(sidebar()).toContain('class="sort-toggle" type="button">pinned</button>');
     expect(sidebar({ pinnedOnly: true })).toContain('class="sort-toggle" type="button">all</button>');
     const hint = "No pinned workspaces — Shift-click a workspace to pin it.";
-    expect(sidebar({ pinnedOnly: true, rows: [] })).toContain(hint);
-    // And with the selected workspace still keeping its row, which is how this
-    // state is normally met: one unexplained row is exactly what needs the hint.
+    // The selected workspace keeps its row, which is how this state is normally
+    // met: one unexplained row is exactly what needs the hint.
     const kept = sidebar({ pinnedOnly: true });
     expect(kept).toContain(hint);
     expect(kept).toContain(session.name);
     // Something pinned: nothing to explain.
     expect(sidebar({ pinnedOnly: true, rows: [{ ...rows[0], pinned: true }] })).not.toContain(hint);
-    // Off, an empty list is about the host and not about pins.
-    expect(sidebar({ rows: [] })).toContain("No tmux sessions on this host yet.");
-    expect(sidebar({ rows: [] })).not.toContain(hint);
-    expect(sidebar({ pinnedOnly: true, rows: [] })).not.toContain("No tmux sessions on this host yet.");
+    // Nothing at all is about the host, filter or no filter: there is nothing
+    // to Shift-click, and saying so would be advice about workspaces that do
+    // not exist.
+    for (const pinnedOnly of [false, true]) {
+      const empty = sidebar({ pinnedOnly, rows: [] });
+      expect(empty).toContain("No tmux sessions on this host yet.");
+      expect(empty).not.toContain(hint);
+    }
   });
 
   it("does not claim the host has no agents when the filter is what emptied the list", () => {

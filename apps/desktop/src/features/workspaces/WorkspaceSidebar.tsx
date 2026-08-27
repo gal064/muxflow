@@ -390,14 +390,18 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         >{props.pinnedOnly ? "all" : "pinned"}</button>
       </div>
       <div aria-labelledby="sidebar-workspaces-label" className="sidebar-scroll" role="list">
-        {/* Said whenever the filter is on with nothing pinned, not only when
-            the list came out empty: the selected workspace keeps its row, so
-            the ordinary way to meet this state is one unexplained row rather
-            than none, and the hint is the only thing that explains it. */}
-        {props.pinnedOnly && !props.rows.some((row) => row.pinned)
-          && <p className="quiet-empty">No pinned workspaces — Shift-click a workspace to pin it.</p>}
-        {props.rows.length === 0 && !props.pinnedOnly
+        {/* An empty list is about the host whether or not the filter is on:
+            the selected workspace keeps its row, so nothing at all here means
+            there is nothing to pin, and telling someone to Shift-click a
+            workspace they do not have is worse than saying so. */}
+        {props.rows.length === 0
           && <p className="quiet-empty">No tmux sessions on this host yet.</p>}
+        {/* Otherwise, said whenever the filter is on with nothing pinned —
+            not only when the list came out empty. The ordinary way to meet
+            this state is the selected workspace sitting there alone, and the
+            hint is the only thing that explains why it is the only row. */}
+        {props.rows.length > 0 && props.pinnedOnly && !props.rows.some((row) => row.pinned)
+          && <p className="quiet-empty">No pinned workspaces — Shift-click a workspace to pin it.</p>}
         {props.rows.length === 0
           ? null
           : workspaceBlocks
