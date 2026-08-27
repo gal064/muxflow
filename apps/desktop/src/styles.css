@@ -257,6 +257,21 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   margin-left: -14px; border-radius: 2px; background: var(--chrome-border);
 }
 
+/* Pinned above Others, in both halves of the sidebar. A label and a hairline
+   rather than a glyph per row: one line says what a mark repeated down every
+   pinned row said, and it says it without taking a pixel from any name. The
+   hairline is a pseudo-element so the label keeps its intrinsic width and the
+   rule fills whatever is left. */
+.list-divider {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0; padding: 6px 8px 4px;
+  font-size: var(--type-label); font-weight: 600; letter-spacing: var(--tracking-label);
+  text-transform: uppercase; color: var(--chrome-faint);
+}
+.list-divider::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--chrome-hairline); }
+/* The first divider sits directly under the section header, which already
+   supplies the space above it. */
+.list-block:first-child > .list-divider { padding-top: 0; }
 .workspace-row, .agent-row { position: relative; }
 .workspace-button {
   display: flex; flex-direction: column; gap: 3px;
@@ -321,7 +336,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    the adapter marks were reading at --chrome-faint and --chrome-dim against a
    light accent, which is the one combination the palette has no contrast for. */
 .workspace-button.active .workspace-shortcut-index,
-.workspace-button.active .workspace-pin,
 .workspace-button.active .agent-icon { color: var(--accent-ink); }
 .workspace-shortcut-index {
   width: 12px; flex: 0 0 auto;
@@ -453,7 +467,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    and the state colours stay reserved for the static dots. */
 .agent-mark-badge.working { width: 7px; height: 7px; background: var(--badge-ring); color: var(--chrome-ink); }
 .workspace-button.active .agent-mark-badge.working { color: var(--accent-ink); }
-.agent-session-label { min-width: 0; flex: 1 1 auto; }
+/* The name and its pin are one cell, so the pin sits against the end of the
+   text rather than out at the row's edge; the label alone still shrinks and
+   ellipsises, which is why it is `0 1 auto` inside a cell that grows. */
+.agent-name-cell { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.agent-session-label { min-width: 0; flex: 0 1 auto; }
 .agent-location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-tab { font-family: var(--font-mono); font-size: var(--type-label); font-weight: 400; color: var(--chrome-faint); }
 .agent-detail {
@@ -605,11 +623,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
   font-variant-numeric: tabular-nums;
 }
-/* The pin marks, at the leading edge of a tab and of a workspace row. Both are
-   `inline-flex` so the 11px glyph sits on the control's optical centre rather
-   than the text baseline, and both are absent — not hidden — when the thing is
-   not pinned, so nothing reserves a slot the way the state indicators do. */
-.tab-pin, .workspace-pin, .agent-group-pin { display: inline-flex; flex: 0 0 auto; color: var(--chrome-dim); }
+/* The pin marks: at the leading edge of a tab, and immediately after an agent
+   row's name. Both are `inline-flex` so the 11px glyph sits on the control's
+   optical centre rather than the text baseline, and both are absent — not
+   hidden — when the thing is not pinned, so nothing reserves a slot the way the
+   state indicators do. */
+.tab-pin, .agent-pin, .agent-group-pin { display: inline-flex; flex: 0 0 auto; color: var(--chrome-dim); }
 /* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
    inline color, so there is no rule here per document kind. */
 .tab-glyph { display: inline-flex; }
