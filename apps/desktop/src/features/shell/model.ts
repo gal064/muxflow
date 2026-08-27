@@ -99,7 +99,7 @@ export function pinnedFirst<T>(items: readonly T[], pinned: (item: T) => boolean
   const leading: T[] = [];
   const rest: T[] = [];
   for (const item of items) (pinned(item) ? leading : rest).push(item);
-  return leading.length === 0 ? [...items] : [...leading, ...rest];
+  return [...leading, ...rest];
 }
 
 export function orderedSessions(sessions: readonly Session[]): Session[] {
