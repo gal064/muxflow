@@ -4,7 +4,7 @@ import { compareAgents, deriveAgentRollups } from "../agents/selectors";
 import type { TmuxSnapshot } from "../../app/types";
 import type { AgentAdapterDescriptor } from "../agents/types";
 import {
-  WORKSPACE_ROW_AGENT_LIMIT, abbreviateHome, inferHome, sessionPath, workspaceMetaLine, workspaceRows,
+  WORKSPACE_ROW_AGENT_LIMIT, abbreviateHome, inferHome, pinnedOnlyRows, sessionPath, workspaceMetaLine, workspaceRows,
 } from "./workspaceRows";
 
 const snapshot: TmuxSnapshot = {
@@ -168,16 +168,20 @@ describe("workspace sidebar rows", () => {
     expect(inferHome(["/home/zed/a", "/home/operator/b"])).toBe("/home/operator");
   });
 
-  it("gives an excluded (archived) workspace no row at all", () => {
-    const visible = workspaceRows({
-      snapshot, activeSessionId: "$1", agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
-      excludeSessionIds: new Set(["$1"]),
+  it("narrows to the pinned workspaces, keeping whichever one is selected", () => {
+    const all = (pinnedAt: ReadonlyMap<string, number>, activeSessionId?: string) => workspaceRows({
+      snapshot, activeSessionId, agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace, pinnedAt,
     });
-    expect(visible.map((row) => row.session.id)).toEqual(["$2"]);
-    expect(workspaceRows({
-      snapshot, activeSessionId: "$1", agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
-      excludeSessionIds: new Set(),
-    })).toHaveLength(2);
+    const filtered = (pinnedAt: ReadonlyMap<string, number>, activeSessionId?: string) =>
+      pinnedOnlyRows(all(pinnedAt, activeSessionId), activeSessionId).map((row) => row.session.id);
+    // The selected workspace keeps its row even unpinned: the filter must never
+    // hide what the shell is currently showing.
+    expect(filtered(new Map([["$2", 1]]), "$1")).toEqual(["$2", "$1"]);
+    expect(filtered(new Map([["$2", 1]]), "$2")).toEqual(["$2"]);
+    // Nothing pinned and nothing selected is an empty list, not a full one.
+    expect(filtered(new Map())).toEqual([]);
+    // The list it narrows is untouched — ⌘P reads that one whole.
+    expect(all(new Map([["$2", 1]]), "$1")).toHaveLength(2);
   });
 });
 

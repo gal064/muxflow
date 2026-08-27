@@ -7,7 +7,7 @@ import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
 import { Icon } from "../../ui/Icon";
 import {
   groupAgentRows, groupAgentRowsByStatus, needsAttention, nextSortMode, sortModeLabel,
-  type AgentListRow, type AgentSortMode,
+  type AgentListRow, type AgentSortMode, type AgentWorkspaceGroup,
 } from "../agents/agentsList";
 import { AgentMark } from "../agents/AgentIdentity";
 import { agentSessionLabel } from "../agents/agentLabels";
@@ -18,13 +18,10 @@ import { sameHostConnection, type HostScopeToken } from "../shell/hostScope";
 import { activityWord, type WorkspaceRowModel } from "./workspaceRows";
 import { useTransientDrag } from "./transientDrag";
 
-export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.archive" | "session.close">;
+export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close">;
 
 interface WorkspaceSidebarProps {
   rows: readonly WorkspaceRowModel[];
-  /** Archived workspaces still alive on this server; drawn under the list, collapsed. */
-  archivedWorkspaces: readonly Session[];
-  onUnarchiveWorkspace(session: Session, scope: HostScopeToken): void;
   agents: readonly AgentListRow[];
   adapters: readonly AgentAdapterDescriptor[];
   agentSort: AgentSortMode;
@@ -40,6 +37,9 @@ interface WorkspaceSidebarProps {
   transport: "local" | "ssh";
   latencyMs?: number;
   phase: ConnectionPhase;
+  /** The list's one filter: pinned workspaces only, plus whatever is selected. */
+  pinnedOnly: boolean;
+  onTogglePinnedOnly(): void;
   onSelectWorkspace(sessionId: string): void;
   /**
    * Shift-click, and the menu item beside it: pins the workspace to the top of
@@ -83,10 +83,6 @@ interface WorkspaceSidebarProps {
  */
 export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const [menu, setMenu] = useState<{ session: Session; anchor: ContextMenuAnchor; index: number; scope: HostScopeToken }>();
-  const [archivedMenu, setArchivedMenu] = useState<{ session: Session; anchor: ContextMenuAnchor; scope: HostScopeToken }>();
-  // Collapsed by default and not persisted: the archive is a place things go
-  // to be out of the way, so it opens only when asked and closes with the app.
-  const [archivedOpen, setArchivedOpen] = useState(false);
   // Launching, resuming, renaming and hook review used to be four permanently
   // visible affordances in the agents panel. They are right-click menus now:
   // the section header for "start something", a row for "do something to this".
@@ -228,13 +224,149 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         <span className="agent-line">
           {/* Icon and state are one object here — see `AgentMark`. */}
           <AgentMark adapterId={row.agent.adapterId} glyphs={props.stateGlyphs} state={row.state} />
-          <span className="agent-session-label">{sessionLabel}</span>
+          {/* Name and pin are one cell so the pin hugs the end of the text
+              rather than floating out at the row's edge, and so the detail
+              column keeps the width it had before any pin existed. */}
+          <span className="agent-name-cell">
+            <span className="agent-session-label">{sessionLabel}</span>
+            {row.location.tabPinnedAt !== undefined
+              && <span aria-hidden="true" className="agent-pin"><Icon name="pin" size={11} /></span>}
+          </span>
           <span className="agent-detail">{detail}</span>
         </span>
       </button>
       {needsAttention(row.state) && <span aria-hidden="true" className="badge badge-row">1</span>}
     </div>;
   };
+
+  const renderWorkspaceRow = (row: WorkspaceRowModel, index: number) => <div className="workspace-row" key={row.session.id} role="listitem">
+    <button
+      aria-current={row.active ? "true" : undefined}
+      // The badge beside this row is a decorative span, so the count
+      // has to be part of the row's own name to be announced at all.
+      // The row lists up to three agents; the label names the loudest
+      // and counts the rest. Reading every line back would make a busy
+      // workspace four announcements long for one list item.
+      aria-label={rowLabel(row)}
+      className={["workspace-button", row.active ? "active" : undefined, props.compactWorkspaces ? "compact" : undefined].filter(Boolean).join(" ")}
+      data-workspace-index={index}
+      // Shift-click pins rather than selects, as it does in the tab
+      // strip. Pinning a workspace must not navigate to it: the row
+      // being moved to the top is often not the one you are working in.
+      onClick={(event) => event.shiftKey
+        ? props.onTogglePinnedWorkspace(row.session, props.commandScope)
+        : props.onSelectWorkspace(row.session.id)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenu({ session: row.session, anchor: { x: event.clientX, y: event.clientY }, index, scope: props.commandScope });
+      }}
+      onDoubleClick={() => props.canMutate && props.onWorkspaceCommand(row.session, "session.rename", props.commandScope)}
+      onKeyDown={(event) => {
+        if (isContextMenuKey(event)) {
+          event.preventDefault();
+          setMenu({ session: row.session, anchor: anchorForElement(event.currentTarget), index, scope: props.commandScope });
+          return;
+        }
+        focusRelative(event, "data-workspace-index", index);
+      }}
+      type="button"
+    >
+      {/* Inside the title, not above it: the number is the row's
+          address, and a line of its own put a column of digits beside
+          the names rather than in front of them. */}
+      <span className="workspace-title">
+        {index < 9 && <span aria-hidden="true" className="workspace-shortcut-index">{index + 1}</span>}
+        {/* One workspace-level indicator, in the same place in both
+            modes. Non-compact shows it for Working alone, because its
+            agent lines below already report blocked and done in words;
+            compact has only the right-edge cluster, whose marks are
+            per-agent and read at 6px, so the row itself said nothing
+            about the workspace at all. Here it is the loudest state
+            across the workspace — see `workspaceIndicatorState`. Every
+            row keeps the slot whether or not it has anything to say, so
+            a state arriving cannot shift the name beside it. */}
+        {props.compactWorkspaces
+          ? <WorkspaceStateIndicator glyphs={props.stateGlyphs} row={row} />
+          : row.working ? <span aria-hidden="true" className="spinner" /> : <HiddenStateSlot />}
+        <span className="workspace-name">{row.session.name}</span>
+      </span>
+      {/* Compact rows trade the per-agent lines for a cluster of
+          badged marks on the same line: which adapters are here and
+          how each is doing, in the width three words would have taken.
+          Decorative, like the lines it replaces — `rowLabel` is the
+          row's whole accessible name either way. */}
+      {props.compactWorkspaces && row.agents.length > 0 && <span aria-hidden="true" className="workspace-agents">
+        {row.agents.map((agent) => <AgentMark
+          adapterId={agent.adapterId}
+          glyphs={props.stateGlyphs}
+          key={agent.id}
+          state={agent.state}
+        />)}
+        {row.agentOverflow > 0 && <span className="workspace-agents-more">+{row.agentOverflow}</span>}
+      </span>}
+      {props.compactWorkspaces && row.unread > 0
+        && <span aria-hidden="true" className="badge badge-inline">{row.unread > 99 ? "99+" : row.unread}</span>}
+      {!props.compactWorkspaces && row.agents.length > 0 && <span className="workspace-activity">
+        {row.agents.map((agent) => <span className="workspace-activity-line" key={agent.id}>
+          {/* Decorative: the button's own accessible name already
+              carries the loudest agent and the total. */}
+          <AgentMark adapterId={agent.adapterId} glyphs={props.stateGlyphs} state={agent.state} />
+          <span className="workspace-activity-text">{agentLine(agent)}</span>
+        </span>)}
+        {row.agentOverflow > 0 && <span className="workspace-activity-line workspace-activity-more">
+          <span className="workspace-activity-text">…{row.agentOverflow} more</span>
+        </span>}
+      </span>}
+      {/* Neither the branch nor the working directory renders here any
+          more: a workspace holds many tabs in many directories, so one
+          branch per row was a lie half the time. Both live on in ⌘P's
+          match key, where they are something you search rather than
+          something you read once per row. */}
+    </button>
+    {!props.compactWorkspaces && row.unread > 0
+      && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
+  </div>;
+
+  /**
+   * The two blocks the dividers label, or nothing when no workspace is pinned.
+   *
+   * Each row keeps the flat position it has in `props.rows`, because that
+   * number is the row's address: it is what the digit beside the name says and
+   * what ⌘1–9 selects, and restarting it per block would make the second block
+   * claim shortcuts the first already owns.
+   */
+  const numberedRows = props.rows.map((row, index) => ({ row, index }));
+  const workspaceBlocks = numberedRows.some((entry) => entry.row.pinned)
+    ? [
+      { key: "pinned", label: "Pinned", entries: numberedRows.filter((entry) => entry.row.pinned) },
+      { key: "others", label: "Others", entries: numberedRows.filter((entry) => !entry.row.pinned) },
+    ].filter((block) => block.entries.length > 0)
+    : undefined;
+
+  /**
+   * One workspace's agents under their own heading. The host is in the tooltip
+   * and not on the line: one connection is live at a time on this branch, so
+   * printing it on every heading spent the row's whole right edge repeating a
+   * constant, and the count that replaces it is the thing that differs.
+   */
+  const renderAgentGroup = (group: AgentWorkspaceGroup) => {
+    const headingId = `agent-workspace-${encodeURIComponent(group.key)}`;
+    return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
+      <h3 className="agent-workspace-heading" id={headingId} title={`${group.workspaceName} · ${group.hostLabel}`}>
+        <span>{group.workspaceName}</span>
+        <span aria-hidden="true" className="agent-group-count">{group.rows.length}</span>
+      </h3>
+      {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
+    </section>;
+  };
+
+  /** The workspace-sort groups under the sidebar's two dividers, or neither. */
+  const agentBlocks = groupedAgents.some((group) => group.pinned)
+    ? [
+      { key: "pinned", label: "Pinned", groups: groupedAgents.filter((group) => group.pinned) },
+      { key: "others", label: "Others", groups: groupedAgents.filter((group) => !group.pinned) },
+    ].filter((block) => block.groups.length > 0)
+    : undefined;
 
   return <nav
     aria-label="Workspaces and agents"
@@ -243,135 +375,50 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     style={{ "--sidebar-width": `${displayedWidth}px` } as CSSProperties}
   >
     <div className="sidebar-section sidebar-workspaces">
-      <div className="section-label" id="sidebar-workspaces-label">Workspaces</div>
-      <div aria-labelledby="sidebar-workspaces-label" className="sidebar-scroll" role="list">
-        {props.rows.length === 0
-          ? <p className="quiet-empty">No tmux sessions on this host yet.</p>
-          : props.rows.map((row, index) => <div className="workspace-row" key={row.session.id} role="listitem">
-            <button
-              aria-current={row.active ? "true" : undefined}
-              // The badge beside this row is a decorative span, so the count
-              // has to be part of the row's own name to be announced at all.
-              // The row lists up to three agents; the label names the loudest
-              // and counts the rest. Reading every line back would make a busy
-              // workspace four announcements long for one list item.
-              aria-label={rowLabel(row)}
-              className={["workspace-button", row.active ? "active" : undefined, props.compactWorkspaces ? "compact" : undefined].filter(Boolean).join(" ")}
-              data-workspace-index={index}
-              // Shift-click pins rather than selects, as it does in the tab
-              // strip. Pinning a workspace must not navigate to it: the row
-              // being moved to the top is often not the one you are working in.
-              onClick={(event) => event.shiftKey
-                ? props.onTogglePinnedWorkspace(row.session, props.commandScope)
-                : props.onSelectWorkspace(row.session.id)}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setMenu({ session: row.session, anchor: { x: event.clientX, y: event.clientY }, index, scope: props.commandScope });
-              }}
-              onDoubleClick={() => props.canMutate && props.onWorkspaceCommand(row.session, "session.rename", props.commandScope)}
-              onKeyDown={(event) => {
-                if (isContextMenuKey(event)) {
-                  event.preventDefault();
-                  setMenu({ session: row.session, anchor: anchorForElement(event.currentTarget), index, scope: props.commandScope });
-                  return;
-                }
-                focusRelative(event, "data-workspace-index", index);
-              }}
-              type="button"
-            >
-              {/* Inside the title, not above it: the number is the row's
-                  address, and a line of its own put a column of digits beside
-                  the names rather than in front of them. */}
-              <span className="workspace-title">
-                {index < 9 && <span aria-hidden="true" className="workspace-shortcut-index">{index + 1}</span>}
-                {/* One workspace-level indicator, in the same place in both
-                    modes. Non-compact shows it for Working alone, because its
-                    agent lines below already report blocked and done in words;
-                    compact has only the right-edge cluster, whose marks are
-                    per-agent and read at 6px, so the row itself said nothing
-                    about the workspace at all. Here it is the loudest state
-                    across the workspace — see `workspaceIndicatorState`. Every
-                    row keeps the slot whether or not it has anything to say, so
-                    a state arriving cannot shift the name beside it. */}
-                {props.compactWorkspaces
-                  ? <WorkspaceStateIndicator glyphs={props.stateGlyphs} row={row} />
-                  : row.working ? <span aria-hidden="true" className="spinner" /> : <HiddenStateSlot />}
-                {/* After the state slot and before the name, so a pin arriving
-                    never moves the indicator every other row keeps in place. */}
-                {row.pinned && <span aria-hidden="true" className="workspace-pin"><Icon name="pin" size={11} /></span>}
-                <span className="workspace-name">{row.session.name}</span>
-              </span>
-              {/* Compact rows trade the per-agent lines for a cluster of
-                  badged marks on the same line: which adapters are here and
-                  how each is doing, in the width three words would have taken.
-                  Decorative, like the lines it replaces — `rowLabel` is the
-                  row's whole accessible name either way. */}
-              {props.compactWorkspaces && row.agents.length > 0 && <span aria-hidden="true" className="workspace-agents">
-                {row.agents.map((agent) => <AgentMark
-                  adapterId={agent.adapterId}
-                  glyphs={props.stateGlyphs}
-                  key={agent.id}
-                  state={agent.state}
-                />)}
-                {row.agentOverflow > 0 && <span className="workspace-agents-more">+{row.agentOverflow}</span>}
-              </span>}
-              {props.compactWorkspaces && row.unread > 0
-                && <span aria-hidden="true" className="badge badge-inline">{row.unread > 99 ? "99+" : row.unread}</span>}
-              {!props.compactWorkspaces && row.agents.length > 0 && <span className="workspace-activity">
-                {row.agents.map((agent) => <span className="workspace-activity-line" key={agent.id}>
-                  {/* Decorative: the button's own accessible name already
-                      carries the loudest agent and the total. */}
-                  <AgentMark adapterId={agent.adapterId} glyphs={props.stateGlyphs} state={agent.state} />
-                  <span className="workspace-activity-text">{agentLine(agent)}</span>
-                </span>)}
-                {row.agentOverflow > 0 && <span className="workspace-activity-line workspace-activity-more">
-                  <span className="workspace-activity-text">…{row.agentOverflow} more</span>
-                </span>}
-              </span>}
-              {/* Neither the branch nor the working directory renders here any
-                  more: a workspace holds many tabs in many directories, so one
-                  branch per row was a lie half the time. Both live on in ⌘P's
-                  match key, where they are something you search rather than
-                  something you read once per row. */}
-            </button>
-            {!props.compactWorkspaces && row.unread > 0
-              && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
-          </div>)}
-      </div>
-      {/* Under the list, not among it: archived rows are not selectable,
-          carry no number and show no agents, so they must not read as one
-          more workspace. Hidden altogether when there is nothing archived. */}
-      {props.archivedWorkspaces.length > 0 && <div className="archived-workspaces">
+      <div className="section-head">
+        <span className="section-label" id="sidebar-workspaces-label">Workspaces</span>
+        {/* The list's one control, in the place and the shape the agents
+            header's ordering toggle already established: it names what the
+            next click will show, not what is showing now. */}
         <button
-          aria-controls="sidebar-archived-list"
-          aria-expanded={archivedOpen}
-          className="archived-toggle"
-          onClick={() => setArchivedOpen((open) => !open)}
+          aria-label={props.pinnedOnly
+            ? "Showing pinned workspaces only. Show all workspaces."
+            : "Showing all workspaces. Show pinned workspaces only."}
+          className="sort-toggle"
+          onClick={props.onTogglePinnedOnly}
           type="button"
-        >
-          <span aria-hidden="true" className="archived-chevron">{archivedOpen ? "▾" : "▸"}</span>
-          Archived ({props.archivedWorkspaces.length})
-        </button>
-        {archivedOpen && <div aria-label="Archived workspaces" className="archived-list" id="sidebar-archived-list" role="list">
-          {props.archivedWorkspaces.map((session) => <div
-            className="archived-row"
-            key={session.id}
-            onContextMenu={(event) => {
-              event.preventDefault();
-              setArchivedMenu({ session, anchor: { x: event.clientX, y: event.clientY }, scope: props.commandScope });
-            }}
-            role="listitem"
-          >
-            <span className="archived-name" title={session.name}>{session.name}</span>
-            <button
-              aria-label={`Unarchive ${session.name}`}
-              className="bar-button"
-              onClick={() => props.onUnarchiveWorkspace(session, props.commandScope)}
-              type="button"
-            >Unarchive</button>
-          </div>)}
-        </div>}
-      </div>}
+        >{props.pinnedOnly ? "all" : "pinned"}</button>
+      </div>
+      <div aria-labelledby="sidebar-workspaces-label" className="sidebar-scroll" role="list">
+        {/* An empty list is about the host whether or not the filter is on:
+            the selected workspace keeps its row, so nothing at all here means
+            there is nothing to pin, and telling someone to Shift-click a
+            workspace they do not have is worse than saying so. */}
+        {props.rows.length === 0
+          && <p className="quiet-empty">No tmux sessions on this host yet.</p>}
+        {/* Otherwise, said whenever the filter is on with nothing pinned —
+            not only when the list came out empty. The ordinary way to meet
+            this state is the selected workspace sitting there alone, and the
+            hint is the only thing that explains why it is the only row. */}
+        {props.rows.length > 0 && props.pinnedOnly && !props.rows.some((row) => row.pinned)
+          && <p className="quiet-empty">No pinned workspaces — Shift-click a workspace to pin it.</p>}
+        {props.rows.length === 0
+          ? null
+          : workspaceBlocks
+            // A pin used to draw a glyph on the row. It draws a divider now:
+            // one label for the whole block says what a mark repeated down
+            // every pinned row said, and it says it without moving any name.
+            ? workspaceBlocks.map((block) => <section
+              aria-labelledby={`sidebar-workspaces-${block.key}`}
+              className="list-block"
+              key={block.key}
+              role="group"
+            >
+              <h3 className="list-divider" id={`sidebar-workspaces-${block.key}`}>{block.label}</h3>
+              {block.entries.map((entry) => renderWorkspaceRow(entry.row, entry.index))}
+            </section>)
+            : props.rows.map((row, index) => renderWorkspaceRow(row, index))}
+      </div>
     </div>
 
     <div
@@ -433,23 +480,25 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       {props.hookNotice && <p className="agents-notice" role="note">{props.hookNotice}</p>}
       <div aria-labelledby="sidebar-agents-label" className="sidebar-scroll" role="list">
         {props.agents.length === 0
-          ? <p className="quiet-empty">No agents detected.</p>
+          // Under the filter this list is not the whole host, so it must not
+          // claim to be: the titlebar's unread count still reads every agent,
+          // and "No agents detected." beside a non-zero badge is a lie.
+          ? <p className="quiet-empty">{props.pinnedOnly ? "No agents in pinned workspaces." : "No agents detected."}</p>
           : props.agentSort === "workspace"
-            ? groupedAgents.map((group) => {
-              const headingId = `agent-workspace-${encodeURIComponent(group.key)}`;
-              // The host is in the tooltip and not on the line. One connection
-              // is live at a time on this branch, so printing it on every
-              // heading spent the row's whole right edge repeating a constant;
-              // the count that replaces it is the thing that differs. The
-              // tooltip keeps it for the day two connections do share a view.
-              return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
-                <h3 className="agent-workspace-heading" id={headingId} title={`${group.workspaceName} · ${group.hostLabel}`}>
-                  <span>{group.workspaceName}</span>
-                  <span aria-hidden="true" className="agent-group-count">{group.rows.length}</span>
-                </h3>
-                {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
-              </section>;
-            })
+            ? agentBlocks
+              // The sidebar's dividers, over the same per-workspace groups:
+              // a pinned workspace's agents read as one block above the rest
+              // rather than as a mark repeated on every group heading.
+              // `role="presentation"`, not `group`: the per-workspace sections
+              // below are already groups, and a group owning a group falls
+              // outside what `role="list"` may own — which can drop the rows
+              // from the list's reported count. Ignored here, the workspace
+              // groups stay the list's own children.
+              ? agentBlocks.map((block) => <div className="list-block" key={block.key} role="presentation">
+                <h3 className="list-divider">{block.label}</h3>
+                {block.groups.map(renderAgentGroup)}
+              </div>)
+              : groupedAgents.map(renderAgentGroup)
             // Priority: the same clustering, keyed on what the agent is doing
             // rather than where it lives. The rows already carry the workspace
             // name in their detail line whenever the sort is not by workspace.
@@ -496,7 +545,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       anchor={menu.anchor}
       items={[
         { id: "rename", label: "Rename workspace…", disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.rename", menu.scope) },
-        // Not gated on `canMutate`: nothing is sent to tmux, as with archiving.
+        // Not gated on `canMutate`: nothing is sent to tmux.
         {
           id: "pin",
           label: props.rows.find((row) => row.session.id === menu.session.id)?.pinned ? "Unpin workspace" : "Pin workspace",
@@ -504,22 +553,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         },
         { id: "up", label: "Move up", disabled: !props.canMutate || moveIndex <= 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft", menu.scope) },
         { id: "down", label: "Move down", disabled: !props.canMutate || moveIndex < 0 || moveIndex === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight", menu.scope) },
-        // Not gated on `canMutate`: nothing is sent to tmux.
-        { id: "archive", label: "Archive workspace", run: () => props.onWorkspaceCommand(menu.session, "session.archive", menu.scope) },
         "separator",
         { id: "close", label: "Close workspace…", destructive: true, disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.close", menu.scope) },
       ]}
       label={`Actions for ${menu.session.name}`}
       onClose={() => setMenu(undefined)}
-    />}
-
-    {archivedMenu && sameHostConnection(archivedMenu.scope, props.commandScope) && <ContextMenu
-      anchor={archivedMenu.anchor}
-      items={[
-        { id: "unarchive", label: "Unarchive workspace", run: () => props.onUnarchiveWorkspace(archivedMenu.session, archivedMenu.scope) },
-      ]}
-      label={`Actions for archived ${archivedMenu.session.name}`}
-      onClose={() => setArchivedMenu(undefined)}
     />}
 
     {/* The sidebar's own width. The token table calls for 240px minimum,

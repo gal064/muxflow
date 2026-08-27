@@ -1,8 +1,8 @@
 import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { renderedPanes } from "../terminal/layout";
-import { MAX_ARCHIVED_WORKSPACES, usableWorkspaceDefault } from "./types";
-import { pinnedFirst, unpinTab, unpinWorkspaceAndTabs } from "./pins";
-import type { AppOwnedTab, AppTabViewMode, ArchivedWorkspaceRecord, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
+import { usableWorkspaceDefault } from "./types";
+import { pinnedFirst, unpinTab } from "./pins";
+import type { AppOwnedTab, AppTabViewMode, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import type { AgentAdapterId, AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
 import { stripAgentStatusGlyphs } from "../agents/agentLabels";
@@ -374,7 +374,7 @@ export function reconcileWorkspaceIdentity(
     }
     return tab;
   });
-  const reconcileRecords = <T extends WorkspaceUiRecord | ArchivedWorkspaceRecord>(records: readonly T[]): T[] => records.filter((item) => {
+  const workspaceUi = state.workspaceUi.filter((item) => {
     const keep = item.hostProfileId !== currentHostProfileId || item.serverIdentity !== currentServerIdentity || sessionIds.has(item.sessionId);
     if (!keep) changed = true;
     return keep;
@@ -390,85 +390,7 @@ export function reconcileWorkspaceIdentity(
     }
     return item;
   });
-  const workspaceUi = reconcileRecords(state.workspaceUi);
-  // Same rule as `workspaceUi`: a record for a session this server no longer
-  // has is a record for a session that was killed from another tmux client,
-  // and keeping it would hide whichever session next takes that id.
-  const archivedWorkspaces = reconcileRecords(state.archivedWorkspaces);
-  return changed ? { ...state, appTabs, workspaceUi, archivedWorkspaces } : state;
-}
-
-function archivedRecordMatches(
-  record: ArchivedWorkspaceRecord,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-): boolean {
-  return Boolean(serverIdentity) && record.hostProfileId === hostProfileId && record.serverIdentity === serverIdentity;
-}
-
-/** The sessions archived on exactly this host and tmux server; none without a server. */
-export function archivedSessionIds(
-  state: PersistedAppState,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-): ReadonlySet<string> {
-  const ids = new Set<string>();
-  for (const record of state.archivedWorkspaces) {
-    if (archivedRecordMatches(record, hostProfileId, serverIdentity)) ids.add(record.sessionId);
-  }
-  return ids;
-}
-
-/** Puts a workspace away. No tmux action: the session and its processes keep running. */
-export function archiveWorkspace(
-  state: PersistedAppState,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-  session: Session,
-  now: number,
-): PersistedAppState {
-  if (!serverIdentity || archivedSessionIds(state, hostProfileId, serverIdentity).has(session.id)) return state;
-  const record: ArchivedWorkspaceRecord = { hostProfileId, serverIdentity, sessionId: session.id, sessionName: session.name, archivedAt: now };
-  const archivedWorkspaces = [...state.archivedWorkspaces, record];
-  if (archivedWorkspaces.length > MAX_ARCHIVED_WORKSPACES) {
-    // The oldest goes. Its session, if still alive, simply reappears in the
-    // sidebar, which is the least surprising thing a cap can do.
-    let oldest = 0;
-    archivedWorkspaces.forEach((item, index) => { if (item.archivedAt < archivedWorkspaces[oldest].archivedAt) oldest = index; });
-    archivedWorkspaces.splice(oldest, 1);
-  }
-  // Archiving takes the pin with it. A pinned row is a row the user asked to
-  // keep at the top of the sidebar, and a row that is no longer in the sidebar
-  // cannot be at the top of it; keeping the record would silently restore the
-  // pin on the next unarchive.
-  return unpinWorkspaceAndTabs({ ...state, archivedWorkspaces }, hostProfileId, serverIdentity, session.id);
-}
-
-export function unarchiveWorkspace(
-  state: PersistedAppState,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-  sessionId: string,
-): PersistedAppState {
-  const archivedWorkspaces = state.archivedWorkspaces.filter((record) =>
-    !(archivedRecordMatches(record, hostProfileId, serverIdentity) && record.sessionId === sessionId));
-  return archivedWorkspaces.length === state.archivedWorkspaces.length ? state : { ...state, archivedWorkspaces };
-}
-
-/**
- * The archived workspaces that are alive on this server, in sidebar order —
- * what the Archived view lists. A record whose session is gone is not shown:
- * `reconcileWorkspaceIdentity` drops it on the next snapshot anyway, and a row
- * for a session that cannot be restored would be a row with nothing to do.
- */
-export function archivedWorkspacesFor(
-  state: PersistedAppState,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-  sessions: readonly Session[],
-): Session[] {
-  const archived = archivedSessionIds(state, hostProfileId, serverIdentity);
-  return orderedSessions(sessions).filter((session) => archived.has(session.id));
+  return changed ? { ...state, appTabs, workspaceUi } : state;
 }
 
 export function recoverableAppTabCount(
@@ -519,7 +441,6 @@ export function discardServerAppState(state: PersistedAppState, hostProfileId: s
     ...state,
     appTabs: state.appTabs.filter((tab) => tab.hostProfileId !== hostProfileId || tab.serverIdentity !== serverIdentity),
     workspaceUi: state.workspaceUi.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
-    archivedWorkspaces: state.archivedWorkspaces.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
     pinnedWorkspaces: state.pinnedWorkspaces.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
     pinnedTabs: state.pinnedTabs.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
   };
@@ -896,11 +817,8 @@ export function resolveSelectedSession(
   sessions: readonly Session[],
   currentId: string | undefined,
   previousName: string | undefined,
-  excluded?: ReadonlySet<string>,
 ): Session | undefined {
-  // An archived workspace is not a selection target, even if it was the
-  // selection when the app last saved: the snapshot moves off it.
-  const ordered = orderedSessions(sessions).filter((session) => !excluded?.has(session.id));
+  const ordered = orderedSessions(sessions);
   return ordered.find((session) => session.id === currentId)
     ?? ordered.find((session) => session.name === previousName)
     ?? ordered[0];

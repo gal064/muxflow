@@ -160,8 +160,8 @@ const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
   onSortMode: noop,
   onTogglePinnedWorkspace: noop,
   onWorkspaceCommand: noop,
-  archivedWorkspaces: [],
-  onUnarchiveWorkspace: noop,
+  pinnedOnly: false,
+  onTogglePinnedOnly: noop,
   phase: "connected",
   rows,
   maxWidth: 426,
@@ -386,7 +386,7 @@ describe("application shell accessibility contracts", () => {
     expect(html.indexOf('data-agent-index="0"')).toBeLessThan(html.indexOf('data-agent-index="1"'));
     expect(html).toContain('data-agent-icon="codex"');
     expect(html).toContain('data-agent-icon="claude"');
-    expect(html).toContain('<span class="agent-session-label">Plan rollout</span><span class="agent-detail">');
+    expect(html).toContain('<span class="agent-session-label">Plan rollout</span></span><span class="agent-detail">');
   });
 
   /**
@@ -502,7 +502,7 @@ describe("application shell accessibility contracts", () => {
       hostLabel="remote-linux" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
       onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop}
-      onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
+      onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
     />;
     await act(async () => { renderer = create(element(agents)); });
     // No agent focused: nothing to act on.
@@ -1091,7 +1091,7 @@ describe("application shell accessibility contracts", () => {
       hostLabel="remote-linux" maxWidth={426} phase="connected" rows={rows} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
       onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onSortMode={noop} onWidth={noop}
-      onWorkspaceCommand={onWorkspaceCommand} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
+      onWorkspaceCommand={onWorkspaceCommand} pinnedOnly={false} onTogglePinnedOnly={noop}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope)); });
@@ -1099,48 +1099,6 @@ describe("application shell accessibility contracts", () => {
     await act(async () => { renderer.update(element(replacementScope)); });
     await act(async () => renderer.root.findByProps({ "data-menu-item": "rename" }).props.onClick());
     expect(onWorkspaceCommand).toHaveBeenCalledWith(session, "session.rename", commandScope);
-    await act(async () => renderer.unmount());
-  });
-
-  it("offers Archive workspace on a row's menu, without asking and without a tmux gate", async () => {
-    const onWorkspaceCommand = vi.fn();
-    let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<WorkspaceSidebar {...sidebarProps({ canMutate: false, onWorkspaceCommand })} />); });
-    await act(async () => renderer.root.findByProps({ "data-workspace-index": 0 }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
-    const archive = renderer.root.findByProps({ "data-menu-item": "archive" });
-    expect(archive.props.disabled).toBeFalsy();
-    await act(async () => archive.props.onClick());
-    expect(onWorkspaceCommand).toHaveBeenCalledWith(session, "session.archive", commandScope);
-    await act(async () => renderer.unmount());
-  });
-
-  it("lists archived workspaces under a collapsed disclosure, with an unarchive bound to the opening scope", async () => {
-    const parked: Session = { id: "$7", name: "parked", windowCount: 1, attachedClients: 0, order: 5 };
-    // Nothing archived: no disclosure at all.
-    expect(sidebar()).not.toContain("Archived (");
-    const html = sidebar({ archivedWorkspaces: [parked] });
-    expect(html).toContain('aria-expanded="false"');
-    expect(html).toContain("Archived (1)");
-    expect(html).not.toContain("Unarchive parked");
-
-    const onUnarchiveWorkspace = vi.fn();
-    const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
-    const element = (scope: typeof commandScope) => <WorkspaceSidebar {...sidebarProps({ archivedWorkspaces: [parked], commandScope: scope, onUnarchiveWorkspace })} />;
-    let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(element(commandScope)); });
-    await act(async () => renderer.root.findByProps({ "aria-controls": "sidebar-archived-list" }).props.onClick());
-    const row = renderer.root.findByProps({ "aria-label": "Unarchive parked" });
-    // Not a workspace row: no number, no selection, no agents.
-    expect(renderer.root.findAllByProps({ "data-workspace-index": 1 })).toHaveLength(0);
-    await act(async () => row.props.onClick());
-    expect(onUnarchiveWorkspace).toHaveBeenCalledWith(parked, commandScope);
-
-    // The row's own menu, opened before the connection was replaced, is gone.
-    await act(async () => renderer.root.findByProps({ id: "sidebar-archived-list" }).findAllByProps({ role: "listitem" })[0]
-      .props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
-    expect(renderer.root.findAllByProps({ "data-menu-item": "unarchive" })).toHaveLength(1);
-    await act(async () => { renderer.update(element(replacementScope)); });
-    expect(renderer.root.findAllByProps({ "data-menu-item": "unarchive" })).toHaveLength(0);
     await act(async () => renderer.unmount());
   });
 
@@ -1159,7 +1117,7 @@ describe("application shell accessibility contracts", () => {
       phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
       onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onSortMode={noop} onWidth={noop}
-      onWorkspaceCommand={noop} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
+      onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope, "Old agent")); });
@@ -1712,25 +1670,138 @@ describe("pinning by Shift-click", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("draws the pin on a pinned workspace row and names it in the row's label", () => {
-    expect(sidebar()).not.toContain("workspace-pin");
-    const html = sidebar({ rows: [{ ...rows[0], pinned: true }] });
-    expect(html).toContain('<span aria-hidden="true" class="workspace-pin">');
-    // The mark is decorative, so the word has to be in the row's own name.
-    expect(html).toContain(`aria-label="${session.name}, pinned,`);
+  it("splits the workspace list into Pinned and Others, and draws no divider until something is pinned", () => {
+    // Nothing pinned: one plain list, no headings and no pin glyph on any row.
+    const plain = sidebar();
+    expect(plain).not.toContain("list-divider");
+    expect(plain).not.toContain("workspace-pin");
+
+    const other: WorkspaceRowModel = {
+      ...rows[0],
+      session: { ...session, id: "$2", name: "other", order: 1 },
+      active: false,
+    };
+    const divided = sidebar({ rows: [{ ...rows[0], pinned: true }, other] });
+    expect(divided).toContain('<h3 class="list-divider" id="sidebar-workspaces-pinned">Pinned</h3>');
+    expect(divided).toContain('<h3 class="list-divider" id="sidebar-workspaces-others">Others</h3>');
+    // Still no glyph on the row: the divider is what says "pinned" now, and
+    // the word stays in the row's own accessible name for the same reason.
+    expect(divided).not.toContain("workspace-pin");
+    expect(divided).toContain(`aria-label="${session.name}, pinned,`);
+    // The numbers stay flat across both blocks — they are ⌘1–9's addresses.
+    expect(divided.indexOf('data-workspace-index="0"')).toBeLessThan(divided.indexOf('data-workspace-index="1"'));
+    expect(divided).toContain('class="workspace-shortcut-index">2</span>');
+
+    // Everything pinned: one block, and no empty "Others" heading under it.
+    const allPinned = sidebar({ rows: [{ ...rows[0], pinned: true }] });
+    expect(allPinned).toContain(">Pinned</h3>");
+    expect(allPinned).not.toContain(">Others</h3>");
   });
 
-  it("heads the agents list with a Pinned block in priority mode", () => {
-    const pinnedRow = buildAgentRows(
-      [agent({ displayName: "Codex one", lifecycle: "idle" })],
-      () => ({ workspaceOrder: 0, workspaceName: "work", hostLabel: "remote-linux", workspacePinnedAt: 5 }),
+  it("says what the workspace filter will show next, and explains an empty-looking filtered list", () => {
+    expect(sidebar()).toContain('class="sort-toggle" type="button">pinned</button>');
+    expect(sidebar({ pinnedOnly: true })).toContain('class="sort-toggle" type="button">all</button>');
+    const hint = "No pinned workspaces — Shift-click a workspace to pin it.";
+    // The selected workspace keeps its row, which is how this state is normally
+    // met: one unexplained row is exactly what needs the hint.
+    const kept = sidebar({ pinnedOnly: true });
+    expect(kept).toContain(hint);
+    expect(kept).toContain(session.name);
+    // Something pinned: nothing to explain.
+    expect(sidebar({ pinnedOnly: true, rows: [{ ...rows[0], pinned: true }] })).not.toContain(hint);
+    // Nothing at all is about the host, filter or no filter: there is nothing
+    // to Shift-click, and saying so would be advice about workspaces that do
+    // not exist.
+    for (const pinnedOnly of [false, true]) {
+      const empty = sidebar({ pinnedOnly, rows: [] });
+      expect(empty).toContain("No tmux sessions on this host yet.");
+      expect(empty).not.toContain(hint);
+    }
+  });
+
+  it("does not claim the host has no agents when the filter is what emptied the list", () => {
+    // The titlebar's unread count deliberately still reads every agent, so a
+    // filtered-empty panel must not answer for the whole host.
+    expect(sidebar({ agents: [] })).toContain("No agents detected.");
+    const filtered = sidebar({ agents: [], pinnedOnly: true });
+    expect(filtered).toContain("No agents in pinned workspaces.");
+    expect(filtered).not.toContain("No agents detected.");
+  });
+
+  it("wraps the agents list's workspace groups in the same two dividers", () => {
+    const rowsFor = (pinnedAt?: number) => buildAgentRows(
+      [agent({ id: "pinned-agent", sessionId: "$1", displayName: "Codex one" }), agent({ id: "loose", sessionId: "$2", displayName: "Codex two" })],
+      (record) => ({
+        workspaceOrder: record.sessionId === "$1" ? 0 : 1,
+        workspaceName: record.sessionId === "$1" ? "api" : "web",
+        hostLabel: "remote-linux",
+        workspacePinnedAt: record.sessionId === "$1" ? pinnedAt : undefined,
+      }),
+      () => true,
+      "workspace",
+    );
+    // No pinned workspace: the groups stand on their own, as they always did.
+    expect(sidebar({ agents: rowsFor() })).not.toContain("list-divider");
+    const html = sidebar({ agents: rowsFor(5) });
+    expect(html).toContain('<h3 class="list-divider">Pinned</h3>');
+    expect(html).toContain('<h3 class="list-divider">Others</h3>');
+    expect(html.indexOf(">Pinned</h3>")).toBeLessThan(html.indexOf(">Others</h3>"));
+    // The blocks are ignored containers, not a second level of group: a group
+    // owning a group is outside what `role="list"` may own.
+    expect(html).toContain('<div class="list-block" role="presentation">');
+  });
+
+  it("puts the pin immediately after the name of an agent whose tab is pinned, in both orderings", () => {
+    for (const agentSort of ["workspace", "status"] as const) {
+      const agents = buildAgentRows(
+        [agent({ id: "on-a-pinned-tab", displayName: "Codex one", windowName: "Ship it" }), agent({ id: "loose", windowId: "@2", paneId: "%2", displayName: "Codex two", windowName: "Later" })],
+        (record) => ({
+          workspaceOrder: 0,
+          workspaceName: "work",
+          hostLabel: "remote-linux",
+          tabPinnedAt: record.id === "on-a-pinned-tab" ? 5 : undefined,
+        }),
+        () => true,
+        agentSort,
+      );
+      const html = sidebar({ agentSort, agents });
+      // One cell: the pin sits against the end of the name, inside the same
+      // flex box, so the detail column keeps the width it had without it.
+      expect(html).toContain('<span class="agent-session-label">Ship it</span><span aria-hidden="true" class="agent-pin">');
+      expect(html).toContain('<span class="agent-session-label">Later</span></span><span class="agent-detail">');
+      // The pinned row leads its block in either ordering.
+      expect(html.indexOf("Ship it")).toBeLessThan(html.indexOf("Later"));
+    }
+  });
+
+  it("heads the agents list with a Pinned block in priority mode, unless it would hold everything", () => {
+    const priorityRows = (pinnedIds: readonly string[]) => buildAgentRows(
+      [
+        agent({ id: "pinned-one", displayName: "Codex one", lifecycle: "idle" }),
+        agent({ id: "loose", windowId: "@2", paneId: "%2", displayName: "Codex two", lifecycle: "blocked" }),
+      ],
+      (record) => ({
+        workspaceOrder: 0,
+        workspaceName: "work",
+        hostLabel: "remote-linux",
+        workspacePinnedAt: pinnedIds.includes(record.id) ? 5 : undefined,
+      }),
       () => true,
       "status",
     );
-    const html = sidebar({ agentSort: "status", agents: pinnedRow });
+    const html = sidebar({ agentSort: "status", agents: priorityRows(["pinned-one"]) });
     expect(html).toContain("<span>Pinned</span>");
-    // No state dot on the heading: "pinned" is not a state an agent is in.
+    // No state dot on that heading: "pinned" is not a state an agent is in.
     expect(html).toContain('<span aria-hidden="true" class="agent-group-pin">');
-    expect(html).not.toContain("agent-group-dot");
+    // The rest still bucket by status under their own headings.
+    expect(html).toContain("<span>Blocked</span>");
+
+    // Every row pinned — which is what the pinned-only filter leaves behind —
+    // and the block would say nothing while costing all four headings.
+    const everything = sidebar({ agentSort: "status", agents: priorityRows(["pinned-one", "loose"]) });
+    expect(everything).not.toContain("<span>Pinned</span>");
+    expect(everything).not.toContain("agent-group-pin");
+    expect(everything).toContain("<span>Blocked</span>");
+    expect(everything).toContain("<span>Idle</span>");
   });
 });
