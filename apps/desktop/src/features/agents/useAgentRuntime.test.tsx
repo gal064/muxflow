@@ -23,10 +23,10 @@ function clientFor(snapshot: AgentSnapshot): AgentClient & { markSeen: ReturnTyp
   };
 }
 
-function Harness({ client, connected = true, focused = true, automaticSeen = true, connectionEpoch = 1, topologyGeneration = 9, topologyWindowIds = ["@1"], excludedSessionIds, effects, onNotificationInstrumentation, onSoundInstrumentation }: { client: AgentClient; connected?: boolean; focused?: boolean; automaticSeen?: boolean; connectionEpoch?: number; topologyGeneration?: number; topologyWindowIds?: string[]; excludedSessionIds?: ReadonlySet<string>; effects?: AgentRuntimeOptions["effects"]; onNotificationInstrumentation?: AgentRuntimeOptions["onNotificationInstrumentation"]; onSoundInstrumentation?: AgentRuntimeOptions["onSoundInstrumentation"] }) {
+function Harness({ client, connected = true, focused = true, automaticSeen = true, connectionEpoch = 1, topologyGeneration = 9, topologyWindowIds = ["@1"], effects, onNotificationInstrumentation, onSoundInstrumentation }: { client: AgentClient; connected?: boolean; focused?: boolean; automaticSeen?: boolean; connectionEpoch?: number; topologyGeneration?: number; topologyWindowIds?: string[]; effects?: AgentRuntimeOptions["effects"]; onNotificationInstrumentation?: AgentRuntimeOptions["onNotificationInstrumentation"]; onSoundInstrumentation?: AgentRuntimeOptions["onSoundInstrumentation"] }) {
   const runtime = useAgentRuntime({
     client, scope: connected ? { ...scope, connectionEpoch, topologyGeneration } : undefined,
-    topologyWindowIds, excludedSessionIds,
+    topologyWindowIds,
     focus: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: focused, terminalVisible: true, automaticSeen },
     soundPreferences: defaultAgentSoundPreferences,
     onStatus: vi.fn(),
@@ -209,48 +209,6 @@ describe("useAgentRuntime focus semantics", () => {
     expect(emitNotification).toHaveBeenCalledTimes(1);
     expect(notificationInstrumentation).toHaveBeenCalledWith(expect.objectContaining({ outcome: "emitted", actionable: false }));
     expect(soundInstrumentation).toHaveBeenCalledWith({ event: "blocked", outcome: "played" });
-    await act(async () => renderer!.unmount());
-  });
-
-  it("hides an archived workspace's agents from the list and silences their notifications, until unarchived", async () => {
-    const snapshot: AgentSnapshot = {
-      hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, revision: agentGeneration(8), eventSequence: agentGeneration(8), acceptedGeneration: agentGeneration(8), notificationWatermark: agentGeneration(8), authoritative: true, adapters: [],
-      agents: [
-        agent({ id: "kept", displayName: "kept", sessionId: "$1", lifecycle: "working", attentionGeneration: 8, seenGeneration: 8 }),
-        agent({ id: "parked", displayName: "parked", sessionId: "$2", windowId: "@2", paneId: "%2", lifecycle: "working", attentionGeneration: 8, seenGeneration: 8 }),
-      ],
-    };
-    const client = clientFor(snapshot);
-    const emitNotification = vi.fn(async () => ({ id: 1, actionable: true }));
-    const playSound = vi.fn(async () => undefined);
-    const archived = new Set(["$2"]);
-    let renderer: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<Harness client={client} focused={false} excludedSessionIds={archived} effects={{ emitNotification, playSound }} />); });
-    const names = () => renderer!.root.findByType("output").props["data-names"] as string;
-    expect(names()).toBe("kept");
-
-    // The archived agent blocks: no sound, no native notification, no row.
-    await act(async () => client.publish({
-      kind: "upsert", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, sequence: agentGeneration(9),
-      record: agent({ id: "parked", displayName: "parked", sessionId: "$2", windowId: "@2", paneId: "%2", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 9, seenGeneration: 8, lifecycleGeneration: 9 }),
-    }));
-    expect(emitNotification).not.toHaveBeenCalled();
-    expect(playSound).not.toHaveBeenCalled();
-    expect(names()).toBe("kept");
-
-    // Unarchiving brings the live record back as it is, without replaying
-    // the notification that was skipped while it was hidden.
-    await act(async () => renderer!.update(<Harness client={client} focused={false} excludedSessionIds={new Set()} effects={{ emitNotification, playSound }} />));
-    expect(names().split(",").sort()).toEqual(["kept", "parked"]);
-    expect(renderer!.root.findByType("output").children.join("")).toContain("parked:blocked");
-    expect(emitNotification).not.toHaveBeenCalled();
-    // The same transition on a visible workspace does notify — the silence
-    // above was the exclusion, not the harness.
-    await act(async () => client.publish({
-      kind: "upsert", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, sequence: agentGeneration(10),
-      record: agent({ id: "kept", displayName: "kept", sessionId: "$1", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 10, seenGeneration: 8, lifecycleGeneration: 10 }),
-    }));
-    expect(emitNotification).toHaveBeenCalledTimes(1);
     await act(async () => renderer!.unmount());
   });
 });

@@ -75,30 +75,12 @@ export interface WorkspaceUiRecord {
 }
 
 /**
- * A workspace the user has put away without closing it.
- *
- * Keyed the way `WorkspaceUiRecord` is — host, tmux server, session id — so a
- * record can only ever hide the exact session it was written for. The tmux
- * session itself is untouched: archiving is a view decision, not a tmux one.
- */
-export interface ArchivedWorkspaceRecord {
-  hostProfileId: string;
-  serverIdentity: string;
-  sessionId: string;
-  sessionName: string;
-  archivedAt: number;
-}
-
-/** The most archived records kept; the oldest go first past this. */
-export const MAX_ARCHIVED_WORKSPACES = 200;
-
-/**
  * A workspace the user has pinned to the top of the sidebar.
  *
- * Keyed exactly like {@link ArchivedWorkspaceRecord} — host, tmux server,
- * session id — for the same reason: a record can only ever act on the session
- * it was written for, and a session id reused by a different server must not
- * inherit somebody else's pin. `pinnedAt` is the sort key of the leading block,
+ * Keyed exactly like {@link WorkspaceUiRecord} — host, tmux server, session id
+ * — for the same reason: a record can only ever act on the session it was
+ * written for, and a session id reused by a different server must not inherit
+ * somebody else's pin. `pinnedAt` is the sort key of the leading block,
  * ascending, so the first thing pinned stays first.
  */
 export interface PinnedWorkspaceRecord {
@@ -149,6 +131,16 @@ export interface ShellState {
   agentStateGlyphs: boolean;
   /** Hides per-agent activity lines from workspace rows. */
   compactWorkspaces: boolean;
+  /**
+   * The workspace list's one filter: only pinned workspaces are listed, and
+   * the agents section shows only their agents.
+   *
+   * Pins already say which workspaces matter, so this needs no second concept
+   * and no second record — it is a boolean over the pins that exist. The
+   * workspace on screen is the one exception the list makes, so turning the
+   * filter on can never leave the shell showing something the sidebar denies.
+   */
+  pinnedOnly: boolean;
   /**
    * Makes terminal *content* readable to a screen reader. Off by default
    * because xterm's screen-reader mode costs a string allocation and an
@@ -211,7 +203,6 @@ export interface PersistedAppState {
   shell: ShellState;
   commands: { shortcutOverrides: Record<string, string | null> };
   hostSetup: Record<string, HostSetupDecision>;
-  archivedWorkspaces: ArchivedWorkspaceRecord[];
   pinnedWorkspaces: PinnedWorkspaceRecord[];
   pinnedTabs: PinnedTabRecord[];
   workspaceDefaults: Record<string, WorkspaceDefaults>;
@@ -227,6 +218,7 @@ export const defaultShellState: ShellState = {
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
   compactWorkspaces: false,
+  pinnedOnly: false,
   terminalScreenReader: false,
   copyOnSelect: false,
   terminalApplicationClipboard: false,
@@ -241,7 +233,6 @@ export const defaultAppState: PersistedAppState = {
   shell: defaultShellState,
   commands: { shortcutOverrides: {} },
   hostSetup: {},
-  archivedWorkspaces: [],
   pinnedWorkspaces: [],
   pinnedTabs: [],
   workspaceDefaults: {},
@@ -278,6 +269,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
       compactWorkspaces: Boolean(shell?.compactWorkspaces),
+      pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
       copyOnSelect: Boolean(shell?.copyOnSelect),
       terminalApplicationClipboard: Boolean(shell?.terminalApplicationClipboard),
@@ -288,7 +280,6 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
     },
     commands: { shortcutOverrides: normalizeShortcutRecord(candidate.commands?.shortcutOverrides) },
     hostSetup: normalizeHostSetup(candidate.hostSetup),
-    archivedWorkspaces: normalizeArchivedWorkspaces(candidate.archivedWorkspaces),
     pinnedWorkspaces: normalizePinnedWorkspaces(candidate.pinnedWorkspaces),
     pinnedTabs: normalizePinnedTabs(candidate.pinnedTabs),
     workspaceDefaults: normalizeWorkspaceDefaults(candidate.workspaceDefaults),
@@ -341,39 +332,6 @@ export function usableWorkspaceDefault(value: unknown): string | undefined {
 }
 
 /**
- * Only well-formed records, one per (host, server, session), and at most
- * {@link MAX_ARCHIVED_WORKSPACES} of them, the oldest going first. A malformed
- * record is dropped rather than repaired: one with no session id could hide
- * nothing, and one with no server identity could hide the wrong thing.
- */
-export function normalizeArchivedWorkspaces(value: unknown): ArchivedWorkspaceRecord[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  const records: ArchivedWorkspaceRecord[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") continue;
-    const record = item as Record<string, unknown>;
-    if (typeof record.hostProfileId !== "string" || !record.hostProfileId
-      || typeof record.serverIdentity !== "string" || !record.serverIdentity
-      || typeof record.sessionId !== "string" || !record.sessionId
-      || typeof record.sessionName !== "string"
-      || typeof record.archivedAt !== "number" || !Number.isFinite(record.archivedAt)) continue;
-    const key = `${record.hostProfileId}\0${record.serverIdentity}\0${record.sessionId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    records.push({
-      hostProfileId: record.hostProfileId,
-      serverIdentity: record.serverIdentity,
-      sessionId: record.sessionId,
-      sessionName: record.sessionName,
-      archivedAt: record.archivedAt,
-    });
-  }
-  if (records.length <= MAX_ARCHIVED_WORKSPACES) return records;
-  return [...records].sort((left, right) => right.archivedAt - left.archivedAt).slice(0, MAX_ARCHIVED_WORKSPACES);
-}
-
-/**
  * The fields every pin record shares, read defensively.
  *
  * A record missing any of them is dropped rather than repaired: a pin with no
@@ -397,8 +355,8 @@ function pinScope(value: unknown): { hostProfileId: string; serverIdentity: stri
 
 /**
  * Well-formed pins only, one per (host, server, session), newest kept within
- * the cap — the archive's rule, so the pin that was just made always survives
- * the truncation that its own arrival caused.
+ * the cap, so the pin that was just made always survives the truncation that
+ * its own arrival caused.
  */
 export function normalizePinnedWorkspaces(value: unknown): PinnedWorkspaceRecord[] {
   if (!Array.isArray(value)) return [];

@@ -54,9 +54,6 @@ import {
   togglePinnedWorkspace,
 } from "../features/shell/pins";
 import {
-  archiveWorkspace,
-  archivedSessionIds,
-  archivedWorkspacesFor,
   combineWorkspaceTabs,
   closeAppTab,
   closeTransientGitDiff,
@@ -69,7 +66,6 @@ import {
   retirePendingTab,
   selectableTabs,
   selectAppTab,
-  unarchiveWorkspace,
   setMarkdownViewMode,
   setWorkspaceDefaults,
   shouldSurfaceAuthoritativeTerminal,
@@ -220,7 +216,6 @@ export function App() {
     fileClient,
     gitClient,
     terminalApplicationClipboardEnabled: appState.shell.terminalApplicationClipboard,
-    excludedSessionIds: (profileId, identity) => archivedSessionIds(appStateRef.current, profileId, identity),
     onHandshakeFailure: (failed) => onHandshakeFailure.current(failed),
     onConnectionStateChanged: (changed, state) => onConnectionStateChanged.current(changed, state),
     setStatus,
@@ -446,27 +441,9 @@ export function App() {
     }));
   }, [setAppState]);
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
-  // Archived workspaces on this host and server. One set, applied at the
-  // source of each list it must be absent from: the agent runtime, the
-  // sidebar rows, and the focus history.
-  // Keyed on the records alone: every other persisted write (a tab switch, a
-  // sidebar drag) must not hand the agent runtime and the sidebar a new set.
-  const archivedRecords = appState.archivedWorkspaces;
-  const archived = useMemo(
-    () => archivedSessionIds({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity),
-    [archivedRecords, currentHostProfileId, hostState.serverIdentity],
-  );
-  const visibleSessions = useMemo(
-    () => archived.size === 0 ? snapshot.sessions : snapshot.sessions.filter((session) => !archived.has(session.id)),
-    [archived, snapshot.sessions],
-  );
-  const archivedWorkspaces = useMemo(
-    () => archivedWorkspacesFor({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity, snapshot.sessions),
-    [archivedRecords, currentHostProfileId, hostState.serverIdentity, snapshot.sessions],
-  );
   // Pinned workspaces and tabs on this host and server, keyed on the records
-  // alone for the same reason the archive is: every other persisted write must
-  // not hand the sidebar and the strip a new map to re-sort against.
+  // alone: every other persisted write (a tab switch, a sidebar drag) must not
+  // hand the sidebar and the strip a new map to re-sort against.
   const pinnedWorkspaceRecords = appState.pinnedWorkspaces;
   const pinnedTabRecords = appState.pinnedTabs;
   const pinnedWorkspaceAt = useMemo(
@@ -499,7 +476,6 @@ export function App() {
     currentHostProfileId,
     decision: appState.hostSetup[currentHostProfileId],
     decisionsArePersistable: appStateRecovery === undefined,
-    excludedSessionIds: archived,
     hostCanMutate: hostState.canMutate,
     // Helper compatibility owns the host-level consent lane while it is
     // unresolved. Runtime observation stays live; only the separate one-time
@@ -530,9 +506,9 @@ export function App() {
     attentionByWorkspace: agentRuntime.rollups.byWorkspace,
     activeBranch: workspaceGit.status?.repository.headName,
     home,
-    excludeSessionIds: archived,
+    pinnedOnly: appState.shell.pinnedOnly,
     pinnedAt: pinnedWorkspaceAt,
-  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, archived, home, pinnedWorkspaceAt, snapshot, workspaceGit.status]);
+  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, appState.shell.pinnedOnly, home, pinnedWorkspaceAt, snapshot, workspaceGit.status]);
   const agentRows = useMemo(() => {
     const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
     const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
@@ -560,6 +536,16 @@ export function App() {
       appState.shell.agentSort,
     );
   }, [agentRuntime.agents, appState.shell.agentSort, currentHostProfileId, hostLabel, hostState.serverIdentity, pinnedTabRecords, pinnedWorkspaceAt, sidebarRows, snapshot.panes, snapshot.windows]);
+  // What the agents section lists, which under the filter is not everything
+  // the shell knows about. Only the section is narrowed: the bell, its count
+  // and ⌘⇧U keep reading the whole list, because "who needs me" is a question
+  // about every agent on the host and a filter over the sidebar is not an
+  // instruction to stop counting the rest.
+  const visibleAgentRows = useMemo(() => {
+    if (!appState.shell.pinnedOnly) return agentRows;
+    const visible = new Set(sidebarRows.map((row) => row.session.id));
+    return agentRows.filter((row) => visible.has(row.agent.sessionId));
+  }, [agentRows, appState.shell.pinnedOnly, sidebarRows]);
   const unread = useMemo(() => unreadCount(agentRows), [agentRows]);
   // The badge counts every waiting agent; the bell can only reach routable
   // ones, so it is disabled on exactly the rows `agents.jumpUnread` would find.
@@ -687,32 +673,10 @@ export function App() {
     selectSession,
     selectWindow,
     selectedAppTabId: selectedAppTab?.id,
-    // Archived workspaces are not destinations: treat them as gone.
-    sessions: visibleSessions,
+    sessions: snapshot.sessions,
     setStatus,
     windows: snapshot.windows,
   });
-  // The archive itself sends tmux nothing: the session and everything in it
-  // keeps running. The only tmux traffic is the ordinary switch to the next
-  // workspace when the archived one was on screen. If
-  // the workspace being archived is the one on screen, the selection moves to
-  // its neighbour — the row after it, else the row before — so the shell is
-  // not left showing a workspace the sidebar no longer lists.
-  const archiveSession = useCallback((session: Session) => {
-    setAppState((current) => archiveWorkspace(current, currentHostProfileId, hostState.serverIdentity, session, Date.now()));
-    if (session.id !== activeSessionId) return;
-    const index = sidebarRows.findIndex((row) => row.session.id === session.id);
-    const next = index < 0 ? undefined : sidebarRows[index + 1] ?? sidebarRows[index - 1];
-    // No neighbour: nothing is selected, now rather than at the next snapshot,
-    // so the strip and terminals do not keep showing a workspace the sidebar
-    // no longer lists.
-    if (next) selectSession(next.session.id);
-    else setActiveSessionId(undefined);
-  }, [activeSessionId, currentHostProfileId, hostState.serverIdentity, selectSession, setActiveSessionId, setAppState, sidebarRows]);
-  const unarchiveSession = useCallback((session: Session, scope: HostScopeToken) => {
-    if (!sameHostConnection(scope, hostScopeRef.current)) return;
-    setAppState((current) => unarchiveWorkspace(current, scope.hostProfileId, scope.serverIdentity, session.id));
-  }, [hostScopeRef, setAppState]);
   // Both pins are scoped writes and nothing else: no tmux traffic, no
   // selection change. The scope check is the same one every row action makes —
   // a menu can outlive the connection it was opened over.
@@ -830,7 +794,6 @@ export function App() {
       selectAgentRow(target);
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
-    archiveSession,
     createSession: createWorkspace,
     createWindow: (sessionId) => {
       notificationActivation.clearNotificationFocusGuard();
@@ -1115,9 +1078,7 @@ export function App() {
       />
       {sidebarOpen && <WorkspaceSidebar
         adapters={agentRuntime.adapters}
-        agents={agentRows}
-        archivedWorkspaces={archivedWorkspaces}
-        onUnarchiveWorkspace={unarchiveSession}
+        agents={visibleAgentRows}
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}
         compactWorkspaces={appState.shell.compactWorkspaces}
@@ -1151,10 +1112,12 @@ export function App() {
         onReviewHooks={agentWorkflow.reviewHooks}
         onSelectAgent={selectAgentRow}
         onSelectWorkspace={selectSession}
+        onTogglePinnedOnly={() => void runCommand(appState.shell.pinnedOnly ? "workspaces.showAll" : "workspaces.showPinnedOnly")}
         onTogglePinnedWorkspace={toggleWorkspacePin}
         onSortMode={(mode) => updateShell({ agentSort: mode })}
         onWorkspaceCommand={(session, commandId, scope) => void runCommand(commandId, { kind: "session", id: session.id, scope })}
         phase={hostState.phase}
+        pinnedOnly={appState.shell.pinnedOnly}
         rows={sidebarRows}
         stateGlyphs={appState.shell.agentStateGlyphs}
         transport={connection.mode}

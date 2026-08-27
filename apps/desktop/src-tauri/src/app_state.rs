@@ -86,24 +86,9 @@ pub struct WorkspaceUiRecord {
     pub selected_app_tab_id: Option<String>,
 }
 
-/// A workspace the user archived: hidden from the sidebar, untouched in tmux.
-/// Keyed like `WorkspaceUiRecord` so it can only ever hide the exact session
-/// it was written for.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ArchivedWorkspaceRecord {
-    pub host_profile_id: String,
-    pub server_identity: String,
-    pub session_id: String,
-    pub session_name: String,
-    pub archived_at: f64,
-}
-
-/// The most archived records a save may carry; the frontend caps at the same number.
-const MAX_ARCHIVED_WORKSPACES: usize = 200;
-
 /// A workspace the user pinned to the top of the sidebar. Keyed like
-/// `ArchivedWorkspaceRecord`; `pinned_at` is the leading block's sort key.
+/// `WorkspaceUiRecord` so it can only ever act on the exact session it was
+/// written for; `pinned_at` is the leading block's sort key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PinnedWorkspaceRecord {
@@ -168,6 +153,9 @@ pub struct ShellPreferences {
     pub agent_state_glyphs: bool,
     #[serde(default)]
     pub compact_workspaces: bool,
+    /// The workspace list's one filter: pinned workspaces only.
+    #[serde(default)]
+    pub pinned_only: bool,
     #[serde(default)]
     pub terminal_screen_reader: bool,
     #[serde(default)]
@@ -270,11 +258,7 @@ pub struct PersistedAppState {
     #[serde(default)]
     pub host_setup: HashMap<String, HostSetupDecision>,
     /// Defaulted for the same reason the shell preferences are: a file written
-    /// before this field existed must keep loading.
-    #[serde(default)]
-    pub archived_workspaces: Vec<ArchivedWorkspaceRecord>,
-    /// Defaulted for the same reason: a file written before pinning existed
-    /// must keep loading, with nothing pinned.
+    /// before pinning existed must keep loading, with nothing pinned.
     #[serde(default)]
     pub pinned_workspaces: Vec<PinnedWorkspaceRecord>,
     #[serde(default)]
@@ -292,7 +276,6 @@ impl Default for PersistedAppState {
             shell: ShellPreferences::default(),
             commands: CommandPreferences::default(),
             host_setup: HashMap::new(),
-            archived_workspaces: Vec::new(),
             pinned_workspaces: Vec::new(),
             pinned_tabs: Vec::new(),
             workspace_defaults: BTreeMap::new(),
@@ -506,26 +489,6 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
             }
         }
     }
-    if value.archived_workspaces.len() > MAX_ARCHIVED_WORKSPACES {
-        return Err("too many archived workspaces".into());
-    }
-    let mut archived = HashSet::new();
-    for record in &value.archived_workspaces {
-        validate_text("host profile ID", &record.host_profile_id, false)?;
-        validate_text("server identity", &record.server_identity, false)?;
-        validate_text("session name", &record.session_name, true)?;
-        validate_tmux_session_id(&record.session_id)?;
-        if !record.archived_at.is_finite() {
-            return Err("invalid archived timestamp".into());
-        }
-        if !archived.insert((
-            record.host_profile_id.as_str(),
-            record.server_identity.as_str(),
-            record.session_id.as_str(),
-        )) {
-            return Err("duplicate archived workspace".into());
-        }
-    }
     if value.pinned_workspaces.len() > MAX_PINNED_WORKSPACES {
         return Err("too many pinned workspaces".into());
     }
@@ -692,6 +655,7 @@ mod tests {
                 agents_section_ratio: Some(0.42),
                 agent_state_glyphs: true,
                 compact_workspaces: true,
+                pinned_only: true,
                 terminal_screen_reader: false,
                 copy_on_select: false,
                 terminal_application_clipboard: false,
@@ -710,13 +674,6 @@ mod tests {
                 shortcut_overrides: HashMap::from([("window.new".into(), Some("Ctrl+T".into()))]),
             },
             host_setup: HashMap::from([("local".into(), HostSetupDecision::Accepted)]),
-            archived_workspaces: vec![ArchivedWorkspaceRecord {
-                host_profile_id: "local".into(),
-                server_identity: "server-a".into(),
-                session_id: "$2".into(),
-                session_name: "parked".into(),
-                archived_at: 1_700_000_000_000.0,
-            }],
             pinned_workspaces: vec![PinnedWorkspaceRecord {
                 host_profile_id: "local".into(),
                 server_identity: "server-a".into(),
@@ -790,39 +747,6 @@ mod tests {
         let encoded = serde_json::to_vec(&state).unwrap();
         let restored: PersistedAppState = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(restored.app_tabs[1], state.app_tabs[1]);
-    }
-
-    #[test]
-    fn archived_workspaces_are_bounded_and_keyed_per_server() {
-        let mut value = sample_state();
-        value
-            .archived_workspaces
-            .push(value.archived_workspaces[0].clone());
-        assert!(validate(&value).unwrap_err().contains("duplicate archived"));
-
-        let mut value = sample_state();
-        value.archived_workspaces[0].server_identity = String::new();
-        assert!(validate(&value).unwrap_err().contains("server identity"));
-
-        let mut value = sample_state();
-        value.archived_workspaces[0].session_id = "not-a-session".into();
-        assert!(validate(&value).unwrap_err().contains("session ID"));
-
-        let mut value = sample_state();
-        value.archived_workspaces = (0..=MAX_ARCHIVED_WORKSPACES)
-            .map(|index| ArchivedWorkspaceRecord {
-                session_id: format!("${index}"),
-                ..value.archived_workspaces[0].clone()
-            })
-            .collect();
-        assert!(validate(&value).unwrap_err().contains("too many"));
-
-        // A file written before the field existed loads with nothing archived.
-        let legacy: PersistedAppState = serde_json::from_value(serde_json::json!({
-            "schemaVersion": 1, "appTabs": [], "workspaceUi": [], "shell": {}
-        }))
-        .unwrap();
-        assert!(legacy.archived_workspaces.is_empty());
     }
 
     #[test]
@@ -948,6 +872,7 @@ mod tests {
         assert!(
             value.shell.agent_state_glyphs
                 && value.shell.compact_workspaces
+                && value.shell.pinned_only
                 && value.shell.terminal_screen_reader
                 && value.shell.copy_on_select
                 && value.shell.terminal_application_clipboard
@@ -1006,11 +931,6 @@ mod tests {
             keys(&stored["workspaceUi"][0]),
             keys(&expected["workspaceUi"][0]),
             "workspaceUi"
-        );
-        assert_eq!(
-            keys(&stored["archivedWorkspaces"][0]),
-            keys(&expected["archivedWorkspaces"][0]),
-            "archivedWorkspaces"
         );
         assert_eq!(
             keys(&stored["pinnedWorkspaces"][0]),
