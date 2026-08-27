@@ -84,24 +84,6 @@
     "local": "accepted",
     "ssh-remote-linux": "declined"
   },
-  "pinnedWorkspaces": [
-    {
-      "hostProfileId": "local",
-      "serverIdentity": "server-a",
-      "sessionId": "$1",
-      "sessionName": "project",
-      "pinnedAt": 1700000001000
-    }
-  ],
-  "pinnedTabs": [
-    {
-      "hostProfileId": "local",
-      "serverIdentity": "server-a",
-      "sessionId": "$1",
-      "tabId": "@3",
-      "pinnedAt": 1700000002000
-    }
-  ],
   "workspaceDefaults": {
     "local": {
       "directory": "/work/projects",

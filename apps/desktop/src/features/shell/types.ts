@@ -74,44 +74,6 @@ export interface WorkspaceUiRecord {
   selectedAppTabId?: string;
 }
 
-/**
- * A workspace the user has pinned to the top of the sidebar.
- *
- * Keyed exactly like {@link WorkspaceUiRecord} — host, tmux server, session id
- * — for the same reason: a record can only ever act on the session it was
- * written for, and a session id reused by a different server must not inherit
- * somebody else's pin. `pinnedAt` is the sort key of the leading block,
- * ascending, so the first thing pinned stays first.
- */
-export interface PinnedWorkspaceRecord {
-  hostProfileId: string;
-  serverIdentity: string;
-  sessionId: string;
-  sessionName: string;
-  pinnedAt: number;
-}
-
-/**
- * A tab the user has pinned to the front of one workspace's strip.
- *
- * `tabId` is the tmux window id (`@N`) for a terminal tab and the app-owned
- * tab id for a document tab. The two id spaces never collide — tmux window ids
- * always start with `@` — so one record type covers both kinds of tab, and the
- * workspace key is what keeps a window id from acting on another workspace.
- */
-export interface PinnedTabRecord {
-  hostProfileId: string;
-  serverIdentity: string;
-  sessionId: string;
-  tabId: string;
-  pinnedAt: number;
-}
-
-/** The most pinned workspaces kept; the oldest pin goes first past this. */
-export const MAX_PINNED_WORKSPACES = 200;
-/** The same ceiling for tabs, for the same reason: a list nobody could read. */
-export const MAX_PINNED_TABS = 200;
-
 export interface ShellState {
   /** Which half of the right panel is showing when it is open. */
   panelSurface: PanelSurface;
@@ -136,7 +98,7 @@ export interface ShellState {
    * the agents section shows only their agents.
    *
    * Pins already say which workspaces matter, so this needs no second concept
-   * and no second record — it is a boolean over the pins that exist. The
+   * — it is a boolean over the pins the host reports. The
    * workspace on screen is the one exception the list makes, so turning the
    * filter on can never leave the shell showing something the sidebar denies.
    */
@@ -203,8 +165,6 @@ export interface PersistedAppState {
   shell: ShellState;
   commands: { shortcutOverrides: Record<string, string | null> };
   hostSetup: Record<string, HostSetupDecision>;
-  pinnedWorkspaces: PinnedWorkspaceRecord[];
-  pinnedTabs: PinnedTabRecord[];
   workspaceDefaults: Record<string, WorkspaceDefaults>;
 }
 
@@ -233,8 +193,6 @@ export const defaultAppState: PersistedAppState = {
   shell: defaultShellState,
   commands: { shortcutOverrides: {} },
   hostSetup: {},
-  pinnedWorkspaces: [],
-  pinnedTabs: [],
   workspaceDefaults: {},
 };
 
@@ -280,8 +238,6 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
     },
     commands: { shortcutOverrides: normalizeShortcutRecord(candidate.commands?.shortcutOverrides) },
     hostSetup: normalizeHostSetup(candidate.hostSetup),
-    pinnedWorkspaces: normalizePinnedWorkspaces(candidate.pinnedWorkspaces),
-    pinnedTabs: normalizePinnedTabs(candidate.pinnedTabs),
     workspaceDefaults: normalizeWorkspaceDefaults(candidate.workspaceDefaults),
   };
 }
@@ -329,73 +285,6 @@ function usableDefault(value: unknown): value is string {
 export function usableWorkspaceDefault(value: unknown): string | undefined {
   if (!usableDefault(value)) return undefined;
   return value.trim().slice(0, MAX_WORKSPACE_DEFAULT_LENGTH);
-}
-
-/**
- * The fields every pin record shares, read defensively.
- *
- * A record missing any of them is dropped rather than repaired: a pin with no
- * server identity would order a workspace on the wrong tmux server, and one
- * with no timestamp has no place in a block whose whole order is the timestamp.
- */
-function pinScope(value: unknown): { hostProfileId: string; serverIdentity: string; sessionId: string; pinnedAt: number } | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const record = value as Record<string, unknown>;
-  if (typeof record.hostProfileId !== "string" || !record.hostProfileId
-    || typeof record.serverIdentity !== "string" || !record.serverIdentity
-    || typeof record.sessionId !== "string" || !record.sessionId
-    || typeof record.pinnedAt !== "number" || !Number.isFinite(record.pinnedAt)) return undefined;
-  return {
-    hostProfileId: record.hostProfileId,
-    serverIdentity: record.serverIdentity,
-    sessionId: record.sessionId,
-    pinnedAt: record.pinnedAt,
-  };
-}
-
-/**
- * Well-formed pins only, one per (host, server, session), newest kept within
- * the cap, so the pin that was just made always survives the truncation that
- * its own arrival caused.
- */
-export function normalizePinnedWorkspaces(value: unknown): PinnedWorkspaceRecord[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  const records: PinnedWorkspaceRecord[] = [];
-  for (const item of value) {
-    const scope = pinScope(item);
-    if (!scope) continue;
-    const sessionName = (item as Record<string, unknown>).sessionName;
-    if (typeof sessionName !== "string") continue;
-    const key = `${scope.hostProfileId}\0${scope.serverIdentity}\0${scope.sessionId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    records.push({ ...scope, sessionName });
-  }
-  return cappedPins(records, MAX_PINNED_WORKSPACES);
-}
-
-/** The same rules for tabs, keyed on the tab as well as its workspace. */
-export function normalizePinnedTabs(value: unknown): PinnedTabRecord[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  const records: PinnedTabRecord[] = [];
-  for (const item of value) {
-    const scope = pinScope(item);
-    if (!scope) continue;
-    const tabId = (item as Record<string, unknown>).tabId;
-    if (typeof tabId !== "string" || !tabId) continue;
-    const key = `${scope.hostProfileId}\0${scope.serverIdentity}\0${scope.sessionId}\0${tabId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    records.push({ ...scope, tabId });
-  }
-  return cappedPins(records, MAX_PINNED_TABS);
-}
-
-function cappedPins<T extends { pinnedAt: number }>(records: T[], cap: number): T[] {
-  if (records.length <= cap) return records;
-  return [...records].sort((left, right) => right.pinnedAt - left.pinnedAt).slice(0, cap);
 }
 
 /**

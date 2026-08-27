@@ -3,8 +3,7 @@ import { compareAgents, displayState } from "../agents/selectors";
 import { needsAttention } from "../agents/agentsList";
 import { agentSessionLabel } from "../agents/agentLabels";
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentAttentionRollup, AgentDisplayState, AgentRecord } from "../agents/types";
-import { orderedSessions } from "../shell/model";
-import { pinnedFirst } from "../shell/pins";
+import { orderedSessions, pinnedFirst } from "../shell/model";
 
 /**
  * A workspace row in the sidebar: name and what its loudest few agents are
@@ -26,7 +25,7 @@ export interface WorkspaceRowModel {
   attention: AgentAttentionRollup["state"];
   /** Number of that workspace's agents waiting on a human. */
   unread: number;
-  /** Shift-clicked to the top of the list; the row draws a pin. */
+  /** Shift-clicked to the top of the list; the row sits under "Pinned". */
   pinned: boolean;
   working: boolean;
   /** The loudest agents here, at most {@link WORKSPACE_ROW_AGENT_LIMIT}. */
@@ -64,15 +63,6 @@ export interface WorkspaceRowInputs {
   activeBranch?: string;
   /** Home directory, so paths render the way a shell prompt would. */
   home?: string;
-  /**
-   * When each pinned workspace on this server was pinned.
-   *
-   * Applied here rather than in the sidebar because this list *is* the
-   * workspace order: ⌘1–9, the ⌘P switcher and the agents list's workspace
-   * ranking all read it, and a pin the sidebar applied on its own would be a
-   * pin only the sidebar knew about.
-   */
-  pinnedAt?: ReadonlyMap<string, number>;
 }
 
 export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
@@ -82,9 +72,14 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
     if (!needsAttention(displayState(agent))) continue;
     unreadBySession.set(agent.sessionId, (unreadBySession.get(agent.sessionId) ?? 0) + 1);
   }
+  // The pin comes off the snapshot, and the leading block is applied here
+  // rather than in the sidebar because this list *is* the workspace order:
+  // ⌘1–9, the ⌘P switcher and the agents list's workspace ranking all read it,
+  // and a pin the sidebar applied on its own would be a pin only the sidebar
+  // knew about.
   const ordered = pinnedFirst(
     orderedSessions(inputs.snapshot.sessions),
-    (session) => inputs.pinnedAt?.get(session.id),
+    (session) => Boolean(session.pinned),
   );
   return ordered.map((session) => {
     const rollup = inputs.attentionByWorkspace.get(session.id);
@@ -97,7 +92,7 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
       active,
       attention,
       unread: unreadBySession.get(session.id) ?? 0,
-      pinned: inputs.pinnedAt?.has(session.id) ?? false,
+      pinned: Boolean(session.pinned),
       working: (rollup?.working ?? 0) > 0,
       agents: shown.map((agent) => ({
         id: agent.id,

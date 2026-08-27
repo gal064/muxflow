@@ -96,6 +96,28 @@ describe("application shell model", () => {
     expect(combined[2]).toMatchObject({ key: "app:a", canMoveLeft: false });
   });
 
+  it("leads the strip with the windows the host reports as pinned", () => {
+    const windows: TmuxWindow[] = [
+      { id: "@1", sessionId: "$1", index: 1, name: "first", active: true, layout: "" },
+      { id: "@2", sessionId: "$1", index: 2, name: "second", active: false, layout: "", pinned: true },
+      { id: "@3", sessionId: "$1", index: 3, name: "third", active: false, layout: "", pinned: true },
+    ];
+    const appTabs = appTabsForWorkspace(tabs, "local", "server-a", sessions[1]);
+    const strip = combineWorkspaceTabs(windows, appTabs);
+    // Pinned first, in window order among themselves; documents stay behind
+    // every terminal tab, pinned or not, because a document has no pin.
+    expect(strip.map((tab) => tab.key))
+      .toEqual(["terminal:@2", "terminal:@3", "terminal:@1", "app:a", "app:b"]);
+    expect(strip.map((tab) => tab.kind === "terminal" && tab.pinned)).toEqual([true, true, false, false, false]);
+    // A move is a change to the window index, so the flags describe the tmux
+    // order and not the pinned one: `@1` is still the leftmost window.
+    expect(strip.find((tab) => tab.key === "terminal:@1")).toMatchObject({ canMoveLeft: false });
+
+    // Nothing pinned is the order the windows arrived in.
+    expect(combineWorkspaceTabs(windows.map((window) => ({ ...window, pinned: false })), appTabs).map((tab) => tab.key))
+      .toEqual(["terminal:@1", "terminal:@2", "terminal:@3", "app:a", "app:b"]);
+  });
+
   it("shows a pending placeholder last, and retires it when its window arrives", () => {
     const windows: TmuxWindow[] = [
       { id: "@1", sessionId: "$1", index: 1, name: "first", active: true, layout: "" },

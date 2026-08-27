@@ -44,15 +44,9 @@ import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
-  defaultAppState, PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
+  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
   type AppOwnedTab, type HostSetupDecision, type ShellState, type WorkspaceDefaults,
 } from "../features/shell/types";
-import {
-  pinnedTabTimes,
-  pinnedWorkspaceTimes,
-  togglePinnedTab,
-  togglePinnedWorkspace,
-} from "../features/shell/pins";
 import {
   combineWorkspaceTabs,
   closeAppTab,
@@ -293,7 +287,6 @@ export function App() {
     currentScope: currentHostScope,
     serverIdentity: hostState.serverIdentity,
     sessions: snapshot.sessions,
-    windows: snapshot.windows,
     setAppState,
   });
 
@@ -440,15 +433,6 @@ export function App() {
     }));
   }, [setAppState]);
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
-  // Pinned workspaces and tabs on this host and server, keyed on the records
-  // alone: every other persisted write (a tab switch, a sidebar drag) must not
-  // hand the sidebar and the strip a new map to re-sort against.
-  const pinnedWorkspaceRecords = appState.pinnedWorkspaces;
-  const pinnedTabRecords = appState.pinnedTabs;
-  const pinnedWorkspaceAt = useMemo(
-    () => pinnedWorkspaceTimes({ ...defaultAppState, pinnedWorkspaces: pinnedWorkspaceRecords }, currentHostProfileId, hostState.serverIdentity),
-    [currentHostProfileId, hostState.serverIdentity, pinnedWorkspaceRecords],
-  );
   const {
     hostSetup: agentHostSetup,
     notificationActivation,
@@ -507,8 +491,7 @@ export function App() {
     attentionByWorkspace: agentRuntime.rollups.byWorkspace,
     activeBranch: workspaceGit.status?.repository.headName,
     home,
-    pinnedAt: pinnedWorkspaceAt,
-  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, pinnedWorkspaceAt, snapshot, workspaceGit.status]);
+  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, snapshot, workspaceGit.status]);
   const sidebarRows = useMemo(
     () => appState.shell.pinnedOnly ? pinnedOnlyRows(switcherRows, activeSessionId) : switcherRows,
     [activeSessionId, appState.shell.pinnedOnly, switcherRows],
@@ -517,15 +500,11 @@ export function App() {
     const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
     const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
     const paneIds = new Set(snapshot.panes.map((pane) => pane.id));
-    // Every pinned tab on this server, not just the workspace on screen: the
-    // agents list spans workspaces, so it needs the pin times of tabs whose
-    // strip is not currently drawn.
-    const tabPinnedAt = new Map<string, number>();
-    for (const record of pinnedTabRecords) {
-      if (record.hostProfileId !== currentHostProfileId || !hostState.serverIdentity
-        || record.serverIdentity !== hostState.serverIdentity) continue;
-      tabPinnedAt.set(`${record.sessionId}\0${record.tabId}`, record.pinnedAt);
-    }
+    // Every window on this server, not just the workspace on screen: the agents
+    // list spans workspaces, so it needs the pins of tabs whose strip is not
+    // currently drawn.
+    const pinnedWindowIds = new Set(snapshot.windows.filter((item) => item.pinned).map((item) => item.id));
+    const pinnedSessionIds = new Set(snapshot.sessions.filter((item) => item.pinned).map((item) => item.id));
     return buildAgentRows(
       agentRuntime.agents,
       (record) => ({
@@ -533,13 +512,13 @@ export function App() {
         workspaceName: record.sessionName || "unknown workspace",
         hostLabel,
         tabIndex: windowIndexById.get(record.windowId),
-        workspacePinnedAt: pinnedWorkspaceAt.get(record.sessionId),
-        tabPinnedAt: tabPinnedAt.get(`${record.sessionId}\0${record.windowId}`),
+        workspacePinned: pinnedSessionIds.has(record.sessionId),
+        tabPinned: pinnedWindowIds.has(record.windowId),
       }),
       (record) => Boolean(record.paneId) && paneIds.has(record.paneId),
       appState.shell.agentSort,
     );
-  }, [agentRuntime.agents, appState.shell.agentSort, currentHostProfileId, hostLabel, hostState.serverIdentity, pinnedTabRecords, pinnedWorkspaceAt, sidebarRows, snapshot.panes, snapshot.windows]);
+  }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, sidebarRows, snapshot.panes, snapshot.sessions, snapshot.windows]);
   // What the agents section lists, which under the filter is not everything
   // the shell knows about. Only the section is narrowed: the bell, its count
   // and ⌘⇧U keep reading the whole list, because "who needs me" is a question
@@ -590,13 +569,6 @@ export function App() {
   };
   const agentPresenceRef = useRef(agentPresence);
   agentPresenceRef.current = agentPresence;
-  const pinnedTabAt = useMemo(
-    () => pinnedTabTimes(
-      { ...defaultAppState, pinnedTabs: pinnedTabRecords },
-      currentHostProfileId, hostState.serverIdentity, activeSessionId,
-    ),
-    [activeSessionId, currentHostProfileId, hostState.serverIdentity, pinnedTabRecords],
-  );
   const combinedTabs = useMemo(
     // The same authority the commit-time recheck reads, `hasUnmappedAgents`
     // included: the strip and the recheck must not disagree about which
@@ -607,9 +579,8 @@ export function App() {
         current: currentAgentTopology,
         hasUnmappedAgents,
       },
-      pinnedTabAt,
     ),
-    [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, pinnedTabAt, windows, workspaceAppTabs],
+    [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
   const grid = useMemo(() => windowGrid(panes), [panes]);
@@ -668,17 +639,27 @@ export function App() {
     setStatus,
     windows: snapshot.windows,
   });
-  // Both pins are scoped writes and nothing else: no tmux traffic, no
-  // selection change. The scope check is the same one every row action makes —
-  // a menu can outlive the connection it was opened over.
+  // Both pins are host state now, so both take the action pipeline: the pin
+  // outlives this app, and every client of the same tmux server sees it. The
+  // scope check is the same one every row action makes — a menu can outlive the
+  // connection it was opened over — and neither pin selects anything, so both
+  // report themselves as silent navigation.
   const toggleWorkspacePin = useCallback((session: Session, scope: HostScopeToken) => {
     if (!sameHostConnection(scope, hostScopeRef.current)) return;
-    setAppState((current) => togglePinnedWorkspace(current, scope.hostProfileId, scope.serverIdentity, session, Date.now()));
-  }, [hostScopeRef, setAppState]);
-  const toggleTabPin = useCallback((tab: CombinedTab, scope: HostScopeToken) => {
-    if (tab.kind === "pending" || !sameHostConnection(scope, hostScopeRef.current)) return;
-    setAppState((current) => togglePinnedTab(current, scope.hostProfileId, scope.serverIdentity, activeSessionId, tab.id, Date.now()));
-  }, [activeSessionId, hostScopeRef, setAppState]);
+    void performAction(
+      { kind: "setPinned", sessionId: session.id, pinned: !session.pinned },
+      undefined,
+      { kind: "navigation", feedback: "silent", measurePanePaint: false },
+    );
+  }, [hostScopeRef, performAction]);
+  const toggleTabPin = useCallback((tab: Extract<CombinedTab, { kind: "terminal" }>, scope: HostScopeToken) => {
+    if (!activeSessionId || !sameHostConnection(scope, hostScopeRef.current)) return;
+    void performAction(
+      { kind: "setPinned", sessionId: activeSessionId, windowId: tab.id, pinned: !tab.pinned },
+      undefined,
+      { kind: "navigation", feedback: "silent", measurePanePaint: false },
+    );
+  }, [activeSessionId, hostScopeRef, performAction]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is

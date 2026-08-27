@@ -133,8 +133,8 @@ describe("agents section ordering", () => {
  * Two facts reach a row: whether its workspace is pinned and whether its tab
  * is. The workspace ordering inherits the first through `workspaceOrder`,
  * because the sidebar list it is built from is already pinned-first; the
- * priority ordering has no workspace ranking to inherit and so reads the pin
- * times itself. Both modes are asserted here, because the whole point of the
+ * priority ordering has no workspace ranking to inherit and so reads the pins
+ * itself. Both modes are asserted here, because the whole point of the
  * feature is that they agree about what comes first.
  */
 describe("pinned agents lead the list in both orderings", () => {
@@ -142,12 +142,12 @@ describe("pinned agents lead the list in both orderings", () => {
   // ordering the sidebar has already put `$pin` first, which is what
   // `workspaceOrder` says.
   const located: Record<string, AgentLocation> = {
-    "$pin": { workspaceOrder: 0, workspaceName: "pinned-ws", tabIndex: 3, workspacePinnedAt: 100 },
+    "$pin": { workspaceOrder: 0, workspaceName: "pinned-ws", tabIndex: 3, workspacePinned: true },
     "$plain": { workspaceOrder: 1, workspaceName: "plain-ws", tabIndex: 1 },
   };
   const place = (record: AgentRecord): AgentLocation => {
     const base = located[record.sessionId] ?? { workspaceOrder: 2, workspaceName: record.sessionName };
-    return record.windowId === "@pinned" ? { ...base, tabIndex: 9, tabPinnedAt: 200 } : base;
+    return record.windowId === "@pinned" ? { ...base, tabIndex: 9, tabPinned: true } : base;
   };
   // The quiet agent in the pinned workspace and the loud one in the plain
   // workspace: without the pin, `blockedElsewhere` sorts first in both modes.
@@ -208,7 +208,7 @@ describe("the bell and ⌘⇧U ignore pins", () => {
     });
     const blockedElsewhere = agent({ id: "blocked-away", displayName: "c", sessionId: "$plain", lifecycle: "blocked", updatedAt: 99 });
     const place = (record: AgentRecord): AgentLocation => record.sessionId === "$pin"
-      ? { workspaceOrder: 0, workspaceName: "pinned-ws", workspacePinnedAt: 100 }
+      ? { workspaceOrder: 0, workspaceName: "pinned-ws", workspacePinned: true }
       : { workspaceOrder: 1, workspaceName: "plain-ws" };
     const rows = buildAgentRows([pinnedDone, blockedElsewhere], place, () => true, "status");
     // The list leads with the pinned row…

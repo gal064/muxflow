@@ -43,7 +43,8 @@ interface WorkspaceSidebarProps {
   onSelectWorkspace(sessionId: string): void;
   /**
    * Shift-click, and the menu item beside it: pins the workspace to the top of
-   * this list, or unpins one already there.
+   * this list, or unpins one already there. The pin is the host's, so this
+   * dispatches an action rather than writing app state.
    */
   onTogglePinnedWorkspace(session: Session, scope: HostScopeToken): void;
   onWorkspaceCommand(session: Session, commandId: WorkspaceCommandId, scope: HostScopeToken): void;
@@ -229,7 +230,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               column keeps the width it had before any pin existed. */}
           <span className="agent-name-cell">
             <span className="agent-session-label">{sessionLabel}</span>
-            {row.location.tabPinnedAt !== undefined
+            {row.location.tabPinned
               && <span aria-hidden="true" className="agent-pin"><Icon name="pin" size={11} /></span>}
           </span>
           <span className="agent-detail">{detail}</span>
@@ -545,7 +546,9 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       anchor={menu.anchor}
       items={[
         { id: "rename", label: "Rename workspace…", disabled: !props.canMutate, run: () => props.onWorkspaceCommand(menu.session, "session.rename", menu.scope) },
-        // Not gated on `canMutate`: nothing is sent to tmux.
+        // Not gated on `canMutate`: a pin is host state rather than a tmux
+        // mutation, and the action pipeline reports it if the connection
+        // cannot carry it.
         {
           id: "pin",
           label: props.rows.find((row) => row.session.id === menu.session.id)?.pinned ? "Unpin workspace" : "Pin workspace",

@@ -1,7 +1,6 @@
 import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { renderedPanes } from "../terminal/layout";
 import { usableWorkspaceDefault } from "./types";
-import { pinnedFirst, unpinTab } from "./pins";
 import type { AppOwnedTab, AppTabViewMode, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import type { AgentAdapterId, AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
@@ -9,7 +8,7 @@ import { stripAgentStatusGlyphs } from "../agents/agentLabels";
 
 export type CombinedTab =
   | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"]; agentAdapterId?: AgentAdapterId; agentPresence: TerminalAgentPresence; pinned: boolean }
-  | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean; pinned: boolean }
+  | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean }
   | { key: `pending:${string}`; kind: "pending"; title: string };
 export type SelectableTab = Exclude<CombinedTab, { kind: "pending" }>;
 export type TerminalAgentPresence = "present" | "absent" | "unknown";
@@ -88,6 +87,21 @@ export interface AgentShellItem {
   updatedAt: number;
 }
 
+/**
+ * The one ordering rule every pinned surface reads: pinned items form a
+ * leading block and everything else keeps the order it arrived in.
+ *
+ * Stable in both halves — the pinned block keeps its input order too — so
+ * pinning never reshuffles anything it was not asked about. The host decides
+ * *what* is pinned; this decides only where the pinned things sit.
+ */
+export function pinnedFirst<T>(items: readonly T[], pinned: (item: T) => boolean): T[] {
+  const leading: T[] = [];
+  const rest: T[] = [];
+  for (const item of items) (pinned(item) ? leading : rest).push(item);
+  return leading.length === 0 ? [...items] : [...leading, ...rest];
+}
+
 export function orderedSessions(sessions: readonly Session[]): Session[] {
   return [...sessions].sort((left, right) => (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER)
     || left.name.localeCompare(right.name)
@@ -153,8 +167,6 @@ export function combineWorkspaceTabs(
   // dropping it made the strip believe a window was empty while the
   // commit-time recheck, reading the full snapshot, called it unknown.
   authority: Omit<AgentPresenceSnapshot, "byWindow"> = {},
-  /** When each of this workspace's tabs was pinned; see `pinnedFirst`. */
-  pinnedAt: ReadonlyMap<string, number> = new Map(),
 ): CombinedTab[] {
   const agentPresence = {
     ...authority,
@@ -187,7 +199,9 @@ export function combineWorkspaceTabs(
         // already-read agents are just as protected by Close All Non-Agent Tabs
         // as working, blocked and unread-complete agents.
         agentPresence: presence,
-        pinned: pinnedAt.has(window.id),
+        // The host's flag, straight off the snapshot: a document tab has no
+        // window on the server, which is why only terminal tabs carry one.
+        pinned: Boolean(window.pinned),
       };
     });
   const ownedTabs: CombinedTab[] = [...appTabs]
@@ -203,12 +217,11 @@ export function combineWorkspaceTabs(
       preview: Boolean(tab.preview),
       canMoveLeft: index > 0,
       canMoveRight: index < ordered.length - 1,
-      pinned: pinnedAt.has(tab.id),
     }));
   const pendingTabs: CombinedTab[] = pending && pendingTabStillOpen(pending, windows)
     ? [{ key: `pending:${pending.key}`, kind: "pending", title: pending.title }]
     : [];
-  // Pinned tabs lead, in the order they were pinned; everything else keeps the
+  // Pinned tabs lead, keeping their window order; everything else keeps the
   // window/document order above. `canMoveLeft` and `canMoveRight` are
   // deliberately *not* recomputed against this: a move is a change to the tmux
   // window index or the document order, which is what those flags describe.
@@ -216,7 +229,10 @@ export function combineWorkspaceTabs(
   // The placeholder stays last, because it is the newest thing asked for and
   // because a placeholder that pushed the existing tabs sideways would move the
   // targets under a person's cursor while they waited.
-  return [...pinnedFirst([...terminalTabs, ...ownedTabs], (tab) => tab.kind === "pending" ? undefined : pinnedAt.get(tab.id)), ...pendingTabs];
+  return [
+    ...pinnedFirst([...terminalTabs, ...ownedTabs], (tab) => tab.kind === "terminal" && tab.pinned),
+    ...pendingTabs,
+  ];
 }
 
 /**
@@ -441,8 +457,6 @@ export function discardServerAppState(state: PersistedAppState, hostProfileId: s
     ...state,
     appTabs: state.appTabs.filter((tab) => tab.hostProfileId !== hostProfileId || tab.serverIdentity !== serverIdentity),
     workspaceUi: state.workspaceUi.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
-    pinnedWorkspaces: state.pinnedWorkspaces.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
-    pinnedTabs: state.pinnedTabs.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
   };
 }
 
@@ -760,18 +774,11 @@ export function setMarkdownViewMode(
 }
 
 export function closeAppTab(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {
-  const closing = state.appTabs.find((tab) => tab.hostProfileId === currentHostProfileId && tab.id === tabId);
   const appTabs = state.appTabs.filter((tab) => tab.hostProfileId !== currentHostProfileId || tab.id !== tabId);
   const workspaceUi = state.workspaceUi.map((item) => item.hostProfileId === currentHostProfileId && item.selectedAppTabId === tabId
     ? { ...item, selectedAppTabId: undefined }
     : item);
-  const closed: PersistedAppState = { ...state, appTabs, workspaceUi };
-  // The tab is gone, so its pin has nothing to order. Dropped here rather than
-  // left to the next reconcile, so a document tab reopened under a fresh id
-  // cannot inherit the position of the one that was closed.
-  return closing
-    ? unpinTab(closed, currentHostProfileId, closing.serverIdentity, closing.sessionId, tabId)
-    : closed;
+  return { ...state, appTabs, workspaceUi };
 }
 
 export function reorderAppTab(
