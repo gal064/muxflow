@@ -160,7 +160,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 0; border-radius: var(--radius-control);
   background: transparent; color: var(--chrome-dim);
 }
-.bar-button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--chrome-hover); color: var(--chrome-ink); }
+.bar-button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--chrome-hover); color: var(--chrome-ink); --icon-knockout: var(--chrome-hover); }
 .bar-button[aria-pressed="true"] { color: var(--chrome-ink-strong); }
 /* A frozen control has to look frozen. While the connection was read-only the
    titlebar's new-workspace `+` and the strip's split and `+` were disabled and
