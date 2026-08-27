@@ -237,7 +237,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .sidebar-section { display: flex; flex-direction: column; min-height: 0; }
 .sidebar-workspaces { flex: 1 1 auto; }
 .sidebar-agents { flex-grow: 0; flex-shrink: 0; }
-.sidebar-section > .section-label { padding: 4px 8px 6px; }
 .section-head { display: flex; align-items: baseline; gap: 8px; padding: 4px 8px 6px; }
 .sidebar-scroll { min-height: 0; overflow-y: auto; scrollbar-width: thin; }
 

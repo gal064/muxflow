@@ -390,10 +390,16 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         >{props.pinnedOnly ? "all" : "pinned"}</button>
       </div>
       <div aria-labelledby="sidebar-workspaces-label" className="sidebar-scroll" role="list">
+        {/* Said whenever the filter is on with nothing pinned, not only when
+            the list came out empty: the selected workspace keeps its row, so
+            the ordinary way to meet this state is one unexplained row rather
+            than none, and the hint is the only thing that explains it. */}
+        {props.pinnedOnly && !props.rows.some((row) => row.pinned)
+          && <p className="quiet-empty">No pinned workspaces — Shift-click a workspace to pin it.</p>}
+        {props.rows.length === 0 && !props.pinnedOnly
+          && <p className="quiet-empty">No tmux sessions on this host yet.</p>}
         {props.rows.length === 0
-          ? <p className="quiet-empty">{props.pinnedOnly
-            ? "No pinned workspaces — Shift-click a workspace to pin it."
-            : "No tmux sessions on this host yet."}</p>
+          ? null
           : workspaceBlocks
             // A pin used to draw a glyph on the row. It draws a divider now:
             // one label for the whole block says what a mark repeated down
@@ -470,21 +476,24 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       {props.hookNotice && <p className="agents-notice" role="note">{props.hookNotice}</p>}
       <div aria-labelledby="sidebar-agents-label" className="sidebar-scroll" role="list">
         {props.agents.length === 0
-          ? <p className="quiet-empty">No agents detected.</p>
+          // Under the filter this list is not the whole host, so it must not
+          // claim to be: the titlebar's unread count still reads every agent,
+          // and "No agents detected." beside a non-zero badge is a lie.
+          ? <p className="quiet-empty">{props.pinnedOnly ? "No agents in pinned workspaces." : "No agents detected."}</p>
           : props.agentSort === "workspace"
             ? agentBlocks
               // The sidebar's dividers, over the same per-workspace groups:
               // a pinned workspace's agents read as one block above the rest
               // rather than as a mark repeated on every group heading.
-              ? agentBlocks.map((block) => <section
-                aria-labelledby={`agent-block-${block.key}`}
-                className="list-block"
-                key={block.key}
-                role="group"
-              >
-                <h3 className="list-divider" id={`agent-block-${block.key}`}>{block.label}</h3>
+              // `role="presentation"`, not `group`: the per-workspace sections
+              // below are already groups, and a group owning a group falls
+              // outside what `role="list"` may own — which can drop the rows
+              // from the list's reported count. Ignored here, the workspace
+              // groups stay the list's own children.
+              ? agentBlocks.map((block) => <div className="list-block" key={block.key} role="presentation">
+                <h3 className="list-divider">{block.label}</h3>
                 {block.groups.map(renderAgentGroup)}
-              </section>)
+              </div>)
               : groupedAgents.map(renderAgentGroup)
             // Priority: the same clustering, keyed on what the agent is doing
             // rather than where it lives. The rows already carry the workspace
