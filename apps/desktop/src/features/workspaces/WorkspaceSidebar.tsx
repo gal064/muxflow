@@ -108,6 +108,15 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       .findIndex((row) => row.session.id === menu.session.id)
     : -1;
   const groupedAgents = props.agentSort === "workspace" ? groupAgentRows(props.agents) : [];
+  /**
+   * The right-clicked workspace as the list has it now.
+   *
+   * The menu outlives the list it was opened over, and the pin is host state
+   * another client of the same tmux server can change while it is open: the
+   * item both reads its label and sends its action from this row, so it can
+   * never ask for the state it is already showing.
+   */
+  const menuRow = menu ? props.rows.find((row) => row.session.id === menu.session.id) : undefined;
   const priorityAgents = props.agentSort === "workspace" ? [] : groupAgentRowsByStatus(props.agents);
   // The flat position in `props.agents`, kept across every grouping: the roving
   // arrow keys walk `[data-agent-index]` in document order, and a per-group
@@ -551,8 +560,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         // cannot carry it.
         {
           id: "pin",
-          label: props.rows.find((row) => row.session.id === menu.session.id)?.pinned ? "Unpin workspace" : "Pin workspace",
-          run: () => props.onTogglePinnedWorkspace(menu.session, menu.scope),
+          label: menuRow?.pinned ? "Unpin workspace" : "Pin workspace",
+          run: () => props.onTogglePinnedWorkspace(menuRow?.session ?? menu.session, menu.scope),
         },
         { id: "up", label: "Move up", disabled: !props.canMutate || moveIndex <= 0, run: () => props.onWorkspaceCommand(menu.session, "session.moveLeft", menu.scope) },
         { id: "down", label: "Move down", disabled: !props.canMutate || moveIndex < 0 || moveIndex === props.rows.length - 1, run: () => props.onWorkspaceCommand(menu.session, "session.moveRight", menu.scope) },
