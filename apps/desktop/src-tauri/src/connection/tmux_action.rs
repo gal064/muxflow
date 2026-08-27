@@ -26,6 +26,7 @@ pub enum TmuxActionKindWire {
     ResizePaneDown,
     ZoomPane,
     ClosePane,
+    SetPinned,
 }
 
 impl From<TmuxActionKindWire> for v1::TmuxActionKind {
@@ -50,6 +51,7 @@ impl From<TmuxActionKindWire> for v1::TmuxActionKind {
             TmuxActionKindWire::ResizePaneDown => Self::ResizePaneDown,
             TmuxActionKindWire::ZoomPane => Self::ZoomPane,
             TmuxActionKindWire::ClosePane => Self::ClosePane,
+            TmuxActionKindWire::SetPinned => Self::SetPinned,
         }
     }
 }
@@ -92,6 +94,10 @@ pub struct TmuxActionWire {
     resize_cells: u32,
     #[serde(default)]
     zoomed: bool,
+    /// The pin state `setPinned` writes for its session, or for `window_id`
+    /// inside it when that is set.
+    #[serde(default)]
+    pinned: bool,
     #[serde(default)]
     expected_server_identity: String,
     #[serde(default)]
@@ -142,6 +148,7 @@ pub async fn tmux_action(
             split_size: action.split_size,
             resize_cells: action.resize_cells,
             zoomed: action.zoomed,
+            pinned: action.pinned,
             expected_server_identity: action.expected_server_identity,
             expected_generation: action.expected_generation,
             confirmed: action.confirmed,
@@ -195,5 +202,20 @@ mod tests {
         assert_eq!(action.expected_generation, 9);
         assert!(action.confirmed);
         assert_eq!(action.directory, "/work/projects");
+
+        let pin: TmuxActionWire = serde_json::from_value(serde_json::json!({
+            "kind": "setPinned",
+            "session_id": "$1",
+            "window_id": "@5",
+            "pinned": true
+        }))
+        .unwrap();
+        assert!(matches!(pin.kind, TmuxActionKindWire::SetPinned));
+        assert_eq!(
+            v1::TmuxActionKind::from(pin.kind),
+            v1::TmuxActionKind::SetPinned
+        );
+        assert_eq!(pin.window_id, "@5");
+        assert!(pin.pinned);
     }
 }

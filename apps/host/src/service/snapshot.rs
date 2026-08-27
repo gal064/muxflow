@@ -18,7 +18,50 @@ struct SessionOrderState {
     servers: BTreeMap<String, Vec<String>>,
 }
 
-static SESSION_ORDER_LOCK: Mutex<()> = Mutex::new(());
+/// What the user pinned on one tmux server.
+///
+/// Pins live beside the session order and for the same reason: tmux has no
+/// concept of either, and the app must not invent tmux state to store one. The
+/// two files are guarded by one lock because they are overlaid onto the same
+/// snapshot in the same pass.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PinState {
+    #[serde(default)]
+    servers: BTreeMap<String, ServerPins>,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerPins {
+    #[serde(default)]
+    sessions: Vec<PinnedSession>,
+    #[serde(default)]
+    windows: Vec<PinnedWindow>,
+}
+
+/// `pinned_at` is milliseconds since the epoch. It is the pinned block's sort
+/// key: entries are held in pin order, so the first thing pinned stays first.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PinnedSession {
+    session_id: String,
+    pinned_at: u64,
+}
+
+/// Carries its session so a window pin can be pruned against the exact
+/// workspace it was written for: tmux can move a window to another session,
+/// and a pin that followed it there was never asked for.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PinnedWindow {
+    session_id: String,
+    window_id: String,
+    pinned_at: u64,
+}
+
+/// One lock for both private sidecars: they are written and overlaid together.
+static SIDECAR_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) fn snapshot_from_identity(
     value: TmuxSnapshot,
@@ -39,6 +82,7 @@ pub(super) fn snapshot_from_identity(
                 window_count: item.window_count,
                 attached_clients: item.attached_clients,
                 order: item.order,
+                pinned: item.pinned,
             })
             .collect(),
         windows: value
@@ -53,6 +97,7 @@ pub(super) fn snapshot_from_identity(
                 layout: item.layout,
                 zoomed: item.zoomed,
                 layout_generation: generation,
+                pinned: item.pinned,
             })
             .collect(),
         panes: value
@@ -113,6 +158,7 @@ pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
     }
     let mut value = discovery.snapshot;
     overlay_session_order(&mut value, &identity)?;
+    overlay_pins(&mut value, &identity)?;
     if before.is_some_and(|before| Some(before) != socket_identity_key(&socket)) {
         bail!("tmux server changed during snapshot discovery");
     }
@@ -142,9 +188,9 @@ pub(super) fn reorder_session(
     session_id: &str,
     target_index: u32,
 ) -> anyhow::Result<()> {
-    let _guard = SESSION_ORDER_LOCK.lock().unwrap();
-    let path = crate::paths::runtime_dir().join("session-order.json");
-    let mut state = load_session_order(&path)?;
+    let _guard = SIDECAR_LOCK.lock().unwrap();
+    let path = session_order_path();
+    let mut state: SessionOrderState = load_sidecar(&path, SESSION_ORDER_LABEL)?;
     let mut order: Vec<_> = snapshot
         .sessions
         .iter()
@@ -152,12 +198,159 @@ pub(super) fn reorder_session(
         .collect();
     reorder_ids(&mut order, session_id, target_index)?;
     state.servers.insert(server_identity.to_owned(), order);
-    save_session_order(&path, &state)?;
+    save_sidecar(&path, SESSION_ORDER_LABEL, &state)?;
     overlay_session_order_unlocked(snapshot, server_identity)
 }
 
+/// Pins or unpins one workspace, or one tab inside it, in the private sidecar.
+///
+/// Nothing is sent to tmux — a pin is presentation — but it is host state and
+/// not app state, so every client of this server sees the same pinned block and
+/// a reinstalled app inherits it. The target is checked against the snapshot
+/// the action was validated on: a pin for a session that has just been closed
+/// would be written for something that can never be drawn, and pruned again on
+/// the next discovery anyway.
+pub(super) fn set_pinned(
+    server_identity: &str,
+    snapshot: &mut TmuxSnapshot,
+    session_id: &str,
+    window_id: &str,
+    pinned: bool,
+) -> anyhow::Result<()> {
+    let _guard = SIDECAR_LOCK.lock().unwrap();
+    write_pin(
+        &pins_path(),
+        server_identity,
+        snapshot,
+        session_id,
+        window_id,
+        pinned,
+    )?;
+    overlay_pins_unlocked(snapshot, server_identity)
+}
+
+fn write_pin(
+    path: &std::path::Path,
+    server_identity: &str,
+    snapshot: &TmuxSnapshot,
+    session_id: &str,
+    window_id: &str,
+    pinned: bool,
+) -> anyhow::Result<()> {
+    if !snapshot.sessions.iter().any(|item| item.id == session_id) {
+        bail!("session no longer exists");
+    }
+    if !window_id.is_empty()
+        && !snapshot
+            .windows
+            .iter()
+            .any(|item| item.id == window_id && item.session_id == session_id)
+    {
+        bail!("window is not linked to the requested session");
+    }
+    let mut state: PinState = load_sidecar(path, PINS_LABEL)?;
+    let pins = state.servers.entry(server_identity.to_owned()).or_default();
+    let pinned_at = now_millis();
+    if window_id.is_empty() {
+        pins.sessions.retain(|item| item.session_id != session_id);
+        if pinned {
+            pins.sessions.push(PinnedSession {
+                session_id: session_id.to_owned(),
+                pinned_at,
+            });
+        }
+    } else {
+        // Keyed on the window alone: a window that moved to another session
+        // must not end up pinned twice under two workspaces.
+        pins.windows.retain(|item| item.window_id != window_id);
+        if pinned {
+            pins.windows.push(PinnedWindow {
+                session_id: session_id.to_owned(),
+                window_id: window_id.to_owned(),
+                pinned_at,
+            });
+        }
+    }
+    save_sidecar(path, PINS_LABEL, &state)
+}
+
+fn overlay_pins(snapshot: &mut TmuxSnapshot, server_identity: &str) -> anyhow::Result<()> {
+    let _guard = SIDECAR_LOCK.lock().unwrap();
+    overlay_pins_unlocked(snapshot, server_identity)
+}
+
+/// Stamps `pinned` onto everything this server has pinned, and forgets the
+/// pins whose session or window is gone.
+///
+/// Pruning belongs here rather than in a close action: a window can also
+/// disappear because another tmux client killed it, and the sidecar must not
+/// accumulate records for topology nobody can see. Discovery is batched, so a
+/// snapshot that lists a session always lists its windows too — there is no
+/// half-filled snapshot in which "no windows here" could mean "not yet known".
+fn overlay_pins_unlocked(snapshot: &mut TmuxSnapshot, server_identity: &str) -> anyhow::Result<()> {
+    apply_pins(&pins_path(), snapshot, server_identity)
+}
+
+fn apply_pins(
+    path: &std::path::Path,
+    snapshot: &mut TmuxSnapshot,
+    server_identity: &str,
+) -> anyhow::Result<()> {
+    let mut state: PinState = load_sidecar(path, PINS_LABEL)?;
+    let Some(pins) = state.servers.get_mut(server_identity) else {
+        for session in &mut snapshot.sessions {
+            session.pinned = false;
+        }
+        for window in &mut snapshot.windows {
+            window.pinned = false;
+        }
+        return Ok(());
+    };
+    let before = (pins.sessions.len(), pins.windows.len());
+    pins.sessions
+        .retain(|item| snapshot.sessions.iter().any(|s| s.id == item.session_id));
+    pins.windows.retain(|item| {
+        snapshot
+            .windows
+            .iter()
+            .any(|w| w.id == item.window_id && w.session_id == item.session_id)
+    });
+    let pinned_sessions: HashSet<_> = pins
+        .sessions
+        .iter()
+        .map(|item| item.session_id.clone())
+        .collect();
+    let pinned_windows: HashSet<_> = pins
+        .windows
+        .iter()
+        .map(|item| item.window_id.clone())
+        .collect();
+    let pruned = before != (pins.sessions.len(), pins.windows.len());
+    let empty = pins.sessions.is_empty() && pins.windows.is_empty();
+    for session in &mut snapshot.sessions {
+        session.pinned = pinned_sessions.contains(&session.id);
+    }
+    for window in &mut snapshot.windows {
+        window.pinned = pinned_windows.contains(&window.id);
+    }
+    if pruned {
+        if empty {
+            state.servers.remove(server_identity);
+        }
+        save_sidecar(path, PINS_LABEL, &state)?;
+    }
+    Ok(())
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 fn overlay_session_order(snapshot: &mut TmuxSnapshot, server_identity: &str) -> anyhow::Result<()> {
-    let _guard = SESSION_ORDER_LOCK.lock().unwrap();
+    let _guard = SIDECAR_LOCK.lock().unwrap();
     overlay_session_order_unlocked(snapshot, server_identity)
 }
 
@@ -165,8 +358,8 @@ fn overlay_session_order_unlocked(
     snapshot: &mut TmuxSnapshot,
     server_identity: &str,
 ) -> anyhow::Result<()> {
-    let path = crate::paths::runtime_dir().join("session-order.json");
-    let mut state = load_session_order(&path)?;
+    let path = session_order_path();
+    let mut state: SessionOrderState = load_sidecar(&path, SESSION_ORDER_LABEL)?;
     let Some(saved) = state.servers.get_mut(server_identity) else {
         for (order, session) in snapshot.sessions.iter_mut().enumerate() {
             session.order = order.try_into().unwrap_or(u32::MAX);
@@ -198,7 +391,7 @@ fn overlay_session_order_unlocked(
         session.order = order.try_into().unwrap_or(u32::MAX);
     }
     if *saved != before {
-        save_session_order(&path, &state)?;
+        save_sidecar(&path, SESSION_ORDER_LABEL, &state)?;
     }
     Ok(())
 }
@@ -215,31 +408,56 @@ fn reorder_ids(order: &mut Vec<String>, session_id: &str, target_index: u32) -> 
     Ok(())
 }
 
-fn load_session_order(path: &std::path::Path) -> anyhow::Result<SessionOrderState> {
+const SESSION_ORDER_LABEL: &str = "session order";
+const PINS_LABEL: &str = "pins";
+
+fn session_order_path() -> std::path::PathBuf {
+    crate::paths::runtime_dir().join("session-order.json")
+}
+
+fn pins_path() -> std::path::PathBuf {
+    crate::paths::runtime_dir().join("pins.json")
+}
+
+fn load_sidecar<T: Default + serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    label: &str,
+) -> anyhow::Result<T> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).context("parse private session order state"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(SessionOrderState::default())
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("parse private {label} state"))
         }
-        Err(error) => Err(error).context("read private session order state"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(error) => Err(error).with_context(|| format!("read private {label} state")),
     }
 }
 
-fn save_session_order(path: &std::path::Path, state: &SessionOrderState) -> anyhow::Result<()> {
-    let parent = path.parent().context("session order path has no parent")?;
+fn save_sidecar<T: serde::Serialize>(
+    path: &std::path::Path,
+    label: &str,
+    state: &T,
+) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{label} path has no parent"))?;
     crate::paths::prepare_runtime_dir(parent)?;
-    let temporary = parent.join(format!(".session-order-{}.tmp", uuid::Uuid::new_v4()));
+    let stem = path
+        .file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sidecar".to_owned());
+    let temporary = parent.join(format!(".{stem}-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> anyhow::Result<()> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&temporary)
-            .context("create private session order state")?;
+            .with_context(|| format!("create private {label} state"))?;
         file.write_all(&serde_json::to_vec(state)?)?;
         file.sync_all()?;
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-        fs::rename(&temporary, path).context("atomically replace session order state")?;
+        fs::rename(&temporary, path)
+            .with_context(|| format!("atomically replace private {label} state"))?;
         fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
@@ -364,6 +582,135 @@ mod tests {
         reorder_ids(&mut order, "$3", 99).unwrap();
         assert_eq!(order, ["$1", "$2", "$3"]);
         assert!(reorder_ids(&mut order, "$99", 0).is_err());
+    }
+
+    fn pinned_fixture() -> TmuxSnapshot {
+        let session = |id: &str, order: u32| tmux_control::Session {
+            id: id.into(),
+            name: id.into(),
+            window_count: 1,
+            attached_clients: 0,
+            order,
+            pinned: false,
+        };
+        let window = |id: &str, session_id: &str| tmux_control::Window {
+            id: id.into(),
+            session_id: session_id.into(),
+            index: 0,
+            name: id.into(),
+            active: false,
+            layout: String::new(),
+            zoomed: false,
+            pinned: false,
+        };
+        TmuxSnapshot {
+            sessions: vec![session("$1", 0), session("$2", 1)],
+            windows: vec![window("@1", "$1"), window("@2", "$1"), window("@3", "$2")],
+            panes: Vec::new(),
+        }
+    }
+
+    fn pins_fixture_path() -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!("muxflow-pins-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        directory.join("pins.json")
+    }
+
+    #[test]
+    fn pins_overlay_marks_the_pinned_workspace_and_tab_and_nothing_else() {
+        let path = pins_fixture_path();
+        let mut snapshot = pinned_fixture();
+        write_pin(&path, "tmux:one", &snapshot, "$2", "", true).unwrap();
+        write_pin(&path, "tmux:one", &snapshot, "$1", "@2", true).unwrap();
+        // Another server's pins are in the same file and must not leak.
+        write_pin(&path, "tmux:two", &snapshot, "$1", "", true).unwrap();
+
+        apply_pins(&path, &mut snapshot, "tmux:one").unwrap();
+        assert_eq!(
+            snapshot
+                .sessions
+                .iter()
+                .map(|item| (item.id.as_str(), item.pinned))
+                .collect::<Vec<_>>(),
+            [("$1", false), ("$2", true)]
+        );
+        assert_eq!(
+            snapshot
+                .windows
+                .iter()
+                .map(|item| (item.id.as_str(), item.pinned))
+                .collect::<Vec<_>>(),
+            [("@1", false), ("@2", true), ("@3", false)]
+        );
+
+        // A server with no record of its own is a snapshot with nothing pinned,
+        // not one that inherits the flags a previous overlay left behind.
+        apply_pins(&path, &mut snapshot, "tmux:three").unwrap();
+        assert!(snapshot.sessions.iter().all(|item| !item.pinned));
+        assert!(snapshot.windows.iter().all(|item| !item.pinned));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_second_pin_of_the_same_thing_unpins_it() {
+        let path = pins_fixture_path();
+        let mut snapshot = pinned_fixture();
+        write_pin(&path, "tmux:one", &snapshot, "$1", "", true).unwrap();
+        write_pin(&path, "tmux:one", &snapshot, "$1", "@1", true).unwrap();
+        apply_pins(&path, &mut snapshot, "tmux:one").unwrap();
+        assert!(snapshot.sessions[0].pinned && snapshot.windows[0].pinned);
+
+        write_pin(&path, "tmux:one", &snapshot, "$1", "", false).unwrap();
+        write_pin(&path, "tmux:one", &snapshot, "$1", "@1", false).unwrap();
+        apply_pins(&path, &mut snapshot, "tmux:one").unwrap();
+        assert!(!snapshot.sessions[0].pinned && !snapshot.windows[0].pinned);
+        let state: PinState = load_sidecar(&path, PINS_LABEL).unwrap();
+        let pins = state.servers.get("tmux:one").unwrap();
+        assert!(pins.sessions.is_empty() && pins.windows.is_empty());
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_overlay_forgets_pins_whose_session_or_window_is_gone() {
+        let path = pins_fixture_path();
+        let full = pinned_fixture();
+        write_pin(&path, "tmux:one", &full, "$2", "", true).unwrap();
+        write_pin(&path, "tmux:one", &full, "$1", "@2", true).unwrap();
+
+        // $2 closed, and @2 with it; $1 keeps only @1.
+        let mut narrowed = TmuxSnapshot {
+            sessions: full.sessions[..1].to_vec(),
+            windows: full.windows[..1].to_vec(),
+            panes: Vec::new(),
+        };
+        apply_pins(&path, &mut narrowed, "tmux:one").unwrap();
+        assert!(!narrowed.sessions[0].pinned && !narrowed.windows[0].pinned);
+        // Pruned in the file too, and the emptied server key with it, so a
+        // session id tmux reuses cannot inherit a pin nobody made for it.
+        let state: PinState = load_sidecar(&path, PINS_LABEL).unwrap();
+        assert!(!state.servers.contains_key("tmux:one"));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_pin_is_refused_for_topology_the_snapshot_does_not_have() {
+        let path = pins_fixture_path();
+        let snapshot = pinned_fixture();
+        assert!(
+            write_pin(&path, "tmux:one", &snapshot, "$9", "", true)
+                .unwrap_err()
+                .to_string()
+                .contains("session no longer exists")
+        );
+        // A window of another workspace is not this workspace's tab.
+        assert!(
+            write_pin(&path, "tmux:one", &snapshot, "$1", "@3", true)
+                .unwrap_err()
+                .to_string()
+                .contains("not linked")
+        );
+        assert!(!path.exists(), "a refused pin must not write the sidecar");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

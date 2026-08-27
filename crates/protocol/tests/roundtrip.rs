@@ -111,6 +111,45 @@ fn session_create_round_trips_its_start_directory() {
     assert_eq!(decoded, action);
 }
 
+/// A pin is host state, so it crosses twice: the action that writes it and
+/// every snapshot that reports it. Both halves have to survive the wire, and
+/// the kind is appended rather than inserted.
+#[test]
+fn pins_round_trip_on_the_action_that_writes_them_and_the_snapshot_that_reports_them() {
+    assert_eq!(v1::TmuxActionKind::SetPinned as i32, 20);
+    let action = v1::TmuxAction {
+        kind: v1::TmuxActionKind::SetPinned.into(),
+        session_id: "$1".into(),
+        window_id: "@5".into(),
+        pinned: true,
+        ..Default::default()
+    };
+    let decoded = v1::TmuxAction::decode(action.encode_to_vec().as_slice()).unwrap();
+    assert!(decoded.pinned);
+    assert_eq!(decoded, action);
+
+    let snapshot = v1::Snapshot {
+        server_identity: "socket:123".into(),
+        generation: 3,
+        sessions: vec![v1::Session {
+            id: "$1".into(),
+            name: "work".into(),
+            pinned: true,
+            ..Default::default()
+        }],
+        windows: vec![v1::Window {
+            id: "@5".into(),
+            session_id: "$1".into(),
+            pinned: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let decoded = v1::Snapshot::decode(snapshot.encode_to_vec().as_slice()).unwrap();
+    assert!(decoded.sessions[0].pinned && decoded.windows[0].pinned);
+    assert_eq!(decoded, snapshot);
+}
+
 #[test]
 fn terminal_visibility_checkpoint_round_trips_without_reusing_fields() {
     let request = v1::Request {

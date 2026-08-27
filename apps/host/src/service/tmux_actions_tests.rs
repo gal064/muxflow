@@ -7,6 +7,7 @@ fn session(id: &str, name: &str, order: u32) -> tmux_control::Session {
         window_count: 2,
         attached_clients: 0,
         order,
+        pinned: false,
     }
 }
 
@@ -19,6 +20,7 @@ fn window(id: &str, index: u32, active: bool) -> tmux_control::Window {
         active,
         layout: format!("layout-{id}"),
         zoomed: false,
+        pinned: false,
     }
 }
 
@@ -46,6 +48,60 @@ fn topology() -> tmux_control::TmuxSnapshot {
         windows: vec![window("@1", 0, true), window("@2", 1, false)],
         panes: vec![pane("%1", "@1", true), pane("%2", "@2", true)],
     }
+}
+
+/// A pin writes a private sidecar rather than touching tmux, so the target
+/// check and the read-back *are* the action: nothing else would notice a pin
+/// written for a window in somebody else's workspace.
+#[test]
+fn a_pin_names_a_live_session_and_only_its_own_window() {
+    let snapshot = topology();
+    let pin = |session_id: &str, window_id: &str| v1::TmuxAction {
+        kind: v1::TmuxActionKind::SetPinned.into(),
+        session_id: session_id.into(),
+        window_id: window_id.into(),
+        pinned: true,
+        ..Default::default()
+    };
+    let validate = |action: &v1::TmuxAction| {
+        validate_targets(v1::TmuxActionKind::SetPinned, action, &snapshot)
+    };
+    // A workspace pin names no window; a tab pin names one of that workspace's.
+    validate(&pin("$1", "")).unwrap();
+    validate(&pin("$1", "@2")).unwrap();
+    assert!(
+        validate(&pin("$9", ""))
+            .unwrap_err()
+            .to_string()
+            .contains("session no longer exists")
+    );
+    assert!(
+        validate(&pin("$2", "@1"))
+            .unwrap_err()
+            .to_string()
+            .contains("not linked")
+    );
+    assert!(validate(&pin("$1", "%1")).is_err());
+
+    // The postcondition reads the flag back off the re-discovered snapshot,
+    // which is the same overlay the app will draw from.
+    let result = v1::TmuxActionResult::default();
+    let postcondition = |action: &v1::TmuxAction, after: &tmux_control::TmuxSnapshot| {
+        action_postcondition(
+            v1::TmuxActionKind::SetPinned,
+            action,
+            &result,
+            &snapshot,
+            after,
+        )
+    };
+    let mut after = snapshot.clone();
+    after.sessions[0].pinned = true;
+    after.windows[1].pinned = true;
+    assert!(postcondition(&pin("$1", ""), &after));
+    assert!(postcondition(&pin("$1", "@2"), &after));
+    assert!(!postcondition(&pin("$1", ""), &snapshot));
+    assert!(!postcondition(&pin("$1", "@2"), &snapshot));
 }
 
 #[test]

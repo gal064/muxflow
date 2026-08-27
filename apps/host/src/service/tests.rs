@@ -470,6 +470,7 @@ fn external_mutation_before_poll_invalidates_cached_action_baseline() {
         window_count: 1,
         attached_clients: 2,
         order: 0,
+        pinned: false,
     });
     let mut cached_with_session = cached.clone();
     cached_with_session.0.sessions.push(tmux_control::Session {
@@ -488,6 +489,7 @@ fn external_mutation_before_poll_invalidates_cached_action_baseline() {
         window_count: 1,
         attached_clients: 0,
         order: 0,
+        pinned: false,
     });
     assert!(baseline_changed(
         Some(&cached),

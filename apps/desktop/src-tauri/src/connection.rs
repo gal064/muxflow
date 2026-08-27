@@ -1026,6 +1026,7 @@ fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
                 window_count: item.window_count,
                 attached_clients: item.attached_clients,
                 order: item.order,
+                pinned: item.pinned,
             })
             .collect(),
         windows: value
@@ -1039,6 +1040,7 @@ fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
                 active: item.active,
                 layout: item.layout,
                 zoomed: item.zoomed,
+                pinned: item.pinned,
             })
             .collect(),
         panes: value

@@ -1,7 +1,9 @@
 use anyhow::{Context, bail};
 use tmux_agent_protocol::v1;
 
-use super::snapshot::{discover_consistent, reorder_session, server_identity, tmux_command};
+use super::snapshot::{
+    discover_consistent, reorder_session, server_identity, set_pinned, tmux_command,
+};
 use super::terminal::validate_tmux_id;
 use command::{
     configure_new_session, configure_new_window, configure_split, escaped_format_literal, run,
@@ -89,6 +91,20 @@ pub(super) fn execute(
             // never mutate tmux user options, names, keys, prefix, or status.
             reorder_session(&identity, &mut before, &action.session_id, action.index)?;
             result.session_id = action.session_id;
+        }
+        v1::TmuxActionKind::SetPinned => {
+            // Presentation, like the session order above: tmux is sent nothing
+            // and the flag lives in a private host sidecar, which is what lets
+            // every client of this server agree about what is pinned.
+            set_pinned(
+                &identity,
+                &mut before,
+                &action.session_id,
+                &action.window_id,
+                action.pinned,
+            )?;
+            result.session_id = action.session_id;
+            result.window_id = action.window_id;
         }
         v1::TmuxActionKind::SelectSession => {
             // Session selection belongs to this app's control client, not a
@@ -339,6 +355,18 @@ fn action_postcondition(
                 .min(u32::try_from(after.sessions.len().saturating_sub(1)).unwrap_or(u32::MAX));
             session(&action.session_id).is_some_and(|item| item.order == expected)
         }
+        // Read back through the same overlay the app reads: the post-action
+        // discovery re-applies the sidecar, so this checks the pin the way the
+        // user will see it rather than the write that was just made.
+        v1::TmuxActionKind::SetPinned => {
+            if action.window_id.is_empty() {
+                session(&action.session_id).is_some_and(|item| item.pinned == action.pinned)
+            } else {
+                window(&action.window_id).is_some_and(|item| {
+                    item.session_id == action.session_id && item.pinned == action.pinned
+                })
+            }
+        }
         v1::TmuxActionKind::SelectSession => session(&action.session_id).is_some(),
         v1::TmuxActionKind::CloseSession => session(&action.session_id).is_none(),
         v1::TmuxActionKind::CreateWindow => window(&result.window_id).is_some_and(|item| {
@@ -499,6 +527,7 @@ fn validate_targets(
             | v1::TmuxActionKind::CloseSession
             | v1::TmuxActionKind::CreateWindow
             | v1::TmuxActionKind::ReorderWindow
+            | v1::TmuxActionKind::SetPinned
     );
     if session_required {
         validate_tmux_id(&action.session_id, '$')?;
@@ -525,6 +554,17 @@ fn validate_targets(
             .any(|item| item.id == action.window_id)
         {
             bail!("window no longer exists");
+        }
+    }
+    // A tab pin names a window inside the session; a workspace pin names none.
+    if kind == v1::TmuxActionKind::SetPinned && !action.window_id.is_empty() {
+        validate_tmux_id(&action.window_id, '@')?;
+        if !snapshot
+            .windows
+            .iter()
+            .any(|item| item.id == action.window_id && item.session_id == action.session_id)
+        {
+            bail!("window is not linked to the requested session");
         }
     }
     if kind == v1::TmuxActionKind::ReorderWindow {

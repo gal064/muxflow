@@ -274,6 +274,9 @@ message Session {
   uint32 window_count = 3;
   uint32 attached_clients = 4;
   uint32 order = 5;
+  // Host-owned presentation flag, overlaid from the private pins sidecar.
+  // tmux knows nothing about it.
+  bool pinned = 6;
 }
 
 message Window {
@@ -285,6 +288,8 @@ message Window {
   string layout = 6;
   bool zoomed = 7;
   uint64 layout_generation = 8;
+  // Host-owned, like Session.pinned.
+  bool pinned = 9;
 }
 
 message Pane {
@@ -330,6 +335,7 @@ enum TmuxActionKind {
   TMUX_ACTION_KIND_RESIZE_PANE_DOWN = 17;
   TMUX_ACTION_KIND_ZOOM_PANE = 18;
   TMUX_ACTION_KIND_CLOSE_PANE = 19;
+  TMUX_ACTION_KIND_SET_PINNED = 20;
 }
 
 message TmuxAction {
@@ -348,8 +354,11 @@ message TmuxAction {
   string target_window_id = 13;
   WindowRelativePosition relative_position = 14;
   // Where a created session's first pane starts. Empty leaves tmux's own
-  // choice alone. NEXT FREE FIELD = 16.
+  // choice alone.
   string directory = 15;
+  // The pin state SET_PINNED writes for session_id, or for window_id inside it
+  // when that is set. NEXT FREE FIELD = 17.
+  bool pinned = 16;
 }
 
 enum WindowRelativePosition {
