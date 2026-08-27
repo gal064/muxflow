@@ -445,6 +445,7 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
             window_count: 1,
             attached_clients: 0,
             order: 0,
+            pinned: false,
         }],
         windows: vec![
             tmux_control::Window {
@@ -455,6 +456,7 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
                 active: true,
                 layout: String::new(),
                 zoomed: false,
+                pinned: false,
             },
             tmux_control::Window {
                 id: "@2".into(),
@@ -464,6 +466,7 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
                 active: false,
                 layout: String::new(),
                 zoomed: false,
+                pinned: false,
             },
         ],
         panes: [("%2", "@1"), ("%3", "@2")]

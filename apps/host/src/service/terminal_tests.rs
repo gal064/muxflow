@@ -139,6 +139,7 @@ fn session_snapshot(attached_clients: u32) -> tmux_control::TmuxSnapshot {
             window_count: 1,
             attached_clients,
             order: 0,
+            pinned: false,
         }],
         windows: Vec::new(),
         panes: Vec::new(),
