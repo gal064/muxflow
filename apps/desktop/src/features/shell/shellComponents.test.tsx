@@ -364,7 +364,7 @@ describe("application shell accessibility contracts", () => {
     expect(html.indexOf('data-agent-index="0"')).toBeLessThan(html.indexOf('data-agent-index="1"'));
     expect(html).toContain('data-agent-icon="codex"');
     expect(html).toContain('data-agent-icon="claude"');
-    expect(html).toContain('<span class="agent-session-label">Plan rollout</span><span class="agent-detail">');
+    expect(html).toContain('<span class="agent-session-label">Plan rollout</span></span><span class="agent-detail">');
   });
 
   /**
@@ -1601,12 +1601,32 @@ describe("pinning by Shift-click", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("draws the pin on a pinned workspace row and names it in the row's label", () => {
-    expect(sidebar()).not.toContain("workspace-pin");
-    const html = sidebar({ rows: [{ ...rows[0], pinned: true }] });
-    expect(html).toContain('<span aria-hidden="true" class="workspace-pin">');
-    // The mark is decorative, so the word has to be in the row's own name.
-    expect(html).toContain(`aria-label="${session.name}, pinned,`);
+  it("splits the workspace list into Pinned and Others, and draws no divider until something is pinned", () => {
+    // Nothing pinned: one plain list, no headings and no pin glyph on any row.
+    const plain = sidebar();
+    expect(plain).not.toContain("list-divider");
+    expect(plain).not.toContain("workspace-pin");
+
+    const other: WorkspaceRowModel = {
+      ...rows[0],
+      session: { ...session, id: "$2", name: "other", order: 1 },
+      active: false,
+    };
+    const divided = sidebar({ rows: [{ ...rows[0], pinned: true }, other] });
+    expect(divided).toContain('<h3 class="list-divider" id="sidebar-workspaces-pinned">Pinned</h3>');
+    expect(divided).toContain('<h3 class="list-divider" id="sidebar-workspaces-others">Others</h3>');
+    // Still no glyph on the row: the divider is what says "pinned" now, and
+    // the word stays in the row's own accessible name for the same reason.
+    expect(divided).not.toContain("workspace-pin");
+    expect(divided).toContain(`aria-label="${session.name}, pinned,`);
+    // The numbers stay flat across both blocks — they are ⌘1–9's addresses.
+    expect(divided.indexOf('data-workspace-index="0"')).toBeLessThan(divided.indexOf('data-workspace-index="1"'));
+    expect(divided).toContain('class="workspace-shortcut-index">2</span>');
+
+    // Everything pinned: one block, and no empty "Others" heading under it.
+    const allPinned = sidebar({ rows: [{ ...rows[0], pinned: true }] });
+    expect(allPinned).toContain(">Pinned</h3>");
+    expect(allPinned).not.toContain(">Others</h3>");
   });
 
   it("says what the workspace filter will show next, and offers the pinned empty state", () => {
@@ -1615,6 +1635,49 @@ describe("pinning by Shift-click", () => {
     expect(sidebar({ pinnedOnly: true, rows: [] }))
       .toContain("No pinned workspaces — Shift-click a workspace to pin it.");
     expect(sidebar({ rows: [] })).toContain("No tmux sessions on this host yet.");
+  });
+
+  it("wraps the agents list's workspace groups in the same two dividers", () => {
+    const rowsFor = (pinnedAt?: number) => buildAgentRows(
+      [agent({ id: "pinned-agent", sessionId: "$1", displayName: "Codex one" }), agent({ id: "loose", sessionId: "$2", displayName: "Codex two" })],
+      (record) => ({
+        workspaceOrder: record.sessionId === "$1" ? 0 : 1,
+        workspaceName: record.sessionId === "$1" ? "api" : "web",
+        hostLabel: "remote-linux",
+        workspacePinnedAt: record.sessionId === "$1" ? pinnedAt : undefined,
+      }),
+      () => true,
+      "workspace",
+    );
+    // No pinned workspace: the groups stand on their own, as they always did.
+    expect(sidebar({ agents: rowsFor() })).not.toContain("list-divider");
+    const html = sidebar({ agents: rowsFor(5) });
+    expect(html).toContain('<h3 class="list-divider" id="agent-block-pinned">Pinned</h3>');
+    expect(html).toContain('<h3 class="list-divider" id="agent-block-others">Others</h3>');
+    expect(html.indexOf("agent-block-pinned")).toBeLessThan(html.indexOf("agent-block-others"));
+  });
+
+  it("puts the pin immediately after the name of an agent whose tab is pinned, in both orderings", () => {
+    for (const agentSort of ["workspace", "status"] as const) {
+      const agents = buildAgentRows(
+        [agent({ id: "on-a-pinned-tab", displayName: "Codex one", windowName: "Ship it" }), agent({ id: "loose", windowId: "@2", paneId: "%2", displayName: "Codex two", windowName: "Later" })],
+        (record) => ({
+          workspaceOrder: 0,
+          workspaceName: "work",
+          hostLabel: "remote-linux",
+          tabPinnedAt: record.id === "on-a-pinned-tab" ? 5 : undefined,
+        }),
+        () => true,
+        agentSort,
+      );
+      const html = sidebar({ agentSort, agents });
+      // One cell: the pin sits against the end of the name, inside the same
+      // flex box, so the detail column keeps the width it had without it.
+      expect(html).toContain('<span class="agent-session-label">Ship it</span><span aria-hidden="true" class="agent-pin">');
+      expect(html).toContain('<span class="agent-session-label">Later</span></span><span class="agent-detail">');
+      // The pinned row leads its block in either ordering.
+      expect(html.indexOf("Ship it")).toBeLessThan(html.indexOf("Later"));
+    }
   });
 
   it("heads the agents list with a Pinned block in priority mode", () => {

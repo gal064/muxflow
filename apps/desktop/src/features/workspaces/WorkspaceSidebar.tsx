@@ -7,7 +7,7 @@ import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
 import { Icon } from "../../ui/Icon";
 import {
   groupAgentRows, groupAgentRowsByStatus, needsAttention, nextSortMode, sortModeLabel,
-  type AgentListRow, type AgentSortMode,
+  type AgentListRow, type AgentSortMode, type AgentWorkspaceGroup,
 } from "../agents/agentsList";
 import { AgentMark } from "../agents/AgentIdentity";
 import { agentSessionLabel } from "../agents/agentLabels";
@@ -224,7 +224,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         <span className="agent-line">
           {/* Icon and state are one object here — see `AgentMark`. */}
           <AgentMark adapterId={row.agent.adapterId} glyphs={props.stateGlyphs} state={row.state} />
-          <span className="agent-session-label">{sessionLabel}</span>
+          {/* Name and pin are one cell so the pin hugs the end of the text
+              rather than floating out at the row's edge, and so the detail
+              column keeps the width it had before any pin existed. */}
+          <span className="agent-name-cell">
+            <span className="agent-session-label">{sessionLabel}</span>
+            {row.location.tabPinnedAt !== undefined
+              && <span aria-hidden="true" className="agent-pin"><Icon name="pin" size={11} /></span>}
+          </span>
           <span className="agent-detail">{detail}</span>
         </span>
       </button>
@@ -281,9 +288,6 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         {props.compactWorkspaces
           ? <WorkspaceStateIndicator glyphs={props.stateGlyphs} row={row} />
           : row.working ? <span aria-hidden="true" className="spinner" /> : <HiddenStateSlot />}
-        {/* After the state slot and before the name, so a pin arriving
-            never moves the indicator every other row keeps in place. */}
-        {row.pinned && <span aria-hidden="true" className="workspace-pin"><Icon name="pin" size={11} /></span>}
         <span className="workspace-name">{row.session.name}</span>
       </span>
       {/* Compact rows trade the per-agent lines for a cluster of
@@ -323,6 +327,47 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
   </div>;
 
+  /**
+   * The two blocks the dividers label, or nothing when no workspace is pinned.
+   *
+   * Each row keeps the flat position it has in `props.rows`, because that
+   * number is the row's address: it is what the digit beside the name says and
+   * what ⌘1–9 selects, and restarting it per block would make the second block
+   * claim shortcuts the first already owns.
+   */
+  const numberedRows = props.rows.map((row, index) => ({ row, index }));
+  const workspaceBlocks = numberedRows.some((entry) => entry.row.pinned)
+    ? [
+      { key: "pinned", label: "Pinned", entries: numberedRows.filter((entry) => entry.row.pinned) },
+      { key: "others", label: "Others", entries: numberedRows.filter((entry) => !entry.row.pinned) },
+    ].filter((block) => block.entries.length > 0)
+    : undefined;
+
+  /**
+   * One workspace's agents under their own heading. The host is in the tooltip
+   * and not on the line: one connection is live at a time on this branch, so
+   * printing it on every heading spent the row's whole right edge repeating a
+   * constant, and the count that replaces it is the thing that differs.
+   */
+  const renderAgentGroup = (group: AgentWorkspaceGroup) => {
+    const headingId = `agent-workspace-${encodeURIComponent(group.key)}`;
+    return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
+      <h3 className="agent-workspace-heading" id={headingId} title={`${group.workspaceName} · ${group.hostLabel}`}>
+        <span>{group.workspaceName}</span>
+        <span aria-hidden="true" className="agent-group-count">{group.rows.length}</span>
+      </h3>
+      {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
+    </section>;
+  };
+
+  /** The workspace-sort groups under the sidebar's two dividers, or neither. */
+  const agentBlocks = groupedAgents.some((group) => group.pinned)
+    ? [
+      { key: "pinned", label: "Pinned", groups: groupedAgents.filter((group) => group.pinned) },
+      { key: "others", label: "Others", groups: groupedAgents.filter((group) => !group.pinned) },
+    ].filter((block) => block.groups.length > 0)
+    : undefined;
+
   return <nav
     aria-label="Workspaces and agents"
     className="sidebar"
@@ -349,7 +394,20 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           ? <p className="quiet-empty">{props.pinnedOnly
             ? "No pinned workspaces — Shift-click a workspace to pin it."
             : "No tmux sessions on this host yet."}</p>
-          : props.rows.map((row, index) => renderWorkspaceRow(row, index))}
+          : workspaceBlocks
+            // A pin used to draw a glyph on the row. It draws a divider now:
+            // one label for the whole block says what a mark repeated down
+            // every pinned row said, and it says it without moving any name.
+            ? workspaceBlocks.map((block) => <section
+              aria-labelledby={`sidebar-workspaces-${block.key}`}
+              className="list-block"
+              key={block.key}
+              role="group"
+            >
+              <h3 className="list-divider" id={`sidebar-workspaces-${block.key}`}>{block.label}</h3>
+              {block.entries.map((entry) => renderWorkspaceRow(entry.row, entry.index))}
+            </section>)
+            : props.rows.map((row, index) => renderWorkspaceRow(row, index))}
       </div>
     </div>
 
@@ -414,21 +472,20 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         {props.agents.length === 0
           ? <p className="quiet-empty">No agents detected.</p>
           : props.agentSort === "workspace"
-            ? groupedAgents.map((group) => {
-              const headingId = `agent-workspace-${encodeURIComponent(group.key)}`;
-              // The host is in the tooltip and not on the line. One connection
-              // is live at a time on this branch, so printing it on every
-              // heading spent the row's whole right edge repeating a constant;
-              // the count that replaces it is the thing that differs. The
-              // tooltip keeps it for the day two connections do share a view.
-              return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
-                <h3 className="agent-workspace-heading" id={headingId} title={`${group.workspaceName} · ${group.hostLabel}`}>
-                  <span>{group.workspaceName}</span>
-                  <span aria-hidden="true" className="agent-group-count">{group.rows.length}</span>
-                </h3>
-                {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
-              </section>;
-            })
+            ? agentBlocks
+              // The sidebar's dividers, over the same per-workspace groups:
+              // a pinned workspace's agents read as one block above the rest
+              // rather than as a mark repeated on every group heading.
+              ? agentBlocks.map((block) => <section
+                aria-labelledby={`agent-block-${block.key}`}
+                className="list-block"
+                key={block.key}
+                role="group"
+              >
+                <h3 className="list-divider" id={`agent-block-${block.key}`}>{block.label}</h3>
+                {block.groups.map(renderAgentGroup)}
+              </section>)
+              : groupedAgents.map(renderAgentGroup)
             // Priority: the same clustering, keyed on what the agent is doing
             // rather than where it lives. The rows already carry the workspace
             // name in their detail line whenever the sort is not by workspace.

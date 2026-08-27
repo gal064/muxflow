@@ -74,6 +74,12 @@ export interface AgentWorkspaceGroup {
   key: string;
   workspaceName: string;
   hostLabel: string;
+  /**
+   * Whether this group's workspace is pinned — which of the two dividers the
+   * group sits under. Read from the rows rather than passed in: every row in a
+   * group shares one workspace, so they all carry the same answer.
+   */
+  pinned: boolean;
   rows: AgentListRow[];
 }
 
@@ -89,7 +95,13 @@ export function groupAgentRows(rows: readonly AgentListRow[]): AgentWorkspaceGro
     const key = [row.agent.hostProfileId, row.agent.serverIdentity, row.agent.sessionId].join("\0");
     const existing = groups.get(key);
     if (existing) existing.rows.push(row);
-    else groups.set(key, { key, workspaceName: row.location.workspaceName, hostLabel, rows: [row] });
+    else groups.set(key, {
+      key,
+      workspaceName: row.location.workspaceName,
+      hostLabel,
+      pinned: row.location.workspacePinnedAt !== undefined,
+      rows: [row],
+    });
   }
   return [...groups.values()];
 }
