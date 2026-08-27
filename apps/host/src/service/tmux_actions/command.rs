@@ -8,20 +8,17 @@ pub(super) const APP_SHELL: &str = "exec \"${SHELL:-/bin/sh}\"";
 
 /// The whole `new-session` argv, built and judged before a session exists.
 ///
-/// Two things ride here that the desktop cannot do for itself. The start
+/// One thing rides here that the desktop cannot do for itself: the start
 /// directory is resolved and checked *on the host that owns the filesystem*,
 /// before `new-session` is spawned, so a path that is missing, relative, or not
 /// a directory refuses the create outright instead of leaving a workspace
-/// sitting in the wrong place. And the first window is named after the
-/// workspace in the same command, so the name arrives with the session rather
-/// than as a second round trip that can fail on its own.
+/// sitting in the wrong place.
 ///
-/// Naming the window has one documented consequence: an explicit `-n` turns
-/// tmux's automatic renaming off for that window, so it keeps the workspace's
-/// name instead of following the running command. The agent naming hook
-/// (`tmux_config`) still renames it when an agent takes the pane over — that
-/// hook is a `rename-window`, not automatic renaming — and a later rename by
-/// the user is likewise preserved.
+/// The name is the session's and only the session's. The first window is left
+/// to tmux, which names it after the command running in it and keeps renaming
+/// it as that changes — an explicit `-n` would have turned that off, and the
+/// name it froze would not have survived anyway: Claude Code and Codex rename
+/// the window through the `pane-title-changed` hook the moment they start.
 pub(super) fn configure_new_session(
     command: &mut std::process::Command,
     action: &v1::TmuxAction,
@@ -45,12 +42,7 @@ pub(super) fn configure_new_session(
     }
     if !action.name.is_empty() {
         validate_name(&action.name)?;
-        // The same escape, and it has to be the same string in both places:
-        // the session and its first window are one name, and a workspace whose
-        // two halves disagree is worse than either.
-        let name = escaped_format_literal(&action.name);
-        command.args(["-s", &name]);
-        command.args(["-n", &name]);
+        command.args(["-s", &escaped_format_literal(&action.name)]);
     }
     command.arg(APP_SHELL);
     Ok(())
@@ -287,10 +279,11 @@ mod tests {
             .collect())
     }
 
-    /// The workspace's name is the first window's name, in the command that
-    /// creates the session — not a rename afterwards that can fail on its own.
+    /// The name names the session. The first window is tmux's to name: an
+    /// explicit `-n` would turn its automatic renaming off, and the agents that
+    /// rename the window a second later would take the name anyway.
     #[test]
-    fn new_session_names_its_first_window_after_the_workspace() {
+    fn new_session_names_the_session_and_leaves_its_window_to_tmux() {
         let action = v1::TmuxAction {
             name: "checkout".into(),
             ..Default::default()
@@ -305,15 +298,13 @@ mod tests {
                 "#{session_id} #{window_id} #{pane_id}",
                 "-s",
                 "checkout",
-                "-n",
-                "checkout",
                 APP_SHELL,
             ]
         );
     }
 
-    /// tmux runs `-c`, `-s` and `-n` through its format parser, so an argument
-    /// is safe from the shell and not from tmux. `#Session-notes` is a legal
+    /// tmux runs `-c` and `-s` through its format parser, so an argument is
+    /// safe from the shell and not from tmux. `#Session-notes` is a legal
     /// directory name that would otherwise start the pane at `` — and `#(…)` is
     /// tmux's run-a-command substitution, which on an SSH profile runs there.
     #[test]
@@ -333,9 +324,7 @@ mod tests {
             after("-c"),
             format!("{}", directory.to_string_lossy()).replace('#', "##")
         );
-        assert_eq!(after("-n"), "build ##(id)");
-        // One name, not two: the session and its first window must not disagree.
-        assert_eq!(after("-s"), after("-n"));
+        assert_eq!(after("-s"), "build ##(id)");
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -445,8 +434,8 @@ mod tests {
         let index = args.iter().position(|argument| argument == "-c").unwrap();
         assert_eq!(args[index + 1], directory.to_string_lossy());
         // Before the name, and long before the shell: the whole argv is one
-        // command, so the directory and the window name land together.
-        assert!(index < args.iter().position(|argument| argument == "-n").unwrap());
+        // command, so the directory and the session name land together.
+        assert!(index < args.iter().position(|argument| argument == "-s").unwrap());
     }
 
     #[test]
