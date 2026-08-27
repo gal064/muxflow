@@ -593,8 +593,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    zero-box guard exists to refuse, and which would cost a full re-layout on the
    way back. `visibility: hidden` keeps the box, keeps the ResizeObserver quiet,
    and takes the covered tab out of the accessibility tree; `inert` takes it out
-   of the tab order and out of reach of the pointer. */
-.app-tab-layer-covered { visibility: hidden; }
+   of the tab order and out of reach of the pointer.
+   `opacity: 0` as well, because `visibility` is inherited and Monaco sets
+   `visibility: visible` on a couple of hundred of its own descendants — the
+   margin, view zones, overlays — so a hidden layer still painted the editor
+   over the terminal. Opacity cannot be overridden from inside. */
+.app-tab-layer-covered { visibility: hidden; opacity: 0; }
 
 /* ── Tab strip ─────────────────────────────────────────────────────────── */
 
