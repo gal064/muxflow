@@ -64,6 +64,7 @@
     "copyOnSelect": true,
     "terminalApplicationClipboard": true,
     "terminalFontSize": 17,
+    "defaultMarkdownView": "preview",
     "windowGeometry": {
       "x": 20,
       "y": 30,
@@ -81,5 +82,42 @@
   "hostSetup": {
     "local": "accepted",
     "ssh-remote-linux": "declined"
+  },
+  "archivedWorkspaces": [
+    {
+      "hostProfileId": "local",
+      "serverIdentity": "server-a",
+      "sessionId": "$2",
+      "sessionName": "parked",
+      "archivedAt": 1700000000000
+    }
+  ],
+  "pinnedWorkspaces": [
+    {
+      "hostProfileId": "local",
+      "serverIdentity": "server-a",
+      "sessionId": "$1",
+      "sessionName": "project",
+      "pinnedAt": 1700000001000
+    }
+  ],
+  "pinnedTabs": [
+    {
+      "hostProfileId": "local",
+      "serverIdentity": "server-a",
+      "sessionId": "$1",
+      "tabId": "@3",
+      "pinnedAt": 1700000002000
+    }
+  ],
+  "workspaceDefaults": {
+    "local": {
+      "directory": "/work/projects",
+      "startupCommand": "git status"
+    },
+    "ssh-remote-linux": {
+      "directory": "/srv/checkout",
+      "startupCommand": "tail -f /var/log/build.log"
+    }
   }
 }

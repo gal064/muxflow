@@ -751,6 +751,24 @@ describe("shell navigation hook cross-kind ownership", () => {
   });
 });
 
+describe("creating a window over a document tab", () => {
+  it("selects the created window in the same workspace and only deselects the document", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => {
+      if (action.kind === "createWindow") return { sessionId: "$1", windowId: "@9", topologyGeneration: 2 };
+      return { topologyGeneration: 3 };
+    });
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+    act(() => harness.navigation.createWindow("$1"));
+    await flush();
+    expect(performAction).toHaveBeenCalledExactlyOnceWith({ kind: "createWindow", sessionId: "$1" });
+    expect(harness.setAppTab).toHaveBeenCalledExactlyOnceWith("$1", undefined);
+    expect(harness.setActiveSessionId).toHaveBeenLastCalledWith("$1");
+    expect(harness.setActiveWindowId).toHaveBeenLastCalledWith("@9");
+    await act(async () => renderer.unmount());
+  });
+});
+
 describe("pending tab placeholder on create", () => {
   it("puts a placeholder up before the create round trip is answered", async () => {
     const created = deferred<TmuxActionResult | undefined>();
@@ -884,6 +902,120 @@ describe("pending tab placeholder on create", () => {
     expect(harness.setPendingTab).toHaveBeenLastCalledWith(
       expect.objectContaining({ sessionId: "$7" }),
     );
+    await act(async () => renderer.unmount());
+  });
+
+  it("sends the configured start directory with the create, and nothing when there is none", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(
+      async () => ({ sessionId: "$7", windowId: "@7", paneId: "%7", topologyGeneration: 2 }),
+    );
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createSession("work", { directory: "~/dev" }));
+    await flush();
+    expect(performAction).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "createSession", name: "work", directory: "~/dev" }),
+    );
+
+    act(() => harness.navigation.createSession("other"));
+    await flush();
+    // Absent rather than empty: the wire mapping is what turns "no preference"
+    // into the empty string the host reads, and it does that in one place.
+    expect(performAction).toHaveBeenLastCalledWith({ kind: "createSession", name: "other" });
+    await act(async () => renderer.unmount());
+  });
+
+  /**
+   * The startup command's one delivery point.
+   *
+   * Everything that makes "exactly once, in the workspace that was created"
+   * true is here: it fires on the ack's own pane id, it fires once, and it does
+   * not fire for a create that failed, for an ack with no pane to type into, or
+   * for an ack that came back after the app moved to another connection.
+   */
+  it("hands the acked pane identity to the create's callback exactly once", async () => {
+    const onCreated = vi.fn();
+    const harness = mountNavigation({
+      performAction: vi.fn<ShellNavigationOptions["performAction"]>(
+        async () => ({ sessionId: "$7", windowId: "@7", paneId: "%7", topologyGeneration: 5 }),
+      ),
+    });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createSession("work", { onCreated }));
+    await flush();
+    await flush();
+
+    expect(onCreated).toHaveBeenCalledOnce();
+    expect(onCreated.mock.calls[0][0]).toEqual({
+      sessionId: "$7", windowId: "@7", paneId: "%7", topologyGeneration: 5,
+    });
+    expect(onCreated.mock.calls[0][1]).toMatchObject({ connectionKey: scope.connectionKey });
+    await act(async () => renderer.unmount());
+  });
+
+  it("never runs the create's callback for a refusal, a throw, or an ack with no pane", async () => {
+    for (const answer of [
+      async () => undefined,
+      async () => { throw new Error("host went away"); },
+      async () => ({ sessionId: "$7", windowId: "@7", topologyGeneration: 5 }),
+    ] satisfies (() => Promise<TmuxActionResult | undefined>)[]) {
+      const onCreated = vi.fn();
+      const harness = mountNavigation({
+        performAction: vi.fn<ShellNavigationOptions["performAction"]>(answer),
+      });
+      const renderer = await harness.renderer();
+      act(() => harness.navigation.createSession("work", { onCreated }));
+      await flush();
+      await flush();
+      expect(onCreated).not.toHaveBeenCalled();
+      await act(async () => renderer.unmount());
+    }
+  });
+
+  /**
+   * A refused create — the host judging the configured start directory is one
+   * way to get one — leaves nothing behind: no placeholder in the strip, and no
+   * workspace selected. The host's own message is what the user sees, and
+   * `performAction` is what surfaces it.
+   */
+  it("leaves no placeholder and no selection behind when the host refuses the create", async () => {
+    const harness = mountNavigation({
+      performAction: vi.fn<ShellNavigationOptions["performAction"]>(async () => {
+        throw new Error("workspace start directory /nope does not exist or is not a directory");
+      }),
+    });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createSession("work", { directory: "/nope" }));
+    await flush();
+    await flush();
+
+    expect(harness.setPendingTab).toHaveBeenLastCalledWith(undefined);
+    expect(harness.setActiveSessionId).not.toHaveBeenCalled();
+    expect(harness.setActiveWindowId).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
+  it("refuses to deliver a create's callback across a connection change", async () => {
+    // The race the ticket names: the ack arrives after the app has moved to a
+    // different host, and the pane id it names belongs to a connection that is
+    // no longer there. Typing into it is typing into someone else's workspace.
+    const created = deferred<TmuxActionResult | undefined>();
+    const onCreated = vi.fn();
+    const harness = mountNavigation({
+      performAction: vi.fn<ShellNavigationOptions["performAction"]>(async () => created.promise),
+    });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createSession("work", { onCreated }));
+    await harness.rerender({ currentScope: { ...scope, connectionEpoch: scope.connectionEpoch + 1 } });
+    created.resolve({ sessionId: "$7", windowId: "@7", paneId: "%7", topologyGeneration: 5 });
+    await flush();
+    await flush();
+
+    expect(onCreated).not.toHaveBeenCalled();
     await act(async () => renderer.unmount());
   });
 });

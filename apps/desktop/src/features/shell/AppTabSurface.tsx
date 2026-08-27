@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
-import { useSanitizedMarkdown } from "../files/markdownPreview";
+import { CLICK_SLOP_PX, selectionHolds, useSanitizedMarkdown } from "../files/markdownPreview";
 import { renderSafeSvg } from "../files/markdown";
 import { useOpenFileTab } from "../files/useOpenFileTab";
 import { IMAGE_PREVIEW_LIMIT_BYTES, isTerminalSingleFileRoot, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
@@ -174,17 +174,75 @@ function EditorToolbar({ canWrite, download, mode, onViewMode, saveState, tab }:
   </header>;
 }
 
-function MarkdownPreview({ source, onStatus }: { source: string; onStatus(message: string): void }) {
-  const html = useSanitizedMarkdown(source);
+/**
+ * The rendered article, which is also ordinary selectable document text.
+ *
+ * Two things used to fight the user's selection. The preview republishes
+ * sanitized HTML whenever the buffer changes, and in split mode the buffer
+ * changes on every keystroke and on every disk reload — replacing the subtree
+ * out from under a live selection collapses it. And the delegated link handler
+ * ran on any click, so releasing a drag that happened to end inside a link
+ * swallowed the gesture and opened the link instead of leaving the text
+ * selected. The gesture is tracked here and handed to the hook, which parks a
+ * finished sanitize until the selection is gone.
+ */
+export function MarkdownPreview({ source, onStatus }: { source: string; onStatus(message: string): void }) {
+  const article = useRef<HTMLElement>(null);
+  const [selecting, setSelecting] = useState(false);
+  // Where the press landed, so a release far from it reads as a drag.
+  const pressedAt = useRef<{ x: number; y: number }>(undefined);
+  const html = useSanitizedMarkdown(source, { held: selecting, container: article });
+  // React 19 compares `dangerouslySetInnerHTML` by reference and assigns
+  // `innerHTML` whenever the object differs, without looking at the string. A
+  // fresh literal per render therefore rebuilds the whole article on any
+  // re-render at all — including the one this component does when the gesture
+  // ends, at exactly the moment the drag's selection is standing in it. Holding
+  // the sanitize back only helps if the wrapper is stable too.
+  const inner = useMemo(() => ({ __html: html }), [html]);
   const [externalUrl, setExternalUrl] = useState<string>();
-  return <><article className="markdown-preview" onClick={(event) => {
+
+  // On the document, not the article: a drag that leaves the preview still ends
+  // somewhere, and a gesture whose end is never seen would hold the preview
+  // frozen for the rest of the session. `blur` is the backstop for an
+  // interruption that takes the window without delivering a pointer event.
+  useEffect(() => {
+    if (!selecting) return;
+    const end = () => setSelecting(false);
+    document.addEventListener("pointerup", end);
+    document.addEventListener("pointercancel", end);
+    window.addEventListener("blur", end);
+    return () => {
+      document.removeEventListener("pointerup", end);
+      document.removeEventListener("pointercancel", end);
+      window.removeEventListener("blur", end);
+    };
+  }, [selecting]);
+
+  return <><article className="markdown-preview" ref={article} onPointerDown={(event) => {
+    if (event.button !== 0) return;
+    pressedAt.current = { x: event.clientX, y: event.clientY };
+    setSelecting(true);
+  }} onClick={(event) => {
+    const pressed = pressedAt.current;
+    pressedAt.current = undefined;
     const anchor = (event.target as HTMLElement).closest("a");
     const href = anchor?.getAttribute("href");
     if (!href) return;
+    // Unconditional, and before the gesture tests below. A click's default
+    // action is activation, not selection — the selection was settled back at
+    // pointerup — so suppressing it costs the drag nothing, while letting a
+    // relative href through navigates the whole webview off the app and takes
+    // every tab, terminal and unsaved buffer with it.
     event.preventDefault();
+    // A release that travelled is a selection gesture, even when it ends on a
+    // link, and a selection still standing at click time is one the user just
+    // made. `detail` is 0 for a keyboard activation, which has no coordinates
+    // to compare and must not be measured against a stale press.
+    if (event.detail > 0 && pressed && Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > CLICK_SLOP_PX) return;
+    if (selectionHolds(article.current)) return;
     if (/^https?:/i.test(href)) setExternalUrl(href);
     else onStatus(`Markdown link: ${href}`);
-  }} dangerouslySetInnerHTML={{ __html: html }} />
+  }} dangerouslySetInnerHTML={inner} />
   {externalUrl && <ConfirmationDialog
     confirmLabel="Open link"
     destructive={false}

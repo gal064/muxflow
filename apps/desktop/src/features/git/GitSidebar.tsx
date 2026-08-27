@@ -23,7 +23,12 @@ interface Props {
   scope?: FileWorkspaceScope;
   root?: ActiveRoot;
   disabled: boolean;
-  onOpenDiff(entry: GitStatusEntry, target: GitDiffTarget): void;
+  /**
+   * `preview` is a single click's transient diff, closed by the next
+   * navigation; a double-click, the context menu and the palette open it
+   * pinned.
+   */
+  onOpenDiff(entry: GitStatusEntry, target: GitDiffTarget, options: { preview: boolean }): void;
   onMessage(message: string): void;
 }
 
@@ -97,8 +102,8 @@ export function GitSidebar(props: Props) {
   // during render, so a render React discards cannot leave these handlers
   // acting on props that were never committed.
   const latest = useCommittedRef({ ...props, unavailable });
-  const openDiff = useCallback((entry: GitStatusEntry, target: GitDiffTarget) => {
-    latest.current.onOpenDiff(entry, target);
+  const openDiff = useCallback((entry: GitStatusEntry, target: GitDiffTarget, options: { preview: boolean }) => {
+    latest.current.onOpenDiff(entry, target, options);
   }, []);
   const focusRow = useCallback((entry: GitStatusEntry, target: GitDiffTarget) => setFocusedRow(
     // The palette only needs to know which row is selected. Re-selecting the
@@ -141,6 +146,16 @@ export function GitSidebar(props: Props) {
     latest.current.onMessage(gitResultMessage(result, result.outcome === "applied" ? "Commit created." : "Commit failed."));
     return result;
   }, []);
+  // Push is reachable whenever the repository is, not only when something is
+  // staged: the whole point of the button is the commit that already happened.
+  const push = useCallback(async () => {
+    const { git } = latest.current;
+    const status = git.status;
+    if (!status || !git.handle || latest.current.unavailable) throw new Error("Git is not available right now.");
+    const result = await git.handle.push(status.repository.id, status.generation);
+    latest.current.onMessage(gitResultMessage(result, result.outcome === "applied" ? `Pushed to ${result.pushTarget || "the upstream"}.` : "Push failed."));
+    return result;
+  }, []);
 
   // Git has no tree cursor to borrow, so the row the palette means is the last
   // one focused or right-clicked. It is stored by path rather than by object:
@@ -164,7 +179,7 @@ export function GitSidebar(props: Props) {
   const committedRowCommand = (commandId: CommandId) => {
     if (!focusedEntry || !focusedRow) return;
     switch (commandId) {
-      case "git.openDiff": props.onOpenDiff(focusedEntry, focusedRow.target); return;
+      case "git.openDiff": props.onOpenDiff(focusedEntry, focusedRow.target, { preview: false }); return;
       case "git.stage": void mutateFile(focusedEntry, "unstaged", "stageFile"); return;
       case "git.unstage": void mutateFile(focusedEntry, "staged", "unstageFile"); return;
       case "git.discard":
@@ -217,13 +232,21 @@ export function GitSidebar(props: Props) {
       <GitGroup title="Untracked" entries={groups.untracked} target="unstaged" mutable={!unavailable} pending={pending} onDiscard={discardRow} onDrag={dragEntry} onFocusEntry={focusRow} onOpen={openDiff} onMenu={openMenu} onStage={stageRow} onUnstage={unstageRow} />
       {props.git.status.entries.length === 0 && <p className="quiet-empty">Working tree clean.</p>}
     </div>
-    {/* The commit form is not permanent chrome any more: it exists exactly when
-        there is something staged to commit. */}
-    {stagedCount > 0 && <GitCommitForm commit={commit} disabled={unavailable} stagedCount={stagedCount} />}
+    {/* Permanent chrome again, for two reasons: Push has to be reachable after
+        the commit that emptied the staged group, and unmounting the form during
+        a transient resynchronization would throw away a half-typed commit
+        message. `disabled` is what a lost connection takes away, not the form. */}
+    <GitCommitForm
+      canPush={!unavailable && !props.git.status.repository.initial}
+      commit={commit}
+      disabled={unavailable}
+      onPush={push}
+      stagedCount={stagedCount}
+    />
     {menu && <ContextMenu
       anchor={menu.anchor}
       items={[
-        { id: "open", label: "Open diff", run: () => props.onOpenDiff(menu.entry, menu.target) },
+        { id: "open", label: "Open diff", run: () => props.onOpenDiff(menu.entry, menu.target, { preview: false }) },
         ...(!unavailable && !menu.entry.conflicted && props.scope && props.root && props.git.status ? [
           menu.target === "staged"
             ? { id: "unstage", label: "Unstage", disabled: menu.entry.submodule, run: () => void mutateFile(menu.entry, "staged", "unstageFile") }
@@ -264,7 +287,7 @@ const GitGroup = memo(function GitGroup(props: {
   title: string; entries: GitStatusEntry[]; target: GitDiffTarget; pending?: ReadonlyMap<string, string>;
   /** Whether this repository can be written to at all; a row decides the rest. */
   mutable?: boolean;
-  onOpen(entry: GitStatusEntry, target: GitDiffTarget): void;
+  onOpen(entry: GitStatusEntry, target: GitDiffTarget, options: { preview: boolean }): void;
   onFocusEntry(entry: GitStatusEntry, target: GitDiffTarget): void;
   onMenu?(entry: GitStatusEntry, target: GitDiffTarget, anchor: ContextMenuAnchor): void;
   onStage?(entry: GitStatusEntry): void;
@@ -298,7 +321,8 @@ const GitGroup = memo(function GitGroup(props: {
             draggable={Boolean(props.onDrag && entry.absolutePath)}
             onDragStart={(event) => entry.absolutePath && props.onDrag?.(entry, event.dataTransfer)}
             onDragEnd={(event) => finishInternalPathDrag(event.dataTransfer.dropEffect !== "none")}
-            onClick={() => props.onOpen(entry, props.target)}
+            onClick={() => props.onOpen(entry, props.target, { preview: true })}
+            onDoubleClick={() => props.onOpen(entry, props.target, { preview: false })}
             // What "the selected change" means for the palette and for a bound
             // shortcut: whichever row the keyboard or the pointer last landed on.
             // Both are needed — macOS WebKit does not focus a button on click.

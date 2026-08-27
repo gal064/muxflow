@@ -30,6 +30,8 @@ interface AppAgentControllerOptions {
   currentHostProfileId: string;
   decision?: HostSetupDecision;
   decisionsArePersistable: boolean;
+  /** Archived workspaces: their agents are filtered out of the runtime at the source. */
+  excludedSessionIds?: ReadonlySet<string>;
   hostCanMutate: boolean;
   /** False while another host-level consent question owns the modal lane. */
   hostSetupAllowed?: boolean;
@@ -103,6 +105,7 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
     focus,
     topologyWindowIds: options.snapshot.windows.map((window) => window.id),
     soundPreferences: options.soundPreferences,
+    excludedSessionIds: options.excludedSessionIds,
     onStatus: options.setStatus,
   });
   const host = useMemo(() => {

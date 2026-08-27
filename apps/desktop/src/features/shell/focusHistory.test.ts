@@ -4,12 +4,15 @@ import {
   canGoForward,
   emptyFocusHistory,
   FOCUS_HISTORY_LIMIT,
+  hasValidStep,
+  nearestValidBack,
   pruneFocusHistory,
   stepFocus,
+  stepFocusToValid,
   visitFocus,
 } from "./focusHistory";
 
-const at = (sessionId: string, windowId?: string) => ({ sessionId, windowId });
+const at = (sessionId: string, windowId?: string, appTabId?: string) => ({ sessionId, windowId, appTabId });
 
 describe("focus history", () => {
   it("goes back and forward to exactly where it was", () => {
@@ -52,6 +55,39 @@ describe("focus history", () => {
     expect(pruned.entries.map((entry) => entry.sessionId)).toEqual(["$2", "$3"]);
     // The cursor still points at the same place it did before the prune.
     expect(pruned.entries[pruned.cursor]).toEqual(at("$2"));
+  });
+
+  it("tells a document tab apart from the terminal it was opened over", () => {
+    let history = visitFocus(emptyFocusHistory, at("$1", "@1"));
+    history = visitFocus(history, at("$1", "@1", "notes"));
+    expect(history.entries).toHaveLength(2);
+    expect(visitFocus(history, at("$1", "@1", "notes"))).toBe(history);
+    expect(stepFocus(history, "back").point).toEqual(at("$1", "@1"));
+  });
+
+  it("steps over entries that no longer exist instead of stopping on them", () => {
+    let history = emptyFocusHistory;
+    for (const point of [at("$1", "@1"), at("$1", "@1", "gone"), at("$1", "@1", "diff"), at("$2", "@2")]) history = visitFocus(history, point);
+    const exists = (point: { appTabId?: string }) => point.appTabId !== "gone" && point.appTabId !== "diff";
+    expect(hasValidStep(history, "back", exists)).toBe(true);
+    expect(hasValidStep(history, "forward", exists)).toBe(false);
+    const back = stepFocusToValid(history, "back", exists);
+    expect(back.point).toEqual(at("$1", "@1"));
+    expect(back.history.cursor).toBe(0);
+    expect(hasValidStep(back.history, "forward", exists)).toBe(true);
+    expect(stepFocusToValid(back.history, "forward", exists).point).toEqual(at("$2", "@2"));
+    // Nothing valid in that direction leaves the history where it was.
+    expect(stepFocusToValid(back.history, "back", exists)).toEqual({ history: back.history });
+    expect(hasValidStep(history, "back", () => false)).toBe(false);
+  });
+
+  it("finds where a closing tab should hand focus, never to itself", () => {
+    let history = emptyFocusHistory;
+    for (const point of [at("$1", "@1"), at("$1", "@1", "notes"), at("$1", "@2"), at("$1", "@2", "notes")]) history = visitFocus(history, point);
+    expect(nearestValidBack(history, () => true, { appTabId: "notes" })).toEqual({ index: 2, point: at("$1", "@2") });
+    expect(nearestValidBack(history, (point) => point.windowId !== "@2", { appTabId: "notes" })).toEqual({ index: 0, point: at("$1", "@1") });
+    expect(nearestValidBack(history, () => false, { appTabId: "notes" })).toBeUndefined();
+    expect(nearestValidBack(visitFocus(emptyFocusHistory, at("$1", "@1", "notes")), () => true, { appTabId: "notes" })).toBeUndefined();
   });
 
   it("has nowhere to go when it is empty", () => {

@@ -5,6 +5,7 @@ import { createPaintTicket } from "../../perf/paintTicket";
 import { keyboardEventIsComposing, type Platform } from "../../commands/registry";
 import type { Pane } from "../../app/types";
 import type { TerminalEventHub } from "./TerminalEventHub";
+import { openExternalUrl } from "./openExternalUrl";
 import {
   XtermRenderer,
   type TerminalInput,
@@ -439,9 +440,9 @@ export function TerminalPane({
         if (message) diagnosticRef.current?.(message);
       },
       onOpenLink: (url) => {
-        if (window.confirm(`Open this external link?\n\n${url}`)) {
-          window.open(url, "_blank", "noopener,noreferrer");
-        }
+        openExternalUrl(url).catch((error) => {
+          diagnosticRef.current?.(`Could not open the link in your browser: ${String(error)}`);
+        });
       },
       onOpenFilePath: (path) => openFilePathRef.current?.(pane.id, path),
       // Which modifier opens one. `currentPlatform()` resolves before the first

@@ -2,7 +2,7 @@ import { keyboardEventIsComposing, type Platform } from "../../commands/registry
 import type { TerminalRenderer } from "./TerminalRenderer";
 
 type TerminalKeyEvent = Pick<KeyboardEvent,
-  "altKey" | "ctrlKey" | "isComposing" | "key" | "keyCode" | "metaKey" | "shiftKey"
+  "altKey" | "code" | "ctrlKey" | "isComposing" | "key" | "keyCode" | "metaKey" | "shiftKey"
 >;
 
 export interface TerminalKeyContext {
@@ -12,16 +12,27 @@ export interface TerminalKeyContext {
   platform: Platform;
 }
 
-/** Returns bytes for the two terminal shortcuts Muxflow owns, or nothing. */
+/** Returns bytes for the terminal shortcuts Muxflow owns, or nothing. */
 export function translateTerminalKey(event: TerminalKeyEvent, context: TerminalKeyContext): string | undefined {
   if (keyboardEventIsComposing(event)) return undefined;
-  const command = context.currentCommand.split("/").at(-1)?.toLowerCase() ?? "";
-  // tmux's current command is foreground evidence. Agent records are not:
-  // process-tree discovery deliberately keeps suspended/background agents
-  // present, so using a record here can steal Shift-Enter from the next app.
-  if (command === "codex" && event.key === "Enter" && event.shiftKey
-    && !event.metaKey && !event.ctrlKey && !event.altKey) {
-    return "\n";
+  // xterm.js 6 has no Ctrl+/ mapping; legacy terminals alias Ctrl+/ and Ctrl+_
+  // to 0x1f (US). Ctrl+_ is left to xterm, which already emits 0x1f.
+  //
+  // `code` is only a fallback for a key that reports no character at all:
+  // `code` is US-positional, and on a QWERTZ layout `Slash` is the `-`/`_`
+  // key, so matching it outright would send 0x1f for an unrelated Ctrl+-.
+  const slashKey = event.key === "/" || (event.key.length !== 1 && event.code === "Slash");
+  if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && slashKey) {
+    return "\u001f";
+  }
+  // Shift-Enter is what Ghostty sends for it: the CSI-u encoding, for every
+  // app. Both agent composers read it as "insert a newline"; xterm.js on its
+  // own sends a bare carriage return, which they read as submit. A
+  // Control-J special case keyed on tmux's foreground command being `codex`
+  // used to cover one composer and missed Claude Code, whose process name is
+  // `claude` or `node` depending on how it was installed.
+  if (event.key === "Enter" && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    return "\u001b[13;2u";
   }
   // Command-Arrow always means line start/end; the screen only picks the
   // encoding. Normal-screen shells and wrappers read the conventional readline

@@ -38,8 +38,15 @@ type ControllerArguments = {
   agentClient: TauriAgentClient;
   fileClient: TauriFileWorkspaceClient;
   gitClient: TauriGitWorkspaceClient;
-  setStatus: Dispatch<SetStateAction<string>>;
+  setStatus: (status: string) => void;
   terminalApplicationClipboardEnabled?: boolean;
+  /**
+   * Sessions a snapshot must not select — the workspaces archived on that
+   * host and server. Asked at snapshot time with the snapshot's own server
+   * identity, because the archived set for the previous server is the wrong
+   * set the moment the server is replaced.
+   */
+  excludedSessionIds?(hostProfileId: string, serverIdentity: string): ReadonlySet<string>;
   /**
    * Called when an SSH bridge dies with a handshake failure, which is the one
    * connection error that is usually not a connection problem at all: a host
@@ -63,6 +70,7 @@ export function useAppConnectionController({
   gitClient,
   setStatus,
   terminalApplicationClipboardEnabled = false,
+  excludedSessionIds,
   onHandshakeFailure,
   onConnectionStateChanged,
 }: ControllerArguments) {
@@ -75,6 +83,8 @@ export function useAppConnectionController({
   connectionStateChangedRef.current = onConnectionStateChanged;
   const terminalApplicationClipboardEnabledRef = useRef(terminalApplicationClipboardEnabled);
   terminalApplicationClipboardEnabledRef.current = terminalApplicationClipboardEnabled;
+  const excludedSessionIdsRef = useRef(excludedSessionIds);
+  excludedSessionIdsRef.current = excludedSessionIds;
   const [hostState, dispatchHost] = useReducer(connectionReducer, initialHostState);
   const snapshot = useMemo(() => denormalizeSnapshot(hostState), [hostState]);
   const snapshotRef = useRef(snapshot);
@@ -477,6 +487,7 @@ export function useAppConnectionController({
             event.snapshot.sessions,
             current,
             snapshotRef.current.sessions.find((session) => session.id === current)?.name,
+            excludedSessionIdsRef.current?.(hostProfileId(connection), event.serverIdentity),
           )?.id);
           setStatus("Live");
         } else if (event.kind === "fileService") {

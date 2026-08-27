@@ -2,6 +2,8 @@ import type { ConnectionSpec } from "../../app/types";
 import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
 
 export type AppTabKind = "file" | "markdown" | "gitDiff";
+/** How a Markdown tab is drawn; also the shape of the persisted default. */
+export type AppTabViewMode = "source" | "preview" | "split";
 /** The two halves of the right panel; they share one 300px surface. */
 export type PanelSurface = "files" | "git";
 
@@ -19,6 +21,19 @@ export const AGENTS_SECTION_MIN_RATIO = 0.15;
 export const AGENTS_SECTION_MAX_RATIO = 0.75;
 export const TERMINAL_FONT_SIZE_MIN = 10;
 export const TERMINAL_FONT_SIZE_MAX = 20;
+/** The same ceiling `hostSetup` uses: one entry per host profile, not per whim. */
+export const MAX_WORKSPACE_DEFAULT_HOSTS = 1_024;
+/**
+ * The longest a workspace default may be, in characters.
+ *
+ * Enforced on *this* side because the storage side's limit is a refusal of the
+ * whole save: `save_app_state` validates every text field against 16 KiB and
+ * returns an error for the entire state, so one over-long paste into a settings
+ * field would stop open tabs, workspace selection, shortcut overrides and window
+ * geometry from persisting at all. Well under that ceiling even at four bytes
+ * per character, and far past any real path or command.
+ */
+export const MAX_WORKSPACE_DEFAULT_LENGTH = 2_048;
 
 export interface AppOwnedTab {
   id: string;
@@ -41,7 +56,7 @@ export interface AppOwnedTab {
    * boundary, and an absent optional is what every other optional here does.
    */
   preview?: boolean;
-  viewMode?: "source" | "preview" | "split";
+  viewMode?: AppTabViewMode;
   /** Git diff tabs retain opaque host path and repository identity. */
   gitRepositoryId?: string;
   gitPath?: string;
@@ -58,6 +73,62 @@ export interface WorkspaceUiRecord {
   sessionName: string;
   selectedAppTabId?: string;
 }
+
+/**
+ * A workspace the user has put away without closing it.
+ *
+ * Keyed the way `WorkspaceUiRecord` is — host, tmux server, session id — so a
+ * record can only ever hide the exact session it was written for. The tmux
+ * session itself is untouched: archiving is a view decision, not a tmux one.
+ */
+export interface ArchivedWorkspaceRecord {
+  hostProfileId: string;
+  serverIdentity: string;
+  sessionId: string;
+  sessionName: string;
+  archivedAt: number;
+}
+
+/** The most archived records kept; the oldest go first past this. */
+export const MAX_ARCHIVED_WORKSPACES = 200;
+
+/**
+ * A workspace the user has pinned to the top of the sidebar.
+ *
+ * Keyed exactly like {@link ArchivedWorkspaceRecord} — host, tmux server,
+ * session id — for the same reason: a record can only ever act on the session
+ * it was written for, and a session id reused by a different server must not
+ * inherit somebody else's pin. `pinnedAt` is the sort key of the leading block,
+ * ascending, so the first thing pinned stays first.
+ */
+export interface PinnedWorkspaceRecord {
+  hostProfileId: string;
+  serverIdentity: string;
+  sessionId: string;
+  sessionName: string;
+  pinnedAt: number;
+}
+
+/**
+ * A tab the user has pinned to the front of one workspace's strip.
+ *
+ * `tabId` is the tmux window id (`@N`) for a terminal tab and the app-owned
+ * tab id for a document tab. The two id spaces never collide — tmux window ids
+ * always start with `@` — so one record type covers both kinds of tab, and the
+ * workspace key is what keeps a window id from acting on another workspace.
+ */
+export interface PinnedTabRecord {
+  hostProfileId: string;
+  serverIdentity: string;
+  sessionId: string;
+  tabId: string;
+  pinnedAt: number;
+}
+
+/** The most pinned workspaces kept; the oldest pin goes first past this. */
+export const MAX_PINNED_WORKSPACES = 200;
+/** The same ceiling for tabs, for the same reason: a list nobody could read. */
+export const MAX_PINNED_TABS = 200;
 
 export interface ShellState {
   /** Which half of the right panel is showing when it is open. */
@@ -91,6 +162,14 @@ export interface ShellState {
   terminalApplicationClipboard: boolean;
   /** Terminal text size in integer CSS pixels. */
   terminalFontSize: number;
+  /**
+   * The mode a *newly opened* Markdown tab starts in.
+   *
+   * Read once, when the tab is created. A tab that is already open keeps
+   * whatever mode it is in, and switching one tab's mode never rewrites this:
+   * the setting is the starting point, not a mirror of the last tab touched.
+   */
+  defaultMarkdownView: AppTabViewMode;
   /** Physical geometry plus the capture scale, used to preserve logical size across monitors. */
   windowGeometry?: { x: number; y: number; width: number; height: number; maximized: boolean; scaleFactorMilli?: number };
 }
@@ -106,6 +185,25 @@ export interface ShellState {
  */
 export type HostSetupDecision = "accepted" | "declined";
 
+/**
+ * What a *new* workspace on one host starts with.
+ *
+ * Per host profile, because a path is a statement about one machine's
+ * filesystem and a startup command is a statement about one machine's shell.
+ * A laptop's `~/dev` says nothing about a build box, and applying either
+ * across hosts is how a create fails on a directory that only exists
+ * somewhere else.
+ *
+ * Both fields are absent rather than empty when unset, and absent means "keep
+ * doing what this app did before the setting existed".
+ */
+export interface WorkspaceDefaults {
+  /** Where the first pane starts. Absent: wherever tmux would have started it. */
+  directory?: string;
+  /** Shell text sent to the first pane once, right after the create. Absent: nothing is sent. */
+  startupCommand?: string;
+}
+
 export interface PersistedAppState {
   schemaVersion: 1;
   appTabs: AppOwnedTab[];
@@ -113,6 +211,10 @@ export interface PersistedAppState {
   shell: ShellState;
   commands: { shortcutOverrides: Record<string, string | null> };
   hostSetup: Record<string, HostSetupDecision>;
+  archivedWorkspaces: ArchivedWorkspaceRecord[];
+  pinnedWorkspaces: PinnedWorkspaceRecord[];
+  pinnedTabs: PinnedTabRecord[];
+  workspaceDefaults: Record<string, WorkspaceDefaults>;
 }
 
 export const defaultShellState: ShellState = {
@@ -129,6 +231,7 @@ export const defaultShellState: ShellState = {
   copyOnSelect: false,
   terminalApplicationClipboard: false,
   terminalFontSize: 13,
+  defaultMarkdownView: "split",
 };
 
 export const defaultAppState: PersistedAppState = {
@@ -138,6 +241,10 @@ export const defaultAppState: PersistedAppState = {
   shell: defaultShellState,
   commands: { shortcutOverrides: {} },
   hostSetup: {},
+  archivedWorkspaces: [],
+  pinnedWorkspaces: [],
+  pinnedTabs: [],
+  workspaceDefaults: {},
 };
 
 export function hostProfileId(connection: ConnectionSpec): string {
@@ -175,12 +282,162 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       copyOnSelect: Boolean(shell?.copyOnSelect),
       terminalApplicationClipboard: Boolean(shell?.terminalApplicationClipboard),
       terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
+      defaultMarkdownView: normalizedViewMode(shell?.defaultMarkdownView),
       ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
         ? { windowGeometry: shell.windowGeometry } : {}),
     },
     commands: { shortcutOverrides: normalizeShortcutRecord(candidate.commands?.shortcutOverrides) },
     hostSetup: normalizeHostSetup(candidate.hostSetup),
+    archivedWorkspaces: normalizeArchivedWorkspaces(candidate.archivedWorkspaces),
+    pinnedWorkspaces: normalizePinnedWorkspaces(candidate.pinnedWorkspaces),
+    pinnedTabs: normalizePinnedTabs(candidate.pinnedTabs),
+    workspaceDefaults: normalizeWorkspaceDefaults(candidate.workspaceDefaults),
   };
+}
+
+/** An unrecognised mode is the default, not a tab that renders nothing. */
+function normalizedViewMode(value: unknown): AppTabViewMode {
+  return value === "source" || value === "preview" || value === "split" ? value : defaultShellState.defaultMarkdownView;
+}
+
+/**
+ * The per-host workspace defaults, with everything unusable dropped.
+ *
+ * An empty or whitespace-only string is not a value here: it is what the field
+ * looks like when the user cleared it, and storing it would make "unset" and
+ * "set to nothing" two different states the create path would have to tell
+ * apart. The entry cap matches `hostSetup` for the same reason — a map keyed
+ * by host profile has no business being unbounded.
+ */
+function normalizeWorkspaceDefaults(value: unknown): Record<string, WorkspaceDefaults> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries: [string, WorkspaceDefaults][] = [];
+  for (const [host, defaults] of Object.entries(value)) {
+    if (entries.length >= MAX_WORKSPACE_DEFAULT_HOSTS) break;
+    // An unusable entry is skipped, never a reason to stop reading: `""` is a
+    // legal JSON key, and abandoning the loop on one would silently drop every
+    // host after it.
+    if (!host || !defaults || typeof defaults !== "object" || Array.isArray(defaults)) continue;
+    const record = defaults as Partial<WorkspaceDefaults>;
+    const directory = usableWorkspaceDefault(record.directory);
+    const startupCommand = usableWorkspaceDefault(record.startupCommand);
+    const entry: WorkspaceDefaults = {
+      ...(directory ? { directory } : {}),
+      ...(startupCommand ? { startupCommand } : {}),
+    };
+    if (entry.directory || entry.startupCommand) entries.push([host, entry]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function usableDefault(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/** One workspace default, trimmed and bounded, or `undefined` when there is none. */
+export function usableWorkspaceDefault(value: unknown): string | undefined {
+  if (!usableDefault(value)) return undefined;
+  return value.trim().slice(0, MAX_WORKSPACE_DEFAULT_LENGTH);
+}
+
+/**
+ * Only well-formed records, one per (host, server, session), and at most
+ * {@link MAX_ARCHIVED_WORKSPACES} of them, the oldest going first. A malformed
+ * record is dropped rather than repaired: one with no session id could hide
+ * nothing, and one with no server identity could hide the wrong thing.
+ */
+export function normalizeArchivedWorkspaces(value: unknown): ArchivedWorkspaceRecord[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const records: ArchivedWorkspaceRecord[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.hostProfileId !== "string" || !record.hostProfileId
+      || typeof record.serverIdentity !== "string" || !record.serverIdentity
+      || typeof record.sessionId !== "string" || !record.sessionId
+      || typeof record.sessionName !== "string"
+      || typeof record.archivedAt !== "number" || !Number.isFinite(record.archivedAt)) continue;
+    const key = `${record.hostProfileId}\0${record.serverIdentity}\0${record.sessionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    records.push({
+      hostProfileId: record.hostProfileId,
+      serverIdentity: record.serverIdentity,
+      sessionId: record.sessionId,
+      sessionName: record.sessionName,
+      archivedAt: record.archivedAt,
+    });
+  }
+  if (records.length <= MAX_ARCHIVED_WORKSPACES) return records;
+  return [...records].sort((left, right) => right.archivedAt - left.archivedAt).slice(0, MAX_ARCHIVED_WORKSPACES);
+}
+
+/**
+ * The fields every pin record shares, read defensively.
+ *
+ * A record missing any of them is dropped rather than repaired: a pin with no
+ * server identity would order a workspace on the wrong tmux server, and one
+ * with no timestamp has no place in a block whose whole order is the timestamp.
+ */
+function pinScope(value: unknown): { hostProfileId: string; serverIdentity: string; sessionId: string; pinnedAt: number } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.hostProfileId !== "string" || !record.hostProfileId
+    || typeof record.serverIdentity !== "string" || !record.serverIdentity
+    || typeof record.sessionId !== "string" || !record.sessionId
+    || typeof record.pinnedAt !== "number" || !Number.isFinite(record.pinnedAt)) return undefined;
+  return {
+    hostProfileId: record.hostProfileId,
+    serverIdentity: record.serverIdentity,
+    sessionId: record.sessionId,
+    pinnedAt: record.pinnedAt,
+  };
+}
+
+/**
+ * Well-formed pins only, one per (host, server, session), newest kept within
+ * the cap — the archive's rule, so the pin that was just made always survives
+ * the truncation that its own arrival caused.
+ */
+export function normalizePinnedWorkspaces(value: unknown): PinnedWorkspaceRecord[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const records: PinnedWorkspaceRecord[] = [];
+  for (const item of value) {
+    const scope = pinScope(item);
+    if (!scope) continue;
+    const sessionName = (item as Record<string, unknown>).sessionName;
+    if (typeof sessionName !== "string") continue;
+    const key = `${scope.hostProfileId}\0${scope.serverIdentity}\0${scope.sessionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    records.push({ ...scope, sessionName });
+  }
+  return cappedPins(records, MAX_PINNED_WORKSPACES);
+}
+
+/** The same rules for tabs, keyed on the tab as well as its workspace. */
+export function normalizePinnedTabs(value: unknown): PinnedTabRecord[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const records: PinnedTabRecord[] = [];
+  for (const item of value) {
+    const scope = pinScope(item);
+    if (!scope) continue;
+    const tabId = (item as Record<string, unknown>).tabId;
+    if (typeof tabId !== "string" || !tabId) continue;
+    const key = `${scope.hostProfileId}\0${scope.serverIdentity}\0${scope.sessionId}\0${tabId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    records.push({ ...scope, tabId });
+  }
+  return cappedPins(records, MAX_PINNED_TABS);
+}
+
+function cappedPins<T extends { pinnedAt: number }>(records: T[], cap: number): T[] {
+  if (records.length <= cap) return records;
+  return [...records].sort((left, right) => right.pinnedAt - left.pinnedAt).slice(0, cap);
 }
 
 /**

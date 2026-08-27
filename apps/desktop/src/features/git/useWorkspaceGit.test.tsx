@@ -16,7 +16,7 @@ describe("useWorkspaceGit", () => {
     const client: GitWorkspaceClient = {
       status: vi.fn(),
       watch: vi.fn(async (activeScope, active) => ({ watchId: `watch-${active.token}`, rootToken: active.token, connectionEpoch: activeScope.terminalEpoch, status: snapshot(active.token, "1"), release: vi.fn() })),
-      diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
+      diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(), push: vi.fn(),
       subscribe: vi.fn((next) => { listener = next; return () => undefined; }),
     };
     const store = new GitRepositoryStore(client);
@@ -48,7 +48,7 @@ describe("useWorkspaceGit", () => {
       watch: vi.fn(async (activeScope) => activeScope.terminalEpoch === 1 ? oldLease : {
         watchId: "current-watch", rootToken: active.token, connectionEpoch: 2, status: snapshot("same", "2"), release: vi.fn(),
       }),
-      diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
+      diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(), push: vi.fn(),
       subscribe: vi.fn((next) => { listeners.push(next); return () => undefined; }),
     };
     const store = new GitRepositoryStore(client);
@@ -74,7 +74,7 @@ describe("useWorkspaceGit", () => {
     const watch = new Promise<Awaited<ReturnType<GitWorkspaceClient["watch"]>>>((resolve) => { resolveWatch = resolve; });
     const active = root("same", "/same");
     const client: GitWorkspaceClient = {
-      status: vi.fn(), watch: vi.fn(() => watch), diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
+      status: vi.fn(), watch: vi.fn(() => watch), diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(), push: vi.fn(),
       subscribe: vi.fn((next) => { listener = next; return () => undefined; }),
     };
     const store = new GitRepositoryStore(client);
@@ -103,7 +103,7 @@ describe("useWorkspaceGit", () => {
     const active = root("shared", "/shared");
     const watch = vi.fn(async () => ({ watchId: "watch", rootToken: active.token, connectionEpoch: scope.terminalEpoch, status: snapshot("shared", "1"), release: vi.fn() }));
     const client: GitWorkspaceClient = {
-      status: vi.fn(), watch, diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
+      status: vi.fn(), watch, diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(), push: vi.fn(),
       subscribe: vi.fn(() => () => undefined),
     };
     const store = new GitRepositoryStore(client);
@@ -136,7 +136,7 @@ describe("useWorkspaceGit", () => {
     const watch = vi.fn(async () => ({ watchId: "watch", rootToken: active.token, connectionEpoch: scope.terminalEpoch, status: snapshot("shared", "1"), release: vi.fn() }));
     const status = vi.fn();
     const client: GitWorkspaceClient = {
-      status, watch, diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(),
+      status, watch, diff: vi.fn(), prepareDiscard: vi.fn(), mutate: vi.fn(), commit: vi.fn(), push: vi.fn(),
       subscribe: vi.fn(() => () => undefined),
     };
     const store = new GitRepositoryStore(client);

@@ -811,3 +811,65 @@ async fn submodule_mutations_are_explicitly_rejected_without_changing_pointer_or
         recorded
     );
 }
+
+/// Staging a deletion must not depend on the deleted file's parent surviving.
+///
+/// `rm -r removed/` leaves Git naming `removed/nested/file` as deleted while
+/// nothing on disk resolves its parent. The strict worktree resolver called
+/// that "unavailable or unsafe" and refused the stage, so the one change a
+/// person could see in the panel was the one they could not stage.
+#[tokio::test]
+async fn deleted_files_stage_with_and_without_their_parent_directory() {
+    let fixture = Fixture::new("stage-deleted");
+    fixture.write("removed/nested/file", b"tracked\n");
+    fixture.write("plain", b"tracked\n");
+    fixture.git(&["add", "."]);
+    fixture.git(&["commit", "-qm", "base"]);
+    fs::remove_dir_all(fixture.root.join("removed")).unwrap();
+    fs::remove_file(fixture.root.join("plain")).unwrap();
+
+    let service = Arc::new(GitService::new(Arc::new(AtomicBool::new(false)), 0));
+    let status = service.status(&fixture.request(), None).await.unwrap();
+    let mut request = fixture.request();
+    request.repository_id = status.repository.unwrap().repository_id;
+    request.expected_status_generation = status.generation;
+    request.connection_epoch = 91;
+    request.mutation = v1::GitMutationKind::StageFile.into();
+    request.path = b"removed/nested/file".to_vec();
+
+    let missing_parent = service
+        .mutate(request.clone(), 91, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(
+        missing_parent.outcome,
+        v1::GitCommandOutcome::Applied as i32
+    );
+    let after = missing_parent.status.unwrap();
+    assert!(
+        after
+            .entries
+            .iter()
+            .any(|entry| entry.path == b"removed/nested/file" && entry.index_status == "D")
+    );
+
+    // The same mutation for a deleted file whose parent is still present.
+    request.expected_status_generation = after.generation;
+    request.path = b"plain".to_vec();
+    let present_parent = service
+        .mutate(request, 91, Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(
+        present_parent.outcome,
+        v1::GitCommandOutcome::Applied as i32
+    );
+    assert!(
+        present_parent
+            .status
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.path == b"plain" && entry.index_status == "D")
+    );
+}

@@ -34,7 +34,6 @@ import { GitRepositoryStore } from "../features/git/repositoryStore";
 import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
 import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
-import { emptyFocusHistory, pruneFocusHistory, stepFocus, visitFocus, type FocusHistory } from "../features/shell/focusHistory";
 import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
 import {
   helperConnectionKey, helperOwnsHostSetupLane, helperUpgradeReducer, initialHelperUpgradeState,
@@ -45,11 +44,23 @@ import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
-  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, type AppOwnedTab, type HostSetupDecision, type ShellState,
+  defaultAppState, PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
+  type AppOwnedTab, type HostSetupDecision, type ShellState, type WorkspaceDefaults,
 } from "../features/shell/types";
 import {
+  pinnedTabTimes,
+  pinnedWorkspaceTimes,
+  togglePinnedTab,
+  togglePinnedWorkspace,
+} from "../features/shell/pins";
+import {
+  archiveWorkspace,
+  archivedSessionIds,
+  archivedWorkspacesFor,
   combineWorkspaceTabs,
   closeAppTab,
+  closeTransientGitDiff,
+  findGitDiffTab,
   mountedAppTabIds,
   mountedTerminalPanes,
   openFileTab,
@@ -58,21 +69,25 @@ import {
   retirePendingTab,
   selectableTabs,
   selectAppTab,
+  unarchiveWorkspace,
   setMarkdownViewMode,
+  setWorkspaceDefaults,
   shouldSurfaceAuthoritativeTerminal,
   tabsToCloseOthers,
   tabsToCloseNonAgent,
   tabsToCloseRight,
+  workspaceDefaultsFor,
   type CombinedTab,
   type AgentPresenceSnapshot,
   type PendingShellTab,
 } from "../features/shell/model";
 import { useContextMenusOpen } from "../ui/ContextMenu";
+import { useFocusHistoryNavigation } from "./useFocusHistoryNavigation";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
-import type { ConnectionSpec, HostProfile, Pane } from "./types";
+import type { ConnectionSpec, HostProfile, Pane, Session } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
 import { useAppRecoveryController } from "./useAppRecoveryController";
@@ -80,6 +95,7 @@ import { useClientResize } from "./useClientResize";
 import { useVisibleTerminalSession } from "./useVisibleTerminalSession";
 import { commitScopedAppTabClose, reportAnnouncedPaneResult, useShellNavigation } from "./useShellNavigation";
 import { useTmuxActionPerformer } from "./useTmuxActionPerformer";
+import { useWorkspaceCreate } from "./useWorkspaceCreate";
 import { windowCellSize } from "../features/terminal/clientSize";
 import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
 import { AppDialogLayer } from "./AppDialogLayer";
@@ -158,25 +174,18 @@ function AppTabFrame({ tab }: { tab: AppOwnedTab }) {
     </section>;
 }
 
-/**
- * What a bulk close is actually about to destroy.
- *
- * Only the terminal windows are named: closing a document tab throws nothing
- * away, and a dialog that counted those too would ask for consent to something
- * that needs none.
- */
-function bulkCloseDetail(tabs: readonly CombinedTab[]): string {
-  const terminals = tabs.filter((tab) => tab.kind === "terminal").length;
-  return terminals === 1
-    ? "1 terminal window will be closed and its running processes terminated."
-    : `${terminals} terminal windows will be closed and their running processes terminated.`;
-}
-
 export function App() {
-  const [status, setStatus] = useState("Discovering local tmux…");
+  // The sequence rides along with the text so that the same message twice —
+  // a create refused for the same reason after its notice was dismissed — is
+  // two notices, not one that the second attempt silently fails to re-show.
+  const [statusState, setStatusState] = useState({ text: "Discovering local tmux…", sequence: 0 });
+  const status = statusState.text;
+  const setStatus = useCallback((text: string) => {
+    setStatusState((current) => ({ text, sequence: current.sequence + 1 }));
+  }, []);
   const {
     compactViewport, completedDownload, notice, setCompletedDownload, setNotice, windowWidth,
-  } = useAppShellChrome(status);
+  } = useAppShellChrome(status, statusState.sequence);
   const [hostSessionSelection, setHostSessionSelection] = useState<{
     clientId: string;
     sessionId: string;
@@ -189,6 +198,14 @@ export function App() {
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
   const platform = useMemo(() => currentPlatform(), []);
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus, platform);
+  // Read by things that run later than the render that scheduled them — the
+  // workspace-create prompt is submitted long after the command that opened it,
+  // and the defaults it applies must be the ones in force at that moment.
+  const appStateRef = useRef(appState);
+  appStateRef.current = appState;
+  // Stable identity: the hooks that read it hold it in a dependency list, and a
+  // fresh closure per render would rebuild them on every keystroke.
+  const readDefaultMarkdownView = useCallback(() => appStateRef.current.shell.defaultMarkdownView, []);
   // One shared observation per repository, for the sidebar and every diff tab.
   const gitRepositories = useMemo(() => new GitRepositoryStore(gitClient), [gitClient]);
   // The connection controller reports helper-relevant lifecycle points; what
@@ -203,6 +220,7 @@ export function App() {
     fileClient,
     gitClient,
     terminalApplicationClipboardEnabled: appState.shell.terminalApplicationClipboard,
+    excludedSessionIds: (profileId, identity) => archivedSessionIds(appStateRef.current, profileId, identity),
     onHandshakeFailure: (failed) => onHandshakeFailure.current(failed),
     onConnectionStateChanged: (changed, state) => onConnectionStateChanged.current(changed, state),
     setStatus,
@@ -237,26 +255,10 @@ export function App() {
     : undefined;
   const [shortcutEditorOpen, setShortcutEditorOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
-  // A bulk close waiting on its one summary dialog. Closing tabs the user is
-  // *not* looking at is not the single close's "the surface's disappearance is
-  // the confirmation" case, so it asks — once, for the whole set.
-  const [pendingBulkClose, setPendingBulkClose] = useState<{
-    tabs: CombinedTab[];
-    scope: HostScopeToken;
-    protectAgents: boolean;
-  }>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
-  const [focusHistory, setFocusHistory] = useState<FocusHistory>(emptyFocusHistory);
-  const focusHistoryRef = useRef(focusHistory);
-  focusHistoryRef.current = focusHistory;
-  // Set while navigation itself is moving the app, so the effect that records
-  // where the app ended up does not record the intermediate state as a *new*
-  // destination — which truncated the forward branch on every back-step across
-  // workspaces.
-  const historyStep = useRef(false);
   const controllers = useRef(new Map<string, TerminalPaneController>());
   const lastSlowSendAt = useRef(new Map<string, number>());
   const shortcuts = appState.commands.shortcutOverrides as ShortcutOverrides;
@@ -297,6 +299,7 @@ export function App() {
     currentScope: currentHostScope,
     serverIdentity: hostState.serverIdentity,
     sessions: snapshot.sessions,
+    windows: snapshot.windows,
     setAppState,
   });
 
@@ -443,6 +446,33 @@ export function App() {
     }));
   }, [setAppState]);
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
+  // Archived workspaces on this host and server. One set, applied at the
+  // source of each list it must be absent from: the agent runtime, the
+  // sidebar rows, and the focus history.
+  // Keyed on the records alone: every other persisted write (a tab switch, a
+  // sidebar drag) must not hand the agent runtime and the sidebar a new set.
+  const archivedRecords = appState.archivedWorkspaces;
+  const archived = useMemo(
+    () => archivedSessionIds({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity),
+    [archivedRecords, currentHostProfileId, hostState.serverIdentity],
+  );
+  const visibleSessions = useMemo(
+    () => archived.size === 0 ? snapshot.sessions : snapshot.sessions.filter((session) => !archived.has(session.id)),
+    [archived, snapshot.sessions],
+  );
+  const archivedWorkspaces = useMemo(
+    () => archivedWorkspacesFor({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity, snapshot.sessions),
+    [archivedRecords, currentHostProfileId, hostState.serverIdentity, snapshot.sessions],
+  );
+  // Pinned workspaces and tabs on this host and server, keyed on the records
+  // alone for the same reason the archive is: every other persisted write must
+  // not hand the sidebar and the strip a new map to re-sort against.
+  const pinnedWorkspaceRecords = appState.pinnedWorkspaces;
+  const pinnedTabRecords = appState.pinnedTabs;
+  const pinnedWorkspaceAt = useMemo(
+    () => pinnedWorkspaceTimes({ ...defaultAppState, pinnedWorkspaces: pinnedWorkspaceRecords }, currentHostProfileId, hostState.serverIdentity),
+    [currentHostProfileId, hostState.serverIdentity, pinnedWorkspaceRecords],
+  );
   const {
     hostSetup: agentHostSetup,
     notificationActivation,
@@ -469,6 +499,7 @@ export function App() {
     currentHostProfileId,
     decision: appState.hostSetup[currentHostProfileId],
     decisionsArePersistable: appStateRecovery === undefined,
+    excludedSessionIds: archived,
     hostCanMutate: hostState.canMutate,
     // Helper compatibility owns the host-level consent lane while it is
     // unresolved. Runtime observation stays live; only the separate one-time
@@ -499,11 +530,22 @@ export function App() {
     attentionByWorkspace: agentRuntime.rollups.byWorkspace,
     activeBranch: workspaceGit.status?.repository.headName,
     home,
-  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, snapshot, workspaceGit.status]);
+    excludeSessionIds: archived,
+    pinnedAt: pinnedWorkspaceAt,
+  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, archived, home, pinnedWorkspaceAt, snapshot, workspaceGit.status]);
   const agentRows = useMemo(() => {
     const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
     const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
     const paneIds = new Set(snapshot.panes.map((pane) => pane.id));
+    // Every pinned tab on this server, not just the workspace on screen: the
+    // agents list spans workspaces, so it needs the pin times of tabs whose
+    // strip is not currently drawn.
+    const tabPinnedAt = new Map<string, number>();
+    for (const record of pinnedTabRecords) {
+      if (record.hostProfileId !== currentHostProfileId || !hostState.serverIdentity
+        || record.serverIdentity !== hostState.serverIdentity) continue;
+      tabPinnedAt.set(`${record.sessionId}\0${record.tabId}`, record.pinnedAt);
+    }
     return buildAgentRows(
       agentRuntime.agents,
       (record) => ({
@@ -511,12 +553,17 @@ export function App() {
         workspaceName: record.sessionName || "unknown workspace",
         hostLabel,
         tabIndex: windowIndexById.get(record.windowId),
+        workspacePinnedAt: pinnedWorkspaceAt.get(record.sessionId),
+        tabPinnedAt: tabPinnedAt.get(`${record.sessionId}\0${record.windowId}`),
       }),
       (record) => Boolean(record.paneId) && paneIds.has(record.paneId),
       appState.shell.agentSort,
     );
-  }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, sidebarRows, snapshot.panes, snapshot.windows]);
+  }, [agentRuntime.agents, appState.shell.agentSort, currentHostProfileId, hostLabel, hostState.serverIdentity, pinnedTabRecords, pinnedWorkspaceAt, sidebarRows, snapshot.panes, snapshot.windows]);
   const unread = useMemo(() => unreadCount(agentRows), [agentRows]);
+  // The badge counts every waiting agent; the bell can only reach routable
+  // ones, so it is disabled on exactly the rows `agents.jumpUnread` would find.
+  const canJump = useMemo(() => Boolean(jumpTarget(agentRows)), [agentRows]);
 
   // Only in its own workspace's strip: a create-session placeholder has no
   // session until its ack names one, and drawing it anywhere before that would
@@ -553,6 +600,13 @@ export function App() {
   };
   const agentPresenceRef = useRef(agentPresence);
   agentPresenceRef.current = agentPresence;
+  const pinnedTabAt = useMemo(
+    () => pinnedTabTimes(
+      { ...defaultAppState, pinnedTabs: pinnedTabRecords },
+      currentHostProfileId, hostState.serverIdentity, activeSessionId,
+    ),
+    [activeSessionId, currentHostProfileId, hostState.serverIdentity, pinnedTabRecords],
+  );
   const combinedTabs = useMemo(
     // The same authority the commit-time recheck reads, `hasUnmappedAgents`
     // included: the strip and the recheck must not disagree about which
@@ -563,10 +617,24 @@ export function App() {
         current: currentAgentTopology,
         hasUnmappedAgents,
       },
+      pinnedTabAt,
     ),
-    [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, windows, workspaceAppTabs],
+    [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, pinnedTabAt, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
+  // A single-clicked Git diff is transient: it lives until the user selects
+  // any other tab. Closed here, on the selection change itself, rather than
+  // through `closeWorkspaceAppTab` — that path reveals a terminal, and the
+  // user has already navigated. Re-checked against live state: a diff pinned
+  // after it was selected is not the one that was selected then.
+  const previousSelectedAppTab = useRef(selectedAppTab);
+  useEffect(() => {
+    const previous = previousSelectedAppTab.current;
+    previousSelectedAppTab.current = selectedAppTab;
+    if (!previous || previous.kind !== "gitDiff" || previous.id === selectedAppTab?.id) return;
+    setAppState((current) => closeTransientGitDiff(current, currentHostProfileId, previous.id));
+    // Keyed on the strip's selection, which is the only thing this rule is about.
+  }, [activeCombinedTabKey]);
   const grid = useMemo(() => windowGrid(panes), [panes]);
   const mountedPanes = useMemo(
     () => mountedTerminalPanes(snapshot.panes, activeWindowId, Boolean(activeWindow?.zoomed)),
@@ -592,21 +660,6 @@ export function App() {
   }, [activeSession, currentHostProfileId, hostState.generation, hostState.serverIdentity,
     selectedAppTab, shellNavigation.observeAuthoritativeWindow, windows]);
 
-  // Focus history follows where the app actually ended up, whatever moved it —
-  // a click, a shortcut, an agent notification, or tmux itself. Except when
-  // ⌘[ / ⌘] moved it: that is a walk through the history, not a new
-  // destination, and recording it would truncate the branch being walked.
-  useEffect(() => {
-    if (!activeSessionId) return;
-    if (historyStep.current) { historyStep.current = false; return; }
-    setFocusHistory((current) => visitFocus(current, { sessionId: activeSessionId, windowId: activeWindowId }));
-  }, [activeSessionId, activeWindowId]);
-  useEffect(() => {
-    setFocusHistory((current) => pruneFocusHistory(current, (point) =>
-      snapshot.sessions.some((session) => session.id === point.sessionId)
-      && (!point.windowId || snapshot.windows.some((item) => item.id === point.windowId))));
-  }, [snapshot.sessions, snapshot.windows]);
-
   const focusDirection = useCallback((direction: PaneDirection) => {
     if (!activePane) return;
     const target = adjacentPane(panes, activePane, direction);
@@ -621,6 +674,56 @@ export function App() {
     notificationActivation.clearNotificationFocusGuard();
     shellNavigation.selectWindow(windowId);
   }, [notificationActivation, shellNavigation]);
+  const revealTerminalUnderAppTab = useCallback((sessionId: string, windowId: string | undefined) => {
+    notificationActivation.clearNotificationFocusGuard();
+    shellNavigation.revealLocalTerminal(sessionId, windowId, () => setNavigationAppTab(sessionId, undefined));
+  }, [notificationActivation, setNavigationAppTab, shellNavigation]);
+  const focusNavigation = useFocusHistoryNavigation({
+    activeSessionId,
+    activeWindowId,
+    appTabs: appState.appTabs,
+    revealTerminal: revealTerminalUnderAppTab,
+    selectAppTab: shellNavigation.selectAppTab,
+    selectSession,
+    selectWindow,
+    selectedAppTabId: selectedAppTab?.id,
+    // Archived workspaces are not destinations: treat them as gone.
+    sessions: visibleSessions,
+    setStatus,
+    windows: snapshot.windows,
+  });
+  // The archive itself sends tmux nothing: the session and everything in it
+  // keeps running. The only tmux traffic is the ordinary switch to the next
+  // workspace when the archived one was on screen. If
+  // the workspace being archived is the one on screen, the selection moves to
+  // its neighbour — the row after it, else the row before — so the shell is
+  // not left showing a workspace the sidebar no longer lists.
+  const archiveSession = useCallback((session: Session) => {
+    setAppState((current) => archiveWorkspace(current, currentHostProfileId, hostState.serverIdentity, session, Date.now()));
+    if (session.id !== activeSessionId) return;
+    const index = sidebarRows.findIndex((row) => row.session.id === session.id);
+    const next = index < 0 ? undefined : sidebarRows[index + 1] ?? sidebarRows[index - 1];
+    // No neighbour: nothing is selected, now rather than at the next snapshot,
+    // so the strip and terminals do not keep showing a workspace the sidebar
+    // no longer lists.
+    if (next) selectSession(next.session.id);
+    else setActiveSessionId(undefined);
+  }, [activeSessionId, currentHostProfileId, hostState.serverIdentity, selectSession, setActiveSessionId, setAppState, sidebarRows]);
+  const unarchiveSession = useCallback((session: Session, scope: HostScopeToken) => {
+    if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    setAppState((current) => unarchiveWorkspace(current, scope.hostProfileId, scope.serverIdentity, session.id));
+  }, [hostScopeRef, setAppState]);
+  // Both pins are scoped writes and nothing else: no tmux traffic, no
+  // selection change. The scope check is the same one every row action makes —
+  // a menu can outlive the connection it was opened over.
+  const toggleWorkspacePin = useCallback((session: Session, scope: HostScopeToken) => {
+    if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    setAppState((current) => togglePinnedWorkspace(current, scope.hostProfileId, scope.serverIdentity, session, Date.now()));
+  }, [hostScopeRef, setAppState]);
+  const toggleTabPin = useCallback((tab: CombinedTab, scope: HostScopeToken) => {
+    if (tab.kind === "pending" || !sameHostConnection(scope, hostScopeRef.current)) return;
+    setAppState((current) => togglePinnedTab(current, scope.hostProfileId, scope.serverIdentity, activeSessionId, tab.id, Date.now()));
+  }, [activeSessionId, hostScopeRef, setAppState]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is
@@ -656,8 +759,23 @@ export function App() {
    * flushes every open editor first, which for a set of tabs would replay the
    * same flush once per tab.
    */
-  const closeWorkspaceAppTab = (tab: AppOwnedTab, scope: HostScopeToken) => {
+  const closeWorkspaceAppTab = (tab: AppOwnedTab, scope: HostScopeToken, mode: "single" | "bulk" = "single") => {
     const commit = () => setAppState((current) => closeAppTab(current, currentHostProfileId, tab.id));
+    // Closing the document on screen goes back to what was showing before
+    // it — the terminal it was opened from, usually — rather than to whatever
+    // terminal the workspace happens to have active. With no history to go
+    // back to, a neighbouring document in the same workspace is next, and
+    // only then the workspace's terminal. A bulk close skips both: its
+    // neighbours are about to go too, and the terminal is where it ends up.
+    if (mode === "single" && selectedAppTabRef.current?.id === tab.id && sameHostConnection(scope, hostScopeRef.current)) {
+      if (focusNavigation.navigateBackFromClosing(tab.id)) return commit();
+      const neighbours = workspaceAppTabs.filter((item) => item.id !== tab.id);
+      const neighbour = neighbours.filter((item) => item.order < tab.order).at(-1) ?? neighbours[0];
+      if (neighbour) {
+        shellNavigation.selectAppTab(tab.sessionId, activeWindowId, neighbour.id);
+        return commit();
+      }
+    }
     commitScopedAppTabClose({
       activeWindowId,
       commit,
@@ -669,9 +787,10 @@ export function App() {
       tabSessionId: tab.sessionId,
     });
   };
+  const bulkCloseInFlight = useRef(false);
   const closeTabSet = useBulkTabClose({
     agentPresenceRef,
-    closeAppTab: closeWorkspaceAppTab,
+    closeAppTab: (tab, scope) => closeWorkspaceAppTab(tab, scope, "bulk"),
     hostScopeRef,
     performAction,
     setStatus,
@@ -680,6 +799,7 @@ export function App() {
   });
   const openTerminalFilePath = useTerminalFileOpen({
     clientIdRef,
+    defaultMarkdownView: readDefaultMarkdownView,
     fileClient,
     fileScope,
     hostScopeRef,
@@ -687,6 +807,15 @@ export function App() {
     setAppState,
     setStatus,
     snapshotRef,
+  });
+  const createWorkspace = useWorkspaceCreate({
+    appStateRef,
+    clientIdRef,
+    createSession: shellNavigation.createSession,
+    currentHostProfileId,
+    hostScopeRef,
+    sendInput,
+    setStatus,
   });
   const { commandContext, runCommand } = useShellCommands({
     activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
@@ -701,7 +830,8 @@ export function App() {
       selectAgentRow(target);
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
-    createSession: shellNavigation.createSession,
+    archiveSession,
+    createSession: createWorkspace,
     createWindow: (sessionId) => {
       notificationActivation.clearNotificationFocusGuard();
       shellNavigation.createWindow(sessionId);
@@ -724,30 +854,14 @@ export function App() {
     serverIdentity: hostState.serverIdentity, setAppState, setConfirmation,
     setPaletteOpen, setSettingsOpen, setShortcutEditorOpen, setStatus, setTextPrompt,
     setWorkspaceSwitcherOpen, snapshot,
-    // Navigation happens here, not inside a state updater. React invokes
-    // updaters twice under StrictMode, and an updater that dispatched tmux
-    // actions therefore sent each one twice, with one captured generation
-    // between them — the same double-dispatch the tab strip documents avoiding.
-    stepFocusHistory: (direction) => {
-      const stepped = stepFocus(focusHistoryRef.current, direction);
-      if (!stepped.point) {
-        setStatus(direction === "back" ? "Nothing earlier to go back to." : "Nothing later to go forward to.");
-        return;
-      }
-      const { sessionId, windowId } = stepped.point;
-      historyStep.current = true;
-      setFocusHistory(stepped.history);
-      if (sessionId !== activeSessionId) selectSession(sessionId);
-      else if (windowId && windowId !== activeWindowId) selectWindow(windowId);
-      else historyStep.current = false;
-    },
+    stepFocusHistory: focusNavigation.step,
     windows,
   });
   // A context menu is an overlay like any other: with it open, ⌘W must not
   // close the tab behind it.
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
-    || Boolean(confirmation) || Boolean(pendingBulkClose) || Boolean(textPrompt)
+    || Boolean(confirmation) || Boolean(textPrompt)
     || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecovery.modalOpen
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
@@ -883,11 +997,25 @@ export function App() {
     void runCommand("window.close", { kind: tab.kind === "app" ? "appTab" : "terminalTab", id: tab.id, scope });
   };
 
-  /** Terminal windows in the set mean one dialog for the set; app tabs alone close on the spot. */
+  /**
+   * Runs a settled bulk close immediately.
+   *
+   * There is no preflight dialog. A close asked for from a tab strip is a
+   * direct manipulation of the thing the person is pointing at, and a modal
+   * between the click and the result made the four-tab case a two-step. What
+   * replaces it is a receipt: the hook flushes dirty editors before it destroys
+   * anything, refuses the whole set if a save fails, still protects terminals
+   * holding agents, and reports afterwards.
+   */
   const bulkCloseTabs = (tabs: CombinedTab[], scope: HostScopeToken, protectAgents = false) => {
-    if (tabs.length === 0) return;
-    if (tabs.some((tab) => tab.kind === "terminal")) setPendingBulkClose({ tabs, scope, protectAgents });
-    else void closeTabSet(tabs, scope, protectAgents);
+    // One set at a time. The dialog used to serialize these by existing; with a
+    // toolbar button in its place a second click lands while the first close is
+    // still walking the set, and the second run reads the same pre-close
+    // snapshot — dispatching closes for windows that are already gone and
+    // ending in a sticky "N could not be closed" for an operation that worked.
+    if (tabs.length === 0 || bulkCloseInFlight.current) return;
+    bulkCloseInFlight.current = true;
+    void closeTabSet(tabs, scope, protectAgents).finally(() => { bulkCloseInFlight.current = false; });
   };
 
   const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {
@@ -899,7 +1027,8 @@ export function App() {
     const root = workspaceFiles.root;
     shellNavigation.selectLocalAppTab(session.id, activeWindowId, `file:${root.token}:${entry.path}`, () => {
       setAppState((current) => openFileTab(
-        current, currentHostProfileId, serverIdentity, session, entry.path, kind, root, options,
+        current, currentHostProfileId, serverIdentity, session, entry.path, kind, root,
+        { ...options, viewMode: current.shell.defaultMarkdownView },
       ));
     });
   };
@@ -929,6 +1058,10 @@ export function App() {
     });
   };
 
+  /** What to call the host in Settings; the profile’s own label wherever there is one. */
+  const currentHostLabel = profiles.find((profile) => profile.id === currentHostProfileId)?.label
+    ?? (currentHostProfileId === "local" ? "Local" : currentHostProfileId);
+
   const updateShell = (update: Partial<ShellState>) =>
     setAppState((current) => ({ ...current, shell: { ...current.shell, ...update } }));
 
@@ -948,8 +1081,13 @@ export function App() {
     style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
   >
     <TitleBar
+      canJump={canJump}
+      canGoBack={focusNavigation.canGoBack}
+      canGoForward={focusNavigation.canGoForward}
       canMutate={hostState.canMutate}
+      onBack={() => void runCommand("focus.back")}
       onBell={() => void runCommand("agents.jumpUnread")}
+      onForward={() => void runCommand("focus.forward")}
       onNewWorkspace={() => void runCommand("session.new")}
       onTogglePanel={() => void runCommand("view.togglePanel")}
       onToggleSidebar={() => void runCommand("view.toggleSidebar")}
@@ -978,6 +1116,8 @@ export function App() {
       {sidebarOpen && <WorkspaceSidebar
         adapters={agentRuntime.adapters}
         agents={agentRows}
+        archivedWorkspaces={archivedWorkspaces}
+        onUnarchiveWorkspace={unarchiveSession}
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}
         compactWorkspaces={appState.shell.compactWorkspaces}
@@ -1011,6 +1151,7 @@ export function App() {
         onReviewHooks={agentWorkflow.reviewHooks}
         onSelectAgent={selectAgentRow}
         onSelectWorkspace={selectSession}
+        onTogglePinnedWorkspace={toggleWorkspacePin}
         onSortMode={(mode) => updateShell({ agentSort: mode })}
         onWorkspaceCommand={(session, commandId, scope) => void runCommand(commandId, { kind: "session", id: session.id, scope })}
         phase={hostState.phase}
@@ -1024,7 +1165,6 @@ export function App() {
           activePaneId={activePane?.id}
           activeTerminalPaneCount={panes.length}
           canMutate={hostState.canMutate && Boolean(activeSession)}
-          canSplit={hostState.canMutate && Boolean(activePane) && !selectedAppTab}
           commandScope={currentHostScope}
           onClose={closeCombinedTab}
           onCloseCurrent={(paneId, scope) => void runCommand("window.close", { kind: "focusedSurface", paneId, scope })}
@@ -1051,10 +1191,12 @@ export function App() {
           onMove={moveCombinedTab}
           onNewTerminal={() => void runCommand("window.new")}
           onPin={(tab) => pinOpenTab(tab.id)}
+          onTogglePinned={(tab) => toggleTabPin(tab, currentHostScope)}
           onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
           onSelect={selectCombinedTab}
-      stateGlyphs={appState.shell.agentStateGlyphs}
-          onSplit={() => void runCommand("pane.splitRight")}
+          platform={platform}
+          shortcuts={shortcuts}
+          stateGlyphs={appState.shell.agentStateGlyphs}
           tabs={combinedTabs}
         />
         <div
@@ -1159,19 +1301,39 @@ export function App() {
         ignoredPaths={ignoredPaths}
         maxWidth={Math.max(PANEL_MIN_WIDTH, Math.floor(windowWidth / 2))}
         onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root, "explorer"); }}
-        onGitDiff={(entry, target) => {
+        onGitDiff={(entry, target, options) => {
           if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
           const session = activeSession;
           const serverIdentity = hostState.serverIdentity;
           const root = workspaceFiles.root;
           const gitStatus = workspaceGit.status;
+          const hostProfileId = currentHostProfileId;
+          // The commit can run twice — once now, and again when a remote flight
+          // it interrupted settles. The second run must only re-select the tab
+          // the first one opened, never open it again: a transient diff the
+          // user has already navigated away from is closed, and stays closed.
+          // Decided in the commit, not in the updater: StrictMode runs the
+          // updater twice and keeps the second result.
+          let committed = false;
           shellNavigation.selectLocalAppTab(
             session.id,
             activeWindowId,
             `git:${gitStatus.repository.id}:${target}:${entry.path}`,
-            () => setAppState((current) => openGitDiffTab(
-              current, currentHostProfileId, serverIdentity, session, entry, target, gitStatus, root,
-            )),
+            () => {
+              const replay = committed;
+              committed = true;
+              setAppState((current) => {
+                if (!replay) {
+                  return openGitDiffTab(
+                    current, hostProfileId, serverIdentity, session, entry, target, gitStatus, root, options,
+                  );
+                }
+                const opened = findGitDiffTab(
+                  current, hostProfileId, serverIdentity, session.id, gitStatus.repository.id, entry.path, target,
+                );
+                return opened ? selectAppTab(current, hostProfileId, serverIdentity, session, opened.id) : current;
+              });
+            },
           );
         }}
         onMessage={setStatus}
@@ -1237,6 +1399,7 @@ export function App() {
       onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
       onShell={updateShell}
       onSounds={(preferences) => { setAgentSounds(preferences); saveAgentSoundPreferences(preferences); }}
+      onWorkspaceDefaults={(patch) => setAppState((current) => setWorkspaceDefaults(current, currentHostProfileId, patch))}
       // The selection survives typing. It used to be cleared on every
       // keystroke, which made "correct this host's address" indistinguishable
       // from "add a host": Connect derived a fresh id from the new values and
@@ -1251,18 +1414,13 @@ export function App() {
       sounds={agentSounds}
       sshConfigPath={sshConfigPath}
       sshTarget={sshTarget}
-    />}
-    {pendingBulkClose && <ConfirmationDialog
-      confirmLabel="Close"
-      destructive
-      detail={bulkCloseDetail(pendingBulkClose.tabs)}
-      onCancel={() => setPendingBulkClose(undefined)}
-      onConfirm={() => {
-        const pending = pendingBulkClose;
-        setPendingBulkClose(undefined);
-        void closeTabSet(pending.tabs, pending.scope, pending.protectAgents);
-      }}
-      title={`Close ${pendingBulkClose.tabs.length} ${pendingBulkClose.tabs.length === 1 ? "tab" : "tabs"}?`}
+      // The host the app is actually on, not the one the connection form is
+      // editing: these defaults are applied by the next workspace created here,
+      // and a form the user is filling in for a machine they have not connected
+      // to yet is not that host.
+      workspaceDefaults={workspaceDefaultsFor(appState, currentHostProfileId)}
+      workspaceDefaultsHostId={currentHostProfileId}
+      workspaceDefaultsHostLabel={currentHostLabel}
     />}
     {workspaceSwitcherOpen && <WorkspaceSwitcher
       onClose={() => setWorkspaceSwitcherOpen(false)}

@@ -103,6 +103,18 @@ describe("TauriGitWorkspaceClient", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "git_request")).toHaveLength(1);
   });
 
+  it("sends a push exactly once and carries the target the host published to", async () => {
+    invokeMock.mockResolvedValueOnce({ operationId: "push", command: {
+      exitCode: 0, stdout: [], stderr: [], applied: true, refreshFailed: false, refreshError: "", outcome: "applied", pushTarget: "origin/main",
+    } });
+    const result = await new TauriGitWorkspaceClient().push(scope, root, "repo-id", "7");
+    expect(result.outcome).toBe("applied");
+    expect(result.pushTarget).toBe("origin/main");
+    const requests = invokeMock.mock.calls.filter(([command]) => command === "git_request");
+    expect(requests).toHaveLength(1);
+    expect(requests[0][1].command).toMatchObject({ operation: "push", repositoryId: "repo-id", expectedStatusGeneration: "7" });
+  });
+
   it("turns malformed event generations and byte arrays into a scoped error instead of crashing the shell", () => {
     const client = new TauriGitWorkspaceClient();
     const events: unknown[] = [];

@@ -3,6 +3,7 @@ import { editorFlushRegistry } from "../features/files/editorFlushRegistry";
 import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 import {
   agentPresenceIsCurrent,
+  bulkCloseCompleteStatus,
   bulkCloseOutcomeStatus,
   tabsEligibleAtBulkCloseCommit,
   type AgentPresenceSnapshot,
@@ -127,10 +128,19 @@ export function useBulkTabClose(options: BulkTabCloseOptions) {
     // commit them only once the stale-sensitive terminal transaction has been
     // admitted. A rejected first terminal close must leave the set untouched.
     if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    let closedAppTabs = 0;
     for (const tab of tabs) {
       if (tab.kind !== "app") continue;
       const appTab = workspaceAppTabs.find((item) => item.id === tab.id);
-      if (appTab) closeAppTab(appTab, scope);
+      if (!appTab) continue;
+      closeAppTab(appTab, scope);
+      closedAppTabs += 1;
     }
+
+    // The receipt for a close that asked nothing first. Emitted last, once the
+    // whole set is actually gone, so the number is what happened rather than
+    // what was attempted.
+    const complete = bulkCloseCompleteStatus(closed + closedAppTabs);
+    if (complete) setStatus(complete);
   }, [agentPresenceRef, closeAppTab, hostScopeRef, performAction, setStatus, snapshotRef, workspaceAppTabs]);
 }

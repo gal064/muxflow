@@ -2,13 +2,18 @@ import { describe, expect, it } from "vitest";
 import type { Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import {
   appTabsForWorkspace,
+  archiveWorkspace,
+  archivedSessionIds,
+  archivedWorkspacesFor,
   bulkCloseOutcomeStatus,
   closeAppTab,
+  closeTransientGitDiff,
   combineWorkspaceTabs,
   discardServerAppState,
   mountedAppTabIds,
   mountedTerminalPanes,
   openFileTab,
+  findGitDiffTab,
   openGitDiffTab,
   orderedSessions,
   pinAppTab,
@@ -28,12 +33,42 @@ import {
   tabsToCloseNonAgent,
   tabsToCloseRight,
   tabsEligibleAtBulkCloseCommit,
+  unarchiveWorkspace,
+  setWorkspaceDefaults,
+  workspaceDefaultsFor,
   type CombinedTab,
 } from "./model";
 import { defaultAppState, type PersistedAppState } from "./types";
 import type { GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import { deriveAgentRollups } from "../agents/selectors";
 import { agent } from "../agents/testFixtures";
+
+describe("per-host workspace defaults", () => {
+  it("edits one host without touching another, and drops an entry with nothing left in it", () => {
+    const local = setWorkspaceDefaults(defaultAppState, "local", { directory: "/work" });
+    const both = setWorkspaceDefaults(local, "ssh-remote", { startupCommand: "tail -f log" });
+    expect(workspaceDefaultsFor(both, "local")).toEqual({ directory: "/work" });
+    expect(workspaceDefaultsFor(both, "ssh-remote")).toEqual({ startupCommand: "tail -f log" });
+    // A host nobody configured gets nothing, which is what "existing users keep
+    // the current behaviour" is made of.
+    expect(workspaceDefaultsFor(both, "ssh-other")).toEqual({});
+
+    const patched = setWorkspaceDefaults(both, "local", { startupCommand: "  npm run dev  " });
+    expect(workspaceDefaultsFor(patched, "local")).toEqual({ directory: "/work", startupCommand: "npm run dev" });
+
+    const cleared = setWorkspaceDefaults(
+      setWorkspaceDefaults(patched, "local", { directory: undefined }),
+      "local",
+      { startupCommand: "   " },
+    );
+    expect(cleared.workspaceDefaults).toEqual({ "ssh-remote": { startupCommand: "tail -f log" } });
+  });
+
+  it("bounds what it writes, not only what it reads back", () => {
+    const written = setWorkspaceDefaults(defaultAppState, "local", { startupCommand: "y".repeat(9_000) });
+    expect(workspaceDefaultsFor(written, "local").startupCommand).toHaveLength(2_048);
+  });
+});
 
 const sessions: Session[] = [
   { id: "$2", name: "two", windowCount: 1, attachedClients: 0, order: 2 },
@@ -309,6 +344,92 @@ describe("application shell model", () => {
     ]));
   });
 
+  it("opens a single-clicked Git diff as transient, promotes it on a pinned open, and never demotes it", () => {
+    const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
+    const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
+    const root = { path: "/repo", token: "root-token" };
+    const open = (state: PersistedAppState, preview: boolean) =>
+      openGitDiffTab(state, "local", "server-a", sessions[1], entry, "unstaged", status, root, { preview });
+    const find = (state: PersistedAppState) => findGitDiffTab(state, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged");
+
+    const transient = open(defaultAppState, true);
+    expect(transient.appTabs).toHaveLength(1);
+    expect(find(transient)).toMatchObject({ kind: "gitDiff", preview: true });
+    expect(transient.workspaceUi[0].selectedAppTabId).toBe(find(transient)!.id);
+
+    // A second single click keeps the same transient tab.
+    const again = open(transient, true);
+    expect(again.appTabs).toHaveLength(1);
+    expect(find(again)).toMatchObject({ id: find(transient)!.id, preview: true });
+
+    // A pinned open promotes it in place; a later single click does not demote it.
+    const pinned = open(again, false);
+    expect(pinned.appTabs).toHaveLength(1);
+    expect(find(pinned)!.id).toBe(find(transient)!.id);
+    expect(find(pinned)!.preview).toBeUndefined();
+    expect(find(open(pinned, true))!.preview).toBeUndefined();
+
+    // A file preview does not take over the transient diff's slot: the diff
+    // is closed by navigation, not rewritten into a file.
+    const withFile = openFileTab(transient, "local", "server-a", sessions[1], "/repo/a.ts", "file", { path: "/repo", token: "root", revision: "1" }, { preview: true });
+    expect(withFile.appTabs).toHaveLength(2);
+    expect(find(withFile)).toMatchObject({ kind: "gitDiff", preview: true });
+
+    // The strip's double-click pins a transient diff the same way.
+    expect(find(pinAppTab(transient, "local", find(transient)!.id))!.preview).toBeUndefined();
+
+    // Without the option the tab is pinned, as every caller before this option was.
+    expect(find(openGitDiffTab(defaultAppState, "local", "server-a", sessions[1], entry, "unstaged", status, root))!.preview).toBeUndefined();
+  });
+
+  it("closes a transient diff on navigation away, and leaves a pinned one where it is", () => {
+    const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
+    const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
+    const transient = openGitDiffTab(tabs, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
+    const transientId = findGitDiffTab(transient, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged")!.id;
+    const left = closeTransientGitDiff(transient, "local", transientId);
+    expect(left.appTabs.map((tab) => tab.id)).toEqual(tabs.appTabs.map((tab) => tab.id));
+    expect(left.workspaceUi[0].selectedAppTabId).toBeUndefined();
+
+    const pinned = pinAppTab(transient, "local", transientId);
+    expect(closeTransientGitDiff(pinned, "local", transientId)).toBe(pinned);
+    // A file tab and an id that is already gone are not this rule's business.
+    expect(closeTransientGitDiff(tabs, "local", "a")).toBe(tabs);
+    expect(closeTransientGitDiff(left, "local", transientId)).toBe(left);
+  });
+
+  it("does not resurrect a closed transient diff when its open commit runs a second time", () => {
+    const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
+    const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
+    // The shape of the commit the shell hands the navigation coordinator: the
+    // first commit opens, every later one only re-selects what is there. The
+    // decision is made per commit, and the updater itself stays pure — React
+    // runs it twice under StrictMode and keeps the second result.
+    let committed = false;
+    const find = (state: PersistedAppState) => findGitDiffTab(state, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged");
+    const commit = (): ((current: PersistedAppState) => PersistedAppState) => {
+      const replay = committed;
+      committed = true;
+      return (current) => {
+        if (!replay) return openGitDiffTab(current, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
+        const opened = find(current);
+        return opened ? selectAppTab(current, "local", "server-a", sessions[1], opened.id) : current;
+      };
+    };
+    const first = commit();
+    first(defaultAppState);
+    const opened = first(defaultAppState);
+    expect(opened.appTabs).toHaveLength(1);
+    const closed = closeAppTab(opened, "local", find(opened)!.id);
+    expect(closed.appTabs).toHaveLength(0);
+    const replay = commit();
+    expect(replay(closed)).toBe(closed);
+    // A replay while the tab is still open only re-selects it.
+    const reselected = replay(selectAppTab(opened, "local", "server-a", sessions[1], undefined));
+    expect(reselected.appTabs).toHaveLength(1);
+    expect(reselected.workspaceUi[0].selectedAppTabId).toBe(find(opened)!.id);
+  });
+
   it("opens one root-scoped file tab and preserves it across root changes", () => {
     const opened = openFileTab(defaultAppState, "local", "server-a", sessions[1], "/repo/README.md", "markdown", { path: "/repo", token: "root-a", revision: "7" });
     expect(opened.appTabs).toHaveLength(1);
@@ -385,6 +506,29 @@ describe("application shell model", () => {
       rootToken: "file-v1:new",
     });
   });
+
+  /**
+   * The configured mode is a *starting* mode. It is read when a tab is made and
+   * never again, which is what keeps the two directions apart: changing the
+   * setting leaves open tabs alone, and changing an open tab's mode leaves the
+   * setting alone.
+   */
+  it("starts a new Markdown tab in the configured mode and leaves an open one where it is", () => {
+    const open = (state: PersistedAppState, resource: string, viewMode?: "source" | "preview" | "split") =>
+      openFileTab(state, "local", "server-a", sessions[1], resource, "markdown",
+        { path: "/repo", token: "root", revision: "1" }, { preview: false, ...(viewMode ? { viewMode } : {}) });
+
+    expect(open(defaultAppState, "/repo/a.md", "preview").appTabs[0].viewMode).toBe("preview");
+    expect(open(defaultAppState, "/repo/a.md", "source").appTabs[0].viewMode).toBe("source");
+    // Omitted is the behaviour every build before the setting had.
+    expect(open(defaultAppState, "/repo/a.md").appTabs[0].viewMode).toBe("split");
+
+    const opened = open(defaultAppState, "/repo/a.md", "source");
+    const switched = setMarkdownViewMode(opened, "local", opened.appTabs[0].id, "split");
+    // Reopening the same file with a different default does not restart it.
+    expect(open(switched, "/repo/a.md", "preview").appTabs[0].viewMode).toBe("split");
+  });
+
   it("keeps at most one preview tab per workspace and reuses its slot in place", () => {
     const open = (state: PersistedAppState, resource: string, preview: boolean, kind: "file" | "markdown" = "file") =>
       openFileTab(state, "local", "server-a", sessions[1], resource, kind, { path: "/repo", token: "root", revision: "1" }, { preview });
@@ -535,5 +679,67 @@ describe("application shell model", () => {
   it("keeps navigation local while writes are frozen instead of queuing a tmux mutation", () => {
     expect(shellNavigationMode(true)).toBe("authoritative");
     expect(shellNavigationMode(false)).toBe("cached");
+  });
+});
+
+describe("archived workspaces", () => {
+  const archived = archiveWorkspace(defaultAppState, "local", "server-a", sessions[1], 10);
+
+  it("hides the workspace on exactly this host and server, and unarchive restores it", () => {
+    expect(archivedSessionIds(archived, "local", "server-a")).toEqual(new Set(["$1"]));
+    expect(archivedWorkspacesFor(archived, "local", "server-a", sessions).map((session) => session.id)).toEqual(["$1"]);
+    expect(archived.archivedWorkspaces).toEqual([
+      { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionName: "one", archivedAt: 10 },
+    ]);
+    // Idempotent, and never without a server identity to key on.
+    expect(archiveWorkspace(archived, "local", "server-a", sessions[1], 11)).toBe(archived);
+    expect(archiveWorkspace(defaultAppState, "local", undefined, sessions[1], 11)).toBe(defaultAppState);
+    const restored = unarchiveWorkspace(archived, "local", "server-a", "$1");
+    expect(restored.archivedWorkspaces).toEqual([]);
+    expect(archivedSessionIds(restored, "local", "server-a").size).toBe(0);
+    expect(unarchiveWorkspace(restored, "local", "server-a", "$1")).toBe(restored);
+  });
+
+  it("never lets a record from another server or host hide a workspace", () => {
+    expect(archivedSessionIds(archived, "local", "server-b").size).toBe(0);
+    expect(archivedSessionIds(archived, "remote", "server-a").size).toBe(0);
+    expect(archivedSessionIds(archived, "local", undefined).size).toBe(0);
+    expect(archivedWorkspacesFor(archived, "local", "server-b", sessions)).toEqual([]);
+    // Another server's records are untouched by this server's reconcile…
+    expect(reconcileWorkspaceIdentity(archived, "local", "server-b", [])).toBe(archived);
+    // …and gone when that server's state is discarded.
+    expect(discardServerAppState(archived, "local", "server-a").archivedWorkspaces).toEqual([]);
+  });
+
+  it("follows a rename, survives a reconnect, and forgets a session killed from another client", () => {
+    const renamed = reconcileWorkspaceIdentity(archived, "local", "server-a", [{ ...sessions[1], name: "uno" }, sessions[0]]);
+    expect(renamed.archivedWorkspaces[0]).toMatchObject({ sessionId: "$1", sessionName: "uno" });
+    expect(archivedSessionIds(renamed, "local", "server-a")).toEqual(new Set(["$1"]));
+    // Same server, same sessions: nothing to change, same object.
+    expect(reconcileWorkspaceIdentity(archived, "local", "server-a", sessions)).toBe(archived);
+    const killed = reconcileWorkspaceIdentity(archived, "local", "server-a", [sessions[0]]);
+    expect(killed.archivedWorkspaces).toEqual([]);
+    // A record with no live session is not offered for unarchiving either.
+    expect(archivedWorkspacesFor(archived, "local", "server-a", [sessions[0]])).toEqual([]);
+  });
+
+  it("caps the archive at 200, dropping the oldest", () => {
+    let state = defaultAppState;
+    for (let index = 0; index < 200; index += 1) {
+      state = archiveWorkspace(state, "local", "server-a", { ...sessions[1], id: `$${index + 100}` }, index + 1);
+    }
+    expect(state.archivedWorkspaces).toHaveLength(200);
+    const overflow = archiveWorkspace(state, "local", "server-a", { ...sessions[1], id: "$999" }, 500);
+    expect(overflow.archivedWorkspaces).toHaveLength(200);
+    expect(archivedSessionIds(overflow, "local", "server-a").has("$100")).toBe(false);
+    expect(archivedSessionIds(overflow, "local", "server-a").has("$999")).toBe(true);
+  });
+
+  it("moves the selection off an archived workspace and onto the first visible one", () => {
+    const hidden = new Set(["$1"]);
+    expect(resolveSelectedSession(sessions, "$1", "one", hidden)?.id).toBe("$2");
+    expect(resolveSelectedSession(sessions, undefined, "one", hidden)?.id).toBe("$2");
+    expect(resolveSelectedSession(sessions, "$2", "two", hidden)?.id).toBe("$2");
+    expect(resolveSelectedSession(sessions, "$1", "one", new Set(["$1", "$2"]))).toBeUndefined();
   });
 });
