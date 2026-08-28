@@ -99,6 +99,13 @@ pub(crate) struct TerminalClient {
     bulk_scope: Uuid,
     writer: Mutex<Option<ControlWriterHandle>>,
     child: Mutex<Option<Child>>,
+    /// Why this side last tore its own transport down, for the bridge
+    /// supervisor to append to the error the dying bridge reports. Without it
+    /// every local teardown reaches the journal as the *reader's* symptom
+    /// ("host bridge closed", "frame I/O failed") and the six places that can
+    /// order one are indistinguishable — which is what left the 2026-08-28
+    /// throttled-link reconnect storm without a cause.
+    teardown_reason: Mutex<Option<&'static str>>,
     stop_signal: StopSignal,
     ready: AtomicBool,
     read_only: AtomicBool,
@@ -156,6 +163,7 @@ impl TerminalClient {
             bulk_scope: Uuid::new_v4(),
             writer: Mutex::new(None),
             child: Mutex::new(None),
+            teardown_reason: Mutex::new(None),
             stop_signal: StopSignal::default(),
             ready: AtomicBool::new(false),
             read_only: AtomicBool::new(false),
@@ -252,7 +260,8 @@ impl TerminalClient {
         }
     }
 
-    fn reconnect_transport(&self) {
+    fn reconnect_transport(&self, reason: &'static str) {
+        *self.teardown_reason.lock().unwrap() = Some(reason);
         files::invalidate_bulk_scope(
             self.bulk_scope,
             "bulk transfer control connection is reconnecting",
@@ -400,7 +409,7 @@ impl TerminalClient {
                 envelope(request_id, 0, Payload::Request(request)),
                 Instant::now() + REQUEST_TIMEOUT,
             )
-            .inspect_err(|_| self.reconnect_transport())
+            .inspect_err(|_| self.reconnect_transport("a control write missed its deadline"))
     }
 
     fn request_git(
@@ -470,7 +479,7 @@ impl TerminalClient {
             // has already proved it cannot make bounded progress. The bridge
             // supervisor owns reconnect policy; removing this one transport is
             // the smallest recovery that reaches it.
-            self.reconnect_transport();
+            self.reconnect_transport("a request could not be written before its deadline");
             return Err(error);
         }
         // A cancel raised between the bind above and the write that has just
@@ -505,7 +514,7 @@ impl TerminalClient {
                 // the same daemon stayed healthy. Tear down only this bridge;
                 // the existing supervisor reconnects and reconciles from an
                 // authoritative snapshot without replaying the request.
-                self.reconnect_transport();
+                self.reconnect_transport("a request went unanswered past its deadline");
                 Err(
                     "host request timed out; reconnecting because commit outcome is unknown and the request will not be replayed"
                         .into(),
@@ -567,7 +576,7 @@ impl TerminalClient {
                 ),
                 Instant::now() + REQUEST_TIMEOUT,
             )
-            .inspect_err(|_| self.reconnect_transport())
+            .inspect_err(|_| self.reconnect_transport("a control write missed its deadline"))
     }
 
     /// Best-effort `Cancel` for a request already on the wire.
