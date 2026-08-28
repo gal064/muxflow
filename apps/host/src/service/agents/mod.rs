@@ -117,6 +117,7 @@ impl AgentRuntime {
             let generation = state.generation;
             let record = state.agents.get_mut(&agent_id).expect("collected above");
             record.lifecycle = v1::AgentLifecycleState::Unknown as i32;
+            record.lifecycle_changed_at_unix_millis = now;
             record.state_generation = generation;
             events.push(v1::AgentEvent {
                 agent: Some(snapshot::record(record)),
