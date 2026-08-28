@@ -86,6 +86,19 @@ export function useAppConnectionController({
   activeSessionIdRef.current = activeSessionId;
   const hostPhaseRef = useRef(hostState.phase);
   hostPhaseRef.current = hostState.phase;
+  /**
+   * The last bridge failure already shown as a notice, for as long as the link
+   * stays down.
+   *
+   * The supervisor reports every failed reconnect attempt, so one overnight
+   * outage is seven or eight copies of the same sentence climbing the backoff
+   * ladder, and a connection problem is a notice the shell never auto-dismisses
+   * — the user wakes to a stack of identical errors. The disconnected strip
+   * carries the standing state; the notice only has to say what changed.
+   * Cleared when the transport reports itself connected again, and when a new
+   * bridge starts, so the next outage announces itself.
+   */
+  const lastBridgeFailureRef = useRef<string | undefined>(undefined);
   const [activeWindowId, setActiveWindowId] = useState<string>();
   const [clientId, setClientId] = useState<string>();
   /**
@@ -372,6 +385,11 @@ export function useAppConnectionController({
     let disposed = false;
     let startedClient: string | undefined;
     let recoveringFlowStall = false;
+    // A new bridge is a new outage, whatever the last one ended up saying. The
+    // Reconnect button restarts this effect without ever passing through
+    // `connected`, and a deliberate press that fails the same way still owes
+    // the user an answer.
+    lastBridgeFailureRef.current = undefined;
     // The design says dirty→snapshot is instant: the daemon's topology actor
     // wakes on the notification and pushes as soon as tmux answers. The user
     // measures ~5s from `cd` to the Explorer moving, and the tab name — pure
@@ -438,7 +456,13 @@ export function useAppConnectionController({
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
           recordIncident("link.bridgeDown", { kind: event.kind, detail });
           setConnectionDetail(detail);
-          setStatus(detail);
+          // Every attempt is journalled and every attempt stands in the strip;
+          // only a failure the user has not already been told about is worth a
+          // notice. While the link is up this is the first failure of an
+          // outage, which always speaks.
+          const repeated = hostPhaseRef.current !== "connected" && detail === lastBridgeFailureRef.current;
+          lastBridgeFailureRef.current = detail;
+          if (!repeated) setStatus(detail);
           // The message is the only thing that separates "this host has no
           // helper" from "this host cannot be reached": both arrive as a dead
           // bridge, and only the first one has a fix the app can offer. The
@@ -454,7 +478,10 @@ export function useAppConnectionController({
           // questions on that first settled render without delaying the bridge.
           connectionStateChangedRef.current?.(connection, event.state);
           dispatchHost({ type: "connection", phase: event.state });
-          if (event.state === "connected") setConnectionDetail("");
+          if (event.state === "connected") {
+            setConnectionDetail("");
+            lastBridgeFailureRef.current = undefined;
+          }
           setStatus(event.state === "connected" ? "Live" : `Connection ${event.state}…`);
         } else if (event.kind === "snapshot") {
           if (topologyDirtyAt !== undefined) {
