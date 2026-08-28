@@ -47,6 +47,12 @@ interface WorkspaceSidebarProps {
    * dispatches an action rather than writing app state.
    */
   onTogglePinnedWorkspace(session: Session, scope: HostScopeToken): void;
+  /**
+   * Shift-click on an agent row, and its menu item: pins the agent's tab, or
+   * unpins one already pinned. The same host pin the tab strip toggles, reached
+   * from here because the agent's tab is often not in the strip on screen.
+   */
+  onTogglePinnedAgentTab(row: AgentListRow, scope: HostScopeToken): void;
   onWorkspaceCommand(session: Session, commandId: WorkspaceCommandId, scope: HostScopeToken): void;
   onSelectAgent(row: AgentListRow, scope: HostScopeToken): void;
   onSortMode(mode: AgentSortMode): void;
@@ -214,7 +220,12 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         data-agent-index={index}
         aria-disabled={!row.routable}
         data-unavailable={row.routable ? undefined : "true"}
-        onClick={() => { if (row.routable) props.onSelectAgent(row, props.commandScope); }}
+        // Shift-click pins the agent's tab rather than navigating to it, as
+        // it does in the tab strip and the workspace list.
+        onClick={(event) => {
+          if (event.shiftKey) props.onTogglePinnedAgentTab(row, props.commandScope);
+          else if (row.routable) props.onSelectAgent(row, props.commandScope);
+        }}
         onContextMenu={(event) => {
           event.preventDefault();
           setFocusedAgentTarget({ id: row.agent.id, scope: props.commandScope });
@@ -610,6 +621,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       items={agentMenu.row
         ? [
           { id: "focus", label: "Focus this agent's pane", disabled: !agentMenu.row.routable, run: () => props.onSelectAgent(agentMenu.row!, agentMenu.scope) },
+          { id: "pin", label: agentMenu.row.location.tabPinned ? "Unpin tab" : "Pin tab", run: () => props.onTogglePinnedAgentTab(agentMenu.row!, agentMenu.scope) },
           { id: "rename", label: "Rename agent…", disabled: !props.canMutate, run: () => props.onRenameAgent(agentMenu.row!.agent, agentMenu.scope) },
           ...resumePlacements(props.adapters, agentMenu.row.agent).map((placement) => ({
             id: `resume-${placement}`,

@@ -159,6 +159,7 @@ const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
   onSelectWorkspace: noop,
   onSortMode: noop,
   onTogglePinnedWorkspace: noop,
+  onTogglePinnedAgentTab: noop,
   onWorkspaceCommand: noop,
   pinnedOnly: false,
   onTogglePinnedOnly: noop,
@@ -501,7 +502,7 @@ describe("application shell accessibility contracts", () => {
       adapters={adapters} agents={rows} agentSort="workspace" agentsRatio={0.4} canMutate={canMutate} commandScope={commandScope} compactWorkspaces={false}
       hostLabel="remote-linux" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
-      onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop}
+      onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop}
       onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
     />;
     await act(async () => { renderer = create(element(agents)); });
@@ -1089,7 +1090,7 @@ describe("application shell accessibility contracts", () => {
       adapters={[]} agents={[]} agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} compactWorkspaces={false}
       hostLabel="remote-linux" maxWidth={426} phase="connected" rows={rows} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
-      onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onSortMode={noop} onWidth={noop}
+      onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onSortMode={noop} onWidth={noop}
       onWorkspaceCommand={onWorkspaceCommand} pinnedOnly={false} onTogglePinnedOnly={noop}
     />;
     let renderer!: ReturnType<typeof create>;
@@ -1115,7 +1116,7 @@ describe("application shell accessibility contracts", () => {
       agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} compactWorkspaces={false} hostLabel="remote-linux" maxWidth={426}
       phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
-      onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onSortMode={noop} onWidth={noop}
+      onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onSortMode={noop} onWidth={noop}
       onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
     />;
     let renderer!: ReturnType<typeof create>;
@@ -1688,6 +1689,28 @@ describe("pinning by Shift-click", () => {
     await act(async () => row.props.onClick({ shiftKey: true }));
     expect(onTogglePinnedWorkspace).toHaveBeenCalledWith(session, commandScope);
     expect(onSelectWorkspace).toHaveBeenCalledTimes(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it("pins an agent's tab on Shift-click and navigates on a plain one", async () => {
+    const onSelectAgent = vi.fn();
+    const onTogglePinnedAgentTab = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<WorkspaceSidebar {...sidebarProps({ onSelectAgent, onTogglePinnedAgentTab })} />);
+    });
+    const row = renderer.root.findAllByProps({ className: "agent-button" })[0];
+    await act(async () => row.props.onClick({ shiftKey: false }));
+    expect(onSelectAgent).toHaveBeenCalledTimes(1);
+    expect(onTogglePinnedAgentTab).not.toHaveBeenCalled();
+
+    await act(async () => row.props.onClick({ shiftKey: true }));
+    expect(onTogglePinnedAgentTab).toHaveBeenCalledWith(expect.objectContaining({ agent: expect.objectContaining({ displayName: "Codex one" }) }), commandScope);
+    expect(onSelectAgent).toHaveBeenCalledTimes(1);
+
+    await act(async () => row.props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    await act(async () => renderer.root.findByProps({ "data-menu-item": "pin" }).props.onClick());
+    expect(onTogglePinnedAgentTab).toHaveBeenCalledTimes(2);
     await act(async () => renderer.unmount());
   });
 

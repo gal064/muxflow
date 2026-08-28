@@ -658,6 +658,12 @@ export function App() {
     if (!activeSessionId || !sameHostConnection(scope, hostScopeRef.current)) return;
     void performAction({ kind: "setPinned", sessionId: activeSessionId, windowId: tab.id, pinned: !tab.pinned });
   }, [activeSessionId, hostScopeRef, performAction]);
+  // From the agents list the tab is named by the agent's own route, which
+  // spans workspaces — no dependence on the session on screen.
+  const toggleAgentTabPin = useCallback((row: AgentListRow, scope: HostScopeToken) => {
+    if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    void performAction({ kind: "setPinned", sessionId: row.agent.sessionId, windowId: row.agent.windowId, pinned: !row.location.tabPinned });
+  }, [hostScopeRef, performAction]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is
@@ -1083,6 +1089,7 @@ export function App() {
         onSelectAgent={selectAgentRow}
         onSelectWorkspace={selectSession}
         onTogglePinnedOnly={() => void runCommand(appState.shell.pinnedOnly ? "workspaces.showAll" : "workspaces.showPinnedOnly")}
+        onTogglePinnedAgentTab={toggleAgentTabPin}
         onTogglePinnedWorkspace={toggleWorkspacePin}
         onSortMode={(mode) => updateShell({ agentSort: mode })}
         onWorkspaceCommand={(session, commandId, scope) => void runCommand(commandId, { kind: "session", id: session.id, scope })}
