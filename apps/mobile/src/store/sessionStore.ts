@@ -40,8 +40,9 @@ export interface ConnectionSlice {
   retryAtMs?: number | undefined;
 }
 
-export interface Session { id: string; name: string; windowCount: number; order: number }
-export interface Window { id: string; sessionId: string; index: number; name: string; active: boolean }
+/** `pinned` is host-owned presentation state (pins sidecar), shared by every client. */
+export interface Session { id: string; name: string; windowCount: number; order: number; pinned: boolean }
+export interface Window { id: string; sessionId: string; index: number; name: string; active: boolean; pinned: boolean }
 export interface Pane {
   id: string;
   sessionId: string;
@@ -158,6 +159,7 @@ export function createSessionStore(): SessionStore {
           name: session.name,
           windowCount: session.windowCount,
           order: session.order,
+          pinned: session.pinned,
         };
       }
       const windows: Record<string, Window> = {};
@@ -168,6 +170,7 @@ export function createSessionStore(): SessionStore {
           index: window.index,
           name: window.name,
           active: window.active,
+          pinned: window.pinned,
         };
       }
       const panes: Record<string, Pane> = {};
