@@ -80,7 +80,7 @@ describe("tmux action execution feedback boundary", () => {
       await harness.perform({ kind: "closeWindow", sessionId: "$1", windowId: "@1", confirmed: true });
     });
     expect(incidents).toHaveBeenCalledWith("action.refused", {
-      kind: "closeWindow",
+      action: "closeWindow",
       error: expect.stringContaining("stale topology: generation changed"),
     });
     // Bounded: an error carrying a whole tmux transcript must not become the

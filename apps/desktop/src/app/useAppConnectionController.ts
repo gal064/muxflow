@@ -436,7 +436,7 @@ export function useAppConnectionController({
           });
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
-          recordIncident("link.bridgeDown", { kind: event.kind, detail });
+          recordIncident("link.bridgeDown", { event: event.kind, detail });
           setConnectionDetail(detail);
           setStatus(detail);
           // The message is the only thing that separates "this host has no

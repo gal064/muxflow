@@ -78,7 +78,7 @@ export function useTmuxActionPerformer(options: Options) {
       // following tab's — so the only record of "the host said no" was a message
       // nobody kept. One line per refusal: refusals are exceptional, and the
       // largest burst is one per tab in a bulk close.
-      recordIncident("action.refused", { kind: action.kind, error: String(error).slice(0, 200) });
+      recordIncident("action.refused", { action: action.kind, error: String(error).slice(0, 200) });
       if (reportStatus && sameHostConnection(initialScope, options.hostScopeRef.current)) options.setStatus(String(error));
       if (execution?.kind === "navigation") throw error;
       return undefined;

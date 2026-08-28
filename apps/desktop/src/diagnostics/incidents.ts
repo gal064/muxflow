@@ -18,9 +18,20 @@ import { invoke } from "@tauri-apps/api/core";
 /** Groups one app launch's records without needing a session boundary line. */
 const launchId = typeof crypto === "undefined" ? "unknown" : crypto.randomUUID().slice(0, 8);
 
+/**
+ * The record's own frame. A detail that happens to carry one of these — an
+ * event `kind`, say — used to spread over the label and leave the line
+ * unattributable, so the frame is written first and the detail cannot reach it.
+ */
+const reservedKeys = new Set(["t", "launch", "kind"]);
+
 export function recordIncident(kind: string, detail?: Record<string, unknown>): void {
   try {
-    const line = JSON.stringify({ t: new Date().toISOString(), launch: launchId, kind, ...detail });
+    const record: Record<string, unknown> = { t: new Date().toISOString(), launch: launchId, kind };
+    for (const [key, value] of Object.entries(detail ?? {})) {
+      if (!reservedKeys.has(key)) record[key] = value;
+    }
+    const line = JSON.stringify(record);
     void invoke("record_incident", { line }).catch(() => undefined);
   } catch {
     // Serialization failed or no Tauri runtime; the journal misses one line.
