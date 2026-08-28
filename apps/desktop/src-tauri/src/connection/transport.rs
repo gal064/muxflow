@@ -246,6 +246,13 @@ fn ssh_base(config_path: Option<&str>) -> Command {
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
+        // A reconnect attempted right after a wake meets a route that is still
+        // black-holed, and the OS default leaves it stuck there for about 75 s —
+        // long enough to outlive the backoff step that scheduled it. This bounds
+        // the handshake and key exchange as well as the connect, so it has to
+        // stay generous enough for a loaded host or a ProxyJump chain.
+        "-o",
+        "ConnectTimeout=10",
     ]);
     command
 }
