@@ -707,10 +707,12 @@ describe("restore admission", () => {
   it("recovers from the host instead of replacing newer output with an older screen", () => {
     expect(restoreDecision(5, 5, false)).toEqual({ kind: "apply" });
     expect(restoreDecision(9, 5, false)).toEqual({ kind: "apply" });
-    expect(restoreDecision(4, 5, false).kind).toBe("reseed");
+    // Both refusals carry the journal kind they are recorded under, which is
+    // also what tells the renderer to recover without a word to the user.
+    expect(restoreDecision(4, 5, false)).toMatchObject({ kind: "reseed", incident: "pane.staleRestore" });
     // An overflowed pane owes the host a seed; a cached screen is not one, and
     // silently doing nothing marks the pane ready while it shows nothing.
-    expect(restoreDecision(9, 5, true).kind).toBe("reseed");
+    expect(restoreDecision(9, 5, true)).toMatchObject({ kind: "reseed", incident: "pane.overflowRestore" });
   });
 });
 

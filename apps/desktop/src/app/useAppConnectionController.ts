@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useReducer, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { TauriAgentClient } from "../features/agents/api";
 import type { TauriFileWorkspaceClient } from "../features/files/api";
 import type { TauriGitWorkspaceClient } from "../features/git/api";
@@ -26,6 +26,12 @@ import {
 } from "../features/terminal/api";
 import { terminalStateCache } from "../features/terminal/TerminalStateCache";
 import { connectionReducer, denormalizeSnapshot, initialHostState } from "../state/connectionReducer";
+import {
+  createLinkQualityMonitor,
+  describeLinkQuality,
+  LINK_QUALITY_POLL_MS,
+  type LinkQualityChange,
+} from "./linkQuality";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
 import { resolveActiveWindowId, type OptimisticWindowSwitch } from "./windowSelection";
 import { resolveSelectedSession } from "../features/shell/model";
@@ -159,6 +165,38 @@ export function useAppConnectionController({
   const hostScopeRef = useRef(currentHostScope);
   hostScopeRef.current = currentHostScope;
   /**
+   * The one thing six drops in two minutes never told the user: it is the
+   * network.
+   *
+   * Both signals it tallies already exist here — the degraded transitions the
+   * strip is driven by, and the echo probe's own outliers — so this is glue
+   * around `linkQuality`, not a new measurement. The message it produces goes
+   * through the amber strip because that is the surface for a standing
+   * condition; a toast for it would be one more line in the stack of
+   * reconnect notices the user is already ignoring.
+   */
+  const linkQuality = useMemo(() => createLinkQualityMonitor(), []);
+  const [linkQualityMessage, setLinkQualityMessage] = useState("");
+  /** What this hook last put in the strip, so it only ever clears its own text. */
+  const shownLinkQuality = useRef("");
+  const linkQualityHostRef = useRef("");
+  // Empty for a local connection: there is no network to blame there.
+  linkQualityHostRef.current = connection.mode === "local" ? "" : connection.target;
+  const applyLinkQuality = useCallback((change: LinkQualityChange | undefined) => {
+    if (!change || !linkQualityHostRef.current) return;
+    if (change.kind === "degraded") {
+      recordIncident("link.quality", {
+        state: change.state,
+        losses: change.losses,
+        lagEvents: change.lagEvents,
+      });
+      setLinkQualityMessage(describeLinkQuality(change.state, linkQualityHostRef.current));
+    } else {
+      recordIncident("link.quality", { state: "ok", afterMs: change.afterMs });
+      setLinkQualityMessage("");
+    }
+  }, []);
+  /**
    * The journal's record of typing lag, which nothing else can report.
    *
    * One probe for the app: input is dispatched from a single callback and the
@@ -186,6 +224,12 @@ export function useAppConnectionController({
   const echoLagProbe = useMemo(() => createEchoLagProbe({
     onSample: (_paneId, lagMs) => inputLatencyReporter.sample("endToEnd", lagMs),
     onIncident: ({ kind, ...detail }) => {
+      // The probe has already applied its own threshold and its own per-pane
+      // dedupe, so an outlier here is exactly one occasion of "the host
+      // answered late" — no second measurement and no timer of our own.
+      if (kind === "input.echoLag" && "lagMs" in detail) {
+        applyLinkQuality(linkQuality.noteEchoLag(Date.now(), detail.lagMs));
+      }
       const currentClientId = clientIdRef.current;
       if (!currentClientId) {
         recordIncident(kind, detail);
@@ -194,7 +238,7 @@ export function useAppConnectionController({
       void fetchLinkStats(currentClientId)
         .then((stats) => recordIncident(kind, stats ? { ...detail, ...stats } : detail));
     },
-  }), [inputLatencyReporter]);
+  }), [applyLinkQuality, inputLatencyReporter, linkQuality]);
   useEffect(() => () => echoLagProbe.dispose(), [echoLagProbe]);
   const hub = useMemo(() => new TerminalEventHub(
     (paneId, reason) => {
@@ -320,13 +364,56 @@ export function useAppConnectionController({
       || hostState.phase === "reconnecting"
       || hostState.phase === "resyncing";
     if (degraded && linkDegradedSince.current === undefined) {
-      linkDegradedSince.current = Date.now();
+      const at = Date.now();
+      linkDegradedSince.current = at;
       recordIncident("link.degraded", { phase: hostState.phase });
+      // The edge, not the bridge's `error` events: the supervisor reports
+      // every failed reconnect attempt, so one outage climbing the backoff
+      // ladder is seven or eight errors and exactly one lost link. A resync is
+      // not a loss at all — that is the native link repairing sequence order
+      // on a connection it still holds.
+      if (hostState.phase !== "resyncing") applyLinkQuality(linkQuality.noteLinkLost(at));
     } else if (!degraded && linkDegradedSince.current !== undefined) {
       recordIncident("link.restored", { afterMs: Date.now() - linkDegradedSince.current });
       linkDegradedSince.current = undefined;
     }
-  }, [hostState.phase]);
+  }, [applyLinkQuality, hostState.phase, linkQuality]);
+
+  /**
+   * The quality summary stands in the strip only while the link is up.
+   *
+   * While a reconnect is in progress the strip is saying what is happening
+   * right now — a bridge failure, "reconnecting…" — and this is a summary of
+   * what has been happening; overwriting the live text with it would be the
+   * app arguing with itself. So it waits for `connected`, which is also the
+   * moment the connection handler blanks the strip, and takes the empty strip
+   * the reconnect leaves behind. It only ever clears text it put there itself.
+   */
+  useEffect(() => {
+    if (linkQualityMessage) {
+      if (hostState.phase !== "connected") return;
+      shownLinkQuality.current = linkQualityMessage;
+      setConnectionDetail(linkQualityMessage);
+      return;
+    }
+    const stale = shownLinkQuality.current;
+    if (!stale) return;
+    shownLinkQuality.current = "";
+    setConnectionDetail((current) => (current === stale ? "" : current));
+  }, [hostState.phase, linkQualityMessage]);
+
+  /** Only time ends an episode, and only an episode pays for the timer. */
+  useEffect(() => {
+    if (!linkQualityMessage) return;
+    const timer = setInterval(() => applyLinkQuality(linkQuality.poll(Date.now())), LINK_QUALITY_POLL_MS);
+    return () => clearInterval(timer);
+  }, [applyLinkQuality, linkQuality, linkQualityMessage]);
+
+  /** A different machine's link is a different link; nothing carries over. */
+  useEffect(() => {
+    linkQuality.reset();
+    setLinkQualityMessage("");
+  }, [currentHostProfileId, linkQuality]);
 
   useEffect(() => {
     void invoke<PersistedProfiles>("list_host_profiles").then((saved) => {
