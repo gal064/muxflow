@@ -388,6 +388,7 @@ mod tests {
                 window_count: 1,
                 attached_clients: 0,
                 order: 0,
+                pinned: false,
             }],
             panes: vec![tmux_control::Pane {
                 id: "%3".into(),

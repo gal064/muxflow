@@ -60,6 +60,7 @@
     "agentsSectionRatio": 0.42,
     "agentStateGlyphs": true,
     "compactWorkspaces": true,
+    "pinnedOnly": true,
     "terminalScreenReader": true,
     "copyOnSelect": true,
     "terminalApplicationClipboard": true,
@@ -83,15 +84,6 @@
     "local": "accepted",
     "ssh-remote-linux": "declined"
   },
-  "archivedWorkspaces": [
-    {
-      "hostProfileId": "local",
-      "serverIdentity": "server-a",
-      "sessionId": "$2",
-      "sessionName": "parked",
-      "archivedAt": 1700000000000
-    }
-  ],
   "workspaceDefaults": {
     "local": {
       "directory": "/work/projects",

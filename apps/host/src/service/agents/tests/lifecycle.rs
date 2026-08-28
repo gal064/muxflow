@@ -971,6 +971,7 @@ fn identical_window_names_never_route_one_agents_state_to_another() {
         active: false,
         layout: String::new(),
         zoomed: false,
+        pinned: false,
     });
     let mut second = topology.panes[0].clone();
     second.id = "%8".into();

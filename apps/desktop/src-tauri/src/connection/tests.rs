@@ -23,6 +23,74 @@ fn incompatible_or_disconnected_client_rejects_mutation_without_queueing() {
 }
 
 #[test]
+fn a_timed_out_host_response_reconnects_instead_of_reusing_the_ordered_lane() {
+    use std::{fs::File, os::fd::FromRawFd};
+
+    let mut fds = [0; 2];
+    // SAFETY: pipe initializes both descriptors on success, and each is moved
+    // into exactly one File below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let read_end = unsafe { File::from_raw_fd(fds[0]) };
+    let write_end = unsafe { File::from_raw_fd(fds[1]) };
+
+    let client = TerminalClient::new();
+    client.ready.store(true, Ordering::Release);
+    *client.writer.lock().unwrap() =
+        Some(ControlWriterHandle::start_with(write_end, "response-timeout-reconnect").unwrap());
+
+    let error = client
+        .request_with_timeout(
+            v1::Request {
+                operation: v1::Operation::SelectTerminalSession.into(),
+                session_id: "$1".into(),
+                ..Default::default()
+            },
+            Duration::from_millis(25),
+            None,
+        )
+        .unwrap_err();
+
+    assert!(error.contains("host request timed out"), "{error}");
+    assert!(error.contains("reconnecting"), "{error}");
+    assert!(!client.ready.load(Ordering::Acquire));
+    assert!(client.writer.lock().unwrap().is_none());
+    assert!(client.pending.lock().unwrap().is_empty());
+    drop(read_end);
+}
+
+#[test]
+fn a_failed_fire_and_forget_input_write_reconnects_the_transport() {
+    use std::{fs::File, os::fd::FromRawFd};
+
+    let mut fds = [0; 2];
+    // SAFETY: pipe initializes both descriptors on success, and each is moved
+    // into exactly one File below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let read_end = unsafe { File::from_raw_fd(fds[0]) };
+    let write_end = unsafe { File::from_raw_fd(fds[1]) };
+
+    let client = TerminalClient::new();
+    client.ready.store(true, Ordering::Release);
+    let writer = ControlWriterHandle::start_with(write_end, "input-write-reconnect").unwrap();
+    writer.close();
+    *client.writer.lock().unwrap() = Some(writer);
+
+    let error = client
+        .dispatch_request(v1::Request {
+            operation: v1::Operation::TerminalInput.into(),
+            scope: "%1".into(),
+            data: b"x".to_vec(),
+            ..Default::default()
+        })
+        .unwrap_err();
+
+    assert!(error.contains("writer is closed"), "{error}");
+    assert!(!client.ready.load(Ordering::Acquire));
+    assert!(client.writer.lock().unwrap().is_none());
+    drop(read_end);
+}
+
+#[test]
 fn sequence_gap_is_detected_before_event_application() {
     assert!(validate_event_sequence(2, 3).is_ok());
     let error = validate_event_sequence(2, 4).unwrap_err();
@@ -377,6 +445,7 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
             window_count: 1,
             attached_clients: 0,
             order: 0,
+            pinned: false,
         }],
         windows: vec![
             tmux_control::Window {
@@ -387,6 +456,7 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
                 active: true,
                 layout: String::new(),
                 zoomed: false,
+                pinned: false,
             },
             tmux_control::Window {
                 id: "@2".into(),
@@ -396,6 +466,7 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
                 active: false,
                 layout: String::new(),
                 zoomed: false,
+                pinned: false,
             },
         ],
         panes: [("%2", "@1"), ("%3", "@2")]

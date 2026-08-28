@@ -336,6 +336,25 @@ pub(crate) async fn handle_request(
             .await;
         }
         (Handler::Terminal, Some(v1::Operation::SetTerminalVisibility)) => {
+            // Reserve sequencer capacity before entering the blocking section.
+            // Waiting here holds no terminal/resource lock, and the connection
+            // frame reader remains free to consume delivery acknowledgements.
+            let event_permit = match event_tx.clone().reserve_owned().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    send_response(
+                        control_tx,
+                        request_id,
+                        response_error(
+                            "terminal_visibility_rejected",
+                            "terminal event sequencer is closed",
+                        ),
+                    )
+                    .await;
+                    pending.lock().unwrap().remove(&request_id);
+                    return;
+                }
+            };
             let terminal = Arc::clone(terminal);
             let event_tx = event_tx.clone();
             let overflowed = Arc::clone(overflowed);
@@ -350,6 +369,7 @@ pub(crate) async fn handle_request(
                             generation: request.terminal_generation_cutoff,
                         },
                     },
+                    event_permit,
                     &event_tx,
                     &overflowed,
                 )

@@ -4,7 +4,7 @@ import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { CLICK_SLOP_PX, selectionHolds, useSanitizedMarkdown } from "../files/markdownPreview";
 import { renderSafeSvg } from "../files/markdown";
 import { useOpenFileTab } from "../files/useOpenFileTab";
-import { IMAGE_PREVIEW_LIMIT_BYTES, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
+import { IMAGE_PREVIEW_LIMIT_BYTES, isTerminalSingleFileRoot, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
 import { DelayedLoading } from "../../ui/DelayedLoading";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { SaveState } from "../files/autosave";
@@ -66,7 +66,11 @@ export function AppTabSurface(props: Props) {
   const { content, editorRequested, view } = file;
   const editor = useEditorPaint(file.paint, editorRequested, true);
   const editFile = file.edit;
-  const canWrite = props.canWrite;
+  // A terminal click outside the workspace carries a host-enforced one-file
+  // read capability. Keep the surface honest about that capability: no editor
+  // writes and no save-state claim for a token the host will never accept on a
+  // mutating operation.
+  const canWrite = props.canWrite && !isTerminalSingleFileRoot(root);
   const onEditorChange = useCallback((typed: string) => {
     if (canWrite) editFile(typed);
   }, [canWrite, editFile]);
@@ -77,7 +81,7 @@ export function AppTabSurface(props: Props) {
   }
   const download = () => props.onDownload(props.tab.resource, "file", root);
   const toolbar = (state: SaveState | undefined) => <EditorToolbar
-    canWrite={props.canWrite}
+    canWrite={canWrite}
     download={download}
     mode={mode}
     onViewMode={props.onViewMode}
@@ -132,7 +136,7 @@ export function AppTabSurface(props: Props) {
           onChange={onEditorChange}
           onReady={editor.onReady}
           path={props.tab.resource}
-          readOnly={!props.canWrite}
+          readOnly={!canWrite}
           value={source}
           wordWrap={props.tab.kind === "markdown"}
         />

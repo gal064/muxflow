@@ -12,6 +12,8 @@ export interface CommandContext {
   canMoveTabRight: boolean;
   /** Whether Settings is showing a picked saved host the store will part with. */
   hasHostProfile: boolean;
+  /** Whether the sidebar is currently filtered to pinned workspaces. */
+  pinnedOnly: boolean;
   /**
    * Row commands (`requires: "row"`) published by whichever row surface holds
    * the row the user last pointed at. See `rowCommands.ts`: the publishing
@@ -45,7 +47,8 @@ export type CommandId =
   | "focus.workspaces" | "focus.tabs" | "focus.back" | "focus.forward"
   | "tab.previous" | "tab.next"
   | "agents.jumpUnread" | "agents.toggleSort"
-  | "session.new" | "session.rename" | "session.moveLeft" | "session.moveRight" | "session.archive" | "session.close"
+  | "session.new" | "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close"
+  | "workspaces.showPinnedOnly" | "workspaces.showAll"
   | WorkspaceSelectCommandId
   | "window.new" | "window.rename" | "window.moveLeft" | "window.moveRight" | "window.close"
   | TabSelectCommandId
@@ -152,8 +155,12 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "session.rename", title: "Rename workspace", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.moveLeft", title: "Move workspace up", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.moveRight", title: "Move workspace down", group: "Workspace", mutates: true, requires: "session" },
-  // Not `mutates`: archiving is an app-side view decision and sends tmux nothing.
-  { id: "session.archive", title: "Archive workspace", group: "Workspace", requires: "session" },
+  // The sidebar's filter, as two commands rather than one toggle: the palette
+  // has no dynamic titles, and "Toggle pinned workspaces" would leave the user
+  // guessing which way it goes. Only the one that applies is ever offered.
+  // Neither `mutates`: this is a view decision and sends tmux nothing.
+  { id: "workspaces.showPinnedOnly", title: "Show pinned workspaces only", group: "Workspace" },
+  { id: "workspaces.showAll", title: "Show all workspaces", group: "Workspace" },
   { id: "session.close", title: "Close workspace…", group: "Workspace", mutates: true, requires: "session", destructive: true },
   // With the rest of the Terminal tab group, not up beside the View commands:
   // the palette's headings assume one contiguous run per group, and these two
@@ -231,6 +238,10 @@ export function commandAvailable(command: CommandDefinition, context: CommandCon
   // here is how the palette and the context menu would drift apart.
   if (command.requires === "row") return context.rowCommands.includes(command.id);
   if (command.requires === "hostProfile") return context.hasHostProfile;
+  // The filter's two commands are each other's inverse, so exactly one of them
+  // is ever the thing to run; offering both would put a no-op in the palette.
+  if (command.id === "workspaces.showPinnedOnly") return !context.pinnedOnly;
+  if (command.id === "workspaces.showAll") return context.pinnedOnly;
   if (command.mutates && !context.canMutate) return false;
   if (command.id === "window.close" && context.hasWindow && !context.canMutate) return false;
   if (command.requires === "session" && !context.hasSession) return false;

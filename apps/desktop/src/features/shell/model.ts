@@ -1,13 +1,13 @@
 import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { renderedPanes } from "../terminal/layout";
-import { MAX_ARCHIVED_WORKSPACES, usableWorkspaceDefault } from "./types";
-import type { AppOwnedTab, AppTabViewMode, ArchivedWorkspaceRecord, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
+import { usableWorkspaceDefault } from "./types";
+import type { AppOwnedTab, AppTabViewMode, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import type { AgentAdapterId, AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
 import { stripAgentStatusGlyphs } from "../agents/agentLabels";
 
 export type CombinedTab =
-  | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"]; agentAdapterId?: AgentAdapterId; agentPresence: TerminalAgentPresence }
+  | { key: `terminal:${string}`; kind: "terminal"; id: string; title: string; index: number; activeInTmux: boolean; zoomed: boolean; canMoveLeft: boolean; canMoveRight: boolean; attention: AgentAttentionRollup["state"]; agentAdapterId?: AgentAdapterId; agentPresence: TerminalAgentPresence; pinned: boolean }
   | { key: `app:${string}`; kind: "app"; id: string; title: string; appKind: AppOwnedTab["kind"]; resource: string; order: number; preview: boolean; canMoveLeft: boolean; canMoveRight: boolean }
   | { key: `pending:${string}`; kind: "pending"; title: string };
 export type SelectableTab = Exclude<CombinedTab, { kind: "pending" }>;
@@ -85,6 +85,21 @@ export interface AgentShellItem {
   windowId: string;
   paneId: string;
   updatedAt: number;
+}
+
+/**
+ * The one ordering rule every pinned surface reads: pinned items form a
+ * leading block and everything else keeps the order it arrived in.
+ *
+ * Stable in both halves — the pinned block keeps its input order too — so
+ * pinning never reshuffles anything it was not asked about. The host decides
+ * *what* is pinned; this decides only where the pinned things sit.
+ */
+export function pinnedFirst<T>(items: readonly T[], pinned: (item: T) => boolean): T[] {
+  const leading: T[] = [];
+  const rest: T[] = [];
+  for (const item of items) (pinned(item) ? leading : rest).push(item);
+  return [...leading, ...rest];
 }
 
 export function orderedSessions(sessions: readonly Session[]): Session[] {
@@ -184,6 +199,9 @@ export function combineWorkspaceTabs(
         // already-read agents are just as protected by Close All Non-Agent Tabs
         // as working, blocked and unread-complete agents.
         agentPresence: presence,
+        // The host's flag, straight off the snapshot: a document tab has no
+        // window on the server, which is why only terminal tabs carry one.
+        pinned: Boolean(window.pinned),
       };
     });
   const ownedTabs: CombinedTab[] = [...appTabs]
@@ -203,10 +221,18 @@ export function combineWorkspaceTabs(
   const pendingTabs: CombinedTab[] = pending && pendingTabStillOpen(pending, windows)
     ? [{ key: `pending:${pending.key}`, kind: "pending", title: pending.title }]
     : [];
-  // Last, because it is the newest thing asked for and because a placeholder
-  // that pushed the existing tabs sideways would move the targets under a
-  // person's cursor while they waited.
-  return [...terminalTabs, ...ownedTabs, ...pendingTabs];
+  // Pinned tabs lead, keeping their window order; everything else keeps the
+  // window/document order above. `canMoveLeft` and `canMoveRight` are
+  // deliberately *not* recomputed against this: a move is a change to the tmux
+  // window index or the document order, which is what those flags describe.
+  //
+  // The placeholder stays last, because it is the newest thing asked for and
+  // because a placeholder that pushed the existing tabs sideways would move the
+  // targets under a person's cursor while they waited.
+  return [
+    ...pinnedFirst([...terminalTabs, ...ownedTabs], (tab) => tab.kind === "terminal" && tab.pinned),
+    ...pendingTabs,
+  ];
 }
 
 /**
@@ -364,7 +390,7 @@ export function reconcileWorkspaceIdentity(
     }
     return tab;
   });
-  const reconcileRecords = <T extends WorkspaceUiRecord | ArchivedWorkspaceRecord>(records: readonly T[]): T[] => records.filter((item) => {
+  const workspaceUi = state.workspaceUi.filter((item) => {
     const keep = item.hostProfileId !== currentHostProfileId || item.serverIdentity !== currentServerIdentity || sessionIds.has(item.sessionId);
     if (!keep) changed = true;
     return keep;
@@ -380,81 +406,7 @@ export function reconcileWorkspaceIdentity(
     }
     return item;
   });
-  const workspaceUi = reconcileRecords(state.workspaceUi);
-  // Same rule as `workspaceUi`: a record for a session this server no longer
-  // has is a record for a session that was killed from another tmux client,
-  // and keeping it would hide whichever session next takes that id.
-  const archivedWorkspaces = reconcileRecords(state.archivedWorkspaces);
-  return changed ? { ...state, appTabs, workspaceUi, archivedWorkspaces } : state;
-}
-
-function archivedRecordMatches(
-  record: ArchivedWorkspaceRecord,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-): boolean {
-  return Boolean(serverIdentity) && record.hostProfileId === hostProfileId && record.serverIdentity === serverIdentity;
-}
-
-/** The sessions archived on exactly this host and tmux server; none without a server. */
-export function archivedSessionIds(
-  state: PersistedAppState,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-): ReadonlySet<string> {
-  const ids = new Set<string>();
-  for (const record of state.archivedWorkspaces) {
-    if (archivedRecordMatches(record, hostProfileId, serverIdentity)) ids.add(record.sessionId);
-  }
-  return ids;
-}
-
-/** Puts a workspace away. No tmux action: the session and its processes keep running. */
-export function archiveWorkspace(
-  state: PersistedAppState,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-  session: Session,
-  now: number,
-): PersistedAppState {
-  if (!serverIdentity || archivedSessionIds(state, hostProfileId, serverIdentity).has(session.id)) return state;
-  const record: ArchivedWorkspaceRecord = { hostProfileId, serverIdentity, sessionId: session.id, sessionName: session.name, archivedAt: now };
-  const archivedWorkspaces = [...state.archivedWorkspaces, record];
-  if (archivedWorkspaces.length > MAX_ARCHIVED_WORKSPACES) {
-    // The oldest goes. Its session, if still alive, simply reappears in the
-    // sidebar, which is the least surprising thing a cap can do.
-    let oldest = 0;
-    archivedWorkspaces.forEach((item, index) => { if (item.archivedAt < archivedWorkspaces[oldest].archivedAt) oldest = index; });
-    archivedWorkspaces.splice(oldest, 1);
-  }
-  return { ...state, archivedWorkspaces };
-}
-
-export function unarchiveWorkspace(
-  state: PersistedAppState,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-  sessionId: string,
-): PersistedAppState {
-  const archivedWorkspaces = state.archivedWorkspaces.filter((record) =>
-    !(archivedRecordMatches(record, hostProfileId, serverIdentity) && record.sessionId === sessionId));
-  return archivedWorkspaces.length === state.archivedWorkspaces.length ? state : { ...state, archivedWorkspaces };
-}
-
-/**
- * The archived workspaces that are alive on this server, in sidebar order —
- * what the Archived view lists. A record whose session is gone is not shown:
- * `reconcileWorkspaceIdentity` drops it on the next snapshot anyway, and a row
- * for a session that cannot be restored would be a row with nothing to do.
- */
-export function archivedWorkspacesFor(
-  state: PersistedAppState,
-  hostProfileId: string,
-  serverIdentity: string | undefined,
-  sessions: readonly Session[],
-): Session[] {
-  const archived = archivedSessionIds(state, hostProfileId, serverIdentity);
-  return orderedSessions(sessions).filter((session) => archived.has(session.id));
+  return changed ? { ...state, appTabs, workspaceUi } : state;
 }
 
 export function recoverableAppTabCount(
@@ -505,7 +457,6 @@ export function discardServerAppState(state: PersistedAppState, hostProfileId: s
     ...state,
     appTabs: state.appTabs.filter((tab) => tab.hostProfileId !== hostProfileId || tab.serverIdentity !== serverIdentity),
     workspaceUi: state.workspaceUi.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
-    archivedWorkspaces: state.archivedWorkspaces.filter((item) => item.hostProfileId !== hostProfileId || item.serverIdentity !== serverIdentity),
   };
 }
 
@@ -585,17 +536,22 @@ export function openFileTab(
   resource: string,
   kind: "file" | "markdown",
   root: { path: string; token: string; revision: string },
-  options: { preview: boolean; viewMode?: AppTabViewMode } = { preview: false },
+  options: { preview: boolean; refreshRoot?: boolean; viewMode?: AppTabViewMode } = { preview: false },
 ): PersistedAppState {
   const inWorkspace = (tab: AppOwnedTab) => tab.hostProfileId === currentHostProfileId
     && tab.serverIdentity === currentServerIdentity
     && tab.sessionId === session.id;
   const existing = state.appTabs.find((tab) => inWorkspace(tab) && tab.resource === resource);
   if (existing) {
-    const pinned = !options.preview && existing.preview
-      ? state.appTabs.map((tab) => tab.id === existing.id ? withoutPreview(tab) : tab)
-      : state.appTabs;
-    return selectAppTab({ ...state, appTabs: pinned }, currentHostProfileId, currentServerIdentity, session, existing.id);
+    let reopened = existing;
+    if (!options.preview && reopened.preview) reopened = withoutPreview(reopened);
+    if (options.refreshRoot) {
+      reopened = { ...reopened, rootPath: root.path, rootToken: root.token };
+    }
+    const appTabs = reopened === existing
+      ? state.appTabs
+      : state.appTabs.map((tab) => tab.id === existing.id ? reopened : tab);
+    return selectAppTab({ ...state, appTabs }, currentHostProfileId, currentServerIdentity, session, existing.id);
   }
 
   const details = {
@@ -613,8 +569,8 @@ export function openFileTab(
   // The slot is reused, not the record: everything that described the previous
   // file — its markdown view mode, its root snapshot — is replaced, and only
   // the tab's identity and position survive.
-  // A transient Git diff is not this slot: it closes on the next navigation
-  // rather than being rewritten into a file, and its identity is a diff's.
+  // A preview Git diff is not this slot: a diff's identity is a repository,
+  // a path and a target, and rewriting one into a file would lose all three.
   const reusable = options.preview
     ? state.appTabs.find((tab) => inWorkspace(tab) && tab.preview && tab.kind !== "gitDiff")
     : undefined;
@@ -714,10 +670,11 @@ export function findGitDiffTab(
 }
 
 /**
- * A single click opens the diff as a transient tab (`preview`), which the
- * shell closes on the next navigation; a double-click, the context menu and
- * the palette open it pinned. As with files, a tab is only ever promoted by a
- * pinned open, never demoted by a transient one.
+ * A single click opens the diff as a preview tab, which the strip draws as one
+ * and a double-click promotes; the context menu and the palette open it pinned
+ * outright. As with files, a tab is only ever promoted by a pinned open, never
+ * demoted by a preview one. Navigating away does not close it: the diff tab
+ * stays in the strip until it is closed, and only the surface follows.
  */
 export function openGitDiffTab(
   state: PersistedAppState,
@@ -816,16 +773,6 @@ export function setMarkdownViewMode(
   };
 }
 
-/**
- * The transient-diff rule: a single-clicked Git diff the user has navigated
- * away from is closed. Anything else — a pinned diff, a file, a tab already
- * gone — is left exactly as it is, and returns the same state object.
- */
-export function closeTransientGitDiff(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {
-  const tab = state.appTabs.find((item) => item.hostProfileId === currentHostProfileId && item.id === tabId);
-  return tab?.kind === "gitDiff" && tab.preview ? closeAppTab(state, currentHostProfileId, tabId) : state;
-}
-
 export function closeAppTab(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {
   const appTabs = state.appTabs.filter((tab) => tab.hostProfileId !== currentHostProfileId || tab.id !== tabId);
   const workspaceUi = state.workspaceUi.map((item) => item.hostProfileId === currentHostProfileId && item.selectedAppTabId === tabId
@@ -877,11 +824,8 @@ export function resolveSelectedSession(
   sessions: readonly Session[],
   currentId: string | undefined,
   previousName: string | undefined,
-  excluded?: ReadonlySet<string>,
 ): Session | undefined {
-  // An archived workspace is not a selection target, even if it was the
-  // selection when the app last saved: the snapshot moves off it.
-  const ordered = orderedSessions(sessions).filter((session) => !excluded?.has(session.id));
+  const ordered = orderedSessions(sessions);
   return ordered.find((session) => session.id === currentId)
     ?? ordered.find((session) => session.name === previousName)
     ?? ordered[0];

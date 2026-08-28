@@ -5,7 +5,7 @@ use std::{
     os::unix::{
         ffi::OsStrExt,
         fs::MetadataExt,
-        io::{AsRawFd, FromRawFd},
+        io::{AsRawFd, FromRawFd, RawFd},
     },
     path::{Path, PathBuf},
     sync::Arc,
@@ -45,6 +45,43 @@ pub(super) struct ReservedDestination {
     overwrite_identity: Option<FileIdentity>,
     collision: DownloadCollisionPolicy,
     _lease: DestinationLease,
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECT_PARENT_OPEN_EPERM: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn inject_parent_open_eperm(attempts: u8) {
+    INJECT_PARENT_OPEN_EPERM.with(|injected| injected.set(attempts));
+}
+
+#[cfg(test)]
+fn remaining_injected_parent_open_eperm() -> u8 {
+    INJECT_PARENT_OPEN_EPERM.with(std::cell::Cell::get)
+}
+
+fn open_parent_fd(name: &CString) -> Result<RawFd, io::Error> {
+    #[cfg(test)]
+    if INJECT_PARENT_OPEN_EPERM.with(|injected| {
+        let remaining = injected.get();
+        injected.set(remaining.saturating_sub(1));
+        remaining > 0
+    }) {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
+    let fd = unsafe {
+        libc::open(
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(fd)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,20 +143,24 @@ impl ReservedDestination {
             .ok_or("download destination has no parent")?
             .to_owned();
         let directory_name = c_string(directory_path.as_os_str(), "destination parent")?;
-        // SAFETY: directory_name is live for this call and the returned fd is
-        // immediately owned by File.
-        let fd = unsafe {
-            libc::open(
-                directory_name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
+        // EPERM can be returned transiently by a filesystem/security mediator.
+        // Retry the identical safe open once: no flag, path, or policy is
+        // relaxed, and the directory identity is still established only from
+        // the descriptor the kernel approved.
+        let fd = match open_parent_fd(&directory_name) {
+            Ok(fd) => fd,
+            Err(first_error) if first_error.raw_os_error() == Some(libc::EPERM) => {
+                std::thread::yield_now();
+                open_parent_fd(&directory_name).map_err(|error| {
+                    format!("destination parent is unavailable or unsafe: {error}")
+                })?
+            }
+            Err(error) => {
+                return Err(format!(
+                    "destination parent is unavailable or unsafe: {error}"
+                ));
+            }
         };
-        if fd < 0 {
-            return Err(format!(
-                "destination parent is unavailable or unsafe: {}",
-                io::Error::last_os_error()
-            ));
-        }
         // SAFETY: fd was freshly returned by open and is uniquely owned.
         let directory = unsafe { File::from_raw_fd(fd) };
         let metadata = directory.metadata().map_err(|error| error.to_string())?;

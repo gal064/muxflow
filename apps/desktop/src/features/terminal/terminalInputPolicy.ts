@@ -25,13 +25,14 @@ export function translateTerminalKey(event: TerminalKeyEvent, context: TerminalK
   if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && slashKey) {
     return "\u001f";
   }
-  const command = context.currentCommand.split("/").at(-1)?.toLowerCase() ?? "";
-  // tmux's current command is foreground evidence. Agent records are not:
-  // process-tree discovery deliberately keeps suspended/background agents
-  // present, so using a record here can steal Shift-Enter from the next app.
-  if (command === "codex" && event.key === "Enter" && event.shiftKey
-    && !event.metaKey && !event.ctrlKey && !event.altKey) {
-    return "\n";
+  // Shift-Enter is what Ghostty sends for it: the CSI-u encoding, for every
+  // app. Both agent composers read it as "insert a newline"; xterm.js on its
+  // own sends a bare carriage return, which they read as submit. A
+  // Control-J special case keyed on tmux's foreground command being `codex`
+  // used to cover one composer and missed Claude Code, whose process name is
+  // `claude` or `node` depending on how it was installed.
+  if (event.key === "Enter" && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    return "\u001b[13;2u";
   }
   // Command-Arrow always means line start/end; the screen only picks the
   // encoding. Normal-screen shells and wrappers read the conventional readline

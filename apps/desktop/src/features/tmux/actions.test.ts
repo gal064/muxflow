@@ -36,6 +36,19 @@ describe("tmux action boundary", () => {
     });
   });
 
+  it("carries the pin state, for a workspace and for one of its tabs", () => {
+    const precondition = { serverIdentity: "tmux:one", generation: 42 };
+    // A workspace pin names no window; a tab pin names the window inside the
+    // workspace it belongs to. Both carry the state being asked for, not a
+    // toggle: the host writes what it is told.
+    expect(toWireTmuxAction({ kind: "setPinned", sessionId: "$1", pinned: true }, precondition))
+      .toMatchObject({ kind: "setPinned", session_id: "$1", window_id: "", pinned: true });
+    expect(toWireTmuxAction({ kind: "setPinned", sessionId: "$1", windowId: "@3", pinned: false }, precondition))
+      .toMatchObject({ kind: "setPinned", session_id: "$1", window_id: "@3", pinned: false });
+    // Absent is unpinned, like every other optional flag on this wire.
+    expect(toWireTmuxAction({ kind: "closePane", paneId: "%7" }, precondition).pinned).toBe(false);
+  });
+
   it("carries a configured workspace directory, and an empty one when there is none", () => {
     const precondition = { serverIdentity: "tmux:one", generation: 42 };
     // The host is what resolves and validates it; this side only has to send

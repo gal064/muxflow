@@ -2,12 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import {
   appTabsForWorkspace,
-  archiveWorkspace,
-  archivedSessionIds,
-  archivedWorkspacesFor,
   bulkCloseOutcomeStatus,
   closeAppTab,
-  closeTransientGitDiff,
   combineWorkspaceTabs,
   discardServerAppState,
   mountedAppTabIds,
@@ -33,7 +29,6 @@ import {
   tabsToCloseNonAgent,
   tabsToCloseRight,
   tabsEligibleAtBulkCloseCommit,
-  unarchiveWorkspace,
   setWorkspaceDefaults,
   workspaceDefaultsFor,
   type CombinedTab,
@@ -99,6 +94,28 @@ describe("application shell model", () => {
     const combined = combineWorkspaceTabs(windows, appTabsForWorkspace(tabs, "local", "server-a", sessions[1]));
     expect(combined[1]).toMatchObject({ key: "terminal:@2", canMoveRight: false });
     expect(combined[2]).toMatchObject({ key: "app:a", canMoveLeft: false });
+  });
+
+  it("leads the strip with the windows the host reports as pinned", () => {
+    const windows: TmuxWindow[] = [
+      { id: "@1", sessionId: "$1", index: 1, name: "first", active: true, layout: "" },
+      { id: "@2", sessionId: "$1", index: 2, name: "second", active: false, layout: "", pinned: true },
+      { id: "@3", sessionId: "$1", index: 3, name: "third", active: false, layout: "", pinned: true },
+    ];
+    const appTabs = appTabsForWorkspace(tabs, "local", "server-a", sessions[1]);
+    const strip = combineWorkspaceTabs(windows, appTabs);
+    // Pinned first, in window order among themselves; documents stay behind
+    // every terminal tab, pinned or not, because a document has no pin.
+    expect(strip.map((tab) => tab.key))
+      .toEqual(["terminal:@2", "terminal:@3", "terminal:@1", "app:a", "app:b"]);
+    expect(strip.map((tab) => tab.kind === "terminal" && tab.pinned)).toEqual([true, true, false, false, false]);
+    // A move is a change to the window index, so the flags describe the tmux
+    // order and not the pinned one: `@1` is still the leftmost window.
+    expect(strip.find((tab) => tab.key === "terminal:@1")).toMatchObject({ canMoveLeft: false });
+
+    // Nothing pinned is the order the windows arrived in.
+    expect(combineWorkspaceTabs(windows.map((window) => ({ ...window, pinned: false })), appTabs).map((tab) => tab.key))
+      .toEqual(["terminal:@1", "terminal:@2", "terminal:@3", "app:a", "app:b"]);
   });
 
   it("shows a pending placeholder last, and retires it when its window arrives", () => {
@@ -344,7 +361,7 @@ describe("application shell model", () => {
     ]));
   });
 
-  it("opens a single-clicked Git diff as transient, promotes it on a pinned open, and never demotes it", () => {
+  it("opens a single-clicked Git diff as a preview, promotes it on a pinned open, and never demotes it", () => {
     const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
     const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
     const root = { path: "/repo", token: "root-token" };
@@ -352,53 +369,62 @@ describe("application shell model", () => {
       openGitDiffTab(state, "local", "server-a", sessions[1], entry, "unstaged", status, root, { preview });
     const find = (state: PersistedAppState) => findGitDiffTab(state, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged");
 
-    const transient = open(defaultAppState, true);
-    expect(transient.appTabs).toHaveLength(1);
-    expect(find(transient)).toMatchObject({ kind: "gitDiff", preview: true });
-    expect(transient.workspaceUi[0].selectedAppTabId).toBe(find(transient)!.id);
+    const previewed = open(defaultAppState, true);
+    expect(previewed.appTabs).toHaveLength(1);
+    expect(find(previewed)).toMatchObject({ kind: "gitDiff", preview: true });
+    expect(previewed.workspaceUi[0].selectedAppTabId).toBe(find(previewed)!.id);
 
-    // A second single click keeps the same transient tab.
-    const again = open(transient, true);
+    // A second single click keeps the same preview tab.
+    const again = open(previewed, true);
     expect(again.appTabs).toHaveLength(1);
-    expect(find(again)).toMatchObject({ id: find(transient)!.id, preview: true });
+    expect(find(again)).toMatchObject({ id: find(previewed)!.id, preview: true });
 
     // A pinned open promotes it in place; a later single click does not demote it.
     const pinned = open(again, false);
     expect(pinned.appTabs).toHaveLength(1);
-    expect(find(pinned)!.id).toBe(find(transient)!.id);
+    expect(find(pinned)!.id).toBe(find(previewed)!.id);
     expect(find(pinned)!.preview).toBeUndefined();
     expect(find(open(pinned, true))!.preview).toBeUndefined();
 
-    // A file preview does not take over the transient diff's slot: the diff
-    // is closed by navigation, not rewritten into a file.
-    const withFile = openFileTab(transient, "local", "server-a", sessions[1], "/repo/a.ts", "file", { path: "/repo", token: "root", revision: "1" }, { preview: true });
+    // A file preview does not take over the diff's slot: a diff's identity is
+    // a repository, a path and a target, not a file to be rewritten.
+    const withFile = openFileTab(previewed, "local", "server-a", sessions[1], "/repo/a.ts", "file", { path: "/repo", token: "root", revision: "1" }, { preview: true });
     expect(withFile.appTabs).toHaveLength(2);
     expect(find(withFile)).toMatchObject({ kind: "gitDiff", preview: true });
 
-    // The strip's double-click pins a transient diff the same way.
-    expect(find(pinAppTab(transient, "local", find(transient)!.id))!.preview).toBeUndefined();
+    // The strip's double-click pins a preview diff the same way.
+    expect(find(pinAppTab(previewed, "local", find(previewed)!.id))!.preview).toBeUndefined();
 
     // Without the option the tab is pinned, as every caller before this option was.
     expect(find(openGitDiffTab(defaultAppState, "local", "server-a", sessions[1], entry, "unstaged", status, root))!.preview).toBeUndefined();
   });
 
-  it("closes a transient diff on navigation away, and leaves a pinned one where it is", () => {
+  it("keeps a preview diff open when the user navigates to a terminal or another workspace", () => {
     const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
     const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
-    const transient = openGitDiffTab(tabs, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
-    const transientId = findGitDiffTab(transient, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged")!.id;
-    const left = closeTransientGitDiff(transient, "local", transientId);
-    expect(left.appTabs.map((tab) => tab.id)).toEqual(tabs.appTabs.map((tab) => tab.id));
-    expect(left.workspaceUi[0].selectedAppTabId).toBeUndefined();
+    const opened = openGitDiffTab(tabs, "local", "server-a", sessions[1], entry, "unstaged", status, { path: "/repo", token: "t" }, { preview: true });
+    const diffId = findGitDiffTab(opened, "local", "server-a", sessions[1].id, "repo-id", entry.path, "unstaged")!.id;
+    expect(opened.workspaceUi[0].selectedAppTabId).toBe(diffId);
 
-    const pinned = pinAppTab(transient, "local", transientId);
-    expect(closeTransientGitDiff(pinned, "local", transientId)).toBe(pinned);
-    // A file tab and an id that is already gone are not this rule's business.
-    expect(closeTransientGitDiff(tabs, "local", "a")).toBe(tabs);
-    expect(closeTransientGitDiff(left, "local", transientId)).toBe(left);
+    // Selecting a terminal tab is `selectAppTab(…, undefined)`: the surface
+    // yields, and the diff tab is still in the strip to go back to.
+    const onTerminal = selectAppTab(opened, "local", "server-a", sessions[1], undefined);
+    expect(onTerminal.workspaceUi[0].selectedAppTabId).toBeUndefined();
+    expect(onTerminal.appTabs.map((tab) => tab.id)).toEqual(opened.appTabs.map((tab) => tab.id));
+    // And clicking it again shows the same tab, not a new one.
+    const back = selectAppTab(onTerminal, "local", "server-a", sessions[1], diffId);
+    expect(back.workspaceUi[0].selectedAppTabId).toBe(diffId);
+    expect(back.appTabs).toHaveLength(opened.appTabs.length);
+
+    // Another workspace has its own selection, so the diff surfaces in neither
+    // that workspace nor the diff's own once it is left.
+    const elsewhere = selectAppTab(opened, "local", "server-a", sessions[0], undefined);
+    expect(appTabsForWorkspace(elsewhere, "local", "server-a", sessions[0])).toEqual([]);
+    expect(appTabsForWorkspace(elsewhere, "local", "server-a", sessions[1]).map((tab) => tab.id))
+      .toContain(diffId);
   });
 
-  it("does not resurrect a closed transient diff when its open commit runs a second time", () => {
+  it("does not resurrect a closed diff when its open commit runs a second time", () => {
     const entry: GitStatusEntry = { path: "YSBmaWxl", displayPath: "a file", indexKind: "modified", worktreeKind: "modified", indexStatus: "M", worktreeStatus: "M", conflicted: false, untracked: false, ignored: false, submodule: false, symlink: false, binary: false };
     const status: GitStatusSnapshot = { repository: { id: "repo-id", worktreeRoot: "/repo", initial: false, detachedHead: false, headName: "main" }, generation: "7", sourceGeneration: "source", entries: [entry], authoritative: true };
     // The shape of the commit the shell hands the navigation coordinator: the
@@ -438,6 +464,73 @@ describe("application shell model", () => {
     expect(deduplicated.appTabs).toHaveLength(1);
     const preview = setMarkdownViewMode(deduplicated, "local", deduplicated.appTabs[0].id, "preview");
     expect(preview.appTabs[0].viewMode).toBe("preview");
+  });
+
+  it("refreshes an existing terminal-opened tab capability without resetting its view", () => {
+    const opened = openFileTab(
+      defaultAppState,
+      "local",
+      "server-a",
+      sessions[1],
+      "/tmp/scratchpad/prompt.md",
+      "markdown",
+      { path: "/tmp/scratchpad", token: "file-v1:old", revision: "1" },
+    );
+    const preview = setMarkdownViewMode(opened, "local", opened.appTabs[0].id, "preview");
+    const refreshed = openFileTab(
+      preview,
+      "local",
+      "server-a",
+      sessions[1],
+      "/tmp/scratchpad/prompt.md",
+      "markdown",
+      { path: "/tmp/scratchpad", token: "file-v1:new", revision: "2" },
+      { preview: false, refreshRoot: true },
+    );
+
+    expect(refreshed.appTabs).toHaveLength(1);
+    expect(refreshed.appTabs[0]).toMatchObject({
+      rootPath: "/tmp/scratchpad",
+      rootToken: "file-v1:new",
+      viewMode: "preview",
+    });
+  });
+
+  it("reacquires a cleared terminal-file capability after server recovery", () => {
+    const opened = openFileTab(
+      defaultAppState,
+      "local",
+      "server-a",
+      sessions[1],
+      "/tmp/scratchpad/prompt.md",
+      "markdown",
+      { path: "/tmp/scratchpad", token: "file-v1:old", revision: "1" },
+    );
+    const liveSession = { ...sessions[1], id: "$99" };
+    const recovered = recoverAppTabsFromPreviousServer(
+      opened,
+      "local",
+      "server-a",
+      "server-b",
+      [liveSession],
+    );
+    expect(recovered.appTabs[0]).toMatchObject({ rootPath: undefined, rootToken: undefined });
+
+    const refreshed = openFileTab(
+      recovered,
+      "local",
+      "server-b",
+      liveSession,
+      "/tmp/scratchpad/prompt.md",
+      "markdown",
+      { path: "/tmp/scratchpad", token: "file-v1:new", revision: "1" },
+      { preview: false, refreshRoot: true },
+    );
+    expect(refreshed.appTabs[0]).toMatchObject({
+      sessionId: "$99",
+      rootPath: "/tmp/scratchpad",
+      rootToken: "file-v1:new",
+    });
   });
 
   /**
@@ -615,64 +708,3 @@ describe("application shell model", () => {
   });
 });
 
-describe("archived workspaces", () => {
-  const archived = archiveWorkspace(defaultAppState, "local", "server-a", sessions[1], 10);
-
-  it("hides the workspace on exactly this host and server, and unarchive restores it", () => {
-    expect(archivedSessionIds(archived, "local", "server-a")).toEqual(new Set(["$1"]));
-    expect(archivedWorkspacesFor(archived, "local", "server-a", sessions).map((session) => session.id)).toEqual(["$1"]);
-    expect(archived.archivedWorkspaces).toEqual([
-      { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionName: "one", archivedAt: 10 },
-    ]);
-    // Idempotent, and never without a server identity to key on.
-    expect(archiveWorkspace(archived, "local", "server-a", sessions[1], 11)).toBe(archived);
-    expect(archiveWorkspace(defaultAppState, "local", undefined, sessions[1], 11)).toBe(defaultAppState);
-    const restored = unarchiveWorkspace(archived, "local", "server-a", "$1");
-    expect(restored.archivedWorkspaces).toEqual([]);
-    expect(archivedSessionIds(restored, "local", "server-a").size).toBe(0);
-    expect(unarchiveWorkspace(restored, "local", "server-a", "$1")).toBe(restored);
-  });
-
-  it("never lets a record from another server or host hide a workspace", () => {
-    expect(archivedSessionIds(archived, "local", "server-b").size).toBe(0);
-    expect(archivedSessionIds(archived, "remote", "server-a").size).toBe(0);
-    expect(archivedSessionIds(archived, "local", undefined).size).toBe(0);
-    expect(archivedWorkspacesFor(archived, "local", "server-b", sessions)).toEqual([]);
-    // Another server's records are untouched by this server's reconcile…
-    expect(reconcileWorkspaceIdentity(archived, "local", "server-b", [])).toBe(archived);
-    // …and gone when that server's state is discarded.
-    expect(discardServerAppState(archived, "local", "server-a").archivedWorkspaces).toEqual([]);
-  });
-
-  it("follows a rename, survives a reconnect, and forgets a session killed from another client", () => {
-    const renamed = reconcileWorkspaceIdentity(archived, "local", "server-a", [{ ...sessions[1], name: "uno" }, sessions[0]]);
-    expect(renamed.archivedWorkspaces[0]).toMatchObject({ sessionId: "$1", sessionName: "uno" });
-    expect(archivedSessionIds(renamed, "local", "server-a")).toEqual(new Set(["$1"]));
-    // Same server, same sessions: nothing to change, same object.
-    expect(reconcileWorkspaceIdentity(archived, "local", "server-a", sessions)).toBe(archived);
-    const killed = reconcileWorkspaceIdentity(archived, "local", "server-a", [sessions[0]]);
-    expect(killed.archivedWorkspaces).toEqual([]);
-    // A record with no live session is not offered for unarchiving either.
-    expect(archivedWorkspacesFor(archived, "local", "server-a", [sessions[0]])).toEqual([]);
-  });
-
-  it("caps the archive at 200, dropping the oldest", () => {
-    let state = defaultAppState;
-    for (let index = 0; index < 200; index += 1) {
-      state = archiveWorkspace(state, "local", "server-a", { ...sessions[1], id: `$${index + 100}` }, index + 1);
-    }
-    expect(state.archivedWorkspaces).toHaveLength(200);
-    const overflow = archiveWorkspace(state, "local", "server-a", { ...sessions[1], id: "$999" }, 500);
-    expect(overflow.archivedWorkspaces).toHaveLength(200);
-    expect(archivedSessionIds(overflow, "local", "server-a").has("$100")).toBe(false);
-    expect(archivedSessionIds(overflow, "local", "server-a").has("$999")).toBe(true);
-  });
-
-  it("moves the selection off an archived workspace and onto the first visible one", () => {
-    const hidden = new Set(["$1"]);
-    expect(resolveSelectedSession(sessions, "$1", "one", hidden)?.id).toBe("$2");
-    expect(resolveSelectedSession(sessions, undefined, "one", hidden)?.id).toBe("$2");
-    expect(resolveSelectedSession(sessions, "$2", "two", hidden)?.id).toBe("$2");
-    expect(resolveSelectedSession(sessions, "$1", "one", new Set(["$1", "$2"]))).toBeUndefined();
-  });
-});

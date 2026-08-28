@@ -31,6 +31,43 @@ fn write_crafted_journal(
 }
 
 #[test]
+fn transient_eperm_retries_the_identical_safe_parent_open_once() {
+    let root = std::env::temp_dir().join(format!("ade-dl-eperm-retry-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    inject_parent_open_eperm(1);
+
+    let reserved = ReservedDestination::reserve(
+        &root.join("report.pdf"),
+        DownloadCollisionPolicy::Fail,
+        Arc::default(),
+    )
+    .unwrap();
+    assert_eq!(remaining_injected_parent_open_eperm(), 0);
+    drop(reserved);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repeated_eperm_fails_after_one_retry() {
+    let root = std::env::temp_dir().join(format!("ade-dl-eperm-stop-{}", Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let destination = root.join("report.pdf");
+    inject_parent_open_eperm(2);
+
+    let failure = match ReservedDestination::reserve(
+        &destination,
+        DownloadCollisionPolicy::Fail,
+        Arc::default(),
+    ) {
+        Ok(_) => panic!("two injected denials must exhaust the bounded retry"),
+        Err(failure) => failure,
+    };
+    assert_eq!(remaining_injected_parent_open_eperm(), 0);
+    assert!(failure.contains("Operation not permitted"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn concurrent_rename_leases_choose_distinct_exact_final_leaves() {
     let root = std::env::temp_dir().join(format!("ade-dl-leases-{}", Uuid::new_v4()));
     fs::create_dir(&root).unwrap();

@@ -28,7 +28,7 @@ const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}
   adapters={[]} agents={[]} agentSort="status" agentsRatio={0.4} canMutate commandScope={commandScope} compactWorkspaces={false} hostLabel="remote-linux"
   latencyMs={41} maxWidth={426} onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop}
   onRenameAgent={noop} onResumeAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
-  onSelectWorkspace={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
+  onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
   phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
   {...overrides}
 />);
@@ -157,7 +157,7 @@ describe("one derivation, three surfaces", () => {
         activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate commandScope={commandScope} onClose={noop} onCloseCurrent={noop} onCloseOthers={noop}
         onCloseNonAgent={noop}
         onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
-        onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} stateGlyphs
+        onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}} stateGlyphs
         tabs={combineWorkspaceTabs(
           [{ id: "@1", sessionId: "$1", index: 0, name: "claude", active: true, layout: "", zoomed: false }] as never,
           [],
@@ -166,7 +166,7 @@ describe("one derivation, three surfaces", () => {
       />),
       renderToStaticMarkup(<WorkspaceSwitcher
         onClose={noop} onSelect={noop} stateGlyphs
-        rows={[{ session, active: true, attention: "blocked", unread: 1, working: false, agents: [], agentOverflow: 0 }]}
+        rows={[{ session, active: true, attention: "blocked", unread: 1, working: false, pinned: false, agents: [], agentOverflow: 0 }]}
       />),
     ];
     for (const html of surfaces) expect(html).toMatch(/class="(state|tab)-dot [a-z]+ glyphs"/);
@@ -178,7 +178,7 @@ describe("one derivation, three surfaces", () => {
     // state while every other surface said it as a process.
     const switcherRow = (attention: "working" | "blocked") => renderToStaticMarkup(<WorkspaceSwitcher
       onClose={noop} onSelect={noop} stateGlyphs={false}
-      rows={[{ session, active: true, attention, unread: 0, working: attention === "working", agents: [], agentOverflow: 0 }]}
+      rows={[{ session, active: true, attention, unread: 0, working: attention === "working", pinned: false, agents: [], agentOverflow: 0 }]}
     />);
     expect(switcherRow("working")).toContain('<span aria-label="Agent working" class="spinner" role="img"></span>');
     expect(switcherRow("working")).not.toContain("state-dot working");
@@ -203,7 +203,7 @@ describe("idle shows nothing, on every surface that draws state", () => {
     activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate commandScope={commandScope}
     onClose={noop} onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop}
     onDownloadTab={noop} onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop}
-    onSelect={noop} platform="mac" shortcuts={{}} stateGlyphs={stateGlyphs}
+    onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}} stateGlyphs={stateGlyphs}
     tabs={combineWorkspaceTabs([idleWindow] as never, [], idleRollups.byWindow)}
   />);
 
@@ -224,7 +224,7 @@ describe("idle shows nothing, on every surface that draws state", () => {
     // The workspace switcher's rows share the same dot and the same rule.
     const switcher = renderToStaticMarkup(<WorkspaceSwitcher
       onClose={noop} onSelect={noop} stateGlyphs={false}
-      rows={[{ session, active: true, attention: "idle", unread: 0, working: false, agents: [], agentOverflow: 0 }]}
+      rows={[{ session, active: true, attention: "idle", unread: 0, working: false, pinned: false, agents: [], agentOverflow: 0 }]}
     />);
     expect(switcher).toContain('<span aria-hidden="true" class="state-dot idle"></span>');
   });

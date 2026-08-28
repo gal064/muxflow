@@ -1,5 +1,5 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ActiveRoot,
   FileWorkspaceClient,
@@ -29,11 +29,11 @@ const scope = (clientId: string): FileWorkspaceScope => ({
 });
 
 let actions!: ReturnType<typeof useAppFileActions>;
-function Harness(props: { client: FileWorkspaceClient; scope: FileWorkspaceScope; root: ActiveRoot }) {
+function Harness(props: { client: FileWorkspaceClient; scope?: FileWorkspaceScope; root?: ActiveRoot }) {
   actions = useAppFileActions({
     canMutate: true,
     client: props.client,
-    currentHostProfileId: props.scope.hostProfileId,
+    currentHostProfileId: props.scope?.hostProfileId ?? "local",
     recordTransfer: vi.fn(),
     refreshDirectory: vi.fn(),
     root: props.root,
@@ -46,6 +46,92 @@ function Harness(props: { client: FileWorkspaceClient; scope: FileWorkspaceScope
 }
 
 describe("useAppFileActions", () => {
+  beforeEach(() => {
+    picker.choose.mockReset();
+  });
+
+  it("downloads a valid file tab whose captured root differs from the live Explorer root", async () => {
+    picker.choose.mockResolvedValueOnce({ destination: "/tmp/report", panelConfirmed: false });
+    const startDownload = vi.fn().mockResolvedValue({
+      id: "transfer-1", scopeKey: "scope", path: "/work/report", destination: "/tmp/report",
+      kind: "file", state: "queued", completedBytes: "0", filesCompleted: "0",
+    });
+    const client = { startDownload, cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
+    const currentRoot = { ...root, token: "root-b", path: "/other", cwd: "/other" };
+    await act(async () => { create(<Harness client={client} scope={scope("a")} root={currentRoot} />); });
+
+    await act(async () => {
+      await actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "fileSurface");
+    });
+
+    expect(startDownload).toHaveBeenCalledWith(expect.anything(), root, expect.objectContaining({ path: "/work/report" }));
+  });
+
+  it("downloads a restored file tab before the live Explorer root is reacquired", async () => {
+    picker.choose.mockResolvedValueOnce({ destination: "/tmp/report", panelConfirmed: false });
+    const startDownload = vi.fn().mockResolvedValue({
+      id: "transfer-1", scopeKey: "scope", path: "/work/report", destination: "/tmp/report",
+      kind: "file", state: "queued", completedBytes: "0", filesCompleted: "0",
+    });
+    const client = { startDownload, cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
+    await act(async () => { create(<Harness client={client} scope={scope("a")} root={undefined} />); });
+
+    await act(async () => {
+      await actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "fileSurface");
+    });
+
+    expect(startDownload).toHaveBeenCalled();
+  });
+
+  it("keeps Explorer downloads bound to the live Explorer root", async () => {
+    const client = { startDownload: vi.fn(), cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
+    const currentRoot = { ...root, token: "root-b", path: "/other", cwd: "/other" };
+    await act(async () => { create(<Harness client={client} scope={scope("a")} root={currentRoot} />); });
+
+    await act(async () => {
+      await actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "explorer");
+    });
+
+    expect(picker.choose).not.toHaveBeenCalled();
+  });
+
+  it("downloads a host-issued terminal file outside the active workspace", async () => {
+    picker.choose.mockResolvedValueOnce({ destination: "/tmp/prompt-copy.md", panelConfirmed: false });
+    const outsideRoot: ActiveRoot = {
+      ...root,
+      path: "/tmp/claude/session/scratchpad",
+      cwd: "/tmp/claude/session/scratchpad",
+      token: `file-v1:${"a".repeat(64)}:${"b".repeat(64)}`,
+    };
+    const transfer: TransferStatus = {
+      id: "outside-transfer",
+      scopeKey: "scope",
+      path: "/tmp/claude/session/scratchpad/prompt.md",
+      destination: "/tmp/prompt-copy.md",
+      kind: "file",
+      state: "queued",
+      completedBytes: "0",
+      filesCompleted: "0",
+    };
+    const client = {
+      startDownload: vi.fn().mockResolvedValue(transfer),
+      cancelTransfer: vi.fn(),
+    } as unknown as FileWorkspaceClient;
+    let renderer!: ReactTestRenderer;
+    await act(async () => { renderer = create(<Harness client={client} scope={scope("a")} root={root} />); });
+
+    await act(async () => {
+      await actions.startDownloadFlow({ path: transfer.path, kind: "file" }, outsideRoot, "fileSurface");
+    });
+
+    expect(client.startDownload).toHaveBeenCalledWith(
+      expect.objectContaining({ clientId: "a" }),
+      outsideRoot,
+      expect.objectContaining({ path: transfer.path, destination: "/tmp/prompt-copy.md" }),
+    );
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("does not start a download after the save panel outlives its host scope", async () => {
     let resolvePicker!: (value: { destination: string; panelConfirmed: boolean }) => void;
     picker.choose.mockReturnValueOnce(new Promise((resolve) => { resolvePicker = resolve; }));
@@ -57,7 +143,7 @@ describe("useAppFileActions", () => {
     await act(async () => { renderer = create(<Harness client={client} scope={scope("a")} root={root} />); });
 
     let flow!: Promise<void>;
-    act(() => { flow = actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root); });
+    act(() => { flow = actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "fileSurface"); });
     await act(async () => { renderer.update(<Harness client={client} scope={scope("b")} root={root} />); });
     await act(async () => { resolvePicker({ destination: "/tmp/report", panelConfirmed: false }); await flow; });
 
@@ -75,7 +161,7 @@ describe("useAppFileActions", () => {
 
     let flow!: Promise<void>;
     await act(async () => {
-      flow = actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root);
+      flow = actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "fileSurface");
       await Promise.resolve();
     });
     await act(async () => { renderer.update(<Harness client={client} scope={scope("b")} root={root} />); });

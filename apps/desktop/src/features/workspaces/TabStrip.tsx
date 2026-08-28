@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../../ui/Icon";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
@@ -41,6 +41,17 @@ interface TabStripProps {
   onRenameTerminal(tab: Extract<CombinedTab, { kind: "terminal" }>, scope: HostScopeToken): void;
   /** Double-clicking a preview tab makes it permanent, as VS Code's does. */
   onPin(tab: Extract<CombinedTab, { kind: "app" }>): void;
+  /**
+   * Shift-click, and the menu item beside it: pins the tab to the front of the
+   * strip, or unpins one already there.
+   *
+   * Terminal tabs only. A pin is host state now, keyed on the tmux window it
+   * names, and a document tab has no window on the host to name.
+   *
+   * Deliberately not `onPin`, which this strip has meant "promote a preview tab
+   * to a permanent one" since Phase 11 and still does.
+   */
+  onTogglePinned(tab: Extract<CombinedTab, { kind: "terminal" }>): void;
   onNewTerminal(): void;
 }
 
@@ -128,6 +139,35 @@ export function TabStrip(props: TabStripProps) {
     revealTab(props.activeKey);
   }, [props.activeKey, props.tabs]);
 
+  // The `…` is an affordance for tabs that cannot be seen, so it is worth its
+  // place in the strip only while the strip is actually hiding one: with
+  // everything visible it opens a list of what is already on screen and steals
+  // width from the tabs themselves. `scrollWidth > clientWidth` is the whole
+  // measurement. It is taken again on any layout of the strip — the window
+  // resizing, the sidebar or right panel opening — and whenever the tab set
+  // itself changes, which is the other way clipping starts and stops.
+  const [clipped, setClipped] = useState(false);
+  // Widths depend on which tabs are there and what they are called, not on the
+  // array's identity: a re-render carrying the same tabs must not tear the
+  // observer down and build it again.
+  const stripSignature = props.tabs
+    .map((tab) => `${tab.key}|${tab.title}|${tab.kind === "terminal" && tab.pinned ? "1" : ""}`)
+    .join("\n");
+  useLayoutEffect(() => {
+    const node = tabs.current;
+    if (!node) return;
+    // A pixel of slack: fractional layout can leave `scrollWidth` a hair over
+    // `clientWidth` with nothing whatsoever hidden.
+    const measure = () => setClipped(node.scrollWidth - node.clientWidth > 1);
+    // Measured directly, and first — the observer's first callback is a frame
+    // away, and it may not exist at all.
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [stripSignature]);
+
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: SelectableTab, index: number) => {
     if (isContextMenuKey(event)) {
       event.preventDefault();
@@ -163,6 +203,14 @@ export function TabStrip(props: TabStripProps) {
     .map((tab, index) => [tab.key, index + 1]));
   const activeTab = selectableTabs(props.tabs).find((tab) => tab.key === props.activeKey);
   const takesTerminals = menuBulk.takesTerminals;
+  // Measured against the strip as it is now, like the bulk-close sets above: a
+  // menu outlives the list it was opened over, and a stale `menu.tab` would let
+  // the item say "Pin" for a tab that is already pinned — and, now that the pin
+  // is host state another client can change, ask the host for a state the tab
+  // is already in. The item reads and acts on this one live tab.
+  const menuTab = menu && props.tabs.find((tab) => tab.key === menu.tab.key);
+  const menuTerminalTab = menuTab?.kind === "terminal" ? menuTab : undefined;
+  const menuTabPinned = Boolean(menuTerminalTab?.pinned);
   const menuClosesFocusedPane = Boolean(menu?.focusedPaneId
     && menu.tab.key === props.activeKey
     && props.activeTerminalPaneCount > 1);
@@ -216,7 +264,19 @@ export function TabStrip(props: TabStripProps) {
               // tabs still route through the confirmation contract.
               if (event.button === 1) { event.preventDefault(); props.onClose(tab, props.commandScope); }
             }}
-            onClick={() => props.onSelect(tab)}
+            // Shift-click pins rather than selects. Nothing else in the strip
+            // claims the modifier, and pinning without selecting is the point:
+            // pinning a background tab must not pull the terminal out from
+            // under whatever is on screen. A document tab has no tmux window
+            // to pin, so Shift does nothing there rather than turning into a
+            // navigation to a tab nobody asked to see.
+            onClick={(event) => {
+              if (event.shiftKey) {
+                if (tab.kind === "terminal") props.onTogglePinned(tab);
+                return;
+              }
+              props.onSelect(tab);
+            }}
             onContextMenu={(event) => {
               // Opening a menu is not a selection: selecting first would make a
               // right-click on a terminal tab issue a real tmux select-window.
@@ -228,7 +288,11 @@ export function TabStrip(props: TabStripProps) {
                 focusedPaneId: tab.kind === "terminal" && tab.key === props.activeKey ? props.activePaneId : undefined,
               });
             }}
-            onDoubleClick={() => {
+            onDoubleClick={(event) => {
+              // Shift is the pin gesture and nothing else: without this, a
+              // shift-double-click pinned and unpinned on the two clicks and
+              // then opened the rename prompt behind them.
+              if (event.shiftKey) return;
               if (tab.kind === "app") props.onPin(tab);
               else if (props.canMutate) props.onRenameTerminal(tab, props.commandScope);
             }}
@@ -241,6 +305,11 @@ export function TabStrip(props: TabStripProps) {
             type="button"
           >
             {shortcutIndex !== undefined && <span aria-hidden="true" className="tab-index">{shortcutIndex}</span>}
+            {/* Leading, beside the number: the close button sits at the tab's
+                trailing edge and keeps its own box, so the mark cannot move
+                the target a pointer is already heading for. */}
+            {tab.kind === "terminal" && tab.pinned
+              && <span aria-label="Pinned" className="tab-pin"><Icon name="pin" size={11} /></span>}
             {tab.kind === "app" && <TabGlyph tab={tab} />}
             {/* The document tab's glyph slot, spent on the adapter mark: a
                 terminal tab's "type" is whichever agent is living in it. Purely
@@ -293,7 +362,11 @@ export function TabStrip(props: TabStripProps) {
         type="button"
       ><Icon name="closeNonAgent" /></button>
       <button aria-label="New terminal tab" className="bar-button" disabled={!props.canMutate} onClick={props.onNewTerminal} title="New terminal tab" type="button"><Icon name="plus" /></button>
-      <button
+      {/* Only while the strip clips — and while its own menu is open, so the
+          control cannot vanish out from under the menu it owns. The menu
+          itself renders off `allTabsAnchor` alone, so anything that opens it
+          without this button still works. */}
+      {(clipped || allTabsAnchor) && <button
         aria-expanded={Boolean(allTabsAnchor)}
         aria-haspopup="menu"
         aria-label="All tabs"
@@ -308,7 +381,7 @@ export function TabStrip(props: TabStripProps) {
         }}
         title="All tabs"
         type="button"
-      ><Icon name="more" /></button>
+      ><Icon name="more" /></button>}
     </div>
     {allTabsAnchor && <ContextMenu
       anchor={allTabsAnchor}
@@ -345,6 +418,13 @@ export function TabStrip(props: TabStripProps) {
       items={[
         ...(menu.tab.kind === "terminal"
           ? [{ id: "rename", label: "Rename tab…", disabled: !props.canMutate, run: () => props.onRenameTerminal(menu.tab as Extract<CombinedTab, { kind: "terminal" }>, menu.scope) }]
+          : []),
+        ...(menuTerminalTab
+          ? [{
+            id: "pin",
+            label: menuTabPinned ? "Unpin tab" : "Pin tab",
+            run: () => props.onTogglePinned(menuTerminalTab),
+          }]
           : []),
         { id: "left", label: "Move left", disabled: !menu.tab.canMoveLeft || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "left", menu.scope) },
         { id: "right", label: "Move right", disabled: !menu.tab.canMoveRight || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "right", menu.scope) },

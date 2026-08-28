@@ -4,6 +4,13 @@ export interface Session {
   windowCount: number;
   attachedClients: number;
   order?: number;
+  /**
+   * Pinned to the top of the workspace list, from the host's own sidecar.
+   *
+   * Not a tmux property and not app state: the host overlays it onto every
+   * snapshot, so every client of one tmux server agrees about what is pinned.
+   */
+  pinned?: boolean;
 }
 
 export interface Window {
@@ -15,6 +22,8 @@ export interface Window {
   layout: string;
   zoomed?: boolean;
   layoutGeneration?: number;
+  /** Pinned to the front of its workspace's strip; see {@link Session.pinned}. */
+  pinned?: boolean;
 }
 
 export interface Pane {

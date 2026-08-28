@@ -447,6 +447,37 @@ pub fn write_flow_resume_rejected_log(pane_id: &str, disposition: &str, reason: 
     eprintln!("{line}");
 }
 
+/// How long an ordered control operation may run before it is worth retaining.
+const SLOW_ORDERED_REQUEST_THRESHOLD: Duration = Duration::from_millis(250);
+
+/// Records a completed ordered operation only when it was materially slow.
+///
+/// Operation names come from the protocol enum and contain no user data. The
+/// timestamp lets this line be joined to the desktop incident journal without
+/// recording a session name, path, request body, or terminal content.
+pub fn record_ordered_request_duration(operation: &str, elapsed: Duration) {
+    if elapsed < SLOW_ORDERED_REQUEST_THRESHOLD {
+        return;
+    }
+    write_ordered_request_log("orderedRequestSlow", operation, elapsed);
+}
+
+/// Records the operation that forced a connection-scoped watchdog recovery.
+pub fn record_ordered_request_timeout(operation: &str, elapsed: Duration) {
+    write_ordered_request_log("orderedRequestTimeout", operation, elapsed);
+}
+
+fn write_ordered_request_log(event: &str, operation: &str, elapsed: Duration) {
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": event,
+        "operation": operation,
+        "ms": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        "atUnixMillis": now_epoch_millis(),
+    });
+    eprintln!("{line}");
+}
+
 /// How slow a daemon-internal echo leg has to be before it earns a log line.
 ///
 /// The desktop already decomposes typing latency, and every leg it can see is

@@ -235,7 +235,7 @@ pub(super) async fn handle(
             send_response(control_tx, request_id, response).await;
         }
         v1::Operation::StartDownload => {
-            let Some(file) = require_rooted_file(&request, request_id, control_tx).await else {
+            let Some(file) = require_readable_file(&request, request_id, control_tx).await else {
                 return;
             };
             let service = Arc::clone(files);
@@ -597,10 +597,53 @@ pub(super) async fn require_rooted_file(
     Some(file)
 }
 
+/// The same payload, admitted for a content read. This is the only admission
+/// path that accepts terminal-link single-file tokens; directory, mutation and
+/// write handlers continue through `require_rooted_file` and reject them.
+pub(super) async fn require_readable_file(
+    request: &v1::Request,
+    request_id: u64,
+    control_tx: &mpsc::Sender<SequencerControl>,
+) -> Option<v1::FileServiceRequest> {
+    let file = require_file(request, request_id, control_tx).await?;
+    if let Err(error) = validate_read_token(&file.root, &file.root_token) {
+        send_response(
+            control_tx,
+            request_id,
+            response_error("invalid_root_token", &error.to_string()),
+        )
+        .await;
+        return None;
+    }
+    Some(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::{Arc, Condvar, Mutex};
+
+    #[tokio::test]
+    async fn single_file_tokens_enter_only_the_read_admission_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("prompt.md");
+        fs::write(&file, "prompt").unwrap();
+        let (root, token) = single_file_root(&file).unwrap();
+        let request = v1::Request {
+            file: Some(v1::FileServiceRequest {
+                root,
+                root_token: token,
+                path: file.to_str().unwrap().to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel(2);
+
+        assert!(require_readable_file(&request, 1, &tx).await.is_some());
+        assert!(require_rooted_file(&request, 2, &tx).await.is_none());
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn two_blocked_file_commits_do_not_starve_async_control_lane() {

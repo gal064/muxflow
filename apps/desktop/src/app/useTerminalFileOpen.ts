@@ -85,7 +85,7 @@ export function useTerminalFileOpen(options: TerminalFileOpenOptions) {
             resolved.path,
             kind,
             resolved.root,
-            { preview: false, viewMode: defaultMarkdownView() },
+            { preview: false, refreshRoot: true, viewMode: defaultMarkdownView() },
           ));
         },
       );

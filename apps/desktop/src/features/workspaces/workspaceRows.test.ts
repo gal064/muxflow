@@ -4,7 +4,7 @@ import { compareAgents, deriveAgentRollups } from "../agents/selectors";
 import type { TmuxSnapshot } from "../../app/types";
 import type { AgentAdapterDescriptor } from "../agents/types";
 import {
-  WORKSPACE_ROW_AGENT_LIMIT, abbreviateHome, inferHome, sessionPath, workspaceMetaLine, workspaceRows,
+  WORKSPACE_ROW_AGENT_LIMIT, abbreviateHome, inferHome, pinnedOnlyRows, sessionPath, workspaceMetaLine, workspaceRows,
 } from "./workspaceRows";
 
 const snapshot: TmuxSnapshot = {
@@ -23,6 +23,12 @@ const snapshot: TmuxSnapshot = {
     { id: "%9", sessionId: "$2", windowId: "@5", index: 0, active: true, width: 80, height: 24, left: 0, top: 0, currentPath: "/home/operator/dev/project-e2e", currentCommand: "zsh" },
   ],
 };
+
+/** The same topology with the host reporting these workspaces as pinned. */
+const pinnedSnapshot = (pinned: readonly string[]): TmuxSnapshot => ({
+  ...snapshot,
+  sessions: snapshot.sessions.map((session) => ({ ...session, pinned: pinned.includes(session.id) })),
+});
 
 const agents = [
   agent({ id: "a", sessionId: "$1", windowId: "@1", paneId: "%1", displayName: "claude", lifecycle: "working", updatedAt: 20 }),
@@ -168,15 +174,50 @@ describe("workspace sidebar rows", () => {
     expect(inferHome(["/home/zed/a", "/home/operator/b"])).toBe("/home/operator");
   });
 
-  it("gives an excluded (archived) workspace no row at all", () => {
-    const visible = workspaceRows({
-      snapshot, activeSessionId: "$1", agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
-      excludeSessionIds: new Set(["$1"]),
+  it("narrows to the pinned workspaces, keeping whichever one is selected", () => {
+    const all = (pinned: readonly string[], activeSessionId?: string) => workspaceRows({
+      snapshot: pinnedSnapshot(pinned), activeSessionId, agents,
+      attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
     });
-    expect(visible.map((row) => row.session.id)).toEqual(["$2"]);
-    expect(workspaceRows({
-      snapshot, activeSessionId: "$1", agents, attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
-      excludeSessionIds: new Set(),
-    })).toHaveLength(2);
+    const filtered = (pinned: readonly string[], activeSessionId?: string) =>
+      pinnedOnlyRows(all(pinned, activeSessionId), activeSessionId).map((row) => row.session.id);
+    // The selected workspace keeps its row even unpinned: the filter must never
+    // hide what the shell is currently showing.
+    expect(filtered(["$2"], "$1")).toEqual(["$2", "$1"]);
+    expect(filtered(["$2"], "$2")).toEqual(["$2"]);
+    // Nothing pinned and nothing selected is an empty list, not a full one.
+    expect(filtered([])).toEqual([]);
+    // The list it narrows is untouched — ⌘P reads that one whole.
+    expect(all(["$2"], "$1")).toHaveLength(2);
+  });
+});
+
+describe("pinned workspaces lead the sidebar list", () => {
+  const pinnedRows = (pinned: readonly string[]) => workspaceRows({
+    snapshot: pinnedSnapshot(pinned),
+    activeSessionId: "$1",
+    agents,
+    attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
+  });
+
+  it("moves a pinned workspace to the top and marks the row", () => {
+    // `$2` sorts second by tmux order; pinning it puts it first.
+    const list = pinnedRows(["$2"]);
+    expect(list.map((row) => row.session.id)).toEqual(["$2", "$1"]);
+    expect(list.map((row) => row.pinned)).toEqual([true, false]);
+  });
+
+  it("keeps pinned workspaces in the workspace order among themselves", () => {
+    const list = pinnedRows(["$1", "$2"]);
+    expect(list.map((row) => row.session.id)).toEqual(["$1", "$2"]);
+    // This list is also ⌘1–9 and the ⌘P switcher, so the numbers follow it.
+    expect(list.map((row) => row.session.name)).toEqual(["muxflow", "project-e2e"]);
+  });
+
+  it("changes nothing when no workspace on this server is pinned", () => {
+    const list = pinnedRows(["$99"]);
+    expect(list.map((row) => row.session.id)).toEqual(["$1", "$2"]);
+    expect(list.every((row) => !row.pinned)).toBe(true);
+    expect(rows().map((row) => row.pinned)).toEqual([false, false]);
   });
 });

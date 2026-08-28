@@ -39,7 +39,7 @@ async function rowMenuItem(renderer: ReturnType<typeof create>, displayPath: str
 }
 
 describe("GitSidebar", () => {
-  it("opens a transient diff on a single click and a pinned one from a double-click, the menu and the palette", async () => {
+  it("opens a preview diff on a single click and a pinned one from a double-click, the menu and the palette", async () => {
     const props = baseProps();
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<GitSidebar {...props} />); });

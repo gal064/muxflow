@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { restoreDecision, sanitizeSerializedScreen, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
+import { activatedTerminalUrl, restoreDecision, sanitizeSerializedScreen, type GridOutcome, type TerminalSize } from "./TerminalRenderer";
 import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 import { interceptTerminalPlainTextPaste, isForcedLocalSelection, paneRecoveryPlan, reconcilePaneGrid } from "./TerminalPane";
 import type { Pane } from "../../app/types";
@@ -879,5 +879,25 @@ describe("sanitizeSerializedScreen", () => {
   it("leaves a screen with no alternate buffer untouched", () => {
     const serialized = "plain screen \u001b[31mred\u001b[0m";
     expect(sanitizeSerializedScreen(serialized)).toBe(serialized);
+  });
+});
+
+describe("activatedTerminalUrl", () => {
+  const plain = { ctrlKey: false, metaKey: false };
+  const command = { ctrlKey: false, metaKey: true };
+  const control = { ctrlKey: true, metaKey: false };
+
+  it("opens only with the platform's file-link modifier", () => {
+    expect(activatedTerminalUrl(plain, "mac", "https://example.com/x")).toBeUndefined();
+    expect(activatedTerminalUrl(control, "mac", "https://example.com/x")).toBeUndefined();
+    expect(activatedTerminalUrl(command, "mac", "https://example.com/x")).toBe("https://example.com/x");
+    expect(activatedTerminalUrl(command, "linux", "https://example.com/x")).toBeUndefined();
+    expect(activatedTerminalUrl(control, "linux", "http://localhost:3000")).toBe("http://localhost:3000/");
+  });
+
+  it("admits only http and https links", () => {
+    expect(activatedTerminalUrl(command, "mac", "file:///etc/passwd")).toBeUndefined();
+    expect(activatedTerminalUrl(command, "mac", "javascript:alert(1)")).toBeUndefined();
+    expect(activatedTerminalUrl(command, "mac", "not a url")).toBeUndefined();
   });
 });

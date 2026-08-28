@@ -8,7 +8,8 @@ export type TmuxActionKind =
   | "createWindow" | "renameWindow" | "reorderWindow" | "selectWindow" | "closeWindow"
   | "splitPaneRight" | "splitPaneDown" | "focusPane"
   | "resizePaneLeft" | "resizePaneRight" | "resizePaneUp" | "resizePaneDown"
-  | "zoomPane" | "closePane";
+  | "zoomPane" | "closePane"
+  | "setPinned";
 
 export interface TmuxAction {
   kind: TmuxActionKind;
@@ -22,6 +23,13 @@ export interface TmuxAction {
   splitSize?: number;
   resizeCells?: number;
   zoomed?: boolean;
+  /**
+   * What `setPinned` writes for its session, or for `windowId` inside it when
+   * that is given. A pin is host state rather than a tmux mutation, so it takes
+   * this pipeline for the scope checks and the authoritative snapshot that
+   * follows, not because tmux is sent anything.
+   */
+  pinned?: boolean;
   confirmed?: boolean;
   /**
    * Where a created session's first pane starts (`createSession` only).
@@ -57,6 +65,7 @@ interface WireTmuxAction {
   split_size: number;
   resize_cells: number;
   zoomed: boolean;
+  pinned: boolean;
   expected_server_identity: string;
   expected_generation: number;
   confirmed: boolean;
@@ -86,6 +95,7 @@ export function toWireTmuxAction(
     split_size: action.splitSize ?? 0,
     resize_cells: action.resizeCells ?? 0,
     zoomed: action.zoomed ?? false,
+    pinned: action.pinned ?? false,
     expected_server_identity: precondition.serverIdentity,
     expected_generation: precondition.generation,
     confirmed: action.confirmed ?? false,
