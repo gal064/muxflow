@@ -27,7 +27,10 @@ impl FileService {
         if self.transfers.lock().unwrap().contains_key(transfer_id) {
             bail!("transfer ID is already active");
         }
-        let root = RootCapability::validate(root, root_token)?;
+        let root = RootCapability::validate_read(root, root_token)?;
+        if folder && root.is_single_file() {
+            bail!("single-file capabilities cannot download folders");
+        }
         let (logical_source, _) = root.resolve_new(path)?;
         reject_root_target(root.logical_root(), &logical_source)?;
         let source_anchor = root.anchor(&logical_source)?;
@@ -81,14 +84,16 @@ impl FileService {
                     format!("{}.tar", name.to_string_lossy()),
                 )
             } else {
-                let file = if leaf_metadata.is_symlink() {
+                let (logical_opened, file) = if leaf_metadata.is_symlink() {
                     let (_, source) = root.resolve_existing(path)?;
                     let (logical_opened, _) = root.regular_file_target(&logical_source, &source)?;
-                    root.anchor(&logical_opened)?.open_file()?
+                    let file = root.anchor(&logical_opened)?.open_file()?;
+                    (logical_opened, file)
                 } else {
-                    source_anchor.open_file()?
+                    (logical_source.clone(), source_anchor.open_file()?)
                 };
                 let opened_metadata = file.metadata()?;
+                root.authorize_opened_file(&logical_opened, &opened_metadata)?;
                 let generation = metadata_generation(&opened_metadata);
                 if expected_generation != 0 && expected_generation != generation {
                     bail!("stale_file_generation: file changed before transfer opened");

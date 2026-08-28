@@ -11,7 +11,10 @@ use tmux_agent_protocol::v1;
 use tokio::{sync::mpsc, time::sleep};
 
 use super::active_root::resolve_cached;
-use super::filesystem::{FileService, root_generation, root_token, validate_root_token};
+use super::filesystem::{
+    FileService, root_generation, root_token, single_file_root, validate_read_token,
+    validate_root_token,
+};
 use super::snapshot::discover_authoritative;
 use super::terminal::VisibilityChange;
 use super::{
@@ -31,6 +34,7 @@ pub(super) mod operation_policy;
 mod tmux_action_dispatch;
 pub(super) use dispatcher::handle_request;
 
+#[derive(Clone)]
 pub(super) struct RequestContext {
     pub(super) control_tx: mpsc::Sender<SequencerControl>,
     pub(super) event_tx: mpsc::Sender<SequencerControl>,

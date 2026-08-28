@@ -857,6 +857,7 @@ impl TerminalClients {
         &mut self,
         pane_id: &str,
         change: VisibilityChange,
+        event_permit: mpsc::OwnedPermit<SequencerControl>,
         sender: &mpsc::Sender<SequencerControl>,
         overflowed: &AtomicBool,
     ) -> anyhow::Result<()> {
@@ -908,17 +909,11 @@ impl TerminalClients {
                 .saturating_add(resource.raw_tail.len()),
         );
         // Charged, never waited for. This runs as a blocking task that the
-        // connection's frame loop awaits inline — `SetTerminalVisibility` is
-        // `Scheduling::Inline` in `operation_policy.rs`, and `service.rs` polls
-        // inline work to completion with `work.await` before it reads the next
-        // frame. That same loop is the sole reader of the `TerminalOutputAck`
-        // frames that release the window. Waiting for credit here therefore
-        // waits on an acknowledgement that cannot be read until the wait ends,
-        // and the wait is taken while holding both the terminal mutex and the
-        // emission fence: the wedge captured in production, where a full window
-        // stopped every request, every pane's output and every topology
-        // snapshot for nine minutes. The control readers repay any excess this
-        // admits by waiting before their next emission.
+        // connection's ordered-operation lane awaits. Waiting for credit here
+        // would wait on an acknowledgement consumed by that connection's frame
+        // reader, while holding both the terminal mutex and the emission fence:
+        // the closed cycle captured in production. The control readers repay
+        // any excess this admits by waiting before their next emission.
         let reservation = match self.output_credit.admit(charge, &stopped) {
             Ok(reservation) => reservation,
             Err(error) => {
@@ -930,17 +925,11 @@ impl TerminalClients {
             }
         };
         let event = pane_resource_event(pane_id, resource, charge);
-        if sender
-            .blocking_send(SequencerControl::OrderedEvent(event))
-            .is_err()
-        {
-            overflowed.store(true, Ordering::Release);
-            self.resources.lock().unwrap().require_seed(
-                pane_id,
-                "visibility recovery could not enter the ordered event sequencer",
-            );
-            bail!("terminal event sequencer is closed");
-        }
+        // The async request lane reserved this slot before taking either the
+        // terminal mutex or this emission fence. Sending through the permit is
+        // immediate, cannot wait on the socket writer, and preserves the
+        // recovery-before-visible-output ordering the fence exists to enforce.
+        event_permit.send(SequencerControl::OrderedEvent(event));
         reservation.commit();
         drop(_emission);
         // Both the hide and the reveal path can push the store past its global

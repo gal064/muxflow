@@ -500,6 +500,26 @@ describe("shell navigation hook cross-kind ownership", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("clears the selected document tab when the already-active terminal tab is picked", async () => {
+    // The path a click on a terminal tab takes while a Git diff is on screen.
+    // The window is the one tmux is already on, so there is nothing to ask the
+    // host for — and the selection still has to be cleared, because that is
+    // what uncovers the terminal. The diff's own tab is untouched: only the
+    // workspace's selection moves, so the tab stays in the strip.
+    const harness = mountNavigation();
+    const renderer = await harness.renderer();
+    act(() => harness.navigation.selectAppTab("$1", "@0", "diff"));
+    expect(harness.setAppTab).toHaveBeenLastCalledWith("$1", "diff");
+
+    act(() => harness.navigation.selectWindow("@0"));
+    await flush();
+    expect(harness.setAppTab).toHaveBeenLastCalledWith("$1", undefined);
+    expect(harness.setActiveWindowId).toHaveBeenLastCalledWith("@0");
+    // Nothing was sent: tmux is already on this window.
+    expect(harness.performAction).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
   it("reasserts a local app tab after an older remote selection", async () => {
     const remote = deferred<TmuxActionResult | undefined>();
     const restoreSession = deferred<TmuxActionResult | undefined>();

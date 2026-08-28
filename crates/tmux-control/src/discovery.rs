@@ -18,6 +18,10 @@ pub struct Session {
     /// discovery initializes this deterministically and the host may overlay a
     /// private sidecar order without changing tmux options.
     pub order: u32,
+    /// Application presentation flag, overlaid by the host from its private
+    /// pins sidecar. tmux has no such concept; discovery always reports false.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +34,9 @@ pub struct Window {
     pub active: bool,
     pub layout: String,
     pub zoomed: bool,
+    /// Overlaid by the host, like [`Session::pinned`].
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +327,7 @@ fn parse_session(line: &str) -> Result<Session, DiscoverError> {
         window_count: number("session", line, value[2])?,
         attached_clients: number("session", line, value[3])?,
         order: 0,
+        pinned: false,
     })
 }
 
@@ -333,6 +341,7 @@ fn parse_window(line: &str) -> Result<Window, DiscoverError> {
         active: value[4] == "1",
         layout: value[5].into(),
         zoomed: value[6] == "1",
+        pinned: false,
     })
 }
 

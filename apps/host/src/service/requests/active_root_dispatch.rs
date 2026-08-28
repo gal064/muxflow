@@ -106,14 +106,13 @@ pub(super) async fn handle(
 
 /// Resolves a terminal-output path on the host that owns the pane.
 ///
-/// The capability returned is the pane's *own* active root, the one the caller
-/// already holds, and never a new one derived from where the path happened to
-/// land. Minting the resolved file's parent directory instead made one
-/// Cmd-click on terminal output enough to mint a persistent root capability
-/// anywhere on the host — `canonicalize` follows symlinks, so a file in the
-/// pane's own directory could name `/etc/passwd` and hand back `/etc`. A path
-/// that resolves outside the pane's authorized root is refused rather than
-/// widening what the caller may read.
+/// A path inside the pane's root reuses that ordinary root capability. A path
+/// outside it receives a read-only capability bound to that one canonical file:
+/// its parent is carried only because file streaming is root-relative, and the
+/// token cannot enumerate the directory or resolve a sibling. This is the
+/// distinction that lets a deliberate Cmd-click open a Claude scratchpad under
+/// `/tmp` without turning the click into a persistent `/tmp/.../scratchpad`
+/// root capability.
 ///
 /// The generation check is monotonic, not an equality: a caller that is merely
 /// behind a busy pane's topology is still asking about a route this host can
@@ -158,7 +157,7 @@ async fn resolve_terminal_file(
     let cache_identity = identity.clone();
     let cache_pane_id = pane_id.clone();
     let resolve_cancellation = Arc::clone(cancellation);
-    let (root, git_worktree, path) = tokio::task::spawn_blocking(move || {
+    let (root, git_worktree, path, token) = tokio::task::spawn_blocking(move || {
         if resolve_cancellation.load(Ordering::Acquire) {
             bail!("terminal file path request was cancelled");
         }
@@ -175,13 +174,11 @@ async fn resolve_terminal_file(
         } else {
             None
         };
-        let path = canonical_terminal_file(&root, &expected_cwd, &candidate, home.as_deref())?;
-        Ok((root, git_worktree, path))
+        let path = canonical_terminal_file(&expected_cwd, &candidate, home.as_deref())?;
+        terminal_file_capability(root, git_worktree, path)
     })
     .await
     .context("terminal file path task failed")??;
-    let token = root_token(&root)?;
-
     let (fresh, fresh_identity, fresh_generation) = discover(generation, topology_lock).await?;
     let stable = !cancellation.load(Ordering::Acquire)
         && fresh_identity == identity
@@ -208,6 +205,22 @@ async fn resolve_terminal_file(
     ))
 }
 
+fn terminal_file_capability(
+    root: String,
+    git_worktree: bool,
+    path: String,
+) -> anyhow::Result<(String, bool, String, String)> {
+    let canonical_root =
+        std::fs::canonicalize(&root).with_context(|| format!("{root} is unavailable"))?;
+    if Path::new(&path).starts_with(&canonical_root) {
+        let token = root_token(&root)?;
+        Ok((root, git_worktree, path, token))
+    } else {
+        let (single_root, token) = single_file_root(Path::new(&path))?;
+        Ok((single_root, false, path, token))
+    }
+}
+
 fn pane_matches_terminal_file_route(
     pane: &tmux_control::Pane,
     file: &v1::FileServiceRequest,
@@ -218,14 +231,13 @@ fn pane_matches_terminal_file_route(
         && pane.current_path == file.expected_cwd
 }
 
-/// The canonical file a terminal path names, confined to `root`.
+/// The canonical regular file a terminal path names.
 ///
-/// Confinement is checked *after* canonicalization, so a symlink is judged by
-/// where it lands and not by how it is spelled. `root` is canonicalized here
-/// too: comparing a canonical path against a root that still contains a symlink
-/// would reject files that are genuinely inside it.
+/// Capability selection happens after this returns: an in-root path keeps the
+/// pane root, while an outside path gets a read-only capability for this exact
+/// canonical leaf. Canonicalizing here makes a symlink's target — not its
+/// user-controlled spelling — the identity the capability binds.
 fn canonical_terminal_file(
-    root: &str,
     cwd: &str,
     candidate: &str,
     home: Option<&Path>,
@@ -254,15 +266,6 @@ fn canonical_terminal_file(
         .with_context(|| format!("{} does not exist", joined.display()))?;
     if !canonical.is_file() {
         bail!("{} is not a file", canonical.display());
-    }
-    let canonical_root =
-        std::fs::canonicalize(root).with_context(|| format!("{root} is unavailable"))?;
-    if !canonical.starts_with(&canonical_root) {
-        bail!(
-            "{} is outside the pane's root {}",
-            canonical.display(),
-            canonical_root.display()
-        );
     }
     Ok(canonical
         .to_str()
@@ -356,7 +359,9 @@ async fn discover(
 
 #[cfg(test)]
 mod terminal_file_tests {
-    use super::{canonical_terminal_file, pane_matches_terminal_file_route};
+    use super::{
+        canonical_terminal_file, pane_matches_terminal_file_route, terminal_file_capability,
+    };
     use std::{fs, path::Path};
     use tmux_agent_protocol::v1;
     use tmux_control::Pane;
@@ -417,17 +422,10 @@ mod terminal_file_tests {
         let root = fs::canonicalize(&root).unwrap();
         let cwd = fs::canonicalize(&cwd).unwrap();
 
-        let relative = canonical_terminal_file(
-            root.to_str().unwrap(),
-            cwd.to_str().unwrap(),
-            "./local.txt",
-            None,
-        )
-        .unwrap();
+        let relative = canonical_terminal_file(cwd.to_str().unwrap(), "./local.txt", None).unwrap();
         assert_eq!(relative, cwd.join("local.txt").to_str().unwrap());
 
         let absolute = canonical_terminal_file(
-            root.to_str().unwrap(),
             cwd.to_str().unwrap(),
             root.join("top.txt").to_str().unwrap(),
             None,
@@ -436,15 +434,8 @@ mod terminal_file_tests {
         assert_eq!(absolute, root.join("top.txt").to_str().unwrap());
     }
 
-    /// One Cmd-click on terminal output must not widen what the caller may read.
-    ///
-    /// The symlink case is the whole point: the path is spelled inside the
-    /// pane's root and lands outside it, which is exactly what canonicalizing
-    /// before comparing catches. The sibling case is the other half — a root
-    /// compared as a string prefix would accept `…/project-notes` as part of
-    /// `…/project`.
     #[test]
-    fn refuses_paths_that_leave_the_pane_root() {
+    fn canonicalizes_paths_outside_the_pane_root_before_capability_selection() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("project");
         let outside = temp.path().join("secrets");
@@ -459,33 +450,68 @@ mod terminal_file_tests {
         let outside = fs::canonicalize(&outside).unwrap();
         let sibling = fs::canonicalize(&sibling).unwrap();
 
-        for candidate in [
-            "./innocent.txt".to_owned(),
-            "../secrets/passwd".to_owned(),
-            outside.join("passwd").to_str().unwrap().to_owned(),
-            sibling.join("notes.txt").to_str().unwrap().to_owned(),
+        for (candidate, expected) in [
+            ("./innocent.txt".to_owned(), outside.join("passwd")),
+            ("../secrets/passwd".to_owned(), outside.join("passwd")),
+            (
+                outside.join("passwd").to_str().unwrap().to_owned(),
+                outside.join("passwd"),
+            ),
+            (
+                sibling.join("notes.txt").to_str().unwrap().to_owned(),
+                sibling.join("notes.txt"),
+            ),
         ] {
-            let error = canonical_terminal_file(
-                root.to_str().unwrap(),
-                root.to_str().unwrap(),
-                &candidate,
-                None,
-            )
-            .expect_err("a path outside the pane root was resolved");
-            assert!(
-                error.to_string().contains("outside the pane's root"),
-                "{candidate} was refused for the wrong reason: {error}"
-            );
+            let resolved =
+                canonical_terminal_file(root.to_str().unwrap(), &candidate, None).unwrap();
+            assert_eq!(resolved, expected.to_str().unwrap());
         }
+    }
+
+    #[test]
+    fn outside_paths_receive_one_file_capabilities_while_inside_paths_keep_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let outside = temp.path().join("scratchpad");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let inside_file = root.join("inside.md");
+        let outside_file = outside.join("prompt.md");
+        fs::write(&inside_file, "inside").unwrap();
+        fs::write(&outside_file, "outside").unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let inside_file = fs::canonicalize(inside_file).unwrap();
+        let outside_file = fs::canonicalize(outside_file).unwrap();
+
+        let inside = terminal_file_capability(
+            root.to_str().unwrap().to_owned(),
+            true,
+            inside_file.to_str().unwrap().to_owned(),
+        )
+        .unwrap();
+        assert_eq!(inside.0, root.to_str().unwrap());
+        assert!(inside.1);
+        assert!(!inside.3.starts_with("file-v1:"));
+
+        let outside = terminal_file_capability(
+            root.to_str().unwrap().to_owned(),
+            true,
+            outside_file.to_str().unwrap().to_owned(),
+        )
+        .unwrap();
+        assert_eq!(outside.0, outside_file.parent().unwrap().to_str().unwrap());
+        assert!(!outside.1);
+        assert_eq!(outside.2, outside_file.to_str().unwrap());
+        assert!(outside.3.starts_with("file-v1:"));
     }
 
     #[test]
     fn rejects_missing_paths_and_directories() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().to_str().unwrap();
-        assert!(canonical_terminal_file(cwd, cwd, "./missing.txt", None).is_err());
+        assert!(canonical_terminal_file(cwd, "./missing.txt", None).is_err());
         assert!(
-            canonical_terminal_file(cwd, cwd, ".", None)
+            canonical_terminal_file(cwd, ".", None)
                 .unwrap_err()
                 .to_string()
                 .contains("not a file")
@@ -505,13 +531,9 @@ mod terminal_file_tests {
         let cwd = fs::canonicalize(cwd).unwrap();
         let report = fs::canonicalize(report).unwrap();
 
-        let resolved = canonical_terminal_file(
-            home.to_str().unwrap(),
-            cwd.to_str().unwrap(),
-            "~/dev/report.pdf",
-            Some(&home),
-        )
-        .unwrap();
+        let resolved =
+            canonical_terminal_file(cwd.to_str().unwrap(), "~/dev/report.pdf", Some(&home))
+                .unwrap();
         assert_eq!(resolved, report.to_str().unwrap());
     }
 
@@ -533,7 +555,7 @@ mod terminal_file_tests {
                 "malformed current-user home prefix",
             ),
         ] {
-            let error = canonical_terminal_file(root, root, candidate, home).unwrap_err();
+            let error = canonical_terminal_file(root, candidate, home).unwrap_err();
             assert!(
                 error.to_string().contains(expected),
                 "{candidate} was refused for the wrong reason: {error}"
@@ -542,7 +564,7 @@ mod terminal_file_tests {
     }
 
     #[test]
-    fn home_path_traversal_remains_confined_to_the_pane_root() {
+    fn home_path_traversal_resolves_before_the_exact_file_capability_is_minted() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let root = home.join("project");
@@ -551,13 +573,8 @@ mod terminal_file_tests {
         let home = fs::canonicalize(home).unwrap();
         let root = fs::canonicalize(root).unwrap();
 
-        let error = canonical_terminal_file(
-            root.to_str().unwrap(),
-            root.to_str().unwrap(),
-            "~/outside.txt",
-            Some(&home),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("outside the pane's root"));
+        let resolved =
+            canonical_terminal_file(root.to_str().unwrap(), "~/outside.txt", Some(&home)).unwrap();
+        assert_eq!(resolved, home.join("outside.txt").to_str().unwrap());
     }
 }

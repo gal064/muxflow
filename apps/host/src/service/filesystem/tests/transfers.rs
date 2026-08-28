@@ -34,6 +34,56 @@ fn download_stream_verifies_blake3_and_cleans_transfer() {
 }
 
 #[test]
+fn terminal_single_file_capability_downloads_only_its_leaf() {
+    let (directory, service) = fixture();
+    let allowed = directory.join("prompt.md");
+    let sibling = directory.join("private.md");
+    fs::write(&allowed, "prompt").unwrap();
+    fs::write(&sibling, "private").unwrap();
+    let (root, token) = single_file_root(&allowed).unwrap();
+
+    let descriptor = service
+        .start_download_authorized(
+            &root,
+            &token,
+            allowed.to_str().unwrap(),
+            false,
+            "terminal-file",
+            0,
+        )
+        .unwrap();
+    assert_eq!(descriptor.total_bytes, 6);
+    service.cancel_download("terminal-file").unwrap();
+
+    assert!(
+        service
+            .start_download_authorized(
+                &root,
+                &token,
+                allowed.to_str().unwrap(),
+                true,
+                "terminal-folder",
+                0,
+            )
+            .is_err()
+    );
+
+    assert!(
+        service
+            .start_download_authorized(
+                &root,
+                &token,
+                sibling.to_str().unwrap(),
+                false,
+                "terminal-sibling",
+                0,
+            )
+            .is_err()
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn transfer_ids_cannot_be_used_as_paths_or_options() {
     let (root, service) = fixture();
     fs::write(root.join("file"), "data").unwrap();

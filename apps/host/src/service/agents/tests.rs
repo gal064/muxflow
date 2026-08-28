@@ -37,6 +37,7 @@ fn topology(command: &str) -> tmux_control::TmuxSnapshot {
             window_count: 1,
             attached_clients: 0,
             order: 0,
+            pinned: false,
         }],
         windows: vec![tmux_control::Window {
             id: "@2".into(),
@@ -46,6 +47,7 @@ fn topology(command: &str) -> tmux_control::TmuxSnapshot {
             active: true,
             layout: String::new(),
             zoomed: false,
+            pinned: false,
         }],
         panes: vec![tmux_control::Pane {
             id: "%7".into(),

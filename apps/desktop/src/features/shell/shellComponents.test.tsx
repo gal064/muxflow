@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import stylesCss from "../../styles.css?raw";
-import { act as domAct, type ComponentProps } from "react";
+import { act as domAct, type ComponentProps, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot } from "react-dom/client";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
@@ -27,7 +27,7 @@ const noop = vi.fn();
 const commandScope = { hostProfileId: "remote", connectionKey: "ssh:remote", connectionEpoch: 1, serverIdentity: "server-a", generation: 1 };
 const session: Session = { id: "$1", name: "A very long workspace name", windowCount: 3, attachedClients: 1, order: 0 };
 const rows: WorkspaceRowModel[] = [{
-  session, active: true, attention: "blocked", unread: 2, working: true,
+  session, active: true, attention: "blocked", unread: 2, working: true, pinned: false,
   agents: [{ id: "a1", adapterId: "codex", name: "codex", state: "blocked" }], agentOverflow: 0,
   branch: "main*", path: "~/dev/muxflow",
 }];
@@ -38,8 +38,8 @@ const rows: WorkspaceRowModel[] = [{
  * measured over it.
  */
 const mixedStrip = [
-  { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: true, attention: "none", agentPresence: "absent" },
-  { key: "terminal:@2", kind: "terminal", id: "@2", title: "claude", index: 2, activeInTmux: false, zoomed: false, canMoveLeft: true, canMoveRight: true, attention: "blocked", agentPresence: "present" },
+  { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: true, attention: "none", agentPresence: "absent", pinned: false },
+  { key: "terminal:@2", kind: "terminal", id: "@2", title: "claude", index: 2, activeInTmux: false, zoomed: false, canMoveLeft: true, canMoveRight: true, attention: "blocked", agentPresence: "present", pinned: false },
   { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: false, canMoveLeft: true, canMoveRight: true },
   { key: "app:diff", kind: "app", id: "diff", title: "README.md", appKind: "gitDiff", resource: "staged:README.md", order: 1, preview: false, canMoveLeft: true, canMoveRight: false },
 ] as const;
@@ -47,7 +47,7 @@ const pendingTab = { key: "pending:create", kind: "pending", title: "Creating" }
 
 type TabStripOverrides = Partial<Pick<
   ComponentProps<typeof TabStrip>,
-  "activeKey" | "canMutate" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "platform" | "shortcuts"
+  "activeKey" | "canMutate" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "onTogglePinned" | "platform" | "shortcuts"
 >>;
 
 /** One TabStrip with every handler stubbed, so a test names only what it means. */
@@ -55,9 +55,31 @@ function tabStripOver(tabs: readonly CombinedTab[], overrides: TabStripOverrides
   return <TabStrip
     activeTerminalPaneCount={1} canMutate commandScope={commandScope} onClose={noop} onCloseCurrent={noop}
     onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
-    onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
-    stateGlyphs={false} tabs={tabs} {...overrides}
+    onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop}
+    platform="mac" shortcuts={{}} stateGlyphs={false} tabs={tabs} {...overrides}
   />;
+}
+
+/**
+ * The widths the strip's tab list reports. `react-test-renderer` has no layout
+ * of its own, so this ref mock is the only place a test can say whether the
+ * strip is clipping a tab — which is what decides the `…` control.
+ */
+function stripNode(scrollWidth: number, clientWidth: number) {
+  return { scrollWidth, clientWidth, querySelector: () => null };
+}
+
+/** Renders a strip whose tab list measures itself as `node` says. */
+function createStrip(element: ReactElement, node: ReturnType<typeof stripNode>) {
+  return create(element, {
+    createNodeMock: (mocked: ReactElement<{ className?: string }>) =>
+      mocked.props.className === "tabstrip-tabs" ? node : null,
+  });
+}
+
+/** The `…` control, or nothing when the strip is not clipping a tab. */
+function allTabsControls(renderer: ReturnType<typeof create>) {
+  return renderer.root.findAllByProps({ "aria-label": "All tabs", type: "button" });
 }
 
 /** Clicks the strip's `…` control the way a pointer does, rect and all. */
@@ -136,9 +158,11 @@ const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
   onSelectAgent: noop,
   onSelectWorkspace: noop,
   onSortMode: noop,
+  onTogglePinnedWorkspace: noop,
+  onTogglePinnedAgentTab: noop,
   onWorkspaceCommand: noop,
-  archivedWorkspaces: [],
-  onUnarchiveWorkspace: noop,
+  pinnedOnly: false,
+  onTogglePinnedOnly: noop,
   phase: "connected",
   rows,
   maxWidth: 426,
@@ -363,7 +387,7 @@ describe("application shell accessibility contracts", () => {
     expect(html.indexOf('data-agent-index="0"')).toBeLessThan(html.indexOf('data-agent-index="1"'));
     expect(html).toContain('data-agent-icon="codex"');
     expect(html).toContain('data-agent-icon="claude"');
-    expect(html).toContain('<span class="agent-session-label">Plan rollout</span><span class="agent-detail">');
+    expect(html).toContain('<span class="agent-session-label">Plan rollout</span></span><span class="agent-detail">');
   });
 
   /**
@@ -478,8 +502,8 @@ describe("application shell accessibility contracts", () => {
       adapters={adapters} agents={rows} agentSort="workspace" agentsRatio={0.4} canMutate={canMutate} commandScope={commandScope} compactWorkspaces={false}
       hostLabel="remote-linux" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
-      onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop}
-      onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
+      onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop}
+      onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
     />;
     await act(async () => { renderer = create(element(agents)); });
     // No agent focused: nothing to act on.
@@ -591,9 +615,9 @@ describe("application shell accessibility contracts", () => {
     const html = renderToStaticMarkup(<TabStrip
       activeKey="app:file" activeTerminalPaneCount={1} canMutate commandScope={commandScope} stateGlyphs={false} onClose={noop}
       onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
-      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
+      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}}
       tabs={[
-        { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked", agentPresence: "present" },
+        { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "blocked", agentPresence: "present", pinned: false },
         { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: true, canMoveLeft: false, canMoveRight: false },
       ]}
     />);
@@ -644,7 +668,7 @@ describe("application shell accessibility contracts", () => {
       activeKey={manyTabs[0].key} activeTerminalPaneCount={0} canMutate
       commandScope={commandScope} stateGlyphs={false} onClose={noop} onCloseCurrent={noop}
       onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop}
-      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
+      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}}
       tabs={[...manyTabs, { key: "pending:create", kind: "pending", title: "Creating" }]}
     />);
     expect(tabHtml.match(/class="tab-index"/g)).toHaveLength(9);
@@ -657,11 +681,12 @@ describe("application shell accessibility contracts", () => {
       activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate commandScope={commandScope}
       stateGlyphs={false} onClose={noop} onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop}
       onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop} onPin={noop}
-      onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
+      onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}}
       tabs={states.map((attention, index) => ({
         key: `terminal:@${index + 1}` as const, kind: "terminal" as const, id: `@${index + 1}`,
         title: attention, index: index + 1, activeInTmux: index === 0, zoomed: false,
         canMoveLeft: index > 0, canMoveRight: index < states.length - 1, attention, agentPresence: "present" as const,
+        pinned: false,
       }))}
     />);
     expect(html).toContain('class="spinner tab-agent-spinner"');
@@ -693,13 +718,13 @@ describe("application shell accessibility contracts", () => {
     const terminal = (id: string, extra: Partial<Extract<CombinedTab, { kind: "terminal" }>>) => ({
       key: `terminal:${id}` as const, kind: "terminal" as const, id, title: `window ${id}`,
       index: 1, activeInTmux: false, zoomed: false, canMoveLeft: false, canMoveRight: false,
-      attention: "none" as const, agentPresence: "absent" as const, ...extra,
+      attention: "none" as const, agentPresence: "absent" as const, pinned: false, ...extra,
     });
     const html = renderToStaticMarkup(<TabStrip
       activeKey="terminal:@1" activeTerminalPaneCount={1} canMutate commandScope={commandScope}
       stateGlyphs={false} onClose={noop} onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop}
       onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop} onPin={noop}
-      onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
+      onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}}
       tabs={[
         terminal("@1", { attention: "working", agentAdapterId: "codex", agentPresence: "present" }),
         terminal("@2", {}),
@@ -724,12 +749,12 @@ describe("application shell accessibility contracts", () => {
 
   it("keeps a tab menu command bound to the connection scope that opened it", async () => {
     const onClose = vi.fn();
-    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent" } as const;
+    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent", pinned: false } as const;
     const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
     const element = (scope: typeof commandScope) => <TabStrip
       activeKey={tab.key} activeTerminalPaneCount={1} canMutate commandScope={scope} stateGlyphs={false} onClose={onClose}
       onCloseCurrent={noop} onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
-      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} tabs={[tab]}
+      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}} tabs={[tab]}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope)); });
@@ -743,13 +768,13 @@ describe("application shell accessibility contracts", () => {
   it("makes the active split tab's menu Close use the same pane-first command as the keyboard", async () => {
     const onClose = vi.fn();
     const onCloseCurrent = vi.fn();
-    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent" } as const;
+    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent", pinned: false } as const;
     const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
     const element = (scope: typeof commandScope, paneId: string) => <TabStrip
       activeKey={tab.key} activePaneId={paneId} activeTerminalPaneCount={2} canMutate commandScope={scope}
       stateGlyphs={false} onClose={onClose} onCloseCurrent={onCloseCurrent} onCloseNonAgent={noop}
       onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
-      onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} tabs={[tab]}
+      onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}} tabs={[tab]}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope, "%1")); });
@@ -766,12 +791,12 @@ describe("application shell accessibility contracts", () => {
   it("keeps an open tab menu's close label and action aligned after external tab activation", async () => {
     const onClose = vi.fn();
     const onCloseCurrent = vi.fn();
-    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent" } as const;
+    const tab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent", pinned: false } as const;
     const element = (activeKey: string) => <TabStrip
       activeKey={activeKey} activePaneId="%1" activeTerminalPaneCount={2} canMutate commandScope={commandScope}
       stateGlyphs={false} onClose={onClose} onCloseCurrent={onCloseCurrent} onCloseNonAgent={noop}
       onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop} onNewTerminal={noop}
-      onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} tabs={[tab]}
+      onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}} tabs={[tab]}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(tab.key)); });
@@ -797,7 +822,7 @@ describe("application shell accessibility contracts", () => {
       activeKey={tab.key} activePaneId="%covered" activeTerminalPaneCount={2} canMutate
       commandScope={commandScope} stateGlyphs={false} onClose={onClose} onCloseCurrent={onCloseCurrent}
       onCloseNonAgent={noop} onCloseOthers={noop} onCloseRight={noop} onDownloadTab={noop} onMove={noop}
-      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}} tabs={[tab]}
+      onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}} tabs={[tab]}
     />); });
     await act(async () => renderer.root.findByProps({ role: "tab" }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
     await act(async () => renderer.root.findByProps({ "data-menu-item": "close" }).props.onClick());
@@ -812,15 +837,15 @@ describe("application shell accessibility contracts", () => {
     const onDownloadTab = vi.fn();
     const onCloseNonAgent = vi.fn();
     const strip = [
-      { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: true, attention: "none", agentPresence: "absent" },
-      { key: "terminal:@2", kind: "terminal", id: "@2", title: "logs", index: 2, activeInTmux: false, zoomed: false, canMoveLeft: true, canMoveRight: false, attention: "none", agentPresence: "absent" },
+      { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: true, attention: "none", agentPresence: "absent", pinned: false },
+      { key: "terminal:@2", kind: "terminal", id: "@2", title: "logs", index: 2, activeInTmux: false, zoomed: false, canMoveLeft: true, canMoveRight: false, attention: "none", agentPresence: "absent", pinned: false },
       { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: false, canMoveLeft: false, canMoveRight: true },
       { key: "app:diff", kind: "app", id: "diff", title: "a.ts (staged)", appKind: "gitDiff", resource: "staged:a.ts", order: 1, preview: false, canMoveLeft: true, canMoveRight: false },
     ] as const;
     const element = (canMutate: boolean) => <TabStrip
       activeKey="app:file" activeTerminalPaneCount={1} canMutate={canMutate} commandScope={commandScope} stateGlyphs={false}
       onClose={noop} onCloseCurrent={noop} onCloseNonAgent={onCloseNonAgent} onCloseOthers={onCloseOthers} onCloseRight={onCloseRight} onDownloadTab={onDownloadTab}
-      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} platform="mac" shortcuts={{}}
+      onMove={noop} onNewTerminal={noop} onPin={noop} onRenameTerminal={noop} onSelect={noop} onTogglePinned={noop} platform="mac" shortcuts={{}}
       tabs={[...strip]}
     />;
     const openMenuOn = async (renderer: ReturnType<typeof create>, index: number) => {
@@ -938,7 +963,7 @@ describe("application shell accessibility contracts", () => {
     const onSelect = vi.fn();
     let renderer!: ReturnType<typeof create>;
     await act(async () => {
-      renderer = create(tabStripOver([...mixedStrip, pendingTab], { activeKey: "app:file", onSelect }));
+      renderer = createStrip(tabStripOver([...mixedStrip, pendingTab], { activeKey: "app:file", onSelect }), stripNode(520, 300));
     });
     await act(async () => openAllTabs(renderer));
     // Opening the list is not a selection: the point of it is to find a tab you
@@ -972,6 +997,53 @@ describe("application shell accessibility contracts", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("shows the all-tabs control only while the strip is clipping a tab", async () => {
+    // The `…` opens a list of every tab. With every tab already on screen that
+    // list says nothing the strip does not, so the control is not drawn — and
+    // the width it would have taken goes to the tabs.
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = createStrip(tabStripOver([...mixedStrip]), stripNode(300, 300)); });
+    expect(allTabsControls(renderer)).toHaveLength(0);
+    await act(async () => renderer.unmount());
+
+    await act(async () => { renderer = createStrip(tabStripOver([...mixedStrip]), stripNode(520, 300)); });
+    expect(allTabsControls(renderer)).toHaveLength(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it("re-measures the strip when it resizes and when the tab set changes", async () => {
+    const observers: Array<() => void> = [];
+    class StubResizeObserver {
+      constructor(callback: () => void) { observers.push(callback); }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", StubResizeObserver);
+    const node = stripNode(300, 300);
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = createStrip(tabStripOver([...mixedStrip]), node); });
+    expect(allTabsControls(renderer)).toHaveLength(0);
+
+    // The window narrows — or a panel opens — and a tab goes off the edge.
+    node.clientWidth = 200;
+    await act(async () => observers.at(-1)?.());
+    expect(allTabsControls(renderer)).toHaveLength(1);
+
+    // And widens again, with room for everything.
+    node.clientWidth = 400;
+    await act(async () => observers.at(-1)?.());
+    expect(allTabsControls(renderer)).toHaveLength(0);
+
+    // A tab set that grows past the edge is the other way clipping starts, and
+    // it moves no layout the observer would report.
+    node.scrollWidth = 900;
+    await act(async () => { renderer.update(tabStripOver([...mixedStrip, pendingTab])); });
+    expect(allTabsControls(renderer)).toHaveLength(1);
+    await act(async () => renderer.unmount());
+    vi.unstubAllGlobals();
+  });
+
   it("advertises the tab shortcut the keymap holds, not the one it ships with", async () => {
     // `tab.select1…9` are hidden from the palette but are ordinary rebindable
     // commands, and the collision repair can clear one outright. A row
@@ -979,10 +1051,10 @@ describe("application shell accessibility contracts", () => {
     // promising nothing.
     let renderer!: ReturnType<typeof create>;
     await act(async () => {
-      renderer = create(tabStripOver([...mixedStrip], {
+      renderer = createStrip(tabStripOver([...mixedStrip], {
         activeKey: "app:file",
         shortcuts: { "tab.select2": "Meta+Alt+2", "tab.select3": null },
-      }));
+      }), stripNode(520, 300));
     });
     await act(async () => openAllTabs(renderer));
     const rows = renderer.root.findAllByProps({ role: "menuitemradio" });
@@ -999,7 +1071,7 @@ describe("application shell accessibility contracts", () => {
     }));
     let renderer!: ReturnType<typeof create>;
     await act(async () => {
-      renderer = create(tabStripOver(many, { activeKey: many[0].key, platform: "linux" }));
+      renderer = createStrip(tabStripOver(many, { activeKey: many[0].key, platform: "linux" }), stripNode(1400, 300));
     });
     await act(async () => openAllTabs(renderer));
     const rows = renderer.root.findAllByProps({ role: "menuitemradio" });
@@ -1018,8 +1090,8 @@ describe("application shell accessibility contracts", () => {
       adapters={[]} agents={[]} agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} compactWorkspaces={false}
       hostLabel="remote-linux" maxWidth={426} phase="connected" rows={rows} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
-      onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
-      onWorkspaceCommand={onWorkspaceCommand} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
+      onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onSortMode={noop} onWidth={noop}
+      onWorkspaceCommand={onWorkspaceCommand} pinnedOnly={false} onTogglePinnedOnly={noop}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope)); });
@@ -1027,48 +1099,6 @@ describe("application shell accessibility contracts", () => {
     await act(async () => { renderer.update(element(replacementScope)); });
     await act(async () => renderer.root.findByProps({ "data-menu-item": "rename" }).props.onClick());
     expect(onWorkspaceCommand).toHaveBeenCalledWith(session, "session.rename", commandScope);
-    await act(async () => renderer.unmount());
-  });
-
-  it("offers Archive workspace on a row's menu, without asking and without a tmux gate", async () => {
-    const onWorkspaceCommand = vi.fn();
-    let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<WorkspaceSidebar {...sidebarProps({ canMutate: false, onWorkspaceCommand })} />); });
-    await act(async () => renderer.root.findByProps({ "data-workspace-index": 0 }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
-    const archive = renderer.root.findByProps({ "data-menu-item": "archive" });
-    expect(archive.props.disabled).toBeFalsy();
-    await act(async () => archive.props.onClick());
-    expect(onWorkspaceCommand).toHaveBeenCalledWith(session, "session.archive", commandScope);
-    await act(async () => renderer.unmount());
-  });
-
-  it("lists archived workspaces under a collapsed disclosure, with an unarchive bound to the opening scope", async () => {
-    const parked: Session = { id: "$7", name: "parked", windowCount: 1, attachedClients: 0, order: 5 };
-    // Nothing archived: no disclosure at all.
-    expect(sidebar()).not.toContain("Archived (");
-    const html = sidebar({ archivedWorkspaces: [parked] });
-    expect(html).toContain('aria-expanded="false"');
-    expect(html).toContain("Archived (1)");
-    expect(html).not.toContain("Unarchive parked");
-
-    const onUnarchiveWorkspace = vi.fn();
-    const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
-    const element = (scope: typeof commandScope) => <WorkspaceSidebar {...sidebarProps({ archivedWorkspaces: [parked], commandScope: scope, onUnarchiveWorkspace })} />;
-    let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(element(commandScope)); });
-    await act(async () => renderer.root.findByProps({ "aria-controls": "sidebar-archived-list" }).props.onClick());
-    const row = renderer.root.findByProps({ "aria-label": "Unarchive parked" });
-    // Not a workspace row: no number, no selection, no agents.
-    expect(renderer.root.findAllByProps({ "data-workspace-index": 1 })).toHaveLength(0);
-    await act(async () => row.props.onClick());
-    expect(onUnarchiveWorkspace).toHaveBeenCalledWith(parked, commandScope);
-
-    // The row's own menu, opened before the connection was replaced, is gone.
-    await act(async () => renderer.root.findByProps({ id: "sidebar-archived-list" }).findAllByProps({ role: "listitem" })[0]
-      .props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
-    expect(renderer.root.findAllByProps({ "data-menu-item": "unarchive" })).toHaveLength(1);
-    await act(async () => { renderer.update(element(replacementScope)); });
-    expect(renderer.root.findAllByProps({ "data-menu-item": "unarchive" })).toHaveLength(0);
     await act(async () => renderer.unmount());
   });
 
@@ -1086,8 +1116,8 @@ describe("application shell accessibility contracts", () => {
       agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} compactWorkspaces={false} hostLabel="remote-linux" maxWidth={426}
       phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
       onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
-      onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onSortMode={noop} onWidth={noop}
-      onWorkspaceCommand={noop} archivedWorkspaces={[]} onUnarchiveWorkspace={noop}
+      onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onSortMode={noop} onWidth={noop}
+      onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope, "Old agent")); });
@@ -1567,5 +1597,255 @@ describe("saved host picker", () => {
     act(() => { renderer = create(settings({ profiles: [profiles[0]] as unknown as HostProfile[], selectedProfileId: "local" })); });
     expect(JSON.stringify(renderer.toJSON())).toContain("The last saved host cannot be removed.");
     act(() => renderer.unmount());
+  });
+});
+
+/**
+ * The gesture, at both surfaces it exists on.
+ *
+ * Shift-click is the whole affordance — there is no pin button — so the two
+ * things worth asserting are that the modifier reaches the pin handler instead
+ * of the selection handler, and that a pinned thing actually draws the mark.
+ */
+describe("pinning by Shift-click", () => {
+  const pinnedTab = { ...mixedStrip[0], pinned: true } as const;
+
+  it("pins a tab on Shift-click and selects it on a plain one", async () => {
+    const onSelect = vi.fn();
+    const onTogglePinned = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(tabStripOver([...mixedStrip], { onSelect, onTogglePinned }));
+    });
+    const tab = renderer.root.findAllByProps({ role: "tab" })[0];
+    await act(async () => tab.props.onClick({ shiftKey: false }));
+    expect(onSelect).toHaveBeenCalledWith(mixedStrip[0]);
+    expect(onTogglePinned).not.toHaveBeenCalled();
+
+    await act(async () => tab.props.onClick({ shiftKey: true }));
+    expect(onTogglePinned).toHaveBeenCalledWith(mixedStrip[0]);
+    // Pinning a background tab must not also navigate to it.
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it("draws the pin on a pinned tab and on nothing else, and offers the menu item both ways", async () => {
+    const html = renderToStaticMarkup(tabStripOver([pinnedTab, mixedStrip[1]]));
+    expect(html.match(/class="tab-pin"/g)).toHaveLength(1);
+    expect(html).toContain('<span aria-label="Pinned" class="tab-pin">');
+
+    const onTogglePinned = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(tabStripOver([pinnedTab], { onTogglePinned })); });
+    await act(async () => renderer.root.findByProps({ role: "tab" })
+      .props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    // The label is the state's opposite: a pinned tab offers Unpin.
+    expect(textOf(renderer.root.findByProps({ "data-menu-item": "pin" }))).toBe("Unpin tab");
+    await act(async () => renderer.root.findByProps({ "data-menu-item": "pin" }).props.onClick());
+    expect(onTogglePinned).toHaveBeenCalledWith(pinnedTab);
+    await act(async () => renderer.unmount());
+
+    await act(async () => { renderer = create(tabStripOver([mixedStrip[1]])); });
+    await act(async () => renderer.root.findByProps({ role: "tab" })
+      .props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    expect(textOf(renderer.root.findByProps({ "data-menu-item": "pin" }))).toBe("Pin tab");
+    await act(async () => renderer.unmount());
+  });
+
+  it("does not offer the pin to a document tab, which the host has no window for", async () => {
+    const onSelect = vi.fn();
+    const onTogglePinned = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    // mixedStrip[2] is the markdown tab: a pin is keyed on a tmux window, and
+    // a document tab does not have one.
+    await act(async () => {
+      renderer = create(tabStripOver([mixedStrip[2]], { onSelect, onTogglePinned }));
+    });
+    const tab = renderer.root.findByProps({ role: "tab" });
+    // Shift does nothing at all here: it is the pin gesture, and a stray one
+    // must not become a navigation to a background document tab.
+    await act(async () => tab.props.onClick({ shiftKey: true }));
+    expect(onTogglePinned).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+    await act(async () => tab.props.onClick({ shiftKey: false }));
+    expect(onSelect).toHaveBeenCalledWith(mixedStrip[2]);
+    await act(async () => tab.props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    expect(renderer.root.findAllByProps({ "data-menu-item": "pin" })).toHaveLength(0);
+    await act(async () => renderer.unmount());
+  });
+
+  it("pins a workspace row on Shift-click and selects it on a plain one", async () => {
+    const onSelectWorkspace = vi.fn();
+    const onTogglePinnedWorkspace = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<WorkspaceSidebar {...sidebarProps({ onSelectWorkspace, onTogglePinnedWorkspace })} />);
+    });
+    const row = renderer.root.findByProps({ className: "workspace-button active" });
+    await act(async () => row.props.onClick({ shiftKey: false }));
+    expect(onSelectWorkspace).toHaveBeenCalledWith(session.id);
+    expect(onTogglePinnedWorkspace).not.toHaveBeenCalled();
+
+    await act(async () => row.props.onClick({ shiftKey: true }));
+    expect(onTogglePinnedWorkspace).toHaveBeenCalledWith(session, commandScope);
+    expect(onSelectWorkspace).toHaveBeenCalledTimes(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it("pins an agent's tab on Shift-click and navigates on a plain one", async () => {
+    const onSelectAgent = vi.fn();
+    const onTogglePinnedAgentTab = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<WorkspaceSidebar {...sidebarProps({ onSelectAgent, onTogglePinnedAgentTab })} />);
+    });
+    const row = renderer.root.findAllByProps({ className: "agent-button" })[0];
+    await act(async () => row.props.onClick({ shiftKey: false }));
+    expect(onSelectAgent).toHaveBeenCalledTimes(1);
+    expect(onTogglePinnedAgentTab).not.toHaveBeenCalled();
+
+    await act(async () => row.props.onClick({ shiftKey: true }));
+    expect(onTogglePinnedAgentTab).toHaveBeenCalledWith(expect.objectContaining({ agent: expect.objectContaining({ displayName: "Codex one" }) }), commandScope);
+    expect(onSelectAgent).toHaveBeenCalledTimes(1);
+
+    await act(async () => row.props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    await act(async () => renderer.root.findByProps({ "data-menu-item": "pin" }).props.onClick());
+    expect(onTogglePinnedAgentTab).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.unmount());
+  });
+
+  it("splits the workspace list into Pinned and Others, and draws no divider until something is pinned", () => {
+    // Nothing pinned: one plain list, no headings and no pin glyph on any row.
+    const plain = sidebar();
+    expect(plain).not.toContain("list-divider");
+    expect(plain).not.toContain("workspace-pin");
+
+    const other: WorkspaceRowModel = {
+      ...rows[0],
+      session: { ...session, id: "$2", name: "other", order: 1 },
+      active: false,
+    };
+    const divided = sidebar({ rows: [{ ...rows[0], pinned: true }, other] });
+    expect(divided).toContain('<h3 class="list-divider" id="sidebar-workspaces-pinned">Pinned</h3>');
+    expect(divided).toContain('<h3 class="list-divider" id="sidebar-workspaces-others">Others</h3>');
+    // Still no glyph on the row: the divider is what says "pinned" now, and
+    // the word stays in the row's own accessible name for the same reason.
+    expect(divided).not.toContain("workspace-pin");
+    expect(divided).toContain(`aria-label="${session.name}, pinned,`);
+    // The numbers stay flat across both blocks — they are ⌘1–9's addresses.
+    expect(divided.indexOf('data-workspace-index="0"')).toBeLessThan(divided.indexOf('data-workspace-index="1"'));
+    expect(divided).toContain('class="workspace-shortcut-index">2</span>');
+
+    // Everything pinned: one block, and no empty "Others" heading under it.
+    const allPinned = sidebar({ rows: [{ ...rows[0], pinned: true }] });
+    expect(allPinned).toContain(">Pinned</h3>");
+    expect(allPinned).not.toContain(">Others</h3>");
+  });
+
+  it("shows the current workspace filter, and explains an empty-looking filtered list", () => {
+    expect(sidebar()).toContain('class="sort-toggle" type="button">all</button>');
+    expect(sidebar({ pinnedOnly: true })).toContain('class="sort-toggle" type="button">pinned only</button>');
+    const hint = "No pinned workspaces — Shift-click a workspace to pin it.";
+    // The selected workspace keeps its row, which is how this state is normally
+    // met: one unexplained row is exactly what needs the hint.
+    const kept = sidebar({ pinnedOnly: true });
+    expect(kept).toContain(hint);
+    expect(kept).toContain(session.name);
+    // Something pinned: nothing to explain.
+    expect(sidebar({ pinnedOnly: true, rows: [{ ...rows[0], pinned: true }] })).not.toContain(hint);
+    // Nothing at all is about the host, filter or no filter: there is nothing
+    // to Shift-click, and saying so would be advice about workspaces that do
+    // not exist.
+    for (const pinnedOnly of [false, true]) {
+      const empty = sidebar({ pinnedOnly, rows: [] });
+      expect(empty).toContain("No tmux sessions on this host yet.");
+      expect(empty).not.toContain(hint);
+    }
+  });
+
+  it("does not claim the host has no agents when the filter is what emptied the list", () => {
+    // The titlebar's unread count deliberately still reads every agent, so a
+    // filtered-empty panel must not answer for the whole host.
+    expect(sidebar({ agents: [] })).toContain("No agents detected.");
+    const filtered = sidebar({ agents: [], pinnedOnly: true });
+    expect(filtered).toContain("No agents in pinned workspaces.");
+    expect(filtered).not.toContain("No agents detected.");
+  });
+
+  it("wraps the agents list's workspace groups in the same two dividers", () => {
+    const rowsFor = (pinned = false) => buildAgentRows(
+      [agent({ id: "pinned-agent", sessionId: "$1", displayName: "Codex one" }), agent({ id: "loose", sessionId: "$2", displayName: "Codex two" })],
+      (record) => ({
+        workspaceOrder: record.sessionId === "$1" ? 0 : 1,
+        workspaceName: record.sessionId === "$1" ? "api" : "web",
+        hostLabel: "remote-linux",
+        workspacePinned: pinned && record.sessionId === "$1",
+      }),
+      () => true,
+      "workspace",
+    );
+    // No pinned workspace: the groups stand on their own, as they always did.
+    expect(sidebar({ agents: rowsFor() })).not.toContain("list-divider");
+    const html = sidebar({ agents: rowsFor(true) });
+    expect(html).toContain('<h3 class="list-divider">Pinned</h3>');
+    expect(html).toContain('<h3 class="list-divider">Others</h3>');
+    expect(html.indexOf(">Pinned</h3>")).toBeLessThan(html.indexOf(">Others</h3>"));
+    // The blocks are ignored containers, not a second level of group: a group
+    // owning a group is outside what `role="list"` may own.
+    expect(html).toContain('<div class="list-block" role="presentation">');
+  });
+
+  it("puts the pin immediately after the name of an agent whose tab is pinned, in both orderings", () => {
+    for (const agentSort of ["workspace", "status"] as const) {
+      const agents = buildAgentRows(
+        [agent({ id: "on-a-pinned-tab", displayName: "Codex one", windowName: "Ship it" }), agent({ id: "loose", windowId: "@2", paneId: "%2", displayName: "Codex two", windowName: "Later" })],
+        (record) => ({
+          workspaceOrder: 0,
+          workspaceName: "work",
+          hostLabel: "remote-linux",
+          tabPinned: record.id === "on-a-pinned-tab",
+        }),
+        () => true,
+        agentSort,
+      );
+      const html = sidebar({ agentSort, agents });
+      // One cell: the pin sits against the end of the name, inside the same
+      // flex box, so the detail column keeps the width it had without it.
+      expect(html).toContain('<span class="agent-session-label">Ship it</span><span aria-hidden="true" class="agent-pin">');
+      expect(html).toContain('<span class="agent-session-label">Later</span></span><span class="agent-detail">');
+      // The pinned row leads its block in either ordering.
+      expect(html.indexOf("Ship it")).toBeLessThan(html.indexOf("Later"));
+    }
+  });
+
+  it("heads the agents list with a Pinned block in priority mode, unless it would hold everything", () => {
+    const priorityRows = (pinnedIds: readonly string[]) => buildAgentRows(
+      [
+        agent({ id: "pinned-one", displayName: "Codex one", lifecycle: "idle" }),
+        agent({ id: "loose", windowId: "@2", paneId: "%2", displayName: "Codex two", lifecycle: "blocked" }),
+      ],
+      (record) => ({
+        workspaceOrder: 0,
+        workspaceName: "work",
+        hostLabel: "remote-linux",
+        workspacePinned: pinnedIds.includes(record.id),
+      }),
+      () => true,
+      "status",
+    );
+    const html = sidebar({ agentSort: "status", agents: priorityRows(["pinned-one"]) });
+    expect(html).toContain("<span>Pinned</span>");
+    // No state dot on that heading: "pinned" is not a state an agent is in.
+    expect(html).toContain('<span aria-hidden="true" class="agent-group-pin">');
+    // The rest still bucket by status under their own headings.
+    expect(html).toContain("<span>Blocked</span>");
+
+    // Every row pinned — which is what the pinned-only filter leaves behind —
+    // and the block would say nothing while costing all four headings.
+    const everything = sidebar({ agentSort: "status", agents: priorityRows(["pinned-one", "loose"]) });
+    expect(everything).not.toContain("<span>Pinned</span>");
+    expect(everything).not.toContain("agent-group-pin");
+    expect(everything).toContain("<span>Blocked</span>");
+    expect(everything).toContain("<span>Idle</span>");
   });
 });

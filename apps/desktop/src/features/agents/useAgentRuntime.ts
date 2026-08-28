@@ -29,13 +29,6 @@ export interface AgentRuntimeOptions {
   /** Window IDs in the topology whose generation the requested snapshot covers. */
   topologyWindowIds: readonly string[];
   soundPreferences: AgentSoundPreferences;
-  /**
-   * Sessions whose agents are out of view — the archived workspaces. Applied
-   * once, at the source: `agents`, the rollups, and every count, jump target,
-   * sound and native notification derived from them follow. The records stay
-   * in the store, so unarchiving brings the live agents back as they are.
-   */
-  excludedSessionIds?: ReadonlySet<string>;
   onStatus(message: string): void;
   effects?: {
     emitNotification?(notification: AgentNativeNotification): Promise<{ id: number; actionable: boolean }>;
@@ -57,13 +50,6 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
 
   const processTransition = useCallback((previous: AgentRecord | undefined, next: AgentRecord, replayed: boolean, reconciledSnapshot = false) => {
     const key = recordKey(next);
-    // Transitions do not pass through the filtered `agents` list, so the
-    // exclusion is applied here as well. Marked processed rather than left
-    // pending: unarchiving must not replay every notification missed since.
-    if (optionsRef.current.excludedSessionIds?.has(next.sessionId)) {
-      runtimeMemory.current.markProcessed(key, next.attentionGeneration);
-      return;
-    }
     const decision = decideAgentNotification(previous, next, {
       focus: optionsRef.current.focus,
       replayed,
@@ -164,11 +150,10 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     return () => { cancelled = true; };
   }, [accept, options.client, options.scope?.clientId, options.scope?.connectionEpoch, options.scope?.hostProfileId, options.scope?.serverIdentity, options.scope?.topologyGeneration, resnapshot]);
 
-  const agents = useMemo(() => {
-    const scoped = agentsForScope(state, options.focus.hostProfileId, options.focus.serverIdentity);
-    const excluded = options.excludedSessionIds;
-    return excluded && excluded.size > 0 ? scoped.filter((record) => !excluded.has(record.sessionId)) : scoped;
-  }, [options.excludedSessionIds, options.focus.hostProfileId, options.focus.serverIdentity, state]);
+  const agents = useMemo(
+    () => agentsForScope(state, options.focus.hostProfileId, options.focus.serverIdentity),
+    [options.focus.hostProfileId, options.focus.serverIdentity, state],
+  );
   const rollups = useMemo(() => deriveAgentRollups(agents), [agents]);
 
   useEffect(() => {

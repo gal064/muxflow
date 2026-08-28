@@ -73,7 +73,7 @@ impl FileService {
         if cancellation.load(Ordering::Acquire) {
             return Err(cancelled("file open"));
         }
-        let root = RootCapability::validate(root, root_token)?;
+        let root = RootCapability::validate_read(root, root_token)?;
         let (logical_target, target) = root.resolve_existing(path)?;
         if logical_target == root.logical_root() {
             bail!("the active root itself cannot be opened as a file");
@@ -81,6 +81,7 @@ impl FileService {
         let (logical_opened, opened_path) = root.regular_file_target(&logical_target, &target)?;
         let mut file = root.anchor(&logical_opened)?.open_file()?;
         let opened_before = file.metadata()?;
+        root.authorize_opened_file(&logical_opened, &opened_before)?;
         let image = image_mime(&opened_path).is_some();
         let size = opened_before.len();
 

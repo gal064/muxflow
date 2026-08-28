@@ -25,6 +25,8 @@ interface AppFileActionsOptions {
   setStatus: (status: string) => void;
 }
 
+export type DownloadOrigin = "explorer" | "fileSurface" | "tabMenu";
+
 /** Owns filesystem mutation, native save-panel serialization, and transfer publication. */
 export function useAppFileActions(options: AppFileActionsOptions) {
   const downloadPickerOpen = useRef(false);
@@ -33,11 +35,16 @@ export function useAppFileActions(options: AppFileActionsOptions) {
   scopeRef.current = options.scope;
   rootRef.current = options.root;
 
-  const selectionIsCurrent = (scope: FileWorkspaceScope, root: ActiveRoot) => {
+  const selectionIsCurrent = (scope: FileWorkspaceScope, root: ActiveRoot, origin: DownloadOrigin) => {
     const currentScope = scopeRef.current;
     return Boolean(currentScope
       && keyForScope(currentScope) === keyForScope(scope)
-      && sameRoot(rootRef.current, root));
+      // Explorer commands act on the live tree and must remain bound to its
+      // current root. A file tab carries its own host-issued root capability;
+      // requiring that capability to equal the Explorer root makes a still-
+      // valid tab undownloadable after `cd` changes the live tree. The host
+      // validates the captured path/token pair before it opens the source.
+      && (origin !== "explorer" || sameRoot(rootRef.current, root)));
   };
 
   const mutateFile = async (mutation: FileMutation) => {
@@ -72,14 +79,15 @@ export function useAppFileActions(options: AppFileActionsOptions) {
     scope: FileWorkspaceScope,
     request: DownloadRequest,
     root: ActiveRoot,
+    origin: DownloadOrigin,
   ) => {
-    if (!selectionIsCurrent(scope, root)) {
+    if (!selectionIsCurrent(scope, root, origin)) {
       options.setStatus("Download cancelled because the active host or workspace changed.");
       return;
     }
     try {
       const transfer = await options.client.startDownload(scope, root, request);
-      if (!selectionIsCurrent(scope, root)) {
+      if (!selectionIsCurrent(scope, root, origin)) {
         await options.client.cancelTransfer(scope, transfer.id).catch(() => undefined);
         options.setStatus("Download cancelled because the active host or workspace changed.");
         return;
@@ -90,7 +98,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
       options.setStatus(banner);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!selectionIsCurrent(scope, root)) {
+      if (!selectionIsCurrent(scope, root, origin)) {
         options.setStatus("Download cancelled because the active host or workspace changed.");
         return;
       }
@@ -111,10 +119,10 @@ export function useAppFileActions(options: AppFileActionsOptions) {
     }
   };
 
-  const startDownloadFlow = async (intent: DownloadIntent, root: ActiveRoot) => {
+  const startDownloadFlow = async (intent: DownloadIntent, root: ActiveRoot, origin: DownloadOrigin) => {
     if (downloadPickerOpen.current) return;
     const scope = scopeRef.current;
-    if (!scope || !selectionIsCurrent(scope, root)) {
+    if (!scope || !selectionIsCurrent(scope, root, origin)) {
       options.setStatus("Downloads require the active live file workspace.");
       return;
     }
@@ -126,7 +134,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
       })
       .finally(() => { downloadPickerOpen.current = false; });
     if (!chosen) return;
-    if (!selectionIsCurrent(scope, root)) {
+    if (!selectionIsCurrent(scope, root, origin)) {
       options.setStatus("Download cancelled because the active host or workspace changed.");
       return;
     }
@@ -135,7 +143,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
       kind: intent.kind,
       destination: chosen.destination,
       collision: chosen.panelConfirmed ? "overwrite" : "fail",
-    }, root);
+    }, root, origin);
   };
 
   return { mutateFile, startDownloadFlow };

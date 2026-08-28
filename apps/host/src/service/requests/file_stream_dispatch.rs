@@ -16,7 +16,7 @@ pub(super) async fn handle(
     files: &Arc<FileService>,
 ) {
     let Some(file) =
-        super::filesystem_dispatch::require_rooted_file(&request, request_id, control_tx).await
+        super::filesystem_dispatch::require_readable_file(&request, request_id, control_tx).await
     else {
         return;
     };

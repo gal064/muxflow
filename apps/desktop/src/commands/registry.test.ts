@@ -25,6 +25,7 @@ const context = (overrides: Partial<CommandContext> = {}): CommandContext => ({
   canMoveSessionUp: true, canMoveSessionDown: true,
   canMoveTabLeft: true, canMoveTabRight: true,
   hasHostProfile: true,
+  pinnedOnly: false,
   rowCommands: [],
   run: () => undefined, ...overrides,
 });

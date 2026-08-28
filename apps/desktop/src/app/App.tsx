@@ -44,16 +44,12 @@ import { effectiveRails } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
-  defaultAppState, PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
+  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
   type AppOwnedTab, type HostSetupDecision, type ShellState, type WorkspaceDefaults,
 } from "../features/shell/types";
 import {
-  archiveWorkspace,
-  archivedSessionIds,
-  archivedWorkspacesFor,
   combineWorkspaceTabs,
   closeAppTab,
-  closeTransientGitDiff,
   findGitDiffTab,
   mountedAppTabIds,
   mountedTerminalPanes,
@@ -63,7 +59,6 @@ import {
   retirePendingTab,
   selectableTabs,
   selectAppTab,
-  unarchiveWorkspace,
   setMarkdownViewMode,
   setWorkspaceDefaults,
   shouldSurfaceAuthoritativeTerminal,
@@ -80,7 +75,7 @@ import { useFocusHistoryNavigation } from "./useFocusHistoryNavigation";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
 import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
-import { inferHome, workspaceRows } from "../features/workspaces/workspaceRows";
+import { inferHome, pinnedOnlyRows, workspaceRows } from "../features/workspaces/workspaceRows";
 import type { ConnectionSpec, HostProfile, Pane, Session } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
@@ -214,7 +209,6 @@ export function App() {
     fileClient,
     gitClient,
     terminalApplicationClipboardEnabled: appState.shell.terminalApplicationClipboard,
-    excludedSessionIds: (profileId, identity) => archivedSessionIds(appStateRef.current, profileId, identity),
     onHandshakeFailure: (failed) => onHandshakeFailure.current(failed),
     onConnectionStateChanged: (changed, state) => onConnectionStateChanged.current(changed, state),
     setStatus,
@@ -439,24 +433,6 @@ export function App() {
     }));
   }, [setAppState]);
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
-  // Archived workspaces on this host and server. One set, applied at the
-  // source of each list it must be absent from: the agent runtime, the
-  // sidebar rows, and the focus history.
-  // Keyed on the records alone: every other persisted write (a tab switch, a
-  // sidebar drag) must not hand the agent runtime and the sidebar a new set.
-  const archivedRecords = appState.archivedWorkspaces;
-  const archived = useMemo(
-    () => archivedSessionIds({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity),
-    [archivedRecords, currentHostProfileId, hostState.serverIdentity],
-  );
-  const visibleSessions = useMemo(
-    () => archived.size === 0 ? snapshot.sessions : snapshot.sessions.filter((session) => !archived.has(session.id)),
-    [archived, snapshot.sessions],
-  );
-  const archivedWorkspaces = useMemo(
-    () => archivedWorkspacesFor({ ...defaultAppState, archivedWorkspaces: archivedRecords }, currentHostProfileId, hostState.serverIdentity, snapshot.sessions),
-    [archivedRecords, currentHostProfileId, hostState.serverIdentity, snapshot.sessions],
-  );
   const {
     hostSetup: agentHostSetup,
     notificationActivation,
@@ -483,7 +459,6 @@ export function App() {
     currentHostProfileId,
     decision: appState.hostSetup[currentHostProfileId],
     decisionsArePersistable: appStateRecovery === undefined,
-    excludedSessionIds: archived,
     hostCanMutate: hostState.canMutate,
     // Helper compatibility owns the host-level consent lane while it is
     // unresolved. Runtime observation stays live; only the separate one-time
@@ -506,7 +481,9 @@ export function App() {
   });
 
   const home = useMemo(() => inferHome(snapshot.panes.map((pane) => pane.currentPath)), [snapshot.panes]);
-  const sidebarRows = useMemo(() => workspaceRows({
+  // Every workspace on this server, pinned first. ⌘P reads this whole; the
+  // sidebar, ⌘1–9 and the agents list read the narrowed version below.
+  const switcherRows = useMemo(() => workspaceRows({
     snapshot,
     activeSessionId,
     agents: agentRuntime.agents,
@@ -514,12 +491,20 @@ export function App() {
     attentionByWorkspace: agentRuntime.rollups.byWorkspace,
     activeBranch: workspaceGit.status?.repository.headName,
     home,
-    excludeSessionIds: archived,
-  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, archived, home, snapshot, workspaceGit.status]);
+  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, snapshot, workspaceGit.status]);
+  const sidebarRows = useMemo(
+    () => appState.shell.pinnedOnly ? pinnedOnlyRows(switcherRows, activeSessionId) : switcherRows,
+    [activeSessionId, appState.shell.pinnedOnly, switcherRows],
+  );
   const agentRows = useMemo(() => {
     const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
     const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
     const paneIds = new Set(snapshot.panes.map((pane) => pane.id));
+    // Every window on this server, not just the workspace on screen: the agents
+    // list spans workspaces, so it needs the pins of tabs whose strip is not
+    // currently drawn.
+    const pinnedWindowIds = new Set(snapshot.windows.filter((item) => item.pinned).map((item) => item.id));
+    const pinnedSessionIds = new Set(snapshot.sessions.filter((item) => item.pinned).map((item) => item.id));
     return buildAgentRows(
       agentRuntime.agents,
       (record) => ({
@@ -527,11 +512,23 @@ export function App() {
         workspaceName: record.sessionName || "unknown workspace",
         hostLabel,
         tabIndex: windowIndexById.get(record.windowId),
+        workspacePinned: pinnedSessionIds.has(record.sessionId),
+        tabPinned: pinnedWindowIds.has(record.windowId),
       }),
       (record) => Boolean(record.paneId) && paneIds.has(record.paneId),
       appState.shell.agentSort,
     );
-  }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, sidebarRows, snapshot.panes, snapshot.windows]);
+  }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, sidebarRows, snapshot.panes, snapshot.sessions, snapshot.windows]);
+  // What the agents section lists, which under the filter is not everything
+  // the shell knows about. Only the section is narrowed: the bell, its count
+  // and ⌘⇧U keep reading the whole list, because "who needs me" is a question
+  // about every agent on the host and a filter over the sidebar is not an
+  // instruction to stop counting the rest.
+  const visibleAgentRows = useMemo(() => {
+    if (!appState.shell.pinnedOnly) return agentRows;
+    const visible = new Set(sidebarRows.map((row) => row.session.id));
+    return agentRows.filter((row) => visible.has(row.agent.sessionId));
+  }, [agentRows, appState.shell.pinnedOnly, sidebarRows]);
   const unread = useMemo(() => unreadCount(agentRows), [agentRows]);
   // The badge counts every waiting agent; the bell can only reach routable
   // ones, so it is disabled on exactly the rows `agents.jumpUnread` would find.
@@ -586,19 +583,6 @@ export function App() {
     [acceptedAgentTopology, agentRuntime.rollups.byWindow, currentAgentTopology, hasUnmappedAgents, pendingTabHere, windows, workspaceAppTabs],
   );
   const activeCombinedTabKey = selectedAppTab ? `app:${selectedAppTab.id}` : activeWindow ? `terminal:${activeWindow.id}` : undefined;
-  // A single-clicked Git diff is transient: it lives until the user selects
-  // any other tab. Closed here, on the selection change itself, rather than
-  // through `closeWorkspaceAppTab` — that path reveals a terminal, and the
-  // user has already navigated. Re-checked against live state: a diff pinned
-  // after it was selected is not the one that was selected then.
-  const previousSelectedAppTab = useRef(selectedAppTab);
-  useEffect(() => {
-    const previous = previousSelectedAppTab.current;
-    previousSelectedAppTab.current = selectedAppTab;
-    if (!previous || previous.kind !== "gitDiff" || previous.id === selectedAppTab?.id) return;
-    setAppState((current) => closeTransientGitDiff(current, currentHostProfileId, previous.id));
-    // Keyed on the strip's selection, which is the only thing this rule is about.
-  }, [activeCombinedTabKey]);
   const grid = useMemo(() => windowGrid(panes), [panes]);
   const mountedPanes = useMemo(
     () => mountedTerminalPanes(snapshot.panes, activeWindowId, Boolean(activeWindow?.zoomed)),
@@ -651,32 +635,35 @@ export function App() {
     selectSession,
     selectWindow,
     selectedAppTabId: selectedAppTab?.id,
-    // Archived workspaces are not destinations: treat them as gone.
-    sessions: visibleSessions,
+    sessions: snapshot.sessions,
     setStatus,
     windows: snapshot.windows,
   });
-  // The archive itself sends tmux nothing: the session and everything in it
-  // keeps running. The only tmux traffic is the ordinary switch to the next
-  // workspace when the archived one was on screen. If
-  // the workspace being archived is the one on screen, the selection moves to
-  // its neighbour — the row after it, else the row before — so the shell is
-  // not left showing a workspace the sidebar no longer lists.
-  const archiveSession = useCallback((session: Session) => {
-    setAppState((current) => archiveWorkspace(current, currentHostProfileId, hostState.serverIdentity, session, Date.now()));
-    if (session.id !== activeSessionId) return;
-    const index = sidebarRows.findIndex((row) => row.session.id === session.id);
-    const next = index < 0 ? undefined : sidebarRows[index + 1] ?? sidebarRows[index - 1];
-    // No neighbour: nothing is selected, now rather than at the next snapshot,
-    // so the strip and terminals do not keep showing a workspace the sidebar
-    // no longer lists.
-    if (next) selectSession(next.session.id);
-    else setActiveSessionId(undefined);
-  }, [activeSessionId, currentHostProfileId, hostState.serverIdentity, selectSession, setActiveSessionId, setAppState, sidebarRows]);
-  const unarchiveSession = useCallback((session: Session, scope: HostScopeToken) => {
+  // Both pins are host state now, so both take the action pipeline: the pin
+  // outlives this app, and every client of the same tmux server sees it. The
+  // scope check is the same one every row action makes — a menu can outlive the
+  // connection it was opened over.
+  //
+  // Deliberately without an `execution`, like the workspace reorder these now
+  // resemble: navigation execution rethrows a refusal for its caller to handle,
+  // and a pin has no navigation to abandon — a host that says no is a status
+  // line and an incident, not an exception nobody is waiting for. The pin state
+  // is read from the same live row or tab the menu label was drawn from, so the
+  // action asks for the opposite of what the user was just shown.
+  const toggleWorkspacePin = useCallback((session: Session, scope: HostScopeToken) => {
     if (!sameHostConnection(scope, hostScopeRef.current)) return;
-    setAppState((current) => unarchiveWorkspace(current, scope.hostProfileId, scope.serverIdentity, session.id));
-  }, [hostScopeRef, setAppState]);
+    void performAction({ kind: "setPinned", sessionId: session.id, pinned: !session.pinned });
+  }, [hostScopeRef, performAction]);
+  const toggleTabPin = useCallback((tab: Extract<CombinedTab, { kind: "terminal" }>, scope: HostScopeToken) => {
+    if (!activeSessionId || !sameHostConnection(scope, hostScopeRef.current)) return;
+    void performAction({ kind: "setPinned", sessionId: activeSessionId, windowId: tab.id, pinned: !tab.pinned });
+  }, [activeSessionId, hostScopeRef, performAction]);
+  // From the agents list the tab is named by the agent's own route, which
+  // spans workspaces — no dependence on the session on screen.
+  const toggleAgentTabPin = useCallback((row: AgentListRow, scope: HostScopeToken) => {
+    if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    void performAction({ kind: "setPinned", sessionId: row.agent.sessionId, windowId: row.agent.windowId, pinned: !row.location.tabPinned });
+  }, [hostScopeRef, performAction]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is
@@ -783,7 +770,6 @@ export function App() {
       selectAgentRow(target);
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
-    archiveSession,
     createSession: createWorkspace,
     createWindow: (sessionId) => {
       notificationActivation.clearNotificationFocusGuard();
@@ -1068,9 +1054,7 @@ export function App() {
       />
       {sidebarOpen && <WorkspaceSidebar
         adapters={agentRuntime.adapters}
-        agents={agentRows}
-        archivedWorkspaces={archivedWorkspaces}
-        onUnarchiveWorkspace={unarchiveSession}
+        agents={visibleAgentRows}
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}
         compactWorkspaces={appState.shell.compactWorkspaces}
@@ -1104,9 +1088,13 @@ export function App() {
         onReviewHooks={agentWorkflow.reviewHooks}
         onSelectAgent={selectAgentRow}
         onSelectWorkspace={selectSession}
+        onTogglePinnedOnly={() => void runCommand(appState.shell.pinnedOnly ? "workspaces.showAll" : "workspaces.showPinnedOnly")}
+        onTogglePinnedAgentTab={toggleAgentTabPin}
+        onTogglePinnedWorkspace={toggleWorkspacePin}
         onSortMode={(mode) => updateShell({ agentSort: mode })}
         onWorkspaceCommand={(session, commandId, scope) => void runCommand(commandId, { kind: "session", id: session.id, scope })}
         phase={hostState.phase}
+        pinnedOnly={appState.shell.pinnedOnly}
         rows={sidebarRows}
         stateGlyphs={appState.shell.agentStateGlyphs}
         transport={connection.mode}
@@ -1138,11 +1126,12 @@ export function App() {
                 revision: "0",
               }
               : workspaceFiles.root;
-            if (root) void startDownloadFlow({ path: appTab.resource, kind: "file" }, root);
+            if (root) void startDownloadFlow({ path: appTab.resource, kind: "file" }, root, "tabMenu");
           }}
           onMove={moveCombinedTab}
           onNewTerminal={() => void runCommand("window.new")}
           onPin={(tab) => pinOpenTab(tab.id)}
+          onTogglePinned={(tab) => toggleTabPin(tab, currentHostScope)}
           onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
           onSelect={selectCombinedTab}
           platform={platform}
@@ -1235,7 +1224,7 @@ export function App() {
               activeRoot={workspaceFiles.root}
               canWrite={hostState.canMutate}
               client={fileClient}
-              onDownload={(path, kind, root) => void startDownloadFlow({ path, kind }, root)}
+              onDownload={(path, kind, root) => void startDownloadFlow({ path, kind }, root, "fileSurface")}
               onDirty={() => pinOpenTab(tab.id)}
               onStatus={setStatus}
               onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, tab.id, viewMode))}
@@ -1251,7 +1240,7 @@ export function App() {
         fileScope={fileScope}
         ignoredPaths={ignoredPaths}
         maxWidth={Math.max(PANEL_MIN_WIDTH, Math.floor(windowWidth / 2))}
-        onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root); }}
+        onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root, "explorer"); }}
         onGitDiff={(entry, target, options) => {
           if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
           const session = activeSession;
@@ -1261,10 +1250,10 @@ export function App() {
           const hostProfileId = currentHostProfileId;
           // The commit can run twice — once now, and again when a remote flight
           // it interrupted settles. The second run must only re-select the tab
-          // the first one opened, never open it again: a transient diff the
-          // user has already navigated away from is closed, and stays closed.
-          // Decided in the commit, not in the updater: StrictMode runs the
-          // updater twice and keeps the second result.
+          // the first one opened, never open it again: a diff the user has
+          // closed in the meantime stays closed. Decided in the commit, not in
+          // the updater: StrictMode runs the updater twice and keeps the
+          // second result.
           let committed = false;
           shellNavigation.selectLocalAppTab(
             session.id,
@@ -1376,7 +1365,11 @@ export function App() {
     {workspaceSwitcherOpen && <WorkspaceSwitcher
       onClose={() => setWorkspaceSwitcherOpen(false)}
       onSelect={selectSession}
-      rows={sidebarRows}
+      // Every workspace, filtered or not. The filter is a way to quieten the
+      // list, not a way to make a workspace unreachable; leaving the switcher
+      // narrowed would mean the only way back to an unpinned workspace is to
+      // turn the filter off first.
+      rows={switcherRows}
       stateGlyphs={appState.shell.agentStateGlyphs}
     />}
     <AppDialogLayer

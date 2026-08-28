@@ -5,7 +5,7 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail};
@@ -81,6 +81,87 @@ const WRITER_DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// wedged in a way no further waiting fixes, and leaking it is strictly better
 /// than hanging the connection task with it.
 const TERMINAL_JOIN_GRACE: Duration = Duration::from_secs(5);
+
+/// Ordered mutations admitted ahead of the one currently executing.
+///
+/// The desktop has its own bounded input and control-write queues, so reaching
+/// this bound means the ordered lane has stopped making progress. Refuse the
+/// connection instead of blocking the frame reader: that reader is the only
+/// task able to consume output acknowledgements and observe peer shutdown.
+const ORDERED_REQUEST_QUEUE: usize = 1_024;
+
+/// No ordinary ordered host operation is allowed to monopolize a connection.
+///
+/// The desktop gives ordinary requests five seconds. This larger host bound
+/// leaves room for the response trip while still turning a lost wakeup or
+/// lock cycle into a scoped reconnect instead of a minutes-long freeze.
+const ORDERED_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A socket writer that cannot advance is no longer a usable connection.
+const PROTOCOL_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+static TEST_LAST_TERMINAL_ACK_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+struct OrderedRequest {
+    request_id: u64,
+    request: v1::Request,
+    policy: requests::operation_policy::OperationPolicy,
+    cancellation: Arc<AtomicBool>,
+    context: requests::RequestContext,
+}
+
+async fn run_ordered_requests(
+    mut receiver: mpsc::Receiver<OrderedRequest>,
+    failed: mpsc::UnboundedSender<String>,
+) {
+    while let Some(work) = receiver.recv().await {
+        let operation = work
+            .policy
+            .known_operation()
+            .map(|operation| operation.as_str_name())
+            .unwrap_or("UNKNOWN");
+        let started = Instant::now();
+        let request_id = work.request_id;
+        let cancellation = Arc::clone(&work.cancellation);
+        let pending = Arc::clone(&work.context.pending);
+        let closed = Arc::clone(&work.context.closed);
+        let execution = async {
+            // Test-only scheduling fault: delay the ordered lane without
+            // touching tmux, the event writer, or the frame reader. This is the
+            // production failure shape reduced to its load-bearing fact.
+            #[cfg(test)]
+            if work.policy.known_operation() == Some(v1::Operation::TestDelay)
+                && work.request.scope == "stall-ordered-lane"
+            {
+                sleep(Duration::from_secs(2)).await;
+            }
+            handle_request(
+                work.request_id,
+                work.request,
+                work.policy,
+                work.cancellation,
+                work.context,
+            )
+            .await;
+        };
+        match timeout(ORDERED_REQUEST_TIMEOUT, execution).await {
+            Ok(()) => {
+                crate::diagnostics::record_ordered_request_duration(operation, started.elapsed())
+            }
+            Err(_) => {
+                cancellation.store(true, Ordering::Release);
+                pending.lock().unwrap().remove(&request_id);
+                closed.store(true, Ordering::Release);
+                crate::diagnostics::record_ordered_request_timeout(operation, started.elapsed());
+                let _ = failed.send(format!(
+                    "ordered host operation {operation} exceeded its execution bound"
+                ));
+                break;
+            }
+        }
+    }
+}
 
 pub async fn serve_with_shutdown(
     mut stream: UnixStream,
@@ -170,10 +251,12 @@ pub async fn serve_with_shutdown(
     let topology_signal = TopologySignal::default();
     let writer_topology_signal = topology_signal.clone();
     let writer_closed = Arc::clone(&closed);
+    let (writer_stopped_tx, mut writer_stopped_rx) = mpsc::unbounded_channel::<String>();
     let mut writer_task = tokio::spawn(async move {
         let mut sequencer = ProtocolSequencer::default();
         let mut gap_fault = events::GapFaultInjector::for_connection();
         let mut pending_message = None;
+        let mut stopped_reason = "host event sequencer closed".to_owned();
         loop {
             let message = match pending_message.take() {
                 Some(message) => message,
@@ -192,17 +275,36 @@ pub async fn serve_with_shutdown(
             writer_topology_signal.observe_event(&message);
             let injected_gap = gap_fault.after(&message);
             let frame = sequencer.frame(message);
-            if write_frame(&mut writer, &frame).await.is_err() {
-                break;
+            match timeout(PROTOCOL_WRITE_TIMEOUT, write_frame(&mut writer, &frame)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    stopped_reason = format!("host event writer failed: {error}");
+                    break;
+                }
+                Err(_) => {
+                    stopped_reason =
+                        "host event writer made no progress before its deadline".into();
+                    break;
+                }
             }
             if let Some(injected_gap) = injected_gap {
                 let frame = sequencer.frame(injected_gap);
-                if write_frame(&mut writer, &frame).await.is_err() {
-                    break;
+                match timeout(PROTOCOL_WRITE_TIMEOUT, write_frame(&mut writer, &frame)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        stopped_reason = format!("host event writer failed: {error}");
+                        break;
+                    }
+                    Err(_) => {
+                        stopped_reason =
+                            "host event writer made no progress before its deadline".into();
+                        break;
+                    }
                 }
             }
         }
         writer_closed.store(true, Ordering::Release);
+        let _ = writer_stopped_tx.send(stopped_reason);
     });
 
     let generation = Arc::new(AtomicU64::new(0));
@@ -242,9 +344,28 @@ pub async fn serve_with_shutdown(
     }
     .spawn();
 
+    let (ordered_tx, ordered_rx) = mpsc::channel(ORDERED_REQUEST_QUEUE);
+    let (ordered_failed_tx, mut ordered_failed_rx) = mpsc::unbounded_channel();
+    let mut ordered_task = tokio::spawn(run_ordered_requests(ordered_rx, ordered_failed_tx));
+
     let mut read_error = None;
     while !closed.load(Ordering::Acquire) {
-        let frame = match read_frame(&mut reader).await {
+        let read = tokio::select! {
+            read = read_frame(&mut reader) => read,
+            failure = ordered_failed_rx.recv() => {
+                read_error = Some(FrameError::Io(std::io::Error::other(
+                    failure.unwrap_or_else(|| "ordered host operation lane stopped".into()),
+                )));
+                break;
+            }
+            failure = writer_stopped_rx.recv() => {
+                read_error = Some(FrameError::Io(std::io::Error::other(
+                    failure.unwrap_or_else(|| "host event writer stopped".into()),
+                )));
+                break;
+            }
+        };
+        let frame = match read {
             Ok(Some(frame)) => frame,
             Ok(None) => break,
             Err(error) if is_clean_peer_disconnect(&error) => break,
@@ -267,6 +388,8 @@ pub async fn serve_with_shutdown(
         }
         match frame.payload {
             Some(Payload::TerminalOutputAck(ack)) => {
+                #[cfg(test)]
+                TEST_LAST_TERMINAL_ACK_EPOCH.store(ack.connection_epoch, Ordering::Release);
                 if output_credit_enabled
                     && ack.connection_epoch == client_hello.connection_epoch
                     && output_credit
@@ -365,39 +488,33 @@ pub async fn serve_with_shutdown(
                 }
                 let detached_work =
                     policy.scheduling == requests::operation_policy::Scheduling::Detached;
-                let work = handle_request(
-                    frame.request_id,
-                    request,
-                    policy,
-                    Arc::clone(&cancellation),
-                    RequestContext {
-                        control_tx: control_tx.clone(),
-                        event_tx: control_tx.clone(),
-                        generation: Arc::clone(&generation),
-                        overflowed: Arc::clone(&overflowed),
-                        subscribed: Arc::clone(&subscribed),
-                        pending: Arc::clone(&pending),
-                        terminal: Arc::clone(&terminal),
-                        topology_lock: Arc::clone(&topology_lock),
-                        topology_baseline: Arc::clone(&topology_baseline),
-                        topology_signal: topology_signal.clone(),
-                        files: Arc::clone(&files),
-                        git: Arc::clone(&git),
-                        bulk_connection: client_hello.bulk_connection,
-                        // Both halves, because the comment on the field
-                        // states a capability fact and `!read_only` alone is a
-                        // proxy for it: a read-only host refuses a bulk
-                        // connection outright, *and* a client that never asked
-                        // for the bulk capability will not open one. Guessing
-                        // from read-only alone hands any other non-read-only
-                        // control client a diff body reference it cannot
-                        // fetch, and an empty diff with it.
-                        bulk_available: !read_only
-                            && client_hello.requested_capabilities & CAP_BULK_DOWNLOAD != 0,
-                        connection_epoch: client_hello.connection_epoch,
-                        closed: Arc::clone(&closed),
-                    },
-                );
+                let context = RequestContext {
+                    control_tx: control_tx.clone(),
+                    event_tx: control_tx.clone(),
+                    generation: Arc::clone(&generation),
+                    overflowed: Arc::clone(&overflowed),
+                    subscribed: Arc::clone(&subscribed),
+                    pending: Arc::clone(&pending),
+                    terminal: Arc::clone(&terminal),
+                    topology_lock: Arc::clone(&topology_lock),
+                    topology_baseline: Arc::clone(&topology_baseline),
+                    topology_signal: topology_signal.clone(),
+                    files: Arc::clone(&files),
+                    git: Arc::clone(&git),
+                    bulk_connection: client_hello.bulk_connection,
+                    // Both halves, because the comment on the field
+                    // states a capability fact and `!read_only` alone is a
+                    // proxy for it: a read-only host refuses a bulk
+                    // connection outright, *and* a client that never asked
+                    // for the bulk capability will not open one. Guessing
+                    // from read-only alone hands any other non-read-only
+                    // control client a diff body reference it cannot
+                    // fetch, and an empty diff with it.
+                    bulk_available: !read_only
+                        && client_hello.requested_capabilities & CAP_BULK_DOWNLOAD != 0,
+                    connection_epoch: client_hello.connection_epoch,
+                    closed: Arc::clone(&closed),
+                };
                 if detached_work {
                     // Give the reader one bounded turn to consume an already
                     // buffered Cancel or EOF after synchronous registration.
@@ -405,10 +522,23 @@ pub async fn serve_with_shutdown(
                     // delaying ordinary work perceptibly.
                     tokio::spawn(async move {
                         sleep(Duration::from_millis(1)).await;
-                        work.await;
+                        handle_request(frame.request_id, request, policy, cancellation, context)
+                            .await;
                     });
-                } else {
-                    work.await;
+                } else if ordered_tx
+                    .try_send(OrderedRequest {
+                        request_id: frame.request_id,
+                        request,
+                        policy,
+                        cancellation,
+                        context,
+                    })
+                    .is_err()
+                {
+                    read_error = Some(FrameError::Io(std::io::Error::other(
+                        "ordered host operation queue is full or closed",
+                    )));
+                    break;
                 }
             }
             _ => {
@@ -423,6 +553,9 @@ pub async fn serve_with_shutdown(
     }
 
     closed.store(true, Ordering::Release);
+    drop(ordered_tx);
+    ordered_task.abort();
+    let _ = (&mut ordered_task).await;
     output_credit.close();
     for (_, token) in pending.lock().unwrap().drain() {
         token.store(true, Ordering::Release);

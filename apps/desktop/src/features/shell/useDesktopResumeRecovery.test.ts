@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { RESUME_GAP_MS, ResumeGapDetector, ResumeTransitionDetector } from "./useDesktopResumeRecovery";
+import {
+  RESUME_GAP_MS, ResumeGapDetector, ResumeTransitionDetector, probeResumedLink,
+} from "./useDesktopResumeRecovery";
 
 describe("desktop suspend/resume detection", () => {
   it("ignores ordinary timer and focus activity", () => {
@@ -39,5 +41,41 @@ describe("desktop suspend/resume detection", () => {
     expect(detector.network(false)).toBe(false);
     expect(detector.network(true)).toBe(true);
     expect(detector.network(true)).toBe(false);
+  });
+});
+
+describe("resumed link probe", () => {
+  const neverFires = () => undefined;
+
+  it("keeps a link that answers", async () => {
+    await expect(probeResumedLink(() => Promise.resolve(), 50, neverFires)).resolves.toBe("alive");
+  });
+
+  it("rebuilds a link that refuses", async () => {
+    await expect(probeResumedLink(() => Promise.reject(new Error("no client")), 50, neverFires)).resolves.toBe("dead");
+  });
+
+  it("rebuilds a link that throws before sending", async () => {
+    await expect(probeResumedLink(() => { throw new Error("gone"); }, 50, neverFires)).resolves.toBe("dead");
+  });
+
+  it("rebuilds a link that never answers, at the timeout", async () => {
+    let fire: (() => void) | undefined;
+    let armedFor: number | undefined;
+    const outcome = probeResumedLink(() => new Promise(() => undefined), 3_000, (callback, ms) => {
+      fire = callback;
+      armedFor = ms;
+    });
+    expect(armedFor).toBe(3_000);
+    fire?.();
+    await expect(outcome).resolves.toBe("dead");
+  });
+
+  it("takes the first answer only", async () => {
+    let fire: (() => void) | undefined;
+    const outcome = probeResumedLink(() => Promise.resolve(), 50, (callback) => { fire = callback; });
+    await expect(outcome).resolves.toBe("alive");
+    fire?.();
+    await expect(outcome).resolves.toBe("alive");
   });
 });

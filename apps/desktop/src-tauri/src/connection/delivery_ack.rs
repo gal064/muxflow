@@ -34,7 +34,7 @@ impl TerminalClient {
 }
 
 #[tauri::command]
-pub fn acknowledge_terminal_delivery(
+pub async fn acknowledge_terminal_delivery(
     client_id: String,
     connection_epoch: u64,
     cumulative_frame_count: u64,
@@ -42,6 +42,24 @@ pub fn acknowledge_terminal_delivery(
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
     let client = get_client(&clients, &client_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        acknowledge_terminal_delivery_blocking(
+            &client,
+            connection_epoch,
+            cumulative_frame_count,
+            cumulative_byte_length,
+        )
+    })
+    .await
+    .map_err(|error| format!("terminal delivery acknowledgement task failed: {error}"))?
+}
+
+fn acknowledge_terminal_delivery_blocking(
+    client: &TerminalClient,
+    connection_epoch: u64,
+    cumulative_frame_count: u64,
+    cumulative_byte_length: u64,
+) -> Result<(), String> {
     let _serialization = client.delivery_ack_serialization.lock().unwrap();
     let Some(host) = client.acknowledge_delivery(
         connection_epoch,
@@ -52,7 +70,7 @@ pub fn acknowledge_terminal_delivery(
         return Ok(());
     };
     *client.pending_delivery_ack.lock().unwrap() = Some((connection_epoch, host));
-    flush_delivery_ack_serialized(&client).inspect_err(|_| client.reconnect_transport())
+    flush_delivery_ack_serialized(client).inspect_err(|_| client.reconnect_transport())
 }
 
 /// Acknowledges host terminal credit for payload this connection dropped.

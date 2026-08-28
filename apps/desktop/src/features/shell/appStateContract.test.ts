@@ -3,7 +3,7 @@ import contract from "./persistedAppState.contract.json";
 import {
   clampedPanelWidth, clampedTerminalFontSize, defaultAppState, defaultShellState, normalizePersistedAppState,
   panelWidthForWindow, PANEL_MIN_WIDTH,
-  type AppOwnedTab, type ArchivedWorkspaceRecord, type PersistedAppState, type WorkspaceDefaults, type WorkspaceUiRecord,
+  type AppOwnedTab, type PersistedAppState, type WorkspaceDefaults, type WorkspaceUiRecord,
 } from "./types";
 
 /**
@@ -45,16 +45,12 @@ describe("persisted app state contract", () => {
     const workspace: Required<WorkspaceUiRecord> = {
       hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", selectedAppTabId: "",
     };
-    const archived: Required<ArchivedWorkspaceRecord> = {
-      hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", archivedAt: 0,
-    };
     // The per-host workspace defaults cross the same boundary, and both of its
     // fields are optional — exactly the shape that stops being saved without
     // anything failing.
     const defaults: Required<WorkspaceDefaults> = { directory: "", startupCommand: "" };
     expect(Object.keys(contract.appTabs[0]).sort()).toEqual(Object.keys(tab).sort());
     expect(Object.keys(contract.workspaceUi[0]).sort()).toEqual(Object.keys(workspace).sort());
-    expect(Object.keys(contract.archivedWorkspaces[0]).sort()).toEqual(Object.keys(archived).sort());
     expect(Object.keys(contract.workspaceDefaults.local).sort()).toEqual(Object.keys(defaults).sort());
   });
 
@@ -71,28 +67,49 @@ describe("persisted app state contract", () => {
     expect(typed.shell.panelWidth).toBe(320);
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
-    expect(typed.archivedWorkspaces[0].sessionId).toBe("$2");
     expect(typed.shell.defaultMarkdownView).toBe("preview");
     expect(typed.workspaceDefaults.local).toEqual({ directory: "/work/projects", startupCommand: "git status" });
   });
 
-  it("keeps only well-formed archived records, one per workspace, newest within the cap", () => {
-    const record = (sessionId: string, archivedAt = 1) => ({ hostProfileId: "local", serverIdentity: "server-a", sessionId, sessionName: "w", archivedAt });
+  it("persists the pinned-only filter and leaves saves from before it showing everything", () => {
+    // The filter is one boolean over the pins that already exist, so the only
+    // thing that can go wrong with it is not coming back — and a save written
+    // before the field existed must come back showing every workspace rather
+    // than an empty sidebar the user cannot explain.
+    const shell = (value: unknown) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { pinnedOnly: value },
+    }).shell.pinnedOnly;
+    expect(shell(true)).toBe(true);
+    expect(shell(false)).toBe(false);
+    expect(shell(undefined)).toBe(false);
+    expect(shell("yes")).toBe(true);
+    expect(defaultAppState.shell.pinnedOnly).toBe(false);
+    expect((contract as unknown as PersistedAppState).shell.pinnedOnly).toBe(true);
+  });
+
+  it("ignores the pin records left behind by the build that kept pins in app state", () => {
+    // Pins are the host's now, read off every snapshot. The records that used
+    // to be here are not a migration — an unknown key is simply dropped — and
+    // the pins themselves are unaffected, because they were never in this file
+    // on the host that owns them.
     const loaded = normalizePersistedAppState({
       ...defaultAppState,
-      archivedWorkspaces: [
-        record("$1"), record("$1", 5), { ...record("$2"), serverIdentity: "" }, { ...record("$3"), archivedAt: "yesterday" },
-        { ...record("$4"), sessionName: undefined }, null, record("$5", 2),
-      ],
+      pinnedWorkspaces: [{ hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionName: "project", pinnedAt: 1 }],
+      pinnedTabs: [{ hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", tabId: "@3", pinnedAt: 2 }],
     });
-    expect(loaded.archivedWorkspaces).toEqual([record("$1"), record("$5", 2)]);
-    const many = Array.from({ length: 205 }, (_, index) => record(`$${index}`, index));
-    const capped = normalizePersistedAppState({ ...defaultAppState, archivedWorkspaces: many }).archivedWorkspaces;
-    expect(capped).toHaveLength(200);
-    expect(capped.map((item) => item.archivedAt)).not.toContain(0);
-    expect(capped.map((item) => item.archivedAt)).toContain(204);
-    // A file from before the field existed loads with nothing archived.
-    expect(normalizePersistedAppState({ ...defaultAppState, archivedWorkspaces: undefined }).archivedWorkspaces).toEqual([]);
+    expect(Object.keys(loaded)).toEqual(Object.keys(defaultAppState));
+    expect(loaded).toEqual(defaultAppState);
+  });
+
+  it("ignores an archivedWorkspaces field left behind by an older build", () => {
+    // The archive is gone, and its records are not a migration: an unknown key
+    // is simply dropped, and the workspaces it used to hide come back.
+    const loaded = normalizePersistedAppState({
+      ...defaultAppState,
+      archivedWorkspaces: [{ hostProfileId: "local", serverIdentity: "server-a", sessionId: "$2", sessionName: "parked", archivedAt: 1 }],
+    });
+    expect(Object.keys(loaded)).toEqual(Object.keys(defaultAppState));
+    expect(loaded).toEqual(defaultAppState);
   });
 });
 
