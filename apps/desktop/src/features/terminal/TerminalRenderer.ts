@@ -196,17 +196,19 @@ export function restoreDecision(
   throughGeneration: number,
   lastEnqueuedGeneration: number,
   overflowed: boolean,
-): { kind: "apply" } | { kind: "reseed"; reason: string } {
+): { kind: "apply" } | { kind: "reseed"; reason: string; incident: "pane.staleRestore" | "pane.overflowRestore" } {
   if (throughGeneration < lastEnqueuedGeneration) {
     return {
       kind: "reseed",
       reason: `A restore through generation ${throughGeneration} arrived for a pane that has already been given generation ${lastEnqueuedGeneration}; requesting a fresh seed.`,
+      incident: "pane.staleRestore",
     };
   }
   if (overflowed) {
     return {
       kind: "reseed",
       reason: "The pane overflowed its renderer queue; a cached restore cannot replace the seed it needs.",
+      incident: "pane.overflowRestore",
     };
   }
   return { kind: "apply" };
@@ -377,7 +379,22 @@ export class XtermRenderer implements TerminalRenderer {
   ): boolean {
     const decision = restoreDecision(throughGeneration, this.#generations.enqueuedGeneration, this.#scheduler.overflowed);
     if (decision.kind === "reseed") {
-      this.#requestSeed(decision.reason);
+      // Refusing a cached screen that the stream has already overtaken is the
+      // recovery working, not a fault: every reconnect that restores a pane
+      // from cache can produce one, and it was reaching the user as a notice
+      // reading like an internal error. The journal keeps the whole fact; the
+      // user keeps a pane that repaints from the host.
+      recordIncident(
+        decision.incident,
+        decision.incident === "pane.staleRestore"
+          ? {
+            paneId: this.#options.paneId,
+            throughGeneration,
+            lastEnqueuedGeneration: this.#generations.enqueuedGeneration,
+          }
+          : { paneId: this.#options.paneId },
+      );
+      this.#requestSeed(decision.reason, false);
       return false;
     }
     this.#newOutput = false;
@@ -649,13 +666,16 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   /**
-   * The diagnostic is never suppressed — a refused write or a refused restore
-   * is exactly the silence P12-U003.7 was about. Only the *request* is deduped,
-   * so one overflow cannot become a reseed storm; a request that fails reopens
-   * the latch here rather than at the caller, and a seed landing clears it.
+   * The diagnostic is suppressed for exactly one class of caller: a cached
+   * restore the live stream has already overtaken, which journals itself and
+   * recovers silently because it is ordinary post-reconnect bookkeeping. Every
+   * other refusal still speaks — a refused write is exactly the silence
+   * P12-U003.7 was about. Only the *request* is deduped, so one overflow cannot
+   * become a reseed storm; a request that fails reopens the latch here rather
+   * than at the caller, and a seed landing clears it.
    */
-  #requestSeed(reason: string): void {
-    this.#options.onDiagnostic?.(reason);
+  #requestSeed(reason: string, announce = true): void {
+    if (announce) this.#options.onDiagnostic?.(reason);
     if (this.#seedRequested) return;
     this.#seedRequested = true;
     void Promise.resolve(this.#options.onResnapshotRequired?.(reason)).catch(() => {
