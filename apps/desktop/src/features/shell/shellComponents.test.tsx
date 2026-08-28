@@ -1816,39 +1816,34 @@ describe("pinning by Shift-click", () => {
       // flex box, so the detail column keeps the width it had without it.
       expect(html).toContain('<span class="agent-session-label">Ship it</span><span aria-hidden="true" class="agent-pin">');
       expect(html).toContain('<span class="agent-session-label">Later</span></span><span class="agent-detail">');
-      // The pinned row leads its block in either ordering.
+      // Both rows share a status and workspace, so the pinned row leads in
+      // either ordering.
       expect(html.indexOf("Ship it")).toBeLessThan(html.indexOf("Later"));
     }
   });
 
-  it("heads the agents list with a Pinned block in priority mode, unless it would hold everything", () => {
-    const priorityRows = (pinnedIds: readonly string[]) => buildAgentRows(
+  it("keeps priority pins inside their status and ahead of unpinned peers", () => {
+    const priorityRows = buildAgentRows(
       [
-        agent({ id: "pinned-one", displayName: "Codex one", lifecycle: "idle" }),
-        agent({ id: "loose", windowId: "@2", paneId: "%2", displayName: "Codex two", lifecycle: "blocked" }),
+        agent({ id: "pinned-working", displayName: "Pinned working", lifecycle: "working", lifecycleChangedAt: 100 }),
+        agent({ id: "loose-working", windowId: "@2", paneId: "%2", displayName: "Loose working", lifecycle: "working", lifecycleChangedAt: 200 }),
+        agent({ id: "loose-blocked", windowId: "@3", paneId: "%3", displayName: "Loose blocked", lifecycle: "blocked", lifecycleChangedAt: 50 }),
       ],
       (record) => ({
         workspaceOrder: 0,
         workspaceName: "work",
         hostLabel: "remote-linux",
-        workspacePinned: pinnedIds.includes(record.id),
+        tabPinned: record.id === "pinned-working",
       }),
       () => true,
       "status",
     );
-    const html = sidebar({ agentSort: "status", agents: priorityRows(["pinned-one"]) });
-    expect(html).toContain("<span>Pinned</span>");
-    // No state dot on that heading: "pinned" is not a state an agent is in.
-    expect(html).toContain('<span aria-hidden="true" class="agent-group-pin">');
-    // The rest still bucket by status under their own headings.
+    const html = sidebar({ agentSort: "status", agents: priorityRows });
+    expect(html).not.toContain("<span>Pinned</span>");
+    expect(html).not.toContain("agent-group-pin");
     expect(html).toContain("<span>Blocked</span>");
-
-    // Every row pinned — which is what the pinned-only filter leaves behind —
-    // and the block would say nothing while costing all five headings.
-    const everything = sidebar({ agentSort: "status", agents: priorityRows(["pinned-one", "loose"]) });
-    expect(everything).not.toContain("<span>Pinned</span>");
-    expect(everything).not.toContain("agent-group-pin");
-    expect(everything).toContain("<span>Blocked</span>");
-    expect(everything).toContain("<span>Idle</span>");
+    expect(html).toContain("<span>Working</span>");
+    expect(html.indexOf("Loose blocked")).toBeLessThan(html.indexOf("Pinned working"));
+    expect(html.indexOf("Pinned working")).toBeLessThan(html.indexOf("Loose working"));
   });
 });

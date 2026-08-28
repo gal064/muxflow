@@ -525,17 +525,12 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
               const headingId = `agent-status-${group.key}`;
               return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
                 <h3 className="agent-workspace-heading" id={headingId}>
-                  {/* The pinned block is not a state, so it draws the same pin
-                      its rows' tabs and workspaces do rather than a dot that
-                      would claim something about what those agents are doing. */}
-                  {group.state
-                    ? <AgentStateIndicator
-                      className="state-dot agent-group-dot"
-                      glyphs={props.stateGlyphs}
-                      spinnerClassName="agent-group-dot"
-                      state={group.state}
-                    />
-                    : <span aria-hidden="true" className="agent-group-pin"><Icon name="pin" size={11} /></span>}
+                  <AgentStateIndicator
+                    className="state-dot agent-group-dot"
+                    glyphs={props.stateGlyphs}
+                    spinnerClassName="agent-group-dot"
+                    state={group.state}
+                  />
                   <span>{group.label}</span>
                   <span aria-hidden="true" className="agent-group-count">{group.rows.length}</span>
                 </h3>
