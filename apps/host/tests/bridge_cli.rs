@@ -136,13 +136,9 @@ fn bridge_exits_when_the_daemon_hangs_up_while_stdin_never_eofs() {
     );
     assert!(status.success(), "a daemon hangup is a clean exit");
 
-    let mut diagnostic = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut diagnostic)
-        .unwrap();
+    // The exit line is written beside the daemon's logs, not to stderr: in the
+    // orphan case the SSH session carrying stderr is the thing already gone.
+    let diagnostic = fs::read_to_string(runtime.join("bridge.log")).unwrap_or_default();
     assert!(
         diagnostic.contains(r#""event":"bridgeExit""#),
         "an exit nothing recorded is the incident all over again: {diagnostic}"

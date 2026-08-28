@@ -594,7 +594,8 @@ fn bounded_log_text(text: &str) -> String {
     }
 }
 
-/// Names the end of a bridge process, on the stderr the desktop captures.
+/// Names the end of a bridge process, in `bridge.log` beside the daemon's own
+/// logs in the runtime directory.
 ///
 /// A bridge that outlived its client used to leave nothing behind: the only
 /// evidence of the orphans a slept laptop left on the remote host was the
@@ -602,13 +603,39 @@ fn bounded_log_text(text: &str) -> String {
 /// finished pumping and which were still connected. One line at the end says
 /// the process reached its own exit and why.
 ///
-/// `reason` is a fixed class and `lifetimeMs` a duration, so no path, hostname,
-/// session name or payload byte is in this line — it stays inside the privacy
-/// declaration above. It is also deliberately short: the desktop retains only
-/// the first two kilobytes of a bridge's stderr.
-pub fn write_bridge_exit_log(reason: &str, lifetime: Duration) {
-    eprintln!("{}", bridge_exit_line(reason, lifetime));
+/// The line lives on the host rather than on stderr: stderr travels back over
+/// the SSH session, which in the orphan case is exactly what is already dead,
+/// and on a startup failure the desktop would splice it into the error it
+/// shows the user. `reason` is a fixed class and `lifetimeMs` a duration, so
+/// no path, hostname, session name or payload byte is in this line — it stays
+/// inside the privacy declaration above.
+pub fn write_bridge_exit_log(runtime: Option<&Path>, reason: &str, lifetime: Duration) {
+    let Some(runtime) = runtime else { return };
+    let path = runtime.join("bridge.log");
+    let oversized = fs::symlink_metadata(&path)
+        .map(|metadata| metadata.is_file() && metadata.len() > MAX_BRIDGE_LOG_BYTES)
+        .unwrap_or(false);
+    let mut options = OpenOptions::new();
+    options
+        .create(true)
+        .write(true)
+        .mode(0o600)
+        // The runtime directory is the user's own private directory; refusing
+        // to follow a symlink out of it keeps a stale or hostile link from
+        // redirecting this write somewhere else.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    if oversized {
+        options.truncate(true);
+    } else {
+        options.append(true);
+    }
+    if let Ok(mut file) = options.open(&path) {
+        let _ = writeln!(file, "{}", bridge_exit_line(reason, lifetime));
+    }
 }
+
+/// Past this the log starts over. One line per connection, so it takes years.
+const MAX_BRIDGE_LOG_BYTES: u64 = 1024 * 1024;
 
 /// Composed apart from the write so the exact line can be pinned by a test.
 fn bridge_exit_line(reason: &str, lifetime: Duration) -> String {

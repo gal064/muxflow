@@ -40,8 +40,9 @@ async fn main() -> anyhow::Result<()> {
                 bail!("usage: muxflow-host bridge --stdio [--socket PATH]");
             }
             let started = std::time::Instant::now();
+            let socket = argument_path("--socket").unwrap_or_else(paths::default_socket_path);
             let outcome = bridge::run(
-                argument_path("--socket").unwrap_or_else(paths::default_socket_path),
+                socket.clone(),
                 !std::env::args().any(|argument| argument == "--no-start"),
             )
             .await;
@@ -68,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let _ = std::io::Write::flush(&mut std::io::stdout());
-            diagnostics::write_bridge_exit_log(reason.label(), started.elapsed());
+            diagnostics::write_bridge_exit_log(socket.parent(), reason.label(), started.elapsed());
             std::process::exit(i32::from(outcome.is_err()));
         }
         Some("helper") => remote_helper::run_cli(std::env::args().skip(2).collect()),
