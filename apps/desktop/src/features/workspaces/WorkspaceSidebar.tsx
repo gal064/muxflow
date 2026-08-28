@@ -401,8 +401,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       <div className="section-head">
         <span className="section-label" id="sidebar-workspaces-label">Workspaces</span>
         {/* The list's one control, in the place and the shape the agents
-            header's ordering toggle already established: it names what the
-            next click will show, not what is showing now. */}
+            header's ordering toggle already established: it names the
+            current filter, while its accessible label describes the action. */}
         <button
           aria-label={props.pinnedOnly
             ? "Showing pinned workspaces only. Show all workspaces."
@@ -410,7 +410,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           className="sort-toggle"
           onClick={props.onTogglePinnedOnly}
           type="button"
-        >{props.pinnedOnly ? "all" : "pinned"}</button>
+        >{props.pinnedOnly ? "pinned only" : "all"}</button>
       </div>
       <div aria-labelledby="sidebar-workspaces-label" className="sidebar-scroll" role="list">
         {/* An empty list is about the host whether or not the filter is on:

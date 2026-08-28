@@ -1742,9 +1742,9 @@ describe("pinning by Shift-click", () => {
     expect(allPinned).not.toContain(">Others</h3>");
   });
 
-  it("says what the workspace filter will show next, and explains an empty-looking filtered list", () => {
-    expect(sidebar()).toContain('class="sort-toggle" type="button">pinned</button>');
-    expect(sidebar({ pinnedOnly: true })).toContain('class="sort-toggle" type="button">all</button>');
+  it("shows the current workspace filter, and explains an empty-looking filtered list", () => {
+    expect(sidebar()).toContain('class="sort-toggle" type="button">all</button>');
+    expect(sidebar({ pinnedOnly: true })).toContain('class="sort-toggle" type="button">pinned only</button>');
     const hint = "No pinned workspaces — Shift-click a workspace to pin it.";
     // The selected workspace keeps its row, which is how this state is normally
     // met: one unexplained row is exactly what needs the hint.
