@@ -18,6 +18,7 @@ apps/desktop/src-tauri/binaries/muxflow-host-*
 
 # Tool caches
 .cache/
+.claude/worktrees/
 .parcel-cache/
 .turbo/
 .vite/
