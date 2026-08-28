@@ -254,6 +254,12 @@ impl AgentRuntime {
         } else {
             parsed_lifecycle
         };
+        let lifecycle_changed_at = previous
+            .as_ref()
+            .filter(|record| record.lifecycle == lifecycle as i32)
+            .map_or(observed_now, |record| {
+                record.lifecycle_changed_at_unix_millis
+            });
         let hook_terminal = if matches!(
             parsed.event_name.as_str(),
             "SessionStart" | "UserPromptSubmit"
@@ -342,6 +348,7 @@ impl AgentRuntime {
             hook_terminal,
             codex_auto_review_turn_id,
             lifecycle_observed_at_unix_millis: observed_now,
+            lifecycle_changed_at_unix_millis: lifecycle_changed_at,
         };
         state.agents.insert(agent_id, record.clone());
         if let Err(error) = self.persist_locked(&state) {

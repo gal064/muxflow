@@ -14,6 +14,6 @@ export const agent = (overrides: AgentFixtureOverrides = {}): AgentRecord => ({
   lifecycleGeneration: agentGeneration(overrides.lifecycleGeneration ?? 3),
   attentionGeneration: agentGeneration(overrides.attentionGeneration ?? 0),
   seenGeneration: agentGeneration(overrides.seenGeneration ?? 0),
-  updatedAt: 100, detectedManually: false, present: true,
+  updatedAt: 100, lifecycleChangedAt: 100, detectedManually: false, present: true,
   ...Object.fromEntries(Object.entries(overrides).filter(([key]) => !["lifecycleGeneration", "attentionGeneration", "seenGeneration"].includes(key))),
 });

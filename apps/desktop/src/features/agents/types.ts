@@ -63,6 +63,8 @@ export interface AgentRecord extends AgentRoute {
   attentionKind?: AgentAttentionKind;
   seenGeneration: AgentGeneration;
   updatedAt: number;
+  /** Host-observed time when `lifecycle` last changed. */
+  lifecycleChangedAt: number;
   detectedManually: boolean;
   present: boolean;
 }

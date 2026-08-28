@@ -6,10 +6,9 @@ import type { AgentDisplayState, AgentRecord } from "./types";
  * control: the order it is in.
  *
  * `workspace` follows the workspace list above it, so the two halves of the
- * sidebar read as one thing. `status` is the inbox: blocked first, then
- * done-but-unread, then working, then idle — Herdr's ranking, in which a
- * finished agent outranks a running one because a finished agent is the one
- * waiting on a human.
+ * sidebar read as one thing. `status` is the visual queue: blocked, working,
+ * done, recently idle, then older idle. Rows inside each state follow their
+ * last real lifecycle transition rather than every hook update.
  *
  * The two modes were called `grouped` and `priority`, which named neither the
  * thing sorted nor — in `grouped`'s case — what it does, since neither mode
@@ -18,6 +17,11 @@ import type { AgentDisplayState, AgentRecord } from "./types";
  * migrate in `features/shell/types.ts`.
  */
 export type AgentSortMode = "status" | "workspace";
+
+/** How long an acknowledged completed agent stays near the active work. */
+export const RECENT_IDLE_WINDOW_MILLIS = 6 * 60 * 60 * 1_000;
+
+export type AgentPriorityBucket = "blocked" | "working" | "done" | "recent" | "idle";
 
 export function isAgentSortMode(value: unknown): value is AgentSortMode {
   return value === "status" || value === "workspace";
@@ -33,7 +37,7 @@ export function nextSortMode(mode: AgentSortMode): AgentSortMode {
  * The persisted value stays `status` — it is in the app-state contract and two
  * migrations already point at it — but "status" names the field the rows are
  * keyed on rather than what the mode does for you, and the mode draws headings
- * now: Blocked, Working, Done, Idle, in the order you should deal with them.
+ * now: Blocked, Working, Done, Recent, Idle, in the order you should deal with them.
  * That is a priority, so the button says priority.
  */
 export function sortModeLabel(mode: AgentSortMode): string {
@@ -63,6 +67,8 @@ export interface AgentLocation {
 export interface AgentListRow {
   agent: AgentRecord;
   state: AgentDisplayState;
+  /** The priority heading this row belongs under; Recent still draws Idle. */
+  priorityBucket: AgentPriorityBucket;
   location: AgentLocation;
   /** A row is only clickable when it resolves to an exact live pane. */
   routable: boolean;
@@ -107,7 +113,7 @@ export function groupAgentRows(rows: readonly AgentListRow[]): AgentWorkspaceGro
 }
 
 /**
- * The four buckets the priority order draws, in the order they are worth your
+ * The five buckets the priority order draws, in the order they are worth your
  * attention.
  *
  * `unknown` shares Idle's bucket rather than getting a fifth heading: it means
@@ -116,11 +122,16 @@ export function groupAgentRows(rows: readonly AgentListRow[]): AgentWorkspaceGro
  * would put the least informative group on equal footing with Blocked.
  */
 export const AGENT_STATUS_GROUPS = [
-  { key: "blocked", label: "Blocked", states: ["blocked"] },
-  { key: "working", label: "Working", states: ["working"] },
-  { key: "done", label: "Done", states: ["done"] },
-  { key: "idle", label: "Idle", states: ["idle", "unknown"] },
-] as const satisfies readonly { key: string; label: string; states: readonly AgentDisplayState[] }[];
+  { key: "blocked", label: "Blocked", state: "blocked" },
+  { key: "working", label: "Working", state: "working" },
+  { key: "done", label: "Done", state: "done" },
+  { key: "recent", label: "Recent", state: "idle" },
+  { key: "idle", label: "Idle", state: "idle" },
+] as const satisfies readonly { key: AgentPriorityBucket; label: string; state: AgentDisplayState }[];
+
+const PRIORITY_RANK = new Map<AgentPriorityBucket, number>(
+  AGENT_STATUS_GROUPS.map((group, index) => [group.key, index]),
+);
 
 export interface AgentStatusGroup {
   key: string;
@@ -136,12 +147,8 @@ export interface AgentStatusGroup {
 /**
  * Buckets an already status-ordered list without re-sorting its rows.
  *
- * The bucket order is not the sort order: `compareAgents` ranks done-unread
- * above working, because a finished agent is the one waiting on a human. That
- * is right for "which single row does ⌘⇧U jump to" and wrong for a column you
- * read top to bottom, where Working sitting between Blocked and Done is what
- * makes the list scan as a queue. Rows keep their sorted order inside each
- * bucket, so the loudest row in a group is still its first.
+ * `buildAgentRows` assigns the bucket once and sorts with the same bucket
+ * ranking, so the flat keyboard order and the grouped reading order agree.
  */
 export function groupAgentRowsByStatus(rows: readonly AgentListRow[]): AgentStatusGroup[] {
   // The pinned block is lifted out above the headings rather than sorted to the
@@ -152,7 +159,7 @@ export function groupAgentRowsByStatus(rows: readonly AgentListRow[]): AgentStat
   //
   // Unless it would hold everything, in which case there is nothing to lift it
   // above: a block containing every row says nothing the list did not already
-  // say, and it costs the four headings that are this ordering's whole point.
+  // say, and it costs the five headings that are this ordering's whole point.
   // That is exactly the shape the pinned-only filter produces, where every row
   // that survives belongs to a pinned workspace.
   const pinned = rows.some((row) => !row.pinned) ? rows.filter((row) => row.pinned) : [];
@@ -161,8 +168,8 @@ export function groupAgentRowsByStatus(rows: readonly AgentListRow[]): AgentStat
     .map((group) => ({
       key: group.key,
       label: group.label,
-      state: group.states[0] as AgentDisplayState,
-      rows: bucketed.filter((row) => (group.states as readonly AgentDisplayState[]).includes(row.state)),
+      state: group.state,
+      rows: bucketed.filter((row) => row.priorityBucket === group.key),
     }))
     .filter((group) => group.rows.length > 0);
   return pinned.length > 0 ? [{ key: "pinned", label: "Pinned", rows: pinned }, ...buckets] : buckets;
@@ -182,12 +189,15 @@ export function buildAgentRows(
   locate: (agent: AgentRecord) => AgentLocation,
   routable: (agent: AgentRecord) => boolean,
   mode: AgentSortMode,
+  now = Date.now(),
 ): AgentListRow[] {
   const rows = agents.map((agent) => {
     const location = locate(agent);
+    const state = displayState(agent);
     return {
       agent,
-      state: displayState(agent),
+      state,
+      priorityBucket: priorityBucket(state, agent.lifecycleChangedAt, now),
       location,
       routable: routable(agent),
       pinned: Boolean(location.workspacePinned || location.tabPinned),
@@ -197,14 +207,25 @@ export function buildAgentRows(
 }
 
 function byStatus(left: AgentListRow, right: AgentListRow): number {
-  // The pinned block first, pinned workspaces ahead of pinned tabs inside it,
-  // and compareAgents — blocked > done-unread > working > unknown > idle, then
-  // most-recently-updated — inside each block. Reusing it keeps one definition
-  // of "loudest"; the pins only decide which block a row is in.
+  // Pinning is one tier, regardless of whether it came from a workspace or a
+  // tab. Inside each tier, the visible queue order and the headings use one
+  // rank; only a real lifecycle transition changes recency, so repeated
+  // Working hooks and route-only updates cannot make two rows trade places.
   return Number(right.pinned) - Number(left.pinned)
-    || Number(Boolean(right.location.workspacePinned)) - Number(Boolean(left.location.workspacePinned))
-    || Number(Boolean(right.location.tabPinned)) - Number(Boolean(left.location.tabPinned))
-    || compareAgents(left.agent, right.agent);
+    || (PRIORITY_RANK.get(left.priorityBucket) ?? Number.MAX_SAFE_INTEGER)
+      - (PRIORITY_RANK.get(right.priorityBucket) ?? Number.MAX_SAFE_INTEGER)
+    || right.agent.lifecycleChangedAt - left.agent.lifecycleChangedAt
+    || left.agent.id.localeCompare(right.agent.id);
+}
+
+function priorityBucket(
+  state: AgentDisplayState,
+  lifecycleChangedAt: number,
+  now: number,
+): AgentPriorityBucket {
+  if (state === "blocked" || state === "working" || state === "done") return state;
+  if (state === "idle" && now - lifecycleChangedAt < RECENT_IDLE_WINDOW_MILLIS) return "recent";
+  return "idle";
 }
 
 function byWorkspace(left: AgentListRow, right: AgentListRow): number {
