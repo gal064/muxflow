@@ -26,7 +26,7 @@ impl TerminalClient {
                 // A same-epoch invalid boundary means native and JavaScript no
                 // longer agree on delivery ownership. Do not retry or continue
                 // on that ledger: reconnect establishes a fresh epoch/window.
-                self.reconnect_transport();
+                self.reconnect_transport("delivery acknowledgement disagreed with the host window");
                 Err(error)
             }
         }
@@ -70,7 +70,9 @@ fn acknowledge_terminal_delivery_blocking(
         return Ok(());
     };
     *client.pending_delivery_ack.lock().unwrap() = Some((connection_epoch, host));
-    flush_delivery_ack_serialized(client).inspect_err(|_| client.reconnect_transport())
+    flush_delivery_ack_serialized(client).inspect_err(|_| {
+        client.reconnect_transport("a delivery acknowledgement could not be written")
+    })
 }
 
 /// Acknowledges host terminal credit for payload this connection dropped.

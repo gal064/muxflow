@@ -23,6 +23,18 @@ use super::{
     validate_tmux_id, writer::ControlWriterHandle,
 };
 
+/// A teardown this side ordered reaches the supervisor as the reader's
+/// symptom — "host bridge closed", "frame I/O failed" — because killing the
+/// ssh child is how the order is carried out. Naming the order on the error is
+/// what lets the journal tell a link the network dropped from one the app
+/// dropped, and which of the app's deadlines did it.
+fn name_local_teardown(error: String, reason: Option<&'static str>) -> String {
+    match reason {
+        Some(reason) => format!("{error} (torn down locally: {reason})"),
+        None => error,
+    }
+}
+
 pub(super) fn supervise_bridge(
     client_id: String,
     connection: ConnectionSpec,
@@ -65,7 +77,15 @@ pub(super) fn supervise_bridge(
         };
         match result {
             Ok(()) => {}
-            Err(error) => send_event(&channel, TerminalEvent::Error { message: error }),
+            Err(error) => {
+                let reason = client.teardown_reason.lock().unwrap().take();
+                send_event(
+                    &channel,
+                    TerminalEvent::Error {
+                        message: name_local_teardown(error, reason),
+                    },
+                );
+            }
         }
         super::files::invalidate_bulk_scope(
             client.bulk_scope,

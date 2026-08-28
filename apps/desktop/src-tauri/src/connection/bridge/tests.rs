@@ -404,3 +404,21 @@ fn credit_for_quarantined_events_is_acknowledged_at_the_barrier() {
     assert_eq!(ack.cumulative_bytes, 12);
     assert_eq!(ack.cumulative_records, 2);
 }
+
+/// The symptom the reader reports is the same whether the network dropped the
+/// link or this side killed it; only the annotation separates them, and a
+/// bridge nothing on this side tore down must not be blamed for a teardown.
+#[test]
+fn a_local_teardown_is_named_on_the_bridge_error_and_only_then() {
+    assert_eq!(
+        super::name_local_teardown(
+            "frame I/O failed: failed to fill whole buffer".into(),
+            Some("a control write missed its deadline"),
+        ),
+        "frame I/O failed: failed to fill whole buffer (torn down locally: a control write missed its deadline)"
+    );
+    assert_eq!(
+        super::name_local_teardown("host bridge closed".into(), None),
+        "host bridge closed"
+    );
+}
