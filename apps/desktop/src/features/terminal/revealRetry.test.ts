@@ -15,10 +15,11 @@ describe("isTransientRevealError", () => {
   // The host returns these as bare strings, so the whole rejection is the
   // message the native command wrote. Matching each in the exact shape
   // `connection.rs` produces is what keeps a rename from going unnoticed.
-  it("recognizes every native phrase that means the transport is not ready", () => {
+  it("recognizes every native refusal that means the transport is not ready", () => {
     expect(isTransientRevealError(new Error("host bridge is disconnected"))).toBe(true);
     expect(isTransientRevealError("terminal client is no longer attached")).toBe(true);
-    expect(TRANSIENT_REVEAL_ERRORS).toHaveLength(2);
+    expect(isTransientRevealError("connection_unavailable: host connection is disconnected or reconciling")).toBe(true);
+    expect(TRANSIENT_REVEAL_ERRORS).toHaveLength(3);
   });
 
   it("treats anything else as a real failure", () => {
@@ -65,12 +66,15 @@ describe("revealFailureAction", () => {
   it("degrades a real conflict on its first failure", () => {
     expect(revealFailureAction({ error: new Error("visibility conflict"), current: true, retriesUsed: 0 }))
       .toBe("degrade");
-    // `connection_unavailable` is not in the transient list and never was; it
-    // keeps landing on the watchdog-plus-seed path exactly as before.
-    expect(revealFailureAction({
-      error: "connection_unavailable: host connection is disconnected or reconciling",
-      current: true,
-      retriesUsed: 0,
-    })).toBe("degrade");
+  });
+
+  // The refusal every reconnect produces: the reveal the epoch frame triggers
+  // reaches the transport one round trip before its `ready` gate opens. It
+  // used to be classified as a conflict, which reseeded through the same gate
+  // and showed the user an error toast for a pane that healed 2s later.
+  it("retries the not-ready refusal instead of degrading on it", () => {
+    const error = "connection_unavailable: host connection is disconnected or reconciling";
+    expect(revealFailureAction({ error, current: true, retriesUsed: 0 })).toBe("retry");
+    expect(revealFailureAction({ error, current: true, retriesUsed: REVEAL_RETRY_LIMIT })).toBe("degrade");
   });
 });

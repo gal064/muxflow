@@ -107,7 +107,7 @@ const PROTOCOL_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// in is a log the user may share, and an error string can carry a path, a
 /// session name or a byte of terminal output with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConnectionEndReason {
+pub(crate) enum ConnectionEndReason {
     /// No first frame arrived inside the handshake window.
     HandshakeTimeout,
     /// The handshake frame could not be read, was not a `ClientHello`, or the
@@ -146,7 +146,7 @@ enum ConnectionEndReason {
 }
 
 impl ConnectionEndReason {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::HandshakeTimeout => "handshake-timeout",
             Self::HandshakeFailed => "handshake-failed",

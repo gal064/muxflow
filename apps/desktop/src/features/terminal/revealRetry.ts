@@ -6,9 +6,10 @@
  * leaves the pane receiving no output at all. Two windows during a connection
  * (re)start reject it deterministically, and they need opposite answers.
  *
- * The bridge publishes its request writer one round trip after it announces the
- * epoch, so the reveal that epoch triggers can arrive before there is anything
- * to write to. That is not a conflict and it clears on its own: resend.
+ * The bridge publishes its request writer — and opens its `ready` gate — one
+ * round trip after it announces the epoch, so the reveal that epoch triggers
+ * can arrive before there is anything to write to. That is not a conflict and
+ * it clears on its own: resend.
  *
  * The other one does not clear by resending. `start_terminal` answers with the
  * new client id before the SSH handshake, and the bridge stamps its new epoch
@@ -23,13 +24,21 @@
  * The native rejections that mean "the transport is not ready yet".
  *
  * Matched as substrings of the stringified error because the host returns
- * these as plain strings. They are literal copies of `connection.rs` — grep
- * for a phrase there before editing it here, since a silently renamed message
- * turns a fast retry back into a two-second freeze.
+ * these as plain strings. Each is a literal copy of `connection.rs` — two of
+ * its sentences and one of its structured codes — so grep for it there before
+ * editing it here, since a silently renamed message turns a fast retry back
+ * into a two-second freeze.
  */
 export const TRANSIENT_REVEAL_ERRORS = [
   "host bridge is disconnected",
   "terminal client is no longer attached",
+  // The `ready` gate every request checks (`request_with_timeout`). The bridge
+  // announces the epoch, then spends a round trip attaching before it sets
+  // `ready`, so the reveal that epoch triggers lands in this refusal on every
+  // reconnect (2026-08-28, the Wi-Fi-off episode: refused 6 ms after
+  // `link.epoch`). Treating it as a conflict sent a reseed through the same
+  // gate and surfaced the pair as an error toast; it clears on its own.
+  "connection_unavailable",
 ] as const;
 
 /**
