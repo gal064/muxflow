@@ -100,6 +100,48 @@ fn hook_generations_dedupe_and_attention_are_monotonic() {
 }
 
 #[test]
+fn lifecycle_change_time_ignores_same_status_hooks_and_advances_on_transition() {
+    let runtime = runtime("lifecycle-change-time");
+    let topology = topology("codex");
+    let working = runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    {
+        let mut state = runtime.state.lock().unwrap();
+        state
+            .agents
+            .get_mut(&working.agent_id)
+            .unwrap()
+            .lifecycle_changed_at_unix_millis = 123;
+    }
+
+    let still_working = runtime
+        .ingest_hook_with_context(&event("tool", 0, "PreToolUse"), "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(
+        still_working.lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert_eq!(still_working.lifecycle_changed_at_unix_millis, 123);
+
+    let completed = runtime
+        .ingest_hook_with_context(&event("stop", 0, "Stop"), "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(completed.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert!(completed.lifecycle_changed_at_unix_millis > 123);
+}
+
+#[test]
 fn rename_returns_a_canonical_published_event_generation() {
     let runtime = runtime("rename-event");
     let topology_snapshot = topology("codex");

@@ -119,6 +119,7 @@ pub(super) fn topology(
                 // observation of what that process is doing, so it starts no
                 // staleness clock.
                 lifecycle_observed_at_unix_millis: 0,
+                lifecycle_changed_at_unix_millis: now,
             },
         );
         changed = true;

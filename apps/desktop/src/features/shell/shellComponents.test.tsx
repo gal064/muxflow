@@ -391,20 +391,15 @@ describe("application shell accessibility contracts", () => {
   });
 
   /**
-   * All four buckets populated, done and working both present.
-   *
-   * That last part is the whole fixture: `compareAgents` ranks done-unread
-   * above working, and the headings read Blocked → Working → Done → Idle, so
-   * this is the one shape in which the flat index order and the reading order
-   * disagree. A fixture without a done agent agrees with itself and proves
-   * nothing about either.
+   * The four populated buckets, including both Done and Working. Recent is
+   * covered with an explicit clock in the agents-list tests.
    */
   const priorityAgents = () => buildAgentRows([
-    agent({ id: "b", windowName: "Fix the build", sessionId: "$1", sessionName: "api", lifecycle: "blocked", updatedAt: 5 }),
-    agent({ id: "w", windowName: "Run the suite", sessionId: "$2", sessionName: "web", lifecycle: "working", updatedAt: 4 }),
-    agent({ id: "d", windowName: "Ship the patch", sessionId: "$2", sessionName: "web", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 4, seenGeneration: 1, updatedAt: 3 }),
-    agent({ id: "u", windowName: "Never reported", sessionId: "$2", sessionName: "web", lifecycle: "unknown", updatedAt: 2 }),
-    agent({ id: "i", windowName: "Nothing doing", sessionId: "$2", sessionName: "web", lifecycle: "idle", updatedAt: 1 }),
+    agent({ id: "b", windowName: "Fix the build", sessionId: "$1", sessionName: "api", lifecycle: "blocked", updatedAt: 5, lifecycleChangedAt: 5 }),
+    agent({ id: "w", windowName: "Run the suite", sessionId: "$2", sessionName: "web", lifecycle: "working", updatedAt: 4, lifecycleChangedAt: 4 }),
+    agent({ id: "d", windowName: "Ship the patch", sessionId: "$2", sessionName: "web", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 4, seenGeneration: 1, updatedAt: 3, lifecycleChangedAt: 3 }),
+    agent({ id: "u", windowName: "Never reported", sessionId: "$2", sessionName: "web", lifecycle: "unknown", updatedAt: 2, lifecycleChangedAt: 2 }),
+    agent({ id: "i", windowName: "Nothing doing", sessionId: "$2", sessionName: "web", lifecycle: "idle", updatedAt: 1, lifecycleChangedAt: 1 }),
   ], (record) => ({ workspaceOrder: 0, workspaceName: record.sessionName }), () => true, "status");
 
   it("draws the priority order as real groups, keyed on the flat keyboard index", () => {
@@ -414,9 +409,7 @@ describe("application shell accessibility contracts", () => {
     const html = sidebar({ agentSort: "status", agents: priorityAgents() });
     expect(html).toContain(">priority</button>");
     for (const label of ["Blocked", "Working", "Done", "Idle"]) expect(html, label).toContain(`<span>${label}</span>`);
-    // Blocked, working, done, idle — the reading order, and deliberately not
-    // the sort's done-outranks-working ranking, which is what puts Working
-    // between Blocked and Done here.
+    // Blocked, working, done, idle — both the reading and flat keyboard order.
     expect(html.indexOf(">Blocked<")).toBeLessThan(html.indexOf(">Working<"));
     expect(html.indexOf(">Working<")).toBeLessThan(html.indexOf(">Done<"));
     expect(html.indexOf(">Done<")).toBeLessThan(html.indexOf(">Idle<"));
@@ -427,10 +420,20 @@ describe("application shell accessibility contracts", () => {
     // says it.
     expect(html).toContain("web · working");
     // One flat index across every group — a per-group index would restart the
-    // roving walk at every heading — and it is *not* ascending in the document,
-    // because done sorts above working and reads below it. Which is exactly why
-    // `focusRelative` cannot treat the number as a document position.
-    expect([...html.matchAll(/data-agent-index="(\d+)"/g)].map((match) => match[1])).toEqual(["0", "2", "1", "3", "4"]);
+    // roving walk at every heading.
+    expect([...html.matchAll(/data-agent-index="(\d+)"/g)].map((match) => match[1])).toEqual(["0", "1", "2", "3", "4"]);
+  });
+
+  it("draws recently idle agents in their own group with the idle indicator", () => {
+    const now = 100_000_000;
+    const agents = buildAgentRows([
+      agent({ id: "recent", lifecycle: "idle", lifecycleChangedAt: now - 60 * 60 * 1_000 }),
+      agent({ id: "idle", lifecycle: "idle", lifecycleChangedAt: now - 7 * 60 * 60 * 1_000 }),
+    ], (record) => ({ workspaceOrder: 0, workspaceName: record.sessionName }), () => true, "status", now);
+    const html = sidebar({ agentSort: "status", agents });
+    expect(html.indexOf(">Recent<")).toBeLessThan(html.indexOf(">Idle<"));
+    expect(html).toContain('id="agent-status-recent"');
+    expect(html).toContain('class="state-dot agent-group-dot idle"');
   });
 
   it("walks every priority row exactly once with the arrow keys, across the group seams", async () => {
@@ -445,8 +448,8 @@ describe("application shell accessibility contracts", () => {
     const walkRows = [...host.querySelectorAll<HTMLElement>("[data-agent-index]")];
     expect(walkRows.map((row) => row.querySelector(".agent-session-label")?.textContent))
       .toEqual(["Fix the build", "Run the suite", "Ship the patch", "Never reported", "Nothing doing"]);
-    // The identity on each row is the flat index, and it does not ascend.
-    expect(walkRows.map((row) => row.dataset.agentIndex)).toEqual(["0", "2", "1", "3", "4"]);
+    // The identity on each row is the flat index across every heading.
+    expect(walkRows.map((row) => row.dataset.agentIndex)).toEqual(["0", "1", "2", "3", "4"]);
 
     walkRows[0].focus();
     const down = [document.activeElement];
@@ -1841,7 +1844,7 @@ describe("pinning by Shift-click", () => {
     expect(html).toContain("<span>Blocked</span>");
 
     // Every row pinned — which is what the pinned-only filter leaves behind —
-    // and the block would say nothing while costing all four headings.
+    // and the block would say nothing while costing all five headings.
     const everything = sidebar({ agentSort: "status", agents: priorityRows(["pinned-one", "loose"]) });
     expect(everything).not.toContain("<span>Pinned</span>");
     expect(everything).not.toContain("agent-group-pin");

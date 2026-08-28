@@ -389,6 +389,7 @@ fn phase6_agent_contract_round_trips_exact_route_and_reconnect_watermark() {
         state_generation: (1_u64 << 53) + 5,
         attention_generation: (1_u64 << 53) + 7,
         attention_kind: "blocked".into(),
+        lifecycle_changed_at_unix_millis: 1_786_000_000_000,
         present: true,
         ..Default::default()
     };

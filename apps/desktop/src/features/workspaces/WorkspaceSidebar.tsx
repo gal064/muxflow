@@ -168,15 +168,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   /**
    * The roving arrow keys, walked in document order.
    *
-   * The number in the attribute is the row's flat position in `props.agents`,
-   * and in the priority mode that is deliberately *not* the reading order:
-   * `compareAgents` ranks done-unread above working, while the headings read
-   * Blocked → Working → Done → Idle. Stepping the number and then taking the
-   * query result at that position walked two orders at once, so a list holding
-   * both a done and a working agent skipped a row going down and stuck at the
-   * seam. The DOM is the only thing that knows the reading order, so the step
-   * happens in it: find where this row sits among the marked rows, move one,
-   * focus what is there. The attribute is then only an identity.
+   * The number in the attribute is the row's flat position in `props.agents`.
+   * The DOM remains the source of truth for the reading order because headings
+   * can lift pinned rows into their own block. Find where this row sits among
+   * the marked rows, move one, and focus what is there; the attribute is only
+   * an identity.
    */
   const focusRelative = (event: KeyboardEvent<HTMLElement>, attribute: string, index: number) => {
     const delta = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;

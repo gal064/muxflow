@@ -43,6 +43,7 @@ interface WireRecord {
   attentionKind?: string;
   seenGeneration: string | number;
   updatedAtUnixMillis: string | number;
+  lifecycleChangedAtUnixMillis?: string | number;
   detectedManually: boolean;
   present: boolean;
 }
@@ -314,6 +315,10 @@ function mapRecord(scope: AgentRequestScope, value: WireRecord): AgentRecord {
   if (agentGeneration(value.route.attentionGeneration, "agent route generation") !== attentionGeneration) {
     throw new Error("Agent route generation conflicts with its record.");
   }
+  const updatedAt = safeNumber(value.updatedAtUnixMillis, "agent update time");
+  const mappedLifecycleChangedAt = value.lifecycleChangedAtUnixMillis === undefined
+    ? 0
+    : safeNumber(value.lifecycleChangedAtUnixMillis, "agent lifecycle change time");
   return {
     id: value.agentId,
     adapterId: canonicalAdapterId(value.adapterId, value.adapter),
@@ -331,7 +336,11 @@ function mapRecord(scope: AgentRequestScope, value: WireRecord): AgentRecord {
     attentionGeneration,
     ...mapAttentionKind(value.attentionKind),
     seenGeneration: agentGeneration(value.seenGeneration, "agent seen generation"),
-    updatedAt: safeNumber(value.updatedAtUnixMillis, "agent update time"),
+    updatedAt,
+    // An old remote helper decodes the additive protobuf field as zero, while
+    // an old native bridge omits the JSON key. Both are the same compatibility
+    // case and use the only timestamp those hosts can supply.
+    lifecycleChangedAt: mappedLifecycleChangedAt > 0 ? mappedLifecycleChangedAt : updatedAt,
     detectedManually: Boolean(value.detectedManually),
     present: Boolean(value.present),
   };

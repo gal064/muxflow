@@ -283,6 +283,7 @@ fn record_json(value: &v1::AgentRecord, host_profile_id: &str) -> Value {
         "attentionKind": value.attention_kind,
         "seenGeneration": value.seen_generation.to_string(),
         "updatedAtUnixMillis": value.updated_at_unix_millis.to_string(),
+        "lifecycleChangedAtUnixMillis": value.lifecycle_changed_at_unix_millis.to_string(),
         "detectedManually": value.detected_manually,
         "present": value.present,
     })
@@ -355,6 +356,7 @@ mod tests {
             agent_id: "codex:1".into(),
             state_generation: (1_u64 << 53) + 1,
             attention_kind: "completed".into(),
+            lifecycle_changed_at_unix_millis: 1_786_000_000_000,
             route: Some(v1::AgentRoute {
                 agent_id: "codex:1".into(),
                 ..Default::default()
@@ -364,6 +366,7 @@ mod tests {
         let json = record_json(&value, "profile-1");
         assert_eq!(json["stateGeneration"], ((1_u64 << 53) + 1).to_string());
         assert_eq!(json["attentionKind"], "completed");
+        assert_eq!(json["lifecycleChangedAtUnixMillis"], "1786000000000");
         assert_eq!(json["route"]["hostProfileId"], "profile-1");
         let sideband = with_connection_epoch(json, (1_u64 << 53) + 3);
         assert_eq!(sideband["connectionEpoch"], ((1_u64 << 53) + 3).to_string());
