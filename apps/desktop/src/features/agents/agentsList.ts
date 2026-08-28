@@ -19,7 +19,7 @@ import type { AgentDisplayState, AgentRecord } from "./types";
 export type AgentSortMode = "status" | "workspace";
 
 /** How long an acknowledged completed agent stays near the active work. */
-export const RECENT_IDLE_WINDOW_MILLIS = 6 * 60 * 60 * 1_000;
+export const RECENT_IDLE_WINDOW_MILLIS = 4 * 60 * 60 * 1_000;
 
 export type AgentPriorityBucket = "blocked" | "working" | "done" | "recent" | "idle";
 
@@ -72,7 +72,7 @@ export interface AgentListRow {
   location: AgentLocation;
   /** A row is only clickable when it resolves to an exact live pane. */
   routable: boolean;
-  /** In the leading block: its workspace is pinned, or its tab is. */
+  /** Whether this agent's tab is pinned. Workspace pins order workspaces. */
   pinned: boolean;
 }
 
@@ -136,11 +136,8 @@ const PRIORITY_RANK = new Map<AgentPriorityBucket, number>(
 export interface AgentStatusGroup {
   key: string;
   label: string;
-  /**
-   * The state the heading's dot draws — the group's own, not any one row's.
-   * Absent on the pinned block, which is not a state and draws a pin instead.
-   */
-  state?: AgentDisplayState;
+  /** The state the heading's dot draws — the group's own, not any one row's. */
+  state: AgentDisplayState;
   rows: AgentListRow[];
 }
 
@@ -151,28 +148,14 @@ export interface AgentStatusGroup {
  * ranking, so the flat keyboard order and the grouped reading order agree.
  */
 export function groupAgentRowsByStatus(rows: readonly AgentListRow[]): AgentStatusGroup[] {
-  // The pinned block is lifted out above the headings rather than sorted to the
-  // top of whichever bucket each of its rows lands in. Left in the buckets, a
-  // pinned agent that happened to be idle would sit under an Idle heading below
-  // three other headings — first in its group, and nowhere near first in the
-  // list, which is the one thing a pin promises.
-  //
-  // Unless it would hold everything, in which case there is nothing to lift it
-  // above: a block containing every row says nothing the list did not already
-  // say, and it costs the five headings that are this ordering's whole point.
-  // That is exactly the shape the pinned-only filter produces, where every row
-  // that survives belongs to a pinned workspace.
-  const pinned = rows.some((row) => !row.pinned) ? rows.filter((row) => row.pinned) : [];
-  const bucketed = pinned.length > 0 ? rows.filter((row) => !row.pinned) : rows;
-  const buckets = AGENT_STATUS_GROUPS
+  return AGENT_STATUS_GROUPS
     .map((group) => ({
       key: group.key,
       label: group.label,
       state: group.state,
-      rows: bucketed.filter((row) => row.priorityBucket === group.key),
+      rows: rows.filter((row) => row.priorityBucket === group.key),
     }))
     .filter((group) => group.rows.length > 0);
-  return pinned.length > 0 ? [{ key: "pinned", label: "Pinned", rows: pinned }, ...buckets] : buckets;
 }
 
 /**
@@ -200,20 +183,19 @@ export function buildAgentRows(
       priorityBucket: priorityBucket(state, agent.lifecycleChangedAt, now),
       location,
       routable: routable(agent),
-      pinned: Boolean(location.workspacePinned || location.tabPinned),
+      pinned: Boolean(location.tabPinned),
     };
   });
   return rows.sort(mode === "status" ? byStatus : byWorkspace);
 }
 
 function byStatus(left: AgentListRow, right: AgentListRow): number {
-  // Pinning is one tier, regardless of whether it came from a workspace or a
-  // tab. Inside each tier, the visible queue order and the headings use one
-  // rank; only a real lifecycle transition changes recency, so repeated
-  // Working hooks and route-only updates cannot make two rows trade places.
-  return Number(right.pinned) - Number(left.pinned)
-    || (PRIORITY_RANK.get(left.priorityBucket) ?? Number.MAX_SAFE_INTEGER)
+  // Status remains the primary queue. A tab pin leads only its own status;
+  // inside pinned and unpinned peers, only a real lifecycle transition changes
+  // recency, so repeated hooks and route-only updates cannot reshuffle rows.
+  return (PRIORITY_RANK.get(left.priorityBucket) ?? Number.MAX_SAFE_INTEGER)
       - (PRIORITY_RANK.get(right.priorityBucket) ?? Number.MAX_SAFE_INTEGER)
+    || Number(right.pinned) - Number(left.pinned)
     || right.agent.lifecycleChangedAt - left.agent.lifecycleChangedAt
     || left.agent.id.localeCompare(right.agent.id);
 }
@@ -250,10 +232,9 @@ function byWorkspace(left: AgentListRow, right: AgentListRow): number {
  * happened to sort first would make the shortcut useless.
  *
  * Order: blocked first, then unread completed; ties break on most recently
- * updated. Deliberately `compareAgents` rather than the list's own `byStatus`,
- * which now leads with the pinned block: a pin says "keep this where I can see
- * it", and letting it outrank a blocked agent somewhere else would turn the
- * one control that means "who needs me most" into a second bookmark.
+ * updated. Deliberately `compareAgents` rather than the list's own `byStatus`:
+ * pins organize peers inside a status, while this control answers only which
+ * reachable agent needs attention most.
  */
 export function jumpTarget(rows: readonly AgentListRow[]): AgentListRow | undefined {
   return [...rows].sort((left, right) => compareAgents(left.agent, right.agent))

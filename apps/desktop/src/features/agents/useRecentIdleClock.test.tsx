@@ -26,7 +26,7 @@ describe("Recent idle deadline clock", () => {
     const now = Date.now();
     const rows = [
       agent({ id: "later", lifecycle: "idle", lifecycleChangedAt: now - 60 * 60 * 1_000 }),
-      agent({ id: "sooner", lifecycle: "idle", lifecycleChangedAt: now - 5 * 60 * 60 * 1_000 }),
+      agent({ id: "sooner", lifecycle: "idle", lifecycleChangedAt: now - 3 * 60 * 60 * 1_000 }),
     ];
     let renderer: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness agents={rows} />); });
@@ -39,7 +39,7 @@ describe("Recent idle deadline clock", () => {
 
     // The first row is now old; the same one-shot scheduler advances at the
     // remaining row's deadline rather than waking on an interval.
-    await act(async () => { vi.advanceTimersByTime(4 * 60 * 60 * 1_000); });
+    await act(async () => { vi.advanceTimersByTime(2 * 60 * 60 * 1_000); });
     expect(revision).toBe(2);
     await act(async () => renderer!.unmount());
   });
@@ -47,7 +47,7 @@ describe("Recent idle deadline clock", () => {
   it("does not run while workspace ordering is selected", async () => {
     const rows = [agent({
       lifecycle: "idle",
-      lifecycleChangedAt: Date.now() - 5 * 60 * 60 * 1_000,
+      lifecycleChangedAt: Date.now() - 3 * 60 * 60 * 1_000,
     })];
     let renderer: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness agents={rows} enabled={false} />); });
