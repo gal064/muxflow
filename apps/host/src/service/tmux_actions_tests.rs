@@ -553,7 +553,8 @@ fn every_action_has_an_identity_relative_authoritative_postcondition() {
         (v1::TmuxActionKind::SplitPaneDown, 0, 12),
     ] {
         let mut after = before.clone();
-        let mut created = pane("%3", "@1", false);
+        after.panes[0].active = false;
+        let mut created = pane("%3", "@1", true);
         created.left = left;
         created.top = top;
         after.panes.push(created);
