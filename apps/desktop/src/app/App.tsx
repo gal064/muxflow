@@ -216,7 +216,7 @@ export function App() {
   });
   const {
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
-    connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
+    connectionDetail, connectionEpoch, connectionMode, currentHostProfileId, linkQualityMessage,
     currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, inputLatencyReporter,
     optimisticWindow, profileRecovery,
     profiles, selectedProfileId, setActiveSessionId, setActiveWindowId,
@@ -1053,6 +1053,7 @@ export function App() {
         // this strip's job is to explain the connection. The full status stays in
         // the live region at the end of the shell.
         detail={connectionDetail}
+        notice={linkQualityMessage}
         hasSnapshot={snapshot.sessions.length > 0}
         onOpenSettings={() => setSettingsOpen(true)}
         onReconnect={() => setConnectionEpoch((value) => value + 1)}

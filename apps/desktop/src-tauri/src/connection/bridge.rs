@@ -45,6 +45,8 @@ pub(super) fn supervise_bridge(
 ) {
     let mut attempt = 0_u32;
     while !client.stop_signal.is_stopped() {
+        // A reason older than this bridge cannot describe it.
+        client.teardown_reason.lock().unwrap().take();
         if attempt != 0 {
             send_event(
                 &channel,
