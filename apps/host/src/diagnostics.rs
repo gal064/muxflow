@@ -643,7 +643,68 @@ fn bridge_exit_line(reason: &str, lifetime: Duration) -> String {
         "subsystem": "host_bridge",
         "event": "bridgeExit",
         "reason": reason,
-        "lifetimeMs": u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX),
+        "lifetimeMs": whole_millis(lifetime),
+    })
+    .to_string()
+}
+
+fn whole_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Names the end of a daemon connection, once per connection, normal or not.
+///
+/// A connection that dies with a slept laptop dies silently: the SSH session
+/// goes away without closing the socket, and the daemon keeps the whole
+/// per-connection object graph — control clients, pane stores, event sinks —
+/// alive until output finally trips the writer's deadline or the daemon
+/// restarts. The counters say a connection ended; they never said which end it
+/// was, how long it had lived, or how long it had been silent first. Those
+/// three numbers are what says whether a protocol-level heartbeat is worth
+/// building, and how short its interval would have to be.
+///
+/// This goes to stderr, unlike the bridge's exit line: the daemon's stderr is
+/// its own private log file — `daemon-start.log` for a daemon the remote
+/// helper starts, `daemon.stderr.log` for one the bridge spawns — and it is
+/// where every other safe log line about this connection already is. `reason`
+/// is a fixed class and the rest are durations, so no path, hostname, session
+/// name or payload byte is in this line.
+///
+/// One caveat for whoever reads the collected lines: the daemon's peer is the
+/// bridge process, so the two idle numbers are the desktop's silence only as
+/// closely as the bridge relays it, and a daemon killed outright leaves no
+/// line for the connections that were still open.
+pub fn write_connection_ended_log(
+    reason: &str,
+    lifetime: Duration,
+    since_last_client_frame: Duration,
+    since_last_host_frame: Duration,
+) {
+    eprintln!(
+        "{}",
+        connection_ended_line(
+            reason,
+            lifetime,
+            since_last_client_frame,
+            since_last_host_frame
+        )
+    );
+}
+
+/// Composed apart from the write so the exact line can be pinned by a test.
+fn connection_ended_line(
+    reason: &str,
+    lifetime: Duration,
+    since_last_client_frame: Duration,
+    since_last_host_frame: Duration,
+) -> String {
+    serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "connectionEnded",
+        "reason": reason,
+        "lifetimeMs": whole_millis(lifetime),
+        "msSinceLastClientFrame": whole_millis(since_last_client_frame),
+        "msSinceLastHostFrame": whole_millis(since_last_host_frame),
     })
     .to_string()
 }
@@ -1516,6 +1577,33 @@ mod tests {
         assert_eq!(
             serialized,
             r#"{"event":"bridgeExit","lifetimeMs":42,"reason":"daemon-eof","subsystem":"host_bridge"}"#
+        );
+    }
+
+    /// The connection line is written for every connection, including the ones
+    /// that ended perfectly normally, so it is the line most likely to be read
+    /// by someone other than its author. What it may carry is pinned exactly
+    /// rather than left to whoever adds the next field to it.
+    #[test]
+    fn the_connection_ended_line_carries_only_a_fixed_reason_and_durations() {
+        let serialized = connection_ended_line(
+            "writer-deadline",
+            Duration::from_millis(9_000),
+            Duration::from_millis(120),
+            Duration::from_millis(7),
+        );
+        for private in [
+            "token=secret",
+            "/home/alice/project",
+            "alice-laptop.local",
+            "my-session",
+            "terminal content",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+        assert_eq!(
+            serialized,
+            r#"{"event":"connectionEnded","lifetimeMs":9000,"msSinceLastClientFrame":120,"msSinceLastHostFrame":7,"reason":"writer-deadline","subsystem":"host_daemon"}"#
         );
     }
 
