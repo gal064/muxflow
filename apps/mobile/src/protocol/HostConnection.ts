@@ -228,6 +228,13 @@ export class HostConnection {
       const timer = setTimeout(() => {
         attempt.pending.delete(requestId);
         reject(new RequestTimeoutError(requestId));
+        // A control request that missed its deadline is not request-scoped:
+        // the host may still complete it, so it is never replayed, and the
+        // ordered lane it sat on has proved it cannot make bounded progress —
+        // later input would queue behind it. Drop this transport; the
+        // supervisor reconnects and reconciles from a fresh snapshot (the
+        // desktop's rule, apps/desktop/src-tauri/src/connection.rs).
+        if (!this.options.bulk) this.reconnectNow(attempt, "host request timed out; reconnecting");
       }, timeoutMs);
       attempt.pending.set(requestId, {
         resolve,

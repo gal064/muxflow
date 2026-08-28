@@ -318,6 +318,10 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
     const timeout = expect(third).rejects.toThrow("The host didn't answer in time.");
     await vi.advanceTimersByTimeAsync(20_000);
     await timeout;
+    // A timed-out control request drops the transport: the request is never
+    // replayed and the ordered lane is not trusted with later input.
+    expect(transport.closed).toBe(true);
+    expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1 });
   });
 
   it("reconnects with exponential backoff on network loss and resets after 60 s connected", async () => {
