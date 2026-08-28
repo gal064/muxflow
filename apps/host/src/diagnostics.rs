@@ -594,6 +594,33 @@ fn bounded_log_text(text: &str) -> String {
     }
 }
 
+/// Names the end of a bridge process, on the stderr the desktop captures.
+///
+/// A bridge that outlived its client used to leave nothing behind: the only
+/// evidence of the orphans a slept laptop left on the remote host was the
+/// processes themselves, days later, and nothing said which of them had
+/// finished pumping and which were still connected. One line at the end says
+/// the process reached its own exit and why.
+///
+/// `reason` is a fixed class and `lifetimeMs` a duration, so no path, hostname,
+/// session name or payload byte is in this line — it stays inside the privacy
+/// declaration above. It is also deliberately short: the desktop retains only
+/// the first two kilobytes of a bridge's stderr.
+pub fn write_bridge_exit_log(reason: &str, lifetime: Duration) {
+    eprintln!("{}", bridge_exit_line(reason, lifetime));
+}
+
+/// Composed apart from the write so the exact line can be pinned by a test.
+fn bridge_exit_line(reason: &str, lifetime: Duration) -> String {
+    serde_json::json!({
+        "subsystem": "host_bridge",
+        "event": "bridgeExit",
+        "reason": reason,
+        "lifetimeMs": u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX),
+    })
+    .to_string()
+}
+
 pub fn write_safe_log(class: SafeErrorClass) {
     let line = serde_json::json!({
         "subsystem": "host_daemon",
@@ -1441,6 +1468,27 @@ mod tests {
         assert_eq!(
             serialized,
             r#"{"errorClass":"host_connection_ended","subsystem":"host_daemon"}"#
+        );
+    }
+
+    /// The bridge's exit line goes back to the desktop over the user's SSH
+    /// connection, so what it may carry is pinned exactly rather than left to
+    /// whoever adds the next field to it.
+    #[test]
+    fn the_bridge_exit_line_carries_only_a_fixed_reason_and_a_duration() {
+        let serialized = bridge_exit_line("daemon-eof", Duration::from_millis(42));
+        for private in [
+            "token=secret",
+            "/home/alice/project",
+            "alice-laptop.local",
+            "my-session",
+            "terminal content",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+        assert_eq!(
+            serialized,
+            r#"{"event":"bridgeExit","lifetimeMs":42,"reason":"daemon-eof","subsystem":"host_bridge"}"#
         );
     }
 
