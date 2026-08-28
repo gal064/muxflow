@@ -146,7 +146,10 @@ pub(super) fn configure_split(
     kind: v1::TmuxActionKind,
     action: &v1::TmuxAction,
 ) -> anyhow::Result<()> {
-    command.args(["split-window", "-d", "-P", "-F", "#{pane_id}"]);
+    // Deliberately omit tmux's `-d`: a user-created split becomes the active
+    // pane, matching create-window and making the keyboard shortcut land where
+    // it just created work.
+    command.args(["split-window", "-P", "-F", "#{pane_id}"]);
     if kind == v1::TmuxActionKind::SplitPaneRight {
         command.arg("-h");
     }
@@ -254,7 +257,6 @@ mod tests {
             args,
             [
                 "split-window",
-                "-d",
                 "-P",
                 "-F",
                 "#{pane_id}",
