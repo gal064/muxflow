@@ -177,13 +177,12 @@ export function useAppConnectionController({
    */
   const linkQuality = useMemo(() => createLinkQualityMonitor(), []);
   const [linkQualityMessage, setLinkQualityMessage] = useState("");
-  /** What this hook last put in the strip, so it only ever clears its own text. */
-  const shownLinkQuality = useRef("");
+  // Empty for a local connection: there is no network to blame there, and the
+  // monitor is not fed at all.
   const linkQualityHostRef = useRef("");
-  // Empty for a local connection: there is no network to blame there.
   linkQualityHostRef.current = connection.mode === "local" ? "" : connection.target;
   const applyLinkQuality = useCallback((change: LinkQualityChange | undefined) => {
-    if (!change || !linkQualityHostRef.current) return;
+    if (!change) return;
     if (change.kind === "degraded") {
       recordIncident("link.quality", {
         state: change.state,
@@ -227,7 +226,7 @@ export function useAppConnectionController({
       // The probe has already applied its own threshold and its own per-pane
       // dedupe, so an outlier here is exactly one occasion of "the host
       // answered late" — no second measurement and no timer of our own.
-      if (kind === "input.echoLag" && "lagMs" in detail) {
+      if (kind === "input.echoLag" && "lagMs" in detail && linkQualityHostRef.current) {
         applyLinkQuality(linkQuality.noteEchoLag(Date.now(), detail.lagMs));
       }
       const currentClientId = clientIdRef.current;
@@ -364,43 +363,13 @@ export function useAppConnectionController({
       || hostState.phase === "reconnecting"
       || hostState.phase === "resyncing";
     if (degraded && linkDegradedSince.current === undefined) {
-      const at = Date.now();
-      linkDegradedSince.current = at;
+      linkDegradedSince.current = Date.now();
       recordIncident("link.degraded", { phase: hostState.phase });
-      // The edge, not the bridge's `error` events: the supervisor reports
-      // every failed reconnect attempt, so one outage climbing the backoff
-      // ladder is seven or eight errors and exactly one lost link. A resync is
-      // not a loss at all — that is the native link repairing sequence order
-      // on a connection it still holds.
-      if (hostState.phase !== "resyncing") applyLinkQuality(linkQuality.noteLinkLost(at));
     } else if (!degraded && linkDegradedSince.current !== undefined) {
       recordIncident("link.restored", { afterMs: Date.now() - linkDegradedSince.current });
       linkDegradedSince.current = undefined;
     }
   }, [applyLinkQuality, hostState.phase, linkQuality]);
-
-  /**
-   * The quality summary stands in the strip only while the link is up.
-   *
-   * While a reconnect is in progress the strip is saying what is happening
-   * right now — a bridge failure, "reconnecting…" — and this is a summary of
-   * what has been happening; overwriting the live text with it would be the
-   * app arguing with itself. So it waits for `connected`, which is also the
-   * moment the connection handler blanks the strip, and takes the empty strip
-   * the reconnect leaves behind. It only ever clears text it put there itself.
-   */
-  useEffect(() => {
-    if (linkQualityMessage) {
-      if (hostState.phase !== "connected") return;
-      shownLinkQuality.current = linkQualityMessage;
-      setConnectionDetail(linkQualityMessage);
-      return;
-    }
-    const stale = shownLinkQuality.current;
-    if (!stale) return;
-    shownLinkQuality.current = "";
-    setConnectionDetail((current) => (current === stale ? "" : current));
-  }, [hostState.phase, linkQualityMessage]);
 
   /** Only time ends an episode, and only an episode pays for the timer. */
   useEffect(() => {
@@ -542,14 +511,25 @@ export function useAppConnectionController({
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
           recordIncident("link.bridgeDown", { event: event.kind, detail });
-          setConnectionDetail(detail);
+          // The native supervisor names a teardown this side ordered on the
+          // error it causes. That is for the journal line above; the words a
+          // person reads stay the plain failure.
+          const shown = detail.split(" (torn down locally:")[0];
+          // An error while the link is up is the link dropping under the app —
+          // exactly one per outage, whatever the backoff ladder reports after
+          // it, and none for the restarts the app orders itself (a resume, a
+          // flow-stall recovery, a host switch), which arrive without one.
+          if (event.kind === "error" && hostPhaseRef.current === "connected" && linkQualityHostRef.current) {
+            applyLinkQuality(linkQuality.noteLinkLost(Date.now()));
+          }
+          setConnectionDetail(shown);
           // Every attempt is journalled and every attempt stands in the strip;
           // only a failure the user has not already been told about is worth a
           // notice. While the link is up this is the first failure of an
           // outage, which always speaks.
-          const repeated = hostPhaseRef.current !== "connected" && detail === lastBridgeFailureRef.current;
-          lastBridgeFailureRef.current = detail;
-          if (!repeated) setStatus(detail);
+          const repeated = hostPhaseRef.current !== "connected" && shown === lastBridgeFailureRef.current;
+          lastBridgeFailureRef.current = shown;
+          if (!repeated) setStatus(shown);
           // The message is the only thing that separates "this host has no
           // helper" from "this host cannot be reached": both arrive as a dead
           // bridge, and only the first one has a fix the app can offer. The
@@ -637,6 +617,7 @@ export function useAppConnectionController({
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, inputLatencyReporter,
+    linkQualityMessage,
     profileRecovery,
     optimisticWindow,
     profiles, profilesHydrated, selectedProfileId, setActiveSessionId, setActiveWindowId,

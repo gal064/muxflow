@@ -261,7 +261,15 @@ impl TerminalClient {
     }
 
     fn reconnect_transport(&self, reason: &'static str) {
-        *self.teardown_reason.lock().unwrap() = Some(reason);
+        // The reason is recorded only when there is a live transport to tear
+        // down. A caller that fails *after* the supervisor has already reaped
+        // a dead bridge — a write parked on the closed writer, a request
+        // outliving the link that carried it — orders nothing, and a reason
+        // left behind then would be pinned on the next bridge's death.
+        let child = self.child.lock().unwrap().take();
+        if child.is_some() {
+            *self.teardown_reason.lock().unwrap() = Some(reason);
+        }
         files::invalidate_bulk_scope(
             self.bulk_scope,
             "bulk transfer control connection is reconnecting",
@@ -274,7 +282,7 @@ impl TerminalClient {
         if let Some(writer) = self.writer.lock().unwrap().take() {
             writer.close();
         }
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        if let Some(mut child) = child {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -409,7 +417,9 @@ impl TerminalClient {
                 envelope(request_id, 0, Payload::Request(request)),
                 Instant::now() + REQUEST_TIMEOUT,
             )
-            .inspect_err(|_| self.reconnect_transport("a control write missed its deadline"))
+            .inspect_err(|_| {
+                self.reconnect_transport("a request could not be written before its deadline")
+            })
     }
 
     fn request_git(
@@ -479,7 +489,7 @@ impl TerminalClient {
             // has already proved it cannot make bounded progress. The bridge
             // supervisor owns reconnect policy; removing this one transport is
             // the smallest recovery that reaches it.
-            self.reconnect_transport("a request could not be written before its deadline");
+            self.reconnect_transport("a control request could not be written before its deadline");
             return Err(error);
         }
         // A cancel raised between the bind above and the write that has just
@@ -576,7 +586,9 @@ impl TerminalClient {
                 ),
                 Instant::now() + REQUEST_TIMEOUT,
             )
-            .inspect_err(|_| self.reconnect_transport("a control write missed its deadline"))
+            .inspect_err(|_| {
+                self.reconnect_transport("a cancel could not be written before its deadline")
+            })
     }
 
     /// Best-effort `Cancel` for a request already on the wire.
