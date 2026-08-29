@@ -101,7 +101,7 @@ async function run(
       activePane: pane, activeSession: session, activeWindow: window,
       appState: { ...defaultAppState, appTabs: [appTab] },
       canMutate: true, closeAppTab, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
-      currentHostProfileId: "local", focusDirection: vi.fn(), generation: 8,
+      currentHostProfileId: "local", focusDirection: vi.fn(),
       hostScope, isHostScopeCurrent: () => true, jumpToUnreadAgent: vi.fn(),
       requestHostProfileDelete: vi.fn(), rowCommands: [], createSession,
       createWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
@@ -308,18 +308,21 @@ describe("shell commands", () => {
     expect(cleared({ ...defaultAppState, shell: { ...defaultAppState.shell, pinnedOnly: true } }).shell.pinnedOnly).toBe(false);
   });
 
-  it("still confirms closing a whole workspace", async () => {
+  it("still confirms closing a whole workspace, and pins no generation while the dialog stands", async () => {
     // A workspace takes every window in it. Different blast radius, and the
-    // complaint that removed the other two dialogs was about tab close. This
-    // one keeps the pinned generation too: the dialog's consent is tied to the
-    // topology the person was shown.
+    // complaint that removed the other two dialogs was about tab close. The
+    // dialog stays; the generation it used to pin does not. Consent is the
+    // named target — this session id — and the dialog can stand for seconds
+    // while an agent's animated pane title moves the host's generation, so a
+    // pinned close was refused on arrival and, because a pin also disables the
+    // retry ladder, refused again on the second click.
     const { setConfirmation, performAction } = await run("session.close", {}, target({ kind: "session", id: "$1" }));
     expect(performAction).not.toHaveBeenCalled();
     expect(setConfirmation).toHaveBeenCalledTimes(1);
     expect(setConfirmation.mock.calls[0][0]).toMatchObject({
       commandId: "session.close",
       action: { kind: "closeSession", sessionId: "$1", confirmed: true },
-      precondition: { serverIdentity: "server-a", generation: 8 },
+      precondition: { serverIdentity: "server-a", generation: 0 },
     });
   });
 
