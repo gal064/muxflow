@@ -73,6 +73,13 @@ pub(super) struct StoredAgent {
     /// those rather than treating them as infinitely old.
     #[serde(default)]
     pub lifecycle_observed_at_unix_millis: i64,
+    /// When `lifecycle` last changed, rather than when it was last observed.
+    ///
+    /// Zero is the on-disk compatibility value for records written before the
+    /// field existed. `load` repairs it from the best timestamp those records
+    /// have, then every real lifecycle transition advances it exactly once.
+    #[serde(default)]
+    pub lifecycle_changed_at_unix_millis: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,11 +107,21 @@ pub(super) fn load(path: &Path) -> StoredState {
         .filter(|state: &StoredState| state.schema_version == STATE_SCHEMA_VERSION)
         .unwrap_or_default();
     for record in state.agents.values_mut() {
+        if record.lifecycle_changed_at_unix_millis == 0 {
+            record.lifecycle_changed_at_unix_millis =
+                if record.lifecycle_observed_at_unix_millis > 0 {
+                    record.lifecycle_observed_at_unix_millis
+                } else {
+                    record.updated_at_unix_millis
+                };
+        }
         // A terminal hook is proof that the turn ended. Normalize the invalid
         // combination observed in a live schema-2 store (`hook_terminal: true`
         // with `lifecycle: working`) so the next daemon snapshot repairs the
         // UI immediately instead of waiting up to the stale-working TTL.
-        if record.hook_terminal {
+        if record.hook_terminal
+            && record.lifecycle != tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32
+        {
             record.lifecycle = tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32;
         }
     }
@@ -207,6 +224,7 @@ mod tests {
         // The field this phase added is absent from the file, and its default
         // is what the staleness sweep reads as "fall back to `updated_at`".
         assert_eq!(record.lifecycle_observed_at_unix_millis, 0);
+        assert_eq!(record.lifecycle_changed_at_unix_millis, 1786000000000);
         fs::remove_file(path).unwrap();
     }
 
@@ -367,6 +385,7 @@ mod tests {
                 hook_terminal: true,
                 codex_auto_review_turn_id: String::new(),
                 lifecycle_observed_at_unix_millis: 1,
+                lifecycle_changed_at_unix_millis: 1,
             },
         );
         persist(&path, &state).unwrap();
@@ -375,6 +394,15 @@ mod tests {
         assert_eq!(
             loaded.agents["codex:field"].lifecycle,
             tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32,
+        );
+        assert_eq!(
+            loaded.agents["codex:field"].lifecycle_changed_at_unix_millis, 1,
+            "normalizing legacy state preserves its durable event time",
+        );
+        let reloaded = load(&path);
+        assert_eq!(
+            reloaded.agents["codex:field"].lifecycle_changed_at_unix_millis, 1,
+            "reloading the same legacy store cannot make the agent newly recent",
         );
         fs::remove_file(path).unwrap();
     }

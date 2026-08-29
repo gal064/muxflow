@@ -35,7 +35,33 @@ use crate::daemon;
 /// actively flushing is never cut off.
 const DRAIN_IDLE: Duration = Duration::from_secs(10);
 
-pub async fn run(socket_path: PathBuf, auto_start: bool) -> anyhow::Result<()> {
+/// Why a bridge stopped pumping — the one field of its exit line that tells a
+/// normal teardown apart from a daemon that vanished under a live client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitReason {
+    /// The client released stdin and the daemon then closed its side: the
+    /// ordinary end of a connection the desktop walked away from.
+    StdinEof,
+    /// The daemon closed the socket while the client was still attached.
+    DaemonEof,
+    /// The client left and the daemon went quiet without ever closing.
+    DrainIdle,
+    /// The connection or the pump itself failed.
+    Error,
+}
+
+impl ExitReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::StdinEof => "stdin-eof",
+            Self::DaemonEof => "daemon-eof",
+            Self::DrainIdle => "drain-idle",
+            Self::Error => "error",
+        }
+    }
+}
+
+pub async fn run(socket_path: PathBuf, auto_start: bool) -> anyhow::Result<ExitReason> {
     let stream = connect(&socket_path, auto_start).await?;
     let (mut socket_read, mut socket_write) = stream.into_split();
     let mut stdin = io::stdin();
@@ -51,14 +77,14 @@ pub async fn run(socket_path: PathBuf, auto_start: bool) -> anyhow::Result<()> {
 
     let mut buffer = vec![0u8; 64 * 1024];
     let mut draining = false;
-    loop {
+    let reason = loop {
         let read = if draining {
             match timeout(DRAIN_IDLE, socket_read.read(&mut buffer)).await {
                 Ok(read) => read?,
                 // Nothing from the daemon for a whole idle window after the
                 // client already left: stop waiting for a close that may
                 // never come.
-                Err(_elapsed) => break,
+                Err(_elapsed) => break ExitReason::DrainIdle,
             }
         } else {
             tokio::select! {
@@ -70,17 +96,32 @@ pub async fn run(socket_path: PathBuf, auto_start: bool) -> anyhow::Result<()> {
             }
         };
         if read == 0 {
-            break;
+            // A close after the client already left is the ordinary teardown.
+            // One while it is still attached is the daemon going away under a
+            // live desktop, which is a different incident entirely.
+            //
+            // The stdin closure and the close it provokes can land in the same
+            // poll — the upload pump shuts the socket down before it reports
+            // stdin gone — and `select!` picks between ready arms at random.
+            // Asking the channel directly is what keeps an ordinary departure
+            // from being filed as a vanished daemon on the losing coin flip.
+            break if draining || stdin_closed.try_recv().is_ok() {
+                ExitReason::StdinEof
+            } else {
+                ExitReason::DaemonEof
+            };
         }
         stdout.write_all(&buffer[..read]).await?;
         stdout.flush().await?;
-    }
+    };
     stdout.flush().await?;
     // The daemon side is finished; a pump still parked on a live stdin has
-    // nothing left to deliver to.
+    // nothing left to deliver to. Aborting the task does not cancel the
+    // blocking read underneath it — only leaving the process does; see the
+    // bridge arm of `main`.
     upload.abort();
     let _ = upload.await;
-    Ok(())
+    Ok(reason)
 }
 
 async fn connect(path: &Path, auto_start: bool) -> anyhow::Result<UnixStream> {

@@ -786,6 +786,7 @@ fn a_working_agent_that_stops_reporting_stops_claiming_to_work() {
         record.lifecycle = v1::AgentLifecycleState::Working as i32;
         record.updated_at_unix_millis = now_millis() - millis;
         record.lifecycle_observed_at_unix_millis = now_millis() - millis;
+        record.lifecycle_changed_at_unix_millis = 123;
     };
     age(STALE_WORKING_TTL_MILLIS);
     assert!(runtime.sweep_stale().is_empty());
@@ -821,6 +822,7 @@ fn a_working_agent_that_stops_reporting_stops_claiming_to_work() {
     assert!(!events[0].notify, "going quiet is not an event to chase");
     let stale = &runtime.snapshot_for("server-a").agents[0];
     assert_eq!(stale.lifecycle, v1::AgentLifecycleState::Unknown as i32);
+    assert!(stale.lifecycle_changed_at_unix_millis > 123);
     assert!(runtime.sweep_stale().is_empty(), "degrading is done once");
 
     // The next hook of any kind restores real state.

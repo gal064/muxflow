@@ -594,6 +594,154 @@ fn bounded_log_text(text: &str) -> String {
     }
 }
 
+/// Names the end of a bridge process, in `bridge.log` beside the daemon's own
+/// logs in the runtime directory.
+///
+/// A bridge that outlived its client used to leave nothing behind: the only
+/// evidence of the orphans a slept laptop left on the remote host was the
+/// processes themselves, days later, and nothing said which of them had
+/// finished pumping and which were still connected. One line at the end says
+/// the process reached its own exit and why.
+///
+/// The line lives on the host rather than on stderr: stderr travels back over
+/// the SSH session, which in the orphan case is exactly what is already dead,
+/// and on a startup failure the desktop would splice it into the error it
+/// shows the user. `reason` is a fixed class and `lifetimeMs` a duration, so
+/// no path, hostname, session name or payload byte is in this line — it stays
+/// inside the privacy declaration above.
+pub fn write_bridge_exit_log(runtime: Option<&Path>, reason: &str, lifetime: Duration) {
+    let Some(runtime) = runtime else { return };
+    let path = runtime.join("bridge.log");
+    let oversized = fs::symlink_metadata(&path)
+        .map(|metadata| metadata.is_file() && metadata.len() > MAX_BRIDGE_LOG_BYTES)
+        .unwrap_or(false);
+    let mut options = OpenOptions::new();
+    options
+        .create(true)
+        .write(true)
+        .mode(0o600)
+        // The runtime directory is the user's own private directory; refusing
+        // to follow a symlink out of it keeps a stale or hostile link from
+        // redirecting this write somewhere else.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    if oversized {
+        options.truncate(true);
+    } else {
+        options.append(true);
+    }
+    if let Ok(mut file) = options.open(&path) {
+        let _ = writeln!(
+            file,
+            "{}",
+            bridge_exit_line(now_epoch_millis(), reason, lifetime)
+        );
+    }
+}
+
+/// Past this the log starts over. One line per connection, so it takes years.
+const MAX_BRIDGE_LOG_BYTES: u64 = 1024 * 1024;
+
+/// Composed apart from the write so the exact line can be pinned by a test.
+/// `at_unix_millis` is the wall clock in the unit the desktop journal keeps and
+/// the other daemon log lines already use, so a line here can be laid next to
+/// either without a second log to date it by.
+fn bridge_exit_line(at_unix_millis: i64, reason: &str, lifetime: Duration) -> String {
+    serde_json::json!({
+        "atUnixMillis": at_unix_millis,
+        "subsystem": "host_bridge",
+        "event": "bridgeExit",
+        "reason": reason,
+        "lifetimeMs": whole_millis(lifetime),
+    })
+    .to_string()
+}
+
+fn whole_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Names the end of a daemon connection, once per connection — except the
+/// routine sub-second hangups agent hooks produce, see
+/// `connection_end_is_worth_a_line`.
+///
+/// A connection that dies with a slept laptop dies silently: the SSH session
+/// goes away without closing the socket, and the daemon keeps the whole
+/// per-connection object graph — control clients, pane stores, event sinks —
+/// alive until output finally trips the writer's deadline or the daemon
+/// restarts. The counters say a connection ended; they never said which end it
+/// was, how long it had lived, or how long it had been silent first. Those
+/// three numbers are what says whether a protocol-level heartbeat is worth
+/// building, and how short its interval would have to be.
+///
+/// This goes to stderr, unlike the bridge's exit line: the daemon's stderr is
+/// its own private log file — `daemon-start.log` for a daemon the remote
+/// helper starts, `daemon.stderr.log` for one the bridge spawns — and it is
+/// where every other safe log line about this connection already is. `reason`
+/// is a fixed class and the rest are durations, so no path, hostname, session
+/// name or payload byte is in this line.
+///
+/// One caveat for whoever reads the collected lines: the daemon's peer is the
+/// bridge process, so the two idle numbers are the desktop's silence only as
+/// closely as the bridge relays it, and a daemon killed outright leaves no
+/// line for the connections that were still open.
+pub fn write_connection_ended_log(
+    reason: &str,
+    lifetime: Duration,
+    since_last_client_frame: Duration,
+    since_last_host_frame: Duration,
+) {
+    if !connection_end_is_worth_a_line(reason, lifetime) {
+        return;
+    }
+    eprintln!(
+        "{}",
+        connection_ended_line(
+            now_epoch_millis(),
+            reason,
+            lifetime,
+            since_last_client_frame,
+            since_last_host_frame
+        )
+    );
+}
+
+/// A connection that did one exchange and hung up is not the kind of end this
+/// line exists to record. Every agent hook (`muxflow-host hook ingest`) is one
+/// such connection, a few milliseconds long, and there are hundreds an hour
+/// while an agent works — enough to bury the one line a day that matters and
+/// grow the log by ~2 MB/day between daemon restarts. The bound is generous:
+/// nothing a laptop's sleep produces ends normally in under a second.
+fn connection_end_is_worth_a_line(reason: &str, lifetime: Duration) -> bool {
+    // `client-reset` is the same departure seen through a reset instead of an
+    // EOF (`is_clean_peer_disconnect`), which is what a hook that exits while
+    // the daemon still has a frame queued for it produces.
+    !matches!(reason, "client-eof" | "client-reset")
+        || lifetime >= ROUTINE_CONNECTION_END_MAX_LIFETIME
+}
+
+const ROUTINE_CONNECTION_END_MAX_LIFETIME: Duration = Duration::from_secs(1);
+
+/// Composed apart from the write so the exact line can be pinned by a test.
+/// `at_unix_millis`: see `bridge_exit_line`.
+fn connection_ended_line(
+    at_unix_millis: i64,
+    reason: &str,
+    lifetime: Duration,
+    since_last_client_frame: Duration,
+    since_last_host_frame: Duration,
+) -> String {
+    serde_json::json!({
+        "atUnixMillis": at_unix_millis,
+        "subsystem": "host_daemon",
+        "event": "connectionEnded",
+        "reason": reason,
+        "lifetimeMs": whole_millis(lifetime),
+        "msSinceLastClientFrame": whole_millis(since_last_client_frame),
+        "msSinceLastHostFrame": whole_millis(since_last_host_frame),
+    })
+    .to_string()
+}
+
 pub fn write_safe_log(class: SafeErrorClass) {
     let line = serde_json::json!({
         "subsystem": "host_daemon",
@@ -1442,6 +1590,97 @@ mod tests {
             serialized,
             r#"{"errorClass":"host_connection_ended","subsystem":"host_daemon"}"#
         );
+    }
+
+    /// The bridge's exit line goes back to the desktop over the user's SSH
+    /// connection, so what it may carry is pinned exactly rather than left to
+    /// whoever adds the next field to it.
+    #[test]
+    fn the_bridge_exit_line_carries_only_a_fixed_reason_and_a_duration() {
+        let serialized =
+            bridge_exit_line(1_700_000_000_000, "daemon-eof", Duration::from_millis(42));
+        for private in [
+            "token=secret",
+            "/home/alice/project",
+            "alice-laptop.local",
+            "my-session",
+            "terminal content",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+        assert_eq!(
+            serialized,
+            r#"{"atUnixMillis":1700000000000,"event":"bridgeExit","lifetimeMs":42,"reason":"daemon-eof","subsystem":"host_bridge"}"#
+        );
+    }
+
+    /// The connection line is written for every connection, including the ones
+    /// that ended perfectly normally, so it is the line most likely to be read
+    /// by someone other than its author. What it may carry is pinned exactly
+    /// rather than left to whoever adds the next field to it.
+    #[test]
+    fn the_connection_ended_line_carries_only_a_fixed_reason_and_durations() {
+        let serialized = connection_ended_line(
+            1_700_000_000_000,
+            "writer-deadline",
+            Duration::from_millis(9_000),
+            Duration::from_millis(120),
+            Duration::from_millis(7),
+        );
+        for private in [
+            "token=secret",
+            "/home/alice/project",
+            "alice-laptop.local",
+            "my-session",
+            "terminal content",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+        assert_eq!(
+            serialized,
+            r#"{"atUnixMillis":1700000000000,"event":"connectionEnded","lifetimeMs":9000,"msSinceLastClientFrame":120,"msSinceLastHostFrame":7,"reason":"writer-deadline","subsystem":"host_daemon"}"#
+        );
+    }
+
+    /// Agent hooks open a connection, ingest one event and hang up, hundreds
+    /// of times an hour; those must not write. Everything a sleeping laptop
+    /// produces — a long-lived hangup, or any abnormal end however short —
+    /// must.
+    #[test]
+    fn only_routine_short_hangups_go_unlogged() {
+        use crate::service::ConnectionEndReason;
+        // The filter matches on the label strings; a renamed label would
+        // silently switch it off.
+        assert_eq!(ConnectionEndReason::ClientEof.label(), "client-eof");
+        assert_eq!(ConnectionEndReason::ClientReset.label(), "client-reset");
+        assert!(!connection_end_is_worth_a_line(
+            "client-eof",
+            Duration::from_millis(6)
+        ));
+        assert!(!connection_end_is_worth_a_line(
+            "client-reset",
+            Duration::from_millis(6)
+        ));
+        assert!(!connection_end_is_worth_a_line(
+            "client-eof",
+            Duration::from_millis(999)
+        ));
+        assert!(connection_end_is_worth_a_line(
+            "client-eof",
+            Duration::from_secs(1)
+        ));
+        assert!(connection_end_is_worth_a_line(
+            "client-eof",
+            Duration::from_secs(2_268)
+        ));
+        assert!(connection_end_is_worth_a_line(
+            "writer-deadline",
+            Duration::from_millis(6)
+        ));
+        assert!(connection_end_is_worth_a_line(
+            "handshake-failed",
+            Duration::ZERO
+        ));
     }
 
     /// A slow leg that fires in a burst must cost one line, and that line must

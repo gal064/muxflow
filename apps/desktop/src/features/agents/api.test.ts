@@ -10,7 +10,7 @@ const wireRecord = {
   agentId: "agent-1", adapter: "codex", adapterId: "codex", nativeSessionId: "native", displayName: "Review bot",
   route: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionNameFallback: "work", windowId: "@1", windowNameFallback: "agent", paneId: "%1", agentId: "agent-1", attentionGeneration: "4" },
   lifecycle: "blocked", authority: "hook", stateGeneration: "5", attentionGeneration: "4", attentionKind: "blocked", seenGeneration: "2",
-  updatedAtUnixMillis: "100", hookAuthorityExpiresAtUnixMillis: "200", detectedManually: true,
+  updatedAtUnixMillis: "100", lifecycleChangedAtUnixMillis: "90", hookAuthorityExpiresAtUnixMillis: "200", detectedManually: true,
   present: true,
 };
 
@@ -20,13 +20,26 @@ describe("TauriAgentClient", () => {
   it("maps the protobuf-derived JSON snapshot into the adapter-neutral record", async () => {
     invokeMock.mockResolvedValue({ snapshot: { generation: "6", acceptedGeneration: "6", agents: [wireRecord], authoritative: true, notificationWatermark: "4", connectionEpoch: "4", adapters: [{ adapter: "unspecified", id: "future", displayName: "Future", supportsLaunch: true, supportsResume: true, supportsHooks: false, supportsProcessDetection: true, supportsScreenFallback: false, hookConfigPath: "", hookEvents: [] }] } });
     const snapshot = await new TauriAgentClient().snapshot(scope);
-    expect(snapshot).toMatchObject({ revision: "6", acceptedGeneration: "6", notificationWatermark: "4", authoritative: true, adapters: [{ id: "future", displayName: "Future", placements: ["window", "split"], supportsProcessDetection: true }], agents: [{ id: "agent-1", adapterId: "codex", lifecycle: "blocked", attentionGeneration: "4", attentionKind: "blocked", paneId: "%1", detectedManually: true }] });
+    expect(snapshot).toMatchObject({ revision: "6", acceptedGeneration: "6", notificationWatermark: "4", authoritative: true, adapters: [{ id: "future", displayName: "Future", placements: ["window", "split"], supportsProcessDetection: true }], agents: [{ id: "agent-1", adapterId: "codex", lifecycle: "blocked", attentionGeneration: "4", attentionKind: "blocked", lifecycleChangedAt: 90, paneId: "%1", detectedManually: true }] });
     // `wireRecord` deliberately still carries `authority` and
     // `hookAuthorityExpiresAtUnixMillis`, and the adapter still carries
     // `supportsScreenFallback`. A host older than this desktop keeps sending
     // them; they must be ignored rather than surfaced or rejected.
     expect(snapshot.agents[0]).not.toHaveProperty("authority");
     expect(invokeMock).toHaveBeenCalledWith("agent_request", { clientId: "client", command: expect.objectContaining({ operation: "snapshot", expectedServerIdentity: "server-a", expectedTopologyGeneration: "9", connectionEpoch: "4" }) });
+  });
+
+  it("falls back to updatedAt for both old-host lifecycle-change wire shapes", async () => {
+    const omitted = { ...wireRecord, agentId: "omitted", lifecycleChangedAtUnixMillis: undefined,
+      route: { ...wireRecord.route, agentId: "omitted" } };
+    const protobufZero = { ...wireRecord, agentId: "zero", lifecycleChangedAtUnixMillis: "0",
+      route: { ...wireRecord.route, agentId: "zero" } };
+    invokeMock.mockResolvedValue({ snapshot: {
+      generation: "6", acceptedGeneration: "6", agents: [omitted, protobufZero], authoritative: true,
+      notificationWatermark: "4", connectionEpoch: "4", adapters: [],
+    } });
+    const snapshot = await new TauriAgentClient().snapshot(scope);
+    expect(snapshot.agents.map((record) => record.lifecycleChangedAt)).toEqual([100, 100]);
   });
 
   // These mappers used to throw. Nothing catches per record, so one value this

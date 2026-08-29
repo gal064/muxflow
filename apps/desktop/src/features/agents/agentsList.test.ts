@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAgentRows, groupAgentRows, groupAgentRowsByStatus, jumpTarget, needsAttention, nextSortMode,
-  sortModeLabel, unreadCount, type AgentLocation,
+  RECENT_IDLE_WINDOW_MILLIS, sortModeLabel, unreadCount, type AgentLocation,
 } from "./agentsList";
 import { agent } from "./testFixtures";
 import type { AgentRecord } from "./types";
@@ -19,13 +19,9 @@ const done = agent({ id: "done", displayName: "claude two", lifecycle: "idle", a
 const idle = agent({ id: "idle", displayName: "claude three", lifecycle: "idle", sessionId: "$2", updatedAt: 5 });
 
 describe("agents section ordering", () => {
-  it("ranks the inbox blocked > done-unread > working > idle", () => {
+  it("ranks the visual queue blocked > working > done > idle", () => {
     const rows = buildAgentRows([idle, working, done, blocked], locate, () => true, "status");
-    expect(rows.map((row) => row.agent.id)).toEqual(["blocked", "done", "working", "idle"]);
-    // The point of the ranking: a finished agent outranks a running one,
-    // because the finished one is the one waiting on a human.
-    expect(rows.findIndex((row) => row.agent.id === "done"))
-      .toBeLessThan(rows.findIndex((row) => row.agent.id === "working"));
+    expect(rows.map((row) => row.agent.id)).toEqual(["blocked", "working", "done", "idle"]);
   });
 
   it("follows the workspace list, then tab order, in workspace mode", () => {
@@ -90,7 +86,7 @@ describe("agents section ordering", () => {
       ["Blocked", ["blocked"]],
       ["Working", ["working"]],
       ["Done", ["done"]],
-      ["Idle", ["unknown", "idle"]],
+      ["Idle", ["idle", "unknown"]],
     ]);
     // Every group draws a state dot, and it is the group's state, not a row's.
     expect(groups.map((group) => group.state)).toEqual(["blocked", "working", "done", "idle"]);
@@ -100,6 +96,81 @@ describe("agents section ordering", () => {
     expect(groupAgentRowsByStatus([])).toEqual([]);
     // Rows keep their sorted order inside a bucket, and no row is lost.
     expect(groups.flatMap((group) => group.rows)).toHaveLength(rows.length);
+  });
+
+  it("orders every status by its last lifecycle change, not its latest hook update", () => {
+    const first = agent({
+      id: "first", displayName: "z", lifecycle: "working", updatedAt: 10,
+      lifecycleChangedAt: 300,
+    });
+    const second = agent({
+      id: "second", displayName: "a", lifecycle: "working", updatedAt: 999,
+      lifecycleChangedAt: 200,
+    });
+    const order = (agents: AgentRecord[]) => buildAgentRows(
+      agents, locate, () => true, "status", 1_000,
+    ).map((row) => row.agent.id);
+    expect(order([second, first])).toEqual(["first", "second"]);
+    expect(order([{ ...first, updatedAt: 2_000 }, { ...second, updatedAt: 3_000 }]))
+      .toEqual(["first", "second"]);
+  });
+
+  it("uses an immutable tie-break when lifecycle change times match", () => {
+    const alpha = agent({
+      id: "alpha", displayName: "z", sessionId: "$2", lifecycle: "working",
+      lifecycleChangedAt: 300,
+    });
+    const omega = agent({
+      id: "omega", displayName: "a", sessionId: "$1", lifecycle: "working",
+      lifecycleChangedAt: 300,
+    });
+    const order = (agents: AgentRecord[]) => buildAgentRows(
+      agents, locate, () => true, "status", 1_000,
+    ).map((row) => row.agent.id);
+    expect(order([omega, alpha])).toEqual(["alpha", "omega"]);
+    expect(order([
+      { ...omega, displayName: "zz", sessionId: "$2" },
+      { ...alpha, displayName: "aa", sessionId: "$1" },
+    ])).toEqual(["alpha", "omega"]);
+  });
+
+  it("splits Recent from Idle at four hours and keeps both newest-change first", () => {
+    const now = 10 * RECENT_IDLE_WINDOW_MILLIS;
+    const agents = [
+      agent({ id: "old-idle", lifecycle: "idle", lifecycleChangedAt: now - 8 * 60 * 60 * 1_000 }),
+      agent({ id: "new-recent", lifecycle: "idle", lifecycleChangedAt: now - 60 * 60 * 1_000 }),
+      agent({ id: "new-idle", lifecycle: "idle", lifecycleChangedAt: now - 7 * 60 * 60 * 1_000 }),
+      agent({ id: "old-recent", lifecycle: "idle", lifecycleChangedAt: now - 2 * 60 * 60 * 1_000 }),
+      agent({ id: "boundary", lifecycle: "idle", lifecycleChangedAt: now - RECENT_IDLE_WINDOW_MILLIS }),
+      agent({ id: "unknown", lifecycle: "unknown", lifecycleChangedAt: now - 1 }),
+    ];
+    const rows = buildAgentRows(agents, locate, () => true, "status", now);
+    expect(groupAgentRowsByStatus(rows).map((group) => [
+      group.label,
+      group.rows.map((row) => row.agent.id),
+    ])).toEqual([
+      ["Recent", ["new-recent", "old-recent"]],
+      ["Idle", ["unknown", "boundary", "new-idle", "old-idle"]],
+    ]);
+  });
+
+  it("moves acknowledged Done into Recent without resetting its completion time", () => {
+    const now = 100_000_000;
+    const completion = now - 60 * 60 * 1_000;
+    const completed = agent({
+      id: "completed", lifecycle: "idle", attentionKind: "completed",
+      attentionGeneration: 4, seenGeneration: 1, lifecycleChangedAt: completion,
+    });
+    const doneRow = buildAgentRows([completed], locate, () => true, "status", now)[0];
+    const acknowledgedRow = buildAgentRows(
+      [{ ...completed, seenGeneration: completed.attentionGeneration }],
+      locate,
+      () => true,
+      "status",
+      now,
+    )[0];
+    expect([doneRow.priorityBucket, acknowledgedRow.priorityBucket]).toEqual(["done", "recent"]);
+    expect(acknowledgedRow.agent.lifecycleChangedAt).toBe(completion);
   });
 
   it("keeps agents whose workspace is not in the list last instead of dropping them", () => {
@@ -130,14 +201,11 @@ describe("agents section ordering", () => {
 /**
  * Pinning, from the agents list's side.
  *
- * Two facts reach a row: whether its workspace is pinned and whether its tab
- * is. The workspace ordering inherits the first through `workspaceOrder`,
- * because the sidebar list it is built from is already pinned-first; the
- * priority ordering has no workspace ranking to inherit and so reads the pins
- * itself. Both modes are asserted here, because the whole point of the
- * feature is that they agree about what comes first.
+ * Workspace pins order whole workspaces through `workspaceOrder`. A tab pin
+ * orders that agent only inside its workspace in workspace mode, or inside its
+ * status in priority mode.
  */
-describe("pinned agents lead the list in both orderings", () => {
+describe("agent pins stay local to their workspace or status", () => {
   // Two workspaces: `$pin` is pinned, `$plain` is not. In the workspace
   // ordering the sidebar has already put `$pin` first, which is what
   // `workspaceOrder` says.
@@ -149,19 +217,23 @@ describe("pinned agents lead the list in both orderings", () => {
     const base = located[record.sessionId] ?? { workspaceOrder: 2, workspaceName: record.sessionName };
     return record.windowId === "@pinned" ? { ...base, tabIndex: 9, tabPinned: true } : base;
   };
-  // The quiet agent in the pinned workspace and the loud one in the plain
-  // workspace: without the pin, `blockedElsewhere` sorts first in both modes.
-  const idleHere = agent({ id: "idle-here", displayName: "a", sessionId: "$pin", lifecycle: "idle", updatedAt: 1 });
-  const idleHerePinnedTab = agent({ id: "pinned-tab", displayName: "b", sessionId: "$pin", windowId: "@pinned", lifecycle: "idle", updatedAt: 2 });
+  // A pinned workspace still leads only through workspace order. The tab pin
+  // is the per-agent pin drawn on the row.
+  const idleHere = agent({
+    id: "idle-here", displayName: "a", sessionId: "$pin", lifecycle: "idle",
+    updatedAt: 1, lifecycleChangedAt: 200,
+  });
+  const idleHerePinnedTab = agent({
+    id: "pinned-tab", displayName: "b", sessionId: "$pin", windowId: "@pinned",
+    lifecycle: "idle", updatedAt: 2, lifecycleChangedAt: 100,
+  });
   const blockedElsewhere = agent({ id: "blocked-away", displayName: "c", sessionId: "$plain", lifecycle: "blocked", updatedAt: 99 });
   const all = [blockedElsewhere, idleHere, idleHerePinnedTab];
 
-  it("puts a pinned workspace's agents first in the priority ordering", () => {
+  it("keeps status ahead of pins in the priority ordering", () => {
     const rows = buildAgentRows(all, place, () => true, "status");
-    // Blocked would otherwise be first; the pin outranks the status ranking,
-    // and inside the pinned block the pinned tab leads.
-    expect(rows.map((row) => row.agent.id)).toEqual(["pinned-tab", "idle-here", "blocked-away"]);
-    expect(rows.map((row) => row.pinned)).toEqual([true, true, false]);
+    expect(rows.map((row) => row.agent.id)).toEqual(["blocked-away", "pinned-tab", "idle-here"]);
+    expect(rows.map((row) => row.pinned)).toEqual([false, true, false]);
   });
 
   it("puts a pinned workspace's agents first in the workspace ordering too", () => {
@@ -171,30 +243,39 @@ describe("pinned agents lead the list in both orderings", () => {
     expect(rows.map((row) => row.agent.id)).toEqual(["pinned-tab", "idle-here", "blocked-away"]);
   });
 
-  it("lifts the pinned block above the status headings rather than into them", () => {
+  it("keeps pinned agents in their status heading", () => {
     const groups = groupAgentRowsByStatus(buildAgentRows(all, place, () => true, "status"));
     expect(groups.map((group) => [group.label, group.rows.map((row) => row.agent.id)])).toEqual([
-      ["Pinned", ["pinned-tab", "idle-here"]],
       ["Blocked", ["blocked-away"]],
+      ["Idle", ["pinned-tab", "idle-here"]],
     ]);
-    // A pinned row inside an Idle bucket would be first in its group and fourth
-    // on screen, which is not what a pin promises. The block has no state dot
-    // for the same reason: "pinned" is not something an agent is doing.
-    expect(groups[0].state).toBeUndefined();
+    expect(groups.map((group) => group.state)).toEqual(["blocked", "idle"]);
     expect(groups.flatMap((group) => group.rows)).toHaveLength(3);
   });
 
-  it("keeps a pinned tab in an unpinned workspace behind the pinned workspaces", () => {
+  it("puts pinned agents before unpinned peers inside each status", () => {
     const strayPinnedTab = agent({ id: "stray", displayName: "d", sessionId: "$plain", windowId: "@pinned", lifecycle: "blocked", updatedAt: 50 });
     const rows = buildAgentRows([...all, strayPinnedTab], place, () => true, "status");
-    expect(rows.map((row) => row.agent.id)).toEqual(["pinned-tab", "idle-here", "stray", "blocked-away"]);
+    expect(rows.map((row) => row.agent.id)).toEqual(["stray", "blocked-away", "pinned-tab", "idle-here"]);
+  });
+
+  it("orders lifecycle recency separately inside pinned and unpinned peers", () => {
+    const rows = buildAgentRows([
+      agent({ id: "pinned-old", lifecycle: "working", lifecycleChangedAt: 200, windowId: "@pinned" }),
+      agent({ id: "loose-new", lifecycle: "working", lifecycleChangedAt: 400, windowId: "@loose-new" }),
+      agent({ id: "pinned-new", lifecycle: "working", lifecycleChangedAt: 300, windowId: "@pinned" }),
+      agent({ id: "loose-old", lifecycle: "working", lifecycleChangedAt: 100, windowId: "@loose-old" }),
+    ], place, () => true, "status", 1_000);
+    expect(rows.map((row) => row.agent.id)).toEqual([
+      "pinned-new", "pinned-old", "loose-new", "loose-old",
+    ]);
   });
 
   it("leaves both orderings exactly as they were when nothing is pinned", () => {
     const plain = (record: AgentRecord): AgentLocation => locations[record.sessionId]
       ?? { workspaceOrder: Number.MAX_SAFE_INTEGER, workspaceName: record.sessionName };
     expect(buildAgentRows([idle, working, done, blocked], plain, () => true, "status").map((row) => row.agent.id))
-      .toEqual(["blocked", "done", "working", "idle"]);
+      .toEqual(["blocked", "working", "done", "idle"]);
     expect(buildAgentRows([idle, working, done, blocked], plain, () => true, "workspace").map((row) => row.pinned))
       .toEqual([false, false, false, false]);
   });
@@ -208,12 +289,10 @@ describe("the bell and ⌘⇧U ignore pins", () => {
     });
     const blockedElsewhere = agent({ id: "blocked-away", displayName: "c", sessionId: "$plain", lifecycle: "blocked", updatedAt: 99 });
     const place = (record: AgentRecord): AgentLocation => record.sessionId === "$pin"
-      ? { workspaceOrder: 0, workspaceName: "pinned-ws", workspacePinned: true }
+      ? { workspaceOrder: 0, workspaceName: "pinned-ws", tabPinned: true }
       : { workspaceOrder: 1, workspaceName: "plain-ws" };
     const rows = buildAgentRows([pinnedDone, blockedElsewhere], place, () => true, "status");
-    // The list leads with the pinned row…
-    expect(rows[0].agent.id).toBe("pinned-done");
-    // …and the bell still means "who needs me most".
+    expect(rows[0].agent.id).toBe("blocked-away");
     expect(jumpTarget(rows)?.agent.id).toBe("blocked-away");
   });
 });

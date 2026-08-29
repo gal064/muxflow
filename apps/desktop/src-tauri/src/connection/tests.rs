@@ -22,8 +22,12 @@ fn incompatible_or_disconnected_client_rejects_mutation_without_queueing() {
     assert!(client.pending.lock().unwrap().is_empty());
 }
 
+/// The shaped-link storm: a reply that is late because the lane is busy is
+/// not a lane that has stopped answering. The bridge stays up through two
+/// late answers; the third in a row, with nothing answered between them, is
+/// the stalled lane and is still torn down.
 #[test]
-fn a_timed_out_host_response_reconnects_instead_of_reusing_the_ordered_lane() {
+fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
     use std::{fs::File, os::fd::FromRawFd};
 
     let mut fds = [0; 2];
@@ -36,25 +40,51 @@ fn a_timed_out_host_response_reconnects_instead_of_reusing_the_ordered_lane() {
     let client = TerminalClient::new();
     client.ready.store(true, Ordering::Release);
     *client.writer.lock().unwrap() =
-        Some(ControlWriterHandle::start_with(write_end, "response-timeout-reconnect").unwrap());
+        Some(ControlWriterHandle::start_with(write_end, "late-answer-keeps-bridge").unwrap());
+    let late = || {
+        client
+            .request_with_timeout(
+                v1::Request {
+                    operation: v1::Operation::SelectTerminalSession.into(),
+                    session_id: "$1".into(),
+                    ..Default::default()
+                },
+                Duration::from_millis(25),
+                Duration::from_millis(25),
+                None,
+            )
+            .unwrap_err()
+    };
 
-    let error = client
-        .request_with_timeout(
-            v1::Request {
-                operation: v1::Operation::SelectTerminalSession.into(),
-                session_id: "$1".into(),
-                ..Default::default()
-            },
-            Duration::from_millis(25),
-            None,
-        )
-        .unwrap_err();
+    for _ in 0..(STALLED_LANE_UNANSWERED_REQUESTS - 1) {
+        let error = late();
+        assert!(error.contains("host request timed out"), "{error}");
+        assert!(error.contains("was kept"), "{error}");
+        assert!(client.ready.load(Ordering::Acquire));
+        assert!(client.writer.lock().unwrap().is_some());
+        assert!(client.pending.lock().unwrap().is_empty());
+    }
 
-    assert!(error.contains("host request timed out"), "{error}");
+    // A third miss inside the silence window is still a burst, not a stall:
+    // parallel requests time out together.
+    let error = late();
+    assert!(error.contains("was kept"), "{error}");
+    assert!(client.ready.load(Ordering::Acquire));
+    client
+        .unanswered_requests
+        .store(STALLED_LANE_UNANSWERED_REQUESTS, Ordering::Release);
+    client.last_answer_at.store(0, Ordering::Release);
+    let error = late();
     assert!(error.contains("reconnecting"), "{error}");
     assert!(!client.ready.load(Ordering::Acquire));
     assert!(client.writer.lock().unwrap().is_none());
     assert!(client.pending.lock().unwrap().is_empty());
+    // The late requests it kept were counted for the link stats.
+    assert_eq!(client.late_requests_total.load(Ordering::Acquire), 3);
+    // A lane becoming ready owes the full silence from that moment.
+    client.last_answer_at.store(0, Ordering::Release);
+    client.lane_ready();
+    assert_ne!(client.last_answer_at.load(Ordering::Acquire), 0);
     drop(read_end);
 }
 

@@ -39,11 +39,38 @@ async fn main() -> anyhow::Result<()> {
             if std::env::args().nth(2).as_deref() != Some("--stdio") {
                 bail!("usage: muxflow-host bridge --stdio [--socket PATH]");
             }
-            bridge::run(
-                argument_path("--socket").unwrap_or_else(paths::default_socket_path),
+            let started = std::time::Instant::now();
+            let socket = argument_path("--socket").unwrap_or_else(paths::default_socket_path);
+            let outcome = bridge::run(
+                socket.clone(),
                 !std::env::args().any(|argument| argument == "--no-start"),
             )
-            .await
+            .await;
+            // Returning from here would drop the tokio runtime, and that drop
+            // waits for the blocking read parked on stdin — a read nothing can
+            // cancel, on a pipe that never EOFs when the peer is an SSH session
+            // whose client silently disappeared. That wait is what left bridge
+            // processes orphaned on the remote host after a laptop slept, so a
+            // finished pump leaves the process here instead.
+            //
+            // An auto-started daemon is unaffected: it is spawned detached, with
+            // null stdin and stdout and a stderr of its own log file, so it
+            // shares no descriptor with this process and nothing signals it on
+            // the way out. Exiting here does skip the flush std runs after
+            // `main` returns, so flush what this arm may have buffered first —
+            // the pump already flushes each write, and this keeps that true for
+            // anything printed here later.
+            let reason = match &outcome {
+                Ok(reason) => *reason,
+                Err(error) => {
+                    // What returning `Err` from `main` would have printed.
+                    eprintln!("Error: {error:?}");
+                    bridge::ExitReason::Error
+                }
+            };
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            diagnostics::write_bridge_exit_log(socket.parent(), reason.label(), started.elapsed());
+            std::process::exit(i32::from(outcome.is_err()));
         }
         Some("helper") => remote_helper::run_cli(std::env::args().skip(2).collect()),
         Some("hook") => match std::env::args().nth(2).as_deref() {

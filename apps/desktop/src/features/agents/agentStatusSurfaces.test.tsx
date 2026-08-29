@@ -217,7 +217,7 @@ describe("idle shows nothing, on every surface that draws state", () => {
     }
     // The sidebar's Idle heading keeps the word and loses the circle — the text
     // is the label, and the dot beside it was saying it a second time. The slot
-    // stays, so the four headings' words still line up with each other.
+    // stays, so the five headings' words still line up with each other.
     const heading = sidebar({ agents: rowsFor([agent({ id: "quiet", lifecycle: "idle" })]) });
     expect(heading).toContain("<span>Idle</span>");
     expect(heading).toContain('<span aria-hidden="true" class="state-dot agent-group-dot idle"></span>');
