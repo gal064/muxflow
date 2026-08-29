@@ -16,7 +16,7 @@ import { filesStore } from "../features/files/filesStore";
 import { log } from "./log";
 
 export type Lane = "control" | "bulk";
-export type TransportFactory = (host: SavedHost, lane: Lane) => Promise<Transport>;
+export type TransportFactory = (host: SavedHost, lane: Lane, signal?: AbortSignal) => Promise<Transport>;
 
 export const APP_VERSION = "0.1.0";
 
@@ -78,7 +78,7 @@ export async function connectHost(host: SavedHost): Promise<void> {
   const dial = factory;
   controlHost = host;
   const connection = new HostConnection({
-    dial: () => dial(host, "control"),
+    dial: (signal) => dial(host, "control", signal),
     appVersion: APP_VERSION,
     // The stored record wins over the caller's copy so the epoch stays monotonic.
     nextConnectionEpoch: () => hostsStore.getState().takeConnectionEpoch(host.id),
@@ -128,7 +128,7 @@ export function openBulkConnection(): Promise<HostConnection> {
   const dial = factory;
   const store = createSessionStore();
   const lane = new HostConnection({
-    dial: () => dial(host, "bulk"),
+    dial: (signal) => dial(host, "bulk", signal),
     appVersion: APP_VERSION,
     nextConnectionEpoch: () => { throw new Error("bulk lanes reuse the control epoch"); },
     store,

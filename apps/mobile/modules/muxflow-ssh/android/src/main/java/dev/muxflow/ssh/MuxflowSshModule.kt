@@ -82,7 +82,7 @@ class MuxflowSshModule : Module() {
       target: SshTarget,
       command: String,
       trustedHostKeyFingerprint: String? ->
-      val keyPair = translatingKeyStoreErrors { SshKeyStore.keyPair(context) }
+      val keyPair = translatingKeyStoreErrors { SshKeyStore.keyPairOrNull(context) }
       synchronized(registryLock) {
         if (channels.containsKey(connectionId)) {
           throw ConnectionAlreadyOpenException(connectionId)
@@ -94,7 +94,7 @@ class MuxflowSshModule : Module() {
         transports[key] = transport
         try {
           channels[connectionId] =
-            transport.open(connectionId, command, trustedHostKeyFingerprint, ::onChannelTerminated)
+            transport.open(connectionId, command, trustedHostKeyFingerprint, keyPair, ::onChannelTerminated)
         } catch (t: Throwable) {
           // A transport this call created has no channel to release it later, so it would sit in
           // the registry with its control thread alive and never be reachable again.

@@ -19,7 +19,7 @@ describe("the §12 error matrix", () => {
           retryable: false,
           action: { kind: "sshKey", label: "Your SSH key" },
           message:
-            "devbox rejected this phone's SSH key. Add the key under Your SSH key to ~/.ssh/authorized_keys on the host.",
+            "devbox rejected this phone's SSH login. Over Tailscale SSH, check the tailnet's SSH policy; otherwise add the key under Your SSH key to ~/.ssh/authorized_keys on the host.",
         },
       ],
       [

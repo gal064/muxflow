@@ -67,7 +67,7 @@ export function describeTransportClose(
         presentation: "fullScreen",
         retryable: false,
         action: SSH_KEY_ACTION,
-        message: `${named(host)} rejected this phone's SSH key. Add the key under Your SSH key to ~/.ssh/authorized_keys on the host.`,
+        message: `${named(host)} rejected this phone's SSH login. Over Tailscale SSH, check the tailnet's SSH policy; otherwise add the key under Your SSH key to ~/.ssh/authorized_keys on the host.`,
       };
     case "hostKeyMismatch":
       // §9.10's second paragraph.

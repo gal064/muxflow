@@ -47,6 +47,12 @@ export interface SshTransportOptions {
   onClose?: (close: TransportClose) => void;
   /** Used only for the §12 copy; carries no port when absent. */
   hostAddress?: HostAddress;
+  /**
+   * Aborting closes the channel while it is still dialling. The native side
+   * then cuts a login that is being held open (Tailscale SSH check mode) and
+   * the dial rejects as `localClose`.
+   */
+  signal?: AbortSignal;
   log?: (line: string) => void;
 }
 
@@ -120,7 +126,17 @@ export function openSshTransport(options: SshTransportOptions): Promise<Transpor
       else pendingClose = close;
     };
 
-    unsubscribe = ssh.addListener((event: SshEvent) => {
+    // The user disconnected while this channel was still dialling: the close
+    // reaches the native side as `closedByClient`, which `finish` reports as
+    // `localClose`; `HostConnection` has already stopped wanting the result.
+    const onAbort = (): void => {
+      if (settled || closedByUs) return;
+      closedByUs = true;
+      log("dial.aborted");
+      ssh.close(connectionId).catch((error: unknown) => log(`close.failed ${describe(error)}`));
+    };
+    options.signal?.addEventListener("abort", onAbort);
+    const removeNativeListener = ssh.addListener((event: SshEvent) => {
       if (event.connectionId !== connectionId) return;
       switch (event.type) {
         case "hostKey": {
@@ -209,7 +225,16 @@ export function openSshTransport(options: SshTransportOptions): Promise<Transpor
       },
     };
 
-    ssh.connect(connectionId, target, command, options.trustedHostKeyFingerprint).catch((error: unknown) => {
+    unsubscribe = () => {
+      removeNativeListener();
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+
+    const dial = ssh.connect(connectionId, target, command, options.trustedHostKeyFingerprint);
+    // Already aborted before the native call was even issued: close right
+    // behind it rather than leaving a channel nobody will use.
+    if (options.signal?.aborted) onAbort();
+    dial.catch((error: unknown) => {
       if (settled) return;
       settled = true;
       unsubscribe();

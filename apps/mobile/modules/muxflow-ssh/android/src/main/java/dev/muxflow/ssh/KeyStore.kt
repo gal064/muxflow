@@ -124,12 +124,14 @@ internal object SshKeyStore {
     }
   }
 
-  /** The stored key pair as JCA keys, ready for `SSHClient.loadKeys`. */
-  fun keyPair(context: Context): KeyPair {
+  /**
+   * The stored key pair as JCA keys, or null when this phone has no key. A missing key is not an
+   * error: a host reached over Tailscale SSH authenticates the phone by its tailnet identity and
+   * accepts the `none` method, so the transport can log in without one.
+   */
+  fun keyPairOrNull(context: Context): KeyPair? {
     SshSecurity.ensureBouncyCastle()
-    val pem =
-      prefs(context).getString(PRIVATE_KEY_PREF, null)
-        ?: throw SshKeyStoreException("This phone has no SSH key yet. Generate one first.")
+    val pem = prefs(context).getString(PRIVATE_KEY_PREF, null) ?: return null
     val decoded = decodeOpenSshPrivateKey(pem)
     return KeyPair(
       Ed25519KeyFactory.getPublicKey(decoded.publicKeyBinary),

@@ -18,7 +18,10 @@ export function KeyCard({ keyHandle }: KeyCardProps) {
   return (
     <View style={styles.card}>
       <Text style={styles.title}>SSH key</Text>
-      <Text style={styles.body}>This phone&apos;s key is added to the host&apos;s ~/.ssh/authorized_keys</Text>
+      <Text style={styles.body}>
+        Not needed over Tailscale SSH. Otherwise this phone&apos;s key is added to the host&apos;s
+        ~/.ssh/authorized_keys.
+      </Text>
       {publicKey === undefined ? (
         <Text style={styles.body}>Reading the key…</Text>
       ) : publicKey === null ? (

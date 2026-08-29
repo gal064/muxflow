@@ -102,7 +102,7 @@ describe("openSshTransport", () => {
         expected: {
           reason: "authFailed",
           message:
-            "10.0.2.2 rejected this phone's SSH key. Add the key under Your SSH key to ~/.ssh/authorized_keys on the host.",
+            "10.0.2.2 rejected this phone's SSH login. Over Tailscale SSH, check the tailnet's SSH policy; otherwise add the key under Your SSH key to ~/.ssh/authorized_keys on the host.",
         },
       },
       {
@@ -172,6 +172,37 @@ describe("openSshTransport", () => {
     await pending.catch((error: TransportDialError) => {
       expect(error.close).toEqual({ reason: "connectFailed", message: "Couldn't reach 10.0.2.2:22222." });
     });
+  });
+
+  it("aborting the signal mid-dial closes the channel and rejects as localClose", async () => {
+    const fake = fakeSsh();
+    const abort = new AbortController();
+    const pending = openSshTransport({
+      connectionId: "c",
+      target,
+      trustedHostKeyFingerprint: null,
+      ssh: fake.ssh,
+      hostAddress,
+      signal: abort.signal,
+    });
+    await Promise.resolve();
+    expect(fake.closes).toEqual([]);
+    abort.abort();
+    expect(fake.closes).toEqual(["c"]);
+    // The native side answers the close the way it always does.
+    fake.emit({ type: "closed", connectionId: "c", exitCode: null, reason: "closedByClient" });
+    await expect(pending).rejects.toBeInstanceOf(TransportDialError);
+    await pending.catch((error: TransportDialError) => {
+      expect(error.close.reason).toBe("localClose");
+    });
+    expect(fake.listenerCount()).toBe(0);
+  });
+
+  it("ignores an abort once the channel is running", async () => {
+    const abort = new AbortController();
+    const { fake } = await connected({ signal: abort.signal });
+    abort.abort();
+    expect(fake.closes).toEqual([]);
   });
 
   it("trusts a host key only when the dialog answers yes", async () => {
