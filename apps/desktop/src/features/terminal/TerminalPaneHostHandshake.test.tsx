@@ -36,11 +36,13 @@ import type { Pane } from "../../app/types";
 const api = vi.hoisted(() => ({
   setTerminalVisibility: vi.fn(async (..._args: unknown[]) => undefined),
   requestTerminalSeed: vi.fn(async (..._args: unknown[]) => undefined),
+  requestTerminalHistory: vi.fn(async (..._args: unknown[]) => undefined),
 }));
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   setTerminalVisibility: api.setTerminalVisibility,
   requestTerminalSeed: api.requestTerminalSeed,
+  requestTerminalHistory: api.requestTerminalHistory,
 }));
 
 const journal = vi.hoisted(() => ({ recordIncident: vi.fn((..._args: unknown[]) => undefined) }));
@@ -147,6 +149,8 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     onSelectionChange(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
     onScrollbackTopReached(): () => void { return () => undefined; }
+    isAlternateScreenActive(): boolean { return false; }
+    get scrollbackRows(): number { return 0; }
     async prependHistory(): Promise<"applied" | "superseded"> { return "applied"; }
     get enqueuedGeneration(): number { return this.#generations.enqueuedGeneration; }
     focus(): void {}

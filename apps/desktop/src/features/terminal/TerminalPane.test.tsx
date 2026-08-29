@@ -53,6 +53,8 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     enqueuedGeneration = 0;
     /** Rows above the screen, as the real renderer counts them. */
     scrollbackRows = 0;
+    /** A TUI is drawing: there is no scrollback to prepend to. */
+    alternateScreen = false;
 
     open(): void {}
     measure(): Size | undefined { return this.measured; }
@@ -72,6 +74,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       this.resizes.push(size);
       return { kind: "applied", size };
     }
+    isAlternateScreenActive(): boolean { return this.alternateScreen; }
     onInput(): () => void { return () => undefined; }
     onSelectionChange(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
@@ -792,39 +795,50 @@ describe("TerminalPane degraded-state watchdog", () => {
 
 /**
  * A seed is the visible grid and nothing above it, so the scrollback the user
- * scrolls up looking for is still in tmux. Reaching the top is the request for
- * it — there is no button, because the gesture already says what a button
- * would.
+ * scrolls up looking for is still in tmux. It comes back a page at a time, the
+ * way tmux's own copy-mode reads it: reaching the top is the request for the
+ * next page — there is no button, because the gesture already says what a
+ * button would — and the first page is fetched behind the pane's first paint so
+ * a wheel a moment after a switch finds something already there.
  */
 describe("lazy scrollback", () => {
-  function historyEvent(paneId: string, text: string): PaneEvent {
+  /** One line per captured row, joined the way the host joins them. */
+  function historyPage(rows: number): string {
+    return Array.from({ length: rows }, (_, index) => `row-${index}`).join("\r\n");
+  }
+
+  /**
+   * @param historySize what tmux says it is holding for this pane. Omitted is
+   * the host's size probe going unanswered, which is a page to ask about again
+   * rather than the end of the history.
+   */
+  function historyEvent(paneId: string, text: string, historySize?: number): PaneEvent {
     return {
       kind: "terminalHistory", paneId, sequence: 2,
       data: ownTerminalBytes(new TextEncoder().encode(text)),
+      ...(historySize === undefined ? {} : { historySize }),
     };
   }
 
-  it("asks once when a screen-seeded pane is scrolled to the top, and not again while the ask is outstanding", async () => {
+  it("asks for one page when a screen-seeded pane is scrolled to the top, and not again while the ask is outstanding", async () => {
     const hub = new FakeHub();
     const mounted = await mountPane(fixturePane("%h1"), hub);
     const renderer = renderers.created[0];
     await act(async () => { hub.deliver(seedEvent("%h1", 4)); });
 
     await act(async () => { renderer.reachTop(); });
-    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h1", 2000, 0]]);
+    // A page, not the whole history: 2,000 lines was ~195 KB in front of the
+    // user's next keystroke.
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h1", 300, 0]]);
 
     // The answer has not arrived, so the second and third gestures are the same
     // question and cost nothing.
     await act(async () => { renderer.reachTop(); renderer.reachTop(); });
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
 
-    await act(async () => { hub.deliver(historyEvent("%h1", "earlier output")); });
+    await act(async () => { hub.deliver(historyEvent("%h1", "earlier output", 2_000)); });
     // Quoted back so the renderer can refuse a splice onto a stream that moved.
     expect(renderer.historySplices).toEqual([{ bytes: 14, throughGeneration: 4 }]);
-
-    // Loaded is loaded: this pane's scrollback is now on the terminal.
-    await act(async () => { renderer.reachTop(); });
-    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
     await act(async () => { mounted.unmount(); });
   });
 
@@ -841,7 +855,95 @@ describe("lazy scrollback", () => {
 
     await act(async () => { renderer.reachTop(); });
 
-    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h7", 2000, 37]]);
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h7", 300, 37]]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("pages: a full answer leaves the next page to ask for, above the rows it just added", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h8"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h8", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    // 2,000 lines above the screen and 300 asked for from the bottom of them:
+    // there is more behind this page.
+    await act(async () => { hub.deliver(historyEvent("%h8", historyPage(300), 2_000)); });
+    // The splice put those rows in this buffer, so the next page starts above
+    // them — the same rule as a pane that printed, and the reason no row is
+    // ever fetched twice.
+    renderer.scrollbackRows = 300;
+
+    await act(async () => { renderer.reachTop(); });
+
+    expect(api.requestTerminalHistory.mock.calls).toEqual([
+      ["client-a", "%h8", 300, 0],
+      ["client-a", "%h8", 300, 300],
+    ]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("stops when the page it asked for reached the top of tmux's history", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h9"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h9", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    // The rows asked for were 0 held + 300, and tmux holds 120: this page is
+    // the whole of it. Decided on that number and never on the answer's own
+    // rows — `-J` joins wrapped lines, so a full page routinely carries fewer
+    // lines than it covers rows, and tmux answers a range past the top with one
+    // clamped row rather than with nothing.
+    await act(async () => { hub.deliver(historyEvent("%h9", historyPage(120), 120)); });
+    expect(renderer.historySplices).toHaveLength(1);
+    renderer.scrollbackRows = 120;
+
+    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("keeps paging when a page fills but leaves history behind it, counted from the rows it asked for", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h11"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h11", 4)); });
+    // Already holding 500 rows, so this page asks for 501-800 of tmux's 900.
+    renderer.scrollbackRows = 500;
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h11", 300, 500]]);
+
+    // 500 + 300 < 900: a hundred rows are still above this.
+    await act(async () => { hub.deliver(historyEvent("%h11", historyPage(300), 900)); });
+    renderer.scrollbackRows = 800;
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls.at(-1)).toEqual(["client-a", "%h11", 300, 800]);
+
+    // 800 + 300 >= 900: that was the last of it.
+    await act(async () => { hub.deliver(historyEvent("%h11", historyPage(100), 900)); });
+    renderer.scrollbackRows = 900;
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("asks again when the host could not read how much history there is", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h12"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h12", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    // The size probe is targeted and the pane went away under it. The rows
+    // still arrived, so they are still spliced — but "tmux did not answer" is
+    // not "there is nothing above this", and the question stays open.
+    await act(async () => { hub.deliver(historyEvent("%h12", historyPage(300))); });
+    expect(renderer.historySplices).toHaveLength(1);
+    renderer.scrollbackRows = 300;
+
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls.at(-1)).toEqual(["client-a", "%h12", 300, 300]);
     await act(async () => { mounted.unmount(); });
   });
 
@@ -853,7 +955,9 @@ describe("lazy scrollback", () => {
     await act(async () => { hub.deliver(seedEvent("%h2", 4)); });
 
     await act(async () => { renderer.reachTop(); });
-    await act(async () => { hub.deliver(historyEvent("%h2", "earlier output")); });
+    // A short page that could not be applied is not an answer about the history:
+    // nothing was spliced, so nothing is latched either.
+    await act(async () => { hub.deliver(historyEvent("%h2", historyPage(3), 3)); });
     expect(renderer.historySplices).toHaveLength(1);
 
     // Nothing was applied, so the question is still open and the next gesture
@@ -870,13 +974,96 @@ describe("lazy scrollback", () => {
     await act(async () => { hub.deliver(seedEvent("%h3", 4)); });
 
     await act(async () => { renderer.reachTop(); });
-    await act(async () => { hub.deliver(historyEvent("%h3", "")); });
+    await act(async () => { hub.deliver(historyEvent("%h3", "", 0)); });
 
     // There is nothing above this screen, so nothing is spliced and nothing is
     // asked for again.
     expect(renderer.historySplices).toEqual([]);
     await act(async () => { renderer.reachTop(); });
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("fetches the first page as soon as the seeded pane has painted, and never before", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p1"), hub);
+    const renderer = renderers.created[0];
+
+    await act(async () => { hub.deliver(seedEvent("%p1", 4)); });
+    // The screen the user is waiting for goes first. Nothing is asked for while
+    // the seed is still on its way to the glass.
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
+
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%p1", 300, 0]]);
+
+    // Once, not once per paint.
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("does not ask a second time when the user reaches the top during the prefetch", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p2"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%p2", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
+
+    // Same question, already outstanding.
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("asks again for a pane the host reseeds while a page is still in flight", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p5"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%p5", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+
+    // The answer to that page never comes — the hub drops this pane's events
+    // while it owes a seed. A latch left standing would leave the new screen
+    // unable to ask for its own first page for the life of this mount.
+    await act(async () => { hub.deliver(seedEvent("%p5", 9)); });
+    await act(async () => { renderer.flushRendered(); });
+
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("asks for nothing on the alternate screen, where there is no scrollback to prepend to", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p3"), hub);
+    const renderer = renderers.created[0];
+    renderer.alternateScreen = true;
+
+    await act(async () => { hub.deliver(seedEvent("%p3", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    await act(async () => { renderer.reachTop(); });
+
+    // The splice would be refused, so the page would have crossed the link to
+    // be thrown away.
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("never prefetches for a pane that came up from its own cached screen", async () => {
+    terminalStateCache.set("%p4", "warm-screen", { terminalEpoch: 7, outputGeneration: 3 });
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p4"), hub);
+    const renderer = renderers.created[0];
+    expect(renderer.restoredSerialized).toBe("warm-screen");
+
+    // That screen is a serialization of this pane's own buffer, scrollback
+    // included: there is nothing above it the host is holding.
+    await act(async () => { renderer.flushRendered(); });
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
     await act(async () => { mounted.unmount(); });
   });
 
@@ -888,48 +1075,67 @@ describe("lazy scrollback", () => {
     // The hide keeps that screen here and tells the host it did.
     await act(async () => { first.unmount(); });
     expect(terminalStateCache.get("%h5")?.screenSeeded).toBe(true);
+    expect(terminalStateCache.get("%h5")?.historyExhausted).toBe(false);
+    api.requestTerminalHistory.mockClear();
 
     const remounted = await mountPane(fixturePane("%h5"), hub);
     const renderer = renderers.created[1];
     expect(renderer.restoredSerialized).toBe("cached-screen");
 
     // Putting a photograph back on a fresh terminal does not give it a
-    // scrollback: what is above this screen is still only in tmux.
+    // scrollback: what is above this screen is still only in tmux. Restored
+    // rather than seeded, so nothing is prefetched — the gesture asks.
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
     await act(async () => { renderer.reachTop(); });
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
     await act(async () => { remounted.unmount(); });
   });
 
-  it("stops asking once the loaded history is part of the cached screen", async () => {
+  it("carries its paging across a hide: the restored screen continues above the pages it holds", async () => {
     const hub = new FakeHub();
     const first = await mountPane(fixturePane("%h6"), hub);
     const renderer = renderers.created[0];
     await act(async () => { hub.deliver(seedEvent("%h6", 4)); });
     await act(async () => { renderer.flushRendered(); });
-    await act(async () => { renderer.reachTop(); });
-    await act(async () => { hub.deliver(historyEvent("%h6", "earlier output")); });
+    await act(async () => { hub.deliver(historyEvent("%h6", historyPage(300), 2_000)); });
+    renderer.scrollbackRows = 300;
     await act(async () => { first.unmount(); });
-    expect(terminalStateCache.get("%h6")?.screenSeeded).toBe(false);
+
+    // The page is in the buffer this screen was serialized from, and the entry
+    // says so — the restore continues from there rather than fetching it again.
+    expect(terminalStateCache.get("%h6")?.screenSeeded).toBe(true);
+    expect(terminalStateCache.get("%h6")?.historyPagesLoaded).toBe(1);
+    expect(terminalStateCache.get("%h6")?.historyExhausted).toBe(false);
+    api.requestTerminalHistory.mockClear();
 
     const remounted = await mountPane(fixturePane("%h6"), hub);
-    // The splice is in the buffer this screen was serialized from, so asking
-    // again would prepend the same rows a second time.
-    await act(async () => { renderers.created[1].reachTop(); });
-    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    const restored = renderers.created[1];
+    restored.scrollbackRows = 300;
+    await act(async () => { restored.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h6", 300, 300]]);
     await act(async () => { remounted.unmount(); });
   });
 
-  it("never asks for a pane that came up from its own cached screen", async () => {
-    terminalStateCache.set("%h4", "warm-screen", { terminalEpoch: 7, outputGeneration: 3 });
+  it("carries the top of the history across a hide, so a restored pane stops asking too", async () => {
     const hub = new FakeHub();
-    const mounted = await mountPane(fixturePane("%h4"), hub);
+    const first = await mountPane(fixturePane("%h10"), hub);
     const renderer = renderers.created[0];
-    expect(renderer.restoredSerialized).toBe("warm-screen");
+    await act(async () => { hub.deliver(seedEvent("%h10", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    await act(async () => { hub.deliver(historyEvent("%h10", historyPage(12), 12)); });
+    renderer.scrollbackRows = 12;
+    await act(async () => { first.unmount(); });
 
-    // That screen is a serialization of this pane's own buffer, scrollback
-    // included: there is nothing above it the host is holding.
-    await act(async () => { renderer.reachTop(); });
+    expect(terminalStateCache.get("%h10")?.historyExhausted).toBe(true);
+    api.requestTerminalHistory.mockClear();
+
+    const remounted = await mountPane(fixturePane("%h10"), hub);
+    const restored = renderers.created[1];
+    restored.scrollbackRows = 12;
+    await act(async () => { restored.flushRendered(); });
+    await act(async () => { restored.reachTop(); });
     expect(api.requestTerminalHistory).not.toHaveBeenCalled();
-    await act(async () => { mounted.unmount(); });
+    await act(async () => { remounted.unmount(); });
   });
 });

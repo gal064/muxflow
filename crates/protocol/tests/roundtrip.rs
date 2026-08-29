@@ -23,6 +23,7 @@ fn terminal_bytes_round_trip_without_utf8_conversion() {
             pane_id: "%3".into(),
             data: vec![0, 0xff, 0x1b, b'[', b'H'],
             generation: 7,
+            ..Default::default()
         })),
     };
 
@@ -841,13 +842,40 @@ fn terminal_history_request_and_answer_round_trip_at_their_own_numbers() {
             // Zero, deliberately: the history is not part of the ordered output
             // stream and claims no place in it.
             generation: 0,
+            // How much scrollback tmux holds, which is the only thing that ends
+            // the paging: the answer's own rows cannot say, because `-J` joins
+            // wrapped ones.
+            history_size: 1_200,
+            history_size_known: true,
         }),
         ..Default::default()
     };
+    let answer_bytes = answer.encode_to_vec();
     assert_eq!(
-        v1::HostEvent::decode(answer.encode_to_vec().as_slice()).unwrap(),
+        v1::HostEvent::decode(answer_bytes.as_slice()).unwrap(),
         answer
     );
+
+    // A size the host could not read is absent rather than zero, and the two
+    // must stay tellable apart: an unknown size means "ask again", a real zero
+    // means there is nothing above the screen. A peer that predates the field
+    // reads neither, and its paging degrades to the first page only.
+    let unanswered = v1::TerminalBytes {
+        pane_id: "%3".into(),
+        data: b"older".to_vec(),
+        ..Default::default()
+    };
+    let decoded = v1::TerminalBytes::decode(unanswered.encode_to_vec().as_slice()).unwrap();
+    assert!(!decoded.history_size_known);
+    assert_eq!(decoded.history_size, 0);
+    let empty_history = v1::TerminalBytes {
+        pane_id: "%3".into(),
+        data: b"older".to_vec(),
+        history_size: 0,
+        history_size_known: true,
+        ..Default::default()
+    };
+    assert_ne!(decoded, empty_history);
 }
 
 /// An old desktop must not mistake a history answer for a seed.
@@ -865,6 +893,7 @@ fn an_unknown_terminal_history_event_is_inert_rather_than_a_seed() {
             pane_id: "%3".into(),
             data: b"scrollback".to_vec(),
             generation: 0,
+            ..Default::default()
         }),
         ..Default::default()
     };

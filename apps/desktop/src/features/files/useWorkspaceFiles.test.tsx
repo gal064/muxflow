@@ -2,7 +2,7 @@
 import { act, create } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope, WorkspaceEvent } from "./types";
-import { keyForTransferConnection } from "./api";
+import { keyForScope, keyForTransferConnection } from "./api";
 import {
   armPanePaint,
   notePanePainted,
@@ -1292,6 +1292,49 @@ describe("useWorkspaceFiles", () => {
     await act(async () => { await Promise.resolve(); });
     expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
     expect(current?.root).toEqual(root);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("holds the root probe behind the paint even when the switch also moved the pane's cwd", async () => {
+    // A workspace switch changes the active pane's `current_path` as well as
+    // its scope, and the effect watching that path calls `rearm` *synchronously*
+    // in the same commit. Ungated, that probe took the one-probe-at-a-time
+    // latch and the gated call became a no-op — so the root, its directory
+    // listing and the Git watch behind it (a whole `git status`, 60-80 KB on the
+    // same ordered lane as the switch's own answer) all went out in front of the
+    // screen the user asked for. Only every entry point being gated makes the
+    // gate true.
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    function Harness({ scope, panePath }: { scope: FileWorkspaceScope; panePath: string }) {
+      useWorkspaceFiles(fixture.client, scope, keyForScope(scope), panePath);
+      return null;
+    }
+    armPanePaint("%1");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<Harness scope={BASE_SCOPE} panePath="/repo" />);
+      await Promise.resolve();
+    });
+    await act(async () => { notePanePainted("%1"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
+
+    const switched: FileWorkspaceScope = { ...BASE_SCOPE, sessionId: "$2", paneId: "%2" };
+    armPanePaint("%2");
+    await act(async () => {
+      renderer.update(<Harness scope={switched} panePath="/elsewhere" />);
+      await Promise.resolve();
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(
+      fixture.client.resolveActiveRoot,
+      "the pane's cwd change probed ahead of the pane's own screen",
+    ).toHaveBeenCalledTimes(1);
+
+    await act(async () => { notePanePainted("%2"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(2);
     await act(async () => { renderer.unmount(); });
   });
 

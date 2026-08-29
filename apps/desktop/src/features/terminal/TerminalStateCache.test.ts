@@ -33,6 +33,42 @@ describe("TerminalStateCache", () => {
     expect(cache.retainedByteLength).toBe(4);
   });
 
+  // An eviction is not free: this cache is what a hidden pane's reveal resumes
+  // from, so a pane evicted while the user is still working in it pays a full
+  // host seed on its next reveal. Twenty was under the number of panes a real
+  // session has open, which made ordinary switching evict panes that were about
+  // to come back.
+  it("holds a real session's worth of panes, inside a hard byte bound", () => {
+    const cache = new TerminalStateCache();
+    expect(cache.capacity).toBe(64);
+    for (let pane = 1; pane <= 64; pane += 1) cache.set(`%${pane}`, `screen-${pane}`);
+    expect(cache.size).toBe(64);
+    expect(cache.get("%1")?.serialized).toBe("screen-1");
+
+    // The count is not the only bound: the bytes are checked on every insert,
+    // so a larger capacity cannot become a larger footprint.
+    const bounded = new TerminalStateCache(64, 1_000, 40);
+    for (let pane = 1; pane <= 64; pane += 1) bounded.set(`%${pane}`, "0123456789");
+    expect(bounded.size).toBe(4);
+    expect(bounded.retainedByteLength).toBe(40);
+  });
+
+  // A screen carries how far up its own history it has been paged, because the
+  // pages are part of the bytes: a restore that forgot would fetch them again.
+  it("carries a screen's paging state, defaulting to a screen nobody paged", () => {
+    const cache = new TerminalStateCache();
+    cache.set("%1", "plain");
+    expect(cache.get("%1")).toMatchObject({
+      screenSeeded: false, historyExhausted: false, historyPagesLoaded: 0,
+    });
+    cache.set("%2", "paged", undefined, {
+      screenSeeded: true, historyExhausted: true, historyPagesLoaded: 3,
+    });
+    expect(cache.get("%2")).toMatchObject({
+      screenSeeded: true, historyExhausted: true, historyPagesLoaded: 3,
+    });
+  });
+
   // This cache is now the only copy of a hidden pane's screen, so declining one
   // has to drop what it was holding rather than keep a stale screen beside a
   // newer one it refused. The pane's next reveal is answered with a seed.

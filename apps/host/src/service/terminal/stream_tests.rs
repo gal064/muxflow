@@ -849,7 +849,7 @@ fn a_history_block_answers_with_the_scrollback_and_moves_nothing_else() {
         harness.runtime(),
     );
     state.handle(
-        ControlRecord::CommandOutput(b"__ADE_HISTORY__:2000:1".to_vec()),
+        ControlRecord::CommandOutput(b"__ADE_HISTORY__:300:1".to_vec()),
         harness.runtime(),
     );
     state.handle(
@@ -878,6 +878,28 @@ fn a_history_block_answers_with_the_scrollback_and_moves_nothing_else() {
         },
         harness.runtime(),
     );
+    // Nothing yet: the rows wait for the size probe, so the renderer gets one
+    // answer that says both what is above its screen and whether that is all.
+    assert!(harness.events().is_empty());
+
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"__ADE_HISTORY_META__:1200".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
 
     let events = harness.events();
     assert_eq!(
@@ -887,6 +909,11 @@ fn a_history_block_answers_with_the_scrollback_and_moves_nothing_else() {
     let terminal = events[0].terminal.as_ref().expect("history carries bytes");
     assert_eq!(terminal.pane_id, "%1");
     assert_eq!(terminal.data, b"older\r\nnewer");
+    // The whole point of the third block: 1,200 lines above the screen, which
+    // is how the renderer knows a 300-line page from 40 above the display has
+    // more behind it.
+    assert_eq!(terminal.history_size, 1_200);
+    assert!(terminal.history_size_known);
     // Not part of the output stream: it claims no place in the generation
     // ordering, so a renderer's monotonic gate can never discard output because
     // a history answer went past it.
@@ -900,7 +927,101 @@ fn a_history_block_answers_with_the_scrollback_and_moves_nothing_else() {
         Some(PaneSeedState::Pending { .. })
     ));
     assert!(state.expected_history.is_none());
+    assert!(state.pending_history_meta.is_none());
     assert!(harness.writes().is_empty());
+}
+
+/// The size probe is targeted, so a pane that goes away mid-request rejects it
+/// — and the rows tmux already handed over are still the page that was asked
+/// for. They are delivered without a size, which the renderer reads as "ask
+/// again", never as the top of the history. Dropping them instead would leave
+/// the pane waiting on a request nothing will ever answer.
+#[test]
+fn a_history_whose_size_probe_is_rejected_is_still_answered_without_one() {
+    let (mut state, mut harness) = Harness::new(&["%1".into()]);
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"__ADE_HISTORY__:300:1".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"older".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::Error {
+            tag: TAG,
+            arguments: "1 7 1".into(),
+        },
+        harness.runtime(),
+    );
+
+    let events = harness.events();
+    let history = events
+        .iter()
+        .find(|event| event.kind == i32::from(v1::EventKind::TerminalHistory))
+        .expect("the captured page is still answered");
+    let terminal = history.terminal.as_ref().expect("history carries bytes");
+    assert_eq!(terminal.data, b"older");
+    assert!(!terminal.history_size_known);
+    assert_eq!(terminal.history_size, 0);
+    // And the sequence is over: nothing is left to be mistaken for the missing
+    // half of it.
+    assert!(state.pending_history_meta.is_none());
+    assert!(state.expected_history.is_none());
+}
+
+/// A probe that answered something this host cannot read is the same answer as
+/// one that did not answer at all: a page to ask about again, never the end.
+#[test]
+fn a_history_size_that_is_not_a_number_is_no_size_at_all() {
+    assert_eq!(
+        history_size_marker(b"__ADE_HISTORY_META__:1200"),
+        Some(1_200)
+    );
+    assert_eq!(history_size_marker(b"__ADE_HISTORY_META__:0"), Some(0));
+    assert_eq!(history_size_marker(b"__ADE_HISTORY_META__:"), None);
+    assert_eq!(
+        history_size_marker(b"__ADE_HISTORY_META__:#{history_size}"),
+        None
+    );
+    // Not the leading marker, which names a pane rather than a size.
+    assert_eq!(history_size_marker(b"__ADE_HISTORY__:300:1"), None);
 }
 
 /// A history marker for a pane this client does not own is addressed to

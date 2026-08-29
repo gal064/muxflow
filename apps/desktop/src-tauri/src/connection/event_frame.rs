@@ -82,6 +82,13 @@ pub(super) enum TerminalEvent {
     History {
         pane_id: String,
         data: Vec<u8>,
+        /// How much scrollback tmux holds for the pane, when it answered.
+        ///
+        /// The renderer compares it against the rows it asked for to decide
+        /// whether this page reached the top. `None` is the probe not having
+        /// answered — a pane that went away mid-request — and means "ask
+        /// again", which is a different answer from a history of zero rows.
+        history_size: Option<u32>,
     },
     FileService {
         scope: String,
@@ -200,7 +207,18 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
         TerminalEvent::ClipboardWrite { data } => {
             encode_bytes(17, "terminal-clipboard".into(), sequence, data)
         }
-        TerminalEvent::History { pane_id, data } => encode_bytes(18, pane_id, sequence, data),
+        TerminalEvent::History {
+            pane_id,
+            data,
+            history_size,
+        } => encode_parts(18, &pane_id, sequence, 5 + data.len(), |frame| {
+            // One presence byte and a big-endian u32, ahead of the rows. The
+            // same shape as `encode_terminal`'s generation header: a fixed-size
+            // number the payload's own bytes could never be mistaken for.
+            frame.push(u8::from(history_size.is_some()));
+            frame.extend_from_slice(&history_size.unwrap_or(0).to_be_bytes());
+            frame.extend_from_slice(&data);
+        }),
         TerminalEvent::FileService { scope, payload } => encode_bytes(12, scope, sequence, payload),
         TerminalEvent::GitService { scope, payload } => encode_bytes(13, scope, sequence, payload),
         TerminalEvent::AgentService { scope, payload } => {

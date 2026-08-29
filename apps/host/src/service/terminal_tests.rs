@@ -1409,10 +1409,22 @@ fn a_history_request_captures_only_the_scrollback_range() {
     // `-E -1` stops at the line above the screen: the history and the seed
     // meet exactly once, with no row in both and none missing between them.
     assert!(command.contains("-S -2000 -E -1"));
-    // No metadata leg, because this is not a screen: nothing in the answer may
-    // be mistaken for a seed the reader has to store.
-    assert!(!command.contains("__ADE_META__"));
+    // No `__ADE_META__` leg, because this is not a screen: nothing in the answer
+    // may be mistaken for a seed the reader has to store.
+    assert!(!command.contains("__ADE_META__:"));
     assert!(!capture_command("%1").contains("-S "));
+    // Wrapped lines are joined, exactly as the screen capture joins them: rows
+    // spliced in without `-J` are hard-broken at the width they were captured
+    // at and never reflow.
+    assert!(command.contains(" -J "), "{command}");
+    // Which is why the size probe exists — a joined answer's line count says
+    // nothing about how many rows it covers. Targeted, because
+    // `#{history_size}` is pane-scoped, and last, because the leading marker
+    // has to stay untargeted so that it always succeeds.
+    assert!(
+        command.ends_with("; display-message -p -t %1 '__ADE_HISTORY_META__:#{history_size}'"),
+        "{command}"
+    );
 }
 
 /// A pane that printed after it was seeded is not handed those rows twice.
@@ -1429,9 +1441,11 @@ fn a_history_request_starts_above_the_scrollback_the_renderer_already_holds() {
     // Still the range the user asked for, not a shorter one.
     assert!(command.contains("__ADE_HISTORY__:2000"));
 
-    // A skip no buffer could justify is clamped rather than obeyed: both bounds
-    // past the top of tmux's history answer with nothing, and a pane told there
-    // is nothing above it stops asking.
+    // A skip no buffer could justify is clamped rather than obeyed. tmux does
+    // not answer an out-of-range range with nothing — it clamps both bounds to
+    // the top of the history and answers with the single row there — so what
+    // stops the pane asking again is the answer being *shorter than the page*,
+    // not empty. The clamp here only keeps the numbers finite.
     let clamped = capture_history_command("%1", 10, u32::MAX);
     assert!(clamped.contains("-S -10010 -E -10001"), "{clamped}");
 }

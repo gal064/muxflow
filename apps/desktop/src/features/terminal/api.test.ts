@@ -107,17 +107,32 @@ describe("binary terminal IPC", () => {
    * A history answer carries no generation, which is the whole difference
    * between it and a seed: it claims no place in the output ordering. Decoding
    * it as a seed would take its first eight bytes of scrollback for one.
+   *
+   * What it carries instead is how much scrollback tmux holds, behind a
+   * presence byte — because "the host could not read it" and "this pane has no
+   * history" are different answers, and only one of them ends the paging.
    */
-  it("decodes a history answer as its own kind, with no generation prefix", () => {
-    expect(decodeTerminalEvent(frame(18, "%4", 12, textEncoder.encode("older\r\nnewer")))).toEqual({
-      kind: "terminalHistory", paneId: "%4", sequence: 12, data: textEncoder.encode("older\r\nnewer"),
+  it("decodes a history answer as its own kind, with a size instead of a generation", () => {
+    const page = (known: number, size: number, text: string) => Uint8Array.from([
+      known, ...u32(size), ...textEncoder.encode(text),
+    ]);
+    expect(decodeTerminalEvent(frame(18, "%4", 12, page(1, 1_200, "older\r\nnewer")))).toEqual({
+      kind: "terminalHistory", paneId: "%4", sequence: 12, historySize: 1_200,
+      data: textEncoder.encode("older\r\nnewer"),
     });
-    // Nothing above the screen is a real answer, not a malformed frame.
-    expect(decodeTerminalEvent(frame(18, "%4", 13))).toEqual({
-      kind: "terminalHistory", paneId: "%4", sequence: 13, data: new Uint8Array(),
+    // Nothing above the screen is a real answer, not a malformed frame — and a
+    // history of zero lines is a size, not a missing one.
+    expect(decodeTerminalEvent(frame(18, "%4", 13, page(1, 0, "")))).toEqual({
+      kind: "terminalHistory", paneId: "%4", sequence: 13, historySize: 0, data: new Uint8Array(),
     });
-    expect(() => decodeTerminalEvent(frame(18, "%4", 0))).toThrow("nonzero");
-    expect(() => decodeTerminalEvent(frame(18, "pane", 12))).toThrow("invalid pane label");
+    // An unanswered probe leaves the field off entirely, so nothing downstream
+    // can read it as a zero.
+    expect(decodeTerminalEvent(frame(18, "%4", 14, page(0, 0, "older")))).toEqual({
+      kind: "terminalHistory", paneId: "%4", sequence: 14, data: textEncoder.encode("older"),
+    });
+    expect(() => decodeTerminalEvent(frame(18, "%4", 15))).toThrow("truncated");
+    expect(() => decodeTerminalEvent(frame(18, "%4", 0, page(1, 0, "")))).toThrow("nonzero");
+    expect(() => decodeTerminalEvent(frame(18, "pane", 12, page(1, 0, "")))).toThrow("invalid pane label");
   });
 
   it("rejects frames truncated before the label, sequence, or terminal generation", () => {

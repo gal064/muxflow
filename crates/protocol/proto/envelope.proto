@@ -344,6 +344,20 @@ message TerminalBytes {
   string pane_id = 1;
   bytes data = 2;
   uint64 generation = 3;
+  // EVENT_KIND_TERMINAL_HISTORY only: how many lines of scrollback tmux is
+  // holding for this pane (`#{history_size}`), read by a targeted
+  // display-message that runs after the capture. It is what tells the renderer
+  // whether the page it just received reached the top of the history: the rows
+  // it asked for are the `skip` it already held plus the page, and anything at
+  // or past this number is the end.
+  //
+  // `history_size_known` because "tmux did not answer" is a different claim
+  // from "this pane has no scrollback". The probe is targeted, so a pane that
+  // went away between the capture and it fails, and the renderer must read that
+  // as a page to ask for again rather than as the end of the history. Zero and
+  // false on every other event.
+  uint32 history_size = 4;
+  bool history_size_known = 5;
 }
 
 enum TmuxActionKind {
