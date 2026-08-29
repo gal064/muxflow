@@ -220,7 +220,7 @@ fn phase14_pane_resource_scaling_and_reveal_parity() {
         }
         let expected_bytes = pane_count * chunks_per_pane * chunk.len();
         let retained_bytes = store.retained_bytes();
-        let retained_panes = store.retained_panes_for_measurement();
+        let retained_panes = store.retained_panes();
         assert_eq!(retained_bytes, expected_bytes);
         assert_eq!(retained_panes, pane_count);
         let recovery = store

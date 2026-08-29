@@ -29,12 +29,13 @@ impl StreamState {
                     // resume, and leaving it here would make the *next* pane to
                     // take its id inherit a pause that was never its own.
                     self.flow.cleared(&pane_id);
-                    // Its capture, likewise. Only the metadata block clears a
-                    // ledger entry, and a capture whose marker is filtered away
-                    // for leaving membership never reaches one — so a pane id
-                    // that is later re-added would inherit an entry nothing can
-                    // clear, and every seed it asked for would be coalesced
-                    // against a photograph nobody is taking.
+                    // Its capture, likewise. The drain below fences only the
+                    // pane whose capture is the block that happens to be open;
+                    // a pane removed with no open block of its own is never
+                    // fenced, so without this a pane id that is later re-added
+                    // would inherit an entry nothing clears, and every seed it
+                    // asked for would be coalesced against a photograph nobody
+                    // is taking.
                     capture_in_flight.lock().unwrap().remove(&pane_id);
                     // The parser still considers an in-flight tmux command
                     // open until its matching `%end` or `%error`. Drain that

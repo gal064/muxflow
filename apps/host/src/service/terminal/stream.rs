@@ -161,8 +161,10 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                                 state.handle(output, runtime(read_started));
                             }
                             emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
-                            // Every pane is about to be captured again, so no
-                            // pane's abandoned capture may coalesce that away.
+                            // Every visible pane is about to be captured
+                            // again, and every hidden one is about to be put
+                            // in seed debt, so no pane's abandoned capture may
+                            // coalesce away the photograph that replaces it.
                             capture_in_flight.lock().unwrap().clear();
                             state.resnapshot_all(&writer, &resources, &stopped);
                         }

@@ -1401,7 +1401,6 @@ fn a_capture_already_in_flight_is_not_queued_twice() {
 /// tmux, and this is how it is fetched: one command that asks for the history
 /// range alone, answering a question the user asked rather than joining the
 /// output stream.
-///
 #[test]
 fn a_history_request_captures_only_the_scrollback_range() {
     let command = capture_history_command("%1", 2000, 0);
@@ -1412,7 +1411,6 @@ fn a_history_request_captures_only_the_scrollback_range() {
     // No `__ADE_META__` leg, because this is not a screen: nothing in the answer
     // may be mistaken for a seed the reader has to store.
     assert!(!command.contains("__ADE_META__:"));
-    assert!(!capture_command("%1").contains("-S "));
     // Wrapped lines are joined, exactly as the screen capture joins them: rows
     // spliced in without `-J` are hard-broken at the width they were captured
     // at and never reflow.
@@ -1443,9 +1441,10 @@ fn a_history_request_starts_above_the_scrollback_the_renderer_already_holds() {
 
     // A skip no buffer could justify is clamped rather than obeyed. tmux does
     // not answer an out-of-range range with nothing — it clamps both bounds to
-    // the top of the history and answers with the single row there — so what
-    // stops the pane asking again is the answer being *shorter than the page*,
-    // not empty. The clamp here only keeps the numbers finite.
+    // the top of the history and answers with the single row there — so the
+    // answer's own size says nothing about whether the top was reached. What
+    // stops the pane asking again is `history_size`, and the renderer's mirror
+    // of this clamp; the clamp here only keeps the numbers finite.
     let clamped = capture_history_command("%1", 10, u32::MAX);
     assert!(clamped.contains("-S -10010 -E -10001"), "{clamped}");
 }

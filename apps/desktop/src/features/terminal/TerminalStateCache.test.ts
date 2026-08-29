@@ -62,13 +62,13 @@ describe("TerminalStateCache", () => {
     const cache = new TerminalStateCache();
     cache.set("%1", "plain");
     expect(cache.get("%1")).toMatchObject({
-      screenSeeded: false, historyExhausted: false, historyPagesLoaded: 0, historyNextPageLines: 0,
+      screenSeeded: false, historyExhausted: false, historyNextPageLines: 0,
     });
     cache.set("%2", "paged", undefined, {
-      screenSeeded: true, historyExhausted: true, historyPagesLoaded: 3, historyNextPageLines: 2_400,
+      screenSeeded: true, historyExhausted: true, historyNextPageLines: 2_400,
     });
     expect(cache.get("%2")).toMatchObject({
-      screenSeeded: true, historyExhausted: true, historyPagesLoaded: 3, historyNextPageLines: 2_400,
+      screenSeeded: true, historyExhausted: true, historyNextPageLines: 2_400,
     });
   });
 
