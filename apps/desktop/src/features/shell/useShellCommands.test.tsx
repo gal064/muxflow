@@ -5,6 +5,7 @@ import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../ap
 import type { CommandId, CommandTarget } from "../../commands/registry";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
 import type { TmuxActionResult } from "../tmux/actions";
+import { requestReconciledTmuxAction } from "../tmux/actionReconciliation";
 import type { HostScopeToken } from "./hostScope";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { defaultAppState, type PersistedAppState } from "./types";
@@ -227,18 +228,46 @@ describe("shell commands", () => {
   });
 
   it("closes a terminal tab and a pane without a dialog, still telling the host it was confirmed", async () => {
+    // No dialog, so nothing pins the topology: the close guards the server it
+    // was aimed at and reconciles against the generation live when it lands.
     const closeWindow = await run("window.close", {}, target({ kind: "terminalTab", id: "@1" }));
     expect(closeWindow.setConfirmation).not.toHaveBeenCalled();
     expect(closeWindow.performAction).toHaveBeenCalledWith(
       { kind: "closeWindow", sessionId: "$1", windowId: "@1", confirmed: true },
-      { serverIdentity: "server-a", generation: 8 },
+      { serverIdentity: "server-a", generation: 0 },
     );
     const closePane = await run("pane.close", {}, target({ kind: "pane", id: "%1" }));
     expect(closePane.setConfirmation).not.toHaveBeenCalled();
     expect(closePane.performAction).toHaveBeenCalledWith(
       { kind: "closePane", sessionId: "$1", windowId: "@1", paneId: "%1", confirmed: true },
-      { serverIdentity: "server-a", generation: 8 },
+      { serverIdentity: "server-a", generation: 0 },
     );
+  });
+
+  it("retries a terminal-tab close whose generation moved, instead of refusing it once", async () => {
+    // Both halves of the fix in one place: what a close with no dialog stamps,
+    // and what the reconciler then does with that stamp. An agent animating a
+    // pane title moves the host's generation between the click and the request,
+    // and the refusal that followed used to reach the user as an error they had
+    // to click through.
+    const { performAction } = await run("window.close", {}, target({ kind: "terminalTab", id: "@1" }));
+    const [action, precondition] = performAction.mock.calls[0];
+    const moved: HostScopeToken = { ...hostScope, generation: 9 };
+    const request = vi.fn()
+      .mockRejectedValueOnce(new Error("stale topology: generation changed"))
+      .mockResolvedValueOnce({ topologyGeneration: 9 });
+
+    await requestReconciledTmuxAction({
+      clientId: "client",
+      action,
+      capturedPrecondition: precondition,
+      initialScope: hostScope,
+      currentScope: () => moved,
+      request,
+      waitForNewerScope: async () => moved,
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("routes ambient Close through the focused pane until it is the last pane", async () => {
@@ -246,13 +275,13 @@ describe("shell commands", () => {
     const split = await run("window.close", { snapshot: { ...snapshot, panes: [pane, secondPane] } });
     expect(split.performAction).toHaveBeenCalledWith(
       { kind: "closePane", sessionId: "$1", windowId: "@1", paneId: "%1", confirmed: true },
-      { serverIdentity: "server-a", generation: 8 },
+      { serverIdentity: "server-a", generation: 0 },
     );
 
     const last = await run("window.close");
     expect(last.performAction).toHaveBeenCalledWith(
       { kind: "closeWindow", sessionId: "$1", windowId: "@1", confirmed: true },
-      { serverIdentity: "server-a", generation: 8 },
+      { serverIdentity: "server-a", generation: 0 },
     );
   });
 
@@ -281,7 +310,9 @@ describe("shell commands", () => {
 
   it("still confirms closing a whole workspace", async () => {
     // A workspace takes every window in it. Different blast radius, and the
-    // complaint that removed the other two dialogs was about tab close.
+    // complaint that removed the other two dialogs was about tab close. This
+    // one keeps the pinned generation too: the dialog's consent is tied to the
+    // topology the person was shown.
     const { setConfirmation, performAction } = await run("session.close", {}, target({ kind: "session", id: "$1" }));
     expect(performAction).not.toHaveBeenCalled();
     expect(setConfirmation).toHaveBeenCalledTimes(1);

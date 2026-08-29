@@ -6,7 +6,7 @@ import { commandRegistry, selectionIndex, type CommandContext, type CommandId, t
 import { rowCommandRegistry } from "../../commands/rowCommands";
 import { nextSortMode } from "../agents/agentsList";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
-import type { TmuxAction, TmuxActionResult } from "../tmux/actions";
+import { closePrecondition, type TmuxAction, type TmuxActionResult } from "../tmux/actions";
 import { relativeWindowReorderAction } from "../../app/windowSelection";
 import { reorderAppTab, type CombinedTab } from "./model";
 import type { AppOwnedTab, PersistedAppState } from "./types";
@@ -256,7 +256,10 @@ export function useShellCommands(options: ShellCommandOptions): {
       // Whether a close *asks* is data — `confirmLabel` — not a second branch
       // of control flow above this one.
       const action: TmuxAction = { ...close.action, confirmed: true };
-      const precondition = { serverIdentity: options.serverIdentity, generation: options.generation };
+      const precondition = closePrecondition(
+        options.serverIdentity,
+        close.confirmLabel ? options.generation : undefined,
+      );
       if (close.confirmLabel) {
         options.setConfirmation(createTmuxConfirmation(commandId, definition.title, close.confirmLabel, action, precondition));
       } else {

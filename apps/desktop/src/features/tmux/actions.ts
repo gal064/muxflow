@@ -47,6 +47,27 @@ export interface AuthoritativePrecondition {
 }
 
 /**
+ * What one close guards on the host.
+ *
+ * A pinned generation is consent: it ties the request to the exact topology a
+ * confirmation dialog showed the person, and `requestReconciledTmuxAction`
+ * will not re-issue it against a newer one. Only a close that asked has that
+ * consent to protect.
+ *
+ * A close that happens on the spot has none — a terminal tab, a pane, each tab
+ * of a bulk close — and pinning the generation there is what makes an ordinary
+ * close fail: an agent animating a pane title moves the host's generation
+ * several times a second, and every close moves it again, so the first attempt
+ * comes back `stale_topology` and the user has to click a second time. Those
+ * guard the server identity alone (`generation: 0`, the host's "no generation
+ * guard"), which reconciles against whatever generation is live when tmux is
+ * finally asked.
+ */
+export function closePrecondition(serverIdentity: string, pinnedGeneration?: number): AuthoritativePrecondition {
+  return { serverIdentity, generation: pinnedGeneration ?? 0 };
+}
+
+/**
  * The native half of one action's switch timeline, passed straight through to
  * the `perf.timeline` record. Present only when the process is running a
  * measured build with `ADE_PERF_LOG` set; see `perf_log/switch_timing.rs` for

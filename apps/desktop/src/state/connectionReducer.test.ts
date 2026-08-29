@@ -103,6 +103,32 @@ describe("connectionReducer", () => {
     expect(recovered.resyncRequested).toBe(false);
   });
 
+  it("ignores a snapshot whose generation went backwards, and re-baselines after a reconnect", () => {
+    const live = connectionReducer(
+      connectionReducer(initialHostState, { type: "connection", phase: "connected" }),
+      { type: "snapshot", snapshot: populated, sequence: 7, generation: 12, serverIdentity: "server-a" },
+    );
+    // A frame overtaken in flight. Taking it would pin every later action to a
+    // generation the host has already left, and each one would be refused as
+    // stale until the next snapshot happened to arrive.
+    const late = connectionReducer(live, {
+      type: "snapshot", snapshot: empty, sequence: 8, generation: 11, serverIdentity: "server-a",
+    });
+    expect(late).toBe(live);
+    // Both restarts still land: another tmux server, and a reconnected link to
+    // the same one whose host process counts from zero again.
+    const otherServer = connectionReducer(live, {
+      type: "snapshot", snapshot: empty, sequence: 1, generation: 1, serverIdentity: "server-b",
+    });
+    expect(otherServer.generation).toBe(1);
+    const reconnected = connectionReducer(
+      connectionReducer(live, { type: "connection", phase: "connected" }),
+      { type: "snapshot", snapshot: empty, sequence: 0, generation: 1, serverIdentity: "server-a" },
+    );
+    expect(reconnected.generation).toBe(1);
+    expect(reconnected.panes).toEqual({});
+  });
+
   it("accepts a lower sequence authoritative reconnect snapshot for the same server", () => {
     const state = connectionReducer(initialHostState, {
       type: "snapshot", snapshot: populated, sequence: 42, serverIdentity: "same-server",
